@@ -697,6 +697,9 @@ struct ClaudeSettings: View {
                 }
                 Button("Open \(provider.name)") { app.claude.open(asking: nil) }.buttonStyle(.glass)
             }
+            Card(title: "Your other AI sessions", footer: "Petal's tools, skill and `petal` command are set up for Claude Code and Codex, so you can ask any session to change your dock.") {
+                SettingToggle(key: "otherAgents", title: "Let them change Petal", detail: "T3 Code, or Claude Code and Codex in a terminal.")
+            }
             Card(title: "In the background") {
                 SettingToggle(key: "claudeUsage", title: "Usage ring", detail: "Around the \(provider.name) button, every 5 minutes.")
                 SettingToggle(key: "ai", title: "Sort new apps and sites", detail: "\(provider.name) decides which mode something new belongs to.")

@@ -7,6 +7,11 @@ MainActor.assumeIsolated {
     let app = NSApplication.shared
     let arguments = CommandLine.arguments
 
+    // `petal <command>` (Petal's executable, linked as ~/.local/bin/petal): the dock from a shell.
+    if arguments.count > 1 && CLI.commands.contains(arguments[1]) {
+        app.setActivationPolicy(.prohibited)
+        CLI.run(Array(arguments.dropFirst()))
+    }
     // `Petal doctor` and `Petal report`: checking Petal, and telling its maker what went wrong.
     if arguments.count > 1 && (arguments[1] == "doctor" || arguments[1] == "report") {
         app.setActivationPolicy(.prohibited)

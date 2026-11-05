@@ -52,7 +52,11 @@ final class PetalApp {
         PetalApp.instance = self
         docks = DockController()
         focus = FocusGuard()
-        Task { for provider in Provider.allCases { await lookFor(provider) } }
+        Task {
+            for provider in Provider.allCases { await lookFor(provider) }
+            // The person's other AI sessions get Petal's tools, skill and command too.
+            if config.bool("otherAgents") { OtherAgents.connect(paths: paths) }
+        }
     }
 
     var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev" }

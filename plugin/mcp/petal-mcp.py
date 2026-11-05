@@ -76,6 +76,7 @@ SETTINGS_SCHEMA = {
     "chatEffort": ("medium", "Claude panel effort: low, medium, high, xhigh or max."),
     "claudeAccess": ("auto", "Claude panel permissions: auto (safe actions run, risky ones ask) or full."),
     "aiProviders": (["claude"], "The AI apps Petal uses, each the user's own install and account: claude, codex, both, or none ([] = no AI; the dock still works)."),
+    "otherAgents": (True, "Let the user's other AI sessions (T3 Code, Claude Code or Codex in a terminal) change Petal: its MCP server, skill and `petal` command are set up for them."),
     "chatProvider": ("claude", "Which of aiProviders the chat panel, the usage ring and sorting use: claude or codex."),
     "codexModel": ("", "Codex chat model; empty = Codex's own default."),
     "codexEffort": ("medium", "Codex chat reasoning effort: low, medium, high or xhigh."),

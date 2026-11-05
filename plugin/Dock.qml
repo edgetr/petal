@@ -115,6 +115,7 @@ Item {
       // Which AI apps Petal uses ("claude", "codex"; [] = none: the dock works
       // whole without AI), and which one the chat, usage ring and sorting use.
       property list<string> aiProviders: ["claude"]
+      property bool otherAgents: true
       property string chatProvider: "claude"
       property string codexModel: ""
       property string codexEffort: "medium"

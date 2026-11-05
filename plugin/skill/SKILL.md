@@ -13,11 +13,17 @@ has its own focus mode, and the dock shows that mode's apps. This skill is insta
 
 ## Changing the dock
 
-Use Petal's MCP tools when they're connected (the `petal` server; Petal's own chat panel always has them):
+Any AI session can change the dock: Petal's own panel, T3 Code, or Claude Code and Codex in a terminal. Petal
+registers its MCP server (`petal`) with Claude Code and Codex and puts `petal` on the PATH (setting `otherAgents`).
+Use, in this order:
+
+1. Petal's MCP tools, when the `petal` server is connected:
 `petal_get_state` first, then `petal_set_settings`, `petal_set_dock`, `petal_save_mode`, `petal_delete_mode`,
 `petal_set_default_mode`, `petal_switch_mode`, `petal_list_apps`, `petal_reload`. Changes apply instantly.
-
-Without the tools, edit the files in `~/.config/petal/`; Petal reloads them within a second:
+2. The `petal` command: `petal get` (everything, with each setting's help), `petal set <key> <json value>`,
+   `petal mode <id>`, `petal current`, `petal modes`, `petal dock petal|macos` (macOS), `petal restart`; `petal help`
+   lists them all.
+3. The files in `~/.config/petal/`; Petal reloads them within a second:
 
 - `settings.json`: settings; `petal_get_state` (or `petal doctor --json`) lists every key with its default and help.
 - `modes.json`: `{"defaultMode", "workspaces": {"<n>": "<mode id>"}, "modes": [{"id", "name", "icon", "color",
@@ -50,5 +56,15 @@ and `… report`. Logs: `petal logs` (Omarchy's shell log; on macOS the system l
 - On macOS, Petal hides macOS's Dock while it runs and gives it back on quit; `petal restore-dock` gives it back by
   hand. Permissions it may need: Accessibility (window lists, badges, focus cards) and Screen Recording (previews).
 - Focus cards ("x.com belongs to Social") appear only in modes with `focusDelay` above 0, with `focusGuard` on.
-- If a request can't be done with settings, Petal's source can be changed (the path is in `petal_get_state`), but a
-  Petal update may replace such edits: say so.
+## Changing Petal itself
+
+Make each dock the user's own with settings, modes and the look first; they apply instantly and survive updates.
+When something truly needs code:
+
+- **Omarchy:** Petal is QML, in the folder `petal_get_state` gives as `plugin_source`. Edit it, then `petal restart`
+  (or `petal_reload`). A Petal update replaces a release install's files, so keep the change small and tell the user;
+  a source checkout (`git clone https://github.com/edgetr/petal`, then its `install.sh`) keeps it.
+- **macOS:** Petal is a Swift app. With a source checkout (`plugin_source` when there is one, else clone it), edit
+  `macos/Sources/Petal/`, build with `macos/build.sh` (needs Apple's developer tools), copy `macos/build/Petal.app`
+  over the running app (`files.app` in `petal_get_state`), and `petal restart`.
+- If the change would help everyone, suggest proposing it upstream as a pull request on edgetr/petal.

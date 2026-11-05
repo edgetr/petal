@@ -44,6 +44,26 @@ print("codex:", s["codexPath"] or "not found")
 if not s["aiProviders"]: print("No AI app found: Petal works as a dock; install Claude Code or Codex for its AI features.")
 PY
 
+# Petal's MCP server for the user's other AI sessions (T3 Code, Claude Code or
+# Codex in a terminal), through each CLI's own `mcp add`, unless otherAgents is
+# off. It points at the plugin link, which stays put across updates.
+if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("otherAgents", True) else 1)' "$config/settings.json" 2>/dev/null; then
+  server="$HOME/.config/omarchy/plugins/egesuren.petal/mcp/petal-mcp.py"
+  for cli in claude codex; do
+    path="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2] + "Path", ""))' "$config/settings.json" "$cli")"
+    [[ -x $path ]] || continue
+    if ! "$path" mcp get petal 2>/dev/null | grep -q "$server"; then
+      if [[ $cli == claude ]]; then
+        "$path" mcp remove -s user petal >/dev/null 2>&1 || true
+        "$path" mcp add -s user petal -- python3 "$server" >/dev/null 2>&1 && echo "$cli: Petal's tools added"
+      else
+        "$path" mcp remove petal >/dev/null 2>&1 || true
+        "$path" mcp add petal -- python3 "$server" >/dev/null 2>&1 && echo "$cli: Petal's tools added"
+      fi
+    fi
+  done
+fi
+
 # Petal's skill, so Claude Code and Codex know Petal in any session (linked, so
 # updates bring the new one along).
 for agent_home in "$HOME/.claude" "$HOME/.codex"; do

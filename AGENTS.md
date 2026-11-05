@@ -123,6 +123,16 @@ How it maps to Omarchy:
 - **Quick actions:** macOS doesn't let other apps read an app's own Dock menu, so an app's right-click menu lists its windows and New Window instead.
 - **Install:** `get.sh` on a Mac installs Petal.app from the newest `macos-v` release into /Applications. A download by curl isn't quarantined, so it opens without Gatekeeper's prompt; a zip downloaded in a browser needs System Settings > Privacy & Security > Open Anyway once.
 
+### Every agent can change Petal
+
+Any AI session the owner opens (Petal's own panel, T3 Code, Claude Code or Codex in a terminal) can change their dock, through three doors, all kept current by Petal while `otherAgents` is on:
+
+- **MCP:** Petal registers its server, `petal`, with Claude Code and Codex through their own `mcp add` (`install.sh` on Omarchy, every start on macOS).
+- **Skill:** `plugin/skill/SKILL.md`, in `~/.claude/skills/petal` and `~/.codex/skills/petal`: what Petal is, how to change it, how to fix it, and how to change its code.
+- **CLI:** `petal` (`bin/petal` on Omarchy; Petal.app's own executable linked as `~/.local/bin/petal` on macOS): `get`, `set`, `mode`, `doctor`, `report`, and the IPC functions.
+
+Change the skill when Petal's files, tools or commands change, so agents stay right.
+
 ### Settings have three lists
 
 The `JsonAdapter` in `Dock.qml`, `SETTINGS_SCHEMA` in `petal-mcp.py` and `Config.defaults` in `macos/Sources/Petal/Config.swift` must list the same keys with the same defaults. A new feature or look adds its setting to all three, so Claude can change it on both platforms. (`claudePath` is the exception: it's in the dock's lists but not Claude's.)

@@ -194,7 +194,9 @@ enum MCP {
     // MARK: The running Petal
 
     /// Asks the running Petal over its socket, as petal-mcp.py does.
-    static func petal(_ args: String...) -> String {
+    static func petal(_ args: String...) -> String { petal(args) }
+
+    static func petal(_ args: [String]) -> String {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return "Petal isn't running" }
         defer { close(fd) }
