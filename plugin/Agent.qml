@@ -208,7 +208,7 @@ Item {
       messages.append({ kind: "step", text: "Searching the web  " + String(item.query || ""), detail: "" })
     else if (m.type === "turn.failed")
       messages.append({ kind: "error", text: String((m.error || {}).message || "Something went wrong"), detail: "" })
-    if ((m.type === "turn.completed" || m.type === "turn.failed") && agent.dock) agent.dock.refreshUsage()
+    if ((m.type === "turn.completed" || m.type === "turn.failed") && agent.dock) agent.dock.refreshUsage(agent.provider)
   }
 
   function handle(line) {
@@ -237,7 +237,7 @@ Item {
       }
       if (m.is_error) messages.append({ kind: "error", text: String(m.result || "Something went wrong"), detail: "" })
       // Usage moved; show it.
-      if (agent.dock) agent.dock.refreshUsage()
+      if (agent.dock) agent.dock.refreshUsage(agent.provider)
     }
   }
 

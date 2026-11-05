@@ -1083,10 +1083,16 @@ Item {
   function providerName(p) { return p === "codex" ? "Codex" : p === "claude" ? "Claude" : "AI" }
   function providerPath(p) { return p === "codex" ? settingsAdapter.codexPath : p === "claude" ? settingsAdapter.claudePath : "" }
   function providerMark(p) { return Qt.resolvedUrl(p === "codex" ? "assets/codex.svg" : "assets/claude.svg") }
-  onChatProviderChanged: { root.usage = null; root.refreshUsage() }
+  onChatProviderChanged: root.refreshUsage(root.chatProvider)
+  onProvidersChanged: { root.refreshUsage(); root.loadCodexModels() }
 
   // ── Usage (Omarchy's collectors read each CLI's own login) ─────────────
-  property var usage: null
+  // Kept per AI, so switching shows the right one straight away; the checks
+  // run one at a time, each for the AI it was started for.
+  property var usageBy: ({})
+  readonly property var usage: root.usageBy[root.chatProvider] || null
+  property string usageFor: ""
+  property var usageQueue: []
   readonly property real usageWorst: {
     var limits = root.usage && root.usage.limits ? root.usage.limits : []
     var worst = -1
@@ -1094,22 +1100,74 @@ Item {
     return worst
   }
 
-  function refreshUsage() {
-    if (!root.settings.claudeUsage || !root.chatProvider || usageProc.running) return
+  // refreshUsage(): every chosen AI, the chat's first; refreshUsage(p): just p.
+  function refreshUsage(p) {
+    if (!root.settings.claudeUsage || !root.chatProvider) return
+    var want = p ? [p] : [root.chatProvider].concat(root.providers.filter(function(x) { return x !== root.chatProvider }))
+    var queue = root.usageQueue.slice()
+    want.forEach(function(x) {
+      if (x && queue.indexOf(x) < 0 && !(usageProc.running && root.usageFor === x)) queue.push(x)
+    })
+    root.usageQueue = queue
+    root.nextUsage()
+  }
+
+  function nextUsage() {
+    if (usageProc.running || root.usageQueue.length === 0) return
+    var queue = root.usageQueue.slice()
+    root.usageFor = queue.shift()
+    root.usageQueue = queue
+    usageProc.command = ["omarchy-agent-usage-" + root.usageFor, "--limits-only"]
     usageProc.running = true
   }
 
   Process {
     id: usageProc
-    command: ["omarchy-agent-usage-" + (root.chatProvider || "claude"), "--limits-only"]
     stdout: StdioCollector {
       onStreamFinished: {
         try {
           var u = JSON.parse(text)
-          if (u && u.ready !== false) root.usage = u
+          if (u && u.ready !== false) {
+            var next = Object.assign({}, root.usageBy)
+            next[root.usageFor] = u
+            root.usageBy = next
+          }
         } catch (e) {}
       }
     }
+    onExited: Qt.callLater(root.nextUsage)
+  }
+
+  // ── Codex's models, from Codex itself (`codex debug models`) ───────────
+  // [{ id, name, efforts: [...] }], in Codex's own order, listed ones only.
+  property var codexModels: []
+
+  function loadCodexModels() {
+    if (root.providers.indexOf("codex") < 0 || !settingsAdapter.codexPath || codexModelsProc.running) return
+    codexModelsProc.running = true
+  }
+
+  Process {
+    id: codexModelsProc
+    command: [settingsAdapter.codexPath, "debug", "models"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try {
+          var list = (JSON.parse(text).models || []).filter(function(m) { return m.visibility === "list" })
+          list.sort(function(a, b) { return (a.priority || 0) - (b.priority || 0) })
+          root.codexModels = list.map(function(m) {
+            return { id: m.slug, name: m.display_name || m.slug,
+                     efforts: (m.supported_reasoning_levels || []).map(function(l) { return l.effort }) }
+          })
+        } catch (e) {}
+      }
+    }
+  }
+
+  Timer {
+    interval: 1500
+    running: true
+    onTriggered: root.loadCodexModels()
   }
 
   Timer {

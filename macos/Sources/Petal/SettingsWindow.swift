@@ -691,14 +691,14 @@ struct ClaudeSettings: View {
                     }
                     .pickerStyle(.segmented)
                 }
-                if provider.models.count > 1 {
-                    Picker("Model", selection: Binding(get: { app.config.string(provider.modelSetting) }, set: { app.config.set(provider.modelSetting, $0) })) {
-                        ForEach(provider.models, id: \.0) { Text($0.1).tag($0.0) }
+                if app.models(for: provider).count > 1 {
+                    let picker = Picker("Model", selection: Binding(get: { app.config.string(provider.modelSetting) }, set: { app.config.set(provider.modelSetting, $0) })) {
+                        ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
                     }
-                    .pickerStyle(.segmented)
+                    if provider == .codex { picker.pickerStyle(.menu) } else { picker.pickerStyle(.segmented) }
                 }
                 Picker("Effort", selection: Binding(get: { app.config.string(provider.effortSetting) }, set: { app.config.set(provider.effortSetting, $0) })) {
-                    ForEach(provider.efforts, id: \.self) { Text($0.capitalized).tag($0) }
+                    ForEach(app.efforts(for: provider), id: \.self) { Text($0.capitalized).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 Picker("Access", selection: Binding(get: { app.config.string("claudeAccess") }, set: { app.config.set("claudeAccess", $0) })) {

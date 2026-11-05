@@ -59,9 +59,19 @@ PanelWindow {
   readonly property string aiName: box.dock ? box.dock.chatName : "Claude"
   readonly property string modelKey: provider === "codex" ? "codexModel" : "chatModel"
   readonly property string effortKey: provider === "codex" ? "codexEffort" : "chatEffort"
-  readonly property var models: provider === "codex" ? [["", "Default"]]
+  // Codex: Default plus its first four listed models; each model has its own efforts.
+  readonly property var codexModel: {
+    var list = box.dock ? box.dock.codexModels : []
+    var id = box.settings ? box.settings.codexModel : ""
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i]
+    return null
+  }
+  readonly property var models: provider === "codex"
+    ? [["", "Default"]].concat((box.dock ? box.dock.codexModels : []).slice(0, 4).map(function(m) { return [m.id, m.name] }))
     : [["haiku", "Haiku"], ["sonnet", "Sonnet"], ["opus", "Opus"], ["fable", "Fable"]]
-  readonly property var efforts: provider === "codex" ? ["low", "medium", "high", "xhigh"] : ["low", "medium", "high", "xhigh", "max"]
+  readonly property var efforts: provider === "codex"
+    ? (box.codexModel && box.codexModel.efforts.length ? box.codexModel.efforts : ["low", "medium", "high", "xhigh"])
+    : ["low", "medium", "high", "xhigh", "max"]
 
   function modelName(id) {
     for (var i = 0; i < models.length; i++) if (models[i][0] === id) return models[i][1]

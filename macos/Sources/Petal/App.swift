@@ -62,6 +62,7 @@ final class PetalApp {
         focus = FocusGuard()
         Task {
             for provider in Provider.allCases { await lookFor(provider) }
+            loadCodexModels()
             // The person's other AI sessions get Petal's tools, skill and command too.
             if config.bool("otherAgents") { OtherAgents.connect(paths: paths) }
         }
@@ -253,6 +254,40 @@ final class PetalApp {
             }
         }
         return provider.knownPaths(home: NSHomeDirectory()).first(where: isTool)
+    }
+
+    /// Codex's own model list (`codex debug models`): listed models in its order, each with its efforts.
+    struct CodexModel: Sendable { let id: String; let name: String; let efforts: [String] }
+    private(set) var codexModels: [CodexModel] = []
+
+    func loadCodexModels() {
+        guard let codex = paths[.codex] else { return }
+        let environment = childEnvironment
+        Task {
+            let result = await AISetup.run(codex, ["debug", "models"], environment: environment, timeout: 30)
+            let json = result.output.firstIndex(of: "{").map { String(result.output[$0...]) } ?? ""
+            guard let root = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any] else { return }
+            codexModels = (root["models"] as? [[String: Any]] ?? [])
+                .filter { $0["visibility"] as? String == "list" }
+                .sorted { ($0["priority"] as? Int ?? 0) < ($1["priority"] as? Int ?? 0) }
+                .compactMap { m in
+                    guard let id = m["slug"] as? String else { return nil }
+                    return CodexModel(id: id, name: m["display_name"] as? String ?? id,
+                                      efforts: (m["supported_reasoning_levels"] as? [[String: Any]] ?? []).compactMap { $0["effort"] as? String })
+                }
+        }
+    }
+
+    /// The models to offer for an AI: Claude's aliases, or Default plus Codex's own list.
+    func models(for provider: Provider) -> [(String, String)] {
+        provider == .codex ? [("", "Default")] + codexModels.map { ($0.id, $0.name) } : provider.models
+    }
+
+    /// The efforts the chosen model takes.
+    func efforts(for provider: Provider) -> [String] {
+        guard provider == .codex, let model = codexModels.first(where: { $0.id == config.string("codexModel") }), !model.efforts.isEmpty
+        else { return provider.efforts }
+        return model.efforts
     }
 
     /// Asking the login shell can take a moment; the dock doesn't wait for it.

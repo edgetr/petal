@@ -384,7 +384,7 @@ struct ClaudePanelView: View {
     private var modelName: String {
         guard let provider else { return "" }
         let model = app.config.string(provider.modelSetting)
-        return provider.models.first { $0.0 == model }?.1 ?? (model.isEmpty ? "Default" : model)
+        return app.models(for: provider).first { $0.0 == model }?.1 ?? (model.isEmpty ? "Default" : model)
     }
 
     @ViewBuilder private var options: some View {
@@ -402,17 +402,25 @@ struct ClaudePanelView: View {
                     .pickerStyle(.segmented).labelsHidden()
                 }
             }
-            if provider.models.count > 1 {
+            if app.models(for: provider).count > 1 {
                 OptionRow(title: "Model") {
-                    Picker("", selection: Binding(get: { app.config.string(provider.modelSetting) }, set: { app.config.set(provider.modelSetting, $0) })) {
-                        ForEach(provider.models, id: \.0) { Text($0.1).tag($0.0) }
+                    if provider == .codex {
+                        // Codex lists more models than fit side by side.
+                        Picker("", selection: Binding(get: { app.config.string(provider.modelSetting) }, set: { app.config.set(provider.modelSetting, $0) })) {
+                            ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
+                        }
+                        .pickerStyle(.menu).labelsHidden().fixedSize()
+                    } else {
+                        Picker("", selection: Binding(get: { app.config.string(provider.modelSetting) }, set: { app.config.set(provider.modelSetting, $0) })) {
+                            ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
+                        }
+                        .pickerStyle(.segmented).labelsHidden()
                     }
-                    .pickerStyle(.segmented).labelsHidden()
                 }
             }
             OptionRow(title: "Effort") {
                 Picker("", selection: Binding(get: { app.config.string(provider.effortSetting) }, set: { app.config.set(provider.effortSetting, $0) })) {
-                    ForEach(provider.efforts, id: \.self) { Text($0).tag($0) }
+                    ForEach(app.efforts(for: provider), id: \.self) { Text($0).tag($0) }
                 }
                 .pickerStyle(.segmented).labelsHidden()
             }

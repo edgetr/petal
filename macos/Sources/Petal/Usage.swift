@@ -15,8 +15,12 @@ struct UsageLimit: Equatable {
 /// macOS's own `security` tool. The token goes nowhere but that one request's Authorization header.
 @MainActor @Observable
 final class Usage {
-    private(set) var limits: [UsageLimit] = []
-    private(set) var help = ""
+    /// Kept per AI, so switching shows the right one straight away and a slow check can't land on the wrong one.
+    private(set) var limitsBy: [Provider: [UsageLimit]] = [:]
+    private(set) var helpBy: [Provider: String] = [:]
+
+    var limits: [UsageLimit] { PetalApp.shared.chatProvider.flatMap { limitsBy[$0] } ?? [] }
+    var help: String { PetalApp.shared.chatProvider.flatMap { helpBy[$0] } ?? "" }
     @ObservationIgnored private var timer: Timer?
 
     /// The fullest limit: what the ring shows.
@@ -25,18 +29,30 @@ final class Usage {
     func start(enabled: @escaping () -> Bool) {
         timer?.invalidate()
         let poll = { [weak self] in
-            guard enabled() else { self?.limits = []; return }
-            Task { await self?.refresh() }
+            guard enabled() else { self?.limitsBy = [:]; return }
+            Task { await self?.refreshAll() }
         }
         poll()
         timer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in MainActor.assumeIsolated { poll() } }
     }
 
+    /// The chat's AI.
     func refresh() async {
-        switch PetalApp.shared.chatProvider {
-        case .claude?: await refreshClaude()
-        case .codex?: await refreshCodex()
-        case nil: limits = []; help = ""
+        if let provider = PetalApp.shared.chatProvider { await refresh(provider) }
+    }
+
+    /// Every chosen AI, the chat's first.
+    func refreshAll() async {
+        let app = PetalApp.shared
+        for provider in [app.chatProvider].compactMap({ $0 }) + app.providers.filter({ $0 != app.chatProvider }) {
+            await refresh(provider)
+        }
+    }
+
+    func refresh(_ provider: Provider) async {
+        switch provider {
+        case .claude: await refreshClaude()
+        case .codex: await refreshCodex()
         }
     }
 
@@ -44,8 +60,8 @@ final class Usage {
     /// thread: a log can be long.
     private func refreshCodex() async {
         let found = await Task.detached { Self.codexLimits() }.value
-        limits = found ?? []
-        help = found == nil ? "Use Codex once to see your usage." : ""
+        limitsBy[.codex] = found ?? []
+        helpBy[.codex] = found == nil ? "Use Codex once to see your usage." : ""
     }
 
     nonisolated private static func codexLimits() -> [UsageLimit]? {
@@ -82,7 +98,7 @@ final class Usage {
 
     private func refreshClaude() async {
         guard let token = await Self.accessToken() else {
-            help = "Sign in to Claude Code to see your usage."
+            helpBy[.claude] = "Sign in to Claude Code to see your usage."
             return
         }
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!, timeoutInterval: 10)
@@ -91,11 +107,11 @@ final class Usage {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let status = (response as? HTTPURLResponse)?.statusCode else {
-            help = "Couldn't reach Anthropic. Trying again shortly."
+            helpBy[.claude] = "Couldn't reach Anthropic. Trying again shortly."
             return
         }
         guard status == 200, let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            help = status == 401 || status == 403 ? "Run `claude auth login` to sign in again." : "Anthropic's usage check answered \(status)."
+            helpBy[.claude] = status == 401 || status == 403 ? "Sign in to Claude again from Petal's settings, under AI." : "Anthropic's usage check answered \(status)."
             return
         }
         var found: [UsageLimit] = []
@@ -104,8 +120,8 @@ final class Usage {
             // The endpoint answers percentages: 0.6 is 0.6%, as Claude Code's own /usage shows it.
             found.append(UsageLimit(label: label, percent: min(1, max(0, used / 100)), resetsAt: Self.date(bucket["resets_at"])))
         }
-        limits = found
-        help = found.isEmpty ? "Anthropic's usage check returned no limits." : ""
+        limitsBy[.claude] = found
+        helpBy[.claude] = found.isEmpty ? "Anthropic's usage check returned no limits." : ""
     }
 
     private static func accessToken() async -> String? {
