@@ -35,7 +35,15 @@ if [[ $mode != install && -n $link && $link != "$ROOT"/* ]]; then
   exit 0
 fi
 
-latest="$(curl -fsSL "https://github.com/$REPO/releases/latest/download/latest.json")" || fail "couldn't reach GitHub"
+# Ask the API for the newest tag (the /latest/download link is cached for a
+# few minutes after a release), then read that release's latest.json.
+tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+  | python3 -c "import json,sys; print(json.load(sys.stdin).get('tag_name',''))" 2>/dev/null || true)"
+if [[ -n $tag ]]; then
+  latest="$(curl -fsSL "https://github.com/$REPO/releases/download/$tag/latest.json")" || fail "couldn't reach GitHub"
+else
+  latest="$(curl -fsSL "https://github.com/$REPO/releases/latest/download/latest.json")" || fail "couldn't reach GitHub"
+fi
 field() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)" <<<"$latest"; }
 version="$(field "d['version']")"
 url="$(field "d['linux']['url']")"
