@@ -39,7 +39,8 @@ final class Updater {
                 let current = PetalApp.shared.version
                 guard Self.newer(latest.version, than: current) else { status = "Petal \(current) is the newest."; return }
                 status = "Downloading Petal \(latest.version)…"
-                try await install(latest)
+                // With the person's own changes to Petal's code, it's rebuilt with them instead (Personal.swift).
+                if try await !Personal.update(to: latest.version, manual: manual) { try await install(latest) }
                 status = "Petal \(latest.version) is ready. Restart Petal to finish."
                 PetalApp.shared.popups.show(FocusCard(kind: .update, version: latest.version))
             } catch {

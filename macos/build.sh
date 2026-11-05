@@ -37,6 +37,9 @@ cp "$ROOT/plugin/assets/claude.svg" "$APP/Contents/Resources/claude.svg"
 # petal-mcp.py, so Omarchy and the Mac describe them the same way.
 mkdir -p "$APP/Contents/Resources/mcp"
 python3 -I "$ROOT/plugin/mcp/petal-mcp.py" --describe > "$APP/Contents/Resources/mcp/tools.json"
+# The person's own changes to Petal's code, kept through updates (`petal personal`; Personal.swift runs it).
+mkdir -p "$APP/Contents/Resources/personal"
+cp "$ROOT/bin/petal-personal" "$APP/Contents/Resources/personal/petal-personal"
 # Petal's skill for Claude Code and Codex, which Petal copies into their skills folders.
 mkdir -p "$APP/Contents/Resources/skill"
 cp "$ROOT/plugin/skill/SKILL.md" "$APP/Contents/Resources/skill/SKILL.md"
