@@ -1511,7 +1511,7 @@ PanelWindow {
               var dim = "<font color='" + Commons.Color.muted + "'>"
               if (c.kind === "update") return "<b>Petal updated to " + esc(c.version) + "</b>"
               if (c.kind === "held") return "<b>" + esc(c.n.summary) + "</b>" + dim + " · " + esc(c.n.app) + (c.allowedHere ? "" : " · held for " + esc(guardCard.target ? guardCard.target.name : "later")) + "</font>"
-              if (c.kind === "guard") return "<b>" + esc(c.title) + "</b>" + dim + " · is for " + esc(guardCard.target ? guardCard.target.name : "") + "</font>"
+              if (c.kind === "guard") return "<b>" + esc(c.title) + "</b> belongs to " + esc(guardCard.target ? guardCard.target.name : "another mode") + "."
               if (c.kind === "fit") return "<b>" + esc(c.title) + "</b>" + dim + " · fits " + esc(guardCard.target ? guardCard.target.name : "") + "</font>"
               return "<b>" + esc(c.title) + "</b>" + dim + " · not in any mode</font>"
             }
@@ -1531,7 +1531,7 @@ PanelWindow {
               var c = guardCard.c
               if (!c) return ""
               if (c.kind === "held") return String(c.n.body || "")
-              if (c.kind === "guard") return "You're in " + (guardCard.here ? guardCard.here.name : "another mode") + " mode."
+              if (c.kind === "guard") return "This workspace is in " + (guardCard.here ? guardCard.here.name : "another") + " mode. Go back to what you were doing, or switch the workspace to " + (guardCard.target ? guardCard.target.name : "that mode") + "."
               if (c.kind === "update") return "Restart the shell to finish (a second or two)."
               return ""
             }
@@ -1555,7 +1555,7 @@ PanelWindow {
         spacing: Style.spacing.sm
 
         CardButton {
-          text: !guardCard.c ? "" : guardCard.c.kind === "update" ? "Later" : guardCard.c.kind === "held" ? (guardCard.c.allowedHere ? "OK" : "Later") : "Stay in " + (guardCard.here ? guardCard.here.name : "this mode")
+          text: !guardCard.c ? "" : guardCard.c.kind === "update" ? "Later" : guardCard.c.kind === "held" ? (guardCard.c.allowedHere ? "OK" : "Later") : "Go back"
           onClicked: window.dock.cardStay()
         }
         CardButton {
