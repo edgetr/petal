@@ -87,4 +87,56 @@ d["plugins"] = plugins
 json.dump(d, open(path, "w"), indent=2)
 PY
 
+# Petal in Omarchy's menu (Super+Space > Petal): a block in the user's menu
+# extension, between markers Petal keeps current. Added once; if it's taken
+# out, it stays out.
+state="${XDG_STATE_HOME:-$HOME/.local/state}/petal"
+mkdir -p "$state"
+python3 - "$state" <<'PY'
+import json, os, sys
+state = sys.argv[1]
+path = os.path.expanduser("~/.config/omarchy/extensions/omarchy-menu.jsonc")
+begin, end = "  // petal:begin (Petal keeps these entries current)", "  // petal:end"
+rows = [
+    ("petal", {"icon": "󰉊", "label": "Petal", "description": "Your dock: modes, held notifications, schedule, settings"}),
+    ("petal.menu", {"icon": "", "label": "Petal Menu", "action": "omarchy-shell petal panel home"}),
+    ("petal.held", {"icon": "", "label": "Held Notifications", "action": "omarchy-shell petal panel held"}),
+    ("petal.schedule", {"icon": "", "label": "Schedule", "action": "omarchy-shell petal panel schedule"}),
+    ("petal.summary", {"icon": "", "label": "Last Week", "action": "omarchy-shell petal panel summary"}),
+    ("petal.describe", {"icon": "", "label": "Build My Modes with AI", "action": "omarchy-shell petal describe"}),
+    ("petal.recipes", {"icon": "", "label": "Share or Add a Dock", "action": "omarchy-shell petal panel recipes"}),
+    ("petal.doctor", {"icon": "", "label": "Check Petal", "action": "omarchy-shell petal panel doctor"}),
+]
+block = [begin] + ['  "%s": %s,' % (k, json.dumps(v, ensure_ascii=False)) for k, v in rows] + [end]
+try:
+    lines = open(path).read().split("\n")
+except OSError:
+    lines = ["{", "}", ""]
+added = os.path.join(state, "omarchy-menu-added")
+start = next((i for i, l in enumerate(lines) if l.strip().startswith("// petal:begin")), None)
+if start is not None:
+    stop = next((i for i, l in enumerate(lines) if i > start and l.strip() == "// petal:end"), start)
+    lines[start:stop + 1] = block
+elif not os.path.exists(added):
+    at = next((i for i, l in enumerate(lines) if l.strip().startswith("{")), None)
+    if at is None:
+        lines = ["{"] + block + ["}", ""]
+    else:
+        lines[at + 1:at + 1] = block
+else:
+    sys.exit(0)
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path + ".tmp", "w") as f:
+    f.write("\n".join(lines))
+os.replace(path + ".tmp", path)
+open(added, "w").close()
+PY
+
+# Petal's mode indicator in Omarchy's bar, beside the workspaces: placed once
+# (the Petal menu's "Mode in the top bar" takes it out and puts it back).
+if [[ ! -e $state/bar-placed ]] && command -v omarchy >/dev/null; then
+  omarchy-shell -q shell rescanPlugins >/dev/null 2>&1 || true
+  if omarchy bar put egesuren.petal --after omarchy.workspaces >/dev/null 2>&1; then touch "$state/bar-placed"; fi
+fi
+
 echo "Petal installed. Restart the shell with: omarchy restart shell"
