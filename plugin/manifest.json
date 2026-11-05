@@ -6,9 +6,18 @@
   "author": "egesuren",
   "description": "An AI-native dock with focus modes per workspace, customizable by asking Claude",
   "kinds": [
-    "service"
+    "service",
+    "bar-widget"
   ],
   "entryPoints": {
-    "service": "Dock.qml"
+    "service": "Dock.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Petal mode",
+    "description": "The mode of the workspace in front, and held notifications; click for the Petal menu",
+    "category": "Workspaces",
+    "allowMultiple": false,
+    "defaultSection": "left"
   }
 }

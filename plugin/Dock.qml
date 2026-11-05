@@ -42,6 +42,34 @@ Item {
     onLoaded: loadedText = text()
   }
 
+  // Whether Petal's mode indicator sits in Omarchy's bar (BarWidget.qml).
+  readonly property bool inBar: {
+    try {
+      var layout = (JSON.parse(userConfigFile.loadedText || "{}").bar || {}).layout || {}
+      for (var section in layout) {
+        var list = layout[section] || []
+        for (var i = 0; i < list.length; i++) if (list[i] && list[i].id === "egesuren.petal") return true
+      }
+    } catch (e) {}
+    return false
+  }
+
+  function setInBar(on) {
+    if (on) {
+      Util.execDetached("omarchy bar put egesuren.petal --after omarchy.workspaces")
+      return
+    }
+    // Off the bar only: Petal itself stays on (its plugins[] entry).
+    Quickshell.execDetached(["python3", "-c", "import json, os, sys\n"
+      + "p = os.path.expanduser('~/.config/omarchy/shell.json')\n"
+      + "d = json.load(open(p))\n"
+      + "layout = (d.get('bar') or {}).get('layout') or {}\n"
+      + "for k, v in layout.items():\n"
+      + "    if isinstance(v, list): layout[k] = [e for e in v if not (isinstance(e, dict) and e.get('id') == 'egesuren.petal')]\n"
+      + "json.dump(d, open(p + '.tmp', 'w'), indent=2)\n"
+      + "os.replace(p + '.tmp', p)\n"])
+  }
+
   readonly property string position: DockModel.normalizePosition(dockConfig.position)
   readonly property bool vertical: DockModel.isVertical(position)
   readonly property bool autohide: dockConfig.autohide === true
@@ -694,9 +722,48 @@ Item {
 
   // modeId -> notifications held for it
   property var held: ({})
+  property int heldSeq: 0
 
   function heldCount(modeId) {
     return (root.held[modeId] || []).length
+  }
+
+  readonly property int heldTotal: {
+    var n = 0
+    for (var id in root.held) n += (root.held[id] || []).length
+    return n
+  }
+
+  // Every held notification, newest first: [{ mode, n }]
+  function heldList(modeId) {
+    var out = []
+    for (var id in root.held) {
+      if (modeId && id !== modeId) continue
+      var list = root.held[id] || []
+      for (var i = 0; i < list.length; i++) out.push({ mode: id, n: list[i] })
+    }
+    out.sort(function(a, b) { return (b.n.at || 0) - (a.n.at || 0) })
+    return out
+  }
+
+  function dismissHeld(modeId, hid) {
+    var next = Object.assign({}, root.held)
+    next[modeId] = (next[modeId] || []).filter(function(x) { return x.hid !== hid })
+    if (next[modeId].length === 0) delete next[modeId]
+    root.held = next
+  }
+
+  // Opens the app a held notification came from (its own buttons went with
+  // it off Omarchy's screen), and lets it go.
+  function openHeld(modeId, n) {
+    root.dismissHeld(modeId, n.hid)
+    if (!n.key) return
+    var windows = root.allWindows.filter(function(w) { return w.key === n.key })
+    root.activate({ key: n.key, windows: windows })
+  }
+
+  function clearAllHeld() {
+    root.held = ({})
   }
 
   function clearHeld(modeId) {
@@ -707,6 +774,7 @@ Item {
   }
 
   function holdFor(modeId, n) {
+    if (!n.hid) n.hid = ++root.heldSeq
     var next = Object.assign({}, root.held)
     next[modeId] = (next[modeId] || []).concat([n]).slice(-50)
     root.held = next
@@ -790,7 +858,18 @@ Item {
     }
   }
 
-  onCardChanged: if (root.card && root.card.autoClose) cardTimeout.restart()
+  // A focus card that pushes out a suggestion or the summary gives it back:
+  // it can show again later, instead of being lost for the day or the week.
+  property var shownCard: null
+  onCardChanged: {
+    var before = root.shownCard
+    root.shownCard = root.card
+    if (root.card && root.card.autoClose) cardTimeout.restart()
+    if (before && root.isFocusCard(root.card)) {
+      if (before.kind === "suggest" && !before.busy) activityItem.saved.suggestedOn = ""
+      if (before.kind === "summary") activityItem.saved.summaryWeek = ""
+    }
+  }
 
   function snooze(key, minutes) {
     var next = Object.assign({}, root.snoozed)
@@ -824,16 +903,26 @@ Item {
   // A card with buttons stays until it's answered (or closed with ×).
   property bool cardHovered: false
 
+  // Focus cards replace each other and Petal's quieter cards (a suggestion,
+  // the summary), never a held notification or an update.
+  function isFocusCard(c) {
+    return !!c && ["guard", "fit", "none"].indexOf(c.kind) >= 0
+  }
+
+  function clearFocusCard() {
+    if (root.isFocusCard(root.card)) root.card = null
+  }
+
   function guardCheck() {
     if (!root.settings.modes || !root.settings.focusGuard) return
-    if (root.card && root.card.kind !== "fit") return
+    if (root.card && ["fit", "suggest", "summary", "done"].indexOf(root.card.kind) < 0) return
     var t = Hyprland.activeToplevel
     if (!t || !t.wayland || !t.workspace) return
     var wsId = t.workspace.id
     if (!(wsId >= 1)) return
     var mode = root.modeForWorkspace(wsId)
     if (!mode || !(Number(mode.focusDelay || 0) > 0)) {
-      if (root.card && root.card.kind !== "held") root.card = null
+      root.clearFocusCard()
       return
     }
     var entry = root.entryForAppId(t.wayland.appId)
@@ -847,7 +936,7 @@ Item {
 
     var ok = function() {
       root.lastOkAddress = address
-      if (root.card && root.card.kind !== "held") root.card = null
+      root.clearFocusCard()
     }
 
     if (browser && /^(new tab|untitled|about:blank|)$/i.test(title)) return ok()
@@ -865,7 +954,7 @@ Item {
     var icon = root.iconFor({ key: key })
     if (owner && owner.id === mode.id) return ok()
     if (owner) {
-      root.card = { kind: "guard", title: title, icon: icon, target: owner.id, ws: wsId, mode: mode.id, snoozeKey: snoozeKey, address: address }
+      root.card = { kind: "guard", title: title, icon: icon, app: key, target: owner.id, ws: wsId, mode: mode.id, snoozeKey: snoozeKey, address: address }
       return
     }
     if (!brain.enabled) return
@@ -876,7 +965,7 @@ Item {
       if (!r || !now || String(now.address) !== address) return
       // Only speak up when it clearly belongs to another mode.
       if (r.mode && r.mode !== mode.id && root.modeById(r.mode)) {
-        root.card = { kind: "guard", title: title, icon: icon, target: r.mode, ws: wsId, mode: mode.id, reason: String(r.reason || ""), snoozeKey: snoozeKey, address: address }
+        root.card = { kind: "guard", title: title, icon: icon, app: key, target: r.mode, ws: wsId, mode: mode.id, reason: String(r.reason || ""), snoozeKey: snoozeKey, address: address }
       } else {
         root.lastOkAddress = address
       }
@@ -888,25 +977,89 @@ Item {
     var c = root.card
     root.card = null
     if (c && c.snoozeKey) root.snooze(c.snoozeKey, 10)
+    activityItem.cardAnswer("close", c)
   }
 
+  // The quiet button: "Go back", "Later", "Not now", "OK".
   function cardStay() {
     var c = root.card
+    if (c && c.kind === "suggest" && c.busy) return
     root.card = null
     if (!c) return
+    if (c.kind === "suggest") {
+      Quickshell.execDetached(["python3", activityItem.mcp, "--cli", "dismiss", String(c.s.key)])
+      return
+    }
     if (c.snoozeKey) root.snooze(c.snoozeKey, 10)
+    if (c.kind === "guard") activityItem.cardAnswer("back", c)
     if (c.kind === "guard" || c.kind === "none") {
       if (root.lastOkAddress && root.lastOkAddress !== c.address) root.focusAddress(root.lastOkAddress)
     }
   }
 
+  // The colored button: "Switch to …", "Make it", "Keep it", "More".
   function cardGo() {
     var c = root.card
+    if (c && c.kind === "suggest") {
+      root.acceptSuggestion(c)
+      return
+    }
     root.card = null
+    if (c && c.kind === "summary") {
+      root.openPanel("summary")
+      return
+    }
     if (!c || !c.target) return
     var ws = c.ws || root.focusedWorkspaceId
     if (c.snoozeKey) root.snooze(c.snoozeKey, 10)
+    if (c.kind === "guard") activityItem.cardAnswer("switch", c)
     root.requestMode(ws, c.target)
+  }
+
+  // ── Suggested modes ───────────────────────────────────────────────────
+  function namesText(names) {
+    var n = root.listOf(names)
+    return n.length <= 1 ? (n[0] || "") : n.slice(0, -1).join(", ") + " and " + n[n.length - 1]
+  }
+
+  function acceptSuggestion(c) {
+    var s = c.s
+    if (c.busy) return
+    if (s.kind === "add") {
+      root.setPinned(s.app, true, s.mode)
+      root.card = { kind: "done", icon: c.icon, title: s.name + " is in " + s.modeName + " now.", body: "", autoClose: true }
+      return
+    }
+    var apps = root.listOf(s.apps).filter(function(a) { return !!DesktopEntries.byId(a) })
+    var fallback = { name: String(s.name || "") || "New mode", icon: "●", color: "#ff5fae", about: "" }
+    if (!brain.enabled) {
+      root.makeMode(fallback, apps, c)
+      return
+    }
+    root.card = Object.assign({}, c, { busy: true })
+    brain.nameMode(root.listOf(s.names), function(r) {
+      var m = Object.assign({}, fallback)
+      if (r) {
+        if (r.name && String(r.name).trim()) m.name = String(r.name).trim().slice(0, 24)
+        var icon = String(r.icon || "").trim()
+        if (icon && icon.length <= 2 && /[^\x00-\x7f]/.test(icon)) m.icon = icon
+        if (/^#[0-9a-fA-F]{6}$/.test(String(r.color || ""))) m.color = String(r.color)
+        if (r.about) m.about = String(r.about).slice(0, 120)
+      }
+      root.makeMode(m, apps, c)
+    })
+  }
+
+  function makeMode(m, apps, c) {
+    var data = root.cloneModes()
+    var base = String(m.name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "mode"
+    var id = base
+    var taken = data.modes.map(function(x) { return x.id })
+    for (var n = 2; taken.indexOf(id) >= 0; n++) id = base + "-" + n
+    data.modes.push({ id: id, name: m.name, icon: m.icon, color: m.color, about: m.about, apps: apps, sites: [], focusDelay: 0, hold: false, allow: [] })
+    root.saveModes(data)
+    if (!root.card || root.card.kind === "suggest")
+      root.card = { kind: "done", icon: c.icon, title: "Made " + m.name + ".", body: "With " + root.namesText(c.s.names) + ". Right-click it in the dock to change it.", autoClose: true }
   }
 
   function cardAllow() {
@@ -965,6 +1118,14 @@ Item {
     running: root.settings.claudeUsage && root.chatProvider !== ""
     triggeredOnStart: true
     onTriggered: root.refreshUsage()
+  }
+
+  // "2026-11-02" -> "Nov 2", in the language Omarchy is set to.
+  function shortDay(iso) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""))
+    if (!m) return ""
+    var locale = Commons.I18n.formatLocale ? Qt.locale(Commons.I18n.formatLocale) : Qt.locale()
+    return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).toLocaleDateString(locale, "MMM d")
   }
 
   function untilText(iso) {
@@ -1117,16 +1278,36 @@ Item {
     if (paths.length) Quickshell.execDetached(["gio", "trash"].concat(paths))
   }
 
-  readonly property bool searchOpen: appSearch.open || askBox.open
+  readonly property bool searchOpen: appSearch.open || askBox.open || petalPanel.open
 
   function openSearch() {
     appSearch.open = true
   }
 
   function openAsk(prefill) {
+    petalPanel.open = false
     root.refreshUsage()
+    askBox.describing = false
     askBox.prefill = prefill || ""
     askBox.open = true
+  }
+
+  // "Describe your day": the chat builds the modes from a few words.
+  function openDescribe() {
+    if (!root.chatProvider) {
+      root.openPanel("")
+      return
+    }
+    root.openAsk("")
+    askBox.describing = true
+  }
+
+  // The Petal menu (from Omarchy's bar, Omarchy's menu or `petal panel`).
+  function openPanel(page) {
+    appSearch.open = false
+    askBox.open = false
+    petalPanel.page = page === "home" ? "" : (page || "")
+    petalPanel.open = true
   }
 
   AppSearch {
@@ -1141,6 +1322,25 @@ Item {
 
   Brain {
     id: brain
+    dock: root
+  }
+
+  PetalPanel {
+    id: petalPanel
+    dock: root
+  }
+
+  // The activity history, suggestions, the weekly summary, schedules.
+  property alias activity: activityItem
+
+  Activity {
+    id: activityItem
+    dock: root
+  }
+
+  // Shortcuts and each mode's Hyprland look.
+  Hypr {
+    id: hyprItem
     dock: root
   }
 
@@ -1188,6 +1388,21 @@ Item {
       })
     }
     function chat(text: string): void { root.openAsk(""); agent.send(text) }
+    function modeAt(n: int): void { var m = root.modes[n - 1]; if (m) root.requestMode(root.focusedWorkspaceId, m.id) }
+    function panel(page: string): void { root.openPanel(page) }
+    function describe(): void { root.openDescribe() }
+    function held(): void { root.openPanel("held") }
+    function summary(): void { root.openPanel("summary") }
+    function testSuggest(): void {
+      activityItem.tool("petal_suggestions", {}, function(r) {
+        var s = r && r.suggestions && r.suggestions.length ? r.suggestions[0]
+          : { kind: "new", key: "test", apps: ["com.mitchellh.ghostty"], names: ["Ghostty", "Linear"], name: "Design", text: "You often use Ghostty and Linear together. Make a Design mode?" }
+        root.card = { kind: "suggest", s: s, icon: root.iconFor({ key: s.kind === "add" ? s.app : s.apps[0] }) }
+      })
+    }
+    function testSummary(): void {
+      activityItem.tool("petal_summary", {}, function(r) { if (r && !r.error) root.card = { kind: "summary", data: r, icon: Qt.resolvedUrl("assets/petal.svg") } })
+    }
     function allow(): void { agent.allow() }
     function testNoWarp(): void { root.withoutWarp("true") }
     function options(): void { root.openAsk(""); askBox.optionsOpen = true }
@@ -1198,6 +1413,7 @@ Item {
     function close(): void {
       appSearch.open = false
       askBox.open = false
+      petalPanel.open = false
       root.card = null
       root.withDock(function(w) { w.closeMenu(); w.closeStack(); w.hidePreview() })
     }

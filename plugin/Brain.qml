@@ -127,4 +127,18 @@ Item {
     brain.ask(prompt, done, "haiku", "low", "n|" + n.app + "|" + n.summary + "|" + n.body)
   }
 
+  // A name, icon, color and about for a new mode made of apps used together.
+  // done({ name, icon, color, about })
+  function nameMode(appNames, done) {
+    var taken = brain.dock.modes.map(function(m) { return m.name + " " + (m.color || "") }).join(", ")
+    var prompt = "You name a focus mode in a dock: a set of apps a person uses together for one kind of work.\n"
+      + "Apps: " + appNames.join(", ") + "\n"
+      + "Modes they already have (use a different name and color): " + taken + "\n"
+      + "Reply with ONLY JSON: {\"name\": \"<one or two plain words, like Design or Studying>\", "
+      + "\"icon\": \"<one Nerd Font Material Design glyph, as the character itself>\", "
+      + "\"color\": \"#rrggbb (soft and bright, readable on dark glass)\", "
+      + "\"about\": \"<what the mode is for, under 12 words>\"}"
+    brain.ask(prompt, done, "haiku", "low")
+  }
+
 }

@@ -1451,6 +1451,9 @@ PanelWindow {
     readonly property var target: c && c.target && window.dock ? window.dock.modeById(c.target) : null
     readonly property var here: c && window.dock ? window.dock.modeById(c.mode || window.modeId) : null
     readonly property int wait: here && window.opt("countdown") ? Number(here.focusDelay || 0) : 0
+    // Petal's own quiet cards: a suggestion, the weekly summary, "done".
+    readonly property bool quiet: !!c && (c.kind === "suggest" || c.kind === "summary" || c.kind === "done")
+    readonly property string range: c && c.kind === "summary" && c.data ? window.dock.shortDay(c.data.from) + " – " + window.dock.shortDay(c.data.to) : ""
     readonly property color hue: target ? window.tint(target.color) : window.accent
 
     visible: !!c && window.isFocusedScreen && window.shown
@@ -1502,6 +1505,8 @@ PanelWindow {
           Text {
             width: parent.width
             textFormat: Text.StyledText
+            wrapMode: guardCard.quiet ? Text.Wrap : Text.NoWrap
+            maximumLineCount: guardCard.quiet ? 3 : 1
             elide: Text.ElideRight
             color: Commons.Color.popups.text
             font.family: window.uiFont
@@ -1511,6 +1516,9 @@ PanelWindow {
               if (!c) return ""
               var esc = function(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;") }
               var dim = "<font color='" + Commons.Color.muted + "'>"
+              if (c.kind === "suggest") return "<b>" + esc(c.s.text) + "</b>"
+              if (c.kind === "done") return "<b>" + esc(c.title) + "</b>"
+              if (c.kind === "summary") return "<b>Last week</b>" + dim + " · " + esc(guardCard.range) + "</font>"
               if (c.kind === "update") return "<b>Petal updated to " + esc(c.version) + "</b>"
               if (c.kind === "held") return "<b>" + esc(c.n.summary) + "</b>" + dim + " · " + esc(c.n.app) + (c.allowedHere ? "" : " · held for " + esc(guardCard.target ? guardCard.target.name : "later")) + "</font>"
               if (c.kind === "guard") return "<b>" + esc(c.title) + "</b> belongs to " + esc(guardCard.target ? guardCard.target.name : "another mode") + "."
@@ -1523,16 +1531,20 @@ PanelWindow {
             width: parent.width
             visible: text !== ""
             wrapMode: Text.Wrap
-            maximumLineCount: 3
+            maximumLineCount: guardCard.c && guardCard.c.kind === "summary" ? 6 : 3
             elide: Text.ElideRight
             textFormat: Text.PlainText
             color: Commons.Color.popups.text
             font.family: window.uiFont
             font.pixelSize: Style.font.body
+            lineHeight: guardCard.c && guardCard.c.kind === "summary" ? 1.15 : 1
             text: {
               var c = guardCard.c
               if (!c) return ""
               if (c.kind === "held") return String(c.n.body || "")
+              if (c.kind === "done") return String(c.body || "")
+              if (c.kind === "summary") return window.dock.listOf(c.data.lines).slice(0, 6).join("\n")
+              if (c.kind === "suggest" && c.busy) return "Making it…"
               if (c.kind === "guard") return "This workspace is in " + (guardCard.here ? guardCard.here.name : "another") + " mode. Go back to what you were doing, or switch the workspace to " + (guardCard.target ? guardCard.target.name : "that mode") + "."
               if (c.kind === "update") return "Restart the shell to finish (a second or two)."
               return ""
@@ -1557,8 +1569,29 @@ PanelWindow {
         spacing: Style.spacing.sm
 
         CardButton {
-          text: !guardCard.c ? "" : guardCard.c.kind === "update" ? "Later" : guardCard.c.kind === "held" ? (guardCard.c.allowedHere ? "OK" : "Later") : "Go back"
+          visible: !(guardCard.c && guardCard.c.kind === "suggest" && guardCard.c.busy)
+          text: {
+            var c = guardCard.c
+            if (!c) return ""
+            if (c.kind === "update") return "Later"
+            if (c.kind === "held") return c.allowedHere ? "OK" : "Later"
+            if (c.kind === "suggest") return "Not now"
+            if (c.kind === "done" || c.kind === "summary") return "OK"
+            return "Go back"
+          }
           onClicked: window.dock.cardStay()
+        }
+        CardButton {
+          visible: !!guardCard.c && (guardCard.c.kind === "suggest" || guardCard.c.kind === "summary")
+          primary: true
+          text: {
+            var c = guardCard.c
+            if (!c) return ""
+            if (c.kind === "summary") return "More"
+            if (c.kind !== "suggest") return ""
+            return c.busy ? "Making it…" : c.s && c.s.kind === "add" ? "Keep it" : "Make it"
+          }
+          onClicked: window.dock.cardGo()
         }
         CardButton {
           visible: !!guardCard.c && guardCard.c.kind === "update"
@@ -2133,6 +2166,11 @@ PanelWindow {
         }
       }
       MenuSeparator { visible: !!menu.m }
+      MenuRow {
+        visible: !!menu.m && window.dock.heldCount(menu.m.id) > 0
+        text: "Show " + (menu.m ? window.dock.heldCount(menu.m.id) : 0) + " held…"
+        onTriggered: window.dock.openPanel("held:" + menu.m.id)
+      }
       MenuRow {
         visible: !!menu.m && window.dock.heldCount(menu.m.id) > 0
         text: "Clear " + (menu.m ? window.dock.heldCount(menu.m.id) : 0) + " held"
