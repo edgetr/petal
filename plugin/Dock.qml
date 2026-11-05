@@ -489,7 +489,7 @@ Item {
   // As its own session unit, the way Omarchy launches apps.
   function launchEntry(entry) {
     if (!entry) return
-    Util.execDetached("uwsm-app -- " + Util.shellQuote(entry.id + ".desktop"))
+    root.withoutWarp("uwsm-app -- " + Util.shellQuote(entry.id + ".desktop"))
   }
 
   // Opens files with an app: its Exec line with the files in place of the
@@ -510,7 +510,7 @@ Item {
     }
     if (!placed) args = args.concat(paths)
     if (args.length === 0) return
-    Quickshell.execDetached(["uwsm-app", "--"].concat(args))
+    root.withoutWarp(["uwsm-app", "--"].concat(args).map(function(a) { return Util.shellQuote(a) }).join(" "))
   }
 
   function activate(item) {
@@ -556,7 +556,7 @@ Item {
     var dispatch = function(step) { return "hyprctl dispatch " + Util.shellQuote(step) }
     var command = steps.map(dispatch).join(" && ")
     if (after.length > 0) command += "; sleep 0.4; " + after.map(dispatch).join("; ")
-    Util.execDetached(command)
+    root.withoutWarp(command)
   }
 
   function minimize(window) {
@@ -567,8 +567,57 @@ Item {
 
   function focusAddress(address) {
     var target = root.dispatchFor(address)
-    if (target) Util.execDetached("hyprctl dispatch " + Util.shellQuote("hl.dsp.focus({ " + target + " })"))
+    if (target) root.withoutWarp("hyprctl dispatch " + Util.shellQuote("hl.dsp.focus({ " + target + " })"))
   }
+
+  // Hyprland moves the pointer onto a window it focuses (and to the middle
+  // of a workspace it switches to). Clicking the dock shouldn't move your
+  // pointer, so Petal turns those warps off while it focuses or opens an
+  // app, then puts your own settings back.
+  property bool warpOff: false
+  property string warpRestore: ""
+
+  function withoutWarp(command) {
+    if (root.warpOff) {
+      Util.execDetached(command)
+    } else {
+      root.warpOff = true
+      warpProc.command = ["bash", "-c",
+        "nw=$(hyprctl getoption cursor:no_warps -j | jq -r .bool); "
+        + "wc=$(hyprctl getoption cursor:warp_on_change_workspace -j | jq -r .int); "
+        + "echo \"$nw $wc\"; "
+        + "hyprctl eval 'hl.config({ cursor = { no_warps = true, warp_on_change_workspace = 0 } })' >/dev/null; "
+        + command]
+      warpProc.running = true
+    }
+    // A new app's window can take a moment to appear and take focus.
+    warpTimer.restart()
+  }
+
+  Process {
+    id: warpProc
+    stdout: SplitParser {
+      onRead: line => {
+        var parts = String(line).trim().split(/\s+/)
+        if (parts.length === 2 && /^(true|false)$/.test(parts[0]) && /^-?\d+$/.test(parts[1]))
+          root.warpRestore = "hl.config({ cursor = { no_warps = " + parts[0] + ", warp_on_change_workspace = " + parts[1] + " } })"
+      }
+    }
+  }
+
+  Timer {
+    id: warpTimer
+    interval: 2500
+    onTriggered: {
+      root.warpOff = false
+      // If the old values couldn't be read, fall back to Omarchy's defaults
+      // rather than leaving warps off.
+      var restore = root.warpRestore || "hl.config({ cursor = { no_warps = false, warp_on_change_workspace = 1 } })"
+      Util.execDetached("hyprctl eval " + Util.shellQuote(restore) + " >/dev/null")
+      root.warpRestore = ""
+    }
+  }
+
 
   function quit(item) {
     if (!item) return
@@ -1109,6 +1158,7 @@ Item {
     }
     function chat(text: string): void { root.openAsk(""); agent.send(text) }
     function allow(): void { agent.allow() }
+    function testNoWarp(): void { root.withoutWarp("true") }
     function options(): void { root.openAsk(""); askBox.optionsOpen = true }
     function newChat(): void { agent.reset() }
     function emptyTrash(): void { root.emptyTrash() }
