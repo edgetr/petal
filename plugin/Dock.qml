@@ -116,6 +116,16 @@ Item {
       // whole without AI), and which one the chat, usage ring and sorting use.
       property list<string> aiProviders: ["claude"]
       property bool otherAgents: true
+      // Shortcuts, schedules, the private activity history behind suggestions
+      // and the weekly summary; magnification and the menu bar icon are macOS's.
+      property bool shortcuts: true
+      property var schedule: []
+      property bool activityLog: true
+      property bool suggestModes: true
+      property bool summary: true
+      property bool magnification: false
+      property real magnificationAmount: 0.5
+      property bool menuBarIcon: true
       property string chatProvider: "claude"
       property string codexModel: ""
       property string codexEffort: "medium"

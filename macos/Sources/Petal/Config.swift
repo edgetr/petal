@@ -42,7 +42,9 @@ final class Config {
         "stackFolders": ["~/Downloads", "~/Pictures/Screenshots"], "trash": true, "modes": true, "countdown": false,
         "focusGuard": false, "holdNotifications": true, "ai": true, "claudeUsage": true, "autoUpdate": true,
         "claudePath": "", "chatModel": "sonnet", "chatEffort": "medium", "claudeAccess": "auto",
-        "aiProviders": ["claude"], "otherAgents": true, "chatProvider": "claude", "codexModel": "", "codexEffort": "medium", "codexPath": "",
+        "aiProviders": ["claude"], "otherAgents": true,
+        "shortcuts": true, "schedule": [Any](), "activityLog": true, "suggestModes": true, "summary": true,
+        "magnification": false, "magnificationAmount": 0.5, "menuBarIcon": true, "chatProvider": "claude", "codexModel": "", "codexEffort": "medium", "codexPath": "",
     ]
 
     private(set) var modes: [Mode] = []

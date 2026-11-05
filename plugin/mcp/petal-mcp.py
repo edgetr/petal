@@ -77,6 +77,14 @@ SETTINGS_SCHEMA = {
     "claudeAccess": ("auto", "Claude panel permissions: auto (safe actions run, risky ones ask) or full."),
     "aiProviders": (["claude"], "The AI apps Petal uses, each the user's own install and account: claude, codex, both, or none ([] = no AI; the dock still works)."),
     "otherAgents": (True, "Let the user's other AI sessions (T3 Code, Claude Code or Codex in a terminal) change Petal: its MCP server, skill and `petal` command are set up for them."),
+    "shortcuts": (True, "Petal's keyboard shortcuts: switch mode (1-9), open the AI panel, open the + search. Never takes one already in use."),
+    "schedule": ([], "Modes by time: [{mode, days: [1-7, 1 = Monday], from: \"HH:MM\", to: \"HH:MM\"}]. When a block starts, the focused workspace switches to that mode."),
+    "activityLog": (True, "Keep a private, local history of which app is in front (never titles), for suggestions and the weekly summary."),
+    "suggestModes": (True, "Suggest new modes, or apps to add to a mode, from the activity history."),
+    "summary": (True, "A weekly summary card: time in each mode, top apps, focus cards."),
+    "magnification": (False, "macOS: icons grow under the pointer."),
+    "magnificationAmount": (0.5, "macOS: how much icons grow, 0.1 to 1 (1 = twice the size)."),
+    "menuBarIcon": (True, "macOS: Petal's icon in the menu bar (mode, updates)."),
     "chatProvider": ("claude", "Which of aiProviders the chat panel, the usage ring and sorting use: claude or codex."),
     "codexModel": ("", "Codex chat model; empty = Codex's own default."),
     "codexEffort": ("medium", "Codex chat reasoning effort: low, medium, high or xhigh."),
@@ -93,6 +101,8 @@ MODE_FIELDS = {
     "focusDelay": "seconds of countdown before leaving (if countdowns are on); 0 also turns focus cards off in this mode",
     "hold": "Omarchy only: hold notifications from apps outside the mode" if MAC else "hold notifications from apps outside the mode",
     "allow": "bundle ids focus cards always accept in this mode" if MAC else "desktop ids whose notifications always come through",
+    "shortcut": "macOS: the name of a Shortcut (Shortcuts app) to run when a Desktop enters this mode, e.g. one that turns on a Focus",
+    "hyprland": "Omarchy: this mode's look for its workspaces: {borderColor: \"#rrggbb\" or \"mode\", gapsIn, gapsOut, wallpaper}",
 }
 WORKSPACE = "Desktop" if MAC else "workspace"
 
@@ -339,6 +349,10 @@ def t_reload(_):
     return {"ok": True, "note": "Omarchy's shell (and Petal) is restarting; the Claude panel closes."}
 
 
+def not_yet(_):
+    raise ValueError("This needs a newer Petal.")
+
+
 TOOLS = {
     "petal_get_state": (t_get_state, "Everything about the user's Petal dock: all settings (with help text and current values), modes, current mode, position/auto-hide and file paths. Call this first.", {}),
     "petal_set_settings": (t_set_settings, "Change one or more Petal settings (appearance like dockColor/dockOpacity/iconSize/accentColor, and feature switches like bounce/badges). Applies instantly.",
@@ -356,6 +370,12 @@ TOOLS = {
     "petal_switch_mode": (t_switch_mode, "Switch the focused %s to a mode." % WORKSPACE, {"id": {"type": "string"}}),
     "petal_list_apps": (t_list_apps, "Installed apps (%s and name), optionally filtered by a search word. Use the ids in a mode's apps." % ("bundle id" if MAC else "desktop id"),
                         {"query": {"type": "string"}}),
+    "petal_export_recipe": (globals().get("t_export_recipe", not_yet), "Save the user's dock as a shareable recipe file (.petal): modes, apps, look and features, nothing personal. Returns its path.",
+                            {"path": {"type": "string", "description": "where to save it; default ~/<name>.petal"}, "name": {"type": "string"}}),
+    "petal_import_recipe": (globals().get("t_import_recipe", not_yet), "Add the modes from a recipe file (.petal) someone shared, and optionally its look. Apps are matched to what's installed; the rest are listed as missing.",
+                            {"path": {"type": "string"}, "look": {"type": "boolean", "description": "also use its look and features"}}),
+    "petal_suggestions": (globals().get("t_suggestions", not_yet), "Modes Petal would suggest from the user's activity (new modes, or apps to add to a mode).", {}),
+    "petal_summary": (globals().get("t_summary", not_yet), "Last week in the user's modes: time in each, top apps, focus cards.", {}),
     "petal_reload": (t_reload, "Restart Petal to load a rebuilt Petal.app (settings and modes don't need this)." if MAC
                      else "Restart Omarchy's shell to load edits to Petal's own source code (settings and modes don't need this).", {}),
 }
