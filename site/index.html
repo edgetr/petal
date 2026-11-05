@@ -4,9 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Petal — a dock that keeps you on task</title>
-  <meta name="description" content="Petal is a dock for Omarchy with a focus mode for every workspace and Claude built in. Change anything about it by asking.">
+  <meta name="description" content="Petal is a dock with a focus mode for every workspace and Claude built in. Change anything about it by asking.">
   <meta property="og:title" content="Petal — a dock that keeps you on task">
-  <meta property="og:description" content="A focus mode for every workspace, with Claude built in. For Omarchy.">
+  <meta property="og:description" content="A focus mode for every workspace, with Claude built in.">
   <meta property="og:url" content="https://petal-dock.vercel.app">
   <meta property="og:type" content="website">
   <link rel="canonical" href="https://petal-dock.vercel.app">
@@ -21,9 +21,6 @@
 <body class="home">
   <header class="nav">
     <a class="nav-brand" href="/"><img src="/icon.svg" alt="">Petal</a>
-    <nav class="nav-links" aria-label="Petal">
-      <a href="https://github.com/edgetr/petal">GitHub</a>
-    </nav>
     <div class="nav-actions">
       <button type="button" class="nav-theme" id="theme" aria-label="Switch between light and dark">
         <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>
@@ -39,13 +36,13 @@
         <h1 class="m-display">A dock that keeps you on task</h1>
         <p class="m-lede">A focus mode for every workspace, with Claude built in. Change anything about it by asking.</p>
         <div class="m-cta">
-          <a class="m-button" href="/download/linux"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4 3.6 3.6V3h2zM5 19h14v2H5z"/></svg><span>Download for Omarchy</span></a>
+          <a class="m-button" href="/download/linux"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4 3.6 3.6V3h2zM5 19h14v2H5z"/></svg><span>Download for Linux</span></a>
           <span class="m-button soon"><span>macOS</span><small>soon</small></span>
           <span class="m-button soon"><span>Windows</span><small>soon</small></span>
-          <p class="m-note away" data-for="mac">Petal for Mac is on its way. Today it runs on Omarchy.</p>
-          <p class="m-note away" data-for="windows">Petal for Windows is on its way. Today it runs on Omarchy.</p>
+          <p class="m-note away" data-for="mac">Petal for Mac is on its way. For now it runs on Linux.</p>
+          <p class="m-note away" data-for="windows">Petal for Windows is on its way. For now it runs on Linux.</p>
           <div class="cmd"><code>curl -fsSL https://petal-dock.vercel.app/install.sh | bash</code><button type="button" data-copy>Copy</button></div>
-          <p class="m-note">Free and open source, for Omarchy.</p>
+          <p class="m-note">Free and open source.</p>
         </div>
       </div>
     </section>
@@ -128,10 +125,10 @@
     <section class="m-section m-get reveal" id="download" aria-labelledby="download-title">
       <div class="m-wrap">
         <img src="/icon-176.webp" width="88" height="88" alt="">
-        <h2 class="m-heading" id="download-title">Free for Omarchy</h2>
-        <p>Omarchy 4.5 or later. It keeps itself up to date. macOS and Windows are on the way.</p>
+        <h2 class="m-heading" id="download-title">Free and open source</h2>
+        <p>On Linux it needs Omarchy 4.5 or later for now. It keeps itself up to date. macOS and Windows are on the way.</p>
         <div class="m-cta">
-          <a class="m-button" href="/download/linux"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4 3.6 3.6V3h2zM5 19h14v2H5z"/></svg><span>Download for Omarchy</span></a>
+          <a class="m-button" href="/download/linux"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4 3.6 3.6V3h2zM5 19h14v2H5z"/></svg><span>Download for Linux</span></a>
           <span class="m-button soon"><span>macOS</span><small>soon</small></span>
           <span class="m-button soon"><span>Windows</span><small>soon</small></span>
           <div class="cmd"><code>curl -fsSL https://petal-dock.vercel.app/install.sh | bash</code><button type="button" data-copy>Copy</button></div>
@@ -162,7 +159,7 @@
           </details>
           <details>
             <summary><span>What do I need?</span><svg class="faq-mark" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
-            <p>Omarchy 4.5 or later. Petal is a plugin for Omarchy's shell, so it doesn't run on other Linux setups, and there is nothing else to install.</p>
+            <p>For now, Omarchy 4.5 or later on Linux. Petal plugs into Omarchy's shell, so there is nothing else to install.</p>
           </details>
         </div>
       </div>

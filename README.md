@@ -1,6 +1,6 @@
 # Petal
 
-**An AI-native dock for [Omarchy](https://omarchy.org).**
+**An AI-native dock.** On Linux today ([Omarchy](https://omarchy.org)), with macOS and Windows on the way.
 Focus modes per workspace, a dock that knows what you're doing, and Claude Code built in.
 Want it different? Just ask Claude.
 
