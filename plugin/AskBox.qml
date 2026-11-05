@@ -93,7 +93,80 @@ PanelWindow {
 
     Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
 
-    MouseArea { anchors.fill: parent }
+    // Clicks on the card stay on the card (and close the dropdown).
+    MouseArea { anchors.fill: parent; onClicked: box.optionsOpen = false }
+
+    // ── Options: a dropdown over the panel, so the panel itself never moves ──
+    Rectangle {
+        id: optionsSheet
+        z: 10
+        visible: opacity > 0
+        opacity: box.optionsOpen ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 140 } }
+        transform: Translate { y: box.optionsOpen ? 0 : -6; Behavior on y { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } } }
+        x: card.pad
+        y: card.pad + Math.round(36 * Style.fontScale)
+        width: card.width - card.pad * 2
+        height: sheet.implicitHeight + Math.round(24 * Style.fontScale)
+        radius: Math.round(14 * Style.fontScale)
+        color: Qt.rgba(Commons.Color.popups.background.r * 0.92, Commons.Color.popups.background.g * 0.92, Commons.Color.popups.background.b * 0.92, 1)
+        border.width: 1
+        border.color: Qt.rgba(1, 1, 1, 0.12)
+
+        // Clicks inside the dropdown stay in it.
+        MouseArea { anchors.fill: parent }
+
+        Column {
+          id: sheet
+          x: Math.round(12 * Style.fontScale)
+          y: Math.round(12 * Style.fontScale)
+          width: parent.width - x * 2
+          spacing: Math.round(10 * Style.fontScale)
+
+          OptionRow {
+            label: "Model"
+            Segmented {
+              width: parent.width
+              options: box.models
+              current: box.settings ? box.settings.chatModel : ""
+              onPicked: value => box.settings.chatModel = value
+            }
+          }
+
+          OptionRow {
+            label: "Effort"
+            Segmented {
+              width: parent.width
+              options: box.efforts.map(function(e) { return [e, e] })
+              current: box.settings ? box.settings.chatEffort : ""
+              onPicked: value => box.settings.chatEffort = value
+            }
+          }
+
+          OptionRow {
+            label: "Full access"
+            Item {
+              width: parent.width
+              height: Math.round(30 * Style.fontScale)
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: box.settings && box.settings.claudeAccess === "full" ? "Skips every permission check" : "Off: safe actions run on their own"
+                color: box.ink
+                opacity: 0.85
+                font.family: box.uiFont
+                font.pixelSize: Math.round(13 * Style.fontScale)
+              }
+              Switch {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                on: !!box.settings && box.settings.claudeAccess === "full"
+                onToggled: box.settings.claudeAccess = box.settings.claudeAccess === "full" ? "auto" : "full"
+              }
+            }
+          }
+        }
+      }
+
 
     Column {
       id: column
@@ -161,70 +234,9 @@ PanelWindow {
         }
       }
 
-      // ── Options: model, effort, commands ──
-      Rectangle {
-        visible: box.optionsOpen
-        width: parent.width
-        height: visible ? sheet.implicitHeight + Math.round(24 * Style.fontScale) : 0
-        radius: Math.round(14 * Style.fontScale)
-        color: Qt.rgba(1, 1, 1, 0.035)
-        border.width: 1
-        border.color: Qt.rgba(1, 1, 1, 0.06)
-
-        Column {
-          id: sheet
-          x: Math.round(12 * Style.fontScale)
-          y: Math.round(12 * Style.fontScale)
-          width: parent.width - x * 2
-          spacing: Math.round(10 * Style.fontScale)
-
-          OptionRow {
-            label: "Model"
-            Segmented {
-              width: parent.width
-              options: box.models
-              current: box.settings ? box.settings.chatModel : ""
-              onPicked: value => box.settings.chatModel = value
-            }
-          }
-
-          OptionRow {
-            label: "Effort"
-            Segmented {
-              width: parent.width
-              options: box.efforts.map(function(e) { return [e, e] })
-              current: box.settings ? box.settings.chatEffort : ""
-              onPicked: value => box.settings.chatEffort = value
-            }
-          }
-
-          OptionRow {
-            label: "Full access"
-            Item {
-              width: parent.width
-              height: Math.round(30 * Style.fontScale)
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                text: box.settings && box.settings.claudeAccess === "full" ? "Skips every permission check" : "Off: safe actions run on their own"
-                color: box.ink
-                opacity: 0.85
-                font.family: box.uiFont
-                font.pixelSize: Math.round(13 * Style.fontScale)
-              }
-              Switch {
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                on: !!box.settings && box.settings.claudeAccess === "full"
-                onToggled: box.settings.claudeAccess = box.settings.claudeAccess === "full" ? "auto" : "full"
-              }
-            }
-          }
-        }
-      }
-
       // ── Empty state ──
       Column {
-        visible: (!box.chat || box.chat.messages.count === 0) && !box.optionsOpen
+        visible: !box.chat || box.chat.messages.count === 0
         width: parent.width
         spacing: Math.round(2 * Style.fontScale)
 
@@ -438,7 +450,7 @@ PanelWindow {
           font.family: box.uiFont
           font.pixelSize: Math.round(14 * Style.fontScale)
           clip: true
-          Keys.onEscapePressed: box.open = false
+          Keys.onEscapePressed: { if (box.optionsOpen) box.optionsOpen = false; else box.open = false }
           Keys.onReturnPressed: box.send()
           Keys.onEnterPressed: box.send()
         }
