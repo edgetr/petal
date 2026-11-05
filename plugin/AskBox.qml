@@ -67,11 +67,14 @@ PanelWindow {
     return null
   }
   readonly property var models: provider === "codex"
-    ? [["", "Default"]].concat((box.dock ? box.dock.codexModels : []).slice(0, 4).map(function(m) { return [m.id, m.name] }))
+    ? [["", "Default"]].concat((box.dock ? box.dock.codexModels : []).map(function(m) { return [m.id, box.modelLabel(m.name)] }))
     : [["haiku", "Haiku"], ["sonnet", "Sonnet"], ["opus", "Opus"], ["fable", "Fable"]]
   readonly property var efforts: provider === "codex"
     ? (box.codexModel && box.codexModel.efforts.length ? box.codexModel.efforts : ["low", "medium", "high", "xhigh"])
     : ["low", "medium", "high", "xhigh", "max"]
+
+  // Codex's names mix "GPT-6.1-Sol" and "GPT-6.1 Terra"; show them all the second way.
+  function modelLabel(name) { return String(name || "").replace(/^(GPT-[\d.]+)-/, "$1 ") }
 
   function modelName(id) {
     for (var i = 0; i < models.length; i++) if (models[i][0] === id) return models[i][1]
@@ -175,7 +178,18 @@ PanelWindow {
           OptionRow {
             visible: box.models.length > 1
             label: "Model"
+            contentHeight: box.provider === "codex" ? modelChips.implicitHeight : Math.round(30 * Style.fontScale)
+            // Claude's four short names side by side; Codex's longer list as pills that wrap.
             Segmented {
+              visible: box.provider !== "codex"
+              width: parent.width
+              options: box.models
+              current: box.settings ? box.settings[box.modelKey] : ""
+              onPicked: value => box.settings[box.modelKey] = value
+            }
+            Chips {
+              id: modelChips
+              visible: box.provider === "codex"
               width: parent.width
               options: box.models
               current: box.settings ? box.settings[box.modelKey] : ""
@@ -563,12 +577,14 @@ PanelWindow {
   component OptionRow: Item {
     id: optionRow
     property string label: ""
+    // Taller when its content wraps (Codex's models); the label stays with the first line.
+    property real contentHeight: Math.round(30 * Style.fontScale)
     default property alias content: slot.data
     width: parent ? parent.width : 0
-    height: Math.round(30 * Style.fontScale)
+    height: contentHeight
 
     Text {
-      anchors.verticalCenter: parent.verticalCenter
+      y: Math.round((30 * Style.fontScale - height) / 2)
       width: Math.round(84 * Style.fontScale)
       text: optionRow.label
       color: box.soft
@@ -580,6 +596,50 @@ PanelWindow {
       x: Math.round(84 * Style.fontScale)
       width: parent.width - x
       height: parent.height
+    }
+  }
+
+  // Pills sized to their names, wrapping onto more lines: for longer lists of
+  // long names (Codex's models), where equal cells would crush them.
+  component Chips: Flow {
+    id: chips
+    property var options: []
+    property var current
+    signal picked(var value)
+    spacing: Math.round(6 * Style.fontScale)
+
+    Repeater {
+      model: chips.options
+      delegate: Rectangle {
+        id: chip
+        required property var modelData
+        readonly property bool chosen: chip.modelData[0] === chips.current
+        width: chipText.implicitWidth + Math.round(24 * Style.fontScale)
+        height: Math.round(28 * Style.fontScale)
+        radius: height / 2
+        color: chosen ? Qt.rgba(1, 1, 1, 0.13) : (chipMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(1, 1, 1, 0.05))
+        border.width: 1
+        border.color: chosen ? Qt.rgba(1, 1, 1, 0.08) : "transparent"
+        Behavior on color { ColorAnimation { duration: 140 } }
+
+        Text {
+          id: chipText
+          anchors.centerIn: parent
+          text: chip.modelData[1]
+          color: box.ink
+          opacity: chip.chosen ? 1 : (chipMouse.containsMouse ? 0.85 : 0.6)
+          font.family: box.uiFont
+          font.pixelSize: Math.round(12.5 * Style.fontScale)
+          font.weight: chip.chosen ? Font.DemiBold : Font.Normal
+        }
+        MouseArea {
+          id: chipMouse
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: chips.picked(chip.modelData[0])
+        }
+      }
     }
   }
 
