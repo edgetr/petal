@@ -4,7 +4,7 @@ Updated 2026-11-05. This file holds Petal's current rules for every coding agent
 
 ## Project
 
-Petal is an AI-native dock for Omarchy, with a focus mode for every workspace and Claude built in. It is a plugin for Omarchy's shell (Quickshell/QML on Hyprland 0.56, Lua config) and runs only on Omarchy. macOS comes next, once the current work is done; Windows is not planned.
+Petal is an AI-native dock for Omarchy, with a focus mode for every workspace and Claude built in. On Omarchy it is a plugin for Omarchy's shell (Quickshell/QML on Hyprland 0.56, Lua config). Petal for macOS (macOS 26 and later, in `macos/`) is being built: a native app that replaces macOS's Dock and gives every Desktop its own mode. Windows is not planned.
 
 - **Focus modes:** each mode has its own apps (the dock's order), color, icon and rules. Every workspace remembers its mode, so switching workspace swaps the dock.
 - **Focus cards** (off by default): when the window in front doesn't belong to the mode, a card says so ("x.com belongs to Social") with Go back / Switch. Petal knows the mode's apps; anything new is sorted by Claude Haiku.
@@ -26,10 +26,10 @@ The owner works on two machines: this Mac and an Omarchy machine. GitHub is the 
 | Machine | System | Checkout | Use it for |
 | --- | --- | --- | --- |
 | the Omarchy machine | Omarchy | `~/Projects/Petal` (the installed plugin) | running and verifying Petal: the dock, `omarchy-shell`, `hyprctl`, logs |
-| Gökay MacBook Pro | macOS | `~/petal` | editing, the site, Git and PRs; Petal doesn't run on macOS yet (it is next) |
+| Gökay MacBook Pro | macOS | `~/petal` | editing, the site, Git and PRs, and building and running Petal for macOS |
 
 - **Where checkouts live:** every project directly in the home folder on the Mac (`~/petal`, `~/edgetr`, …), and in `~/Projects` on Omarchy. Never in `~/Documents`: macOS keeps it from background jobs, so `tools/fleet` can't sync it.
-- **Check where you are** (`uname`) before running anything Omarchy-only. Until Petal runs on macOS, say on the Mac that a dock change wasn't run on the real dock.
+- **Check where you are** (`uname`) before running anything Omarchy-only. On the Mac, say that a change to the Omarchy plugin wasn't run on the real dock.
 - **To verify a change** on the real dock, it has to run on the Omarchy machine. An agent on the Mac pushes the branch and says the dock check is left for the Omarchy machine; it doesn't fake the check.
 - **Sync through GitHub:** `tools/fleet` runs on both machines at login and every 5 minutes. It fetches every `edgetr` checkout and fast-forwards it to GitHub. It never pushes, and it leaves alone a branch that has diverged, a merge or rebase in progress, and a pull that would overwrite uncommitted changes. So work reaches the other machine only once it is committed and pushed; `tools/fleet status` shows what's behind or ahead. On the Omarchy machine the Petal checkout is the installed plugin, so a push to `main` reaches the live dock's files within 5 minutes (they take effect on `omarchy restart shell`). Don't copy files between machines.
 - **On a new machine,** clone Petal and run `tools/fleet install` once (launchd on macOS, a systemd user timer on Omarchy).
@@ -54,6 +54,7 @@ The owner works on two machines: this Mac and an Omarchy machine. GitHub is the 
 - **Before every commit:** check the staged files for secrets, tokens, personal data (the repository is public), whitespace errors (`git diff --cached --check`) and unrelated changes. Stage files by name.
 - **Commits:** a short imperative subject that says what changed for the user; the body says why.
 - **Releases:** bump `plugin/manifest.json`, tag `vX.Y.Z` to match, push the tag. `.github/workflows/release.yml` checks the tag against the manifest, builds `Petal-<v>-linux.tar.gz` and `latest.json`, and publishes the GitHub Release. Every installed Petal updates itself from it within hours, so releasing is outward-facing: only when the owner says to.
+- **macOS releases** have their own tags, `macos-vX.Y.Z`, matching `macos/VERSION`, so each platform ships on its own. Their release workflow doesn't exist yet; it comes with the first public macOS build.
 - **History rewrites and force-pushes:** only when the owner asks. Make a backup bundle outside the repository first.
 - **Repository visibility:** never change it.
 - **Worktrees:** remove a worktree, and its local branch, once its branch has merged or been pushed to `main`.
@@ -71,9 +72,11 @@ The owner works on two machines: this Mac and an Omarchy machine. GitHub is the 
 | Scripts | Bash and Python 3 standard library (`install.sh`, `get.sh`, `uninstall.sh`, `bin/petal`) |
 | System | `busctl` (notifications, LauncherEntry), `gio`, `hyprctl`, `omarchy-shell`, `uwsm-app` |
 | Website | static `site/` (no build step, self-hosted Geist), Vercel project `petal-dock` |
+| macOS | Swift and SwiftUI with macOS's own Liquid Glass, macOS 26 and later, built with Swift Package Manager (`macos/`), no dependencies yet |
+| Signing | no Apple Developer ID: Petal for macOS is signed ad hoc (or with one stable self-made certificate), and people open it once through System Settings > Privacy & Security > Open Anyway |
 | Release | GitHub Actions with the workflow's own `GITHUB_TOKEN` only |
 
-Add no dependency beyond what a stock Omarchy install has without the owner. Python stays standard library.
+Add no dependency beyond what a stock Omarchy install has, or a Swift package to the Mac app, without the owner. Python stays standard library.
 
 ## Architecture
 
@@ -89,6 +92,24 @@ Add no dependency beyond what a stock Omarchy install has without the owner. Pyt
 - **Holding:** held notifications are removed from Omarchy's screen with `omarchy-shell notifications dismiss <summary>`; they stay in its history.
 - **User data:** `~/.config/petal/` holds `modes.json`, `settings.json` and `instructions.md`. Petal reloads them live. `defaults/modes.json` seeds a new install.
 - **Install:** `install.sh` links `plugin/` into `~/.config/omarchy/plugins/egesuren.petal` and `bin/petal` into `~/.local/bin`, seeds the config, finds `claude`, and enables the plugin. `get.sh` installs and updates from the latest release into `~/.local/share/petal`; a source checkout reports version `dev` and is never touched by it.
+
+### Petal for macOS
+
+`macos/Sources/Petal/`:
+
+- `main.swift`: starts Petal as a background app (no menu bar, no Dock icon), replaces macOS's Dock, and gives it back on quit or when killed.
+- `Config.swift`: reads `modes.json`, `settings.json` and `dock.json` in `~/.config/petal/` (the same folder and formats as Omarchy), and reads them again within a second of a change.
+- `Spaces.swift`: which Desktop each screen shows, numbered as Mission Control numbers them. macOS has no public API for this; it reads SkyLight's private `SLSCopyManagedDisplaySpaces`, read-only, looked up at run time.
+- `SystemDock.swift`: hides macOS's Dock (auto-hide with a 1000-second delay) and restores the owner's own Dock settings from `~/.config/petal/macos-dock.json`, which also survives a crash.
+- `Dock.swift`: one Liquid Glass panel per screen, the mode button, the apps, the right-click menu, auto-hide.
+
+How it maps to Omarchy:
+
+- **Workspaces are Desktops.** `"workspaces": {"1": "building", "2": "social"}` puts Desktop 1 in Building and Desktop 2 in Social; a full-screen app's Space keeps the mode of the Desktop before it.
+- **The dock's apps:** the mode's apps first, in the mode's order, then other apps with a window on that screen's Desktop, which keep their slot for the session (`DockModel.js`).
+- **Where the dock sits** (`position`: bottom, left or right; `autoHide`; `replaceDock`) is in `~/.config/petal/dock.json`, since Omarchy keeps it in its own shell config, not in `settings.json`.
+- **No held notifications:** macOS lets no app read or hide another app's notifications, so the Mac has no holding.
+- `macos/build.sh` builds `macos/build/Petal.app` with the icon from `brand/macos/` and the seed `defaults/modes-macos.json`.
 
 ### Settings have two lists
 
@@ -108,7 +129,7 @@ The `JsonAdapter` in `Dock.qml` and `SETTINGS_SCHEMA` in `petal-mcp.py` must lis
     "hold": <bool>, "allow": ["<desktop id>"] } ] }
 ```
 
-Desktop ids are the file names in `/usr/share/applications` or `~/.local/share/applications`, minus `.desktop`. When the owner asks to change their modes, edit this file; Petal reloads it.
+Desktop ids are the file names in `/usr/share/applications` or `~/.local/share/applications`, minus `.desktop`. On macOS, `apps` holds bundle identifiers (`com.apple.Safari`), `icon` an SF Symbol name (`hammer`), and the workspace numbers are Desktop numbers. When the owner asks to change their modes, edit this file; Petal reloads it.
 
 ## QML and Omarchy gotchas
 
@@ -127,6 +148,12 @@ Desktop ids are the file names in `/usr/share/applications` or `~/.local/share/a
 - **Words:** say what a thing does in the user's terms ("x.com belongs to Social"), not how it works.
 - **Color:** each mode's own color; Petal's accent is pink `#d9367f`. The dock follows the Omarchy theme unless the user sets a color.
 
+### On macOS
+
+- **Liquid Glass is macOS's own** (SwiftUI's `glassEffect`), never imitated with blur and gradients as on Omarchy.
+- **A mode's color goes on content** (the mode's symbol), not tinted into the glass: macOS's tinted icon style takes the color out of tinted glass, and the color is how you tell the mode at a glance.
+- Opening or focusing an app must not move the pointer, as on Omarchy.
+
 ### Marketing site
 
 `site/` follows Edgetr's design language (`~/Projects/edgetr/AGENTS.md`, Design language): Geist, solid fills, light and dark, one static sample of the dock, no real screenshots. Describe Petal by what it does. `site/vercel.json` holds the redirects (`/install.sh` → `get.sh` on `main`, `/download/linux`, `/github`); keep them.
@@ -136,6 +163,7 @@ Desktop ids are the file names in `/usr/share/applications` or `~/.local/share/a
 - **Reload:** on the Omarchy machine, the checkout is the installed plugin (the plugin link points at `~/Projects/Petal/plugin`), so edits go live on `omarchy restart shell`.
 - **Logs:** `quickshell log "$(ls -td /run/user/$UID/quickshell/by-id/*/ | head -1)log.qslog"`, or `petal logs`. A change leaves no new QML warnings.
 - **Drive it:** `omarchy-shell petal <fn>` calls the IPC functions in `Dock.qml` (`mode`, `ask`, `chat`, `testCard`, `testToast`, `testBounce`, `close`, …); `bin/petal` wraps the common ones.
+- **macOS:** `macos/build.sh`, then run `macos/build/Petal.app/Contents/MacOS/Petal`. `PETAL_KEEP_DOCK=1` leaves macOS's Dock alone, and `PETAL_DEBUG=1` logs each screen's Desktop, mode and apps. After quitting, `defaults read com.apple.dock autohide` shows the owner's Dock setting is back.
 - **MCP:** run `petal-mcp.py` with a `tools/list` request on stdin after changing it.
 - **Site:** `python3 -m http.server 8104` from `site/`, then look at 1440px and 390px, in light and dark.
 - **Reporting:** say what was seen working on the real dock and what was not checked.
