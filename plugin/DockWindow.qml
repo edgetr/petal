@@ -2358,8 +2358,10 @@ PanelWindow {
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       onClicked: {
+        // Decide before triggering: a two-step row (confirm) flips keepOpen.
+        var keep = row.keepOpen
         row.triggered()
-        if (!row.keepOpen) window.closeMenu()
+        if (!keep) window.closeMenu()
       }
     }
   }

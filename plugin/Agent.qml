@@ -3,10 +3,10 @@ import Quickshell
 import Quickshell.Io
 
 // The Claude panel's chat: a real Claude Code session (the local CLI in
-// print mode, streaming JSON), working in your home folder. It can read,
-// search, browse and edit files on its own. Commands it wants to run come
-// back as "Allow?" requests; allowing one re-runs the turn with exactly
-// those commands permitted (for the rest of the chat).
+// print mode, streaming JSON), working in your home folder. In auto mode,
+// Claude Code approves safe actions itself; anything it won't approve comes
+// back as an "Allow?" request, and allowing it re-runs the turn with exactly
+// that permitted (for the rest of the chat). Full access skips all checks.
 Item {
   id: agent
 
@@ -77,7 +77,7 @@ Item {
       "--model", s.chatModel || "sonnet",
       "--effort", s.chatEffort || "medium",
       "--output-format", "stream-json", "--verbose",
-      "--permission-mode", s.claudeAccess === "full" ? "bypassPermissions" : "acceptEdits",
+      "--permission-mode", s.claudeAccess === "full" ? "bypassPermissions" : "auto",
       "--append-system-prompt", agent.systemPrompt]
     if (agent.sessionId) args.push("--resume", agent.sessionId)
     if (agent.allowed.length) args = args.concat(["--allowedTools"]).concat(agent.allowed)

@@ -86,10 +86,11 @@ Item {
       property bool claudeUsage: true
       property string claudePath: ""
       // The Claude panel's chat (Claude Code CLI): model alias, effort
-      // (low … max), and access: "ask" (asks before running commands) or "full".
+      // (low … max), and access: "auto" (Claude Code's auto mode: safe actions
+      // run on their own, risky ones ask) or "full" (bypass permissions).
       property string chatModel: "sonnet"
       property string chatEffort: "medium"
-      property string claudeAccess: "ask"
+      property string claudeAccess: "auto"
     }
   }
 
@@ -1045,6 +1046,9 @@ Item {
     }
     function chat(text: string): void { root.openAsk(""); agent.send(text) }
     function allow(): void { agent.allow() }
+    function options(): void { root.openAsk(""); askBox.optionsOpen = true }
+    function newChat(): void { agent.reset() }
+    function emptyTrash(): void { root.emptyTrash() }
     function testToast(): void { root.showToast({ app: "Petal", summary: "Hello", body: "This came through your mode", key: "", icon: "" }) }
     function testBounce(key: string): void { var next = Object.assign({}, root.bounces); next[key] = Date.now(); root.bounces = next }
     function close(): void {

@@ -147,12 +147,12 @@ PanelWindow {
           anchors.verticalCenter: parent.verticalCenter
           spacing: Math.round(6 * Style.fontScale)
 
-          Pill {
-            text: box.settings ? box.modelName(box.settings.chatModel) + " · " + box.settings.chatEffort : ""
+          QuietButton {
+            text: (box.settings ? box.modelName(box.settings.chatModel) + " · " + box.settings.chatEffort : "") + (box.optionsOpen ? "  ⌃" : "  ⌄")
             active: box.optionsOpen
             onClicked: box.optionsOpen = !box.optionsOpen
           }
-          Pill {
+          QuietButton {
             visible: !!box.chat && box.chat.messages.count > 0
             text: "New chat"
             onClicked: box.chat.reset()
@@ -161,51 +161,77 @@ PanelWindow {
         }
       }
 
-      // ── Options: one model, effort, access ──
-      Column {
+      // ── Options: model, effort, commands ──
+      Rectangle {
         visible: box.optionsOpen
         width: parent.width
-        spacing: Math.round(8 * Style.fontScale)
+        height: visible ? sheet.implicitHeight + Math.round(24 * Style.fontScale) : 0
+        radius: Math.round(14 * Style.fontScale)
+        color: Qt.rgba(1, 1, 1, 0.035)
+        border.width: 1
+        border.color: Qt.rgba(1, 1, 1, 0.06)
 
-        Flow {
-          width: parent.width
-          spacing: Math.round(6 * Style.fontScale)
-          Repeater {
-            model: box.models
-            delegate: Pill {
-              required property var modelData
-              text: modelData[1]
-              active: !!box.settings && box.settings.chatModel === modelData[0]
-              onClicked: box.settings.chatModel = modelData[0]
+        Column {
+          id: sheet
+          x: Math.round(12 * Style.fontScale)
+          y: Math.round(12 * Style.fontScale)
+          width: parent.width - x * 2
+          spacing: Math.round(10 * Style.fontScale)
+
+          OptionRow {
+            label: "Model"
+            Segmented {
+              width: parent.width
+              options: box.models
+              current: box.settings ? box.settings.chatModel : ""
+              onPicked: value => box.settings.chatModel = value
             }
           }
-          Item { width: Math.round(10 * Style.fontScale); height: 1 }
-          Repeater {
-            model: box.efforts
-            delegate: Pill {
-              required property string modelData
-              text: modelData
-              active: !!box.settings && box.settings.chatEffort === modelData
-              onClicked: box.settings.chatEffort = modelData
+
+          OptionRow {
+            label: "Effort"
+            Segmented {
+              width: parent.width
+              options: box.efforts.map(function(e) { return [e, e] })
+              current: box.settings ? box.settings.chatEffort : ""
+              onPicked: value => box.settings.chatEffort = value
             }
           }
-        }
 
-        Pill {
-          text: box.settings && box.settings.claudeAccess === "full" ? "Full access: runs commands without asking" : "Asks before running commands"
-          active: !!box.settings && box.settings.claudeAccess === "full"
-          onClicked: box.settings.claudeAccess = box.settings.claudeAccess === "full" ? "ask" : "full"
+          OptionRow {
+            label: "Full access"
+            Item {
+              width: parent.width
+              height: Math.round(30 * Style.fontScale)
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: box.settings && box.settings.claudeAccess === "full" ? "Skips every permission check" : "Off: safe actions run on their own"
+                color: box.ink
+                opacity: 0.85
+                font.family: box.uiFont
+                font.pixelSize: Math.round(13 * Style.fontScale)
+              }
+              Switch {
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                on: !!box.settings && box.settings.claudeAccess === "full"
+                onToggled: box.settings.claudeAccess = box.settings.claudeAccess === "full" ? "auto" : "full"
+              }
+            }
+          }
         }
       }
 
       // ── Empty state ──
       Column {
-        visible: !box.chat || box.chat.messages.count === 0
+        visible: (!box.chat || box.chat.messages.count === 0) && !box.optionsOpen
         width: parent.width
-        spacing: Math.round(10 * Style.fontScale)
+        spacing: Math.round(2 * Style.fontScale)
 
         Text {
           width: parent.width
+          leftPadding: Math.round(10 * Style.fontScale)
+          bottomPadding: Math.round(6 * Style.fontScale)
           wrapMode: Text.Wrap
           textFormat: Text.PlainText
           text: "Ask anything. Claude can change your dock and modes, your Omarchy setup, or your files."
@@ -214,15 +240,42 @@ PanelWindow {
           font.pixelSize: Math.round(13 * Style.fontScale)
         }
 
-        Flow {
-          width: parent.width
-          spacing: Math.round(6 * Style.fontScale)
-          Repeater {
-            model: box.suggestions
-            delegate: Pill {
-              required property string modelData
-              text: modelData
-              onClicked: box.chat.send(modelData)
+        Repeater {
+          model: box.suggestions
+          delegate: Rectangle {
+            id: suggestion
+            required property string modelData
+            width: parent.width
+            height: Math.round(34 * Style.fontScale)
+            radius: Math.round(10 * Style.fontScale)
+            color: sugMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.06) : "transparent"
+
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              x: Math.round(10 * Style.fontScale)
+              text: suggestion.modelData
+              color: box.ink
+              opacity: sugMouse.containsMouse ? 1 : 0.8
+              font.family: box.uiFont
+              font.pixelSize: Math.round(13.5 * Style.fontScale)
+            }
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.right: parent.right
+              anchors.rightMargin: Math.round(10 * Style.fontScale)
+              text: "↗"
+              color: box.soft
+              opacity: sugMouse.containsMouse ? 1 : 0
+              font.family: box.uiFont
+              font.pixelSize: Math.round(13 * Style.fontScale)
+              Behavior on opacity { NumberAnimation { duration: 120 } }
+            }
+            MouseArea {
+              id: sugMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: box.chat.send(suggestion.modelData)
             }
           }
         }
@@ -403,6 +456,145 @@ PanelWindow {
     }
   }
 
+  // A label on the left, a control filling the rest.
+  component OptionRow: Item {
+    id: optionRow
+    property string label: ""
+    default property alias content: slot.data
+    width: parent ? parent.width : 0
+    height: Math.round(30 * Style.fontScale)
+
+    Text {
+      anchors.verticalCenter: parent.verticalCenter
+      width: Math.round(84 * Style.fontScale)
+      text: optionRow.label
+      color: box.soft
+      font.family: box.uiFont
+      font.pixelSize: Math.round(12.5 * Style.fontScale)
+    }
+    Item {
+      id: slot
+      x: Math.round(84 * Style.fontScale)
+      width: parent.width - x
+      height: parent.height
+    }
+  }
+
+  // One track, equal cells, a highlight that slides to the picked one.
+  component Segmented: Rectangle {
+    id: seg
+    property var options: []
+    property var current
+    signal picked(var value)
+    readonly property int count: options.length
+    readonly property int index: {
+      for (var i = 0; i < options.length; i++) if (options[i][0] === current) return i
+      return -1
+    }
+    readonly property real cell: count > 0 ? (width - 6) / count : 0
+    height: Math.round(30 * Style.fontScale)
+    radius: height / 2
+    color: Qt.rgba(1, 1, 1, 0.05)
+
+    Rectangle {
+      visible: seg.index >= 0
+      x: 3 + seg.index * seg.cell
+      y: 3
+      width: seg.cell
+      height: seg.height - 6
+      radius: height / 2
+      color: Qt.rgba(1, 1, 1, 0.13)
+      border.width: 1
+      border.color: Qt.rgba(1, 1, 1, 0.08)
+      Behavior on x { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+    }
+
+    Row {
+      x: 3
+      Repeater {
+        model: seg.options
+        delegate: Item {
+          id: cellItem
+          required property var modelData
+          required property int index
+          width: seg.cell
+          height: seg.height
+          Text {
+            anchors.centerIn: parent
+            text: cellItem.modelData[1]
+            color: box.ink
+            opacity: cellItem.index === seg.index ? 1 : (cellMouse.containsMouse ? 0.85 : 0.55)
+            font.family: box.uiFont
+            font.pixelSize: Math.round(12.5 * Style.fontScale)
+            font.weight: cellItem.index === seg.index ? Font.DemiBold : Font.Normal
+          }
+          MouseArea {
+            id: cellMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: seg.picked(cellItem.modelData[0])
+          }
+        }
+      }
+    }
+  }
+
+  component Switch: Rectangle {
+    id: sw
+    property bool on: false
+    signal toggled()
+    width: Math.round(34 * Style.fontScale)
+    height: Math.round(20 * Style.fontScale)
+    radius: height / 2
+    color: sw.on ? box.accent : Qt.rgba(1, 1, 1, 0.14)
+    Behavior on color { ColorAnimation { duration: 140 } }
+    Rectangle {
+      width: parent.height - 4
+      height: width
+      radius: width / 2
+      y: 2
+      x: sw.on ? parent.width - width - 2 : 2
+      color: "white"
+      Behavior on x { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+    }
+    MouseArea {
+      anchors.fill: parent
+      cursorShape: Qt.PointingHandCursor
+      onClicked: sw.toggled()
+    }
+  }
+
+  // Header buttons: text only, a soft fill on hover or while open.
+  component QuietButton: Rectangle {
+    id: quiet
+    property string text: ""
+    property bool active: false
+    signal clicked()
+    width: quietText.implicitWidth + Math.round(22 * Style.fontScale)
+    height: Math.round(30 * Style.fontScale)
+    radius: height / 2
+    color: quiet.active ? Qt.rgba(1, 1, 1, 0.12) : (quietMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.08) : "transparent")
+    Behavior on color { ColorAnimation { duration: 140 } }
+    Text {
+      id: quietText
+      anchors.centerIn: parent
+      textFormat: Text.PlainText
+      text: quiet.text
+      color: box.ink
+      opacity: quiet.active || quietMouse.containsMouse ? 1 : 0.7
+      font.family: box.uiFont
+      font.pixelSize: Math.round(12.5 * Style.fontScale)
+    }
+    MouseArea {
+      id: quietMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: quiet.clicked()
+    }
+  }
+
   component Pill: Rectangle {
     id: pill
     property string text: ""
@@ -443,7 +635,7 @@ PanelWindow {
     width: Math.round(30 * Style.fontScale)
     height: width
     radius: width / 2
-    color: rb.filled ? (rbMouse.containsMouse ? Qt.lighter(box.accent, 1.12) : box.accent) : (rbMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(1, 1, 1, 0.05))
+    color: rb.filled ? (rbMouse.containsMouse ? Qt.lighter(box.accent, 1.12) : box.accent) : (rbMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : "transparent")
 
     Text {
       anchors.centerIn: parent

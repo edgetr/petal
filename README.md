@@ -19,8 +19,8 @@ Focus modes per workspace, a dock that knows what you're doing, and Claude Code 
   held messages that can't wait.
 - **Claude, in the dock.** The Claude button opens a real Claude Code chat. Ask it to add a mode,
   fix a config, find a file or explain why your laptop is slow. It reads, searches and edits
-  files on its own and **asks you before running any command** ("Allow / Don't allow"),
-  unless you give it full access. One model and effort setting, right in the panel.
+  files and runs safe commands on its own (Claude Code's auto mode); anything risky comes back as
+  **Allow / Don't allow**. Or switch on full access. One model and effort setting, right in the panel.
 - **Usage ring.** A ring around the Claude button shows how much of your Claude Code limit is
   used (pink, amber at 70%, red at 90%). Hover for numbers; the panel shows when it resets.
 - **A good dock, too:** unread badges, a single bounce when an app needs you, download progress
@@ -112,7 +112,7 @@ Feature switches (the same as the settings menu) plus:
 |---|---|---|
 | `chatModel` | `"sonnet"` | Claude panel model: `haiku`, `sonnet`, `opus`, `fable` |
 | `chatEffort` | `"medium"` | `low`, `medium`, `high`, `xhigh`, `max` |
-| `claudeAccess` | `"ask"` | `"ask"`: asks before commands; `"full"`: runs them without asking |
+| `claudeAccess` | `"auto"` | `"auto"`: Claude Code's auto mode (safe actions run, risky ones ask); `"full"`: bypass all permission checks |
 | `claudePath` | found by install.sh | path to the `claude` CLI |
 | `stackFolders` | Downloads, Screenshots | folder stacks |
 
