@@ -50,6 +50,33 @@ enum Snapshot {
             ("card-made", AnyView(CardView(card: FocusCard(kind: .made, target: app.config.modes.last, desktop: 1, suggestion: sampleNew))), nil),
             ("card-summary", AnyView(CardView(card: FocusCard(kind: .summary, summary: sampleSummary))), nil),
         ]
+        let recipeFile = URL(fileURLWithPath: folder).appending(path: "sample.petal")
+        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        try? Data(##"{"petal":1,"name":"Ada's Omarchy","from":"omarchy","modes":[{"id":"building","name":"Building","icon":"x","color":"#b18cff","about":"code and terminals","apps":["com.mitchellh.ghostty","code","zed"]},{"id":"music","name":"Music","color":"#ff9f5f","about":"listening","apps":["spotify","steam"]}],"apps":{"com.mitchellh.ghostty":"Ghostty","code":"Visual Studio Code","zed":"Zed","spotify":"Spotify","steam":"Steam"},"settings":{"iconSize":48,"appGlow":false},"dock":{"position":"left","autoHide":true}}"##.utf8).write(to: recipeFile)
+        if let plan = try? Recipe.plan(recipeFile) {
+            views.append(("recipe", AnyView(RecipeImportView(url: recipeFile, plan: plan) {}), nil))
+        }
+        views.append(("overview", AnyView(OverviewView {}), nil))
+        views.append(("whats-new", AnyView(ReleaseNotesView(version: "0.2.0", preloaded: .init(body: """
+            ## Petal 0.2.0
+
+            Your dock learns a little: **suggested modes** and a *weekly summary*, from a history that stays on your Mac.
+
+            - Share your dock as a `.petal` file, by AirDrop or Messages
+            - Keyboard shortcuts: ⌃⌥1…9 switch modes
+            - Magnification, and [a menu bar icon](https://github.com/edgetr/petal)
+
+            ### Fixes
+            * Focus cards no longer cover the update card
+            """, link: nil))), CGSize(width: 560, height: 600)))
+        views.append(("describe-day", AnyView(DescribeDaySheet()), nil))
+        for dot in [false, true] {
+            let mark = MenuBar.mark(dot: dot)
+            views.append(("menubar\(dot ? "-dot" : "")", AnyView(HStack(spacing: 16) {
+                Image(nsImage: mark).renderingMode(.template).foregroundStyle(.white)
+                Image(nsImage: mark).renderingMode(.template).resizable().frame(width: 72, height: 72).foregroundStyle(.white)
+            }.padding(12)), nil))
+        }
         for section in SettingsSection.allCases {
             views.append(("settings-\(section.rawValue)", AnyView(SettingsView(selection: section)), CGSize(width: 920, height: 700)))
         }

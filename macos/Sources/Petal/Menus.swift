@@ -111,6 +111,7 @@ enum Menus {
                 menu.addItem(row)
             }
         }
+        menu.addItem(ClosureMenuItem(title: "All Desktops…") { app.overview.show() })
         menu.addItem(.separator())
         if let provider = app.chatProvider {
             menu.addItem(ClosureMenuItem(title: "Change with \(provider.name)…") { app.claude.open(asking: "Change my \(mode.name) mode: ", send: false) })

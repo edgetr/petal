@@ -33,6 +33,11 @@ final class PetalApp {
     @ObservationIgnored let settings = SettingsWindow()
     @ObservationIgnored let welcome = Welcome()
     @ObservationIgnored let recipes = RecipeWindow()
+    @ObservationIgnored let automation = ModeAutomation()
+    @ObservationIgnored let menuBar = MenuBar()
+    @ObservationIgnored let overview = Overview()
+    @ObservationIgnored let releaseNotes = ReleaseNotes()
+    let hotkeys = Hotkeys()
     @ObservationIgnored private(set) var docks: DockController!
     @ObservationIgnored private(set) var focus: FocusGuard!
     @ObservationIgnored let ipc = IPC()
@@ -75,6 +80,8 @@ final class PetalApp {
             guard let self else { return }
             docks.refresh()
             signals.watch(Stacks.resolve(config.strings("stackFolders")))
+            hotkeys.refresh()
+            menuBar.refresh()
         }
         registerIPC()
         ipc.start()
@@ -82,6 +89,8 @@ final class PetalApp {
         signals.start(watchFolders: Stacks.resolve(config.strings("stackFolders")))
         updater.start()
         activity.start()
+        automation.start()
+        menuBar.start()
         aiSetup.refreshAll()
         Skill.install()
         if !config.welcomed {
@@ -113,8 +122,10 @@ final class PetalApp {
                 alert.runModal()
             }
             docks.show(true)
+            hotkeys.refresh()
         } else {
             docks.show(false)
+            hotkeys.refresh()
             popups.closeAll()
             popups.dismissCard()
             SystemDock.restore()
@@ -162,10 +173,22 @@ final class PetalApp {
         countdown?.invalidate()
     }
 
+    /// Puts a Desktop in a mode at once, with no countdown (the schedule).
+    func setModeNow(_ id: String, desktop: Int) { apply(id, desktop: desktop) }
+
     private func apply(_ id: String, desktop: Int) {
         stay()
         config.setMode(id, forDesktop: desktop)
         if let card = popups.card, card.target?.id == id { popups.dismissCard() }
+    }
+
+    // MARK: Describe your day
+
+    /// The person says what they do; the chat builds their modes from it with Petal's tools.
+    func describeDay(_ text: String) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        guard !text.isEmpty, chatProvider != nil else { return }
+        claude.open(asking: "Here's what I do on this computer: \(text). Build my focus modes from the apps I have installed (petal_list_apps): a few clear modes with fitting icons, colors and abouts, replacing the starter modes I haven't changed. Then tell me in two lines what you made.")
     }
 
     // MARK: Launching
@@ -292,6 +315,7 @@ final class PetalApp {
             }
             return "ok"
         }
+        ipc.on("overview") { [unowned self] _ in overview.show(); return "ok" }
         ipc.on("summary") { [unowned self] _ in insights.showSummary(); return "ok" }
         ipc.on("recipe") { [unowned self] args in
             guard let path = args.first, FileManager.default.fileExists(atPath: path) else { return "no such file" }
@@ -305,7 +329,7 @@ final class PetalApp {
         }
         ipc.on("emptyTrash") { _ in Stacks.emptyTrash(); return "ok" }
         ipc.on("close") { [unowned self] _ in
-            claude.close(); search.close(); popups.closeAll(); popups.dismissCard()
+            claude.close(); search.close(); popups.closeAll(); popups.dismissCard(); overview.close()
             return "ok"
         }
         ipc.on("dock") { [unowned self] args in

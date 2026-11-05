@@ -115,7 +115,9 @@ enum Recipe {
             if from == "macos", NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) != nil { return id }
             return byName[(names[id] ?? id).lowercased()]
         }
-        var taken = Set((MCP.read(MCP.modesFile)?["modes"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })
+        let existing = MCP.read(MCP.modesFile)?["modes"] as? [[String: Any]] ?? []
+        var taken = Set(existing.compactMap { $0["id"] as? String })
+        var takenNames = Set(existing.compactMap { ($0["name"] as? String)?.lowercased() })
         var planned: [PlannedMode] = []
         for (index, var mode) in modes.enumerated() {
             let original = (mode["id"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "mode"
@@ -127,7 +129,11 @@ enum Recipe {
                 if let found = resolve(app) { if !apps.contains(found) { apps.append(found) } } else { missing.append(names[app] ?? app) }
             }
             let allow = (mode["allow"] as? [String] ?? []).compactMap(resolve)
-            let name = mode["name"] as? String ?? original.capitalized
+            // A name that's already there gets a number too, so the two can be told apart.
+            let given = mode["name"] as? String ?? original.capitalized
+            var name = given, m = 2
+            while takenNames.contains(name.lowercased()) { name = "\(given) \(m)"; m += 1 }
+            takenNames.insert(name.lowercased())
             let about = mode["about"] as? String ?? ""
             var icon = mode["icon"] as? String ?? ""
             if NSImage(systemSymbolName: icon, accessibilityDescription: nil) == nil { icon = symbol(for: name + " " + about) }

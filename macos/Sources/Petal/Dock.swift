@@ -139,6 +139,7 @@ final class DockController {
             panel.place(on: screen)
         }
         if config.keepWindowsClear && !config.autoHide { keepWindowsClear(snapshot) }
+        app.automation.modeShown(dock(for: NSScreen.main)?.mode?.id)
     }
 
     /// macOS keeps no room for a dock other than its own, so windows would run under Petal's. While auto-hide is

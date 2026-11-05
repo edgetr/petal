@@ -87,22 +87,35 @@ final class InsightsController {
     func accept(_ card: FocusCard) {
         guard let suggestion = card.suggestion else { return }
         if suggestion.kind == .add {
-            if let app = suggestion.apps.first { config.addApp(app, to: suggestion.mode) }
-            self.app.popups.dismissCard()
+            accept(suggestion) { _ in }
+            app.popups.dismissCard()
             return
         }
         var busy = card
         busy.working = true
         app.popups.show(busy)
-        let names = suggestion.apps.map(Apps.name)
-        if app.focus.brain.enabled {
-            app.focus.brain.nameMode(apps: names) { [weak self] answer in self?.make(card, suggestion, answer) }
-        } else {
-            make(card, suggestion, nil)
+        accept(suggestion) { [weak self] mode in
+            guard let self, let mode, app.popups.card?.id == card.id else { return }   // closed while the AI was thinking
+            app.popups.dismissCard()
+            app.popups.show(FocusCard(kind: .made, target: mode, desktop: card.desktop, suggestion: suggestion))
         }
     }
 
-    private func make(_ card: FocusCard, _ suggestion: Insights.Suggestion, _ answer: [String: Any]?) {
+    /// Does what a suggestion says: keeps the app in its mode, or makes the new mode (handing it back).
+    func accept(_ suggestion: Insights.Suggestion, done: @escaping (Mode?) -> Void) {
+        if suggestion.kind == .add {
+            if let id = suggestion.apps.first { config.addApp(id, to: suggestion.mode) }
+            return done(nil)
+        }
+        let names = suggestion.apps.map(Apps.name)
+        if app.focus.brain.enabled {
+            app.focus.brain.nameMode(apps: names) { [weak self] answer in done(self?.make(suggestion, answer)) }
+        } else {
+            done(make(suggestion, nil))
+        }
+    }
+
+    private func make(_ suggestion: Insights.Suggestion, _ answer: [String: Any]?) -> Mode {
         let guess = suggestion.guess
         var name = (answer?["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if name.isEmpty || name.count > 24 { name = guess?.name ?? "New mode" }
@@ -110,19 +123,13 @@ final class InsightsController {
         if NSImage(systemSymbolName: icon, accessibilityDescription: nil) == nil { icon = guess?.icon ?? "circle.fill" }
         let used = Set(config.modes.map { $0.hex.lowercased() })
         let color = NSColor(hex: answer?["color"] as? String)
-            ?? Self.palette.first { !used.contains($0) }.flatMap { NSColor(hex: $0) } ?? NSColor(hex: "#5fb8ff")!
-        let about = (answer?["about"] as? String) ?? "\(Insights.list(suggestion.apps.map(Apps.name)))"
+            ?? Insights.palette.first { !used.contains($0) }.flatMap { NSColor(hex: $0) } ?? NSColor(hex: "#5fb8ff")!
+        let about = (answer?["about"] as? String) ?? Insights.list(suggestion.apps.map(Apps.name))
         let mode = Mode(id: Self.uniqueID(name, taken: Set(config.modes.map(\.id))), name: name, icon: icon, color: color, about: about,
                         apps: suggestion.apps, sites: [], focusDelay: 0, allow: [])
         config.save(mode)
-        guard app.popups.card?.id == card.id else { return }   // closed while the AI was thinking
-        var made = card
-        made.working = false
-        app.popups.dismissCard()
-        app.popups.show(FocusCard(kind: .made, target: mode, desktop: made.desktop, suggestion: suggestion))
+        return mode
     }
-
-    static let palette = ["#5fb8ff", "#ff9f5f", "#7ed38a", "#ffd25f", "#ff6fae", "#b18cff", "#5fe0d0", "#ff7a6b"]
 
     /// "Design" → "design", "design-2" if that's taken.
     static func uniqueID(_ name: String, taken: Set<String>) -> String {

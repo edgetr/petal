@@ -46,6 +46,12 @@ struct RecipeImportView: View {
     let url: URL
     let done: () -> Void
     @State private var plan: Recipe.Plan?
+
+    init(url: URL, plan: Recipe.Plan? = nil, done: @escaping () -> Void) {
+        self.url = url
+        self.done = done
+        _plan = State(initialValue: plan)
+    }
     @State private var problem = ""
     @State private var useLook = false
     @State private var added = false
@@ -85,6 +91,7 @@ struct RecipeImportView: View {
         }
         .frame(width: 600)
         .task {
+            guard plan == nil else { return }
             let url = url
             do { plan = try await Task.detached { try Recipe.plan(url) }.value } catch { problem = error.localizedDescription }
         }
@@ -103,8 +110,7 @@ struct RecipeImportView: View {
                 Toggle(isOn: $useLook) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Use this look too")
-                        Text("Changes " + Insights.list(plan.lookChanges.map { Recipe.lookNames[$0] ?? $0 }.prefix(4).map { $0 })
-                             + (plan.lookChanges.count > 4 ? ", and \(plan.lookChanges.count - 4) more" : "") + ".")
+                        Text("Changes " + Insights.list(plan.lookChanges.map { Recipe.lookNames[$0] ?? $0 }) + ".")
                             .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -144,7 +150,7 @@ struct RecipeModeRow: View {
                 ModeIcon(icon: mode.icon, size: 14).foregroundStyle(color)
                     .frame(width: 32, height: 32).glassEffect(.regular, in: .circle)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(mode.name + (mode.renamed ? " (\(mode.id))" : "")).font(.system(size: 14, weight: .semibold))
+                    Text(mode.name).font(.system(size: 14, weight: .semibold))
                     if !mode.about.isEmpty { Text(mode.about).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1) }
                 }
             }
