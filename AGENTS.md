@@ -9,14 +9,14 @@ Petal is an AI-native dock for Omarchy, with a focus mode for every workspace an
 - **Focus modes:** each mode has its own apps (the dock's order), color, icon and rules. Every workspace remembers its mode, so switching workspace swaps the dock.
 - **Focus cards** (off by default): when the window in front doesn't belong to the mode, a card says so ("x.com belongs to Social") with Go back / Switch. Petal knows the mode's apps; anything new is sorted by Claude Haiku.
 - **Held notifications:** in a mode that holds them, notifications from apps outside the mode are taken off Omarchy's screen and wait on their mode with a count. The mode's own apps show natively. There is no Do Not Disturb.
-- **Claude in the dock:** the Claude button opens a Claude Code chat (the user's own `claude` CLI and plan). Petal's MCP server lets it change any setting or mode; when a setting can't do it, Claude may edit Petal's code. A ring around the button shows Claude usage.
+- **AI in the dock, optional:** the AI button opens a chat with the user's own Claude Code or Codex (their own CLI and plan; `aiProviders` picks Claude, Codex, both or none, and `chatProvider` the one the chat uses). Petal's MCP server lets it change any setting or mode; when a setting can't do it, it may edit Petal's code. A ring around the button shows that AI's usage.
 - **A good dock:** badges, bounce, download progress, quick actions and recent files, drops, window previews, minimized windows, now playing, folder stacks, auto-hide, one dock per screen.
 - **Settings menu:** the right-click menu stays tiny (position, auto-hide, focus cards, hold notifications). Everything else is changed by asking Claude.
 
 The owner is Gökay Ege Süren. The repository is `edgetr/petal` on GitHub (public, MIT; where it is checked out is under Fleet). Petal is an Edgetr product; the studio site (`edgetr/edgetr`: `~/Projects/edgetr` on Omarchy, `~/edgetr` on the Mac) describes it and follows this file for facts.
 
 - **Status:** 3.1.x is released (`plugin/manifest.json` holds the version) and updates itself from GitHub Releases.
-- **Business model:** free and open source. Petal has no server and no analytics. Its AI features use the user's own Claude Code login, and count toward their Claude usage. Without `claude`, everything else works.
+- **Business model:** free and open source. Petal has no server and no analytics. Its AI features use the user's own Claude Code or Codex login, and count toward that plan's usage. Without an AI app, everything else works.
 - **Wording:** say Omarchy, not Linux, for where Petal runs today.
 
 ## Fleet
@@ -67,7 +67,7 @@ The owner works on two machines: this Mac and an Omarchy machine. GitHub is the 
 | Layer | Decision |
 | --- | --- |
 | Shell | Quickshell (QML + JavaScript), loaded by Omarchy's shell as a user plugin (`plugin/manifest.json`, id `egesuren.petal`, entry `Dock.qml`) |
-| AI | the user's `claude` CLI: `claude -p --model haiku --effort low` for quick sorting, stream-json Claude Code sessions for the chat |
+| AI | the user's own `claude` or `codex` CLI. Sorting: `claude -p --model haiku --effort low`, or `codex exec --json --ephemeral --sandbox read-only` at low effort. Chat: stream-json Claude Code sessions, or `codex exec --json` resumed by thread id, with Petal's MCP tools approved ahead (codex exec can't ask) |
 | MCP | `plugin/mcp/petal-mcp.py`, Python standard library only |
 | Scripts | Bash and Python 3 standard library (`install.sh`, `get.sh`, `uninstall.sh`, `bin/petal`) |
 | System | `busctl` (notifications, LauncherEntry), `gio`, `hyprctl`, `omarchy-shell`, `uwsm-app` |
@@ -83,15 +83,15 @@ Add no dependency beyond what a stock Omarchy install has, or a Swift package to
 - `Dock.qml`: the root service. Settings (the `JsonAdapter` over `~/.config/petal/settings.json`), modes, items per workspace, the focus guard, notification holding, usage polling, updates, and IPC (`IpcHandler` target `petal`, reached as `omarchy-shell petal <fn>`).
 - `DockWindow.qml`: one dock per screen: the UI, menus, cards, previews, stacks.
 - `DockModel.js`: pure helpers for the dock's items.
-- `Brain.qml`: quick JSON calls to Claude Haiku that sort windows and notifications into modes.
-- `Agent.qml`: the Claude Code chat: stream-json, resume, and Allow, which re-runs with per-part `Bash(...)` rules. It passes `--mcp-config` for the Petal MCP server, allows `mcp__petal`, and appends `~/.config/petal/instructions.md` to the system prompt. Model, effort and access come from the settings `chatModel`, `chatEffort`, `claudeAccess`.
+- `Brain.qml`: quick JSON calls to the chosen AI (Claude Haiku, or Codex at low effort) that sort windows and notifications into modes.
+- `Agent.qml`: the chat with `chatProvider`. Claude Code: stream-json, resume, and Allow, which re-runs with per-part `Bash(...)` rules. Codex: `codex exec --json`, resumed by thread id; it can't ask mid-turn, so it works in its sandbox (Full access skips it). It passes `--mcp-config` for the Petal MCP server, allows `mcp__petal`, and appends `~/.config/petal/instructions.md` to the system prompt. Model and effort come from `chatModel`/`chatEffort` (Claude) or `codexModel`/`codexEffort` (Codex); access from `claudeAccess` for both.
 - `AskBox.qml`: the Claude panel's UI. `AppSearch.qml`: the "+" search for apps and folders.
 - `Signals.qml`: `busctl monitor` for notifications and LauncherEntry progress and badges.
 - `brand/icon.py`: draws Petal's icon and writes every copy of it: the flat ones (`site/icon.svg`, the site's PNGs, `plugin/assets/petal.svg`) and the macOS app icon (`brand/Petal.icon` for Icon Composer and Xcode, compiled to `brand/macos/Assets.car` and `Petal.icns`, with `brand/previews/` of every appearance). Change the icon there, never by hand, and run it on the Mac: it needs Xcode.
-- **Usage:** `omarchy-agent-usage-claude --limits-only` every 5 minutes; `percent` is a 0–1 fraction.
+- **Usage:** `omarchy-agent-usage-<chatProvider> --limits-only` (Omarchy ships collectors for both) every 5 minutes; `percent` is a 0–1 fraction.
 - **Holding:** held notifications are removed from Omarchy's screen with `omarchy-shell notifications dismiss <summary>`; they stay in its history.
 - **User data:** `~/.config/petal/` holds `modes.json`, `settings.json` and `instructions.md`. Petal reloads them live. `defaults/modes.json` seeds a new install.
-- **Install:** `install.sh` links `plugin/` into `~/.config/omarchy/plugins/egesuren.petal` and `bin/petal` into `~/.local/bin`, seeds the config, finds `claude`, and enables the plugin. `get.sh` installs and updates from the latest release into `~/.local/share/petal`; a source checkout reports version `dev` and is never touched by it.
+- **Install:** `install.sh` links `plugin/` into `~/.config/omarchy/plugins/egesuren.petal` and `bin/petal` into `~/.local/bin`, seeds the config, finds `claude` and `codex` (a new install starts with whichever is installed in `aiProviders`), and enables the plugin. `get.sh` installs and updates from the latest release into `~/.local/share/petal`; a source checkout reports version `dev` and is never touched by it.
 
 ### Petal for macOS
 

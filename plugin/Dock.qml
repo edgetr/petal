@@ -112,8 +112,8 @@ Item {
       property string chatModel: "sonnet"
       property string chatEffort: "medium"
       property string claudeAccess: "auto"
-      // Which AI apps Petal uses, and which one the chat uses ("claude", "codex"). Petal for macOS reads these;
-      // on Omarchy only Claude is wired up so far.
+      // Which AI apps Petal uses ("claude", "codex"; [] = none: the dock works
+      // whole without AI), and which one the chat, usage ring and sorting use.
       property list<string> aiProviders: ["claude"]
       property string chatProvider: "claude"
       property string codexModel: ""
@@ -906,7 +906,22 @@ Item {
     else if (c.snoozeKey) root.snooze(c.snoozeKey, 60)
   }
 
-  // ── Claude Code usage (Omarchy's collector reads the CLI's own login) ──
+  // ── AI apps: the user's own Claude Code and Codex installs ────────────
+  readonly property var providers: {
+    var list = settingsAdapter.aiProviders || []
+    var out = []
+    for (var i = 0; i < list.length; i++)
+      if ((list[i] === "claude" || list[i] === "codex") && out.indexOf(list[i]) < 0) out.push(list[i])
+    return out
+  }
+  readonly property string chatProvider: providers.indexOf(settingsAdapter.chatProvider) >= 0 ? settingsAdapter.chatProvider : (providers.length ? providers[0] : "")
+  readonly property string chatName: providerName(chatProvider)
+  function providerName(p) { return p === "codex" ? "Codex" : p === "claude" ? "Claude" : "AI" }
+  function providerPath(p) { return p === "codex" ? settingsAdapter.codexPath : p === "claude" ? settingsAdapter.claudePath : "" }
+  function providerMark(p) { return Qt.resolvedUrl(p === "codex" ? "assets/codex.svg" : "assets/claude.svg") }
+  onChatProviderChanged: { root.usage = null; root.refreshUsage() }
+
+  // ── Usage (Omarchy's collectors read each CLI's own login) ─────────────
   property var usage: null
   readonly property real usageWorst: {
     var limits = root.usage && root.usage.limits ? root.usage.limits : []
@@ -916,13 +931,13 @@ Item {
   }
 
   function refreshUsage() {
-    if (!root.settings.claudeUsage || usageProc.running) return
+    if (!root.settings.claudeUsage || !root.chatProvider || usageProc.running) return
     usageProc.running = true
   }
 
   Process {
     id: usageProc
-    command: ["omarchy-agent-usage-claude", "--limits-only"]
+    command: ["omarchy-agent-usage-" + (root.chatProvider || "claude"), "--limits-only"]
     stdout: StdioCollector {
       onStreamFinished: {
         try {
@@ -936,7 +951,7 @@ Item {
   Timer {
     interval: 5 * 60 * 1000
     repeat: true
-    running: root.settings.claudeUsage
+    running: root.settings.claudeUsage && root.chatProvider !== ""
     triggeredOnStart: true
     onTriggered: root.refreshUsage()
   }
@@ -991,7 +1006,6 @@ Item {
   Agent {
     id: agent
     dock: root
-    claudePath: settingsAdapter.claudePath
   }
 
   // ── Recent files per app (from ~/.local/share/recently-used.xbel) ─────
@@ -1117,7 +1131,6 @@ Item {
   Brain {
     id: brain
     dock: root
-    claudePath: settingsAdapter.claudePath
   }
 
 

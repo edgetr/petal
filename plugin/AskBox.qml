@@ -6,7 +6,7 @@ import Quickshell.Wayland
 import qs.Commons
 import qs.Commons as Commons
 
-// The Claude panel: a Claude Code chat that lives above the dock. It can
+// The chat panel: a Claude Code or Codex chat that lives above the dock. It can
 // change your dock, your Omarchy setup or your files, and asks before it
 // runs commands (unless you give it full access).
 PanelWindow {
@@ -51,12 +51,18 @@ PanelWindow {
     "Why is my laptop slow right now?",
     "Make my terminal font a bit bigger"
   ]
-  readonly property var models: [["haiku", "Haiku"], ["sonnet", "Sonnet"], ["opus", "Opus"], ["fable", "Fable"]]
-  readonly property var efforts: ["low", "medium", "high", "xhigh", "max"]
+  // The chosen AI, and its own model and effort settings.
+  readonly property string provider: box.dock ? box.dock.chatProvider : "claude"
+  readonly property string aiName: box.dock ? box.dock.chatName : "Claude"
+  readonly property string modelKey: provider === "codex" ? "codexModel" : "chatModel"
+  readonly property string effortKey: provider === "codex" ? "codexEffort" : "chatEffort"
+  readonly property var models: provider === "codex" ? [["", "Default"]]
+    : [["haiku", "Haiku"], ["sonnet", "Sonnet"], ["opus", "Opus"], ["fable", "Fable"]]
+  readonly property var efforts: provider === "codex" ? ["low", "medium", "high", "xhigh"] : ["low", "medium", "high", "xhigh", "max"]
 
   function modelName(id) {
     for (var i = 0; i < models.length; i++) if (models[i][0] === id) return models[i][1]
-    return id
+    return id || "Default"
   }
 
   readonly property var worstLimit: {
@@ -124,12 +130,24 @@ PanelWindow {
           spacing: Math.round(10 * Style.fontScale)
 
           OptionRow {
+            visible: !!box.dock && box.dock.providers.length > 1
+            label: "Chat with"
+            Segmented {
+              width: parent.width
+              options: box.dock ? box.dock.providers.map(function(p) { return [p, box.dock.providerName(p)] }) : []
+              current: box.provider
+              onPicked: value => { box.settings.chatProvider = value; if (box.chat) box.chat.reset() }
+            }
+          }
+
+          OptionRow {
+            visible: box.models.length > 1
             label: "Model"
             Segmented {
               width: parent.width
               options: box.models
-              current: box.settings ? box.settings.chatModel : ""
-              onPicked: value => box.settings.chatModel = value
+              current: box.settings ? box.settings[box.modelKey] : ""
+              onPicked: value => box.settings[box.modelKey] = value
             }
           }
 
@@ -138,8 +156,8 @@ PanelWindow {
             Segmented {
               width: parent.width
               options: box.efforts.map(function(e) { return [e, e] })
-              current: box.settings ? box.settings.chatEffort : ""
-              onPicked: value => box.settings.chatEffort = value
+              current: box.settings ? box.settings[box.effortKey] : ""
+              onPicked: value => box.settings[box.effortKey] = value
             }
           }
 
@@ -189,7 +207,7 @@ PanelWindow {
             width: Math.round(20 * Style.fontScale)
             height: width
             sourceSize: Qt.size(width * 2, height * 2)
-            source: Qt.resolvedUrl("assets/claude.svg")
+            source: box.dock ? box.dock.providerMark(box.provider) : Qt.resolvedUrl("assets/claude.svg")
             RotationAnimation on rotation {
               running: !!box.chat && box.chat.running
               from: 0; to: 360; duration: 2400; loops: Animation.Infinite
@@ -198,7 +216,7 @@ PanelWindow {
           }
           Text {
             anchors.verticalCenter: parent.verticalCenter
-            text: "Claude"
+            text: box.aiName
             color: box.ink
             font.family: box.uiFont
             font.pixelSize: Math.round(15 * Style.fontScale)
@@ -221,7 +239,7 @@ PanelWindow {
           spacing: Math.round(6 * Style.fontScale)
 
           QuietButton {
-            text: (box.settings ? box.modelName(box.settings.chatModel) + " · " + box.settings.chatEffort : "") + (box.optionsOpen ? "  ⌃" : "  ⌄")
+            text: (box.settings ? box.modelName(box.settings[box.modelKey]) + " · " + box.settings[box.effortKey] : "") + (box.optionsOpen ? "  ⌃" : "  ⌄")
             active: box.optionsOpen
             onClicked: box.optionsOpen = !box.optionsOpen
           }
@@ -246,7 +264,7 @@ PanelWindow {
           bottomPadding: Math.round(6 * Style.fontScale)
           wrapMode: Text.Wrap
           textFormat: Text.PlainText
-          text: "Ask anything. Claude can change your dock and modes, your Omarchy setup, or your files."
+          text: "Ask anything. " + box.aiName + " can change your dock and modes, your Omarchy setup, or your files."
           color: box.soft
           font.family: box.uiFont
           font.pixelSize: Math.round(13 * Style.fontScale)
@@ -396,7 +414,7 @@ PanelWindow {
               width: parent.width - 24
               spacing: 8
               Text {
-                text: "Claude wants to"
+                text: box.aiName + " wants to"
                 color: box.soft
                 font.family: box.uiFont
                 font.pixelSize: Math.round(12 * Style.fontScale)
@@ -434,7 +452,7 @@ PanelWindow {
           anchors.verticalCenter: parent.verticalCenter
           x: Math.round(18 * Style.fontScale)
           visible: input.text.length === 0
-          text: box.chat && box.chat.messages.count > 0 ? "Reply…" : "Ask Claude…"
+          text: box.chat && box.chat.messages.count > 0 ? "Reply…" : "Ask " + box.aiName + "…"
           color: box.soft
           font.family: box.uiFont
           font.pixelSize: Math.round(14 * Style.fontScale)

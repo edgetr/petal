@@ -529,7 +529,7 @@ PanelWindow {
 
       // Modes
       ModeSwitcher { visible: window.opt("modes") && !!window.dock && window.dock.modes.length > 0 }
-      AskSlot { visible: window.opt("ai") || window.opt("claudeUsage") }
+      AskSlot { visible: !!window.dock && window.dock.providers.length > 0 && (window.opt("ai") || window.opt("claudeUsage")) }
       Separator { visible: window.opt("modes") }
 
       // Apps: a fixed-size stage as wide as the busiest mode needs, with the
@@ -824,8 +824,8 @@ PanelWindow {
     }
   }
 
-  // Claude: opens the Claude panel (usage, change modes, models). The ring
-  // shows how much of your tightest Claude Code limit is used.
+  // The AI button (Claude or Codex): opens the chat panel. The ring shows how
+  // much of that AI's tightest limit is used.
   component AskSlot: Item {
     id: askSlot
     readonly property int size: Math.round(window.iconSize * 0.95)
@@ -833,7 +833,7 @@ PanelWindow {
     readonly property color ringColor: used >= 0.9 ? "#ff4d6d" : used >= 0.7 ? "#ffb347" : window.accent
     property string tip: {
       // The ring shows what's used; the tooltip, what's left.
-      var t = "Claude"
+      var t = window.dock ? window.dock.chatName : "AI"
       var limits = window.dock && window.dock.usage && window.dock.usage.limits ? window.dock.usage.limits : []
       for (var i = 0; i < limits.length; i++)
         t += " · " + String(limits[i].title || limits[i].label).replace(" (7-day)", "") + " " + Math.round((1 - Number(limits[i].percent)) * 100) + "% left"
@@ -857,7 +857,7 @@ PanelWindow {
         width: Math.round(askSlot.size * 0.56)
         height: width
         sourceSize: Qt.size(width * 2, height * 2)
-        source: Qt.resolvedUrl("assets/claude.svg")
+        source: window.dock ? window.dock.providerMark(window.dock.chatProvider) : Qt.resolvedUrl("assets/claude.svg")
         scale: askMouse.pressed ? 0.88 : (askMouse.containsMouse ? 1.08 : 1)
         Behavior on scale { NumberAnimation { duration: 120 } }
       }
@@ -1985,7 +1985,8 @@ PanelWindow {
       }
       MenuSeparator {}
       MenuRow {
-        text: "Anything else? Ask Claude…"
+        visible: !!window.dock && window.dock.providers.length > 0
+        text: "Anything else? Ask " + (window.dock ? window.dock.chatName : "Claude") + "…"
         onTriggered: window.dock.openAsk("")
       }
       Text {
@@ -2138,8 +2139,8 @@ PanelWindow {
         onTriggered: window.dock.clearHeld(menu.m.id)
       }
       MenuRow {
-        visible: !!menu.m
-        text: "Change with Claude…"
+        visible: !!menu.m && window.dock.providers.length > 0
+        text: "Change with " + window.dock.chatName + "…"
         onTriggered: window.dock.openAsk(menu.m ? "Change my " + menu.m.name + " mode: " : "")
       }
       MenuRow {
