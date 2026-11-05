@@ -62,7 +62,14 @@ case "${1:-help}" in
   search)   omarchy-shell petal search ;;
   settings) omarchy-shell petal settings ;;
   edit)     "${EDITOR:-nvim}" "$config/modes.json" ;;
-  restart)  omarchy restart shell ;;
+  restart)
+    # With the person's own changes in use, it also checks the dock comes back (after an update that it doesn't,
+    # the last Petal that worked is put back).
+    if [[ -d ${PETAL_HOME:-$HOME/.local/share/petal}/source/.git ]]; then
+      exec python3 "$(dirname "$(readlink -f "$0")")/petal-personal" restart
+    fi
+    omarchy restart shell ;;
+  personal) shift; exec python3 "$(dirname "$(readlink -f "$0")")/petal-personal" "$@" ;;
   update)
     here="$(dirname "$(readlink -f "$0")")"
     case "${2:-}" in
@@ -91,6 +98,7 @@ petal restart     restart Omarchy's shell (reloads Petal)
 petal update      update Petal from GitHub Releases (--check to only look)
 petal version     the installed version
 petal logs [n]    recent Petal log lines
+petal personal    your own changes to Petal's code, kept through updates (init, status, list, save "…", undo, reset, retry)
 petal doctor      check Petal (--fix repairs what it safely can, --json for details)
 petal report "…"  tell Petal's maker what went wrong (a GitHub issue; shown to you first)
 petal get [key]   all settings and modes, or one setting

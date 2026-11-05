@@ -3,6 +3,7 @@
 #
 #   macos/build.sh                    a release build, signed with Petal's certificate if it's in a keychain
 #   PETAL_SIGN_IDENTITY=<hash> ...    signed with that certificate instead
+#   PETAL_ARCHS=arm64 ...             only for these architectures (a personal build: this Mac's own, and quicker)
 #
 # Petal has no Apple Developer ID. Its own self-made certificate, "Petal (Edgetr)", signs every release (the release
 # workflow gets it from the repository's secrets), so macOS knows each update as the same app and keeps the
@@ -15,8 +16,11 @@ IDENTITY="${PETAL_SIGN_IDENTITY:-$(security find-identity 2>/dev/null | awk '/"P
 IDENTITY="${IDENTITY:--}"
 APP="build/Petal.app"
 
+ARCH_FLAGS=()
+for arch in ${PETAL_ARCHS:-arm64 x86_64}; do ARCH_FLAGS+=(--arch "$arch"); done
+
 log="$(mktemp)"
-if ! swift build -c release --arch arm64 --arch x86_64 >"$log" 2>&1; then
+if ! swift build -c release "${ARCH_FLAGS[@]}" >"$log" 2>&1; then
   grep -E "error" "$log" || tail -20 "$log"
   rm -f "$log"
   echo "build failed" >&2
@@ -24,7 +28,7 @@ if ! swift build -c release --arch arm64 --arch x86_64 >"$log" 2>&1; then
 fi
 grep -E "warning: " "$log" | grep -v x86_64 || true
 rm -f "$log"
-BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/Petal"
+BIN="$(swift build -c release "${ARCH_FLAGS[@]}" --show-bin-path)/Petal"
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -37,6 +41,9 @@ cp "$ROOT/plugin/assets/claude.svg" "$APP/Contents/Resources/claude.svg"
 # petal-mcp.py, so Omarchy and the Mac describe them the same way.
 mkdir -p "$APP/Contents/Resources/mcp"
 python3 -I "$ROOT/plugin/mcp/petal-mcp.py" --describe > "$APP/Contents/Resources/mcp/tools.json"
+# The person's own changes to Petal's code, kept through updates (`petal personal`; Personal.swift runs it).
+mkdir -p "$APP/Contents/Resources/personal"
+cp "$ROOT/bin/petal-personal" "$APP/Contents/Resources/personal/petal-personal"
 # Petal's skill for Claude Code and Codex, which Petal copies into their skills folders.
 mkdir -p "$APP/Contents/Resources/skill"
 cp "$ROOT/plugin/skill/SKILL.md" "$APP/Contents/Resources/skill/SKILL.md"

@@ -32,8 +32,11 @@ enum Doctor {
 
         // The app and its signature.
         let signer = signature()
-        note(signer == "Petal (Edgetr)" ? "ok" : "warn", "app",
-             "Petal \(version) at \(home(Bundle.main.bundlePath))" + (signer == "Petal (Edgetr)" ? "." : ", signed \(signer ?? "ad hoc"): macOS may ask for its permissions again after each update."))
+        // A build of the person's own changes is signed with their own certificate (Personal.swift).
+        let stable = signer == "Petal (Edgetr)" || (signer == "Petal (Personal)" && Personal.inUse)
+        note(stable ? "ok" : "warn", "app",
+             "Petal \(version) at \(home(Bundle.main.bundlePath))" + (stable ? (signer == "Petal (Personal)" ? ", with your own changes." : ".")
+                : ", signed \(signer ?? "ad hoc"): macOS may ask for its permissions again after each update."))
 
         // The files, which Petal won't overwrite while they're broken.
         let seed = Bundle.main.url(forResource: "modes", withExtension: "json")
@@ -135,6 +138,9 @@ enum Doctor {
         } else {
             note("error", "tools", "Petal's AI tools don't answer (Petal.app may be damaged: reinstall it).")
         }
+
+        // The person's own changes to Petal's code (Personal.swift).
+        found += Personal.findings(fix: fix)
 
         // Recent trouble in the log.
         let problems = logLines(minutes: 30).filter { $0.localizedCaseInsensitiveContains("error") || $0.localizedCaseInsensitiveContains("fault") }

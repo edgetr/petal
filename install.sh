@@ -7,7 +7,13 @@ config="$HOME/.config/petal"
 plugins="$HOME/.config/omarchy/plugins"
 
 mkdir -p "$config" "$plugins" "$HOME/.local/bin"
-ln -sfn "$here/plugin" "$plugins/egesuren.petal"
+# A release install with the person's own changes (`petal personal`) runs the dock from their source instead.
+plugin="$here/plugin"
+root="${PETAL_HOME:-$HOME/.local/share/petal}"
+if [[ $here == "$root"/* && -d $root/source/.git ]] && PETAL_HOME="$root" python3 "$here/bin/petal-personal" active 2>/dev/null; then
+  plugin="$root/source/plugin"
+fi
+ln -sfn "$plugin" "$plugins/egesuren.petal"
 ln -sfn "$here/bin/petal" "$HOME/.local/bin/petal"
 
 [[ -f $config/modes.json ]] || cp "$here/defaults/modes.json" "$config/modes.json"

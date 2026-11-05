@@ -1150,6 +1150,8 @@ Item {
         try {
           var r = JSON.parse(String(text).trim().split("\n").pop())
           if (r.status === "updated") root.card = { kind: "update", title: "Petal " + r.version, version: r.version, icon: Qt.resolvedUrl("assets/petal.svg") }
+          // A release that couldn't take the person's own changes to Petal's code: they keep theirs (petal personal).
+          else if (r.status === "kept" && !r.again) root.personalNotice(r.version, r.message || "")
         } catch (e) {}
       }
     }
@@ -1169,7 +1171,12 @@ Item {
   }
 
   function restartShell() {
-    Util.execDetached("omarchy restart shell")
+    // `petal restart`, which also checks the dock comes back when the person has changed Petal's code.
+    Util.execDetached(Util.shellQuote(root.home + "/.local/bin/petal") + " restart")
+  }
+
+  function personalNotice(version, message) {
+    root.card = { kind: "kept", title: "Petal " + version, version: version, message: message, icon: Qt.resolvedUrl("assets/petal.svg") }
   }
 
   // ── Claude chat (the Claude panel) ─────────────────────────────────────
@@ -1403,6 +1410,7 @@ Item {
     function testSummary(): void {
       activityItem.tool("petal_summary", {}, function(r) { if (r && !r.error) root.card = { kind: "summary", data: r, icon: Qt.resolvedUrl("assets/petal.svg") } })
     }
+    function personalNotice(version: string, message: string): void { root.personalNotice(version, message) }
     function allow(): void { agent.allow() }
     function testNoWarp(): void { root.withoutWarp("true") }
     function options(): void { root.openAsk(""); askBox.optionsOpen = true }

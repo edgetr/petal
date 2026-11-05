@@ -26,6 +26,12 @@ PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 MAC = sys.platform == "darwin"
 DOCK = os.path.join(CONFIG, "dock.json")
 SOCKET = os.environ.get("PETAL_SOCKET") or os.path.join(CONFIG, "petal.sock")
+# The person's own changes to Petal's code, kept through updates (bin/petal-personal, `petal personal`).
+PERSONAL = os.path.join(HOME, "Library/Application Support/Petal/source") if MAC else \
+    os.path.join(os.environ.get("PETAL_HOME") or os.path.join(HOME, ".local/share/petal"), "source")
+PERSONAL_HOW = ("To change Petal's code so it survives updates: `petal personal init` (once), edit the files in source, then "
+                "`petal personal save \"<what changed>\"`" + (", which builds it and restarts Petal into it." if MAC else
+                ", then `petal restart` to load it.") + " `petal personal help` lists the rest.")
 
 # Every setting Petal reads, with its default and what it does. Petal
 # reloads settings.json as soon as it changes.
@@ -233,8 +239,10 @@ def t_get_state(_):
         "current_mode": petal("current") if MAC else run("omarchy-shell", "petal", "current"),
         "dock": dock_config(),
         "files": {"settings": SETTINGS, "modes": MODES, "instructions": INSTRUCTIONS,
-                  "plugin_source": os.environ.get("PETAL_SOURCE", "") if MAC else PLUGIN_DIR,
+                  "plugin_source": (os.path.join(PERSONAL, "macos") if os.path.exists(os.path.join(PERSONAL, "macos", "Package.swift"))
+                                    else os.environ.get("PETAL_SOURCE", "")) if MAC else PLUGIN_DIR,
                   **({"app": os.environ.get("PETAL_APP", "")} if MAC else {})},
+        "personal": {"source": PERSONAL, "set_up": os.path.exists(os.path.join(PERSONAL, ".git", "petal-personal.json")), "how": PERSONAL_HOW},
     }
 
 
@@ -349,7 +357,10 @@ def t_list_apps(args):
 def t_reload(_):
     if MAC:
         return {"ok": True, "note": petal("restart") + "; the Claude panel closes."}
-    subprocess.Popen(["omarchy", "restart", "shell"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    # `petal restart` also checks the dock comes back when the user has changed Petal's code (petal personal).
+    cli = os.path.join(HOME, ".local/bin/petal")
+    command = [cli, "restart"] if os.access(cli, os.X_OK) else ["omarchy", "restart", "shell"]
+    subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     return {"ok": True, "note": "Omarchy's shell (and Petal) is restarting; the Claude panel closes."}
 
 

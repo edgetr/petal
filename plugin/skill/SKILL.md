@@ -60,12 +60,31 @@ and `… report`. Logs: `petal logs` (Omarchy's shell log; on macOS the system l
 ## Changing Petal itself
 
 Make each dock the user's own with settings, modes and the look first; they apply instantly and survive updates.
-When something truly needs code:
+When something truly needs code, change Petal's **personal source**: a git repository of Petal's source that every
+update is combined with, so the user's changes are never lost.
 
-- **Omarchy:** Petal is QML, in the folder `petal_get_state` gives as `plugin_source`. Edit it, then `petal restart`
-  (or `petal_reload`). A Petal update replaces a release install's files, so keep the change small and tell the user;
-  a source checkout (`git clone https://github.com/edgetr/petal`, then its `install.sh`) keeps it.
-- **macOS:** Petal is a Swift app. With a source checkout (`plugin_source` when there is one, else clone it), edit
-  `macos/Sources/Petal/`, build with `macos/build.sh` (needs Apple's developer tools), copy `macos/build/Petal.app`
-  over the running app (`files.app` in `petal_get_state`), and `petal restart`.
-- If the change would help everyone, suggest proposing it upstream as a pull request on edgetr/petal.
+1. `petal personal init` (once; safe to run again) sets it up from the installed release and prints where it is
+   (`personal.source` in `petal_get_state`): `~/.local/share/petal/source` on Omarchy, `~/Library/Application
+   Support/Petal/source` on macOS. On macOS it needs Apple's command line tools; if they're missing, macOS shows its
+   own installer, and the user runs it again once they're in.
+2. Edit the files there. Omarchy: the dock is QML in `plugin/` (no build); `petal restart` loads an edit to try it.
+   macOS: the app is Swift in `macos/Sources/Petal/`.
+3. `petal personal save "<what changed, in the user's words>"` after each change that works. It commits the edit as
+   one of the user's changes. On macOS it builds first (an edit that doesn't build isn't saved: fix the errors it
+   prints and save again), then installs the build and restarts Petal into it. On Omarchy, `petal restart` loads it;
+   if the dock doesn't come back, `petal personal undo` takes the newest change out.
+
+`petal personal status` and `list` show the changes, unsaved edits and the last update; `undo [<n>]` takes out
+unsaved edits, or the n-th newest change; `reset` goes back to plain releases; `restore` brings a backup back (every
+undo, reset and update keeps one). On Omarchy, only `plugin/` runs from the personal source; Petal's scripts
+(`bin/`, `get.sh`) stay the release's.
+
+When a release arrives, Petal combines it with the user's changes; where both touch the same code, the user's
+chosen AI resolves it, keeping both intents, and the result has to build (macOS) or bring the dock up (Omarchy). If
+that can't be done, the user keeps their Petal as it is and is told; `petal personal status` says why and
+`petal personal retry` tries again. Never discard the user's changes to fix this: offer `petal report`.
+
+Don't edit Petal's installed release files or Petal.app itself: the next update replaces them. A developer's git
+checkout (`git clone https://github.com/edgetr/petal`, then its `install.sh` on Omarchy, or `macos/build.sh`) is
+changed with git instead; `petal personal` says so there. If a change would help everyone, suggest proposing it
+upstream as a pull request on edgetr/petal.

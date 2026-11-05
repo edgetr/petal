@@ -5,7 +5,7 @@ import AppKit
 enum CLI {
     static let commands: Set<String> = ["mode", "stay", "current", "desktop", "ask", "chat", "search", "settings", "reveal", "check",
                                         "dock", "restart", "version", "update", "modes", "get", "set", "restore-dock", "help",
-                                        "recipe", "suggest", "summary", "overview"]
+                                        "recipe", "suggest", "summary", "overview", "personal"]
 
     static let help = """
     petal mode <id>           put this Desktop in a mode (waits out a focus countdown)
@@ -27,6 +27,7 @@ enum CLI {
     petal doctor [--fix]      check Petal, and repair what it safely can
     petal report "<what>"     tell Petal's maker what went wrong (a GitHub issue; shown to you first)
     petal restore-dock        give macOS its Dock back, even if Petal crashed
+    petal personal …          your own changes to Petal's code, kept through updates (petal personal help)
     """
 
     /// Runs a command and exits. Commands that need the running Petal reach it over its socket.
@@ -64,6 +65,8 @@ enum CLI {
             else { print(summary.title + ":"); for line in summary.lines { print("  " + line) } }
         case "chat":
             print(MCP.petal("chat", rest.joined(separator: " ")))
+        case "personal":
+            Personal.command(rest)
         case "mode":
             guard let id = rest.first else { fail("usage: petal mode <id>") }
             print(MCP.petal("mode", id))

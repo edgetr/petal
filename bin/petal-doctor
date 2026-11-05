@@ -91,6 +91,7 @@ class Doctor:
         self.shell()
         self.logs()
         self.updates()
+        self.personal()
         return self.findings
 
     def install(self):
@@ -240,6 +241,17 @@ class Doctor:
             self.note("warn", "updates", "Petal %s is out (this is %s): `petal update`." % (status.get("version"), status.get("current")))
         elif status.get("status") in ("current", "dev"):
             self.note("ok", "updates", "Up to date." if status["status"] == "current" else "Installed from source (updates with git).")
+
+
+    def personal(self):
+        """The person's own changes to Petal's code (bin/petal-personal), when there are any."""
+        if not os.path.isdir(os.path.join(os.environ.get("PETAL_HOME") or os.path.join(HOME, ".local/share/petal"), "source", ".git")):
+            return
+        code, out = run("python3", os.path.join(HERE, "petal-personal"), "doctor", *(["--fix"] if self.fix else []), timeout=120)
+        try:
+            self.findings += json.loads(out.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            self.note("warn", "code", "Couldn't check your own changes to Petal: %s" % out.strip()[-160:])
 
 
 def recent_logs(n):
