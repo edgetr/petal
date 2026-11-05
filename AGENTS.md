@@ -73,7 +73,7 @@ The owner works on two machines: this Mac and an Omarchy machine. GitHub is the 
 | System | `busctl` (notifications, LauncherEntry), `gio`, `hyprctl`, `omarchy-shell`, `uwsm-app` |
 | Website | static `site/` (no build step, self-hosted Geist), Vercel project `petal-dock` |
 | macOS | Swift and SwiftUI with macOS's own Liquid Glass, macOS 26 and later, built with Swift Package Manager (`macos/`), no dependencies yet |
-| Signing | no Apple Developer ID: Petal for macOS is signed ad hoc (or with one stable self-made certificate), and people open it once through System Settings > Privacy & Security > Open Anyway |
+| Signing | no Apple Developer ID. Releases are signed with a self-made certificate when the `MACOS_SIGNING_P12` and `MACOS_SIGNING_PASSWORD` secrets exist (so updates keep Accessibility and Screen Recording), else ad hoc. A zip opened from a browser needs System Settings > Privacy & Security > Open Anyway once |
 | Release | GitHub Actions with the workflow's own `GITHUB_TOKEN` only |
 
 Add no dependency beyond what a stock Omarchy install has, or a Swift package to the Mac app, without the owner. Python stays standard library.
@@ -104,7 +104,7 @@ A native app in `macos/` (Swift Package Manager; `macos/build.sh` builds `macos/
 - `Claude.swift`: the Claude panel (Agent.qml and AskBox.qml: the same CLI arguments, stream-json, resume and Allow flow, with a macOS system prompt) and the "+" search.
 - `Focus.swift`: focus cards and Brain (Claude Haiku), with Omarchy's exact prompts.
 - `Windows.swift` (Accessibility: window lists, minimized windows, raising one window, the front window's title), `Spaces.swift` (which Desktop each screen shows, through SkyLight's private `SLSCopyManagedDisplaySpaces`, read-only, looked up at run time), `Signals.swift` (badges from macOS's hidden Dock, download progress through `NSProgress`, now playing from Music and Spotify), `Stacks.swift`, `Apps.swift`, `Usage.swift` (Claude Code's login from the Keychain, the same usage endpoint as Omarchy's collector).
-- `SystemDock.swift`: hides macOS's Dock (auto-hide, 1000-second delay) and gives back the owner's own Dock settings, saved in `~/.config/petal/macos-dock.json` so a crash can't lose them. "Import Dock" reads its apps and folders.
+- `SystemDock.swift`: hides macOS's Dock (auto-hide, 1000-second delay), only once the owner's own Dock settings are saved in `~/.config/petal/macos-dock.json`, and gives them back on quit, when killed, or on the next launch. `petal restore-dock` (or `Petal --restore-dock`) gives them back even if Petal crashed or was deleted. "Import Dock" reads the Dock's apps and folders.
 - `SettingsWindow.swift` and `Onboarding.swift`: the settings window and the first-run welcome. `Updater.swift`: updates from `macos-v*` releases. `IPC.swift`: the socket. `Snapshot.swift`: `--snapshot`.
 
 How it maps to Omarchy:
