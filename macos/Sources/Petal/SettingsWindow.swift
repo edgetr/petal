@@ -468,6 +468,7 @@ struct ModesSettings: View {
                 }
             }
         }
+        ShareDockCard()
         .sheet(item: $editing) { mode in
             ModeEditor(mode: mode, isNew: !app.config.modes.contains { $0.id == mode.id }).environment(app)
         }

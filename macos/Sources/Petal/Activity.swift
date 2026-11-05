@@ -7,7 +7,9 @@ import AppKit
 @MainActor
 final class ActivityLog {
     nonisolated static let folder = URL(fileURLWithPath: NSHomeDirectory()).appending(path: "Library/Application Support/Petal")
-    nonisolated static let file = folder.appending(path: "activity.jsonl")
+    /// PETAL_ACTIVITY points somewhere else, for trying the suggestions on a made-up history.
+    nonisolated static let file = ProcessInfo.processInfo.environment["PETAL_ACTIVITY"].map { URL(fileURLWithPath: $0) }
+        ?? folder.appending(path: "activity.jsonl")
     /// The Mac's own bookkeeping: when a suggestion or the weekly summary was last shown.
     nonisolated static let stateFile = folder.appending(path: "state.json")
 
@@ -126,6 +128,9 @@ enum Insights {
 
     static func setting(_ key: String) -> Bool { settings[key] as? Bool ?? MCP.schema[key]?.first as? Bool ?? true }
 
+    /// Colors for new modes, in order.
+    static let palette = ["#5fb8ff", "#ff9f5f", "#7ed38a", "#ffd25f", "#ff6fae", "#b18cff", "#5fe0d0", "#ff7a6b"]
+
     static let suggestionsFile = MCP.folder.appending(path: "suggestions.json")
 
     static var dismissed: Set<String> { Set(MCP.read(suggestionsFile)?["dismissed"] as? [String] ?? []) }
@@ -140,11 +145,20 @@ enum Insights {
 
     // MARK: Names
 
-    /// An app's name, from its bundle; its id if it isn't installed.
+    /// An app's name, from its bundle; if it isn't installed, the last part of its id ("dev.zed.Zed" → "Zed").
     static func name(_ id: String) -> String {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id), let bundle = Bundle(url: url) else { return id }
-        return bundle.localizedInfoDictionary?["CFBundleDisplayName"] as? String ?? bundle.infoDictionary?["CFBundleDisplayName"] as? String
-            ?? bundle.infoDictionary?["CFBundleName"] as? String ?? url.deletingPathExtension().lastPathComponent
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id), let bundle = Bundle(url: url) else {
+            let last = id.split(separator: ".").last.map(String.init) ?? id
+            return last.prefix(1).uppercased() + last.dropFirst()
+        }
+        return plain(bundle.localizedInfoDictionary?["CFBundleDisplayName"] as? String ?? bundle.infoDictionary?["CFBundleDisplayName"] as? String
+            ?? bundle.infoDictionary?["CFBundleName"] as? String ?? url.deletingPathExtension().lastPathComponent)
+    }
+
+    /// Without invisible formatting marks (some apps put a left-to-right mark before their name).
+    static func plain(_ text: String) -> String {
+        String(String.UnicodeScalarView(text.unicodeScalars.filter { $0.properties.generalCategory != .format }))
+            .trimmingCharacters(in: .whitespaces)
     }
 
     /// "Figma", "Figma and Linear", "Figma, Linear and Notion", "Figma, Linear and 2 more".

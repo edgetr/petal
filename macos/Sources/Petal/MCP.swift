@@ -162,6 +162,18 @@ enum MCP {
             return ["result": petal("mode", args["id"] as? String ?? "")]
         case "petal_list_apps":
             return apps(matching: args["query"] as? String ?? "")
+        case "petal_export_recipe":
+            return ["path": try Recipe.export(path: args["path"] as? String, name: args["name"] as? String)]
+        case "petal_import_recipe":
+            guard let path = args["path"] as? String, !path.isEmpty else { throw Failure("path is required") }
+            let plan = try Recipe.plan(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+            return try Recipe.apply(plan, look: args["look"] as? Bool ?? false)
+        case "petal_suggestions":
+            guard Insights.setting("activityLog") else { return ["suggestions": [], "note": "The activity history is off (activityLog)."] }
+            return ["suggestions": Insights.suggestions().map(\.json)]
+        case "petal_summary":
+            guard Insights.setting("activityLog") else { return ["note": "The activity history is off (activityLog)."] }
+            return Insights.summary(lastWeek: false).json
         case "petal_reload":
             return ["ok": true, "note": petal("restart") + "; the Claude panel closes."]
         default:
@@ -223,10 +235,16 @@ enum MCP {
 
     /// Installed apps by bundle id and name, filtered by a word in either.
     static func apps(matching query: String) -> [[String: String]] {
+        installed().filter { query.isEmpty || "\($0.id) \($0.name)".localizedCaseInsensitiveContains(query) }
+            .map { ["id": $0.id, "name": $0.name] }
+    }
+
+    /// Every app in the usual places: bundle id, name, and where it is.
+    static func installed() -> [(id: String, name: String, path: String)] {
         let roots = ["/Applications", "/Applications/Utilities", "/System/Applications", "/System/Applications/Utilities",
                      NSHomeDirectory() + "/Applications"]
         var seen = Set<String>()
-        var found: [[String: String]] = []
+        var found: [(id: String, name: String, path: String)] = []
         for root in roots {
             let names = (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []
             var paths = names.filter { $0.hasSuffix(".app") }.map { root + "/" + $0 }
@@ -239,10 +257,9 @@ enum MCP {
                 seen.insert(id)
                 let name = bundle.infoDictionary?["CFBundleDisplayName"] as? String ?? bundle.infoDictionary?["CFBundleName"] as? String
                     ?? (path as NSString).lastPathComponent.replacingOccurrences(of: ".app", with: "")
-                if !query.isEmpty && !"\(id) \(name)".localizedCaseInsensitiveContains(query) { continue }
-                found.append(["id": id, "name": name])
+                found.append((id, Insights.plain(name), path))
             }
         }
-        return found.sorted { $0["name"]!.localizedCaseInsensitiveCompare($1["name"]!) == .orderedAscending }
+        return found.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 }

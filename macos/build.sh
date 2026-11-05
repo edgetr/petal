@@ -59,6 +59,29 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSUIElement</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
   <key>NSHumanReadableCopyright</key><string>Edgetr. MIT License.</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Petal Dock</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Owner</string>
+      <key>LSItemContentTypes</key><array><string>tech.edgetr.petal.recipe</string></array>
+      <key>CFBundleTypeIconSystemGenerated</key><true/>
+    </dict>
+  </array>
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key><string>tech.edgetr.petal.recipe</string>
+      <key>UTTypeDescription</key><string>Petal Dock</string>
+      <key>UTTypeConformsTo</key><array><string>public.json</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key><array><string>petal</string></array>
+        <key>public.mime-type</key><array><string>application/x-petal</string></array>
+      </dict>
+    </dict>
+  </array>
   <key>NSAppleEventsUsageDescription</key><string>Petal shows what's playing in Music and Spotify, and opens and empties the Trash in Finder.</string>
 </dict>
 </plist>

@@ -32,6 +32,7 @@ final class PetalApp {
     @ObservationIgnored let tooltips = Tooltips()
     @ObservationIgnored let settings = SettingsWindow()
     @ObservationIgnored let welcome = Welcome()
+    @ObservationIgnored let recipes = RecipeWindow()
     @ObservationIgnored private(set) var docks: DockController!
     @ObservationIgnored private(set) var focus: FocusGuard!
     @ObservationIgnored let ipc = IPC()
@@ -292,6 +293,11 @@ final class PetalApp {
             return "ok"
         }
         ipc.on("summary") { [unowned self] _ in insights.showSummary(); return "ok" }
+        ipc.on("recipe") { [unowned self] args in
+            guard let path = args.first, FileManager.default.fileExists(atPath: path) else { return "no such file" }
+            recipes.show(URL(fileURLWithPath: path))
+            return "ok"
+        }
         ipc.on("testBounce") { [unowned self] args in
             guard let id = args.first else { return "which app?" }
             signals.bounce(id)
@@ -322,10 +328,13 @@ final class PetalApp {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var signals: [DispatchSourceSignal] = []
+    private var opened: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let app = PetalApp()
         app.start()
+        for url in opened { app.recipes.show(url) }
+        opened = []
         // Being killed (logout, `killall Petal`) gives macOS its Dock back too, not only quitting.
         for number in [SIGTERM, SIGINT, SIGHUP] {
             signal(number, SIG_IGN)
@@ -333,6 +342,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             source.setEventHandler { NSApp.terminate(nil) }
             source.resume()
             signals.append(source)
+        }
+    }
+
+    /// Double-clicking a .petal file someone shared: what it adds, first.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.pathExtension.lowercased() == "petal" {
+            if PetalApp.started { PetalApp.shared.recipes.show(url) } else { opened.append(url) }
         }
     }
 
