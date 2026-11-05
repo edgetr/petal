@@ -26,9 +26,9 @@ The owner works on two machines, linked to each other in T3 Code. GitHub is the 
 | Machine | System | Checkout | Use it for |
 | --- | --- | --- | --- |
 | `LEGION_5_PRO` | Omarchy | `~/Projects/Petal` (the installed plugin) | running and verifying Petal: the dock, `omarchy-shell`, `hyprctl`, logs |
-| Gökay MacBook Pro | macOS | `~/petal` | editing, the site, Git and PRs. Petal can't run here |
+| Gökay MacBook Pro | macOS | `~/petal` | editing, the site, Git and PRs; Petal doesn't run on macOS yet (a macOS version is planned) |
 
-- **Check where you are** (`uname`) before running anything Omarchy-only. On the Mac, say that a dock change wasn't run on the real dock.
+- **Check where you are** (`uname`) before running anything Omarchy-only. Until Petal runs on macOS, say on the Mac that a dock change wasn't run on the real dock.
 - **To verify a change,** push the branch and have it run on `LEGION_5_PRO`: in T3, pass its `environmentId` from `t3_environment_links`. If it is unreachable, say so; don't fake the check.
 - **Sync through GitHub:** commit and push on one machine, pull on the other. Don't copy files between them, and pull before starting work.
 - **Per-machine setup** (T3 project icons, `~/.config/petal/`, the plugin link) isn't in the repository: change it on each machine, or say which one is still left.

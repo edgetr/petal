@@ -1,10 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <rect width="64" height="64" rx="15" fill="#f1f0ec"/>
   <g transform="translate(32 34)" fill="#17181c">
-    <path d="M0 -2.5 C -9 -8 -9 -19 0 -22 C 9 -19 9 -8 0 -2.5 Z" fill="#d9367f"/>
-    <path d="M0 -2.5 C -9 -8 -9 -19 0 -22 C 9 -19 9 -8 0 -2.5 Z" transform="rotate(72)"/>
-    <path d="M0 -2.5 C -9 -8 -9 -19 0 -22 C 9 -19 9 -8 0 -2.5 Z" transform="rotate(144)"/>
-    <path d="M0 -2.5 C -9 -8 -9 -19 0 -22 C 9 -19 9 -8 0 -2.5 Z" transform="rotate(216)"/>
-    <path d="M0 -2.5 C -9 -8 -9 -19 0 -22 C 9 -19 9 -8 0 -2.5 Z" transform="rotate(288)"/>
+    <path d="M0 -4.5C4.8 -8.7 4.8 -15.3 0 -19.5C-4.8 -15.3 -4.8 -8.7 0 -4.5Z" fill="#d9367f"/>
+    <path d="M0 -4.5C4.8 -8.7 4.8 -15.3 0 -19.5C-4.8 -15.3 -4.8 -8.7 0 -4.5Z" transform="rotate(72)"/>
+    <path d="M0 -4.5C4.8 -8.7 4.8 -15.3 0 -19.5C-4.8 -15.3 -4.8 -8.7 0 -4.5Z" transform="rotate(144)"/>
+    <path d="M0 -4.5C4.8 -8.7 4.8 -15.3 0 -19.5C-4.8 -15.3 -4.8 -8.7 0 -4.5Z" transform="rotate(216)"/>
+    <path d="M0 -4.5C4.8 -8.7 4.8 -15.3 0 -19.5C-4.8 -15.3 -4.8 -8.7 0 -4.5Z" transform="rotate(288)"/>
   </g>
 </svg>
