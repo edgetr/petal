@@ -817,9 +817,11 @@ PanelWindow {
     readonly property real used: window.dock ? window.dock.usageWorst : -1
     readonly property color ringColor: used >= 0.9 ? "#ff4d6d" : used >= 0.7 ? "#ffb347" : Commons.Color.accent
     property string tip: {
+      // The ring shows what's used; the tooltip, what's left.
       var t = "Claude"
       var limits = window.dock && window.dock.usage && window.dock.usage.limits ? window.dock.usage.limits : []
-      for (var i = 0; i < limits.length; i++) t += " · " + String(limits[i].title || limits[i].label).replace(" (7-day)", "") + " " + Math.round(Number(limits[i].percent) * 100) + "%"
+      for (var i = 0; i < limits.length; i++)
+        t += " · " + String(limits[i].title || limits[i].label).replace(" (7-day)", "") + " " + Math.round((1 - Number(limits[i].percent)) * 100) + "% left"
       return t
     }
     width: window.vertical ? window.slotSize : size + Style.spacing.sm * 2
