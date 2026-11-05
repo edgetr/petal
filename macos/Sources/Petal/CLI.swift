@@ -4,7 +4,8 @@ import AppKit
 /// Omarchy, so any agent (T3 Code, Claude Code, Codex in a terminal) or person can drive the dock from a shell.
 enum CLI {
     static let commands: Set<String> = ["mode", "stay", "current", "desktop", "ask", "chat", "search", "settings", "reveal", "check",
-                                        "dock", "restart", "version", "update", "modes", "get", "set", "restore-dock", "help"]
+                                        "dock", "restart", "version", "update", "modes", "get", "set", "restore-dock", "help",
+                                        "recipe", "suggest", "summary", "overview"]
 
     static let help = """
     petal mode <id>           put this Desktop in a mode (waits out a focus countdown)
@@ -17,6 +18,12 @@ enum CLI {
     petal ask | chat <text>   open the AI panel, or ask it something
     petal search | settings   open the "+" search, or Petal's settings
     petal restart | update    restart Petal, or check for a new one
+    petal recipe export [<file>]           share your dock: modes, apps and look in a .petal file
+    petal recipe import <file> [--look] [--dry-run]
+                              add the modes from a .petal file (and its look, with --look)
+    petal suggest [--json]    modes Petal would suggest from your activity
+    petal summary [--json]    the last 7 days in your modes
+    petal overview            every Desktop and its mode
     petal doctor [--fix]      check Petal, and repair what it safely can
     petal report "<what>"     tell Petal's maker what went wrong (a GitHub issue; shown to you first)
     petal restore-dock        give macOS its Dock back, even if Petal crashed
@@ -41,6 +48,20 @@ enum CLI {
             let text = rest.dropFirst().joined(separator: " ")
             let value = (try? JSONSerialization.jsonObject(with: Data(text.utf8), options: .fragmentsAllowed)) ?? text
             do { output(try MCP.call("petal_set_settings", ["settings": [rest[0]: value]])) } catch { fail(error.localizedDescription) }
+        case "recipe":
+            recipe(rest)
+        case "suggest":
+            guard Insights.setting("activityLog") else { fail("The activity history is off (petal set activityLog true).") }
+            let found = Insights.suggestions()
+            if rest.contains("--json") { output(["suggestions": found.map(\.json)]) }
+            else if found.isEmpty { print("Nothing to suggest yet.") }
+            else { for suggestion in found { print("- " + (suggestion.json["text"] as? String ?? "")) } }
+        case "summary":
+            guard Insights.setting("activityLog") else { fail("The activity history is off (petal set activityLog true).") }
+            let summary = Insights.summary(lastWeek: false)
+            if rest.contains("--json") { output(summary.json) }
+            else if summary.modes.isEmpty { print("Nothing yet: Petal notes which app is in front, a minute at a time.") }
+            else { print(summary.title + ":"); for line in summary.lines { print("  " + line) } }
         case "chat":
             print(MCP.petal("chat", rest.joined(separator: " ")))
         case "mode":
@@ -50,6 +71,39 @@ enum CLI {
             print(MCP.petal(([command] + rest)))
         }
         exit(0)
+    }
+
+    /// `petal recipe export [<file>]` and `petal recipe import <file> [--look]`.
+    static func recipe(_ args: [String]) {
+        switch args.first {
+        case "export":
+            do { print(try Recipe.export(path: args.dropFirst().first, name: nil)) } catch { fail(error.localizedDescription) }
+        case "import":
+            guard let path = args.dropFirst().first(where: { !$0.hasPrefix("--") }) else { fail("usage: petal recipe import <file> [--look]") }
+            let look = args.contains("--look")
+            do {
+                let plan = try Recipe.plan(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+                print("\(plan.name) adds \(plan.modes.count == 1 ? "a mode" : "\(plan.modes.count) modes"):")
+                for mode in plan.modes {
+                    print("  \(mode.name) (\(mode.id)): \(mode.apps.map(Insights.name).joined(separator: ", "))"
+                          + (mode.missing.isEmpty ? "" : "; not on this Mac: " + mode.missing.joined(separator: ", ")))
+                }
+                if look && !plan.lookChanges.isEmpty {
+                    print("Its look changes: " + plan.lookChanges.map { Recipe.lookNames[$0] ?? $0 }.joined(separator: ", "))
+                }
+                if args.contains("--dry-run") { exit(0) }
+                if isatty(0) != 0 {
+                    print("Add \(plan.modes.count == 1 ? "it" : "them")? [y/N] ", terminator: "")
+                    guard readLine()?.lowercased().hasPrefix("y") == true else { exit(1) }
+                }
+                try Recipe.apply(plan, look: look)
+                print("Added.")
+            } catch {
+                fail(error.localizedDescription)
+            }
+        default:
+            fail("usage: petal recipe export [<file>] | petal recipe import <file> [--look]")
+        }
     }
 
     static func output(_ value: Any?) {

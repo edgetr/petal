@@ -13,6 +13,8 @@ struct Mode: Equatable, Identifiable {
     var sites: [String]
     var focusDelay: Double
     var allow: [String]
+    /// A Shortcut (Shortcuts app) to run when the Desktop in front enters this mode.
+    var shortcut: String = ""
 
     var hex: String { color.hex }
 }
@@ -75,6 +77,7 @@ final class Config {
     }
     func string(_ key: String) -> String { settings[key] as? String ?? Self.defaults[key] as? String ?? "" }
     func strings(_ key: String) -> [String] { settings[key] as? [String] ?? Self.defaults[key] as? [String] ?? [] }
+    func value(_ key: String) -> Any? { settings[key] ?? Self.defaults[key] }
 
     /// Changes one setting; everything else in settings.json stays as it was.
     func set(_ key: String, _ value: Any) {
@@ -136,6 +139,7 @@ final class Config {
             entry["sites"] = mode.sites
             entry["focusDelay"] = mode.focusDelay
             entry["allow"] = mode.allow
+            entry["shortcut"] = mode.shortcut.isEmpty ? nil : mode.shortcut
             if let index = list.firstIndex(where: { $0["id"] as? String == mode.id }) { list[index] = entry } else { list.append(entry) }
             root["modes"] = list
         }
@@ -211,7 +215,7 @@ final class Config {
                         color: NSColor(hex: m["color"] as? String) ?? .systemPink, about: m["about"] as? String ?? "",
                         apps: (m["apps"] as? [String] ?? []).map { $0.trimmingCharacters(in: .whitespaces) },
                         sites: m["sites"] as? [String] ?? [], focusDelay: (m["focusDelay"] as? NSNumber)?.doubleValue ?? 0,
-                        allow: m["allow"] as? [String] ?? [])
+                        allow: m["allow"] as? [String] ?? [], shortcut: m["shortcut"] as? String ?? "")
         }
         settings = Self.readObject(settingsFile)
         dock = Self.readObject(dockFile)

@@ -27,6 +27,9 @@ final class ScreenDock {
     @ObservationIgnored var order: [String] = []
     @ObservationIgnored var frames: [String: CGRect] = [:]   // slot frames in the panel, top-left origin
     @ObservationIgnored weak var panel: DockPanel?
+    let magnifier = Magnifier()
+
+    init() { magnifier.dock = self }
 
     var vertical: Bool { PetalApp.shared.config.position != "bottom" }
 }
@@ -139,6 +142,7 @@ final class DockController {
             panel.place(on: screen)
         }
         if config.keepWindowsClear && !config.autoHide { keepWindowsClear(snapshot) }
+        app.automation.modeShown(dock(for: NSScreen.main)?.mode?.id)
     }
 
     /// macOS keeps no room for a dock other than its own, so windows would run under Petal's. While auto-hide is
@@ -456,6 +460,7 @@ final class DockPanel: NSPanel {
     private func followMouse() {
         guard config.autoHide, let screen = screenRef else {
             if !dock.revealed { dock.revealed = true }
+            if frame.contains(NSEvent.mouseLocation) { dock.magnifier.wake() }
             return
         }
         let mouse = NSEvent.mouseLocation
@@ -468,6 +473,7 @@ final class DockPanel: NSPanel {
         default: atEdge = mouse.y <= area.minY + depth && mouse.x >= area.minX && mouse.x <= area.maxX
         }
         let over = frame.insetBy(dx: -8, dy: -8).contains(mouse)
+        if over && !tucked { dock.magnifier.wake() }
         if !dock.revealed && atEdge {
             dock.revealed = true
             place(on: screen)
@@ -488,6 +494,7 @@ final class DockPanel: NSPanel {
 
 struct DockView: View {
     @Environment(PetalApp.self) private var app
+    @Environment(\.snapshotting) private var snapshotting
     let dock: ScreenDock
 
     var config: Config { app.config }
@@ -501,31 +508,37 @@ struct DockView: View {
         let stacks = Stacks.resolve(config.strings("stackFolders"))
         let extras = (config.bool("nowPlaying") && app.signals.nowPlaying != nil) || !dock.minimized.isEmpty
             || (config.bool("stacks") && !stacks.isEmpty) || config.bool("trash")
-        GlassEffectContainer {
-            layout {
-                if modesOn { ModeSwitcher(dock: dock, size: icon * 0.95).padding(dock.vertical ? .vertical : .horizontal, 6) }
-                if !app.providers.isEmpty && (config.bool("ai") || config.bool("claudeUsage")) {
-                    ClaudeButton(dock: dock, size: icon * 0.95).frame(width: slot, height: slot)
-                }
-                if modesOn { Separator(vertical: dock.vertical, slot: slot) }
-                stage(layout)
-                if extras { Separator(vertical: dock.vertical, slot: slot) }
-                if config.bool("nowPlaying"), let playing = app.signals.nowPlaying {
-                    NowPlayingSlot(dock: dock, playing: playing, icon: icon).frame(width: slot, height: slot)
-                }
-                ForEach(dock.minimized) { window in
-                    MinimizedSlot(dock: dock, window: window, icon: icon).frame(width: slot, height: slot)
-                }
-                if config.bool("stacks") {
-                    ForEach(stacks, id: \.self) { folder in
-                        StackSlot(dock: dock, folder: folder, icon: icon).frame(width: slot, height: slot)
-                    }
-                }
-                if config.bool("trash") { TrashSlot(dock: dock, icon: icon).frame(width: slot, height: slot) }
+        let row = layout {
+            if modesOn {
+                ModeSwitcher(dock: dock, size: icon * 0.95).padding(dock.vertical ? .vertical : .horizontal, 6)
+                    .magnified(dock, "switcher", scales: false)
             }
-            .padding(4)
-            .background(RightClickCatcher { Menus.settings(for: dock) })
-            .glassEffect(glass, in: .rect(cornerRadius: radius))
+            if !app.providers.isEmpty && (config.bool("ai") || config.bool("claudeUsage")) {
+                ClaudeButton(dock: dock, size: icon * 0.95).frame(width: slot, height: slot).magnified(dock, "claude")
+            }
+            if modesOn { Separator(vertical: dock.vertical, slot: slot).magnified(dock, "separator:modes", scales: false) }
+            stage(layout)
+            if extras { Separator(vertical: dock.vertical, slot: slot).magnified(dock, "separator:extras", scales: false) }
+            if config.bool("nowPlaying"), let playing = app.signals.nowPlaying {
+                NowPlayingSlot(dock: dock, playing: playing, icon: icon).frame(width: slot, height: slot).magnified(dock, "media")
+            }
+            ForEach(dock.minimized) { window in
+                MinimizedSlot(dock: dock, window: window, icon: icon).frame(width: slot, height: slot)
+                    .magnified(dock, "min:\(window.id)")
+            }
+            if config.bool("stacks") {
+                ForEach(stacks, id: \.self) { folder in
+                    StackSlot(dock: dock, folder: folder, icon: icon).frame(width: slot, height: slot).magnified(dock, "stack:\(folder)")
+                }
+            }
+            if config.bool("trash") { TrashSlot(dock: dock, icon: icon).frame(width: slot, height: slot).magnified(dock, "trash") }
+        }
+        .padding(4)
+        .background { if !snapshotting { RightClickCatcher { Menus.settings(for: dock) } } }
+        .modifier(DockGlass(dock: dock, glass: glass, radius: radius))
+        // A container would lift the stretching glass above the icons; there's only the one glass to hold anyway.
+        Group {
+            if Magnifier.enabled { row } else { GlassEffectContainer { row } }
         }
         .padding(outer)
         .fixedSize()
@@ -534,12 +547,18 @@ struct DockView: View {
     }
 
     /// Room around the glass: for its shadow, and inward for icons lifting and bouncing.
+    /// With magnification, it's room for the largest icons too, so the panel never resizes while they grow.
     private var outer: EdgeInsets {
-        let room = icon * 0.55
+        var room = icon * 0.55
+        var along: CGFloat = 10
+        if Magnifier.enabled {
+            room = max(room, slot * Magnifier.amount + 6)
+            along += Magnifier.room(slot: slot, amount: Magnifier.amount)
+        }
         switch config.position {
-        case "left": return EdgeInsets(top: 10, leading: 2, bottom: 10, trailing: room)
-        case "right": return EdgeInsets(top: 10, leading: room, bottom: 10, trailing: 2)
-        default: return EdgeInsets(top: room, leading: 10, bottom: 2, trailing: 10)
+        case "left": return EdgeInsets(top: along, leading: 2, bottom: along, trailing: room)
+        case "right": return EdgeInsets(top: along, leading: room, bottom: along, trailing: 2)
+        default: return EdgeInsets(top: room, leading: along, bottom: 2, trailing: along)
         }
     }
 
@@ -560,9 +579,10 @@ struct DockView: View {
             ForEach(Array(dock.items.enumerated()), id: \.element.id) { index, item in
                 AppSlot(dock: dock, item: item, index: index, icon: icon, slot: slot)
                     .frame(width: slot, height: slot)
+                    .magnified(dock, item.id)
                     .transition(.scale(scale: 0.7).combined(with: .opacity))
             }
-            AddSlot(dock: dock, icon: icon).frame(width: slot, height: slot)
+            AddSlot(dock: dock, icon: icon).frame(width: slot, height: slot).magnified(dock, "add")
         }
         .frame(width: dock.vertical ? slot : length, height: dock.vertical ? length : slot)
     }
@@ -597,7 +617,8 @@ extension View {
     /// The icon lifts and grows inward under the pointer.
     func lift(_ hovering: Bool, icon: CGFloat) -> some View {
         let config = PetalApp.shared.config
-        let amount = config.bool("hoverLift") && hovering ? config.number("hoverLiftAmount") : 0
+        // Magnification takes lift's place.
+        let amount = config.bool("hoverLift") && !Magnifier.enabled && hovering ? config.number("hoverLiftAmount") : 0
         let position = config.position
         let shift = icon * amount * 1.2
         return scaleEffect(1 + amount, anchor: position == "left" ? .leading : position == "right" ? .trailing : .bottom)
@@ -712,7 +733,7 @@ struct ClaudeButton: View {
         .frame(width: size, height: size)
         .animation(.easeOut(duration: 0.12), value: hovering)
         .slotFrame(dock, "claude")
-        .overlay(SlotMouse(left: { app.claude.open(asking: nil) }, right: { Menus.settings(for: dock) },
+        .slotMouse(SlotMouse(left: { app.claude.open(asking: nil) }, right: { Menus.settings(for: dock) },
                            hover: { on in
                                hovering = on
                                app.tooltips.show(on ? app.usageTooltip : nil, over: "claude", in: dock)
@@ -813,7 +834,7 @@ struct AppSlot: View {
         .offset(dragShift)
         .zIndex(dragged ? 10 : 0)
         .slotFrame(dock, item.id)
-        .overlay(SlotMouse(
+        .slotMouse(SlotMouse(
             left: { app.popups.closeAll(); app.docks.activate(item) },
             right: { Menus.app(item, in: dock) },
             middle: { app.docks.newWindow(item.id) },
@@ -981,7 +1002,7 @@ struct AddSlot: View {
         }
         .lift(hovering, icon: icon)
         .slotFrame(dock, "add")
-        .overlay(SlotMouse(left: { app.popups.closeAll(); app.search.open(in: dock) }, right: { Menus.settings(for: dock) },
+        .slotMouse(SlotMouse(left: { app.popups.closeAll(); app.search.open(in: dock) }, right: { Menus.settings(for: dock) },
                            hover: { on in
                                hovering = on
                                app.tooltips.show(on ? (dock.mode.map { "Add apps to \($0.name)" } ?? "Add apps") : nil, over: "add", in: dock)
@@ -1018,7 +1039,7 @@ struct NowPlayingSlot: View {
         }
         .lift(hovering, icon: icon)
         .slotFrame(dock, "media")
-        .overlay(SlotMouse(left: { NowPlaying.send("playpause", to: playing.player) },
+        .slotMouse(SlotMouse(left: { NowPlaying.send("playpause", to: playing.player) },
                            right: { Menus.media(playing) },
                            middle: { NowPlaying.send("next track", to: playing.player) },
                            hover: { on in
@@ -1073,7 +1094,7 @@ struct MinimizedSlot: View {
         .lift(hovering, icon: icon)
         .slotFrame(dock, "min:\(window.id)")
         .onAppear { app.previews.snapshot(window) }
-        .overlay(SlotMouse(left: { Windows.focus(window) }, right: { Windows.focus(window) }, middle: { Windows.close(window) },
+        .slotMouse(SlotMouse(left: { Windows.focus(window) }, right: { Windows.focus(window) }, middle: { Windows.close(window) },
                            hover: { on in
                                hovering = on
                                app.tooltips.show(on ? "\(window.title) (minimized)" : nil, over: "min:\(window.id)", in: dock)
@@ -1104,7 +1125,7 @@ struct StackSlot: View {
             if dock.openPopup == key { Circle().fill(Color(nsColor: app.accent)).frame(width: 4, height: 4).offset(y: 5) }
         }
         .slotFrame(dock, key)
-        .overlay(SlotMouse(left: { app.popups.toggleStack(folder, in: dock) },
+        .slotMouse(SlotMouse(left: { app.popups.toggleStack(folder, in: dock) },
                            right: { Menus.stack(folder) },
                            middle: { NSWorkspace.shared.open(Stacks.url(folder)) },
                            hover: { on in
@@ -1128,7 +1149,7 @@ struct TrashSlot: View {
             .scaleEffect(fileOver ? 1.2 : 1)
             .lift(hovering, icon: icon)
             .slotFrame(dock, "trash")
-            .overlay(SlotMouse(left: { Stacks.openTrash() }, right: { Menus.trash() },
+            .slotMouse(SlotMouse(left: { Stacks.openTrash() }, right: { Menus.trash() },
                                hover: { on in
                                    hovering = on
                                    app.tooltips.show(on ? "Trash" : nil, over: "trash", in: dock)
@@ -1176,7 +1197,10 @@ struct SlotMouse: NSViewRepresentable {
             area = new
         }
 
-        override func mouseEntered(with event: NSEvent) { handlers?.hover(true) }
+        override func mouseEntered(with event: NSEvent) {
+            (window as? DockPanel)?.dock.magnifier.wake()
+            handlers?.hover(true)
+        }
         override func mouseExited(with event: NSEvent) { handlers?.hover(false) }
 
         override func mouseDown(with event: NSEvent) {

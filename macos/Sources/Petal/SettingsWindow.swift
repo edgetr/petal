@@ -333,7 +333,10 @@ struct DockSettings: View {
             }
             Toggle("Open Petal at login", isOn: Binding(get: { app.openAtLogin }, set: { app.openAtLogin = $0 }))
                 .toggleStyle(.switch).controlSize(.small)
+            SettingToggle(key: "menuBarIcon", title: "Petal in the menu bar", detail: "Your mode, your Desktops, and updates.")
         }
+
+        ShortcutsCard()
 
         Card(title: "Bring your Dock along", footer: "Copies macOS's Dock into a mode called My Dock, which every Desktop starts in, and its folders into stacks. Your Dock itself doesn't change.") {
             HStack(spacing: -6) {
@@ -431,6 +434,9 @@ struct ModesSettings: View {
         SettingToggle(key: "modes", title: "Focus modes", detail: "Each Desktop's own mode, with its own apps.")
             .padding(16).glassEffect(.regular, in: .rect(cornerRadius: 20))
 
+        DescribeDayCard()
+        SuggestionsCard()
+
         let columns = [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)]
         LazyVGrid(columns: columns, spacing: 14) {
             ForEach(app.config.modes) { mode in
@@ -467,7 +473,10 @@ struct ModesSettings: View {
                     .frame(width: 180)
                 }
             }
+            Button("See every Desktop") { app.overview.show() }.buttonStyle(.glass)
         }
+        ScheduleCard()
+        ShareDockCard()
         .sheet(item: $editing) { mode in
             ModeEditor(mode: mode, isNew: !app.config.modes.contains { $0.id == mode.id }).environment(app)
         }
@@ -589,6 +598,7 @@ struct ModeEditor: View {
                 Slider(value: $mode.focusDelay, in: 0...120, step: 5)
                 Text(mode.focusDelay == 0 ? "never" : "\(Int(mode.focusDelay)) s").monospacedDigit().frame(width: 52)
             }
+            ShortcutPicker(name: $mode.shortcut)
             HStack {
                 if !isNew {
                     Button("Delete", role: .destructive) { app.config.delete(mode: mode.id); dismiss() }
@@ -735,6 +745,7 @@ struct FocusSettings: View {
             SettingToggle(key: "focusGuard", title: "Focus cards")
             SettingToggle(key: "countdown", title: "Wait before leaving a mode", detail: "Switching to another mode waits out the mode's own delay.")
         }
+        HistoryCard()
     }
 }
 
@@ -782,13 +793,20 @@ struct AppsSettings: View {
 }
 
 struct LookSettings: View {
+    @Environment(PetalApp.self) private var app
+
     var body: some View {
         Card(title: "Icons") {
             SettingSlider(key: "iconSize", title: "Size", range: 24...72)
             SettingSlider(key: "idleOpacity", title: "Apps not running", range: 0.2...1, step: 0.05,
                           format: { "\(Int($0 * 100))%" })
-            SettingToggle(key: "hoverLift", title: "Lift on hover")
-            SettingSlider(key: "hoverLiftAmount", title: "Lift", range: 0...0.3, step: 0.01, format: { "\(Int($0 * 100))%" })
+            SettingToggle(key: "magnification", title: "Magnification", detail: "Icons grow under the pointer, and their neighbours make room.")
+            if app.config.bool("magnification") {
+                SettingSlider(key: "magnificationAmount", title: "Grow", range: 0.1...1, step: 0.05, format: { "\(Int($0 * 100))%" })
+            } else {
+                SettingToggle(key: "hoverLift", title: "Lift on hover")
+                SettingSlider(key: "hoverLiftAmount", title: "Lift", range: 0...0.3, step: 0.01, format: { "\(Int($0 * 100))%" })
+            }
             SettingToggle(key: "appGlow", title: "Glow", detail: "Running apps glow in their icon's color.")
             SettingToggle(key: "tooltips", title: "Names on hover")
             SettingToggle(key: "separators", title: "Dividers between sections")
@@ -892,8 +910,13 @@ struct AboutSettings: View {
         Card(title: "Updates") {
             SettingToggle(key: "autoUpdate", title: "Update automatically", detail: "New versions install themselves, then offer a restart.")
             HStack {
-                Button("Check now") { app.updater.check(manual: true) }.buttonStyle(.glass)
-                Text(app.updater.status).font(.system(size: 11)).foregroundStyle(.secondary)
+                if let ready = app.updater.ready {
+                    Button("Restart to update") { app.relaunch() }.buttonStyle(.glassProminent).tint(SettingsSection.dock.tint)
+                    Button("What’s new in \(ready)") { app.releaseNotes.show(ready) }.buttonStyle(.glass)
+                } else {
+                    Button("Check now") { app.updater.check(manual: true) }.buttonStyle(.glass)
+                    Text(app.updater.status).font(.system(size: 11)).foregroundStyle(.secondary)
+                }
             }
         }
     }

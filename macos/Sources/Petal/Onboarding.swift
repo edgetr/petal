@@ -28,6 +28,7 @@ struct WelcomeView: View {
     let done: () -> Void
     @State private var bringDock = true
     @State private var atLogin = true
+    @State private var day = ""
     @State private var tick = 0
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
@@ -61,6 +62,16 @@ struct WelcomeView: View {
                                 Text("Optional. Without it, Petal is still a whole dock.").font(.system(size: 12)).foregroundStyle(.secondary)
                             }
                             ProviderList()
+                            if let provider = app.chatProvider, case .ready = app.aiSetup.state(provider) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    TextField("What do you do on this Mac? Like “I code, write papers and talk to friends”", text: $day, axis: .vertical)
+                                        .lineLimit(1...3)
+                                        .textFieldStyle(.plain)
+                                        .padding(10)
+                                        .background(.black.opacity(0.12), in: .rect(cornerRadius: 10))
+                                    Text("Optional. \(provider.name) builds your modes from it.").font(.system(size: 11)).foregroundStyle(.secondary)
+                                }
+                            }
                         }
                         .padding(14).frame(width: 520).glassEffect(.regular, in: .rect(cornerRadius: 20))
                         step(symbol: "macwindow.on.rectangle", title: "Let Petal see your windows",
@@ -98,6 +109,10 @@ struct WelcomeView: View {
                         app.config.setDock("welcomed", true)
                         app.useDock("petal")
                         done()
+                        if !day.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            let text = day
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { app.describeDay(text) }
+                        }
                     }
                     .buttonStyle(.glassProminent)
                     .tint(accent)

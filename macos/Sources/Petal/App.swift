@@ -27,9 +27,17 @@ final class PetalApp {
     let search = AppSearch()
     let updater = Updater()
     let aiSetup = AISetup()
+    let insights = InsightsController()
+    @ObservationIgnored let activity = ActivityLog()
     @ObservationIgnored let tooltips = Tooltips()
     @ObservationIgnored let settings = SettingsWindow()
     @ObservationIgnored let welcome = Welcome()
+    @ObservationIgnored let recipes = RecipeWindow()
+    @ObservationIgnored let automation = ModeAutomation()
+    @ObservationIgnored let menuBar = MenuBar()
+    @ObservationIgnored let overview = Overview()
+    @ObservationIgnored let releaseNotes = ReleaseNotes()
+    let hotkeys = Hotkeys()
     @ObservationIgnored private(set) var docks: DockController!
     @ObservationIgnored private(set) var focus: FocusGuard!
     @ObservationIgnored let ipc = IPC()
@@ -72,12 +80,17 @@ final class PetalApp {
             guard let self else { return }
             docks.refresh()
             signals.watch(Stacks.resolve(config.strings("stackFolders")))
+            hotkeys.refresh()
+            menuBar.refresh()
         }
         registerIPC()
         ipc.start()
         usage.start { [weak self] in self?.config.bool("claudeUsage") ?? false }
         signals.start(watchFolders: Stacks.resolve(config.strings("stackFolders")))
         updater.start()
+        activity.start()
+        automation.start()
+        menuBar.start()
         aiSetup.refreshAll()
         Skill.install()
         if !config.welcomed {
@@ -109,8 +122,10 @@ final class PetalApp {
                 alert.runModal()
             }
             docks.show(true)
+            hotkeys.refresh()
         } else {
             docks.show(false)
+            hotkeys.refresh()
             popups.closeAll()
             popups.dismissCard()
             SystemDock.restore()
@@ -158,10 +173,22 @@ final class PetalApp {
         countdown?.invalidate()
     }
 
+    /// Puts a Desktop in a mode at once, with no countdown (the schedule).
+    func setModeNow(_ id: String, desktop: Int) { apply(id, desktop: desktop) }
+
     private func apply(_ id: String, desktop: Int) {
         stay()
         config.setMode(id, forDesktop: desktop)
         if let card = popups.card, card.target?.id == id { popups.dismissCard() }
+    }
+
+    // MARK: Describe your day
+
+    /// The person says what they do; the chat builds their modes from it with Petal's tools.
+    func describeDay(_ text: String) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        guard !text.isEmpty, chatProvider != nil else { return }
+        claude.open(asking: "Here's what I do on this computer: \(text). Build my focus modes from the apps I have installed (petal_list_apps): a few clear modes with fitting icons, colors and abouts, replacing the starter modes I haven't changed. Then tell me in two lines what you made.")
     }
 
     // MARK: Launching
@@ -278,13 +305,21 @@ final class PetalApp {
             return "ok"
         }
         ipc.on("testCard") { [unowned self] args in
-            if args.first == "update" {
-                popups.show(FocusCard(kind: .update, version: version))
-            } else {
+            switch args.first {
+            case "suggest": insights.showSuggestion(marking: false)
+            case "summary": insights.showSummary()
+            default:
                 popups.show(FocusCard(kind: .guardCard, bundleID: "net.imput.helium", title: "x.com",
                                       target: config.mode(id: "social"), here: docks.focusedDock?.mode,
                                       reason: "Social feed, not work", desktop: docks.focusedDock?.desktop))
             }
+            return "ok"
+        }
+        ipc.on("overview") { [unowned self] _ in overview.show(); return "ok" }
+        ipc.on("summary") { [unowned self] _ in insights.showSummary(); return "ok" }
+        ipc.on("recipe") { [unowned self] args in
+            guard let path = args.first, FileManager.default.fileExists(atPath: path) else { return "no such file" }
+            recipes.show(URL(fileURLWithPath: path))
             return "ok"
         }
         ipc.on("testBounce") { [unowned self] args in
@@ -294,7 +329,7 @@ final class PetalApp {
         }
         ipc.on("emptyTrash") { _ in Stacks.emptyTrash(); return "ok" }
         ipc.on("close") { [unowned self] _ in
-            claude.close(); search.close(); popups.closeAll(); popups.dismissCard()
+            claude.close(); search.close(); popups.closeAll(); popups.dismissCard(); overview.close()
             return "ok"
         }
         ipc.on("dock") { [unowned self] args in
@@ -317,10 +352,13 @@ final class PetalApp {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var signals: [DispatchSourceSignal] = []
+    private var opened: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let app = PetalApp()
         app.start()
+        for url in opened { app.recipes.show(url) }
+        opened = []
         // Being killed (logout, `killall Petal`) gives macOS its Dock back too, not only quitting.
         for number in [SIGTERM, SIGINT, SIGHUP] {
             signal(number, SIG_IGN)
@@ -328,6 +366,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             source.setEventHandler { NSApp.terminate(nil) }
             source.resume()
             signals.append(source)
+        }
+    }
+
+    /// Double-clicking a .petal file someone shared: what it adds, first.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls where url.pathExtension.lowercased() == "petal" {
+            if PetalApp.started { PetalApp.shared.recipes.show(url) } else { opened.append(url) }
         }
     }
 

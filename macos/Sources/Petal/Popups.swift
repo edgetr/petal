@@ -365,9 +365,10 @@ struct StackRow: View {
 
 // MARK: - Cards
 
-/// A focus card or an update card (Omarchy's card kinds guard and update; holding isn't on the Mac).
+/// A card over the dock: a focus card (Omarchy's guard card), a suggested mode, a mode just made from one, or the
+/// weekly summary. Updates are in the menu bar, not here.
 struct FocusCard: Identifiable, Equatable {
-    enum Kind { case guardCard, update }
+    enum Kind { case guardCard, suggestion, made, summary }
     let id = UUID()
     let kind: Kind
     var bundleID = ""
@@ -375,11 +376,13 @@ struct FocusCard: Identifiable, Equatable {
     var target: Mode?
     var here: Mode?
     var reason = ""
-    var version = ""
     var desktop: Int?
     var snoozeKey = ""
+    var suggestion: Insights.Suggestion?
+    var summary: Insights.Summary?
+    var working = false
 
-    static func == (a: FocusCard, b: FocusCard) -> Bool { a.id == b.id }
+    static func == (a: FocusCard, b: FocusCard) -> Bool { a.id == b.id && a.working == b.working && a.kind == b.kind }
 }
 
 struct CardView: View {
@@ -387,36 +390,11 @@ struct CardView: View {
     let card: FocusCard
 
     var body: some View {
-        VStack(alignment: .trailing, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                Group {
-                    if card.kind == .update {
-                        Image(nsImage: NSApp.applicationIconImage).resizable()
-                    } else {
-                        Image(nsImage: Apps.icon(card.bundleID)).resizable()
-                    }
-                }
-                .frame(width: 30, height: 30)
-                VStack(alignment: .leading, spacing: 4) {
-                    line1
-                    line2.font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(3).fixedSize(horizontal: false, vertical: true)
-                    if !card.reason.isEmpty {
-                        Text("✦ " + card.reason).font(.system(size: 11)).foregroundStyle(Color(nsColor: card.target?.color ?? app.accent))
-                    }
-                }
-                Spacer(minLength: 0)
-                RoundButton(symbol: "xmark") { app.focus.close(card) }
-            }
-            HStack(spacing: 8) {
-                Button(card.kind == .update ? "Later" : "Go back") { app.focus.stay(card) }
-                    .buttonStyle(.glass)
-                if card.kind == .update {
-                    Button("Restart now") { app.focus.close(card); app.relaunch() }
-                        .buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
-                } else if let target = card.target {
-                    Button(switchLabel(target)) { app.focus.go(card) }
-                        .buttonStyle(.glassProminent).tint(Color(nsColor: target.color))
-                }
+        Group {
+            switch card.kind {
+            case .guardCard: guardCard
+            case .suggestion, .made: suggestionCard
+            case .summary: SummaryCard(card: card)
             }
         }
         .padding(16)
@@ -425,26 +403,137 @@ struct CardView: View {
         .padding(6)
     }
 
+    // MARK: Focus
+
+    private var guardCard: some View {
+        VStack(alignment: .trailing, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(nsImage: Apps.icon(card.bundleID)).resizable().frame(width: 30, height: 30)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("\(Text(card.title).bold()) belongs to \(card.target?.name ?? "another mode").").font(.system(size: 13))
+                    Text("This Desktop is in \(card.here?.name ?? "this") mode. Go back to what you were doing, or switch the Desktop to \(card.target?.name ?? "it").")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(3).fixedSize(horizontal: false, vertical: true)
+                    if !card.reason.isEmpty {
+                        Text("✦ " + card.reason).font(.system(size: 11)).foregroundStyle(Color(nsColor: card.target?.color ?? app.accent))
+                    }
+                }
+                Spacer(minLength: 0)
+                RoundButton(symbol: "xmark") { app.focus.close(card) }
+            }
+            HStack(spacing: 8) {
+                Button("Go back") { app.focus.stay(card) }.buttonStyle(.glass)
+                if let target = card.target {
+                    Button(switchLabel(target)) { app.focus.go(card) }
+                        .buttonStyle(.glassProminent).tint(Color(nsColor: target.color))
+                }
+            }
+        }
+    }
+
     private func switchLabel(_ target: Mode) -> String {
         let delay = Int(card.here?.focusDelay ?? 0)
         return "Switch to \(target.name)" + (app.config.bool("countdown") && delay > 0 ? " (\(delay)s)" : "")
     }
 
-    @ViewBuilder private var line1: some View {
-        switch card.kind {
-        case .update:
-            Text("Petal updated to \(card.version)").font(.system(size: 13, weight: .bold))
-        case .guardCard:
-            Text("\(Text(card.title).bold()) belongs to \(card.target?.name ?? "another mode").").font(.system(size: 13))
+    // MARK: Suggestions
+
+    private var suggestionCard: some View {
+        let suggestion = card.suggestion
+        let mode = card.kind == .made ? card.target : app.config.modes.first { $0.id == suggestion?.mode }
+        return VStack(alignment: .trailing, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                AppIcons(ids: suggestion?.apps ?? [], size: 30)
+                VStack(alignment: .leading, spacing: 4) {
+                    if card.kind == .made, let mode {
+                        Text("\(Text(mode.name).bold()) is ready.").font(.system(size: 13))
+                        Text("With \(Insights.list((suggestion?.apps ?? []).map(Apps.name))). Put a Desktop in it from the mode switcher.")
+                            .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    } else if let suggestion {
+                        Text(suggestion.text(modeName: mode?.name ?? suggestion.mode)).font(.system(size: 13))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(suggestion.kind == .mode ? "A mode of their own, with just these apps in its dock." : "\(suggestion.names.first ?? "It") joins \(mode?.name ?? "the mode")'s apps in the dock.")
+                            .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+                RoundButton(symbol: "xmark") { app.popups.dismissCard() }
+            }
+            HStack(spacing: 8) {
+                if card.kind == .made, let mode {
+                    Button("OK") { app.popups.dismissCard() }.buttonStyle(.glass)
+                    if let desktop = card.desktop {
+                        Button("Use it here") { app.popups.dismissCard(); app.requestMode(mode.id, desktop: desktop) }
+                            .buttonStyle(.glassProminent).tint(Color(nsColor: mode.color))
+                    }
+                } else if let suggestion {
+                    if card.working { ProgressView().controlSize(.small) }
+                    Button("Not now") { app.insights.decline(card) }.buttonStyle(.glass).disabled(card.working)
+                    Button(suggestion.kind == .mode ? "Make it" : "Keep it") { app.insights.accept(card) }
+                        .buttonStyle(.glassProminent).tint(Color(nsColor: mode?.color ?? app.accent)).disabled(card.working)
+                }
+            }
         }
     }
+}
 
-    @ViewBuilder private var line2: some View {
-        switch card.kind {
-        case .update:
-            Text("Restart Petal to finish (a second or two).")
-        case .guardCard:
-            Text("This Desktop is in \(card.here?.name ?? "this") mode. Go back to what you were doing, or switch the Desktop to \(card.target?.name ?? "it").")
+/// A few app icons, overlapping a little.
+struct AppIcons: View {
+    let ids: [String]
+    let size: CGFloat
+
+    var body: some View {
+        HStack(spacing: -size * 0.35) {
+            ForEach(ids.prefix(3), id: \.self) { id in
+                Image(nsImage: Apps.icon(id)).resizable().frame(width: size, height: size)
+            }
+        }
+    }
+}
+
+/// The weekly summary: time in each mode, its top apps, and how focus cards went. Plain and kind.
+struct SummaryCard: View {
+    @Environment(PetalApp.self) private var app
+    let card: FocusCard
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(card.summary?.title ?? "Your week").font(.system(size: 13, weight: .bold))
+                Spacer()
+                RoundButton(symbol: "xmark") { app.popups.dismissCard() }
+            }
+            if let summary = card.summary { SummaryRows(summary: summary) }
+            HStack {
+                Spacer()
+                Button("Thanks") { app.popups.dismissCard() }.buttonStyle(.glass)
+            }
+        }
+    }
+}
+
+struct SummaryRows: View {
+    @Environment(PetalApp.self) private var app
+    let summary: Insights.Summary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if summary.modes.isEmpty {
+                Text("Nothing yet: Petal notes which app is in front, a minute at a time, while you use your Mac.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(summary.modes.prefix(5), id: \.id) { mode in
+                let color = Color(nsColor: app.config.modes.first { $0.id == mode.id }?.color ?? app.accent)
+                HStack(spacing: 10) {
+                    ModeIcon(icon: app.config.modes.first { $0.id == mode.id }?.icon ?? "circle.fill", size: 12)
+                        .foregroundStyle(color).frame(width: 22)
+                    Text(Insights.Summary.line(mode)).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 6)
+                    AppIcons(ids: mode.apps.map(\.id), size: 20)
+                }
+            }
+            if let line = summary.cardsLine {
+                Text(line).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }
