@@ -82,6 +82,7 @@ Add no dependency beyond what a stock Omarchy install has without the owner. Pyt
 - `Agent.qml`: the Claude Code chat: stream-json, resume, and Allow, which re-runs with per-part `Bash(...)` rules. It passes `--mcp-config` for the Petal MCP server, allows `mcp__petal`, and appends `~/.config/petal/instructions.md` to the system prompt. Model, effort and access come from the settings `chatModel`, `chatEffort`, `claudeAccess`.
 - `AskBox.qml`: the Claude panel's UI. `AppSearch.qml`: the "+" search for apps and folders.
 - `Signals.qml`: `busctl monitor` for notifications and LauncherEntry progress and badges.
+- `brand/icon.py`: draws Petal's icon and writes every copy of it: the flat ones (`site/icon.svg`, the site's PNGs, `plugin/assets/petal.svg`) and the macOS app icon (`brand/Petal.icon` for Icon Composer and Xcode, compiled to `brand/macos/Assets.car` and `Petal.icns`, with `brand/previews/` of every appearance). Change the icon there, never by hand, and run it on the Mac: it needs Xcode.
 - **Usage:** `omarchy-agent-usage-claude --limits-only` every 5 minutes; `percent` is a 0–1 fraction.
 - **Holding:** held notifications are removed from Omarchy's screen with `omarchy-shell notifications dismiss <summary>`; they stay in its history.
 - **User data:** `~/.config/petal/` holds `modes.json`, `settings.json` and `instructions.md`. Petal reloads them live. `defaults/modes.json` seeds a new install.
