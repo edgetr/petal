@@ -6,8 +6,6 @@ Want it different? Just ask Claude.
 
 **[Download →](https://petal-dock.vercel.app)** · [Releases](https://github.com/edgetr/petal/releases)
 
-![Petal dock](docs/dock.png)
-
 ## What it does
 
 - **Focus modes.** Building, Writing, Social, or any modes you make. Each mode has its own apps,
@@ -36,11 +34,6 @@ Want it different? Just ask Claude.
 
 Right-click the dock for the few settings you'll touch often (position, auto-hide, focus cards,
 holding notifications). Everything else: ask Claude.
-
-<p>
-  <img src="docs/claude.png" width="49%" alt="Claude panel">
-  <img src="docs/settings.png" width="49%" alt="Settings">
-</p>
 
 ## Requirements
 
@@ -202,7 +195,7 @@ notifications local.
 
 ## Credits
 
-Built for Omarchy by [@edgetr](https://github.com/edgetr), with Claude. Inspired by an AI-native
+Made by [Edgetr](https://edgetr.tech) in Istanbul, with Claude. Inspired by an AI-native
 focus dock idea from Thariq. The Claude logo is a trademark of Anthropic; Petal is not
 affiliated with Anthropic or Omarchy.
 

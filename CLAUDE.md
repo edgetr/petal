@@ -29,7 +29,7 @@ Desktop ids: file names in /usr/share/applications or ~/.local/share/application
 - `Agent.qml` passes `--mcp-config` for `plugin/mcp/petal-mcp.py` (stdlib-only MCP server) and allows `mcp__petal`; `~/.config/petal/instructions.md` is appended to the system prompt.
 - Settings: the JsonAdapter in `Dock.qml` and `SETTINGS_SCHEMA` in `petal-mcp.py` must list the same keys. New feature or look → add both, so Claude can change it.
 - Releases: bump `plugin/manifest.json` version, tag `vX.Y.Z`, push the tag; `.github/workflows/release.yml` builds the tarball + `latest.json`. `get.sh` installs/updates from it (`petal update`); source checkouts report `dev` and aren't touched.
-- Website: `site/` (static, Vercel project `petal-dock`, root dir `site`); `/install.sh` redirects to `get.sh` on main.
+- Website: `site/` (static, Vercel project `petal-dock`, root dir `site`, auto-deploys from main); follows Edgetr's design language (edgetr/edgetr AGENTS.md): Geist, solid fills, one static sample, no real screenshots. `/install.sh` redirects to `get.sh` on main.
 
 ## Gotchas
 - User plugins get no shellConfig/appLibrary; read shell.json via FileView, launch with `uwsm-app -- <id>.desktop`.

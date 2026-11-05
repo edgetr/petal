@@ -3,217 +3,209 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Petal — the dock that knows what you're doing</title>
-  <meta name="description" content="Petal is an AI-native dock with focus modes per workspace and Claude built in. Customize anything by asking.">
-  <link rel="icon" href="/petal.svg" type="image/svg+xml">
-  <meta property="og:title" content="Petal">
-  <meta property="og:description" content="An AI-native dock with focus modes and Claude built in.">
-  <meta property="og:image" content="/claude.png">
-  <style>
-    :root {
-      --bg: #170b14;
-      --bg2: #22101d;
-      --ink: #ffe9f4;
-      --soft: rgba(255, 233, 244, 0.62);
-      --faint: rgba(255, 233, 244, 0.38);
-      --line: rgba(255, 255, 255, 0.09);
-      --card: rgba(255, 255, 255, 0.04);
-      --pink: #ff5fae;
-      --pink2: #ffa3d7;
-      --radius: 22px;
-      color-scheme: dark;
-    }
-    * { box-sizing: border-box; }
-    html, body { margin: 0; }
-    body {
-      background:
-        radial-gradient(1200px 600px at 50% -10%, rgba(255, 95, 174, 0.22), transparent 70%),
-        radial-gradient(800px 500px at 90% 30%, rgba(177, 140, 255, 0.10), transparent 70%),
-        var(--bg);
-      color: var(--ink);
-      font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Inter", "Adwaita Sans", "Segoe UI", Roboto, sans-serif;
-      -webkit-font-smoothing: antialiased;
-    }
-    a { color: inherit; }
-    .wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
-
-    nav { display: flex; align-items: center; justify-content: space-between; padding: 22px 0; }
-    .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; font-size: 18px; text-decoration: none; }
-    .brand img { width: 26px; height: 26px; }
-    nav .links { display: flex; gap: 22px; font-size: 14px; }
-    nav .links a { color: var(--soft); text-decoration: none; }
-    nav .links a:hover { color: var(--ink); }
-
-    .hero { text-align: center; padding: 72px 0 40px; }
-    .hero h1 {
-      font-size: clamp(38px, 6vw, 64px); line-height: 1.05; letter-spacing: -0.03em; margin: 0 0 18px; font-weight: 700;
-      background: linear-gradient(180deg, #fff, #ffc4e2); -webkit-background-clip: text; background-clip: text; color: transparent;
-    }
-    .hero p { color: var(--soft); font-size: 19px; max-width: 620px; margin: 0 auto 34px; }
-
-    .download { display: flex; flex-direction: column; align-items: center; gap: 14px; }
-    .buttons { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
-    .btn {
-      display: inline-flex; align-items: center; gap: 10px; padding: 13px 22px; border-radius: 999px;
-      font-weight: 600; font-size: 15px; text-decoration: none; border: 1px solid var(--line);
-      background: var(--card); color: var(--ink); transition: transform .12s ease, background .15s ease;
-    }
-    .btn:hover { transform: translateY(-1px); background: rgba(255, 255, 255, 0.08); }
-    .btn.primary { background: var(--pink); border-color: transparent; color: #fff; box-shadow: 0 8px 30px rgba(255, 95, 174, 0.35); }
-    .btn.primary:hover { background: #ff73b9; }
-    .btn.off { opacity: 0.38; pointer-events: none; }
-    .btn svg { width: 18px; height: 18px; fill: currentColor; }
-    .btn small { font-weight: 500; opacity: 0.75; }
-    .note { color: var(--faint); font-size: 13px; }
-
-    .cmd {
-      display: flex; align-items: center; gap: 12px; max-width: 560px; width: 100%;
-      background: rgba(0, 0, 0, 0.35); border: 1px solid var(--line); border-radius: 14px; padding: 10px 10px 10px 16px;
-      font: 13.5px/1.4 "JetBrains Mono", ui-monospace, Menlo, monospace; color: var(--ink);
-    }
-    .cmd code { flex: 1; overflow-x: auto; white-space: nowrap; }
-    .cmd button {
-      border: 0; border-radius: 9px; padding: 7px 12px; background: rgba(255, 255, 255, 0.08); color: var(--ink);
-      font: 600 12px/1 inherit; font-family: inherit; cursor: pointer;
-    }
-    .cmd button:hover { background: rgba(255, 255, 255, 0.14); }
-
-    .shot { margin: 56px auto 0; max-width: 900px; }
-    .shot img { width: 100%; border-radius: 18px; display: block; border: 1px solid var(--line); box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5); }
-
-    section { padding: 80px 0 0; }
-    section h2 { font-size: 30px; letter-spacing: -0.02em; margin: 0 0 8px; }
-    section > .wrap > p.lead { color: var(--soft); margin: 0 0 32px; max-width: 640px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
-    .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 22px; }
-    .card h3 { margin: 0 0 6px; font-size: 16px; }
-    .card p { margin: 0; color: var(--soft); font-size: 14.5px; }
-    .card .ico { font-size: 22px; margin-bottom: 10px; display: block; }
-
-    .split { display: grid; grid-template-columns: 1.05fr 1fr; gap: 36px; align-items: center; }
-    .split img { width: 100%; border-radius: 18px; border: 1px solid var(--line); }
-    .prompts { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; }
-    .prompts span { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; font-size: 14.5px; }
-
-    footer { padding: 90px 0 50px; color: var(--faint); font-size: 13px; text-align: center; }
-    footer a { color: var(--soft); }
-
-    @media (max-width: 760px) {
-      .split { grid-template-columns: 1fr; }
-      nav .links { gap: 14px; }
-      .hero { padding-top: 40px; }
-    }
-  </style>
+  <title>Petal — a dock that keeps you on task</title>
+  <meta name="description" content="Petal is a dock for Omarchy with a focus mode for every workspace and Claude built in. Change anything about it by asking.">
+  <meta property="og:title" content="Petal — a dock that keeps you on task">
+  <meta property="og:description" content="A focus mode for every workspace, with Claude built in. For Omarchy on Linux.">
+  <meta property="og:url" content="https://petal-dock.vercel.app">
+  <meta property="og:type" content="website">
+  <link rel="canonical" href="https://petal-dock.vercel.app">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="preload" href="/fonts/Geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/home.css">
+  <link rel="stylesheet" href="/petal.css">
+  <script src="/theme.js"></script>
+  <script src="/home.js" defer></script>
 </head>
-<body>
-  <div class="wrap">
-    <nav>
-      <a class="brand" href="/"><img src="/petal.svg" alt="">Petal</a>
-      <div class="links">
-        <a href="#features">Features</a>
-        <a href="#claude">Claude</a>
-        <a href="https://github.com/edgetr/petal">GitHub</a>
-      </div>
+<body class="home">
+  <header class="nav">
+    <a class="nav-brand" href="/"><img src="/icon.svg" alt="">Petal</a>
+    <nav class="nav-links" aria-label="Petal">
+      <a href="https://github.com/edgetr/petal">GitHub</a>
     </nav>
+    <div class="nav-actions">
+      <button type="button" class="nav-theme" id="theme" aria-label="Switch between light and dark">
+        <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>
+        <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.6A8.5 8.5 0 1 1 9.4 4a6.6 6.6 0 0 0 10.6 10.6z"/></svg>
+      </button>
+      <a class="nav-download" href="#download">Download</a>
+    </div>
+  </header>
 
-    <header class="hero">
-      <h1>The dock that knows<br>what you're doing.</h1>
-      <p>Petal gives every workspace a focus mode, holds back what can wait, and has Claude built in. Want it different? Just ask.</p>
-
-      <div class="download">
-        <div class="buttons" id="buttons">
-          <a class="btn primary" id="linux" href="https://github.com/edgetr/petal/releases/latest/download/Petal-linux.tar.gz">
-            <svg viewBox="0 0 24 24"><path d="M12 3v11.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4 3.6 3.6V3h2zM5 19h14v2H5z"/></svg>
-            Download for Linux <small id="ver"></small>
-          </a>
-          <a class="btn off" id="mac" href="#" aria-disabled="true">macOS <small>soon</small></a>
-          <a class="btn off" id="win" href="#" aria-disabled="true">Windows <small>soon</small></a>
+  <main id="top">
+    <section class="m-hero">
+      <div class="m-wrap">
+        <h1 class="m-display">A dock that keeps you on task</h1>
+        <p class="m-lede">A focus mode for every workspace, with Claude built in. Change anything about it by asking.</p>
+        <div class="m-cta">
+          <a class="m-button" href="/download/linux"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4 3.6 3.6V3h2zM5 19h14v2H5z"/></svg><span>Download for Linux</span></a>
+          <span class="m-button soon"><span>macOS</span><small>soon</small></span>
+          <span class="m-button soon"><span>Windows</span><small>soon</small></span>
+          <p class="m-note away" data-for="mac">Petal for Mac is on its way. Today it runs on Omarchy (Linux).</p>
+          <p class="m-note away" data-for="windows">Petal for Windows is on its way. Today it runs on Omarchy (Linux).</p>
+          <div class="cmd"><code>curl -fsSL https://petal-dock.vercel.app/install.sh | bash</code><button type="button" data-copy>Copy</button></div>
+          <p class="m-note">Free and open source, for Omarchy.</p>
         </div>
-        <div class="cmd" id="cmd">
-          <code>curl -fsSL https://petal-dock.vercel.app/install.sh | bash</code>
-          <button type="button" id="copy">Copy</button>
-        </div>
-        <div class="note" id="note">For Omarchy on Linux. Installs in seconds, updates itself.</div>
       </div>
+    </section>
 
-      <div class="shot"><img src="/dock.png" alt="The Petal dock with focus modes, the Claude button and apps"></div>
-    </header>
+    <section class="m-band reveal" id="dock" aria-label="The dock">
+      <div class="stage" aria-hidden="true">
+        <div class="fcard on" id="fcard">
+          <div><b>x.com</b> <span class="dim">· is for Social</span></div>
+          <div>You're in Building mode.</div>
+          <div class="acts"><span class="m-chip light">Stay in Building</span><span class="m-chip primary" id="go">Switch to Social</span></div>
+        </div>
+        <div class="dock" id="dockspec">
+          <div class="switch">
+            <span class="hl" id="hl"></span>
+            <b data-mode="0" style="--c:#b18cff" class="on"><svg viewBox="0 0 24 24"><path d="M14 4l6 6-3 3-6-6zM11 7L4 20"/></svg></b>
+            <b data-mode="1" style="--c:#ff9f7a"><svg viewBox="0 0 24 24"><path d="M4 20l1-4L16 5l3 3L8 19zM14 7l3 3"/></svg></b>
+            <b data-mode="2" style="--c:#ff5fae"><svg viewBox="0 0 24 24"><path d="M4 5h16v10H9l-5 4z"/></svg></b>
+          </div>
+          <span class="claude"><svg class="ring2" viewBox="0 0 40 40"><circle cx="20" cy="20" r="18"/></svg><img src="/claude.svg" alt=""></span>
+          <span class="sep"></span>
+          <div class="apps" id="apps"></div>
+          <span class="tile plus"><svg viewBox="0 0 24 24"><path d="M12 6v12M6 12h12"/></svg></span>
+          <span class="sep"></span>
+          <span class="tile folder"><svg viewBox="0 0 24 24"><path d="M12 7v8M8.5 11.5L12 15l3.5-3.5"/></svg></span>
+          <span class="tile trash"><svg viewBox="0 0 24 24"><path d="M6 7h12M9 7V5h6v2M8 7l1 12h6l1-12"/></svg></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="m-section reveal" id="modes" aria-labelledby="modes-title">
+      <div class="m-wrap">
+        <h2 class="m-heading" id="modes-title">A mode for every workspace</h2>
+        <p>Each workspace remembers its mode, and each mode has its own apps. Swipe between workspaces and the dock changes with you.</p>
+        <dl class="modes">
+          <dt><i style="--c:#b18cff"></i>Building</dt><dd>Terminal, editor, docs. Notifications from everything else wait.</dd>
+          <dt><i style="--c:#ff9f7a"></i>Writing</dt><dd>Notes and documents, nothing pinging.</dd>
+          <dt><i style="--c:#ff5fae"></i>Social</dt><dd>Chats, feeds and videos, everything comes through.</dd>
+          <dt><i style="--c:#7fd6c2"></i>Yours</dt><dd>“Add a Gaming mode with Steam and Discord.” Claude makes it.</dd>
+        </dl>
+      </div>
+    </section>
+
+    <section class="m-section reveal" id="claude" aria-labelledby="claude-title">
+      <div class="m-wrap">
+        <h2 class="m-heading" id="claude-title">Change anything by asking</h2>
+        <p>Claude lives in the dock and knows how Petal works: its look, its features, its modes. Say what you want and it's done. It can help with the rest of your computer too, and asks before anything risky.</p>
+        <dl class="modes">
+          <dt>Look</dt><dd>“Make the dock background black.” “Bigger icons.”</dd>
+          <dt>Behaviour</dt><dd>“Stop the icons from bouncing.” “Move the dock to the left.”</dd>
+          <dt>Modes</dt><dd>“Add a Gaming mode with Steam and Discord.”</dd>
+          <dt>Usage</dt><dd>A ring around the Claude button fills as you use your Claude plan. Hover it to see what's left.</dd>
+        </dl>
+      </div>
+    </section>
+
+    <section class="m-section reveal" id="held" aria-labelledby="held-title">
+      <div class="m-wrap">
+        <h2 class="m-heading" id="held-title">Held, not lost</h2>
+        <p>In a focus mode, notifications from apps outside it wait quietly on their own mode, with a count. Your mode's apps come through as usual, and Claude lets the ones that can't wait find you.</p>
+      </div>
+    </section>
+
+    <section class="m-section reveal" id="more" aria-labelledby="more-title">
+      <div class="m-wrap">
+        <h2 class="m-heading" id="more-title">And the rest of it</h2>
+        <ul class="features">
+          <li><h3>Badges and bounces</h3><p>Unread counts on icons, and one bounce when an app needs you.</p></li>
+          <li><h3>Progress rings</h3><p>Downloads and copies show their progress around the icon.</p></li>
+          <li><h3>Live previews</h3><p>Hover an app to see its windows. Click one to bring it forward.</p></li>
+          <li><h3>Minimize into the dock</h3><p>Minimized windows wait as thumbnails until you want them.</p></li>
+          <li><h3>Drop to open</h3><p>Drop files on an app to open them there, or on the trash.</p></li>
+          <li><h3>Now playing</h3><p>Album art with play and pause, right in the dock.</p></li>
+          <li><h3>Folder stacks</h3><p>Downloads and screenshots, newest first, a click away.</p></li>
+          <li><h3>Every screen</h3><p>One dock per monitor, each with its own workspace's mode.</p></li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="m-section m-get reveal" id="download" aria-labelledby="download-title">
+      <div class="m-wrap">
+        <img src="/icon-176.webp" width="88" height="88" alt="">
+        <h2 class="m-heading" id="download-title">Free for Omarchy</h2>
+        <p>Linux with Omarchy 4.5 or later. It keeps itself up to date. macOS and Windows are on the way.</p>
+        <div class="m-cta">
+          <a class="m-button" href="/download/linux"><svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11.2l3.6-3.6 1.4 1.4-6 6-6-6 1.4-1.4 3.6 3.6V3h2zM5 19h14v2H5z"/></svg><span>Download for Linux</span></a>
+          <span class="m-button soon"><span>macOS</span><small>soon</small></span>
+          <span class="m-button soon"><span>Windows</span><small>soon</small></span>
+          <div class="cmd"><code>curl -fsSL https://petal-dock.vercel.app/install.sh | bash</code><button type="button" data-copy>Copy</button></div>
+          <p class="m-note">Or build it from <a href="https://github.com/edgetr/petal">source</a>.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="m-section m-faq reveal" id="faq" aria-labelledby="faq-title">
+      <div class="m-wrap">
+        <h2 class="m-heading" id="faq-title">Good to know</h2>
+        <div class="m-questions">
+          <details>
+            <summary><span>Is Petal free?</span><svg class="faq-mark" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
+            <p>Yes, and open source under the MIT license.</p>
+          </details>
+          <details>
+            <summary><span>Do I need Claude?</span><svg class="faq-mark" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
+            <p>No. Modes, badges, previews and everything else work without it. With Claude Code installed and signed in, Petal uses your own plan for the chat and for sorting new windows into modes.</p>
+          </details>
+          <details>
+            <summary><span>What leaves my computer?</span><svg class="faq-mark" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
+            <p>Petal has no servers, analytics or tracking. With Claude sorting on, the title of a window it doesn't know, and held notifications, go to Claude through your Claude Code. Turn it off and nothing does.</p>
+          </details>
+          <details>
+            <summary><span>How do updates work?</span><svg class="faq-mark" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
+            <p>Petal checks for a new version now and then, installs it, and asks before restarting the shell to load it.</p>
+          </details>
+          <details>
+            <summary><span>What do I need?</span><svg class="faq-mark" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
+            <p>Omarchy 4.5 or later. Petal is a plugin for its shell, so there is nothing else to install.</p>
+          </details>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <nav class="section-rail" aria-label="On this page">
+    <a href="#top" aria-current="true"><span>Top</span></a>
+    <a href="#dock"><span>The dock</span></a>
+    <a href="#modes"><span>Modes</span></a>
+    <a href="#claude"><span>Claude</span></a>
+    <a href="#held"><span>Notifications</span></a>
+    <a href="#more"><span>The rest</span></a>
+    <a href="#download"><span>Download</span></a>
+    <a href="#faq"><span>Good to know</span></a>
+  </nav>
+
+  <div class="wrap">
+    <footer class="site">
+      <div class="foot-grid">
+        <div class="foot-brand">
+          <a class="brand" href="/"><img src="/icon.svg" alt="">Petal</a>
+          <p>A dock that keeps you on task. Made by <a href="https://edgetr.tech">Edgetr</a> in Istanbul.</p>
+        </div>
+        <div>
+          <h4>Petal</h4>
+          <a href="#download">Download</a>
+          <a href="https://github.com/edgetr/petal">GitHub</a>
+          <a href="https://github.com/edgetr/petal/releases">Releases</a>
+        </div>
+        <div>
+          <h4>Edgetr</h4>
+          <a href="https://edgetr.tech">edgetr.tech</a>
+          <a href="https://volplane.me">Volplane</a>
+          <a href="https://sayzen-app.vercel.app">Sayzen</a>
+          <a href="https://fitlink.page">FitLink</a>
+        </div>
+        <div>
+          <h4>Contact</h4>
+          <a href="mailto:founder@edgetr.tech">founder@edgetr.tech</a>
+        </div>
+      </div>
+      <p class="foot-line">© 2026 Edgetr · Made in Istanbul</p>
+    </footer>
   </div>
-
-  <section id="features">
-    <div class="wrap">
-      <h2>A dock with a sense of focus</h2>
-      <p class="lead">Modes like Building, Writing and Social, each with their own apps and rules. Every workspace remembers its mode, so swiping between workspaces swaps the dock too.</p>
-      <div class="grid">
-        <div class="card"><span class="ico">🌸</span><h3>Focus modes</h3><p>Each mode has its own apps and color. Apps from other modes stay out of the way.</p></div>
-        <div class="card"><span class="ico">🔕</span><h3>Held notifications</h3><p>Messages from outside your mode wait quietly. The ones that can't wait still get through.</p></div>
-        <div class="card"><span class="ico">🧭</span><h3>Gentle nudges</h3><p>Drifting to a Social tab while Building? A small card asks if you meant to switch.</p></div>
-        <div class="card"><span class="ico">✨</span><h3>Everything a dock should do</h3><p>Badges, progress rings, previews, now playing, folder stacks, drop to open, minimize into the dock.</p></div>
-      </div>
-    </div>
-  </section>
-
-  <section id="claude">
-    <div class="wrap split">
-      <div>
-        <h2>Claude, right in your dock</h2>
-        <p class="lead" style="margin-bottom:0">A real Claude Code session a click away. It can change your dock, your setup or your files, and asks before anything risky. A ring around its button shows how much of your Claude limit you've used.</p>
-        <div class="prompts">
-          <span>“Make the dock background black.”</span>
-          <span>“Stop the icons from bouncing.”</span>
-          <span>“Add a Gaming mode with Steam and Discord.”</span>
-          <span>“Why is my laptop slow right now?”</span>
-        </div>
-        <p class="note" style="margin-top:14px">Uses your own Claude Code login. Optional: everything else works without it.</p>
-      </div>
-      <img src="/claude.png" alt="The Claude panel in Petal">
-    </div>
-  </section>
-
-  <section>
-    <div class="wrap">
-      <h2>Build from source</h2>
-      <p class="lead">Petal is open source (MIT).</p>
-      <div class="cmd" style="max-width:100%">
-        <code>git clone https://github.com/edgetr/petal && cd petal && ./install.sh && omarchy restart shell</code>
-      </div>
-    </div>
-  </section>
-
-  <footer>
-    <div class="wrap">
-      Made by <a href="https://github.com/edgetr">@edgetr</a> · <a href="https://github.com/edgetr/petal">GitHub</a> · <a href="https://github.com/edgetr/petal/releases">Releases</a><br>
-      Not affiliated with Anthropic or Omarchy. Claude is a trademark of Anthropic.
-    </div>
-  </footer>
-
-  <script>
-    // Lead with the visitor's own OS; Linux is the only one available today.
-    (function () {
-      var ua = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent || "";
-      var os = /mac/i.test(ua) ? "mac" : /win/i.test(ua) ? "win" : "linux";
-      var note = document.getElementById("note");
-      var buttons = document.getElementById("buttons");
-      if (os === "mac" || os === "win") {
-        var mine = document.getElementById(os);
-        buttons.insertBefore(mine, buttons.firstChild);
-        note.textContent = (os === "mac" ? "Petal for macOS" : "Petal for Windows") + " is on its way. For now, Petal runs on Omarchy (Linux).";
-      }
-
-      fetch("https://api.github.com/repos/edgetr/petal/releases/latest")
-        .then(function (r) { return r.ok ? r.json() : null })
-        .then(function (r) { if (r && r.tag_name) document.getElementById("ver").textContent = r.tag_name })
-        .catch(function () {});
-
-      var copy = document.getElementById("copy");
-      copy.addEventListener("click", function () {
-        var text = document.querySelector("#cmd code").textContent;
-        (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(function () {
-          copy.textContent = "Copied";
-          setTimeout(function () { copy.textContent = "Copy" }, 1400);
-        }).catch(function () {});
-      });
-    })();
-  </script>
 </body>
 </html>
