@@ -18,7 +18,6 @@ PanelWindow {
   property bool optionsOpen: false
   // "Describe your day": what you write becomes your modes.
   property bool describing: false
-  property real emptyFull: 0
   readonly property var settings: dock ? dock.settings : null
   readonly property var chat: dock ? dock.chat : null
   readonly property string uiFont: dock ? dock.uiFont : "Adwaita Sans"
@@ -162,9 +161,8 @@ PanelWindow {
 
     readonly property int pad: Math.round(18 * Style.fontScale)
     width: Math.round(560 * Style.fontScale)
-    // The bottom (and the text box) never moves. The suggestions, describing your day and the options share one
-    // height, the larger of what they need, so switching between them moves nothing; a conversation grows the
-    // panel upward only once it needs more room, up to half the screen, then scrolls.
+    // The bottom (and the text box) never moves. The panel is as tall as what it shows (the suggestions, the
+    // options, or the conversation, up to half the screen, then it scrolls) and grows or shrinks upward.
     height: column.implicitHeight + pad * 2
     x: Math.round((box.width - width) / 2)
     y: box.height - height - Math.round(104 * Style.fontScale)
@@ -182,13 +180,13 @@ PanelWindow {
     Rectangle {
         id: optionsSheet
         z: 10
-        // Laid out even when closed (just clear, and not taking clicks), so its height can set the panel's.
+        // Laid out even when closed (just clear, and not taking clicks), so its height is known before it opens.
         enabled: box.optionsOpen
         opacity: box.optionsOpen ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 140 } }
         transform: Translate { y: box.optionsOpen ? 0 : -6; Behavior on y { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } } }
         x: card.pad
-        y: card.pad + Math.round(36 * Style.fontScale)
+        y: column.y + bodyArea.y
         width: card.width - card.pad * 2
         height: sheet.implicitHeight + Math.round(24 * Style.fontScale)
         radius: Math.round(14 * Style.fontScale)
@@ -345,16 +343,14 @@ PanelWindow {
       Item {
         id: bodyArea
         width: parent.width
-        readonly property real minimum: Math.max(optionsSheet.height, box.emptyFull)
-        height: Math.min(Math.round(box.height * 0.5),
-                         Math.max(minimum, box.chat && box.chat.messages.count > 0 ? log.contentHeight : emptyState.implicitHeight))
+        // While the options are open they take the body's place exactly, with the same space above and below.
+        height: box.optionsOpen ? optionsSheet.height
+              : Math.min(Math.round(box.height * 0.5), box.chat && box.chat.messages.count > 0 ? log.contentHeight : emptyState.implicitHeight)
+        clip: true
 
       // ── Empty state ──
       Column {
         id: emptyState
-        // Its height with the suggestions (not while describing your day, which is shorter) sets the minimum.
-        onImplicitHeightChanged: if (!box.describing && implicitHeight > 0) box.emptyFull = implicitHeight
-        Component.onCompleted: box.emptyFull = implicitHeight
         visible: !box.chat || box.chat.messages.count === 0
         width: parent.width
         // The options open over the chat; what's under them fades out instead of peeking from below.
@@ -465,6 +461,8 @@ PanelWindow {
         model: box.chat ? box.chat.messages : null
         boundsBehavior: Flickable.StopAtBounds
         onCountChanged: Qt.callLater(function() { log.positionViewAtEnd() })
+        // Closing the options gives the conversation its room back, still showing the latest.
+        onHeightChanged: if (!box.optionsOpen) Qt.callLater(function() { log.positionViewAtEnd() })
         onContentHeightChanged: if (atYEnd || box.chat.running) Qt.callLater(function() { log.positionViewAtEnd() })
 
         footer: Item {

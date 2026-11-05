@@ -332,18 +332,19 @@ struct ClaudePanelView: View {
 
     var body: some View {
         @Bindable var panel = panel
-        // The bottom (and the text box) never moves. The suggestions and the options share one minimum height, so
-        // switching between them moves nothing; a conversation grows the panel upward only once it needs more room,
-        // up to half the screen, then scrolls. The options open over what's below the header.
+        // The bottom (and the text box) never moves. The panel is as tall as what it shows (the suggestions, the
+        // options, or the conversation, up to half the screen, then it scrolls) and grows or shrinks upward. The
+        // options take the body's place; what's under them keeps its state but no room.
         VStack(alignment: .leading, spacing: 14) {
             header
             ZStack(alignment: .top) {
                 Group { if agent.messages.isEmpty { empty } else { conversation } }
                     .frame(maxWidth: .infinity, alignment: .top)
+                    .frame(height: panel.optionsOpen ? 0 : nil, alignment: .top)
+                    .clipped()
                     .opacity(panel.optionsOpen ? 0 : 1)
                 if panel.optionsOpen { options.transition(.opacity.combined(with: .offset(y: -6))) }
             }
-            .frame(minHeight: 180, alignment: .top)
             input
         }
         .padding(18)
