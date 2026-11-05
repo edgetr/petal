@@ -16,6 +16,8 @@ PanelWindow {
   property bool open: false
   property string prefill: ""
   property bool optionsOpen: false
+  // "Describe your day": what you write becomes your modes.
+  property bool describing: false
   readonly property var settings: dock ? dock.settings : null
   readonly property var chat: dock ? dock.chat : null
   readonly property string uiFont: dock ? dock.uiFont : "Adwaita Sans"
@@ -34,6 +36,7 @@ PanelWindow {
   onOpenChanged: {
     if (!open) {
       optionsOpen = false
+      describing = false
       return
     }
     input.text = box.prefill
@@ -74,9 +77,28 @@ PanelWindow {
 
   function send() {
     if (!box.chat || box.chat.running) return
-    var t = input.text
+    var t = input.text.trim()
+    if (!t) return
     input.text = ""
+    if (box.describing) {
+      box.describing = false
+      box.chat.send(box.describePrompt(t), t)
+      return
+    }
     box.chat.send(t)
+  }
+
+  // The message both platforms send (the chat's tools do the rest).
+  function describePrompt(text) {
+    return "Here's what I do on this computer: " + text.replace(/[.\s]+$/, "") + ". Build my focus modes from the apps I have "
+      + "installed (petal_list_apps): a few clear modes with fitting icons, colors and abouts, replacing the starter modes I "
+      + "haven't changed. Then tell me in two lines what you made."
+  }
+
+  function startDescribing() {
+    box.describing = true
+    input.text = ""
+    input.forceActiveFocus()
   }
 
   MouseArea {
@@ -264,14 +286,51 @@ PanelWindow {
           bottomPadding: Math.round(6 * Style.fontScale)
           wrapMode: Text.Wrap
           textFormat: Text.PlainText
-          text: "Ask anything. " + box.aiName + " can change your dock and modes, your Omarchy setup, or your files."
+          text: box.describing
+            ? "Say in a few words what you do on this computer, like “I code, write papers and talk to friends”. " + box.aiName + " builds your modes from it."
+            : "Ask anything. " + box.aiName + " can change your dock and modes, your Omarchy setup, or your files."
           color: box.soft
           font.family: box.uiFont
           font.pixelSize: Math.round(13 * Style.fontScale)
         }
 
+        // Describe your day: the first suggestion, a little apart from the rest.
+        Rectangle {
+          visible: !box.describing
+          width: parent.width
+          height: Math.round(34 * Style.fontScale)
+          radius: Math.round(10 * Style.fontScale)
+          color: describeMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.06) : "transparent"
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            x: Math.round(10 * Style.fontScale)
+            textFormat: Text.PlainText
+            text: "Describe your day, and get modes for it"
+            color: box.accent
+            font.family: box.uiFont
+            font.pixelSize: Math.round(13.5 * Style.fontScale)
+          }
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.right: parent.right
+            anchors.rightMargin: Math.round(10 * Style.fontScale)
+            text: "→"
+            color: box.soft
+            opacity: describeMouse.containsMouse ? 1 : 0
+            font.family: box.uiFont
+            font.pixelSize: Math.round(13 * Style.fontScale)
+          }
+          MouseArea {
+            id: describeMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: box.startDescribing()
+          }
+        }
+
         Repeater {
-          model: box.suggestions
+          model: box.describing ? [] : box.suggestions
           delegate: Rectangle {
             id: suggestion
             required property string modelData
@@ -452,7 +511,7 @@ PanelWindow {
           anchors.verticalCenter: parent.verticalCenter
           x: Math.round(18 * Style.fontScale)
           visible: input.text.length === 0
-          text: box.chat && box.chat.messages.count > 0 ? "Reply…" : "Ask " + box.aiName + "…"
+          text: box.describing ? "What do you do on this computer?" : box.chat && box.chat.messages.count > 0 ? "Reply…" : "Ask " + box.aiName + "…"
           color: box.soft
           font.family: box.uiFont
           font.pixelSize: Math.round(14 * Style.fontScale)
@@ -468,7 +527,11 @@ PanelWindow {
           font.family: box.uiFont
           font.pixelSize: Math.round(14 * Style.fontScale)
           clip: true
-          Keys.onEscapePressed: { if (box.optionsOpen) box.optionsOpen = false; else box.open = false }
+          Keys.onEscapePressed: {
+            if (box.optionsOpen) box.optionsOpen = false
+            else if (box.describing) box.describing = false
+            else box.open = false
+          }
           Keys.onReturnPressed: box.send()
           Keys.onEnterPressed: box.send()
         }

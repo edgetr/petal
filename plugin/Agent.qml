@@ -49,6 +49,9 @@ Item {
     + "then petal_set_settings (appearance: dockColor, dockOpacity, iconSize, accentColor, font, …; feature switches: "
     + "bounce, badges, previews, …), petal_set_dock (position, auto-hide), petal_save_mode / petal_delete_mode "
     + "(focus modes and their apps; get desktop ids from petal_list_apps). Changes apply instantly. "
+    + "Modes by time are the `schedule` setting; a mode's `hyprland` field gives its workspaces their own border color, "
+    + "gaps and wallpaper. petal_suggestions and petal_summary read Petal's private activity history; "
+    + "petal_export_recipe and petal_import_recipe share a dock as a .petal file (say what an import adds before you run it). "
     + "If a request can't be done with settings, you may edit Petal's QML source (path in petal_get_state) and then "
     + "call petal_reload; mention that a Petal update could replace source edits. "
     + "You can also help with anything else on the computer: Omarchy, Hyprland, apps, files. "
@@ -72,11 +75,13 @@ Item {
     if (proc.running) proc.signal(15)
   }
 
-  function send(text) {
+  // send(text[, shown]): `shown` is what the chat shows as yours, when the
+  // message itself is longer (Describe your day).
+  function send(text, shown) {
     var t = String(text || "").trim()
     if (!t || proc.running) return
     agent.pendingAsk = []
-    messages.append({ kind: "user", text: t, detail: "" })
+    messages.append({ kind: "user", text: String(shown || t).trim(), detail: "" })
     agent.run(t)
   }
 
@@ -167,6 +172,10 @@ Item {
     case "mcp__petal__petal_list_apps": return "Looking up apps"
     case "mcp__petal__petal_switch_mode": return "Switching to  " + String(input.id || "")
     case "mcp__petal__petal_reload": return "Reloading Petal"
+    case "mcp__petal__petal_export_recipe": return "Saving your dock to share"
+    case "mcp__petal__petal_import_recipe": return "Adding a shared dock"
+    case "mcp__petal__petal_suggestions": return "Looking at how you use your modes"
+    case "mcp__petal__petal_summary": return "Adding up last week"
     default: return tool
     }
   }
