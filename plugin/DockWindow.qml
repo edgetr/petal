@@ -1512,6 +1512,7 @@ PanelWindow {
               var esc = function(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;") }
               var dim = "<font color='" + Commons.Color.muted + "'>"
               if (c.kind === "update") return "<b>Petal updated to " + esc(c.version) + "</b>"
+              if (c.kind === "kept") return "<b>Petal " + esc(c.version) + " couldn't take your changes</b>"
               if (c.kind === "held") return "<b>" + esc(c.n.summary) + "</b>" + dim + " · " + esc(c.n.app) + (c.allowedHere ? "" : " · held for " + esc(guardCard.target ? guardCard.target.name : "later")) + "</font>"
               if (c.kind === "guard") return "<b>" + esc(c.title) + "</b> belongs to " + esc(guardCard.target ? guardCard.target.name : "another mode") + "."
               if (c.kind === "fit") return "<b>" + esc(c.title) + "</b>" + dim + " · fits " + esc(guardCard.target ? guardCard.target.name : "") + "</font>"
@@ -1535,6 +1536,7 @@ PanelWindow {
               if (c.kind === "held") return String(c.n.body || "")
               if (c.kind === "guard") return "This workspace is in " + (guardCard.here ? guardCard.here.name : "another") + " mode. Go back to what you were doing, or switch the workspace to " + (guardCard.target ? guardCard.target.name : "that mode") + "."
               if (c.kind === "update") return "Restart the shell to finish (a second or two)."
+              if (c.kind === "kept") return "You still have your own Petal, with your changes. " + String(c.message || "").split("\n")[0]
               return ""
             }
           }
@@ -1557,8 +1559,20 @@ PanelWindow {
         spacing: Style.spacing.sm
 
         CardButton {
-          text: !guardCard.c ? "" : guardCard.c.kind === "update" ? "Later" : guardCard.c.kind === "held" ? (guardCard.c.allowedHere ? "OK" : "Later") : "Go back"
+          text: !guardCard.c ? "" : (guardCard.c.kind === "update" || guardCard.c.kind === "kept") ? "Later" : guardCard.c.kind === "held" ? (guardCard.c.allowedHere ? "OK" : "Later") : "Go back"
           onClicked: window.dock.cardStay()
+        }
+        CardButton {
+          // Asks the person's AI to explain it and offer to report it (petal report shows the report first).
+          visible: !!guardCard.c && guardCard.c.kind === "kept" && !!window.dock.chatProvider
+          primary: true
+          text: "Ask " + window.dock.chatName
+          onClicked: {
+            var v = guardCard.c.version
+            window.dock.card = null
+            window.dock.openAsk("")
+            window.dock.chat.send("Petal " + v + " couldn't take my own changes to Petal's code. Run `petal personal status`, tell me in plain words what happened, and offer to report it with `petal report` (show me the report first).")
+          }
         }
         CardButton {
           visible: !!guardCard.c && guardCard.c.kind === "update"
