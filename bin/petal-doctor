@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""Petal's doctor and reporter on Omarchy (bin/petal runs them as `petal doctor` and `petal report`).
+
+  petal doctor [--fix] [--json]    check Petal; --fix repairs what's safe to repair (backing up what it replaces)
+  petal report "<what happened>" [--yes]
+                                   a GitHub issue on edgetr/petal: the doctor's findings, versions and recent log
+                                   lines, redacted. Shown first; filed with `gh` when it's signed in, else opened
+                                   as a filled-in issue page in the browser.
+
+Petal for macOS has the same two commands in Petal.app (`Petal doctor`, `Petal report`). Standard library only.
+"""
+import glob
+import importlib.util
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.parse
+
+HOME = os.path.expanduser("~")
+CONFIG = os.path.join(HOME, ".config", "petal")
+HERE = os.path.dirname(os.path.realpath(__file__))
+ROOT = os.path.dirname(HERE)
+PLUGIN = os.path.join(ROOT, "plugin")
+LINK = os.path.join(HOME, ".config/omarchy/plugins/egesuren.petal")
+REPO = "edgetr/petal"
+
+
+def run(*cmd, timeout=20, stdin=None):
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, input=stdin)
+        return out.returncode, (out.stdout or "") + (out.stderr or "")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return -1, str(e)
+
+
+def read(path):
+    """(data, problem): problem is None, "missing" or "invalid"."""
+    if not os.path.exists(path):
+        return None, "missing"
+    try:
+        with open(path) as f:
+            return json.load(f), None
+    except (OSError, ValueError):
+        return None, "invalid"
+
+
+def write(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def backup(path):
+    target = "%s.broken-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
+    shutil.copy2(path, target)
+    return target
+
+
+def schema():
+    spec = importlib.util.spec_from_file_location("petal_mcp", os.path.join(PLUGIN, "mcp", "petal-mcp.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.SETTINGS_SCHEMA
+
+
+def desktop_ids():
+    dirs = [os.path.join(HOME, ".local/share/applications")]
+    dirs += [os.path.join(d, "applications") for d in os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")]
+    return {os.path.basename(p)[:-8] for d in dirs for p in glob.glob(os.path.join(d, "*.desktop"))}
+
+
+class Doctor:
+    def __init__(self, fix):
+        self.fix = fix
+        self.findings = []
+
+    def note(self, level, area, text, fixed=None):
+        """level: ok, warn or error. fixed: what --fix did about it."""
+        self.findings.append({"level": level, "area": area, "text": text, **({"fixed": fixed} if fixed else {})})
+
+    def check(self):
+        self.install()
+        self.files()
+        self.ai()
+        self.tools()
+        self.shell()
+        self.logs()
+        self.updates()
+        return self.findings
+
+    def install(self):
+        version, _ = read(os.path.join(PLUGIN, "manifest.json"))
+        self.version = (version or {}).get("version", "?")
+        target = os.path.realpath(LINK) if os.path.islink(LINK) or os.path.exists(LINK) else ""
+        if not target:
+            fixed = None
+            if self.fix and os.path.exists(os.path.join(ROOT, "install.sh")):
+                code, _ = run("bash", os.path.join(ROOT, "install.sh"), timeout=120)
+                fixed = "ran install.sh" if code == 0 else None
+            self.note("error", "install", "Petal isn't linked into Omarchy's plugins.", fixed)
+        else:
+            self.note("ok", "install", "Petal %s is installed (%s)." % (self.version, target.replace(HOME, "~")))
+        shell, _ = read(os.path.join(HOME, ".config/omarchy/shell.json"))
+        plugins = json.dumps((shell or {}).get("plugins", ""))
+        if "egesuren.petal" not in plugins:
+            self.note("warn", "install", "Petal may not be turned on in Omarchy's shell config (~/.config/omarchy/shell.json).")
+
+    def files(self):
+        settings_path = os.path.join(CONFIG, "settings.json")
+        settings, problem = read(settings_path)
+        if problem == "missing":
+            self.note("ok", "settings", "No settings.json yet: Petal uses the defaults.")
+        elif problem == "invalid":
+            fixed = None
+            if self.fix:
+                fixed = "backed up as %s, started fresh" % os.path.basename(backup(settings_path))
+                write(settings_path, {})
+            self.note("error", "settings", "settings.json isn't valid JSON, so Petal ignores it.", fixed)
+        elif settings is not None:
+            known = schema()
+            unknown = sorted(k for k in settings if k not in known and not k.endswith("Path"))
+            if unknown:
+                self.note("warn", "settings", "Unknown settings (ignored): %s." % ", ".join(unknown))
+            else:
+                self.note("ok", "settings", "settings.json is fine.")
+
+        modes_path = os.path.join(CONFIG, "modes.json")
+        modes, problem = read(modes_path)
+        seed = os.path.join(ROOT, "defaults", "modes.json")
+        if problem:
+            fixed = None
+            if self.fix and os.path.exists(seed):
+                if problem == "invalid":
+                    backup(modes_path)
+                shutil.copy2(seed, modes_path)
+                fixed = "put back the default modes" + (" (old file backed up)" if problem == "invalid" else "")
+            self.note("error", "modes", "modes.json is %s." % ("missing" if problem == "missing" else "not valid JSON"), fixed)
+            return
+        ids = [m.get("id") for m in modes.get("modes", [])]
+        changed, problems = False, []
+        if not ids:
+            problems.append("there are no modes")
+        if modes.get("defaultMode") not in ids and ids:
+            problems.append("the default mode doesn't exist")
+            if self.fix:
+                modes["defaultMode"], changed = ids[0], True
+        stale = {k: v for k, v in modes.get("workspaces", {}).items() if v not in ids}
+        if stale:
+            problems.append("workspaces %s point at modes that don't exist" % ", ".join(sorted(stale)))
+            if self.fix:
+                modes["workspaces"] = {k: v for k, v in modes["workspaces"].items() if v in ids}
+                changed = True
+        if changed:
+            write(modes_path, modes)
+        if problems:
+            self.note("error" if not ids else "warn", "modes", "In modes.json: " + "; ".join(problems) + ".", "fixed" if changed else None)
+        else:
+            installed = desktop_ids()
+            missing = sorted({a for m in modes.get("modes", []) for a in m.get("apps", []) if installed and a not in installed})
+            self.note("ok", "modes", "%d modes." % len(ids) + (" Not installed (skipped in the dock): %s." % ", ".join(missing[:8]) if missing else ""))
+
+    def ai(self):
+        settings, _ = read(os.path.join(CONFIG, "settings.json"))
+        settings = settings or {}
+        chosen = settings.get("aiProviders", ["claude"])
+        if not chosen:
+            self.note("ok", "ai", "No AI chosen: Petal works as a dock without it.")
+            return
+        changed = False
+        for provider in chosen:
+            key = provider + "Path"
+            path = settings.get(key, "")
+            if not (path and os.access(path, os.X_OK)):
+                found = shutil.which(provider) or next((p for p in (os.path.expanduser("~/.local/bin/" + provider),
+                    os.path.expanduser("~/.local/share/mise/command-wrappers/bin/" + provider)) if os.access(p, os.X_OK)), "")
+                if self.fix and found:
+                    settings[key], changed = found, True
+                self.note("error", "ai", "%s is chosen but Petal can't find it%s." % (provider, " (found it at %s)" % found.replace(HOME, "~") if found else
+                          "; install it, or take it out of aiProviders"), "set %s" % key if self.fix and found else None)
+                continue
+            if provider == "claude":
+                code, out = run(path, "auth", "status", "--json")
+                try:
+                    signed = json.loads(out).get("loggedIn") is True
+                except ValueError:
+                    signed = False
+            else:
+                code, out = run(path, "login", "status")
+                signed = code == 0 and "logged in" in out.lower()
+            if signed:
+                self.note("ok", "ai", "%s is installed and signed in." % provider)
+            else:
+                self.note("error", "ai", "%s isn't signed in: run `%s %s`." % (provider, provider, "auth login" if provider == "claude" else "login"))
+        if changed:
+            write(os.path.join(CONFIG, "settings.json"), settings)
+
+    def tools(self):
+        request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n"
+        code, out = run("python3", os.path.join(PLUGIN, "mcp", "petal-mcp.py"), stdin=request)
+        try:
+            count = len(json.loads(out.splitlines()[0])["result"]["tools"])
+            self.note("ok", "tools", "Petal's AI tools answer (%d tools)." % count)
+        except (ValueError, KeyError, IndexError):
+            self.note("error", "tools", "Petal's AI tools (petal-mcp.py) don't answer: %s" % out.strip()[:160])
+
+    def shell(self):
+        code, out = run("omarchy-shell", "petal", "current", timeout=8)
+        if code == 0 and out.strip():
+            self.note("ok", "dock", "The dock is running (mode: %s)." % out.strip().splitlines()[-1])
+        else:
+            fixed = None
+            if self.fix:
+                subprocess.Popen(["omarchy", "restart", "shell"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                fixed = "restarted Omarchy's shell"
+            self.note("error", "dock", "The dock isn't answering (Omarchy's shell may not have loaded Petal).", fixed)
+
+    def logs(self):
+        self.log_lines = recent_logs(200)
+        problems = [l for l in self.log_lines if any(w in l.lower() for w in ("warn", "error", "typeerror", "referenceerror"))]
+        if problems:
+            self.note("warn", "logs", "%d recent warnings or errors in Petal's log, the last: %s" % (len(problems), redact(problems[-1])[:200]))
+        else:
+            self.note("ok", "logs", "No recent warnings in Petal's log.")
+
+    def updates(self):
+        get = os.path.join(ROOT, "get.sh")
+        if not os.path.exists(get):
+            return
+        code, out = run("bash", get, "--check", timeout=30)
+        try:
+            status = json.loads(out.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            return
+        if status.get("status") == "available":
+            self.note("warn", "updates", "Petal %s is out (this is %s): `petal update`." % (status.get("version"), status.get("current")))
+        elif status.get("status") in ("current", "dev"):
+            self.note("ok", "updates", "Up to date." if status["status"] == "current" else "Installed from source (updates with git).")
+
+
+def recent_logs(n):
+    runs = sorted(glob.glob("/run/user/%d/quickshell/by-id/*/" % os.getuid()), key=os.path.getmtime)
+    if not runs:
+        return []
+    code, out = run("quickshell", "log", os.path.join(runs[-1], "log.qslog"), timeout=15)
+    lines = [l for l in out.splitlines() if any(w in l for w in ("petal", "egesuren", "DockWindow", "Dock.qml", "Brain", "Agent", "AskBox", "Signals"))]
+    return lines[-n:]
+
+
+def redact(text):
+    user = os.environ.get("USER", "")
+    text = text.replace(HOME, "~")
+    return text.replace(user, "<user>") if len(user) > 2 else text
+
+
+def show(findings):
+    marks = {"ok": "✓", "warn": "!", "error": "✗"}
+    for f in findings:
+        print("%s %-9s %s%s" % (marks[f["level"]], f["area"], f["text"], ("  → " + f["fixed"]) if f.get("fixed") else ""))
+    errors = [f for f in findings if f["level"] == "error" and not f.get("fixed")]
+    if errors:
+        print("\nSomething still needs fixing. `petal doctor --fix` repairs what it can; `petal report \"what happened\"` tells Petal's maker.")
+
+
+def report(args):
+    title = next((a for a in args if not a.startswith("--")), "").strip() or "Something went wrong in Petal"
+    doctor = Doctor(fix=False)
+    findings = doctor.check()
+    code, kernel = run("uname", "-sr")
+    _, omarchy = run("omarchy-version")
+    lines = ["**What happened:** " + title, "", "**Petal** %s on Omarchy %s (%s)" % (doctor.version, omarchy.strip() or "?", kernel.strip()), "",
+             "**Doctor:**", ""]
+    lines += ["- %s **%s**: %s%s" % (f["level"], f["area"], redact(f["text"]), " (fixed: %s)" % f["fixed"] if f.get("fixed") else "") for f in findings]
+    logs = [redact(l) for l in doctor.log_lines[-40:]]
+    if logs:
+        lines += ["", "<details><summary>Recent log lines</summary>", "", "```", *logs, "```", "</details>"]
+    lines += ["", "_Filed with `petal report`._"]
+    body = "\n".join(lines)
+    print("Title: " + title + "\n\n" + body + "\n")
+    signed_in = shutil.which("gh") and run("gh", "auth", "status")[0] == 0
+    if "--yes" not in args:
+        if not sys.stdin.isatty():
+            print("Run again with --yes to file it.")
+            return
+        answer = input("File this on github.com/%s%s? [y/N] " % (REPO, "" if signed_in else " (opens your browser)")).strip().lower()
+        if answer not in ("y", "yes"):
+            print("Not filed.")
+            return
+    if signed_in:
+        code, out = run("gh", "issue", "create", "--repo", REPO, "--title", title, "--body", body, timeout=60)
+        print(out.strip() if code == 0 else "gh couldn't file it: " + out.strip())
+        if code == 0:
+            return
+    url = "https://github.com/%s/issues/new?%s" % (REPO, urllib.parse.urlencode({"title": title, "body": body[:6000]}))
+    opener = shutil.which("xdg-open") or shutil.which("open")
+    if opener:
+        subprocess.Popen([opener, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        print("Opened the issue page in your browser; check it and press Submit.")
+    else:
+        print(url)
+
+
+def main():
+    args = sys.argv[1:]
+    command = args[0] if args else "doctor"
+    if command == "report":
+        return report(args[1:])
+    findings = Doctor(fix="--fix" in args).check()
+    if "--json" in args:
+        json.dump({"findings": findings}, sys.stdout, indent=2)
+        print()
+    else:
+        show(findings)
+    sys.exit(1 if any(f["level"] == "error" and not f.get("fixed") for f in findings) else 0)
+
+
+if __name__ == "__main__":
+    main()

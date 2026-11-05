@@ -75,6 +75,7 @@ final class PetalApp {
         signals.start(watchFolders: Stacks.resolve(config.strings("stackFolders")))
         updater.start()
         aiSetup.refreshAll()
+        Skill.install()
         if !config.welcomed {
             welcome.show()
         } else {

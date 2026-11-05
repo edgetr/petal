@@ -44,6 +44,15 @@ print("codex:", s["codexPath"] or "not found")
 if not s["aiProviders"]: print("No AI app found: Petal works as a dock; install Claude Code or Codex for its AI features.")
 PY
 
+# Petal's skill, so Claude Code and Codex know Petal in any session (linked, so
+# updates bring the new one along).
+for agent_home in "$HOME/.claude" "$HOME/.codex"; do
+  if [[ -d $agent_home ]]; then
+    mkdir -p "$agent_home/skills"
+    ln -sfn "$here/plugin/skill" "$agent_home/skills/petal"
+  fi
+done
+
 # Enable it in Omarchy's shell config instead of the old dock plugin.
 python3 - <<'PY'
 import json, os

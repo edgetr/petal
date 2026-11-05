@@ -884,12 +884,116 @@ struct AboutSettings: View {
         .padding(.vertical, 24)
         .glassEffect(.regular, in: .rect(cornerRadius: 24))
 
+        DoctorCard()
+
         Card(title: "Updates") {
             SettingToggle(key: "autoUpdate", title: "Update automatically", detail: "New versions install themselves, then offer a restart.")
             HStack {
                 Button("Check now") { app.updater.check(manual: true) }.buttonStyle(.glass)
                 Text(app.updater.status).font(.system(size: 11)).foregroundStyle(.secondary)
             }
+        }
+    }
+}
+
+/// "Check Petal": the doctor's findings, a button to fix what it can, and a way to report what it can't.
+struct DoctorCard: View {
+    @Environment(PetalApp.self) private var app
+    @State private var findings: [Doctor.Finding] = []
+    @State private var working = false
+    @State private var reporting = false
+
+    var body: some View {
+        Card(title: "Check Petal", footer: "Finds and fixes common problems. If something's still wrong, report it: you see the report before it goes anywhere.") {
+            ForEach(permissionFindings + findings) { finding in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: finding.level == "ok" ? "checkmark.circle.fill" : finding.level == "warn" ? "exclamationmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(finding.level == "ok" ? .green : finding.level == "warn" ? .orange : .red)
+                    Text(finding.text + (finding.fixed.map { " Fixed: \($0)." } ?? "")).font(.system(size: 12))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            HStack {
+                Button(findings.isEmpty ? "Check Petal" : "Check again") { run(fix: false) }.buttonStyle(.glass)
+                if findings.contains(where: { $0.level != "ok" && $0.fixed == nil }) {
+                    Button("Fix what can be fixed") { run(fix: true) }.buttonStyle(.glassProminent).tint(SettingsSection.dock.tint)
+                }
+                Button("Report a problem…") { reporting = true }.buttonStyle(.glass)
+                if working { ProgressView().controlSize(.small) }
+            }
+        }
+        .sheet(isPresented: $reporting) { ReportSheet().environment(app) }
+    }
+
+    /// macOS grants these to the app itself, so the window checks them, not the doctor command.
+    private var permissionFindings: [Doctor.Finding] {
+        guard !findings.isEmpty else { return [] }
+        return [Doctor.Finding(level: Windows.trusted ? "ok" : "warn", area: "permissions",
+                               text: Windows.trusted ? "Petal can see your windows." : "Petal can't see your windows yet: allow it under Permissions."),
+                Doctor.Finding(level: Capture.allowed ? "ok" : "warn", area: "permissions",
+                               text: Capture.allowed ? "Window previews are allowed." : "Window previews need Screen Recording (optional).")]
+    }
+
+    private func run(fix: Bool) {
+        working = true
+        Task {
+            let result = await AISetup.run(Bundle.main.executablePath ?? "", ["doctor", "--json"] + (fix ? ["--fix"] : []),
+                                           environment: ProcessInfo.processInfo.environment, timeout: 120)
+            let json = result.output.split(separator: "\n").last { $0.hasPrefix("{") }.map(String.init) ?? ""
+            findings = (try? JSONDecoder().decode([String: [Doctor.Finding]].self, from: Data(json.utf8)))?["findings"] ?? []
+            working = false
+            app.docks.refresh()
+        }
+    }
+}
+
+struct ReportSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var what = ""
+    @State private var preview = ""
+    @State private var status = ""
+    @State private var working = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Report a problem").font(.system(size: 18, weight: .semibold))
+            TextField("What happened?", text: $what, axis: .vertical).lineLimit(2...4)
+            if !preview.isEmpty {
+                ScrollView {
+                    Text(preview).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(height: 220)
+                .padding(8)
+                .background(.black.opacity(0.12), in: .rect(cornerRadius: 10))
+                Text("This goes to github.com/edgetr/petal, where anyone can read it. Your username is replaced, and no window titles or file contents are included.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if !status.isEmpty { Text(status).font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled) }
+            HStack {
+                if working { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                if preview.isEmpty {
+                    Button("Show the report") { run(["--preview"]) { preview = $0 } }
+                        .buttonStyle(.glassProminent).disabled(what.trimmingCharacters(in: .whitespaces).isEmpty || working)
+                } else {
+                    Button("Report it") { run(["--yes"]) { status = $0.split(separator: "\n").last.map(String.init) ?? "" } }
+                        .buttonStyle(.glassProminent).disabled(working || !status.isEmpty)
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 560)
+    }
+
+    private func run(_ flags: [String], done: @escaping (String) -> Void) {
+        working = true
+        Task {
+            let result = await AISetup.run(Bundle.main.executablePath ?? "", ["report", what] + flags,
+                                           environment: ProcessInfo.processInfo.environment, timeout: 120)
+            working = false
+            done(result.output.trimmingCharacters(in: .whitespacesAndNewlines))
         }
     }
 }

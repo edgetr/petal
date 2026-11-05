@@ -7,6 +7,11 @@ MainActor.assumeIsolated {
     let app = NSApplication.shared
     let arguments = CommandLine.arguments
 
+    // `Petal doctor` and `Petal report`: checking Petal, and telling its maker what went wrong.
+    if arguments.count > 1 && (arguments[1] == "doctor" || arguments[1] == "report") {
+        app.setActivationPolicy(.prohibited)
+        Doctor.command(arguments)
+    }
     // `Petal --restore-dock` gives macOS's Dock back without Petal running (bin/petal restore-dock).
     if arguments.contains("--restore-dock") {
         SystemDock.restore()

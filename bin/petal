@@ -16,6 +16,10 @@ if [[ $(uname) == Darwin ]]; then
     chat)     shift; ipc chat "$*" ;;
     dock)     ipc dock "${2:-}" ;;
     update)   ipc update ;;
+    doctor|report)
+      app="/Applications/Petal.app/Contents/MacOS/Petal"
+      [[ -x $app ]] || app="$(dirname "$(readlink -f "$0")")/../macos/build/Petal.app/Contents/MacOS/Petal"
+      exec "$app" "$@" ;;
     restore-dock)
       # Gives macOS's Dock back even if Petal crashed or was deleted.
       if pgrep -xq Petal; then ipc dock macos
@@ -39,6 +43,8 @@ petal edit            edit ~/.config/petal/modes.json
 petal restart         restart Petal
 petal update          check for a new Petal now
 petal restore-dock    give macOS's Dock back, even if Petal crashed or was deleted
+petal doctor          check Petal (--fix repairs what it safely can)
+petal report "…"      tell Petal's maker what went wrong (a GitHub issue; shown to you first)
 petal version         the running version
 petal logs [n]        recent Petal log lines
 HELP
@@ -65,6 +71,8 @@ case "${1:-help}" in
       *) "$here/../get.sh" --update ;;
     esac ;;
   version)  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$(dirname "$(readlink -f "$0")")/../plugin/manifest.json" ;;
+  doctor)   shift; exec python3 "$(dirname "$(readlink -f "$0")")/petal-doctor" doctor "$@" ;;
+  report)   shift; exec python3 "$(dirname "$(readlink -f "$0")")/petal-doctor" report "$@" ;;
   logs)     quickshell log -n -p /usr/share/omarchy/shell 2>/dev/null | grep -i -E "petal|egesuren|DockWindow|Dock.qml|Brain|Signals|AppSearch|AskBox" | tail -n "${2:-40}" ;;
   *)
     cat <<'HELP'
@@ -80,6 +88,8 @@ petal restart     restart Omarchy's shell (reloads Petal)
 petal update      update Petal from GitHub Releases (--check to only look)
 petal version     the installed version
 petal logs [n]    recent Petal log lines
+petal doctor      check Petal (--fix repairs what it safely can, --json for details)
+petal report "…"  tell Petal's maker what went wrong (a GitHub issue; shown to you first)
 HELP
     ;;
 esac

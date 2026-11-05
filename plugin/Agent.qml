@@ -52,7 +52,8 @@ Item {
     + "If a request can't be done with settings, you may edit Petal's QML source (path in petal_get_state) and then "
     + "call petal_reload; mention that a Petal update could replace source edits. "
     + "You can also help with anything else on the computer: Omarchy, Hyprland, apps, files. "
-    + "If something needs the user's approval, say in one line what it would do; they can allow it from the panel."
+    + "If something needs the user's approval, say in one line what it would do; they can allow it from the panel. "
+    + "If something about Petal itself is broken, run `petal doctor` (and `petal doctor --fix`); the petal skill says more."
 
   function fullPrompt() {
     var mine = String(instructionsFile.text() || "").trim()
