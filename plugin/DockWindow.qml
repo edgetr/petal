@@ -245,6 +245,9 @@ PanelWindow {
 
   function requestPreview(slot) {
     if (!opt("previews") || window.menuOpen || window.stackOpen || window.dragging) return
+    // A hide queued by a brief leave (the dock sliding up under the pointer
+    // fires leave/enter) must not cancel this request.
+    previewHideTimer.stop()
     if (window.previewKey) {
       window.previewKey = slot.key
       window.previewSlot = slot
@@ -270,7 +273,7 @@ PanelWindow {
     id: previewShowTimer
     interval: 380
     onTriggered: {
-      var slot = window.pendingPreviewSlot
+      var slot = window.pendingPreviewSlot || (window.hoverSlot && window.hoverSlot.key !== undefined && window.hoverSlot.windowCount > 0 ? window.hoverSlot : null)
       if (!slot || !slot.hovered) return
       window.previewKey = slot.key
       window.previewSlot = slot
@@ -283,6 +286,7 @@ PanelWindow {
     onTriggered: {
       if (previewHover.hovered) return
       if (window.previewSlot && window.previewSlot.hovered) return
+      if (window.pendingPreviewSlot && window.pendingPreviewSlot.hovered) return
       window.hidePreview()
       if (window.autohide) hideTimer.restart()
     }
