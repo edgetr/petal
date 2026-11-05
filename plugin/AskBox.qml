@@ -328,6 +328,9 @@ PanelWindow {
       Column {
         visible: !box.chat || box.chat.messages.count === 0
         width: parent.width
+        // The options open over the chat; what's under them fades out instead of peeking from below.
+        opacity: box.optionsOpen ? 0 : 1
+        Behavior on opacity { NumberAnimation { duration: 140 } }
         spacing: Math.round(2 * Style.fontScale)
 
         Text {
@@ -425,6 +428,8 @@ PanelWindow {
         id: log
         visible: !!box.chat && box.chat.messages.count > 0
         width: parent.width
+        opacity: box.optionsOpen ? 0 : 1
+        Behavior on opacity { NumberAnimation { duration: 140 } }
         height: Math.min(contentHeight, Math.round(box.height * 0.5))
         clip: true
         spacing: Math.round(10 * Style.fontScale)
