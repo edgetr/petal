@@ -17,9 +17,9 @@ Any AI session can change the dock: Petal's own panel, T3 Code, or Claude Code a
 registers its MCP server (`petal`) with Claude Code and Codex and puts `petal` on the PATH (setting `otherAgents`).
 Use, in this order:
 
-1. Petal's MCP tools, when the `petal` server is connected:
-`petal_get_state` first, then `petal_set_settings`, `petal_set_dock`, `petal_save_mode`, `petal_delete_mode`,
-`petal_set_default_mode`, `petal_switch_mode`, `petal_list_apps`, `petal_reload`. Changes apply instantly.
+1. Petal's MCP tools, when the `petal` server is connected: `petal_get_state` first, then `petal_set_settings`,
+   `petal_set_dock`, `petal_save_mode`, `petal_delete_mode`, `petal_set_default_mode`, `petal_switch_mode`,
+   `petal_list_apps`, `petal_reload`. Changes apply instantly.
 2. The `petal` command: `petal get` (everything, with each setting's help), `petal set <key> <json value>`,
    `petal mode <id>`, `petal current`, `petal modes`, `petal dock petal|macos` (macOS), `petal restart`; `petal help`
    lists them all.
@@ -56,6 +56,7 @@ and `… report`. Logs: `petal logs` (Omarchy's shell log; on macOS the system l
 - On macOS, Petal hides macOS's Dock while it runs and gives it back on quit; `petal restore-dock` gives it back by
   hand. Permissions it may need: Accessibility (window lists, badges, focus cards) and Screen Recording (previews).
 - Focus cards ("x.com belongs to Social") appear only in modes with `focusDelay` above 0, with `focusGuard` on.
+
 ## Changing Petal itself
 
 Make each dock the user's own with settings, modes and the look first; they apply instantly and survive updates.
