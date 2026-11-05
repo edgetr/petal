@@ -108,7 +108,7 @@ PanelWindow {
   function runDoctor(fix) {
     if (panel.doctorRunning) return
     panel.doctorRunning = true
-    panel.activity.run([panel.activity.petalBin, "doctor", "--json"].concat(fix ? ["--fix"] : []), function(text) {
+    panel.activity.run(panel.petal(["doctor", "--json"].concat(fix ? ["--fix"] : [])), function(text) {
       panel.doctorRunning = false
       try {
         var start = String(text).indexOf("{")
@@ -119,6 +119,12 @@ PanelWindow {
     })
   }
 
+  // `petal <args>` through bash: if it isn't there, bash still exits (127)
+  // and the page says so, instead of waiting for a program that never ran.
+  function petal(args) {
+    return ["bash", "-c", "exec \"$0\" \"$@\"", panel.activity.petalBin].concat(args)
+  }
+
   readonly property bool anyProblem: findings.some(function(f) { return f.level !== "ok" && !f.fixed })
 
   function previewReport() {
@@ -126,7 +132,7 @@ PanelWindow {
     if (!what || panel.reportBusy) return
     panel.reportBusy = true
     panel.reportResult = ""
-    panel.activity.run([panel.activity.petalBin, "report", what], function(text) {
+    panel.activity.run(panel.petal(["report", what]), function(text) {
       panel.reportBusy = false
       panel.reportPreview = String(text).replace(/\n*Run again with --yes to file it\.\s*$/, "").trim()
     })
@@ -136,7 +142,7 @@ PanelWindow {
     var what = reportField.text.trim()
     if (!what || panel.reportBusy) return
     panel.reportBusy = true
-    panel.activity.run([panel.activity.petalBin, "report", what, "--yes"], function(text) {
+    panel.activity.run(panel.petal(["report", what, "--yes"]), function(text) {
       panel.reportBusy = false
       var lines = String(text).trim().split("\n")
       panel.reportResult = lines[lines.length - 1] || "Sent."

@@ -1584,7 +1584,13 @@ PanelWindow {
         CardButton {
           visible: !!guardCard.c && (guardCard.c.kind === "suggest" || guardCard.c.kind === "summary")
           primary: true
-          text: !guardCard.c ? "" : guardCard.c.kind === "summary" ? "More" : guardCard.c.busy ? "Making it…" : guardCard.c.s.kind === "add" ? "Keep it" : "Make it"
+          text: {
+            var c = guardCard.c
+            if (!c) return ""
+            if (c.kind === "summary") return "More"
+            if (c.kind !== "suggest") return ""
+            return c.busy ? "Making it…" : c.s && c.s.kind === "add" ? "Keep it" : "Make it"
+          }
           onClicked: window.dock.cardGo()
         }
         CardButton {

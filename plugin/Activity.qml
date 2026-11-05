@@ -23,7 +23,10 @@ Item {
   readonly property bool logging: !!settings && settings.activityLog
   // Input in the last two minutes.
   readonly property bool present: !idle.isIdle
-  property alias state: petalState
+  property alias saved: petalState
+  // Petal's state file has been read (or found missing): until then, what
+  // already happened (a schedule block applied today) isn't known.
+  property bool savedLoaded: false
 
   Component.onCompleted: {
     Quickshell.execDetached(["mkdir", "-p", activity.stateDir])
@@ -38,6 +41,8 @@ Item {
     path: activity.stateDir + "/state.json"
     printErrors: false
     onAdapterUpdated: writeAdapter()
+    onLoaded: activity.savedLoaded = true
+    onLoadFailed: activity.savedLoaded = true
 
     JsonAdapter {
       id: petalState
@@ -90,7 +95,7 @@ Item {
   // A focus card's answer: "back", "switch" or "close".
   function cardAnswer(answer, c) {
     if (!c || c.kind !== "guard") return
-    activity.append({ t: activity.nowSeconds(), card: answer, app: String(c.key || ""), mode: String(c.mode || "") })
+    activity.append({ t: activity.nowSeconds(), card: answer, app: String(c.app || ""), mode: String(c.mode || "") })
   }
 
   // ── Running Petal's own tools (petal-mcp.py, petal doctor) ─────────────
@@ -199,7 +204,7 @@ Item {
     interval: 30 * 1000
     repeat: true
     triggeredOnStart: true
-    running: !!activity.settings && activity.scheduleBlocks().length > 0
+    running: activity.savedLoaded && !!activity.settings && activity.scheduleBlocks().length > 0
     onTriggered: activity.checkSchedule()
   }
 
@@ -248,10 +253,12 @@ Item {
       if (!start) continue
       var key = start + "|" + b.from + "|" + b.to + "|" + b.mode
       if (fired.indexOf(key) >= 0) continue
+      // No workspace in front yet (the shell is starting): next time.
+      var ws = activity.dock.focusedWorkspaceId
+      if (!(ws >= 1)) return
       fired.push(key)
       petalState.scheduleFired = fired.slice(-30)
-      var ws = activity.dock.focusedWorkspaceId
-      if (ws >= 1) activity.dock.applyMode(ws, b.mode)
+      activity.dock.applyMode(ws, b.mode)
     }
   }
 

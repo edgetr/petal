@@ -15,7 +15,20 @@ BarWidget {
   id: root
   moduleName: "egesuren.petal"
 
-  readonly property var dock: bar && bar.shell && typeof bar.shell.serviceFor === "function" ? bar.shell.serviceFor("egesuren.petal") : null
+  // The widget can be built before Petal's service is: look again until it's there.
+  property var dock: null
+  function findDock() {
+    if (!root.dock && root.bar && root.bar.shell && typeof root.bar.shell.serviceFor === "function")
+      root.dock = root.bar.shell.serviceFor("egesuren.petal") || null
+  }
+  onBarChanged: findDock()
+  Component.onCompleted: findDock()
+  Timer {
+    interval: 1000
+    repeat: true
+    running: !root.dock && !!root.bar
+    onTriggered: root.findDock()
+  }
   readonly property var screenMonitor: QsWindow.window && QsWindow.window.screen ? Hyprland.monitorFor(QsWindow.window.screen) : Hyprland.focusedMonitor
   readonly property int workspaceId: screenMonitor && screenMonitor.activeWorkspace ? screenMonitor.activeWorkspace.id : -1
   readonly property var mode: dock && dock.settings.modes ? dock.modeForWorkspace(workspaceId) : null

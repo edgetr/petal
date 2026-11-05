@@ -858,7 +858,18 @@ Item {
     }
   }
 
-  onCardChanged: if (root.card && root.card.autoClose) cardTimeout.restart()
+  // A focus card that pushes out a suggestion or the summary gives it back:
+  // it can show again later, instead of being lost for the day or the week.
+  property var shownCard: null
+  onCardChanged: {
+    var before = root.shownCard
+    root.shownCard = root.card
+    if (root.card && root.card.autoClose) cardTimeout.restart()
+    if (before && root.isFocusCard(root.card)) {
+      if (before.kind === "suggest" && !before.busy) activityItem.saved.suggestedOn = ""
+      if (before.kind === "summary") activityItem.saved.summaryWeek = ""
+    }
+  }
 
   function snooze(key, minutes) {
     var next = Object.assign({}, root.snoozed)
@@ -943,7 +954,7 @@ Item {
     var icon = root.iconFor({ key: key })
     if (owner && owner.id === mode.id) return ok()
     if (owner) {
-      root.card = { kind: "guard", title: title, icon: icon, key: key, target: owner.id, ws: wsId, mode: mode.id, snoozeKey: snoozeKey, address: address }
+      root.card = { kind: "guard", title: title, icon: icon, app: key, target: owner.id, ws: wsId, mode: mode.id, snoozeKey: snoozeKey, address: address }
       return
     }
     if (!brain.enabled) return
@@ -954,7 +965,7 @@ Item {
       if (!r || !now || String(now.address) !== address) return
       // Only speak up when it clearly belongs to another mode.
       if (r.mode && r.mode !== mode.id && root.modeById(r.mode)) {
-        root.card = { kind: "guard", title: title, icon: icon, key: key, target: r.mode, ws: wsId, mode: mode.id, reason: String(r.reason || ""), snoozeKey: snoozeKey, address: address }
+        root.card = { kind: "guard", title: title, icon: icon, app: key, target: r.mode, ws: wsId, mode: mode.id, reason: String(r.reason || ""), snoozeKey: snoozeKey, address: address }
       } else {
         root.lastOkAddress = address
       }
@@ -1113,7 +1124,8 @@ Item {
   function shortDay(iso) {
     var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""))
     if (!m) return ""
-    return Qt.locale(Commons.I18n.formatLocale).toString(new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])), "MMM d")
+    var locale = Commons.I18n.formatLocale ? Qt.locale(Commons.I18n.formatLocale) : Qt.locale()
+    return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).toLocaleDateString(locale, "MMM d")
   }
 
   function untilText(iso) {

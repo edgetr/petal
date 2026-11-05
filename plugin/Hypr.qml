@@ -58,8 +58,10 @@ Item {
     id: reloadTimer
     interval: 600
     onTriggered: {
-      hypr.dock.activity.state.lookApplied = false
+      hypr.dock.activity.saved.lookApplied = false
       hypr.applied = null
+      // A theme switch puts its own wallpaper up.
+      hypr.wallpaperSet = ""
       hypr.syncShortcuts()
       hypr.readOriginals()
     }
@@ -173,7 +175,7 @@ Item {
   // user's own are kept in Petal's state (a restart of the shell then still
   // knows them).
   function readOriginals() {
-    var saved = hypr.dock.activity.state
+    var saved = hypr.dock.activity.saved
     if (saved.lookApplied && saved.lookOriginals) {
       hypr.originals = saved.lookOriginals
       hypr.applied = {}
@@ -255,7 +257,7 @@ Item {
     var lua = hypr.lookLua(want)
     if (lua) hypr.hyprEval(lua)
     hypr.applied = look
-    var state = hypr.dock.activity.state
+    var state = hypr.dock.activity.saved
     state.lookOriginals = hypr.originals
     state.lookApplied = !!look
   }
