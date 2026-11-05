@@ -10,7 +10,7 @@ final class FocusGuard {
     private var pending: DispatchWorkItem?
     private var lastTitle = ""
     private var timer: Timer?
-    private let brain = Brain()
+    let brain = Brain()
 
     var app: PetalApp { PetalApp.shared }
     var config: Config { app.config }
@@ -40,7 +40,8 @@ final class FocusGuard {
 
     func check() {
         guard config.bool("modes"), config.bool("focusGuard") else { return }
-        if let card = app.popups.card, card.kind == .update { return }
+        // A suggestion or the weekly summary stays until it's answered.
+        if let card = app.popups.card, card.kind != .guardCard { return }
         guard let front = NSWorkspace.shared.frontmostApplication, front.activationPolicy == .regular,
               front.bundleIdentifier != Bundle.main.bundleIdentifier, let key = front.bundleIdentifier,
               let dock = app.docks.focusedDock, let desktop = dock.desktop, let mode = config.mode(forDesktop: desktop) else { return }
@@ -100,13 +101,12 @@ final class FocusGuard {
 
     /// ×: dismiss, and don't ask about this again for 10 minutes.
     func close(_ card: FocusCard) {
-        app.popups.dismissCard()
-        if !card.snoozeKey.isEmpty { snoozed[card.snoozeKey] = Date().addingTimeInterval(600) }
+        answer(card, "close")
     }
 
     /// Go back: dismiss, snooze, and bring back what you were doing.
     func stay(_ card: FocusCard) {
-        close(card)
+        answer(card, "back")
         guard card.kind == .guardCard, let lastOk, lastOk != card.bundleID,
               let running = NSRunningApplication.runningApplications(withBundleIdentifier: lastOk).first else { return }
         Windows.bringForward(running)
@@ -114,9 +114,16 @@ final class FocusGuard {
 
     /// Switch: dismiss, snooze, and put the Desktop in the card's mode.
     func go(_ card: FocusCard) {
-        close(card)
+        answer(card, "switch")
         guard let target = card.target, let desktop = card.desktop ?? app.docks.focusedDock?.desktop else { return }
         app.requestMode(target.id, desktop: desktop)
+    }
+
+    /// Every answer dismisses and snoozes the card, and goes in the activity history (for the weekly summary).
+    private func answer(_ card: FocusCard, _ choice: String) {
+        app.popups.dismissCard()
+        if !card.snoozeKey.isEmpty { snoozed[card.snoozeKey] = Date().addingTimeInterval(600) }
+        if card.kind == .guardCard { app.activity.recordCard(choice, app: card.bundleID, mode: card.here?.id ?? "") }
     }
 
     // MARK: Browsers
@@ -162,6 +169,21 @@ final class Brain {
         Reply with ONLY JSON: {"mode": "<id>"|null, "reason": "<max 8 words, what it is>"}
         """
         ask(prompt, key: "w|\(app)|\(title)", done: done)
+    }
+
+    /// A name, symbol, color and about for a new mode holding `apps` (names), unlike the modes there are.
+    func nameMode(apps: [String], done: @escaping ([String: Any]?) -> Void) {
+        let colors = PetalApp.shared.config.modes.map(\.hex).joined(separator: ", ")
+        let prompt = """
+        You name focus modes for a dock. Each mode has its own apps; the user switches a Desktop into a mode.
+        Modes they have:
+        \(modesBrief)
+
+        These apps are often used together: \(apps.joined(separator: ", ")).
+        Name a new mode for them: 1 or 2 words, unlike the existing names. Pick an SF Symbol name for its icon, a #rrggbb color unlike these (\(colors)), and a short about: what the mode is for, used to sort new apps into it.
+        Reply with ONLY JSON: {"name": "<name>", "icon": "<SF Symbol>", "color": "#rrggbb", "about": "<under 12 words>"}
+        """
+        ask(prompt, key: "n|" + apps.joined(separator: "|"), done: done)
     }
 
     private var modesBrief: String {

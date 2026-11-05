@@ -23,6 +23,18 @@ enum Snapshot {
             .init(kind: .ask, text: "defaults write com.apple.finder AppleShowAllFiles -bool true"),
         ])
 
+        let installed = Apps.installed().map(\.id)
+        let pick = { (wanted: [String]) in wanted.filter(installed.contains) + installed.filter { !wanted.contains($0) } }
+        let sampleNew = Insights.Suggestion(kind: .mode, key: "a+b", apps: Array(pick(["com.figma.Desktop", "com.linear", "com.apple.Preview"]).prefix(2)),
+                                            minutes: 260, days: 4)
+        let sampleAdd = Insights.Suggestion(kind: .add, key: "add", apps: Array(pick(["com.tinyspeck.slackmacgap", "com.apple.MobileSMS"]).prefix(1)),
+                                            mode: app.config.modes.first?.id ?? "", minutes: 90, days: 5)
+        let sampleSummary = Insights.Summary(title: "Last week", from: Date().addingTimeInterval(-7 * 86400), to: Date(),
+                                             modes: app.config.modes.prefix(3).enumerated().map { index, mode in
+                                                 .init(id: mode.id, name: mode.name, minutes: [740, 185, 40][index],
+                                                       apps: mode.apps.filter(installed.contains).prefix(3).enumerated().map { ($0.element, [500, 150, 60][$0.offset]) })
+                                             }, cardsShown: 8, wentBack: 5)
+
         var views: [(String, AnyView, CGSize?)] = [
             ("dock", AnyView(DockView(dock: dock)), nil),
             ("welcome", AnyView(WelcomeView {}), CGSize(width: 640, height: 720)),
@@ -33,6 +45,10 @@ enum Snapshot {
                                                       target: app.config.mode(id: "social"), here: dock.mode,
                                                       reason: "Social feed, not work"))), nil),
             ("stack", AnyView(StackView(folder: "~/Downloads") {}), nil),
+            ("card-suggest", AnyView(CardView(card: FocusCard(kind: .suggestion, suggestion: sampleNew))), nil),
+            ("card-add", AnyView(CardView(card: FocusCard(kind: .suggestion, suggestion: sampleAdd))), nil),
+            ("card-made", AnyView(CardView(card: FocusCard(kind: .made, target: app.config.modes.last, desktop: 1, suggestion: sampleNew))), nil),
+            ("card-summary", AnyView(CardView(card: FocusCard(kind: .summary, summary: sampleSummary))), nil),
         ]
         for section in SettingsSection.allCases {
             views.append(("settings-\(section.rawValue)", AnyView(SettingsView(selection: section)), CGSize(width: 920, height: 700)))

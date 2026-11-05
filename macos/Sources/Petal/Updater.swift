@@ -9,6 +9,8 @@ import Observation
 @MainActor @Observable
 final class Updater {
     private(set) var status = ""
+    /// A new Petal is installed and waits for a restart: the menu bar icon shows a dot and offers it.
+    var ready: String?
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var checking = false
 
@@ -41,7 +43,7 @@ final class Updater {
                 status = "Downloading Petal \(latest.version)…"
                 try await install(latest)
                 status = "Petal \(latest.version) is ready. Restart Petal to finish."
-                PetalApp.shared.popups.show(FocusCard(kind: .update, version: latest.version))
+                ready = latest.version
             } catch {
                 status = "Couldn't update: \(error.localizedDescription)"
             }

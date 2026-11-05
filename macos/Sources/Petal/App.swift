@@ -27,6 +27,8 @@ final class PetalApp {
     let search = AppSearch()
     let updater = Updater()
     let aiSetup = AISetup()
+    let insights = InsightsController()
+    @ObservationIgnored let activity = ActivityLog()
     @ObservationIgnored let tooltips = Tooltips()
     @ObservationIgnored let settings = SettingsWindow()
     @ObservationIgnored let welcome = Welcome()
@@ -78,6 +80,7 @@ final class PetalApp {
         usage.start { [weak self] in self?.config.bool("claudeUsage") ?? false }
         signals.start(watchFolders: Stacks.resolve(config.strings("stackFolders")))
         updater.start()
+        activity.start()
         aiSetup.refreshAll()
         Skill.install()
         if !config.welcomed {
@@ -278,15 +281,17 @@ final class PetalApp {
             return "ok"
         }
         ipc.on("testCard") { [unowned self] args in
-            if args.first == "update" {
-                popups.show(FocusCard(kind: .update, version: version))
-            } else {
+            switch args.first {
+            case "suggest": insights.showSuggestion(marking: false)
+            case "summary": insights.showSummary()
+            default:
                 popups.show(FocusCard(kind: .guardCard, bundleID: "net.imput.helium", title: "x.com",
                                       target: config.mode(id: "social"), here: docks.focusedDock?.mode,
                                       reason: "Social feed, not work", desktop: docks.focusedDock?.desktop))
             }
             return "ok"
         }
+        ipc.on("summary") { [unowned self] _ in insights.showSummary(); return "ok" }
         ipc.on("testBounce") { [unowned self] args in
             guard let id = args.first else { return "which app?" }
             signals.bounce(id)
