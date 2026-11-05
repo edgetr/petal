@@ -22,7 +22,7 @@ enum Personal {
     nonisolated static var signing: URL { folder.appending(path: "signing") }
 
     /// What the check builds in the tree it's given, and what's kept of it for installing.
-    nonisolated static let buildCheck = "PETAL_SIGN_IDENTITY=- /bin/bash macos/build.sh"
+    nonisolated static let buildCheck = "PETAL_SIGN_IDENTITY=- PETAL_ARCHS=$(/usr/bin/uname -m) /bin/bash macos/build.sh"
     nonisolated static let buildOutput = "macos/build/Petal.app"
 
     nonisolated static var state: [String: Any] {
@@ -207,9 +207,12 @@ enum Personal {
     static func update(to version: String, manual: Bool) async throws -> Bool {
         guard inUse, !isDevelopmentBuild else { return false }
         guard let tools = await Task.detached(operation: { developerTools }).value else {
-            installDeveloperTools()
-            let message = "Your changes to Petal's code need Apple's command line tools to be rebuilt, and they aren't installed; macOS is asking to install them."
-            tell(version: version, message: message)
+            let message = "Your changes to Petal's code need Apple's command line tools to be rebuilt, and they aren't installed."
+            if manual || !told.contains(version) {
+                told.insert(version)
+                installDeveloperTools()
+                tell(version: version, message: message + " macOS is asking to install them; Petal tries again after.")
+            }
             throw Failure(message)
         }
         let status = result(await Task.detached { core(["status", "--json"], tools: tools) }.value.output)
@@ -239,6 +242,9 @@ enum Personal {
             throw Failure(reply["message"] as? String ?? "Couldn't bring your changes over to Petal \(version).")
         }
     }
+
+    /// Releases the person has already been told about this run (the check repeats every 6 hours).
+    private static var told: Set<String> = []
 
     /// Tells the person plainly that they keep their own Petal, and offers to report it.
     static func tell(version: String, message: String, detail: String = "") {
