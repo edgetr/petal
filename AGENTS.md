@@ -4,7 +4,7 @@ Updated 2026-11-05. This file holds Petal's current rules for every coding agent
 
 ## Project
 
-Petal is an AI-native dock for Omarchy, with a focus mode for every workspace and Claude built in. It is a plugin for Omarchy's shell (Quickshell/QML on Hyprland 0.56, Lua config) and runs only on Omarchy; macOS and Windows are planned, not started.
+Petal is an AI-native dock for Omarchy, with a focus mode for every workspace and Claude built in. It is a plugin for Omarchy's shell (Quickshell/QML on Hyprland 0.56, Lua config) and runs only on Omarchy. macOS comes next, once the current work is done; Windows is not planned.
 
 - **Focus modes:** each mode has its own apps (the dock's order), color, icon and rules. Every workspace remembers its mode, so switching workspace swaps the dock.
 - **Focus cards** (off by default): when the window in front doesn't belong to the mode, a card says so ("x.com belongs to Social") with Go back / Switch. Petal knows the mode's apps; anything new is sorted by Claude Haiku.
@@ -26,12 +26,13 @@ The owner works on two machines, linked to each other in T3 Code. GitHub is the 
 | Machine | System | Checkout | Use it for |
 | --- | --- | --- | --- |
 | `LEGION_5_PRO` | Omarchy | `~/Projects/Petal` (the installed plugin) | running and verifying Petal: the dock, `omarchy-shell`, `hyprctl`, logs |
-| Gökay MacBook Pro | macOS | `~/petal` | editing, the site, Git and PRs; Petal doesn't run on macOS yet (a macOS version is planned) |
+| Gökay MacBook Pro | macOS | `~/petal` | editing, the site, Git and PRs; Petal doesn't run on macOS yet (it is next) |
 
 - **Check where you are** (`uname`) before running anything Omarchy-only. Until Petal runs on macOS, say on the Mac that a dock change wasn't run on the real dock.
 - **To verify a change,** push the branch and have it run on `LEGION_5_PRO`: in T3, pass its `environmentId` from `t3_environment_links`. If it is unreachable, say so; don't fake the check.
-- **Sync through GitHub:** commit and push on one machine, pull on the other. Don't copy files between them, and pull before starting work.
-- **Per-machine setup** (T3 project icons, `~/.config/petal/`, the plugin link) isn't in the repository: change it on each machine, or say which one is still left.
+- **Sync through GitHub:** `tools/fleet` runs on both machines at login and every 5 minutes. It fetches every `edgetr` checkout and fast-forwards it to GitHub. It never pushes, and it leaves alone a branch that has diverged, a merge or rebase in progress, and a pull that would overwrite uncommitted changes. So work reaches the other machine only once it is committed and pushed; `tools/fleet status` shows what's behind or ahead. On `LEGION_5_PRO` the Petal checkout is the installed plugin, so a push to `main` reaches the live dock's files within 5 minutes (they take effect on `omarchy restart shell`). Don't copy files between machines.
+- **On a new machine,** clone Petal and run `tools/fleet install` once (launchd on macOS, a systemd user timer on Omarchy).
+- **Per-machine setup** (T3 project icons, `~/.config/petal/`, the plugin link, `tools/fleet install`) isn't in the repository: change it on each machine, or say which one is still left.
 
 ## Identity and accounts
 

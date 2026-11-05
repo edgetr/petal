@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+# Keeps every machine's checkouts up to date with GitHub, so moving between machines needs no `git pull`.
+#
+#   tools/fleet sync        fetch every checkout and fast-forward what can be fast-forwarded
+#   tools/fleet status      each checkout's branch, what it is behind or ahead, uncommitted files
+#   tools/fleet install     sync at login and every 5 minutes (launchd on macOS, a systemd timer on Omarchy)
+#   tools/fleet uninstall   stop that
+#
+# Checkouts are the git repositories one level under ~, ~/Projects and ~/Documents whose origin belongs to the
+# owner of this repository on GitHub. FLEET_ROOTS and FLEET_OWNER change that, in the environment or in
+# ~/.config/fleet/config (shell syntax).
+#
+# Sync only ever moves a branch forward to what is already on GitHub. It never pushes, never merges or rebases,
+# leaves a branch that has diverged alone, skips a repository in the middle of a merge or rebase, and git itself
+# refuses a fast-forward that would overwrite uncommitted changes. Work still reaches the other machine only once
+# it is committed and pushed. Bash 3.2, so it runs on macOS's own bash.
+set -u
+
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/fleet/config"
+[ -f "$CONFIG" ] && . "$CONFIG"
+FLEET_ROOTS="${FLEET_ROOTS:-$HOME $HOME/Projects $HOME/Documents}"
+FLEET_OWNER="${FLEET_OWNER:-$(git -C "$(dirname "$SELF")" remote get-url origin 2>/dev/null | sed -E 's#^.*github\.com[:/]([^/]+)/.*$#\1#')}"
+LABEL="com.edgetr.fleet"
+
+# Never wait for a password or a host key: a background job has no one to answer.
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=15}"
+
+say() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+
+checkouts() {
+  local root dir url
+  for root in $FLEET_ROOTS; do
+    for dir in "$root"/*/; do
+      [ -e "${dir}.git" ] || continue
+      url="$(git -C "$dir" remote get-url origin 2>/dev/null)" || continue
+      case "$url" in
+        *github.com[:/]"$FLEET_OWNER"/*) echo "${dir%/}" ;;
+      esac
+    done
+  done
+}
+
+busy() {   # a merge, rebase, cherry-pick, revert or bisect in progress
+  local g
+  g="$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
+  [ -d "$g/rebase-merge" ] || [ -d "$g/rebase-apply" ] || [ -f "$g/MERGE_HEAD" ] ||
+    [ -f "$g/CHERRY_PICK_HEAD" ] || [ -f "$g/REVERT_HEAD" ] || [ -f "$g/BISECT_LOG" ]
+}
+
+sync_one() {
+  local dir="$1" name current default upstream behind ahead before
+  name="${dir/#$HOME/~}"
+  if busy "$dir"; then say "$name: merge or rebase in progress, left alone"; return; fi
+  if ! git -C "$dir" fetch --prune --quiet origin 2>/dev/null; then say "$name: couldn't reach origin"; return; fi
+
+  current="$(git -C "$dir" branch --show-current)"
+  default="$(git -C "$dir" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)"
+  default="${default#origin/}"; default="${default:-main}"
+
+  # The branch that is checked out: forward to its upstream if it is only behind.
+  if [ -n "$current" ] && upstream="$(git -C "$dir" rev-parse --abbrev-ref '@{u}' 2>/dev/null)"; then
+    behind="$(git -C "$dir" rev-list --count 'HEAD..@{u}')"
+    ahead="$(git -C "$dir" rev-list --count '@{u}..HEAD')"
+    if [ "$behind" -gt 0 ] && [ "$ahead" -eq 0 ]; then
+      before="$(git -C "$dir" rev-parse --short HEAD)"
+      if git -C "$dir" merge --ff-only --quiet '@{u}' >/dev/null 2>&1; then
+        say "$name: $current $before..$(git -C "$dir" rev-parse --short HEAD) ($behind new)"
+      else
+        say "$name: $current is $behind behind, but pulling would overwrite uncommitted changes; left alone"
+      fi
+    elif [ "$behind" -gt 0 ]; then
+      say "$name: $current has diverged from $upstream ($ahead ahead, $behind behind); left alone"
+    fi
+  fi
+
+  # The default branch when it isn't checked out here: move it forward too, so the next branch starts current.
+  # A local fetch refuses anything that isn't a fast-forward, and a branch checked out in another worktree.
+  if [ "$current" != "$default" ] && git -C "$dir" show-ref --verify --quiet "refs/heads/$default" &&
+     [ "$(git -C "$dir" rev-parse "$default")" != "$(git -C "$dir" rev-parse "origin/$default" 2>/dev/null)" ]; then
+    if git -C "$dir" fetch --quiet . "origin/$default:$default" 2>/dev/null; then
+      say "$name: $default moved forward (not checked out)"
+    fi
+  fi
+}
+
+sync_all() {
+  local lock="${TMPDIR:-/tmp}/fleet-$(id -u).lock" dir
+  find "$lock" -maxdepth 0 -mmin +10 -exec rmdir {} \; 2>/dev/null   # left by a run that was killed
+  mkdir "$lock" 2>/dev/null || { say "another sync is running"; return 0; }
+  trap "rmdir '$lock' 2>/dev/null" EXIT
+  checkouts | while IFS= read -r dir; do sync_one "$dir"; done
+}
+
+status_all() {
+  local dir current dirty counts
+  checkouts | while IFS= read -r dir; do
+    current="$(git -C "$dir" branch --show-current)"
+    dirty="$(git -C "$dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+    counts="$(git -C "$dir" rev-list --left-right --count '@{u}...HEAD' 2>/dev/null | awk '{print $1" behind, "$2" ahead"}')"
+    printf '%-32s %-24s %-22s %s\n' "${dir/#$HOME/~}" "${current:-(detached)}" "${counts:-no upstream}" \
+      "$([ "$dirty" -gt 0 ] && echo "$dirty uncommitted")"
+  done
+}
+
+install_macos() {
+  local plist="$HOME/Library/LaunchAgents/$LABEL.plist" log="$HOME/Library/Logs/fleet.log"
+  mkdir -p "$(dirname "$plist")" "$(dirname "$log")"
+  cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key><array><string>/bin/bash</string><string>$SELF</string><string>sync</string></array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>StandardOutPath</key><string>$log</string>
+  <key>StandardErrorPath</key><string>$log</string>
+</dict>
+</plist>
+EOF
+  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null
+  launchctl bootstrap "gui/$(id -u)" "$plist" && echo "fleet syncs at login and every 5 minutes; log: ${log/#$HOME/~}"
+}
+
+install_linux() {
+  local dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  mkdir -p "$dir"
+  cat > "$dir/fleet.service" <<EOF
+[Unit]
+Description=Fast-forward this machine's checkouts to GitHub
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash $SELF sync
+EOF
+  cat > "$dir/fleet.timer" <<EOF
+[Unit]
+Description=Sync this machine's checkouts every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl --user daemon-reload && systemctl --user enable --now fleet.timer >/dev/null &&
+    echo "fleet syncs a minute after login and every 5 minutes; log: journalctl --user -u fleet"
+}
+
+uninstall() {
+  case "$(uname)" in
+    Darwin)
+      launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null
+      rm -f "$HOME/Library/LaunchAgents/$LABEL.plist" ;;
+    *)
+      systemctl --user disable --now fleet.timer 2>/dev/null
+      rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/fleet."{service,timer}
+      systemctl --user daemon-reload ;;
+  esac
+  echo "fleet no longer syncs on its own"
+}
+
+case "${1:-}" in
+  sync) sync_all ;;
+  status) status_all ;;
+  install) if [ "$(uname)" = Darwin ]; then install_macos; else install_linux; fi ;;
+  uninstall) uninstall ;;
+  *) sed -n '2,7p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
