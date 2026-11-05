@@ -1,41 +1,31 @@
-# Petal: notes for agents
+@AGENTS.md
 
-Omarchy shell plugin (Quickshell/QML, Hyprland 0.56 Lua config). Reload with
-`omarchy restart shell` (plugin hot reload is unreliable). Logs:
-`quickshell log "$(ls -td /run/user/$UID/quickshell/by-id/*/ | head -1)log.qslog"`.
+# Claude-specific notes
 
-## Changing modes (the user may ask you to)
-Edit `~/.config/petal/modes.json`; Petal reloads it live.
-```
-{ "defaultMode": "<id>", "workspaces": { "<n>": "<id>" },
-  "modes": [ { "id", "name", "icon": "<Nerd Font glyph>", "color": "#rrggbb",
-    "about": "what it's for (Claude sorts activity with this)",
-    "apps": ["<desktop id>", ...],          // dock order
-    "sites": ["<word in tab titles>", ...],
-    "focusDelay": <seconds, 0 = no guard>,
-    "hold": <bool>, "allow": ["<desktop id>"] } ] }
-```
-Desktop ids: file names in /usr/share/applications or ~/.local/share/applications, minus `.desktop`.
+`AGENTS.md` above is shared with Codex, Gemini and opencode and stays provider-neutral. This part holds only what is specific to Claude Code: the Claude app, T3 Code and Petal's own Claude panel all run it on this repo.
 
-## Code map
-- `Dock.qml`: root service: settings, modes, items per workspace, focus guard, notification holding, IPC (`omarchy-shell petal …`).
-- `DockWindow.qml`: one dock per screen (UI, menus, cards).
-- `Brain.qml`: quick JSON calls (`claude -p --model haiku --effort low`) to sort windows/notifications into modes. Chat model/effort/access: settings chatModel/chatEffort/claudeAccess.
-- Usage: `omarchy-agent-usage-claude --limits-only` every 5 min; `percent` is a 0–1 fraction.
-- Holding: no Do Not Disturb; held notifications are removed from Omarchy's screen with `omarchy-shell notifications dismiss <summary>`, allowed ones show natively.
-- `Signals.qml`: `busctl monitor` for notifications and LauncherEntry progress/badges.
-- `AppSearch.qml` ("+" search, apps and folders), `AskBox.qml` (Claude panel UI), `Agent.qml` (Claude Code chat: stream-json, resume, Allow re-runs with per-part `Bash(...)` rules).
+## Instruction files
 
-- `Agent.qml` passes `--mcp-config` for `plugin/mcp/petal-mcp.py` (stdlib-only MCP server) and allows `mcp__petal`; `~/.config/petal/instructions.md` is appended to the system prompt.
-- Settings: the JsonAdapter in `Dock.qml` and `SETTINGS_SCHEMA` in `petal-mcp.py` must list the same keys. New feature or look → add both, so Claude can change it.
-- Releases: bump `plugin/manifest.json` version, tag `vX.Y.Z`, push the tag; `.github/workflows/release.yml` builds the tarball + `latest.json`. `get.sh` installs/updates from it (`petal update`); source checkouts report `dev` and aren't touched.
-- Website: `site/` (static, Vercel project `petal-dock`, root dir `site`, auto-deploys from main); follows Edgetr's design language (edgetr/edgetr AGENTS.md): Geist, solid fills, one static sample, no real screenshots. `/install.sh` redirects to `get.sh` on main.
+- Claude Code loads `AGENTS.md` only through the import above, because this project has a `CLAUDE.md`. Keep every rule that all agents need in `AGENTS.md`.
+- Claude's auto-memory is only for facts about this machine and session history. A rule every agent should follow goes in `AGENTS.md`, or Codex and Gemini threads in T3 will never see it.
 
-## Gotchas
-- User plugins get no shellConfig/appLibrary; read shell.json via FileView, launch with `uwsm-app -- <id>.desktop`.
-- Don't name QML properties `left`/`right`/etc. (FINAL on Item).
-- ColorQuantizer can't read `image://icon`; icon color is sampled with a Canvas.
-- Inline-component handlers in a derived use override the base; use Connections.
-- The right-click settings menu stays tiny (position, auto-hide, focus cards, hold notifications); everything else is changed by asking Claude (MCP).
-- No secrets in the repo; the release workflow only uses the built-in GITHUB_TOKEN.
-- Popups: Glass (hairline border), Adwaita Sans, switches for on/off rows; keep them calm.
+## Petal's own Claude
+
+- Petal's Claude panel is a Claude Code session too (`Agent.qml`): it gets the `mcp__petal` tools and `~/.config/petal/instructions.md`. When a change here touches what that Claude can do (a new setting, tool or mode field), update `SETTINGS_SCHEMA` and the tool descriptions in `petal-mcp.py` so it knows.
+- To change the owner's dock (settings, modes), prefer the `mcp__petal` tools when they are connected; otherwise edit `~/.config/petal/` directly. Either way Petal reloads live.
+- Petal calls Haiku at low effort for sorting and uses the chat model the user picks. Keep new background calls on Haiku; they count toward the user's Claude usage.
+
+## Skills and commands
+
+- `omarchy`: load it before editing anything in `~/.config/hypr/`, `~/.config/omarchy/` or other Omarchy config. Petal's own `~/.config/petal/` is covered by `AGENTS.md`.
+- `/code-review` and `/security-review`: the independent review must come from a reviewer that didn't write the code. Use a fresh subagent, or in T3 a `delegate_task` to another provider for a second model's view.
+- `/simplify`: cleanup pass after a feature lands.
+- `frontend-design` and other generic design skills are subordinate to the design language in `AGENTS.md`. The dock and the marketing site are different systems; on `site/`, follow Edgetr's. When a skill disagrees (gradients, grain, busy copy, real screenshots, fake product demos), follow `AGENTS.md`.
+
+## T3 Code
+
+- T3 tools (`delegate_task`, `link_pull_request`, `t3_thread_launch`, previews) exist only when this runs inside T3, not in the Claude app or Petal's panel. Don't assume them.
+- Call `link_pull_request` for every PR you open or work on.
+- T3 creates its own worktrees under `~/.t3/worktrees/`, separate from Claude Code's `.claude/worktrees/`. Remove a worktree and its local branch once its branch has merged or been pushed to `main`.
+- A worktree is not the installed plugin: only `~/Projects/Petal/plugin` is live. To try a worktree's change on the real dock, merge it into the main checkout first, or say it wasn't run.
+- For parallel work, give each delegated agent its own worktree (`isolation: "worktree"`). It starts from the last local commit, so commit what it needs first.
