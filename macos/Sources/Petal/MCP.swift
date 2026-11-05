@@ -86,7 +86,9 @@ enum MCP {
                     "dock": ["position": dock["position"] ?? "bottom", "autohide": dock["autoHide"] ?? false, "dock": dock["dock"] ?? "petal"],
                     "files": ["settings": settingsFile.path, "modes": modesFile.path,
                               "instructions": folder.appending(path: "instructions.md").path,
-                              "plugin_source": environment["PETAL_SOURCE"] ?? "", "app": environment["PETAL_APP"] ?? Bundle.main.bundlePath]]
+                              "plugin_source": Personal.sourceForAgents ?? environment["PETAL_SOURCE"] ?? "",
+                              "app": environment["PETAL_APP"] ?? Bundle.main.bundlePath],
+                    "personal": ["source": Personal.source.path, "set_up": Personal.exists, "how": Personal.how]]
         case "petal_set_settings":
             let changes = args["settings"] as? [String: Any] ?? [:]
             let unknown = changes.keys.filter { schema[$0] == nil }.sorted()
