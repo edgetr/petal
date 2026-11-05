@@ -9,7 +9,7 @@ final class Welcome {
     private var window: NSWindow?
 
     func show() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 720),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 800),
                               styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
@@ -40,7 +40,7 @@ struct WelcomeView: View {
                     .shadow(color: .black.opacity(0.35), radius: 20, y: 10)
                 VStack(spacing: 6) {
                     Text("Meet Petal").font(.system(size: 32, weight: .bold))
-                    Text("A dock with a focus mode for every Desktop, and Claude built in.")
+                    Text("A dock with a focus mode for every Desktop, and AI built in if you want it.")
                         .font(.system(size: 14)).foregroundStyle(.secondary)
                 }
                 GlassEffectContainer(spacing: 12) {
@@ -55,7 +55,14 @@ struct WelcomeView: View {
                                 }
                             }
                         }
-                        ClaudeSetupRow().padding(14).frame(width: 520).glassEffect(.regular, in: .rect(cornerRadius: 20))
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text("AI").font(.system(size: 14, weight: .semibold))
+                                Text("Optional. Without it, Petal is still a whole dock.").font(.system(size: 12)).foregroundStyle(.secondary)
+                            }
+                            ProviderList()
+                        }
+                        .padding(14).frame(width: 520).glassEffect(.regular, in: .rect(cornerRadius: 20))
                         step(symbol: "macwindow.on.rectangle", title: "Let Petal see your windows",
                              detail: "For window lists, badges and focus cards. macOS asks once.") {
                             let _ = tick
@@ -101,8 +108,14 @@ struct WelcomeView: View {
             }
             .padding(36)
         }
-        .frame(width: 640, height: 720)
+        .frame(width: 640, height: 800)
         .onReceive(timer) { _ in tick += 1 }
+        .task {
+            // Start with the AIs already on this Mac switched on, and none otherwise: it's optional.
+            for provider in Provider.allCases { await app.lookFor(provider) }
+            app.config.set("aiProviders", Provider.allCases.filter { app.paths[$0] != nil }.map(\.rawValue))
+            app.aiSetup.refreshAll()
+        }
     }
 
     private func step<Trailing: View, Extra: View>(symbol: String, title: String, detail: String,
@@ -125,44 +138,71 @@ struct WelcomeView: View {
     }
 }
 
-/// Claude's state, and the one thing to do next: install it, sign in, or nothing.
-struct ClaudeSetupRow: View {
+/// One AI app: whether Petal uses it, its state, and the one thing to do next (install it, sign in, or nothing).
+struct ProviderRow: View {
     @Environment(PetalApp.self) private var app
+    let provider: Provider
+    @Binding var on: Bool
 
     var body: some View {
-        let setup = app.claudeSetup
+        let setup = app.aiSetup
+        let state = setup.state(provider)
         HStack(spacing: 14) {
-            ClaudeMark().frame(width: 22, height: 22).frame(width: 40, height: 40).glassEffect(.regular, in: .circle)
+            ProviderMark(provider: provider).frame(width: 20, height: 20).frame(width: 40, height: 40).glassEffect(.regular, in: .circle)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Claude").font(.system(size: 14, weight: .semibold))
-                Text(detail(setup.state)).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(provider.name).font(.system(size: 14, weight: .semibold))
+                Text(on ? detail(state) : provider.plan).font(.system(size: 12)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
-            switch setup.state {
-            case .checking, .installing, .signingIn:
-                ProgressView().controlSize(.small)
-            case .missing:
-                Button("Install") { setup.install() }.buttonStyle(.glassProminent).tint(SettingsSection.claude.tint)
-            case .signedOut:
-                Button("Sign in…") { setup.signIn() }.buttonStyle(.glassProminent).tint(SettingsSection.claude.tint)
-            case .failed:
-                Button("Try again") { setup.refresh() }.buttonStyle(.glass)
-            case .ready:
-                Label("Ready", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 12, weight: .medium))
+            if on {
+                switch state {
+                case .checking, .installing, .signingIn:
+                    ProgressView().controlSize(.small)
+                case .missing:
+                    Button("Install") { setup.install(provider) }.buttonStyle(.glassProminent).tint(SettingsSection.claude.tint)
+                case .signedOut:
+                    Button("Sign in…") { setup.signIn(provider) }.buttonStyle(.glassProminent).tint(SettingsSection.claude.tint)
+                case .failed:
+                    Button("Try again") { setup.refresh(provider) }.buttonStyle(.glass)
+                case .ready:
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                }
             }
+            Toggle("", isOn: $on).toggleStyle(.switch).labelsHidden().controlSize(.small)
         }
     }
 
-    private func detail(_ state: ClaudeSetup.State) -> String {
+    private func detail(_ state: AISetup.State) -> String {
         switch state {
-        case .checking: "Looking for Claude…"
-        case .missing: "Petal uses your own Claude account. It installs Claude Code, the app it talks to, for you."
-        case .installing: "Installing Claude Code…"
-        case .signedOut: "Sign in with your Claude account. It counts toward your Claude plan."
+        case .checking: "Looking for \(provider.appName)…"
+        case .missing: "Petal installs \(provider.appName) for you. \(provider.plan)"
+        case .installing: "Installing \(provider.appName)…"
+        case .signedOut: "Sign in with your own account. \(provider.plan)"
         case .signingIn: "Finish signing in in your browser."
-        case .ready(let email): email.isEmpty ? "Signed in." : "Signed in as \(email)."
+        case .ready(let email): email.isEmpty ? "Ready." : "Signed in as \(email)."
         case .failed(let text): text
+        }
+    }
+}
+
+/// The AI apps as switches, saved in aiProviders; none is fine.
+struct ProviderList: View {
+    @Environment(PetalApp.self) private var app
+
+    var body: some View {
+        VStack(spacing: 12) {
+            ForEach(Provider.allCases) { provider in
+                ProviderRow(provider: provider, on: Binding(
+                    get: { app.providers.contains(provider) },
+                    set: { on in
+                        var chosen = app.providers.filter { $0 != provider }
+                        if on { chosen.append(provider) }
+                        app.config.set("aiProviders", Provider.allCases.filter(chosen.contains).map(\.rawValue))
+                        if on { app.aiSetup.refresh(provider) }
+                        app.docks.refresh()
+                    }))
+            }
         }
     }
 }

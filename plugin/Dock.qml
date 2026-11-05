@@ -112,6 +112,13 @@ Item {
       property string chatModel: "sonnet"
       property string chatEffort: "medium"
       property string claudeAccess: "auto"
+      // Which AI apps Petal uses, and which one the chat uses ("claude", "codex"). Petal for macOS reads these;
+      // on Omarchy only Claude is wired up so far.
+      property list<string> aiProviders: ["claude"]
+      property string chatProvider: "claude"
+      property string codexModel: ""
+      property string codexEffort: "medium"
+      property string codexPath: ""
     }
   }
 

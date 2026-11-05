@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The settings window: everything Petal can change, on Liquid Glass over the person's own wallpaper, blurred.
 /// On Omarchy the right-click menu stays tiny and the rest is asking Claude; the Mac adds this window, and its
-/// first field is still "Ask Claude".
+/// first field still asks the AI (when there is one).
 @MainActor
 final class SettingsWindow {
     private var window: NSWindow?
@@ -37,7 +37,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .dock: "Dock"
         case .modes: "Modes"
-        case .claude: "Claude"
+        case .claude: "AI"
         case .focus: "Focus"
         case .apps: "Apps & Extras"
         case .look: "Look"
@@ -50,7 +50,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .dock: "dock.rectangle"
         case .modes: "circle.hexagongrid.fill"
-        case .claude: "sparkle"
+        case .claude: "sparkles"
         case .focus: "scope"
         case .apps: "square.grid.2x2.fill"
         case .look: "paintbrush.pointed.fill"
@@ -76,7 +76,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .dock: "Choose your dock, and where it sits."
         case .modes: "Each Desktop has its own mode, with its own apps."
-        case .claude: "The Claude button: chat, model and usage."
+        case .claude: "Claude, Codex, or no AI at all."
         case .focus: "Gentle cards when you drift from your mode."
         case .apps: "What the dock shows besides your apps."
         case .look: "Size, motion and color."
@@ -120,9 +120,10 @@ struct SettingsView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 4) {
+            if let provider = app.chatProvider {
             HStack(spacing: 8) {
                 Image(systemName: "sparkle").foregroundStyle(SettingsSection.claude.tint)
-                TextField("Ask Claude to change anything…", text: $ask)
+                TextField("Ask \(provider.name) to change anything…", text: $ask)
                     .textFieldStyle(.plain)
                     .onSubmit {
                         let text = ask.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -134,6 +135,7 @@ struct SettingsView: View {
             .padding(10)
             .glassEffect(.regular.interactive(), in: .capsule)
             .padding(.bottom, 10)
+            }
 
             ForEach(SettingsSection.allCases) { section in
                 Button {
@@ -641,52 +643,67 @@ struct ClaudeSettings: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
-        Card { ClaudeSetupRow() }
-            .onAppear { app.claudeSetup.refresh() }
-        Card {
-            HStack(spacing: 18) {
-                UsageRing(usage: app.usage, size: 64)
-                VStack(alignment: .leading, spacing: 6) {
-                    if app.usage.limits.isEmpty {
-                        Text(app.usage.help.isEmpty ? "Checking your Claude usage…" : app.usage.help).foregroundStyle(.secondary)
-                    }
-                    ForEach(app.usage.limits, id: \.label) { limit in
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack {
-                                Text(limit.label).font(.system(size: 12, weight: .medium))
-                                Spacer()
-                                Text("\(Int(limit.percent * 100))%").font(.system(size: 12).monospacedDigit())
-                                if let reset = limit.resetsAt {
-                                    Text("resets \(reset, style: .relative)").font(.system(size: 11)).foregroundStyle(.secondary)
+        Card(title: "Your AI", footer: "Each is your own app and account. Choose one, both, or neither: without AI, Petal is still a whole dock.") {
+            ProviderList()
+        }
+        .onAppear { app.aiSetup.refreshAll() }
+        if let provider = app.chatProvider {
+            Card {
+                HStack(spacing: 18) {
+                    UsageRing(usage: app.usage, size: 64)
+                    VStack(alignment: .leading, spacing: 6) {
+                        if app.usage.limits.isEmpty {
+                            Text(app.usage.help.isEmpty ? "Checking your \(provider.name) usage…" : app.usage.help).foregroundStyle(.secondary)
+                        }
+                        ForEach(app.usage.limits, id: \.label) { limit in
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack {
+                                    Text(limit.label).font(.system(size: 12, weight: .medium))
+                                    Spacer()
+                                    Text("\(Int(limit.percent * 100))%").font(.system(size: 12).monospacedDigit())
+                                    if let reset = limit.resetsAt {
+                                        Text("resets \(reset, style: .relative)").font(.system(size: 11)).foregroundStyle(.secondary)
+                                    }
                                 }
+                                ProgressView(value: limit.percent).tint(UsageRing.color(limit.percent))
                             }
-                            ProgressView(value: limit.percent).tint(UsageRing.color(limit.percent))
                         }
                     }
                 }
             }
-        }
-        Card(title: "Chat") {
-            Picker("Model", selection: Binding(get: { app.config.string("chatModel") }, set: { app.config.set("chatModel", $0) })) {
-                Text("Haiku").tag("haiku"); Text("Sonnet").tag("sonnet"); Text("Opus").tag("opus"); Text("Fable").tag("fable")
+            Card(title: "Chat") {
+                if app.providers.count > 1 {
+                    Picker("Chat with", selection: Binding(get: { provider.rawValue }, set: {
+                        app.config.set("chatProvider", $0)
+                        Task { await app.usage.refresh() }
+                    })) {
+                        ForEach(app.providers) { Text($0.name).tag($0.rawValue) }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                if provider.models.count > 1 {
+                    Picker("Model", selection: Binding(get: { app.config.string(provider.modelSetting) }, set: { app.config.set(provider.modelSetting, $0) })) {
+                        ForEach(provider.models, id: \.0) { Text($0.1).tag($0.0) }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                Picker("Effort", selection: Binding(get: { app.config.string(provider.effortSetting) }, set: { app.config.set(provider.effortSetting, $0) })) {
+                    ForEach(provider.efforts, id: \.self) { Text($0.capitalized).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Picker("Access", selection: Binding(get: { app.config.string("claudeAccess") }, set: { app.config.set("claudeAccess", $0) })) {
+                    Text(provider == .claude ? "Ask before risky steps" : "Safe steps only").tag("auto")
+                    Text("Full access").tag("full")
+                }
+                Button("Open \(provider.name)") { app.claude.open(asking: nil) }.buttonStyle(.glass)
             }
-            .pickerStyle(.segmented)
-            Picker("Effort", selection: Binding(get: { app.config.string("chatEffort") }, set: { app.config.set("chatEffort", $0) })) {
-                Text("Low").tag("low"); Text("Medium").tag("medium"); Text("High").tag("high"); Text("Extra").tag("xhigh"); Text("Max").tag("max")
+            Card(title: "In the background") {
+                SettingToggle(key: "claudeUsage", title: "Usage ring", detail: "Around the \(provider.name) button, every 5 minutes.")
+                SettingToggle(key: "ai", title: "Sort new apps and sites", detail: "\(provider.name) decides which mode something new belongs to.")
             }
-            .pickerStyle(.segmented)
-            Picker("Access", selection: Binding(get: { app.config.string("claudeAccess") }, set: { app.config.set("claudeAccess", $0) })) {
-                Text("Ask before risky steps").tag("auto")
-                Text("Full access").tag("full")
+            Card(title: "Your notes for \(provider.name)", footer: "\(provider.name) reads these every time you ask it something.") {
+                InstructionsEditor()
             }
-            Button("Open Claude") { app.claude.open(asking: nil) }.buttonStyle(.glass)
-        }
-        Card(title: "Claude in the background") {
-            SettingToggle(key: "claudeUsage", title: "Usage ring", detail: "Around the Claude button, every 5 minutes.")
-            SettingToggle(key: "ai", title: "Sort new apps and sites", detail: "Claude Haiku decides which mode something new belongs to.")
-        }
-        Card(title: "Your notes for Claude", footer: "Claude reads these every time you ask it something.") {
-            InstructionsEditor()
         }
     }
 }

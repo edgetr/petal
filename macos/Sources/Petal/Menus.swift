@@ -19,11 +19,13 @@ enum Menus {
         menu.addItem(toggle("Auto-hide", config.autoHide) { config.setDock("autoHide", !config.autoHide) })
         menu.addItem(toggle("Focus cards", config.bool("focusGuard")) { config.set("focusGuard", !config.bool("focusGuard")) })
         menu.addItem(.separator())
-        menu.addItem(ClosureMenuItem(title: "Anything else? Ask Claude…") { app.claude.open(asking: nil) })
-        let hint = NSMenuItem(title: "Like “stop the icons bouncing” or “turn off the app glow”.", action: nil, keyEquivalent: "")
-        hint.isEnabled = false
-        menu.addItem(hint)
-        menu.addItem(.separator())
+        if let provider = app.chatProvider {
+            menu.addItem(ClosureMenuItem(title: "Anything else? Ask \(provider.name)…") { app.claude.open(asking: nil) })
+            let hint = NSMenuItem(title: "Like “stop the icons bouncing” or “turn off the app glow”.", action: nil, keyEquivalent: "")
+            hint.isEnabled = false
+            menu.addItem(hint)
+            menu.addItem(.separator())
+        }
         menu.addItem(ClosureMenuItem(title: "Petal Settings…") { app.settings.show() })
         menu.addItem(ClosureMenuItem(title: "Use macOS’s Dock") { app.useDock("macos") })
         menu.addItem(ClosureMenuItem(title: "Quit Petal") { NSApp.terminate(nil) })
@@ -110,7 +112,9 @@ enum Menus {
             }
         }
         menu.addItem(.separator())
-        menu.addItem(ClosureMenuItem(title: "Change with Claude…") { app.claude.open(asking: "Change my \(mode.name) mode: ", send: false) })
+        if let provider = app.chatProvider {
+            menu.addItem(ClosureMenuItem(title: "Change with \(provider.name)…") { app.claude.open(asking: "Change my \(mode.name) mode: ", send: false) })
+        }
         menu.addItem(ClosureMenuItem(title: "Edit in Settings…") { app.settings.show(.modes) })
         if config.modes.count > 1 {
             menu.addItem(ClosureMenuItem(title: "Delete Mode…") {

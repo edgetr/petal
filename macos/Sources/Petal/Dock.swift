@@ -504,7 +504,7 @@ struct DockView: View {
         GlassEffectContainer {
             layout {
                 if modesOn { ModeSwitcher(dock: dock, size: icon * 0.95).padding(dock.vertical ? .vertical : .horizontal, 6) }
-                if config.bool("ai") || config.bool("claudeUsage") {
+                if !app.providers.isEmpty && (config.bool("ai") || config.bool("claudeUsage")) {
                     ClaudeButton(dock: dock, size: icon * 0.95).frame(width: slot, height: slot)
                 }
                 if modesOn { Separator(vertical: dock.vertical, slot: slot) }
@@ -705,7 +705,8 @@ struct ClaudeButton: View {
     var body: some View {
         ZStack {
             Circle().fill(.white.opacity(hovering ? 0.16 : 0.07)).overlay(Circle().strokeBorder(.white.opacity(0.14)))
-            ClaudeMark().frame(width: size * 0.56, height: size * 0.56).scaleEffect(hovering ? 1.08 : 1)
+            ProviderMark(provider: app.chatProvider).foregroundStyle(.white.opacity(0.9))
+                .frame(width: size * 0.56, height: size * 0.56).scaleEffect(hovering ? 1.08 : 1)
             if app.config.bool("claudeUsage") { UsageRing(usage: app.usage, size: size, line: 2.5, track: false) }
         }
         .frame(width: size, height: size)

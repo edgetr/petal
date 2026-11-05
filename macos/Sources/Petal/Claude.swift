@@ -2,9 +2,10 @@ import AppKit
 import Observation
 import SwiftUI
 
-/// The Claude Code chat (Agent.qml): the person's own `claude` CLI and plan, one process per turn, resumed across
-/// turns, with Petal's MCP tools. Steps Claude takes show as one-line steps; permission denials become an "Allow"
-/// card that re-runs with per-part Bash(...) rules.
+/// The chat (Agent.qml): the person's own Claude Code or Codex, one process per turn, resumed across turns, with
+/// Petal's tools (Petal itself, `Petal --mcp`). Steps the AI takes show as one-line steps. Claude's permission
+/// denials become an "Allow" card that re-runs with per-part Bash(...) rules; Codex can't ask mid-turn, so its
+/// sandbox (or Full access) decides.
 @MainActor @Observable
 final class Agent {
     enum Kind { case user, claude, step, ask, error }
@@ -15,11 +16,13 @@ final class Agent {
         init(kind: Kind, text: String) { self.kind = kind; self.text = text }
     }
     struct Denial: Equatable { let tool: String; let label: String; let rules: [String] }
+    enum Event { case session(String), text(String), step(String), denials([Denial]), error(String), finished }
 
     private(set) var messages: [Message] = []
     private(set) var running = false
     private(set) var pendingAsk: [Denial] = []
     @ObservationIgnored private var sessionID: String?
+    @ObservationIgnored private var sessionProvider: Provider?
     @ObservationIgnored private var allowed: [String] = []
     @ObservationIgnored private var process: Process?
     @ObservationIgnored private var errorText = ""
@@ -66,22 +69,23 @@ final class Agent {
     }
 
     private func run(_ prompt: String) {
-        guard let claude = app.claudePath else {
-            messages.append(Message(kind: .error, text: "Petal couldn't find Claude Code. Install it from claude.com/claude-code, then try again."))
+        guard let provider = app.chatProvider else {
+            messages.append(Message(kind: .error, text: "Choose an AI in Petal's settings first."))
             return
         }
+        guard let path = app.paths[provider] else {
+            messages.append(Message(kind: .error, text: "Petal couldn't find \(provider.appName). Set it up in Petal's settings, under AI."))
+            return
+        }
+        if sessionProvider != provider { sessionID = nil; allowed = []; sessionProvider = provider }
         let config = app.config
-        var arguments = ["-p", "--model", config.string("chatModel"), "--effort", config.string("chatEffort"),
-                         "--output-format", "stream-json", "--verbose",
-                         "--permission-mode", config.string("claudeAccess") == "full" ? "bypassPermissions" : "auto",
-                         "--append-system-prompt", systemPrompt]
-        arguments += ["--mcp-config", mcpConfig]
-        if let sessionID { arguments += ["--resume", sessionID] }
-        arguments += ["--allowedTools", "mcp__petal"] + allowed
+        let chat = Provider.Chat(model: config.string(provider.modelSetting), effort: config.string(provider.effortSetting),
+                                 fullAccess: config.string("claudeAccess") == "full", instructions: instructions(provider),
+                                 tools: Bundle.main.executablePath ?? "", session: sessionID, allowed: allowed)
 
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: claude)
-        process.arguments = arguments
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = provider.chatArguments(chat)
         process.environment = app.childEnvironment
         process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         let input = Pipe(), output = Pipe(), error = Pipe()
@@ -98,7 +102,7 @@ final class Agent {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard self.runID == id else { return }
-                    for line in lines { self.handle(line) }
+                    for line in lines { for event in provider.events(line) { self.apply(event) } }
                 }
             }
         }
@@ -122,8 +126,9 @@ final class Agent {
                     self.running = false
                     self.process = nil
                     let status = finished.terminationStatus
-                    if status != 0 && status != 15 && !self.errorText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        self.messages.append(Message(kind: .error, text: String(self.errorText.prefix(300))))
+                    let detail = self.errorText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if status != 0 && status != 15 && !detail.isEmpty {
+                        self.messages.append(Message(kind: .error, text: String(detail.suffix(300))))
                     }
                 }
             }
@@ -135,49 +140,27 @@ final class Agent {
             input.fileHandleForWriting.write(Data(prompt.utf8))
             try? input.fileHandleForWriting.close()
         } catch {
-            messages.append(Message(kind: .error, text: "Couldn't start Claude Code: \(error.localizedDescription)"))
+            messages.append(Message(kind: .error, text: "Couldn't start \(provider.appName): \(error.localizedDescription)"))
         }
     }
 
-    private func handle(_ line: String) {
-        guard let event = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return }
-        if let id = event["session_id"] as? String { sessionID = id }
-        switch event["type"] as? String {
-        case "assistant":
-            let content = (event["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
-            for part in content {
-                if part["type"] as? String == "text", let text = part["text"] as? String,
-                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    messages.append(Message(kind: .claude, text: text.trimmingCharacters(in: .whitespacesAndNewlines)))
-                } else if part["type"] as? String == "tool_use", let name = part["name"] as? String, name != "ToolSearch" {
-                    messages.append(Message(kind: .step, text: Self.describe(name, part["input"] as? [String: Any] ?? [:])))
-                }
-            }
-        case "result":
-            var denials: [Denial] = []
-            for denial in event["permission_denials"] as? [[String: Any]] ?? [] {
-                let tool = denial["tool_name"] as? String ?? ""
-                let input = denial["tool_input"] as? [String: Any] ?? [:]
-                let label = tool == "Bash" ? (input["command"] as? String ?? "") : Self.describe(tool, input)
-                guard !denials.contains(where: { $0.label == label }) else { continue }
-                let rules = tool == "Bash" ? Self.bashRules(input["command"] as? String ?? "") : [tool]
-                denials.append(Denial(tool: tool, label: label, rules: rules))
-            }
-            if !denials.isEmpty {
-                pendingAsk = denials
-                messages.append(Message(kind: .ask, text: denials.map(\.label).joined(separator: "\n")))
-            }
-            if event["is_error"] as? Bool == true {
-                messages.append(Message(kind: .error, text: event["result"] as? String ?? "Something went wrong"))
-            }
-            Task { await app.usage.refresh() }
-        default:
-            break
+    private func apply(_ event: Event) {
+        switch event {
+        case .session(let id): sessionID = id
+        case .text(let text):
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { messages.append(Message(kind: .claude, text: trimmed)) }
+        case .step(let text): messages.append(Message(kind: .step, text: text))
+        case .denials(let denials):
+            pendingAsk = denials
+            messages.append(Message(kind: .ask, text: denials.map(\.label).joined(separator: "\n")))
+        case .error(let text): messages.append(Message(kind: .error, text: text))
+        case .finished: Task { await app.usage.refresh() }
         }
     }
 
     /// One rule per part of a shell command, so allowing `a && b` allows a and b, not anything else.
-    static func bashRules(_ command: String) -> [String] {
+    nonisolated static func bashRules(_ command: String) -> [String] {
         var parts = [command]
         for separator in ["||", "&&", "|", ";", "\n"] {
             parts = parts.flatMap { $0.components(separatedBy: separator) }
@@ -185,7 +168,7 @@ final class Agent {
         return parts.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.map { "Bash(\($0))" }
     }
 
-    static func describe(_ name: String, _ input: [String: Any]) -> String {
+    nonisolated static func describe(_ name: String, _ input: [String: Any]) -> String {
         func home(_ path: Any?) -> String {
             let text = path as? String ?? ""
             return text.hasPrefix(NSHomeDirectory()) ? "~" + text.dropFirst(NSHomeDirectory().count) : text
@@ -215,9 +198,9 @@ final class Agent {
         }
     }
 
-    private var systemPrompt: String {
+    private func instructions(_ provider: Provider) -> String {
         var prompt = """
-        You are Claude, running inside Petal, the user's dock on macOS. Your replies show in a small panel above the dock: be brief and friendly, short paragraphs, no big headings. You work in the user's home folder.
+        You are \(provider.name), running inside Petal, the user's dock on macOS. Your replies show in a small panel above the dock: be brief and friendly, short paragraphs, no big headings. You work in the user's home folder.
 
         Everything about the dock is customizable through you. Use the petal MCP tools: call petal_get_state first, then petal_set_settings (appearance: dockColor, iconSize, accentColor, …; feature switches: bounce, badges, previews, …), petal_set_dock (position, auto-hide), petal_save_mode / petal_delete_mode (focus modes and their apps; apps are bundle identifiers, get them from petal_list_apps; mode icons are SF Symbol names), petal_switch_mode (puts the current Desktop in a mode). Every Desktop has its own mode. Changes apply instantly. If a request can't be done with settings and Petal's source is on this Mac (path in petal_get_state), you may edit its Swift source, rebuild it with macos/build.sh, copy macos/build/Petal.app over the running app (its path is files.app in petal_get_state), and call petal_reload; mention that a Petal update could replace source edits. You can also help with anything else on the Mac: apps, files, macOS settings (defaults, AppleScript, the shell). If something needs the user's approval, say in one line what it would do; they can allow it from the panel.
         """
@@ -226,12 +209,6 @@ final class Agent {
         return prompt
     }
 
-    /// Petal's tools are Petal itself (`Petal --mcp`), so nothing else needs installing.
-    private var mcpConfig: String {
-        let object: [String: Any] = ["mcpServers": ["petal": ["command": Bundle.main.executablePath ?? "", "args": ["--mcp"]]]]
-        let data = (try? JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])) ?? Data()
-        return String(decoding: data, as: UTF8.self)
-    }
 }
 
 /// Collects a process's output and hands back whole lines (the pipe's reader and the exit handler both feed it).
@@ -377,10 +354,10 @@ struct ClaudePanelView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            ClaudeMark().frame(width: 20, height: 20)
+            ProviderMark(provider: app.chatProvider).frame(width: 20, height: 20)
                 .rotationEffect(.degrees(agent.running ? 360 : 0))
                 .animation(agent.running ? .linear(duration: 2.4).repeatForever(autoreverses: false) : .default, value: agent.running)
-            Text("Claude").font(.system(size: 15, weight: .semibold))
+            Text(provider?.name ?? "AI").font(.system(size: 15, weight: .semibold))
             if let worst = app.usage.worst {
                 Text("\(Int(((1 - worst.percent) * 100).rounded()))% left" + (worst.resetsAt.map { " · resets in " + PetalApp.until($0) } ?? ""))
                     .font(.system(size: 12))
@@ -390,7 +367,7 @@ struct ClaudePanelView: View {
             Button {
                 panel.optionsOpen.toggle()
             } label: {
-                Text("\(app.config.string("chatModel").capitalized) · \(app.config.string("chatEffort"))  \(panel.optionsOpen ? "⌃" : "⌄")")
+                Text("\(modelName) · \(provider.map { app.config.string($0.effortSetting) } ?? "")  \(panel.optionsOpen ? "⌃" : "⌄")")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
@@ -402,17 +379,40 @@ struct ClaudePanelView: View {
         .frame(height: 28)
     }
 
-    private var options: some View {
+    private var provider: Provider? { app.chatProvider }
+
+    private var modelName: String {
+        guard let provider else { return "" }
+        let model = app.config.string(provider.modelSetting)
+        return provider.models.first { $0.0 == model }?.1 ?? (model.isEmpty ? "Default" : model)
+    }
+
+    @ViewBuilder private var options: some View {
+        if let provider {
         VStack(alignment: .leading, spacing: 10) {
-            OptionRow(title: "Model") {
-                Picker("", selection: Binding(get: { app.config.string("chatModel") }, set: { app.config.set("chatModel", $0) })) {
-                    Text("Haiku").tag("haiku"); Text("Sonnet").tag("sonnet"); Text("Opus").tag("opus"); Text("Fable").tag("fable")
+            if app.providers.count > 1 {
+                OptionRow(title: "Chat with") {
+                    Picker("", selection: Binding(get: { provider.rawValue }, set: {
+                        app.config.set("chatProvider", $0)
+                        agent.reset()
+                        Task { await app.usage.refresh() }
+                    })) {
+                        ForEach(app.providers) { Text($0.name).tag($0.rawValue) }
+                    }
+                    .pickerStyle(.segmented).labelsHidden()
                 }
-                .pickerStyle(.segmented).labelsHidden()
+            }
+            if provider.models.count > 1 {
+                OptionRow(title: "Model") {
+                    Picker("", selection: Binding(get: { app.config.string(provider.modelSetting) }, set: { app.config.set(provider.modelSetting, $0) })) {
+                        ForEach(provider.models, id: \.0) { Text($0.1).tag($0.0) }
+                    }
+                    .pickerStyle(.segmented).labelsHidden()
+                }
             }
             OptionRow(title: "Effort") {
-                Picker("", selection: Binding(get: { app.config.string("chatEffort") }, set: { app.config.set("chatEffort", $0) })) {
-                    ForEach(["low", "medium", "high", "xhigh", "max"], id: \.self) { Text($0).tag($0) }
+                Picker("", selection: Binding(get: { app.config.string(provider.effortSetting) }, set: { app.config.set(provider.effortSetting, $0) })) {
+                    ForEach(provider.efforts, id: \.self) { Text($0).tag($0) }
                 }
                 .pickerStyle(.segmented).labelsHidden()
             }
@@ -429,11 +429,12 @@ struct ClaudePanelView: View {
         }
         .padding(12)
         .background(.white.opacity(0.05), in: .rect(cornerRadius: 14))
+        }
     }
 
     private var empty: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Ask anything. Claude can change your dock and modes, your Mac's settings, or your files.")
+            Text("Ask anything. \(provider?.name ?? "It") can change your dock and modes, your Mac's settings, or your files.")
                 .font(.system(size: 13)).foregroundStyle(.secondary).padding(.bottom, 6)
             ForEach(Self.suggestions, id: \.self) { suggestion in
                 SuggestionRow(text: suggestion) { agent.send(suggestion) }
@@ -466,7 +467,7 @@ struct ClaudePanelView: View {
     private var input: some View {
         @Bindable var panel = panel
         return HStack(spacing: 8) {
-            TextField(agent.messages.isEmpty ? "Ask Claude…" : "Reply…", text: $panel.draft)
+            TextField(agent.messages.isEmpty ? "Ask \(provider?.name ?? "AI")…" : "Reply…", text: $panel.draft)
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
                 .focused($focused)

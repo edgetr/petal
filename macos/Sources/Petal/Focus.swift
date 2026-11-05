@@ -138,14 +138,18 @@ final class FocusGuard {
     }
 }
 
-/// Quick JSON calls to Claude Haiku that sort activity into modes (Brain.qml): one at a time, answers cached.
+/// Quick JSON calls that sort activity into modes (Brain.qml), to the chosen AI's quick, cheap setting (Claude
+/// Haiku; Codex at low effort): one at a time, answers cached.
 @MainActor
 final class Brain {
     private var queue: [(prompt: String, key: String, done: ([String: Any]?) -> Void)] = []
     private var busy = false
     private var cache: [String: [String: Any]] = [:]
 
-    var enabled: Bool { PetalApp.shared.config.bool("ai") && PetalApp.shared.claudePath != nil }
+    var enabled: Bool {
+        let app = PetalApp.shared
+        return app.config.bool("ai") && app.chatProvider.flatMap { app.paths[$0] } != nil
+    }
 
     func classifyWindow(app: String, title: String, done: @escaping ([String: Any]?) -> Void) {
         let prompt = """
@@ -173,15 +177,14 @@ final class Brain {
     }
 
     private func next() {
-        guard !busy, !queue.isEmpty, let claude = PetalApp.shared.claudePath else { return }
+        guard !busy, !queue.isEmpty, let provider = PetalApp.shared.chatProvider, let path = PetalApp.shared.paths[provider] else { return }
         busy = true
         let job = queue.removeFirst()
         let environment = PetalApp.shared.childEnvironment
         DispatchQueue.global().async {
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: claude)
-            process.arguments = ["-p", "--model", "haiku", "--effort", "low", "--no-session-persistence", "--setting-sources", "",
-                                 "--strict-mcp-config", "--tools", ""]
+            process.executableURL = URL(fileURLWithPath: path)
+            process.arguments = provider.quickArguments
             process.environment = environment
             process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
             let input = Pipe(), output = Pipe()
@@ -194,7 +197,7 @@ final class Brain {
                 try? input.fileHandleForWriting.close()
                 let data = output.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
-                let text = String(decoding: data, as: UTF8.self)
+                let text = provider.quickReply(String(decoding: data, as: UTF8.self))
                 if process.terminationStatus == 0, let start = text.firstIndex(of: "{"), let end = text.lastIndex(of: "}") {
                     answer = try? JSONSerialization.jsonObject(with: Data(text[start...end].utf8)) as? [String: Any]
                 }

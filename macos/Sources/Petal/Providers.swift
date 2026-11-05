@@ -1,0 +1,204 @@
+import AppKit
+import SwiftUI
+
+/// The AI apps Petal can talk to, each the person's own local install and account: Claude Code and Codex, as T3
+/// Code uses them. Everything that differs between them lives here; a new one (Grok, and so on) is a new case.
+enum Provider: String, CaseIterable, Identifiable, Sendable {
+    case claude, codex
+
+    var id: String { rawValue }
+    var name: String { self == .claude ? "Claude" : "Codex" }
+    var binary: String { rawValue }
+    var pathSetting: String { self == .claude ? "claudePath" : "codexPath" }
+    var modelSetting: String { self == .claude ? "chatModel" : "codexModel" }
+    var effortSetting: String { self == .claude ? "chatEffort" : "codexEffort" }
+    var plan: String { self == .claude ? "Uses your own Claude plan." : "Uses your own ChatGPT plan." }
+    var appName: String { self == .claude ? "Claude Code" : "Codex" }
+
+    /// The maker's own installer, which needs no developer tools.
+    var installer: String {
+        switch self {
+        case .claude: "curl -fsSL https://claude.ai/install.sh | bash"
+        case .codex: "curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=true sh"
+        }
+    }
+
+    /// Signing in finishes in the browser, with the person's own account.
+    var signInArguments: [String] { self == .claude ? ["auth", "login", "--claudeai"] : ["login"] }
+    var statusArguments: [String] { self == .claude ? ["auth", "status", "--json"] : ["login", "status"] }
+
+    /// Who is signed in, from the status command's output: nil when no one is.
+    func signedIn(status: Int32, output: String) -> String? {
+        switch self {
+        case .claude:
+            let info = (try? JSONSerialization.jsonObject(with: Data(output.utf8))) as? [String: Any]
+            return info?["loggedIn"] as? Bool == true ? (info?["email"] as? String ?? "") : nil
+        case .codex:
+            return status == 0 && output.localizedCaseInsensitiveContains("logged in") ? "" : nil
+        }
+    }
+
+    var models: [(String, String)] {
+        switch self {
+        case .claude: [("haiku", "Haiku"), ("sonnet", "Sonnet"), ("opus", "Opus"), ("fable", "Fable")]
+        case .codex: [("", "Default")]
+        }
+    }
+
+    var efforts: [String] {
+        self == .claude ? ["low", "medium", "high", "xhigh", "max"] : ["low", "medium", "high", "xhigh"]
+    }
+
+    /// The places its installer puts it, after the person's own shell.
+    func knownPaths(home: String) -> [String] {
+        switch self {
+        case .claude: ["\(home)/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude", "\(home)/.claude/local/claude"]
+        case .codex: ["\(home)/.local/bin/codex", "/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
+        }
+    }
+
+    // MARK: Chat
+
+    struct Chat {
+        let model: String
+        let effort: String
+        let fullAccess: Bool
+        let instructions: String
+        let tools: String          // Petal itself, with --mcp
+        let session: String?
+        let allowed: [String]
+    }
+
+    /// One turn of the chat; the prompt goes on stdin.
+    func chatArguments(_ chat: Chat) -> [String] {
+        switch self {
+        case .claude:
+            let mcp: [String: Any] = ["mcpServers": ["petal": ["command": chat.tools, "args": ["--mcp"]]]]
+            let config = (try? JSONSerialization.data(withJSONObject: mcp, options: [.withoutEscapingSlashes])).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+            var arguments = ["-p", "--model", chat.model.isEmpty ? "sonnet" : chat.model, "--effort", chat.effort,
+                             "--output-format", "stream-json", "--verbose",
+                             "--permission-mode", chat.fullAccess ? "bypassPermissions" : "auto",
+                             "--append-system-prompt", chat.instructions, "--mcp-config", config]
+            if let session = chat.session { arguments += ["--resume", session] }
+            return arguments + ["--allowedTools", "mcp__petal"] + chat.allowed
+        case .codex:
+            var arguments = ["exec", "--json", "--skip-git-repo-check", "-C", NSHomeDirectory()]
+            arguments += chat.fullAccess ? ["--dangerously-bypass-approvals-and-sandbox"] : ["--sandbox", "workspace-write"]
+            if !chat.model.isEmpty { arguments += ["-m", chat.model] }
+            arguments += ["-c", "model_reasoning_effort=\(Self.toml(chat.effort))",
+                          "-c", "developer_instructions=\(Self.toml(chat.instructions))",
+                          "-c", "mcp_servers.petal.command=\(Self.toml(chat.tools))",
+                          "-c", "mcp_servers.petal.args=[\"--mcp\"]",
+                          "-c", "mcp_servers.petal.default_tools_approval_mode=\"approve\""]
+            if let session = chat.session { arguments += ["resume", session] }
+            return arguments + ["-"]
+        }
+    }
+
+    /// What one line of the chat's output means.
+    func events(_ line: String) -> [Agent.Event] {
+        guard let event = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return [] }
+        switch self {
+        case .claude: return Self.claudeEvents(event)
+        case .codex: return Self.codexEvents(event)
+        }
+    }
+
+    private static func claudeEvents(_ event: [String: Any]) -> [Agent.Event] {
+        var out: [Agent.Event] = []
+        if let id = event["session_id"] as? String { out.append(.session(id)) }
+        switch event["type"] as? String {
+        case "assistant":
+            for part in (event["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? [] {
+                if part["type"] as? String == "text", let text = part["text"] as? String {
+                    out.append(.text(text))
+                } else if part["type"] as? String == "tool_use", let name = part["name"] as? String, name != "ToolSearch" {
+                    out.append(.step(Agent.describe(name, part["input"] as? [String: Any] ?? [:])))
+                }
+            }
+        case "result":
+            var denials: [Agent.Denial] = []
+            for denial in event["permission_denials"] as? [[String: Any]] ?? [] {
+                let tool = denial["tool_name"] as? String ?? ""
+                let input = denial["tool_input"] as? [String: Any] ?? [:]
+                let label = tool == "Bash" ? (input["command"] as? String ?? "") : Agent.describe(tool, input)
+                guard !denials.contains(where: { $0.label == label }) else { continue }
+                denials.append(Agent.Denial(tool: tool, label: label, rules: tool == "Bash" ? Agent.bashRules(input["command"] as? String ?? "") : [tool]))
+            }
+            if !denials.isEmpty { out.append(.denials(denials)) }
+            if event["is_error"] as? Bool == true { out.append(.error(event["result"] as? String ?? "Something went wrong")) }
+            out.append(.finished)
+        default:
+            break
+        }
+        return out
+    }
+
+    private static func codexEvents(_ event: [String: Any]) -> [Agent.Event] {
+        let item = event["item"] as? [String: Any] ?? [:]
+        switch (event["type"] as? String, item["type"] as? String) {
+        case ("thread.started", _):
+            return (event["thread_id"] as? String).map { [.session($0)] } ?? []
+        case ("item.completed", "agent_message"):
+            return [.text(item["text"] as? String ?? "")]
+        case ("item.started", "command_execution"):
+            return [.step("Running  " + ((item["command"] as? String ?? "").components(separatedBy: "\n").first ?? ""))]
+        case ("item.started", "mcp_tool_call"):
+            return [.step(Agent.describe("mcp__petal__" + (item["tool"] as? String ?? ""), item["arguments"] as? [String: Any] ?? [:]))]
+        case ("item.started", "file_change"):
+            let path = ((item["changes"] as? [[String: Any]])?.first?["path"] as? String) ?? ""
+            return [.step("Editing  " + path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))]
+        case ("item.started", "web_search"):
+            return [.step("Searching the web  " + (item["query"] as? String ?? ""))]
+        case ("turn.failed", _):
+            return [.error(((event["error"] as? [String: Any])?["message"] as? String) ?? "Something went wrong"), .finished]
+        case ("turn.completed", _):
+            return [.finished]
+        default:
+            return []
+        }
+    }
+
+    // MARK: Quick calls
+
+    /// A quick, cheap call that answers with JSON (sorting activity into modes).
+    var quickArguments: [String] {
+        switch self {
+        case .claude:
+            ["-p", "--model", "haiku", "--effort", "low", "--no-session-persistence", "--setting-sources", "",
+             "--strict-mcp-config", "--tools", ""]
+        case .codex:
+            ["exec", "--json", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "-C", NSTemporaryDirectory(),
+             "-c", "model_reasoning_effort=\"low\"", "-"]
+        }
+    }
+
+    /// The reply text in a quick call's output.
+    func quickReply(_ output: String) -> String {
+        guard self == .codex else { return output }
+        return output.split(separator: "\n").compactMap { line -> String? in
+            guard let event = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  let item = event["item"] as? [String: Any], item["type"] as? String == "agent_message" else { return nil }
+            return item["text"] as? String
+        }.last ?? ""
+    }
+
+    static func toml(_ text: String) -> String {
+        let escaped = text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        return "\"\(escaped)\""
+    }
+}
+
+/// Each AI's mark: Claude's from Petal's assets; others a plain symbol.
+struct ProviderMark: View {
+    let provider: Provider?
+
+    var body: some View {
+        switch provider {
+        case .claude?: ClaudeMark()
+        case .codex?: Image(systemName: "chevron.left.forwardslash.chevron.right").resizable().scaledToFit().fontWeight(.bold)
+        case nil: Image(systemName: "sparkle").resizable().scaledToFit()
+        }
+    }
+}

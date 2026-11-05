@@ -1,65 +1,69 @@
 import AppKit
 import Observation
 
-/// Getting Claude ready without a terminal: Petal installs Claude Code with Anthropic's own installer when it's
-/// missing, and runs its sign-in, which finishes in the browser.
+/// Getting each AI ready without a terminal: Petal installs it with its maker's own installer when it's missing,
+/// and runs its sign-in, which finishes in the browser with the person's own account.
 @MainActor @Observable
-final class ClaudeSetup {
+final class AISetup {
     enum State: Equatable {
         case checking, missing, installing, signedOut, signingIn, ready(String), failed(String)
     }
-    private(set) var state: State = .checking
-    @ObservationIgnored private var poll: Timer?
+    private(set) var states: [Provider: State] = [:]
+    @ObservationIgnored private var polls: [Provider: Timer] = [:]
 
     var app: PetalApp { PetalApp.shared }
 
-    func refresh() {
+    func state(_ provider: Provider) -> State { states[provider] ?? .checking }
+
+    func refreshAll() { for provider in Provider.allCases { refresh(provider) } }
+
+    func refresh(_ provider: Provider) {
         Task {
-            if app.claudePath == nil { await app.lookForClaude() }
-            guard let claude = app.claudePath else { state = .missing; return }
-            let status = await Self.run(claude, ["auth", "status", "--json"], environment: app.childEnvironment)
-            let info = (try? JSONSerialization.jsonObject(with: Data(status.output.utf8))) as? [String: Any]
-            if info?["loggedIn"] as? Bool == true {
-                state = .ready(info?["email"] as? String ?? "")
-                poll?.invalidate()
-            } else if state != .signingIn {
-                state = .signedOut
+            if app.paths[provider] == nil { await app.lookFor(provider) }
+            guard let path = app.paths[provider] else { states[provider] = .missing; return }
+            let status = await Self.run(path, provider.statusArguments, environment: app.childEnvironment, timeout: 20)
+            if let who = provider.signedIn(status: status.status, output: status.output) {
+                states[provider] = .ready(who)
+                polls[provider]?.invalidate()
+            } else if states[provider] != .signingIn {
+                states[provider] = .signedOut
             }
         }
     }
 
-    /// Anthropic's installer puts `claude` in ~/.local/bin; then sign in.
-    func install() {
-        state = .installing
+    func install(_ provider: Provider) {
+        states[provider] = .installing
         Task {
-            let result = await Self.run("/bin/bash", ["-c", "curl -fsSL https://claude.ai/install.sh | bash"], environment: app.childEnvironment)
-            await app.lookForClaude()
-            guard result.status == 0, app.claudePath != nil else {
-                state = .failed("Claude Code didn't install. Check your connection and try again.")
+            let result = await Self.run("/bin/bash", ["-c", provider.installer], environment: app.childEnvironment)
+            await app.lookFor(provider)
+            guard result.status == 0, app.paths[provider] != nil else {
+                states[provider] = .failed("\(provider.appName) didn't install. Check your connection and try again.")
                 return
             }
-            signIn()
+            signIn(provider)
         }
     }
 
-    /// Claude Code's own sign-in: it opens the browser, and the person signs in to their Claude account there.
-    func signIn() {
-        guard let claude = app.claudePath else { state = .missing; return }
-        state = .signingIn
+    func signIn(_ provider: Provider) {
+        guard let path = app.paths[provider] else { states[provider] = .missing; return }
+        states[provider] = .signingIn
         let environment = app.childEnvironment
         Task {
-            let result = await Self.run(claude, ["auth", "login", "--claudeai"], environment: environment, timeout: 600) { line in
+            let result = await Self.run(path, provider.signInArguments, environment: environment, timeout: 600) { line in
                 // If it shows a link instead of opening one, open it.
-                if let range = line.range(of: #"https://\S+"#, options: .regularExpression), !line.lowercased().contains("opening") {
-                    DispatchQueue.main.async { NSWorkspace.shared.open(URL(string: String(line[range]))!) }
+                if let range = line.range(of: #"https://\S+"#, options: .regularExpression), !line.lowercased().contains("opening"),
+                   let url = URL(string: String(line[range])) {
+                    DispatchQueue.main.async { NSWorkspace.shared.open(url) }
                 }
             }
-            if result.status != 0 && state == .signingIn { state = .failed("Signing in didn't finish. Try again.") }
-            refresh()
+            if result.status != 0 && states[provider] == .signingIn {
+                states[provider] = .failed("Signing in didn't finish. Try again.")
+            }
+            refresh(provider)
         }
-        poll?.invalidate()
-        poll = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
+        polls[provider]?.invalidate()
+        polls[provider] = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh(provider) }
         }
     }
 

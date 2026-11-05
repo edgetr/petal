@@ -26,7 +26,7 @@ final class PetalApp {
     let claude = ClaudePanel()
     let search = AppSearch()
     let updater = Updater()
-    let claudeSetup = ClaudeSetup()
+    let aiSetup = AISetup()
     @ObservationIgnored let tooltips = Tooltips()
     @ObservationIgnored let settings = SettingsWindow()
     @ObservationIgnored let welcome = Welcome()
@@ -37,13 +37,22 @@ final class PetalApp {
     var launching: [String: (start: Date, windows: Int)] = [:]
     var pendingMode: PendingMode?
     @ObservationIgnored private var countdown: Timer?
-    private(set) var claudePath: String?
+    /// Where each AI app is installed, when it is.
+    private(set) var paths: [Provider: String] = [:]
+
+    /// The AIs the person chose (none is fine: Petal is a whole dock without them).
+    var providers: [Provider] { config.strings("aiProviders").compactMap(Provider.init(rawValue:)) }
+
+    /// The one the chat, the usage ring and sorting use.
+    var chatProvider: Provider? {
+        Provider(rawValue: config.string("chatProvider")).flatMap { providers.contains($0) ? $0 : nil } ?? providers.first
+    }
 
     init() {
         PetalApp.instance = self
         docks = DockController()
         focus = FocusGuard()
-        Task { await lookForClaude() }
+        Task { for provider in Provider.allCases { await lookFor(provider) } }
     }
 
     var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev" }
@@ -65,7 +74,7 @@ final class PetalApp {
         usage.start { [weak self] in self?.config.bool("claudeUsage") ?? false }
         signals.start(watchFolders: Stacks.resolve(config.strings("stackFolders")))
         updater.start()
-        claudeSetup.refresh()
+        aiSetup.refreshAll()
         if !config.welcomed {
             welcome.show()
         } else {
@@ -162,7 +171,7 @@ final class PetalApp {
     // MARK: Claude
 
     var usageTooltip: String {
-        "Claude" + usage.limits.map { " · \($0.label.replacingOccurrences(of: " (7-day)", with: "")) \(Int(((1 - $0.percent) * 100).rounded()))% left" }.joined()
+        (chatProvider?.name ?? "AI") + usage.limits.map { " · \($0.label.replacingOccurrences(of: " (7-day)", with: "")) \(Int(((1 - $0.percent) * 100).rounded()))% left" }.joined()
     }
 
     static func until(_ date: Date) -> String {
@@ -191,14 +200,14 @@ final class PetalApp {
         return environment
     }
 
-    /// The claudePath setting, else the `claude` the person's own terminal runs (an interactive login shell, so
-    /// .zshrc counts), else the places Claude Code installs itself.
-    nonisolated static func findClaude(_ setting: String) -> String? {
+    /// The path setting, else the one the person's own terminal runs (an interactive login shell, so .zshrc
+    /// counts), else the places its installer puts it.
+    nonisolated static func find(_ provider: Provider, setting: String) -> String? {
         let isTool = { (path: String) in !path.isEmpty && FileManager.default.isExecutableFile(atPath: path) }
         if isTool(setting) { return setting }
         let shell = Process()
         shell.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
-        shell.arguments = ["-lic", "command -v claude"]
+        shell.arguments = ["-lic", "command -v \(provider.binary)"]
         let pipe = Pipe()
         shell.standardOutput = pipe
         shell.standardError = FileHandle.nullDevice
@@ -211,15 +220,13 @@ final class PetalApp {
                 return path
             }
         }
-        let home = NSHomeDirectory()
-        return ["\(home)/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude", "\(home)/.claude/local/claude"]
-            .first(where: isTool)
+        return provider.knownPaths(home: NSHomeDirectory()).first(where: isTool)
     }
 
     /// Asking the login shell can take a moment; the dock doesn't wait for it.
-    func lookForClaude() async {
-        let setting = config.string("claudePath")
-        claudePath = await Task.detached { PetalApp.findClaude(setting) }.value
+    func lookFor(_ provider: Provider) async {
+        let setting = config.string(provider.pathSetting)
+        paths[provider] = await Task.detached { PetalApp.find(provider, setting: setting) }.value
     }
 
     // MARK: Restarting

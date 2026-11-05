@@ -42,6 +42,7 @@ final class Config {
         "stackFolders": ["~/Downloads", "~/Pictures/Screenshots"], "trash": true, "modes": true, "countdown": false,
         "focusGuard": false, "holdNotifications": true, "ai": true, "claudeUsage": true, "autoUpdate": true,
         "claudePath": "", "chatModel": "sonnet", "chatEffort": "medium", "claudeAccess": "auto",
+        "aiProviders": ["claude"], "chatProvider": "claude", "codexModel": "", "codexEffort": "medium", "codexPath": "",
     ]
 
     private(set) var modes: [Mode] = []
