@@ -43,6 +43,13 @@ enum Spaces {
         return found
     }
 
+    /// How many Desktops there are, across every display.
+    static func count() -> Int {
+        guard let mainConnection, let copySpaces,
+              let displays = copySpaces(mainConnection())?.takeRetainedValue() as? [[String: Any]] else { return 0 }
+        return displays.reduce(0) { $0 + ($1["Spaces"] as? [[String: Any]] ?? []).filter { $0["type"] as? Int == 0 }.count }
+    }
+
     private static func uuid(of screen: NSScreen) -> String? {
         guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
               let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { return nil }

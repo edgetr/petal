@@ -6,5 +6,7 @@ import PackageDescription
 let package = Package(
     name: "Petal",
     platforms: [.macOS(.v26)],
-    targets: [.executableTarget(name: "Petal", path: "Sources/Petal")]
+    targets: [.executableTarget(name: "Petal", path: "Sources/Petal")],
+    // Swift 5 language mode, as Sayzen: AppKit's callbacks make Swift 6's strict concurrency checks mostly noise.
+    swiftLanguageModes: [.v5]
 )

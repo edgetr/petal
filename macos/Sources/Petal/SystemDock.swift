@@ -13,6 +13,36 @@ enum SystemDock {
 
     static var isReplaced: Bool { FileManager.default.fileExists(atPath: backup.path) }
 
+    /// The apps in macOS's Dock, in its order, as bundle ids: "Import Dock" makes them a mode.
+    static func apps() -> [String] {
+        let items = CFPreferencesCopyAppValue("persistent-apps" as CFString, "com.apple.dock" as CFString) as? [[String: Any]] ?? []
+        var ids: [String] = []
+        for item in items {
+            let tile = item["tile-data"] as? [String: Any] ?? [:]
+            var id = tile["bundle-identifier"] as? String
+            if id == nil, let file = tile["file-data"] as? [String: Any], let path = file["_CFURLString"] as? String,
+               let url = URL(string: path) {
+                id = Bundle(url: url)?.bundleIdentifier
+            }
+            if let id, !ids.contains(id) { ids.append(id) }
+        }
+        return ids
+    }
+
+    /// The folders in macOS's Dock (Downloads, Screenshots…), written with ~ as Petal's stackFolders are.
+    static func folders() -> [String] {
+        let items = CFPreferencesCopyAppValue("persistent-others" as CFString, "com.apple.dock" as CFString) as? [[String: Any]] ?? []
+        return items.compactMap { item in
+            let tile = item["tile-data"] as? [String: Any] ?? [:]
+            guard let file = tile["file-data"] as? [String: Any], let text = file["_CFURLString"] as? String,
+                  let url = URL(string: text), url.isFileURL else { return nil }
+            let path = url.path(percentEncoded: false)
+            let home = NSHomeDirectory()
+            let trimmed = path.hasSuffix("/") && path.count > 1 ? String(path.dropLast()) : path
+            return trimmed.hasPrefix(home) ? "~" + trimmed.dropFirst(home.count) : trimmed
+        }
+    }
+
     static func replace() {
         if !isReplaced {
             var saved: [String: Any] = [:]

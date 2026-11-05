@@ -14,7 +14,7 @@ VERSION="$(cat VERSION)"
 IDENTITY="${PETAL_SIGN_IDENTITY:--}"
 APP="build/Petal.app"
 
-swift build -c release --arch arm64 --arch x86_64 >/dev/null
+swift build -c release --arch arm64 --arch x86_64 2>&1 | grep -E "error|warning: " | grep -v x86_64 || true
 BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/Petal"
 
 rm -rf "$APP"
@@ -23,6 +23,10 @@ cp "$BIN" "$APP/Contents/MacOS/Petal"
 # The icon: Assets.car holds every appearance (light, dark, tinted, clear); Petal.icns is the fallback.
 cp "$ROOT/brand/macos/Assets.car" "$ROOT/brand/macos/Petal.icns" "$APP/Contents/Resources/"
 cp "$ROOT/defaults/modes-macos.json" "$APP/Contents/Resources/modes.json"
+cp "$ROOT/plugin/assets/claude.svg" "$APP/Contents/Resources/claude.svg"
+# Claude's Petal tools: the same MCP server as on Omarchy, which knows it's on a Mac.
+mkdir -p "$APP/Contents/Resources/mcp"
+cp "$ROOT/plugin/mcp/petal-mcp.py" "$APP/Contents/Resources/mcp/petal-mcp.py"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -42,9 +46,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSUIElement</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
   <key>NSHumanReadableCopyright</key><string>Edgetr. MIT License.</string>
+  <key>NSAppleEventsUsageDescription</key><string>Petal shows what's playing in Music and Spotify, and opens and empties the Trash in Finder.</string>
 </dict>
 </plist>
 PLIST
 
-codesign --force --options runtime --sign "$IDENTITY" "$APP" 2>/dev/null
+codesign --force --options runtime --entitlements Petal.entitlements --sign "$IDENTITY" "$APP" 2>/dev/null
 echo "built $APP $VERSION ($( [ "$IDENTITY" = "-" ] && echo "ad hoc" || echo "signed"))"

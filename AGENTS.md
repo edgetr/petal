@@ -54,7 +54,7 @@ The owner works on two machines: this Mac and an Omarchy machine. GitHub is the 
 - **Before every commit:** check the staged files for secrets, tokens, personal data (the repository is public), whitespace errors (`git diff --cached --check`) and unrelated changes. Stage files by name.
 - **Commits:** a short imperative subject that says what changed for the user; the body says why.
 - **Releases:** bump `plugin/manifest.json`, tag `vX.Y.Z` to match, push the tag. `.github/workflows/release.yml` checks the tag against the manifest, builds `Petal-<v>-linux.tar.gz` and `latest.json`, and publishes the GitHub Release. Every installed Petal updates itself from it within hours, so releasing is outward-facing: only when the owner says to.
-- **macOS releases** have their own tags, `macos-vX.Y.Z`, matching `macos/VERSION`, so each platform ships on its own. Their release workflow doesn't exist yet; it comes with the first public macOS build.
+- **macOS releases** have their own tags, `macos-vX.Y.Z`, matching `macos/VERSION`, so each platform ships on its own. `.github/workflows/release-macos.yml` builds `Petal-<v>-macos.zip` and `latest-macos.json` and publishes the release with `--latest=false`: Omarchy's updater reads the release marked latest, which must stay a Linux one. Releasing is outward-facing either way: only when the owner says to.
 - **History rewrites and force-pushes:** only when the owner asks. Make a backup bundle outside the repository first.
 - **Repository visibility:** never change it.
 - **Worktrees:** remove a worktree, and its local branch, once its branch has merged or been pushed to `main`.
@@ -95,25 +95,33 @@ Add no dependency beyond what a stock Omarchy install has, or a Swift package to
 
 ### Petal for macOS
 
-`macos/Sources/Petal/`:
+A native app in `macos/` (Swift Package Manager; `macos/build.sh` builds `macos/build/Petal.app`), the same product as on Omarchy, feature for feature, except held notifications. `macos/Sources/Petal/`:
 
-- `main.swift`: starts Petal as a background app (no menu bar, no Dock icon), replaces macOS's Dock, and gives it back on quit or when killed.
-- `Config.swift`: reads `modes.json`, `settings.json` and `dock.json` in `~/.config/petal/` (the same folder and formats as Omarchy), and reads them again within a second of a change.
-- `Spaces.swift`: which Desktop each screen shows, numbered as Mission Control numbers them. macOS has no public API for this; it reads SkyLight's private `SLSCopyManagedDisplaySpaces`, read-only, looked up at run time.
-- `SystemDock.swift`: hides macOS's Dock (auto-hide with a 1000-second delay) and restores the owner's own Dock settings from `~/.config/petal/macos-dock.json`, which also survives a crash.
-- `Dock.swift`: one Liquid Glass panel per screen, the mode button, the apps, the right-click menu, auto-hide.
+- `App.swift`: `PetalApp`, which everything shares: which dock is showing (Petal or macOS's), opening at login, mode switching with the countdown, launching, finding `claude`, the IPC functions. `main.swift` starts it as a background app (no menu bar, no Dock icon).
+- `Config.swift`: `modes.json`, `settings.json` and `dock.json` in `~/.config/petal/`, read again within a second of any change. Its `defaults` list is the third copy of the settings (see below).
+- `Dock.swift`: one Liquid Glass panel per screen (`DockController`, `DockPanel`, `DockView`): the mode switcher, the Claude button with its usage ring, the apps (glow, badges, bounce, dots, launch pulse, drag to reorder, file drops), "+", now playing, minimized windows, stacks, the Trash, auto-hide.
+- `Popups.swift`: tooltips, window previews, stack popovers and cards (focus and update) as glass panels over the dock. `Menus.swift`: every right-click menu, as macOS menus.
+- `Claude.swift`: the Claude panel (Agent.qml and AskBox.qml: the same CLI arguments, stream-json, resume and Allow flow, with a macOS system prompt) and the "+" search.
+- `Focus.swift`: focus cards and Brain (Claude Haiku), with Omarchy's exact prompts.
+- `Windows.swift` (Accessibility: window lists, minimized windows, raising one window, the front window's title), `Spaces.swift` (which Desktop each screen shows, through SkyLight's private `SLSCopyManagedDisplaySpaces`, read-only, looked up at run time), `Signals.swift` (badges from macOS's hidden Dock, download progress through `NSProgress`, now playing from Music and Spotify), `Stacks.swift`, `Apps.swift`, `Usage.swift` (Claude Code's login from the Keychain, the same usage endpoint as Omarchy's collector).
+- `SystemDock.swift`: hides macOS's Dock (auto-hide, 1000-second delay) and gives back the owner's own Dock settings, saved in `~/.config/petal/macos-dock.json` so a crash can't lose them. "Import Dock" reads its apps and folders.
+- `SettingsWindow.swift` and `Onboarding.swift`: the settings window and the first-run welcome. `Updater.swift`: updates from `macos-v*` releases. `IPC.swift`: the socket. `Snapshot.swift`: `--snapshot`.
 
 How it maps to Omarchy:
 
-- **Workspaces are Desktops.** `"workspaces": {"1": "building", "2": "social"}` puts Desktop 1 in Building and Desktop 2 in Social; a full-screen app's Space keeps the mode of the Desktop before it.
-- **The dock's apps:** the mode's apps first, in the mode's order, then other apps with a window on that screen's Desktop, which keep their slot for the session (`DockModel.js`).
-- **Where the dock sits** (`position`: bottom, left or right; `autoHide`; `replaceDock`) is in `~/.config/petal/dock.json`, since Omarchy keeps it in its own shell config, not in `settings.json`.
-- **No held notifications:** macOS lets no app read or hide another app's notifications, so the Mac has no holding.
-- `macos/build.sh` builds `macos/build/Petal.app` with the icon from `brand/macos/` and the seed `defaults/modes-macos.json`.
+- **Workspaces are Desktops.** `"workspaces": {"1": "building", "2": "social"}` puts Desktop 1 in Building and Desktop 2 in Social. A full-screen app's Space keeps the mode of the Desktop before it, and the dock doesn't show over full-screen apps.
+- **Which dock:** the first launch offers to import macOS's Dock as a mode, My Dock (the default mode; its folders become stacks), then hides macOS's Dock. Choosing macOS's Dock in the settings window (or the right-click menu) turns Petal's dock off; opening Petal again opens its settings.
+- **`dock.json`** holds what Omarchy keeps in its own shell config (`position`: bottom, left or right; `autoHide`) and the Mac's own choices (`dock`: petal or macos; `openAtLogin`; `welcomed`).
+- **IPC:** `omarchy-shell petal <fn>` becomes the socket `~/.config/petal/petal.sock`: write one JSON array (`["mode", "social"]`), read one line. `bin/petal` and `petal-mcp.py` use it on a Mac.
+- **Claude's tools:** `petal-mcp.py` ships inside Petal.app and knows it's on a Mac (bundle ids, `dock.json`, the socket). It runs with `/usr/bin/python3`, which needs Apple's command line tools.
+- **Settings window:** the Mac has one (the owner asked for it), over the person's own wallpaper, blurred, on Liquid Glass; its first field still asks Claude. The right-click menu stays tiny.
+- **No held notifications:** macOS lets no app read or hide another app's notifications.
+- **Quick actions:** macOS doesn't let other apps read an app's own Dock menu, so an app's right-click menu lists its windows and New Window instead.
+- **Install:** `get.sh` on a Mac installs Petal.app from the newest `macos-v` release into /Applications. A download by curl isn't quarantined, so it opens without Gatekeeper's prompt; a zip downloaded in a browser needs System Settings > Privacy & Security > Open Anyway once.
 
-### Settings have two lists
+### Settings have three lists
 
-The `JsonAdapter` in `Dock.qml` and `SETTINGS_SCHEMA` in `petal-mcp.py` must list the same keys with the same defaults. A new feature or look adds its setting to both, so Claude can change it.
+The `JsonAdapter` in `Dock.qml`, `SETTINGS_SCHEMA` in `petal-mcp.py` and `Config.defaults` in `macos/Sources/Petal/Config.swift` must list the same keys with the same defaults. A new feature or look adds its setting to all three, so Claude can change it on both platforms. (`claudePath` is the exception: it's in the dock's lists but not Claude's.)
 
 ### Modes
 
@@ -163,7 +171,8 @@ Desktop ids are the file names in `/usr/share/applications` or `~/.local/share/a
 - **Reload:** on the Omarchy machine, the checkout is the installed plugin (the plugin link points at `~/Projects/Petal/plugin`), so edits go live on `omarchy restart shell`.
 - **Logs:** `quickshell log "$(ls -td /run/user/$UID/quickshell/by-id/*/ | head -1)log.qslog"`, or `petal logs`. A change leaves no new QML warnings.
 - **Drive it:** `omarchy-shell petal <fn>` calls the IPC functions in `Dock.qml` (`mode`, `ask`, `chat`, `testCard`, `testToast`, `testBounce`, `close`, …); `bin/petal` wraps the common ones.
-- **macOS:** `macos/build.sh`, then run `macos/build/Petal.app/Contents/MacOS/Petal`. `PETAL_KEEP_DOCK=1` leaves macOS's Dock alone, and `PETAL_DEBUG=1` logs each screen's Desktop, mode and apps. After quitting, `defaults read com.apple.dock autohide` shows the owner's Dock setting is back.
+- **macOS:** `macos/build.sh`, then run `macos/build/Petal.app/Contents/MacOS/Petal` (`PETAL_KEEP_DOCK=1` leaves macOS's Dock alone). `printf '["current"]\n' | nc -U ~/.config/petal/petal.sock` talks to it. After quitting, `defaults read com.apple.dock autohide` shows the owner's Dock setting is back.
+- **macOS without touching the screen:** `Petal --snapshot <folder>` draws every view (dock, settings pages, welcome, Claude panel, search, cards, stacks) into PNGs. Native controls and scroll views draw as placeholders there; check those live. Don't test on the owner's screen while they're in a call or sharing it.
 - **MCP:** run `petal-mcp.py` with a `tools/list` request on stdin after changing it.
 - **Site:** `python3 -m http.server 8104` from `site/`, then look at 1440px and 390px, in light and dark.
 - **Reporting:** say what was seen working on the real dock and what was not checked.

@@ -23,6 +23,39 @@ say() { if [[ $mode == install || $mode == update ]]; then echo "$@"; fi; }
 emit() { if [[ $mode == auto || $mode == check ]]; then echo "$1"; fi; }
 fail() { emit "{\"status\":\"error\",\"message\":\"$1\"}"; say "Petal: $1" >&2; exit 1; }
 
+# Petal for macOS: Petal.app from the newest macos-v release, into /Applications (or ~/Applications). A download
+# by curl isn't quarantined, so macOS opens it without the "unidentified developer" prompt. JSON is read with
+# macOS's own JavaScript, since a Mac without developer tools has no python3.
+if [[ $(uname) == Darwin ]]; then
+  json() { osascript -l JavaScript -e "function run(argv) { var d = JSON.parse(argv[0]); return ($1); }" "$2"; }
+  manifest="${PETAL_MACOS_MANIFEST:-}"
+  if [[ -z $manifest ]]; then
+    releases="$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=30")" || fail "couldn't reach GitHub"
+    manifest="$(json "((d.find(function (r) { return r.tag_name.indexOf('macos-v') === 0 && !r.draft && !r.prerelease; }) || {assets: []}).assets.filter(function (a) { return a.name === 'latest-macos.json'; })[0] || {}).browser_download_url || ''" "$releases")"
+  fi
+  [[ -n $manifest ]] || fail "Petal for macOS has no release yet"
+  latest="$(curl -fsSL "$manifest")" || fail "couldn't reach GitHub"
+  version="$(json 'd.version' "$latest")"
+  url="$(json 'd.url' "$latest")"
+  sha="$(json 'd.sha256' "$latest")"
+  dest="${PETAL_APPS:-/Applications}"
+  if [[ ! -w $dest ]]; then dest="$HOME/Applications"; mkdir -p "$dest"; fi
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  say "Downloading Petal $version for macOS…"
+  curl -fsSL "$url" -o "$tmp/Petal.zip" || fail "couldn't download Petal $version"
+  [[ $(shasum -a 256 "$tmp/Petal.zip" | cut -d' ' -f1) == "$sha" ]] || fail "the download didn't match its checksum"
+  ditto -x -k "$tmp/Petal.zip" "$tmp/unpacked" || fail "couldn't unpack Petal $version"
+  [[ -d $tmp/unpacked/Petal.app ]] || fail "the download had no Petal.app"
+  osascript -e 'tell application id "tech.edgetr.petal" to quit' >/dev/null 2>&1 || true
+  rm -rf "$dest/Petal.app"
+  ditto "$tmp/unpacked/Petal.app" "$dest/Petal.app"
+  xattr -dr com.apple.quarantine "$dest/Petal.app" 2>/dev/null || true
+  [[ -n ${PETAL_NO_OPEN:-} ]] || open "$dest/Petal.app"
+  say "Petal $version is in $dest and open. Its welcome window lets you bring your Dock along."
+  exit 0
+fi
+
 for tool in curl tar python3 sha256sum; do
   command -v "$tool" >/dev/null || fail "missing $tool"
 done

@@ -1,0 +1,51 @@
+# Push a tag like macos-v1.0.0 (matching macos/VERSION) to publish Petal for macOS.
+# Builds Petal.app (signed ad hoc: Petal has no Apple Developer ID), zips it, writes latest-macos.json (what the
+# Mac updater and get.sh read), and creates the GitHub Release. Uses only the workflow's own GITHUB_TOKEN.
+#
+# The release is never marked "latest": Omarchy's updater reads the latest release, which must stay a Linux one.
+name: Release macOS
+
+on:
+  push:
+    tags: ["macos-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the version
+        run: |
+          v="${GITHUB_REF_NAME#macos-v}"
+          m="$(cat macos/VERSION)"
+          [ "$v" = "$m" ] || { echo "Tag $v doesn't match macos/VERSION $m"; exit 1; }
+
+      - name: Build
+        run: macos/build.sh
+
+      - name: Package
+        run: |
+          v="${GITHUB_REF_NAME#macos-v}"
+          mkdir -p dist
+          ditto -c -k --keepParent macos/build/Petal.app "dist/Petal-$v-macos.zip"
+          sha="$(shasum -a 256 "dist/Petal-$v-macos.zip" | cut -d' ' -f1)"
+          cat > dist/latest-macos.json <<JSON
+          {
+            "version": "$v",
+            "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/Petal-$v-macos.zip",
+            "sha256": "$sha"
+          }
+          JSON
+          cat dist/latest-macos.json
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${GITHUB_REF_NAME#macos-v}"
+          gh release create "$GITHUB_REF_NAME" "dist/Petal-$v-macos.zip" dist/latest-macos.json \
+            --title "Petal for macOS $v" --generate-notes --latest=false

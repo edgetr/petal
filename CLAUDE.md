@@ -11,7 +11,7 @@
 
 ## Petal's own Claude
 
-- Petal's Claude panel is a Claude Code session too (`Agent.qml`): it gets the `mcp__petal` tools and `~/.config/petal/instructions.md`. When a change here touches what that Claude can do (a new setting, tool or mode field), update `SETTINGS_SCHEMA` and the tool descriptions in `petal-mcp.py` so it knows.
+- Petal's Claude panel is a Claude Code session too (`Agent.qml` on Omarchy, `Claude.swift` on macOS): it gets the `mcp__petal` tools and `~/.config/petal/instructions.md`. When a change here touches what that Claude can do (a new setting, tool or mode field), update `SETTINGS_SCHEMA` and the tool descriptions in `petal-mcp.py` so it knows, and its macOS system prompt in `Claude.swift` if the change is Mac-only.
 - To change the owner's dock (settings, modes), prefer the `mcp__petal` tools when they are connected; otherwise edit `~/.config/petal/` directly. Either way Petal reloads live.
 - Petal calls Haiku at low effort for sorting and uses the chat model the user picks. Keep new background calls on Haiku; they count toward the user's Claude usage.
 

@@ -1,0 +1,722 @@
+import AppKit
+import Observation
+import SwiftUI
+
+/// The Claude Code chat (Agent.qml): the person's own `claude` CLI and plan, one process per turn, resumed across
+/// turns, with Petal's MCP tools. Steps Claude takes show as one-line steps; permission denials become an "Allow"
+/// card that re-runs with per-part Bash(...) rules.
+@MainActor @Observable
+final class Agent {
+    enum Kind { case user, claude, step, ask, error }
+    struct Message: Identifiable, Equatable {
+        let id = UUID()
+        let kind: Kind
+        let text: String
+        init(kind: Kind, text: String) { self.kind = kind; self.text = text }
+    }
+    struct Denial: Equatable { let tool: String; let label: String; let rules: [String] }
+
+    private(set) var messages: [Message] = []
+    private(set) var running = false
+    private(set) var pendingAsk: [Denial] = []
+    @ObservationIgnored private var sessionID: String?
+    @ObservationIgnored private var allowed: [String] = []
+    @ObservationIgnored private var process: Process?
+    @ObservationIgnored private var errorText = ""
+
+    var app: PetalApp { PetalApp.shared }
+
+    func send(_ text: String) {
+        let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty, !running else { return }
+        pendingAsk = []
+        messages.append(Message(kind: .user, text: prompt))
+        run(prompt)
+    }
+
+    func allow() {
+        for denial in pendingAsk { for rule in denial.rules where !allowed.contains(rule) { allowed.append(rule) } }
+        pendingAsk = []
+        messages.append(Message(kind: .step, text: "Allowed"))
+        run("I approved that. Go ahead and run it, then continue.")
+    }
+
+    func deny() {
+        pendingAsk = []
+        messages.append(Message(kind: .step, text: "Not allowed"))
+    }
+
+    func stop() { process?.terminate() }
+
+    /// Shows a made-up conversation, for `Petal --snapshot`.
+    func preview(_ sample: [Message]) {
+        messages = sample
+        pendingAsk = [Denial(tool: "Bash", label: sample.last?.text ?? "", rules: [])]
+    }
+
+    func reset() {
+        stop()
+        messages = []
+        sessionID = nil
+        allowed = []
+        pendingAsk = []
+    }
+
+    private func run(_ prompt: String) {
+        guard let claude = app.claudePath else {
+            messages.append(Message(kind: .error, text: "Petal couldn't find Claude Code. Install it from claude.com/claude-code, then try again."))
+            return
+        }
+        let config = app.config
+        var arguments = ["-p", "--model", config.string("chatModel"), "--effort", config.string("chatEffort"),
+                         "--output-format", "stream-json", "--verbose",
+                         "--permission-mode", config.string("claudeAccess") == "full" ? "bypassPermissions" : "auto",
+                         "--append-system-prompt", systemPrompt, "--mcp-config", mcpConfig]
+        if let sessionID { arguments += ["--resume", sessionID] }
+        arguments += ["--allowedTools", "mcp__petal"] + allowed
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: claude)
+        process.arguments = arguments
+        process.environment = app.childEnvironment
+        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        let input = Pipe(), output = Pipe(), error = Pipe()
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = error
+        errorText = ""
+
+        let buffer = LineBuffer()
+        output.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else { return }
+            let lines = buffer.lines(adding: chunk)
+            guard !lines.isEmpty else { return }
+            DispatchQueue.main.async { MainActor.assumeIsolated { for line in lines { self.handle(line) } } }
+        }
+        error.fileHandleForReading.readabilityHandler = { handle in
+            let text = String(decoding: handle.availableData, as: UTF8.self)
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.errorText += text } }
+        }
+        process.terminationHandler = { finished in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    output.fileHandleForReading.readabilityHandler = nil
+                    error.fileHandleForReading.readabilityHandler = nil
+                    self.running = false
+                    self.process = nil
+                    let status = finished.terminationStatus
+                    if status != 0 && status != 15 && !self.errorText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        self.messages.append(Message(kind: .error, text: String(self.errorText.prefix(300))))
+                    }
+                }
+            }
+        }
+        do {
+            try process.run()
+            running = true
+            self.process = process
+            input.fileHandleForWriting.write(Data(prompt.utf8))
+            try? input.fileHandleForWriting.close()
+        } catch {
+            messages.append(Message(kind: .error, text: "Couldn't start Claude Code: \(error.localizedDescription)"))
+        }
+    }
+
+    private func handle(_ line: String) {
+        guard let event = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return }
+        if let id = event["session_id"] as? String { sessionID = id }
+        switch event["type"] as? String {
+        case "assistant":
+            let content = (event["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
+            for part in content {
+                if part["type"] as? String == "text", let text = part["text"] as? String,
+                   !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    messages.append(Message(kind: .claude, text: text.trimmingCharacters(in: .whitespacesAndNewlines)))
+                } else if part["type"] as? String == "tool_use", let name = part["name"] as? String, name != "ToolSearch" {
+                    messages.append(Message(kind: .step, text: Self.describe(name, part["input"] as? [String: Any] ?? [:])))
+                }
+            }
+        case "result":
+            var denials: [Denial] = []
+            for denial in event["permission_denials"] as? [[String: Any]] ?? [] {
+                let tool = denial["tool_name"] as? String ?? ""
+                let input = denial["tool_input"] as? [String: Any] ?? [:]
+                let label = tool == "Bash" ? (input["command"] as? String ?? "") : Self.describe(tool, input)
+                guard !denials.contains(where: { $0.label == label }) else { continue }
+                let rules = tool == "Bash" ? Self.bashRules(input["command"] as? String ?? "") : [tool]
+                denials.append(Denial(tool: tool, label: label, rules: rules))
+            }
+            if !denials.isEmpty {
+                pendingAsk = denials
+                messages.append(Message(kind: .ask, text: denials.map(\.label).joined(separator: "\n")))
+            }
+            if event["is_error"] as? Bool == true {
+                messages.append(Message(kind: .error, text: event["result"] as? String ?? "Something went wrong"))
+            }
+            Task { await app.usage.refresh() }
+        default:
+            break
+        }
+    }
+
+    /// One rule per part of a shell command, so allowing `a && b` allows a and b, not anything else.
+    static func bashRules(_ command: String) -> [String] {
+        var parts = [command]
+        for separator in ["||", "&&", "|", ";", "\n"] {
+            parts = parts.flatMap { $0.components(separatedBy: separator) }
+        }
+        return parts.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.map { "Bash(\($0))" }
+    }
+
+    static func describe(_ name: String, _ input: [String: Any]) -> String {
+        func home(_ path: Any?) -> String {
+            let text = path as? String ?? ""
+            return text.hasPrefix(NSHomeDirectory()) ? "~" + text.dropFirst(NSHomeDirectory().count) : text
+        }
+        switch name {
+        case "Bash": return "Running  " + ((input["command"] as? String ?? "").components(separatedBy: "\n").first ?? "")
+        case "Read": return "Reading  " + home(input["file_path"])
+        case "Edit", "MultiEdit": return "Editing  " + home(input["file_path"])
+        case "Write": return "Writing  " + home(input["file_path"])
+        case "Glob", "Grep": return "Searching  " + (input["pattern"] as? String ?? "")
+        case "WebSearch": return "Searching the web  " + (input["query"] as? String ?? "")
+        case "WebFetch": return "Reading  " + (input["url"] as? String ?? "")
+        case "TodoWrite": return "Planning"
+        case "mcp__petal__petal_get_state": return "Looking at your dock"
+        case "mcp__petal__petal_set_settings":
+            return "Changing  " + ((input["settings"] as? [String: Any])?.keys.sorted().joined(separator: ", ") ?? "")
+        case "mcp__petal__petal_reset_settings": return "Resetting settings"
+        case "mcp__petal__petal_set_dock": return "Moving the dock"
+        case "mcp__petal__petal_save_mode":
+            let mode = input["mode"] as? [String: Any] ?? [:]
+            return "Saving mode  " + (mode["name"] as? String ?? mode["id"] as? String ?? "")
+        case "mcp__petal__petal_delete_mode": return "Deleting mode  " + (input["id"] as? String ?? "")
+        case "mcp__petal__petal_list_apps": return "Looking up apps"
+        case "mcp__petal__petal_switch_mode": return "Switching to  " + (input["id"] as? String ?? "")
+        case "mcp__petal__petal_reload": return "Reloading Petal"
+        default: return name
+        }
+    }
+
+    private var systemPrompt: String {
+        var prompt = """
+        You are Claude, running inside Petal, the user's dock on macOS. Your replies show in a small panel above the dock: be brief and friendly, short paragraphs, no big headings. You work in the user's home folder.
+
+        Everything about the dock is customizable through you. Use the petal MCP tools: call petal_get_state first, then petal_set_settings (appearance: dockColor, iconSize, accentColor, …; feature switches: bounce, badges, previews, …), petal_set_dock (position, auto-hide), petal_save_mode / petal_delete_mode (focus modes and their apps; apps are bundle identifiers, get them from petal_list_apps; mode icons are SF Symbol names), petal_switch_mode (puts the current Desktop in a mode). Every Desktop has its own mode. Changes apply instantly. If a request can't be done with settings and Petal's source is on this Mac (path in petal_get_state), you may edit its Swift source, rebuild it with macos/build.sh, and call petal_reload; mention that a Petal update could replace source edits. You can also help with anything else on the Mac: apps, files, macOS settings (defaults, AppleScript, the shell). If something needs the user's approval, say in one line what it would do; they can allow it from the panel.
+        """
+        let notes = (try? String(contentsOf: app.config.instructionsFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !notes.isEmpty { prompt += "\n\nThe user's own instructions:\n" + notes }
+        return prompt
+    }
+
+    private var mcpConfig: String {
+        let script = Bundle.main.url(forResource: "petal-mcp", withExtension: "py", subdirectory: "mcp")?.path ?? ""
+        let object: [String: Any] = ["mcpServers": ["petal": ["command": "/usr/bin/python3", "args": [script]]]]
+        let data = (try? JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }
+}
+
+/// Collects a process's output and hands back whole lines. Only the pipe's reader thread uses it.
+final class LineBuffer: @unchecked Sendable {
+    private var data = Data()
+
+    func lines(adding chunk: Data) -> [String] {
+        data.append(chunk)
+        var lines: [String] = []
+        while let newline = data.firstIndex(of: 0x0A) {
+            lines.append(String(decoding: data[data.startIndex..<newline], as: UTF8.self))
+            data.removeSubrange(data.startIndex...newline)
+        }
+        return lines
+    }
+}
+
+// MARK: - The panel
+
+/// A glass panel that takes typing without taking focus from the app in front, and closes when you click elsewhere.
+@MainActor
+final class InputPanel: NSPanel {
+    private let hosting = NSHostingView(rootView: AnyView(EmptyView()))
+    var onClose: () -> Void = {}
+
+    init() {
+        super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        contentView = hosting
+        isFloatingPanel = true
+        level = .floating
+        backgroundColor = .clear
+        isOpaque = false
+        hasShadow = false
+        hidesOnDeactivate = false
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+    }
+
+    override var canBecomeKey: Bool { true }
+
+    override func resignKey() {
+        super.resignKey()
+        close()
+    }
+
+    override func close() {
+        super.close()
+        onClose()
+    }
+
+    /// Centered on the screen with the pointer, its bottom `above` points over the screen's bottom.
+    func show<Content: View>(_ content: Content, above: CGFloat) {
+        hosting.rootView = AnyView(content.environment(PetalApp.shared))
+        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
+        hosting.layoutSubtreeIfNeeded()
+        let size = hosting.fittingSize
+        setFrame(NSRect(x: screen.frame.midX - size.width / 2, y: screen.frame.minY + above, width: size.width, height: size.height).integral,
+                 display: true)
+        makeKeyAndOrderFront(nil)
+    }
+
+    /// Grows upward as the conversation does, keeping its bottom edge.
+    func fit() {
+        hosting.layoutSubtreeIfNeeded()
+        let size = hosting.fittingSize
+        guard size != frame.size else { return }
+        setFrame(NSRect(x: frame.midX - size.width / 2, y: frame.minY, width: size.width, height: size.height).integral, display: true,
+                 animate: false)
+    }
+}
+
+/// The Claude panel (AskBox.qml).
+@MainActor @Observable
+final class ClaudePanel {
+    let agent = Agent()
+    var draft = ""
+    var optionsOpen = false
+    private(set) var isOpen = false
+    @ObservationIgnored private var panel: InputPanel?
+
+    func open(asking text: String?, send: Bool = true) {
+        let app = PetalApp.shared
+        Task { await app.usage.refresh() }
+        if panel == nil {
+            let panel = InputPanel()
+            panel.onClose = { [weak self] in self?.isOpen = false; self?.optionsOpen = false }
+            self.panel = panel
+        }
+        isOpen = true
+        if let text, send {
+            agent.send(text)
+            draft = ""
+        } else {
+            draft = text ?? ""
+        }
+        app.tooltips.hide()
+        app.popups.closeAll()
+        panel?.show(ClaudePanelView(panel: self), above: 104)
+    }
+
+    func openOptions() {
+        open(asking: nil)
+        optionsOpen = true
+    }
+
+    func close() { panel?.close() }
+
+    func fit() { panel?.fit() }
+}
+
+struct ClaudePanelView: View {
+    @Environment(PetalApp.self) private var app
+    let panel: ClaudePanel
+    @FocusState private var focused: Bool
+
+    var agent: Agent { panel.agent }
+
+    static let suggestions = ["Add a Gaming mode to my dock", "Why is my Mac slow right now?", "Make my dock icons a bit bigger"]
+
+    var body: some View {
+        @Bindable var panel = panel
+        VStack(alignment: .leading, spacing: 14) {
+            header
+            if panel.optionsOpen { options.transition(.opacity.combined(with: .offset(y: -6))) }
+            if agent.messages.isEmpty { empty } else { conversation }
+            input
+        }
+        .padding(18)
+        .frame(width: 560)
+        .glassEffect(.regular, in: .rect(cornerRadius: 22))
+        .padding(10)
+        .onAppear { focused = true }
+        .onChange(of: agent.messages.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
+        .onChange(of: panel.optionsOpen) { _, _ in DispatchQueue.main.async { panel.fit() } }
+        .onChange(of: agent.running) { _, _ in DispatchQueue.main.async { panel.fit() } }
+        .onExitCommand {
+            if panel.optionsOpen { panel.optionsOpen = false } else { panel.close() }
+        }
+        .animation(.easeOut(duration: 0.16), value: panel.optionsOpen)
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            ClaudeMark().frame(width: 20, height: 20)
+                .rotationEffect(.degrees(agent.running ? 360 : 0))
+                .animation(agent.running ? .linear(duration: 2.4).repeatForever(autoreverses: false) : .default, value: agent.running)
+            Text("Claude").font(.system(size: 15, weight: .semibold))
+            if let worst = app.usage.worst {
+                Text("\(Int(((1 - worst.percent) * 100).rounded()))% left" + (worst.resetsAt.map { " · resets in " + PetalApp.until($0) } ?? ""))
+                    .font(.system(size: 12))
+                    .foregroundStyle(worst.percent >= 0.9 ? Color(red: 1, green: 0.42, blue: 0.54) : .secondary)
+            }
+            Spacer()
+            Button {
+                panel.optionsOpen.toggle()
+            } label: {
+                Text("\(app.config.string("chatModel").capitalized) · \(app.config.string("chatEffort"))  \(panel.optionsOpen ? "⌃" : "⌄")")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            if !agent.messages.isEmpty {
+                Button("New chat") { agent.reset() }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            RoundButton(symbol: "xmark") { panel.close() }
+        }
+        .frame(height: 28)
+    }
+
+    private var options: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            OptionRow(title: "Model") {
+                Picker("", selection: Binding(get: { app.config.string("chatModel") }, set: { app.config.set("chatModel", $0) })) {
+                    Text("Haiku").tag("haiku"); Text("Sonnet").tag("sonnet"); Text("Opus").tag("opus"); Text("Fable").tag("fable")
+                }
+                .pickerStyle(.segmented).labelsHidden()
+            }
+            OptionRow(title: "Effort") {
+                Picker("", selection: Binding(get: { app.config.string("chatEffort") }, set: { app.config.set("chatEffort", $0) })) {
+                    ForEach(["low", "medium", "high", "xhigh", "max"], id: \.self) { Text($0).tag($0) }
+                }
+                .pickerStyle(.segmented).labelsHidden()
+            }
+            OptionRow(title: "Full access") {
+                let full = app.config.string("claudeAccess") == "full"
+                HStack {
+                    Text(full ? "Skips every permission check" : "Off: safe actions run on their own")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                    Spacer()
+                    Toggle("", isOn: Binding(get: { full }, set: { app.config.set("claudeAccess", $0 ? "full" : "auto") }))
+                        .toggleStyle(.switch).labelsHidden().controlSize(.small)
+                }
+            }
+        }
+        .padding(12)
+        .background(.white.opacity(0.05), in: .rect(cornerRadius: 14))
+    }
+
+    private var empty: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Ask anything. Claude can change your dock and modes, your Mac's settings, or your files.")
+                .font(.system(size: 13)).foregroundStyle(.secondary).padding(.bottom, 6)
+            ForEach(Self.suggestions, id: \.self) { suggestion in
+                SuggestionRow(text: suggestion) { agent.send(suggestion) }
+            }
+        }
+    }
+
+    private var conversation: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(agent.messages) { message in
+                        MessageView(message: message, last: message.id == agent.messages.last?.id).id(message.id)
+                    }
+                    if agent.running { TypingDots().id("typing") }
+                }
+                .padding(.vertical, 2)
+            }
+            .scrollIndicators(.never)
+            .frame(maxHeight: (NSScreen.main?.frame.height ?? 900) * 0.5)
+            .fixedSize(horizontal: false, vertical: true)
+            .onChange(of: agent.messages.count) { _, _ in
+                withAnimation {
+                    if agent.running { proxy.scrollTo("typing", anchor: .bottom) } else if let last = agent.messages.last?.id { proxy.scrollTo(last, anchor: .bottom) }
+                }
+            }
+        }
+    }
+
+    private var input: some View {
+        @Bindable var panel = panel
+        return HStack(spacing: 8) {
+            TextField(agent.messages.isEmpty ? "Ask Claude…" : "Reply…", text: $panel.draft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 14))
+                .focused($focused)
+                .onSubmit(submit)
+            Button {
+                if agent.running { agent.stop() } else { submit() }
+            } label: {
+                Image(systemName: agent.running ? "stop.fill" : "arrow.up")
+                    .font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+                    .frame(width: 30, height: 30)
+                    .background(Color(nsColor: app.accent), in: .circle)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 6)
+        .frame(height: 42)
+        .background(.white.opacity(0.06), in: .capsule)
+        .overlay(Capsule().strokeBorder(focused ? Color(nsColor: app.accent).opacity(0.6) : .white.opacity(0.1)))
+    }
+
+    private func submit() {
+        guard !agent.running else { return }
+        let text = panel.draft
+        panel.draft = ""
+        agent.send(text)
+    }
+}
+
+struct OptionRow<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        HStack {
+            Text(title).font(.system(size: 12.5)).foregroundStyle(.secondary).frame(width: 84, alignment: .leading)
+            content
+        }
+    }
+}
+
+struct SuggestionRow: View {
+    let text: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                Text(text).font(.system(size: 13))
+                Spacer()
+                Text("↗").opacity(hovering ? 1 : 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .background(hovering ? .white.opacity(0.06) : .clear, in: .rect(cornerRadius: 10))
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
+struct MessageView: View {
+    @Environment(PetalApp.self) private var app
+    let message: Agent.Message
+    let last: Bool
+
+    var body: some View {
+        let accent = Color(nsColor: app.accent)
+        switch message.kind {
+        case .user:
+            HStack {
+                Spacer(minLength: 100)
+                Text(message.text).font(.system(size: 13.5)).textSelection(.enabled)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(accent.opacity(0.22), in: .rect(cornerRadius: 14))
+            }
+        case .claude:
+            Text(Self.markdown(message.text)).font(.system(size: 13.5)).lineSpacing(2).textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .step:
+            Text("›  " + message.text).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+        case .error:
+            Text(message.text).font(.system(size: 13.5)).foregroundStyle(Color(red: 1, green: 0.42, blue: 0.54)).textSelection(.enabled)
+        case .ask:
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Claude wants to").font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(message.text).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+                if last && !app.claude.agent.pendingAsk.isEmpty {
+                    HStack {
+                        Button("Allow") { app.claude.agent.allow() }.buttonStyle(.glassProminent).tint(accent)
+                        Button("Don't allow") { app.claude.agent.deny() }.buttonStyle(.glass)
+                    }
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white.opacity(0.05), in: .rect(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(accent.opacity(0.45)))
+        }
+    }
+
+    static func markdown(_ text: String) -> AttributedString {
+        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+    }
+}
+
+struct TypingDots: View {
+    var body: some View {
+        TimelineView(.animation) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            HStack(spacing: 5) {
+                ForEach(0..<3) { i in
+                    Circle().fill(Color(nsColor: PetalApp.shared.accent)).frame(width: 6, height: 6)
+                        .opacity(0.25 + 0.75 * (sin((t - Double(i) * 0.16) * .pi / 0.42) + 1) / 2)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - "+": add apps and folders
+
+@MainActor @Observable
+final class AppSearch {
+    var query = ""
+    var selection = 0
+    private(set) var mode: Mode?
+    @ObservationIgnored private var panel: InputPanel?
+
+    func open(in dock: ScreenDock?) {
+        let app = PetalApp.shared
+        mode = (dock ?? app.docks.focusedDock)?.mode
+        query = ""
+        selection = 0
+        if panel == nil { panel = InputPanel() }
+        app.tooltips.hide()
+        panel?.show(AppSearchView(search: self), above: 110)
+    }
+
+    func close() { panel?.close() }
+
+    struct Result: Identifiable, Hashable {
+        let id: String
+        let name: String
+        let isFolder: Bool
+        let path: String
+    }
+
+    var results: [Result] {
+        let q = query.trimmingCharacters(in: .whitespaces)
+        var list: [Result] = []
+        let typedPath = q.hasPrefix("/") || q.hasPrefix("~")
+        if !typedPath {
+            list += Apps.search(q).prefix(60).map { Result(id: $0.id, name: $0.name, isFolder: false, path: "") }
+        }
+        if !q.isEmpty {
+            let expanded = (q as NSString).expandingTildeInPath
+            let base = typedPath ? (expanded.hasSuffix("/") ? expanded : (expanded as NSString).deletingLastPathComponent) : NSHomeDirectory()
+            let prefix = typedPath ? (expanded.hasSuffix("/") ? "" : (expanded as NSString).lastPathComponent) : q
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: base)) ?? []
+            let folders = names.filter { !$0.hasPrefix(".") && $0.lowercased().hasPrefix(prefix.lowercased()) }
+                .filter { var isDir: ObjCBool = false; return FileManager.default.fileExists(atPath: base + "/" + $0, isDirectory: &isDir) && isDir.boolValue }
+                .sorted().prefix(20)
+            let home = NSHomeDirectory()
+            list += folders.map { name in
+                let full = (base as NSString).appendingPathComponent(name)
+                let short = full.hasPrefix(home) ? "~" + full.dropFirst(home.count) : full
+                return Result(id: "folder:" + short, name: short, isFolder: true, path: short)
+            }
+        }
+        return list
+    }
+
+    func added(_ result: Result) -> Bool {
+        result.isFolder ? PetalApp.shared.config.strings("stackFolders").contains(result.path) : (mode?.apps.contains(result.id) ?? false)
+    }
+
+    func toggle(_ result: Result) {
+        let config = PetalApp.shared.config
+        if result.isFolder {
+            var folders = config.strings("stackFolders")
+            if folders.contains(result.path) { folders.removeAll { $0 == result.path } } else { folders.append(result.path) }
+            config.set("stackFolders", folders)
+        } else if let mode {
+            if mode.apps.contains(result.id) { config.removeApp(result.id, from: mode.id) } else { config.addApp(result.id, to: mode.id) }
+            self.mode = config.modes.first { $0.id == mode.id }
+        }
+    }
+}
+
+struct AppSearchView: View {
+    @Environment(PetalApp.self) private var app
+    let search: AppSearch
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        @Bindable var search = search
+        let results = search.results
+        let accent = Color(nsColor: app.accent)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(search.mode.map { "Add to \($0.name)" } ?? "Add to the dock").font(.system(size: 17, weight: .bold)).foregroundStyle(accent)
+                Spacer()
+                RoundButton(symbol: "xmark") { search.close() }
+            }
+            TextField(search.mode.map { "Add an app or folder to \($0.name)…" } ?? "Add an app or folder…", text: $search.query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 14))
+                .focused($focused)
+                .padding(.horizontal, 12)
+                .frame(height: 38)
+                .background(.white.opacity(0.06), in: .rect(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(focused ? accent : .white.opacity(0.12)))
+                .onSubmit { if results.indices.contains(search.selection) { search.toggle(results[search.selection]) } }
+                .onKeyPress(.downArrow) { search.selection = min(search.selection + 1, max(0, results.count - 1)); return .handled }
+                .onKeyPress(.upArrow) { search.selection = max(search.selection - 1, 0); return .handled }
+                .onChange(of: search.query) { _, _ in search.selection = 0 }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 2) {
+                        if results.isEmpty { Text("Nothing matches").foregroundStyle(.secondary).padding(.vertical, 20) }
+                        ForEach(Array(results.enumerated()), id: \.element.id) { index, result in
+                            SearchRow(result: result, selected: index == search.selection, added: search.added(result)) {
+                                search.selection = index
+                                search.toggle(result)
+                            }
+                            .id(index)
+                            .onHover { if $0 { search.selection = index } }
+                        }
+                    }
+                }
+                .frame(height: 8 * 42)
+                .scrollIndicators(.never)
+                .onChange(of: search.selection) { _, new in proxy.scrollTo(new) }
+            }
+        }
+        .padding(18)
+        .frame(width: 440)
+        .glassEffect(.regular, in: .rect(cornerRadius: 22))
+        .padding(10)
+        .onAppear { focused = true }
+        .onExitCommand { search.close() }
+    }
+}
+
+struct SearchRow: View {
+    let result: AppSearch.Result
+    let selected: Bool
+    let added: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        let accent = Color(nsColor: PetalApp.shared.accent)
+        Button(action: toggle) {
+            HStack(spacing: 10) {
+                Image(nsImage: result.isFolder ? NSWorkspace.shared.icon(forFile: (result.path as NSString).expandingTildeInPath) : Apps.icon(result.id))
+                    .resizable().frame(width: 28, height: 28)
+                Text(result.name).font(.system(size: 13)).lineLimit(1).truncationMode(.middle)
+                Spacer()
+                Text(result.isFolder ? (added ? "Stack ✓" : "+ Stack") : (added ? "In dock ✓" : "+ Add"))
+                    .font(.system(size: 12, weight: .medium)).foregroundStyle(added ? accent : .secondary)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 40)
+            .background(selected ? accent.opacity(0.22) : .clear, in: .rect(cornerRadius: 10))
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+    }
+}

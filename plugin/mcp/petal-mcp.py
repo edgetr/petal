@@ -10,6 +10,8 @@ Code setup:  claude mcp add petal -- python3 /path/to/petal-mcp.py
 import glob
 import json
 import os
+import plistlib
+import socket
 import subprocess
 import sys
 
@@ -19,6 +21,10 @@ SETTINGS = os.path.join(CONFIG, "settings.json")
 MODES = os.path.join(CONFIG, "modes.json")
 INSTRUCTIONS = os.path.join(CONFIG, "instructions.md")
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# Petal for macOS ships this same server inside Petal.app, and keeps the dock's place in dock.json.
+MAC = sys.platform == "darwin"
+DOCK = os.path.join(CONFIG, "dock.json")
+SOCKET = os.environ.get("PETAL_SOCKET") or os.path.join(CONFIG, "petal.sock")
 
 # Every setting Petal reads, with its default and what it does. Petal
 # reloads settings.json as soon as it changes.
@@ -74,15 +80,16 @@ SETTINGS_SCHEMA = {
 MODE_FIELDS = {
     "id": "unique id, lowercase",
     "name": "display name",
-    "icon": "one Nerd Font glyph or emoji",
+    "icon": "an SF Symbol name, like hammer" if MAC else "one Nerd Font glyph or emoji",
     "color": "#rrggbb",
     "about": "what the mode is for (used to sort activity into it)",
-    "apps": "desktop ids, in dock order",
+    "apps": ("bundle ids" if MAC else "desktop ids") + ", in dock order",
     "sites": "words or domains found in browser tab titles that belong to this mode",
-    "focusDelay": "seconds of countdown before leaving (if countdowns are on)",
-    "hold": "hold notifications from apps outside the mode",
-    "allow": "desktop ids whose notifications always come through",
+    "focusDelay": "seconds of countdown before leaving (if countdowns are on); 0 also turns focus cards off in this mode",
+    "hold": "Omarchy only: hold notifications from apps outside the mode" if MAC else "hold notifications from apps outside the mode",
+    "allow": "bundle ids focus cards always accept in this mode" if MAC else "desktop ids whose notifications always come through",
 }
+WORKSPACE = "Desktop" if MAC else "workspace"
 
 
 def read_json(path, fallback):
@@ -110,7 +117,49 @@ def run(*cmd):
         return str(e)
 
 
+def petal(*args):
+    """Asks the running Petal for macOS, over its socket, as `omarchy-shell petal` does on Omarchy."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(5)
+            conn.connect(SOCKET)
+            conn.sendall((json.dumps(list(args)) + "\n").encode())
+            reply = b""
+            while not reply.endswith(b"\n"):
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                reply += chunk
+            return reply.decode().strip()
+    except OSError as e:
+        return "Petal isn't running (%s)" % e
+
+
+def mac_apps(query=""):
+    roots = ["/Applications", "/Applications/Utilities", "/System/Applications", "/System/Applications/Utilities",
+             os.path.join(HOME, "Applications")]
+    apps, seen = [], set()
+    for root in roots:
+        for path in sorted(glob.glob(os.path.join(root, "*.app")) + glob.glob(os.path.join(root, "*", "*.app"))):
+            try:
+                with open(os.path.join(path, "Contents", "Info.plist"), "rb") as f:
+                    info = plistlib.load(f)
+            except Exception:   # a missing or malformed Info.plist: not an app to list
+                continue
+            app_id = info.get("CFBundleIdentifier")
+            if not app_id or app_id in seen:
+                continue
+            seen.add(app_id)
+            name = info.get("CFBundleDisplayName") or info.get("CFBundleName") or os.path.basename(path)[:-4]
+            if query and query.lower() not in (app_id + " " + name).lower():
+                continue
+            apps.append({"id": app_id, "name": name})
+    return sorted(apps, key=lambda a: a["name"].lower())
+
+
 def installed_apps(query=""):
+    if MAC:
+        return mac_apps(query)
     dirs = [os.path.join(HOME, ".local/share/applications")]
     dirs += [os.path.join(d, "applications") for d in os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")]
     apps, seen = [], set()
@@ -143,6 +192,10 @@ def installed_apps(query=""):
 
 
 def dock_config():
+    if MAC:
+        dock = read_json(DOCK, {})
+        return {"position": dock.get("position", "bottom"), "autohide": dock.get("autoHide", False),
+                "dock": dock.get("dock", "petal")}
     shell = read_json(os.path.join(HOME, ".config/omarchy/shell.json"), {})
     dock = shell.get("dock", {})
     return {"position": dock.get("position", "bottom"), "autohide": dock.get("autohide", False)}
@@ -158,9 +211,10 @@ def t_get_state(_):
         "settings_help": {k: v[1] for k, v in SETTINGS_SCHEMA.items()},
         "modes": read_json(MODES, {}),
         "mode_fields": MODE_FIELDS,
-        "current_mode": run("omarchy-shell", "petal", "current"),
+        "current_mode": petal("current") if MAC else run("omarchy-shell", "petal", "current"),
         "dock": dock_config(),
-        "files": {"settings": SETTINGS, "modes": MODES, "instructions": INSTRUCTIONS, "plugin_source": PLUGIN_DIR},
+        "files": {"settings": SETTINGS, "modes": MODES, "instructions": INSTRUCTIONS,
+                  "plugin_source": os.environ.get("PETAL_SOURCE", "") if MAC else PLUGIN_DIR},
     }
 
 
@@ -186,6 +240,8 @@ def t_reset_settings(args):
 
 
 def t_set_dock(args):
+    if MAC:
+        return mac_set_dock(args)
     done = {}
     if "position" in args:
         if args["position"] not in ("bottom", "top", "left", "right"):
@@ -193,6 +249,22 @@ def t_set_dock(args):
         done["position"] = run("omarchy-dock", "position", args["position"])
     if "autohide" in args:
         done["autohide"] = run("omarchy-dock", "autohide", "on" if args["autohide"] else "off")
+    return done
+
+
+def mac_set_dock(args):
+    dock, done = read_json(DOCK, {}), {}
+    if "position" in args:
+        if args["position"] not in ("bottom", "left", "right"):
+            raise ValueError("position must be bottom, left or right (the menu bar holds the top)")
+        dock["position"] = done["position"] = args["position"]
+    if "autohide" in args:
+        dock["autoHide"] = done["autohide"] = bool(args["autohide"])
+    write_json(DOCK, dock)
+    if "use" in args:
+        if args["use"] not in ("petal", "macos"):
+            raise ValueError("use must be petal or macos")
+        done["use"] = petal("dock", args["use"])
     return done
 
 
@@ -245,6 +317,8 @@ def t_set_default_mode(args):
 
 
 def t_switch_mode(args):
+    if MAC:
+        return {"result": petal("mode", args.get("id", ""))}
     return {"result": run("omarchy-shell", "petal", "mode", args.get("id", "")) or "ok"}
 
 
@@ -253,6 +327,8 @@ def t_list_apps(args):
 
 
 def t_reload(_):
+    if MAC:
+        return {"ok": True, "note": petal("restart") + "; the Claude panel closes."}
     subprocess.Popen(["omarchy", "restart", "shell"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     return {"ok": True, "note": "Omarchy's shell (and Petal) is restarting; the Claude panel closes."}
 
@@ -263,17 +339,30 @@ TOOLS = {
                            {"settings": {"type": "object", "description": "setting name -> new value"}}),
     "petal_reset_settings": (t_reset_settings, "Reset settings to their defaults (all, or just the given keys).",
                              {"keys": {"type": "array", "items": {"type": "string"}}}),
-    "petal_set_dock": (t_set_dock, "Move the dock (position: bottom, top, left, right) and/or turn auto-hide on or off.",
-                       {"position": {"type": "string", "enum": ["bottom", "top", "left", "right"]}, "autohide": {"type": "boolean"}}),
+    "petal_set_dock": (t_set_dock, "Move the dock (position: bottom, left, right) and/or turn auto-hide on or off; use: petal or macos picks Petal or macOS's own Dock (the other turns off)." if MAC
+                       else "Move the dock (position: bottom, top, left, right) and/or turn auto-hide on or off.",
+                       {"position": {"type": "string", "enum": ["bottom", "left", "right"] if MAC else ["bottom", "top", "left", "right"]},
+                        "autohide": {"type": "boolean"}, **({"use": {"type": "string", "enum": ["petal", "macos"]}} if MAC else {})}),
     "petal_save_mode": (t_save_mode, "Create a mode or update fields of an existing one (merges). Fields: " + "; ".join("%s: %s" % kv for kv in MODE_FIELDS.items()),
                         {"mode": {"type": "object", "description": "must include id"}}),
     "petal_delete_mode": (t_delete_mode, "Delete a mode.", {"id": {"type": "string"}}),
-    "petal_set_default_mode": (t_set_default_mode, "Set the mode new workspaces start in.", {"id": {"type": "string"}}),
-    "petal_switch_mode": (t_switch_mode, "Switch the focused workspace to a mode.", {"id": {"type": "string"}}),
-    "petal_list_apps": (t_list_apps, "Installed apps (desktop id and name), optionally filtered by a search word. Use the ids in a mode's apps.",
+    "petal_set_default_mode": (t_set_default_mode, "Set the mode new %ss start in." % WORKSPACE, {"id": {"type": "string"}}),
+    "petal_switch_mode": (t_switch_mode, "Switch the focused %s to a mode." % WORKSPACE, {"id": {"type": "string"}}),
+    "petal_list_apps": (t_list_apps, "Installed apps (%s and name), optionally filtered by a search word. Use the ids in a mode's apps." % ("bundle id" if MAC else "desktop id"),
                         {"query": {"type": "string"}}),
-    "petal_reload": (t_reload, "Restart Omarchy's shell to load edits to Petal's own source code (settings and modes don't need this).", {}),
+    "petal_reload": (t_reload, "Restart Petal to load a rebuilt Petal.app (settings and modes don't need this)." if MAC
+                     else "Restart Omarchy's shell to load edits to Petal's own source code (settings and modes don't need this).", {}),
 }
+
+
+def version():
+    if MAC:   # inside Petal.app: Contents/Resources/mcp/petal-mcp.py
+        try:
+            with open(os.path.join(PLUGIN_DIR, "..", "Info.plist"), "rb") as f:
+                return plistlib.load(f).get("CFBundleShortVersionString", "")
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            return ""
+    return read_json(os.path.join(PLUGIN_DIR, "manifest.json"), {}).get("version", "")
 
 
 def tool_list():
@@ -289,7 +378,7 @@ def handle(msg):
     if method == "initialize":
         return {"protocolVersion": (msg.get("params") or {}).get("protocolVersion", "2025-06-18"),
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "petal", "version": read_json(os.path.join(PLUGIN_DIR, "manifest.json"), {}).get("version", "")},
+                "serverInfo": {"name": "petal", "version": version()},
                 "instructions": "Tools to customize the Petal dock. Call petal_get_state first."}
     if method == "tools/list":
         return {"tools": tool_list()}

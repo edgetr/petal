@@ -3,6 +3,44 @@
 set -euo pipefail
 config="$HOME/.config/petal"
 
+# Petal for macOS: the same commands, sent to the running Petal over its socket.
+if [[ $(uname) == Darwin ]]; then
+  ipc() {
+    local json="[" sep="" arg
+    for arg in "$@"; do arg=${arg//\\/\\\\}; arg=${arg//\"/\\\"}; json+="$sep\"$arg\""; sep=","; done
+    printf '%s]\n' "$json" | nc -U "$config/petal.sock" || echo "Petal isn't running" >&2
+  }
+  case "${1:-help}" in
+    mode)     ipc mode "${2:?usage: petal mode <id>}" ;;
+    stay|current|ask|search|settings|restart|version|reveal|check) ipc "$1" ;;
+    chat)     shift; ipc chat "$*" ;;
+    dock)     ipc dock "${2:-}" ;;
+    update)   ipc update ;;
+    modes)    osascript -l JavaScript -e "var d=JSON.parse($.NSString.stringWithContentsOfFileEncodingError('$config/modes.json',4,null).js); d.modes.map(m=>m.id+' - '+m.name+' | '+(m.apps||[]).join(', ')).join('\\n')" ;;
+    edit)     open -t "$config/modes.json" ;;
+    logs)     log show --last 30m --style compact --predicate 'process == "Petal"' 2>/dev/null | tail -n "${2:-40}" ;;
+    *)
+      cat <<'HELP'
+petal mode <id>       put this Desktop in a mode (waits out a focus countdown)
+petal stay            cancel a countdown
+petal current         print this Desktop's mode
+petal modes           list modes and their apps
+petal ask             open the Claude panel
+petal chat <text>     ask Claude something
+petal search          open the add-apps search
+petal settings        open Petal's settings
+petal dock [petal|macos]  which dock is showing, or switch
+petal edit            edit ~/.config/petal/modes.json
+petal restart         restart Petal
+petal update          check for a new Petal now
+petal version         the running version
+petal logs [n]        recent Petal log lines
+HELP
+      ;;
+  esac
+  exit 0
+fi
+
 case "${1:-help}" in
   mode)     omarchy-shell petal mode "${2:?usage: petal mode <id>}" ;;
   stay)     omarchy-shell petal stay ;;
