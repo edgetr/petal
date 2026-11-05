@@ -152,15 +152,15 @@ PanelWindow {
 
     readonly property int pad: Math.round(18 * Style.fontScale)
     width: Math.round(560 * Style.fontScale)
-    height: column.implicitHeight + pad * 2
+    // One height for every state (suggestions, describing your day, options, a conversation): the header and the
+    // text box never move; what's between them has its own room, and a long conversation scrolls in it.
+    height: Math.round(Math.min(box.height * 0.7, 480 * Style.fontScale))
     x: Math.round((box.width - width) / 2)
     y: box.height - height - Math.round(104 * Style.fontScale)
     radius: Math.round(22 * Style.fontScale)
     color: box.dock ? box.dock.popupFill : Qt.rgba(Commons.Color.popups.background.r, Commons.Color.popups.background.g, Commons.Color.popups.background.b, 0.74)
     border.width: 1
     border.color: Qt.rgba(1, 1, 1, 0.1)
-
-    Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
 
     // Clicks on the card stay on the card (and close the dropdown).
     MouseArea { anchors.fill: parent; onClicked: box.optionsOpen = false }
@@ -326,6 +326,12 @@ PanelWindow {
         }
       }
 
+      // ── Body: everything between the header and the text box ──
+      Item {
+        id: body
+        width: parent.width
+        height: card.height - card.pad * 2 - Math.round(28 * Style.fontScale) - Math.round(42 * Style.fontScale) - column.spacing * 2
+
       // ── Empty state ──
       Column {
         visible: !box.chat || box.chat.messages.count === 0
@@ -432,7 +438,7 @@ PanelWindow {
         width: parent.width
         opacity: box.optionsOpen ? 0 : 1
         Behavior on opacity { NumberAnimation { duration: 140 } }
-        height: Math.min(contentHeight, Math.round(box.height * 0.5))
+        height: parent.height
         clip: true
         spacing: Math.round(10 * Style.fontScale)
         model: box.chat ? box.chat.messages : null
@@ -553,6 +559,8 @@ PanelWindow {
             }
           }
         }
+      }
+
       }
 
       // ── Input ──

@@ -332,20 +332,24 @@ struct ClaudePanelView: View {
 
     var body: some View {
         @Bindable var panel = panel
+        // One height for every state, so the header and the text box never move: what's between them has its own
+        // room (a long conversation scrolls in it), and the options open over it.
         VStack(alignment: .leading, spacing: 14) {
             header
-            if panel.optionsOpen { options.transition(.opacity.combined(with: .offset(y: -6))) }
-            if agent.messages.isEmpty { empty } else { conversation }
+            ZStack(alignment: .top) {
+                Group { if agent.messages.isEmpty { empty } else { conversation } }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .opacity(panel.optionsOpen ? 0 : 1)
+                if panel.optionsOpen { options.transition(.opacity.combined(with: .offset(y: -6))) }
+            }
+            .frame(maxHeight: .infinity)
             input
         }
         .padding(18)
-        .frame(width: 560)
+        .frame(width: 560, height: min(480, (NSScreen.main?.frame.height ?? 900) * 0.7))
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
         .padding(10)
         .onAppear { focused = true }
-        .onChange(of: agent.messages.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
-        .onChange(of: panel.optionsOpen) { _, _ in DispatchQueue.main.async { panel.fit() } }
-        .onChange(of: agent.running) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onExitCommand {
             if panel.optionsOpen { panel.optionsOpen = false } else { panel.close() }
         }
@@ -462,8 +466,6 @@ struct ClaudePanelView: View {
                 .padding(.vertical, 2)
             }
             .scrollIndicators(.never)
-            .frame(maxHeight: (NSScreen.main?.frame.height ?? 900) * 0.5)
-            .fixedSize(horizontal: false, vertical: true)
             .onChange(of: agent.messages.count) { _, _ in
                 withAnimation {
                     if agent.running { proxy.scrollTo("typing", anchor: .bottom) } else if let last = agent.messages.last?.id { proxy.scrollTo(last, anchor: .bottom) }

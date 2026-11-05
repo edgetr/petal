@@ -41,7 +41,8 @@ PanelWindow {
     if (open) panel.enter()
     else panel.page = ""
   }
-  onPageChanged: if (open) panel.enter()
+  // Every page starts at its top.
+  onPageChanged: { pageScroll.contentY = 0; if (open) panel.enter() }
 
   HyprlandFocusGrab {
     active: panel.open
@@ -225,7 +226,8 @@ PanelWindow {
 
     readonly property int pad: Math.round(16 * panel.s)
     width: Math.round(420 * panel.s)
-    height: Math.min(content.implicitHeight + pad * 2, panel.height - Math.round(80 * panel.s))
+    // One size for every page, so moving between pages never moves the menu; a long page scrolls.
+    height: Math.min(Math.round(520 * panel.s), panel.height - Math.round(80 * panel.s))
     x: Math.round((panel.width - width) / 2)
     y: Math.round((panel.height - height) / 2.6)
     radius: Math.round(20 * panel.s)
@@ -234,12 +236,11 @@ PanelWindow {
     border.color: Qt.rgba(1, 1, 1, 0.1)
     clip: true
 
-    Behavior on height { NumberAnimation { duration: Style.duration(160); easing.type: Easing.OutCubic } }
-
     // Clicks on the card stay on the card.
     MouseArea { anchors.fill: parent }
 
     Flickable {
+      id: pageScroll
       anchors.fill: parent
       anchors.margins: card.pad
       contentHeight: content.implicitHeight
