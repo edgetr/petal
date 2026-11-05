@@ -25,7 +25,7 @@ enum Snapshot {
 
         var views: [(String, AnyView, CGSize?)] = [
             ("dock", AnyView(DockView(dock: dock)), nil),
-            ("welcome", AnyView(WelcomeView {}), CGSize(width: 640, height: 640)),
+            ("welcome", AnyView(WelcomeView {}), CGSize(width: 640, height: 720)),
             ("claude-empty", AnyView(ClaudePanelView(panel: ClaudePanel())), nil),
             ("claude-chat", AnyView(ClaudePanelView(panel: app.claude)), nil),
             ("search", AnyView(AppSearchView(search: app.search)), nil),

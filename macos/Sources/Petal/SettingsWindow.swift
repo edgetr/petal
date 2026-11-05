@@ -307,7 +307,7 @@ struct DockSettings: View {
             } choose: { app.useDock("macos") }
         }
 
-        Text("Removing Petal? Choose macOS’s Dock first, or run `petal restore-dock` afterwards: Petal keeps your own Dock’s settings until then.")
+        Text("Your own Dock is kept safe: quitting Petal, or removing it, brings it back as it was.")
             .font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 6)
             .fixedSize(horizontal: false, vertical: true)
 
@@ -320,6 +320,15 @@ struct DockSettings: View {
             .pickerStyle(.segmented)
             Toggle("Auto-hide", isOn: Binding(get: { app.config.autoHide }, set: { app.config.setDock("autoHide", $0) }))
                 .toggleStyle(.switch).controlSize(.small)
+            if !app.config.autoHide {
+                Toggle(isOn: Binding(get: { app.config.keepWindowsClear }, set: { app.config.setDock("keepWindowsClear", $0) })) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Keep windows clear of the dock")
+                        Text("Windows end above the dock instead of running under it.").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                }
+                .toggleStyle(.switch).controlSize(.small)
+            }
             Toggle("Open Petal at login", isOn: Binding(get: { app.openAtLogin }, set: { app.openAtLogin = $0 }))
                 .toggleStyle(.switch).controlSize(.small)
         }
@@ -632,6 +641,8 @@ struct ClaudeSettings: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
+        Card { ClaudeSetupRow() }
+            .onAppear { app.claudeSetup.refresh() }
         Card {
             HStack(spacing: 18) {
                 UsageRing(usage: app.usage, size: 64)

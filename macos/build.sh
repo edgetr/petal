@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # Builds Petal.app for macOS 26 and later into macos/build/.
 #
-#   macos/build.sh                    a release build, signed ad hoc
+#   macos/build.sh                    a release build, signed with Petal's certificate if it's in a keychain
 #   PETAL_SIGN_IDENTITY=<hash> ...    signed with that certificate instead
 #
-# Petal has no Apple Developer ID, so a downloaded Petal.app is opened once through System Settings > Privacy &
-# Security > Open Anyway. Signing with one stable certificate (even a self-made one) keeps the permissions macOS
-# grants (Accessibility, Screen Recording) across updates; an ad hoc signature changes with every build.
+# Petal has no Apple Developer ID. Its own self-made certificate, "Petal (Edgetr)", signs every release (the release
+# workflow gets it from the repository's secrets), so macOS knows each update as the same app and keeps the
+# permissions people gave it (Accessibility, Screen Recording). Without it the build is signed ad hoc.
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(cd .. && pwd)"
 VERSION="$(cat VERSION)"
-IDENTITY="${PETAL_SIGN_IDENTITY:--}"
+IDENTITY="${PETAL_SIGN_IDENTITY:-$(security find-identity 2>/dev/null | awk '/"Petal \(Edgetr\)"/ {print $2; exit}')}"
+IDENTITY="${IDENTITY:--}"
 APP="build/Petal.app"
 
 log="$(mktemp)"
@@ -32,9 +33,10 @@ cp "$BIN" "$APP/Contents/MacOS/Petal"
 cp "$ROOT/brand/macos/Assets.car" "$ROOT/brand/macos/Petal.icns" "$APP/Contents/Resources/"
 cp "$ROOT/defaults/modes-macos.json" "$APP/Contents/Resources/modes.json"
 cp "$ROOT/plugin/assets/claude.svg" "$APP/Contents/Resources/claude.svg"
-# Claude's Petal tools: the same MCP server as on Omarchy, which knows it's on a Mac.
+# Claude's Petal tools run inside Petal (`Petal --mcp`); their names, descriptions and settings come from
+# petal-mcp.py, so Omarchy and the Mac describe them the same way.
 mkdir -p "$APP/Contents/Resources/mcp"
-cp "$ROOT/plugin/mcp/petal-mcp.py" "$APP/Contents/Resources/mcp/petal-mcp.py"
+python3 -I "$ROOT/plugin/mcp/petal-mcp.py" --describe > "$APP/Contents/Resources/mcp/tools.json"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -60,4 +62,5 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 codesign --force --options runtime --entitlements Petal.entitlements --sign "$IDENTITY" "$APP" 2>/dev/null
-echo "built $APP $VERSION ($( [ "$IDENTITY" = "-" ] && echo "ad hoc" || echo "signed"))"
+codesign --verify --strict "$APP"
+echo "built $APP $VERSION ($( [ "$IDENTITY" = "-" ] && echo "signed ad hoc" || echo "signed by $(codesign -dvv "$APP" 2>&1 | sed -n 's/^Authority=//p' | head -1)"))"

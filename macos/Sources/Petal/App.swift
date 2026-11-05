@@ -26,6 +26,7 @@ final class PetalApp {
     let claude = ClaudePanel()
     let search = AppSearch()
     let updater = Updater()
+    let claudeSetup = ClaudeSetup()
     @ObservationIgnored let tooltips = Tooltips()
     @ObservationIgnored let settings = SettingsWindow()
     @ObservationIgnored let welcome = Welcome()
@@ -42,11 +43,7 @@ final class PetalApp {
         PetalApp.instance = self
         docks = DockController()
         focus = FocusGuard()
-        let setting = config.string("claudePath")
-        Task {
-            // Asking the login shell can take a moment; the dock doesn't wait for it.
-            claudePath = await Task.detached { PetalApp.findClaude(setting) }.value
-        }
+        Task { await lookForClaude() }
     }
 
     var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev" }
@@ -68,6 +65,7 @@ final class PetalApp {
         usage.start { [weak self] in self?.config.bool("claudeUsage") ?? false }
         signals.start(watchFolders: Stacks.resolve(config.strings("stackFolders")))
         updater.start()
+        claudeSetup.refresh()
         if !config.welcomed {
             welcome.show()
         } else {
@@ -88,6 +86,7 @@ final class PetalApp {
         config.setDock("dock", which)
         if which == "petal" {
             // PETAL_KEEP_DOCK=1 leaves macOS's Dock alone, for working on Petal next to it.
+            DockGuard.install()
             if ProcessInfo.processInfo.environment["PETAL_KEEP_DOCK"] != "1" && !SystemDock.replace() {
                 let alert = NSAlert()
                 alert.messageText = "Petal couldn't save your Dock's settings"
@@ -215,6 +214,12 @@ final class PetalApp {
         let home = NSHomeDirectory()
         return ["\(home)/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude", "\(home)/.claude/local/claude"]
             .first(where: isTool)
+    }
+
+    /// Asking the login shell can take a moment; the dock doesn't wait for it.
+    func lookForClaude() async {
+        let setting = config.string("claudePath")
+        claudePath = await Task.detached { PetalApp.findClaude(setting) }.value
     }
 
     // MARK: Restarting

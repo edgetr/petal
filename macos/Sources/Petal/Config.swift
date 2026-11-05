@@ -88,6 +88,8 @@ final class Config {
     /// "petal" shows Petal and hides macOS's Dock; "macos" keeps macOS's Dock and turns Petal's off.
     var whichDock: String { dock["dock"] as? String ?? "petal" }
     var welcomed: Bool { dock["welcomed"] as? Bool ?? false }
+    /// Windows end above the dock instead of running under it (while auto-hide is off).
+    var keepWindowsClear: Bool { dock["keepWindowsClear"] as? Bool ?? true }
 
     func setDock(_ key: String, _ value: Any) {
         update(dockFile) { $0[key] = value }

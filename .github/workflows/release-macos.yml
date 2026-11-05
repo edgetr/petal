@@ -43,7 +43,8 @@ jobs:
           security import "$RUNNER_TEMP/petal.p12" -k "$keychain" -P "$PASSWORD" -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -s -k petal "$keychain" >/dev/null
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
-          identity="$(security find-identity -p codesigning "$keychain" | awk 'NR==1 {print $2}')"
+          # Self-made, so macOS lists it as untrusted; codesign signs with it all the same.
+          identity="$(security find-identity "$keychain" | awk '/\)/ {print $2; exit}')"
           echo "PETAL_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
 
       - name: Build

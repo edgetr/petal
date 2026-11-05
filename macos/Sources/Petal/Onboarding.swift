@@ -9,7 +9,7 @@ final class Welcome {
     private var window: NSWindow?
 
     func show() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 600),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 720),
                               styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
@@ -55,6 +55,7 @@ struct WelcomeView: View {
                                 }
                             }
                         }
+                        ClaudeSetupRow().padding(14).frame(width: 520).glassEffect(.regular, in: .rect(cornerRadius: 20))
                         step(symbol: "macwindow.on.rectangle", title: "Let Petal see your windows",
                              detail: "For window lists, badges and focus cards. macOS asks once.") {
                             let _ = tick
@@ -100,7 +101,7 @@ struct WelcomeView: View {
             }
             .padding(36)
         }
-        .frame(width: 640, height: 640)
+        .frame(width: 640, height: 720)
         .onReceive(timer) { _ in tick += 1 }
     }
 
@@ -121,5 +122,47 @@ struct WelcomeView: View {
         .padding(14)
         .frame(width: 520)
         .glassEffect(.regular, in: .rect(cornerRadius: 20))
+    }
+}
+
+/// Claude's state, and the one thing to do next: install it, sign in, or nothing.
+struct ClaudeSetupRow: View {
+    @Environment(PetalApp.self) private var app
+
+    var body: some View {
+        let setup = app.claudeSetup
+        HStack(spacing: 14) {
+            ClaudeMark().frame(width: 22, height: 22).frame(width: 40, height: 40).glassEffect(.regular, in: .circle)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Claude").font(.system(size: 14, weight: .semibold))
+                Text(detail(setup.state)).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            switch setup.state {
+            case .checking, .installing, .signingIn:
+                ProgressView().controlSize(.small)
+            case .missing:
+                Button("Install") { setup.install() }.buttonStyle(.glassProminent).tint(SettingsSection.claude.tint)
+            case .signedOut:
+                Button("Sign in…") { setup.signIn() }.buttonStyle(.glassProminent).tint(SettingsSection.claude.tint)
+            case .failed:
+                Button("Try again") { setup.refresh() }.buttonStyle(.glass)
+            case .ready:
+                Label("Ready", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 12, weight: .medium))
+            }
+        }
+    }
+
+    private func detail(_ state: ClaudeSetup.State) -> String {
+        switch state {
+        case .checking: "Looking for Claude…"
+        case .missing: "Petal uses your own Claude account. It installs Claude Code, the app it talks to, for you."
+        case .installing: "Installing Claude Code…"
+        case .signedOut: "Sign in with your Claude account. It counts toward your Claude plan."
+        case .signingIn: "Finish signing in in your browser."
+        case .ready(let email): email.isEmpty ? "Signed in." : "Signed in as \(email)."
+        case .failed(let text): text
+        }
     }
 }

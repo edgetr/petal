@@ -138,6 +138,47 @@ final class DockController {
 
             panel.place(on: screen)
         }
+        if config.keepWindowsClear && !config.autoHide { keepWindowsClear(snapshot) }
+    }
+
+    /// macOS keeps no room for a dock other than its own, so windows would run under Petal's. While auto-hide is
+    /// off, a window reaching into the dock's strip is shortened to end above it (or narrowed, for a side dock); one
+    /// too small to shorten is moved out instead. Omarchy reserves the same strip for its dock.
+    private func keepWindowsClear(_ snapshot: WindowList) {
+        guard Windows.trusted else { return }
+        let top = NSScreen.screens.first?.frame.maxY ?? 0
+        for panel in panels.values {
+            guard let screen = panel.screenRef else { continue }
+            let icon = max(16, config.number("iconSize"))
+            let inset = config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5
+            let reserve = panel.gap * 2 + 2 + icon + inset * 2 + 8
+            let area = screen.frame
+            // The screen in Accessibility's coordinates (top-left origin).
+            let screenAX = CGRect(x: area.minX, y: top - area.maxY, width: area.width, height: area.height)
+            for window in snapshot.onScreenWindows where screenAX.intersects(window.frame) {
+                let f = window.frame
+                var target = f
+                switch config.position {
+                case "left":
+                    let limit = screenAX.minX + reserve
+                    guard f.minX < limit - 2, f.maxX > limit else { continue }
+                    target = f.width - (limit - f.minX) >= 300 ? CGRect(x: limit, y: f.minY, width: f.maxX - limit, height: f.height)
+                        : CGRect(x: limit, y: f.minY, width: f.width, height: f.height)
+                case "right":
+                    let limit = screenAX.maxX - reserve
+                    guard f.maxX > limit + 2, f.minX < limit else { continue }
+                    target = limit - f.minX >= 300 ? CGRect(x: f.minX, y: f.minY, width: limit - f.minX, height: f.height)
+                        : CGRect(x: limit - f.width, y: f.minY, width: f.width, height: f.height)
+                default:
+                    let limit = screenAX.maxY - reserve
+                    guard f.maxY > limit + 2, f.minY < limit else { continue }
+                    target = limit - f.minY >= 200 ? CGRect(x: f.minX, y: f.minY, width: f.width, height: limit - f.minY)
+                        : CGRect(x: f.minX, y: max(screenAX.minY + 30, limit - f.height), width: f.width, height: f.height)
+                }
+                guard let ax = Windows.windows(of: window.pid).first(where: { !$0.minimized && $0.frame.equalTo(f, within: 4) }) else { continue }
+                Windows.setFrame(ax, target)
+            }
+        }
     }
 
     /// Every minimized window of the running apps, across Desktops and modes.
@@ -294,6 +335,9 @@ struct WindowList {
     }
 
     func onScreenFrames(pid: pid_t) -> [CGRect] { onScreen.filter { $0.pid == pid }.map(\.frame) }
+
+    /// Every app window on screen, top-left origin as Accessibility counts.
+    var onScreenWindows: [(pid: pid_t, frame: CGRect)] { onScreen.map { ($0.pid, $0.frame) } }
 }
 
 extension CGRect {

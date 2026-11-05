@@ -399,6 +399,12 @@ def handle(msg):
 
 
 def main():
+    # Petal for macOS answers Claude itself (no python3 needed on the Mac); its build takes the tools, settings and
+    # mode fields from here, so both platforms describe them the same way.
+    if "--describe" in sys.argv:
+        json.dump({"tools": tool_list(), "settings": {k: list(v) for k, v in SETTINGS_SCHEMA.items()},
+                   "mode_fields": MODE_FIELDS}, sys.stdout, indent=1, ensure_ascii=False)
+        return
     for line in sys.stdin:
         line = line.strip()
         if not line:

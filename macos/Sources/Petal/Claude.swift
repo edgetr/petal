@@ -75,7 +75,7 @@ final class Agent {
                          "--output-format", "stream-json", "--verbose",
                          "--permission-mode", config.string("claudeAccess") == "full" ? "bypassPermissions" : "auto",
                          "--append-system-prompt", systemPrompt]
-        if Self.hasPython { arguments += ["--mcp-config", mcpConfig] }
+        arguments += ["--mcp-config", mcpConfig]
         if let sessionID { arguments += ["--resume", sessionID] }
         arguments += ["--allowedTools", "mcp__petal"] + allowed
 
@@ -215,36 +215,20 @@ final class Agent {
         }
     }
 
-    /// /usr/bin/python3 runs Petal's tools only with Apple's command line tools installed; without them it's a stub
-    /// that asks to install them, every time.
-    static let hasPython: Bool = {
-        let check = Process()
-        check.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
-        check.arguments = ["-p"]
-        check.standardOutput = FileHandle.nullDevice
-        check.standardError = FileHandle.nullDevice
-        guard (try? check.run()) != nil else { return false }
-        check.waitUntilExit()
-        return check.terminationStatus == 0
-    }()
-
     private var systemPrompt: String {
         var prompt = """
         You are Claude, running inside Petal, the user's dock on macOS. Your replies show in a small panel above the dock: be brief and friendly, short paragraphs, no big headings. You work in the user's home folder.
 
         Everything about the dock is customizable through you. Use the petal MCP tools: call petal_get_state first, then petal_set_settings (appearance: dockColor, iconSize, accentColor, …; feature switches: bounce, badges, previews, …), petal_set_dock (position, auto-hide), petal_save_mode / petal_delete_mode (focus modes and their apps; apps are bundle identifiers, get them from petal_list_apps; mode icons are SF Symbol names), petal_switch_mode (puts the current Desktop in a mode). Every Desktop has its own mode. Changes apply instantly. If a request can't be done with settings and Petal's source is on this Mac (path in petal_get_state), you may edit its Swift source, rebuild it with macos/build.sh, copy macos/build/Petal.app over the running app (its path is files.app in petal_get_state), and call petal_reload; mention that a Petal update could replace source edits. You can also help with anything else on the Mac: apps, files, macOS settings (defaults, AppleScript, the shell). If something needs the user's approval, say in one line what it would do; they can allow it from the panel.
         """
-        if !Self.hasPython {
-            prompt += "\n\nPetal's tools aren't available on this Mac (they need Apple's command line tools: `xcode-select --install`). Change Petal by editing its files directly instead: ~/.config/petal/settings.json, modes.json (apps are bundle ids; workspaces are Desktop numbers) and dock.json (position, autoHide). Petal reloads them within a second."
-        }
         let notes = (try? String(contentsOf: app.config.instructionsFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !notes.isEmpty { prompt += "\n\nThe user's own instructions:\n" + notes }
         return prompt
     }
 
+    /// Petal's tools are Petal itself (`Petal --mcp`), so nothing else needs installing.
     private var mcpConfig: String {
-        let script = Bundle.main.url(forResource: "petal-mcp", withExtension: "py", subdirectory: "mcp")?.path ?? ""
-        let object: [String: Any] = ["mcpServers": ["petal": ["command": "/usr/bin/python3", "args": [script]]]]
+        let object: [String: Any] = ["mcpServers": ["petal": ["command": Bundle.main.executablePath ?? "", "args": ["--mcp"]]]]
         let data = (try? JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])) ?? Data()
         return String(decoding: data, as: UTF8.self)
     }

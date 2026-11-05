@@ -1,5 +1,8 @@
 import AppKit
 
+// `Petal --mcp`: Claude's Petal tools on stdin and stdout, started by the Claude panel's session.
+if CommandLine.arguments.contains("--mcp") { MCP.run() }
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let arguments = CommandLine.arguments

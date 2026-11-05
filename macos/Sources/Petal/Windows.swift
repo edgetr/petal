@@ -74,6 +74,17 @@ enum Windows {
         if let app = NSRunningApplication(processIdentifier: window.pid) { bringForward(app) }
     }
 
+    /// Moves and resizes a window (top-left origin).
+    static func setFrame(_ window: AppWindow, _ frame: CGRect) {
+        var origin = frame.origin, size = frame.size
+        if frame.origin != window.frame.origin, let value = AXValueCreate(.cgPoint, &origin) {
+            AXUIElementSetAttributeValue(window.element, kAXPositionAttribute as CFString, value)
+        }
+        if frame.size != window.frame.size, let value = AXValueCreate(.cgSize, &size) {
+            AXUIElementSetAttributeValue(window.element, kAXSizeAttribute as CFString, value)
+        }
+    }
+
     static func minimize(_ window: AppWindow) {
         AXUIElementSetAttributeValue(window.element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
     }
