@@ -4,7 +4,7 @@ import Observation
 
 /// Updates from GitHub Releases, as get.sh does on Omarchy: 2 minutes after launch, then every 6 hours, while
 /// autoUpdate is on. macOS releases have their own tags (macos-vX.Y.Z) and carry latest-macos.json:
-/// {"version": "X.Y.Z", "url": "<zip>", "sha256": "<hex>"}. The new Petal.app replaces this one in place, and a card
+/// {"version": "X.Y.Z", "url": "<zip>", "sha256": "<hex>"}. The new Petal.app replaces this one in place, and the menu bar
 /// offers to restart. A build run from a source checkout is never updated.
 @MainActor @Observable
 final class Updater {
