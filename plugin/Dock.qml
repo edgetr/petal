@@ -990,7 +990,7 @@ Item {
           var r = JSON.parse(String(text).trim().split("\n").pop())
           if (r.status === "updated") root.card = { kind: "update", title: "Petal " + r.version, version: r.version, icon: Qt.resolvedUrl("assets/petal.svg") }
           // A release that couldn't take the person's own changes to Petal's code: they keep theirs (petal personal).
-          else if (r.status === "kept") root.personalNotice(r.version, r.message || "")
+          else if (r.status === "kept" && !r.again) root.personalNotice(r.version, r.message || "")
         } catch (e) {}
       }
     }

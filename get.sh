@@ -124,8 +124,9 @@ if [[ -d $ROOT/source/.git ]] && PETAL_HOME="$ROOT" python3 "$ROOT/releases/$ver
   if [[ $combined != updated && $combined != nothing ]]; then
     rm -rf "$ROOT/releases/$version"
     message="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("message", ""))' "$result" 2>/dev/null || true)"
-    emit "$(python3 -c 'import json,sys; print(json.dumps({"status": "kept", "version": sys.argv[1], "current": sys.argv[2], "message": sys.argv[3]}))' \
-      "$version" "$current" "${message:-it stopped partway}")"
+    again="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1]).get("again") else "")' "$result" 2>/dev/null || true)"
+    emit "$(python3 -c 'import json,sys; print(json.dumps({"status": "kept", "version": sys.argv[1], "current": sys.argv[2], "message": sys.argv[3], "again": bool(sys.argv[4])}))' \
+      "$version" "$current" "${message:-it stopped partway}" "$again")"
     say "Petal $version couldn't take your own changes, so you keep Petal $current with them: ${message:-it stopped partway}."
     say "\`petal personal status\` says more; \`petal report\` tells Petal's maker."
     [[ $mode == auto ]] && exit 0

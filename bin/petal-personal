@@ -10,7 +10,7 @@ no conflict markers and pass a check (on macOS: it builds). If it can't be made 
 Petal the person has keeps running, and they're told. A backup ref (refs/petal/backups/...) is kept before every
 rewrite, so nothing the person made is ever lost.
 
-  petal personal init                     set the source up (once) and print where it is
+  petal personal init [--from <dir>]      set the source up (once; from a release's files) and print where it is
   petal personal status [--json]          what's in it: changes, unsaved edits, the last update
   petal personal list                     the person's changes, newest first
   petal personal save "<what changed>"    commit the edits and use them (agents run this after a change)
@@ -55,7 +55,13 @@ FIX_ATTEMPTS = 3                          # rounds of "here are the build errors
 
 
 class Kept(Exception):
-    """The update couldn't be combined with the person's changes; their Petal stays as it is."""
+    """The update couldn't be combined with the person's changes; their Petal stays as it is. `again`: the same
+    release already failed with the same changes, and the person has been told."""
+
+    def __init__(self, message, detail="", again=False):
+        super().__init__(message)
+        self.detail = detail
+        self.again = again
 
 
 class Problem(Exception):
@@ -126,7 +132,8 @@ def count_changes():
 
 
 def unsaved(cwd=None):
-    return [line[3:] for line in git("status", "--porcelain", "--untracked-files=all", cwd=cwd).splitlines() if line.strip()]
+    out = git("status", "--porcelain", "--untracked-files=all", cwd=cwd, quiet=True).stdout   # unstripped: columns matter
+    return [line[3:] for line in out.splitlines() if line.strip()]
 
 
 @contextlib.contextmanager
@@ -267,8 +274,9 @@ def developer_install():
     return ""
 
 
-def init(quiet=False):
-    """Sets the source up once, from the installed release, and puts it in use. Returns its path."""
+def init(quiet=False, release_dir=None):
+    """Sets the source up once, from the installed release (or a release's files in `release_dir`), and puts it in
+    use. Returns its path."""
     checkout = developer_install()
     if checkout:
         raise Problem("Petal runs from a source checkout (%s); change that checkout instead, with git." % short(checkout))
@@ -276,7 +284,7 @@ def init(quiet=False):
         shutil.rmtree(GIT)   # a set-up that stopped halfway (the download failed, say)
     if not exists():
         version = installed_version()
-        with release_tree(version) as tree:
+        with release_tree(version, release_dir) as tree:
             version = release_version(tree, version)
             os.makedirs(SOURCE, exist_ok=True)
             if os.listdir(SOURCE):
@@ -512,7 +520,7 @@ def update(version=None, release_dir=None, auto=False, check_cmd=None, keep=None
         mine = rev("refs/heads/mine")
         failed = s.get("failed") or {}
         if auto and failed.get("version") == version and failed.get("mine") == mine:
-            raise Kept(failed.get("reason") or "it couldn't be done last time")
+            raise Kept(failed.get("reason") or "It couldn't be done last time", failed.get("detail", ""), again=True)
         if unsaved():
             git("add", "-A")
             git("commit", "-q", "-m", "Edits not saved yet (kept before updating to Petal %s)" % version)
@@ -526,8 +534,7 @@ def update(version=None, release_dir=None, auto=False, check_cmd=None, keep=None
                 result = rev("HEAD", cwd=work)
                 keep_built(work, keep)
         except Kept as kept:
-            reason = str(kept)
-            save_state(failed={"version": version, "mine": mine, "reason": reason, "at": time.strftime("%Y-%m-%d %H:%M"),
+            save_state(failed={"version": version, "mine": mine, "reason": str(kept), "detail": kept.detail, "at": time.strftime("%Y-%m-%d %H:%M"),
                                "backup": saved})
             raise
         # Edits made while it ran would be lost by moving mine; they're kept, and it tries again next time.
@@ -546,28 +553,28 @@ def combine(work, version, check_cmd):
     while rebasing(work):
         steps += 1
         if steps > 200:
-            raise Kept("the update went round in circles")
+            raise Kept("The update went round in circles")
         conflicted = git("diff", "--name-only", "--diff-filter=U", cwd=work).splitlines()
         if conflicted:
             subject = git("log", "-1", "--format=%s", "REBASE_HEAD", cwd=work, check=False) or "a change"
             answer = ask_ai(work, resolve_prompt(version, subject, conflicted))
             left = [p for p in conflicted if os.path.exists(os.path.join(work, p)) and has_markers(os.path.join(work, p))]
             if left:
-                raise Kept("your change \"%s\" and Petal %s change the same code, and %s" %
-                           (subject, version, "the AI couldn't combine them" + (" (%s)" % answer if answer else "") if answer is not None
-                            else "there's no AI to combine them (aiProviders is empty or the app isn't installed)"))
+                raise Kept("Your change \"%s\" and Petal %s change the same code, and %s" % (subject, version,
+                           "%s couldn't combine them" % ai_name() if answer is not None else "there's no AI app to combine them"),
+                           "%s said: %s\nConflicts left in: %s" % (ai_name()[:1].upper() + ai_name()[1:], answer, ", ".join(left)) if answer is not None else "")
         git("add", "-A", cwd=work)
         if git("diff", "--cached", "--quiet", cwd=work, check=False, quiet=True).returncode == 0 and conflicted:
             out = git("rebase", "--skip", cwd=work, check=False, quiet=True)   # the update already does what it did
         else:
             out = git("rebase", "--continue", cwd=work, check=False, quiet=True)
         if out.returncode != 0 and rebasing(work) and not git("diff", "--name-only", "--diff-filter=U", cwd=work):
-            raise Kept("the update stopped: " + tail(out.stderr or out.stdout, 3))
+            raise Kept("The update stopped partway", tail(out.stderr or out.stdout, 5))
     if git("merge-base", "--is-ancestor", "upstream", "HEAD", cwd=work, check=False, quiet=True).returncode != 0:
-        raise Kept("the update didn't go through: " + tail(out.stderr or out.stdout, 3))
+        raise Kept("The update didn't go through", tail(out.stderr or out.stdout, 5))
     left = markers(work, "upstream")
     if left:
-        raise Kept("conflict markers were left in %s" % ", ".join(left[:5]))
+        raise Kept("Combining them left unfinished conflicts", "Conflict markers in: " + ", ".join(left[:5]))
     subjects = [c[2] for c in changes_in(work)]
     for attempt in range(FIX_ATTEMPTS + 1):
         ok, output = check(check_cmd, work)
@@ -576,15 +583,15 @@ def combine(work, version, check_cmd):
         if attempt == FIX_ATTEMPTS:
             break
         answer = ask_ai(work, fix_prompt(version, subjects, tail(output, 80)))
-        if answer is None:
+        if answer is None or answer.upper().startswith("FAILED"):
             break
         if unsaved(cwd=work):
             git("add", "-A", cwd=work)
             git("commit", "-q", "-m", "Fit my changes to Petal %s" % version, cwd=work)
         left = markers(work, "upstream")
         if left:
-            raise Kept("conflict markers were left in %s" % ", ".join(left[:5]))
-    raise Kept("Petal %s with your changes doesn't build:\n%s" % (version, tail(output, 15)))
+            raise Kept("Combining them left unfinished conflicts", "Conflict markers in: " + ", ".join(left[:5]))
+    raise Kept("Petal %s with your changes doesn't build" % version, tail(output, 15))
 
 
 def changes_in(tree):
@@ -638,6 +645,11 @@ Fix the code so it builds, keeping both what the update meant to do and what the
 little as you can. Don't run git commands that change anything (no commit, rebase, checkout or reset); Petal commits \
 your fix and builds again. Reply with one short line on what you fixed, or a line starting with FAILED: and why.""".format(
         version=version, errors=errors, subjects="; ".join('"%s"' % s for s in subjects) or "(none listed)")
+
+
+def ai_name():
+    chosen = None if os.environ.get("PETAL_PERSONAL_RESOLVER") else ai()
+    return {"claude": "Claude", "codex": "Codex"}.get(chosen[0] if chosen else "", "the AI")
 
 
 def ai():
@@ -741,7 +753,7 @@ def verify():
             git("commit", "-q", "-m", "Edits not saved yet")
             saved = backup("dock-down-" + str(s.get("version")))
         git("reset", "-q", "--hard", s["good"])
-        reason = "the dock didn't come up with Petal %s and your changes" % s.get("version")
+        reason = "The dock didn't come up with Petal %s and your changes" % s.get("version")
         save_state(pending=None, version=s.get("good_version"), failed={
             "version": s.get("version"), "mine": s["good"], "reason": reason, "at": time.strftime("%Y-%m-%d %H:%M"), "backup": saved})
     restart_shell()
@@ -776,9 +788,9 @@ def status():
 
 
 def doctor(fix=False):
-    """Findings for `petal doctor` on both platforms (area "personal")."""
+    """Findings for `petal doctor` on both platforms (area "code")."""
     found = []
-    note = lambda level, text, fixed=None: found.append(dict({"level": level, "area": "personal", "text": text}, **({"fixed": fixed} if fixed else {})))
+    note = lambda level, text, fixed=None: found.append(dict({"level": level, "area": "code", "text": text}, **({"fixed": fixed} if fixed else {})))
     if not exists():
         return found
     st = status()
@@ -798,8 +810,8 @@ def doctor(fix=False):
         note("warn", "An update's work folder was left behind (%s)." % short(WORK), fixed)
     if st["failed"]:
         f = st["failed"]
-        note("error", "Petal %s couldn't take your changes (%s). You still have your own Petal. `petal personal retry` "
-             "tries again; `petal report` tells Petal's maker." % (f.get("version"), f.get("reason", "").split("\n")[0]))
+        note("error", "Petal %s couldn't take your changes: %s. You still have your own Petal. `petal personal retry` "
+             "tries again; `petal report` tells Petal's maker." % (f.get("version"), f.get("reason", "").split("\n")[0].rstrip(".")))
     if st["pending"]:
         fixed = None
         if fix:
@@ -846,7 +858,7 @@ def main(argv):
     rest = args[1:]
     try:
         if command == "init":
-            init()
+            init(release_dir=option(rest, "--from"))
             say(SOURCE)
         elif command == "path":
             say(SOURCE)
@@ -866,7 +878,9 @@ def main(argv):
                 if st["unsaved"]:
                     say("Not saved yet: " + ", ".join(st["unsaved"][:8]) + (" …" if len(st["unsaved"]) > 8 else ""))
                 if st["failed"]:
-                    say("Petal %s couldn't take your changes: %s" % (st["failed"].get("version"), st["failed"].get("reason")))
+                    say("Petal %s couldn't take your changes. %s." % (st["failed"].get("version"), st["failed"].get("reason")))
+                    if st["failed"].get("detail"):
+                        say(st["failed"]["detail"])
         elif command == "list":
             require()
             listed = changes()
@@ -916,9 +930,11 @@ def main(argv):
     except Kept as kept:
         message = str(kept)
         if as_json:
-            print(json.dumps({"status": "kept", "version": state().get("failed", {}).get("version") or version, "message": message}))
+            print(json.dumps({"status": "kept", "version": (state().get("failed") or {}).get("version") or version, "message": message,
+                              "detail": kept.detail, "again": kept.again}))
         else:
-            say("This update couldn't take your changes: %s. Your Petal stays as it is, with them; nothing is lost." % message)
+            say("This update couldn't take your changes. %s.%s\nYour Petal stays as it is, with them; nothing is lost."
+                % (message, ("\n" + kept.detail) if kept.detail else ""))
         return 3
     except Problem as problem:
         if as_json:

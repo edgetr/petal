@@ -251,7 +251,7 @@ class Doctor:
         try:
             self.findings += json.loads(out.strip().splitlines()[-1])
         except (ValueError, IndexError):
-            self.note("warn", "personal", "Couldn't check your own changes to Petal: %s" % out.strip()[-160:])
+            self.note("warn", "code", "Couldn't check your own changes to Petal: %s" % out.strip()[-160:])
 
 
 def recent_logs(n):
