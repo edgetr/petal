@@ -716,7 +716,7 @@ PanelWindow {
           readonly property bool active: index === sw.activeIndex
           readonly property color hue: window.tint(modelData.color)
           readonly property int held: window.dock ? window.dock.heldCount(modelData.id) : 0
-          property string tip: modelData.name + (held > 0 ? " · " + held + " held" : "") + (active ? "  ✓" : "")
+          property string tip: modelData.name + (held > 0 ? " · " + held + " held" : "")
 
           x: window.vertical ? sw.pad : sw.pad + index * sw.seg
           y: window.vertical ? sw.pad + index * sw.seg : sw.pad
