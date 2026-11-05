@@ -13,7 +13,7 @@ Petal is an AI-native dock for Omarchy, with a focus mode for every workspace an
 - **A good dock:** badges, bounce, download progress, quick actions and recent files, drops, window previews, minimized windows, now playing, folder stacks, auto-hide, one dock per screen.
 - **Settings menu:** the right-click menu stays tiny (position, auto-hide, focus cards, hold notifications). Everything else is changed by asking Claude.
 
-The owner is Gökay Ege Süren. The repository is `edgetr/petal` on GitHub (public, MIT; where it is checked out is under Fleet). Petal is an Edgetr product; the studio site (`edgetr/edgetr`: `~/Projects/edgetr` on Omarchy, `~/Documents/edgetr` on the Mac) describes it and follows this file for facts.
+The owner is Gökay Ege Süren. The repository is `edgetr/petal` on GitHub (public, MIT; where it is checked out is under Fleet). Petal is an Edgetr product; the studio site (`edgetr/edgetr`: `~/Projects/edgetr` on Omarchy, `~/edgetr` on the Mac) describes it and follows this file for facts.
 
 - **Status:** 3.1.x is released (`plugin/manifest.json` holds the version) and updates itself from GitHub Releases.
 - **Business model:** free and open source. Petal has no server and no analytics. Its AI features use the user's own Claude Code login, and count toward their Claude usage. Without `claude`, everything else works.
@@ -28,6 +28,7 @@ The owner works on two machines: this Mac and an Omarchy machine. GitHub is the 
 | the Omarchy machine | Omarchy | `~/Projects/Petal` (the installed plugin) | running and verifying Petal: the dock, `omarchy-shell`, `hyprctl`, logs |
 | Gökay MacBook Pro | macOS | `~/petal` | editing, the site, Git and PRs; Petal doesn't run on macOS yet (it is next) |
 
+- **Where checkouts live:** every project directly in the home folder on the Mac (`~/petal`, `~/edgetr`, …), and in `~/Projects` on Omarchy. Never in `~/Documents`: macOS keeps it from background jobs, so `tools/fleet` can't sync it.
 - **Check where you are** (`uname`) before running anything Omarchy-only. Until Petal runs on macOS, say on the Mac that a dock change wasn't run on the real dock.
 - **To verify a change** on the real dock, it has to run on the Omarchy machine. An agent on the Mac pushes the branch and says the dock check is left for the Omarchy machine; it doesn't fake the check.
 - **Sync through GitHub:** `tools/fleet` runs on both machines at login and every 5 minutes. It fetches every `edgetr` checkout and fast-forwards it to GitHub. It never pushes, and it leaves alone a branch that has diverged, a merge or rebase in progress, and a pull that would overwrite uncommitted changes. So work reaches the other machine only once it is committed and pushed; `tools/fleet status` shows what's behind or ahead. On the Omarchy machine the Petal checkout is the installed plugin, so a push to `main` reaches the live dock's files within 5 minutes (they take effect on `omarchy restart shell`). Don't copy files between machines.

@@ -6,7 +6,7 @@
 #   tools/fleet install     sync at login and every 5 minutes (launchd on macOS, a systemd timer on Omarchy)
 #   tools/fleet uninstall   stop that
 #
-# Checkouts are the git repositories one level under ~, ~/Projects and ~/Documents whose origin belongs to the
+# Checkouts are the git repositories one level under ~ and ~/Projects whose origin belongs to the
 # owner of this repository on GitHub. FLEET_ROOTS and FLEET_OWNER change that, in the environment or in
 # ~/.config/fleet/config (shell syntax).
 #
@@ -19,7 +19,7 @@ set -u
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/fleet/config"
 [ -f "$CONFIG" ] && . "$CONFIG"
-FLEET_ROOTS="${FLEET_ROOTS:-$HOME $HOME/Projects $HOME/Documents}"
+FLEET_ROOTS="${FLEET_ROOTS:-$HOME $HOME/Projects}"
 FLEET_OWNER="${FLEET_OWNER:-$(git -C "$(dirname "$SELF")" remote get-url origin 2>/dev/null | sed -E 's#^.*github\.com[:/]([^/]+)/.*$#\1#')}"
 LABEL="com.edgetr.fleet"
 
