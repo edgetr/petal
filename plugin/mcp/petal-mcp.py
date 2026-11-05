@@ -289,7 +289,7 @@ def handle(msg):
     if method == "initialize":
         return {"protocolVersion": (msg.get("params") or {}).get("protocolVersion", "2025-06-18"),
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "petal", "version": "3.1.0"},
+                "serverInfo": {"name": "petal", "version": read_json(os.path.join(PLUGIN_DIR, "manifest.json"), {}).get("version", "")},
                 "instructions": "Tools to customize the Petal dock. Call petal_get_state first."}
     if method == "tools/list":
         return {"tools": tool_list()}

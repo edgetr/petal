@@ -39,7 +39,10 @@ PY
 python3 - <<'PY'
 import json, os
 path = os.path.expanduser("~/.config/omarchy/shell.json")
-d = json.load(open(path))
+try:
+    d = json.load(open(path))
+except (OSError, ValueError):
+    d = {}
 plugins = [p for p in d.get("plugins", []) if p.get("id") not in ("egesuren.dock", "egesuren.petal")]
 plugins.append({"id": "egesuren.petal"})
 d["plugins"] = plugins

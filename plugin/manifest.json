@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "egesuren.petal",
   "name": "Petal",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "author": "egesuren",
   "description": "An AI-native dock with focus modes per workspace, customizable by asking Claude",
   "kinds": [
