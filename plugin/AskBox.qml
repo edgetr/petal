@@ -624,6 +624,12 @@ PanelWindow {
           height: seg.height
           Text {
             anchors.centerIn: parent
+            // Long names (Codex's models) shrink to fit their cell instead of running into the next.
+            width: cellItem.width - Math.round(8 * Style.fontScale)
+            horizontalAlignment: Text.AlignHCenter
+            fontSizeMode: Text.HorizontalFit
+            minimumPixelSize: Math.round(10 * Style.fontScale)
+            elide: Text.ElideRight
             text: cellItem.modelData[1]
             color: box.ink
             opacity: cellItem.index === seg.index ? 1 : (cellMouse.containsMouse ? 0.85 : 0.55)
