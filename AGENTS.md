@@ -13,11 +13,25 @@ Petal is an AI-native dock for Omarchy, with a focus mode for every workspace an
 - **A good dock:** badges, bounce, download progress, quick actions and recent files, drops, window previews, minimized windows, now playing, folder stacks, auto-hide, one dock per screen.
 - **Settings menu:** the right-click menu stays tiny (position, auto-hide, focus cards, hold notifications). Everything else is changed by asking Claude.
 
-The owner is Gökay Ege Süren. The repository is `~/Projects/Petal`, remote `edgetr/petal` (public, MIT). Petal is an Edgetr product; the studio site (`~/Projects/edgetr`) describes it and follows this file for facts.
+The owner is Gökay Ege Süren. The repository is `edgetr/petal` on GitHub (public, MIT; where it is checked out is under Fleet). Petal is an Edgetr product; the studio site (`edgetr/edgetr`: `~/Projects/edgetr` on Omarchy, `~/Documents/edgetr` on the Mac) describes it and follows this file for facts.
 
 - **Status:** 3.1.x is released (`plugin/manifest.json` holds the version) and updates itself from GitHub Releases.
 - **Business model:** free and open source. Petal has no server and no analytics. Its AI features use the user's own Claude Code login, and count toward their Claude usage. Without `claude`, everything else works.
 - **Wording:** say Omarchy, not Linux, for where Petal runs today.
+
+## Fleet
+
+The owner works on two machines, linked to each other in T3 Code. GitHub is the only way code moves between them.
+
+| Machine | System | Checkout | Use it for |
+| --- | --- | --- | --- |
+| `LEGION_5_PRO` | Omarchy | `~/Projects/Petal` (the installed plugin) | running and verifying Petal: the dock, `omarchy-shell`, `hyprctl`, logs |
+| Gökay MacBook Pro | macOS | `~/petal` | editing, the site, Git and PRs; Petal doesn't run on macOS yet (a macOS version is planned) |
+
+- **Check where you are** (`uname`) before running anything Omarchy-only. Until Petal runs on macOS, say on the Mac that a dock change wasn't run on the real dock.
+- **To verify a change,** push the branch and have it run on `LEGION_5_PRO`: in T3, pass its `environmentId` from `t3_environment_links`. If it is unreachable, say so; don't fake the check.
+- **Sync through GitHub:** commit and push on one machine, pull on the other. Don't copy files between them, and pull before starting work.
+- **Per-machine setup** (T3 project icons, `~/.config/petal/`, the plugin link) isn't in the repository: change it on each machine, or say which one is still left.
 
 ## Identity and accounts
 
@@ -116,7 +130,7 @@ Desktop ids are the file names in `/usr/share/applications` or `~/.local/share/a
 
 ## Verification
 
-- **Reload:** this checkout is the installed plugin (the plugin link points at `~/Projects/Petal/plugin`), so edits go live on `omarchy restart shell`.
+- **Reload:** on `LEGION_5_PRO`, the checkout is the installed plugin (the plugin link points at `~/Projects/Petal/plugin`), so edits go live on `omarchy restart shell`.
 - **Logs:** `quickshell log "$(ls -td /run/user/$UID/quickshell/by-id/*/ | head -1)log.qslog"`, or `petal logs`. A change leaves no new QML warnings.
 - **Drive it:** `omarchy-shell petal <fn>` calls the IPC functions in `Dock.qml` (`mode`, `ask`, `chat`, `testCard`, `testToast`, `testBounce`, `close`, …); `bin/petal` wraps the common ones.
 - **MCP:** run `petal-mcp.py` with a `tools/list` request on stdin after changing it.
