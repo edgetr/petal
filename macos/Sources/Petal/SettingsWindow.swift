@@ -692,7 +692,7 @@ struct ClaudeSettings: View {
                     .pickerStyle(.segmented)
                 }
                 if app.models(for: provider).count > 1 {
-                    let picker = Picker("Model", selection: Binding(get: { app.config.string(provider.modelSetting) }, set: { app.config.set(provider.modelSetting, $0) })) {
+                    let picker = Picker("Model", selection: Binding(get: { app.currentModel(for: provider) }, set: { app.config.set(provider.modelSetting, $0) })) {
                         ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
                     }
                     if provider == .codex { picker.pickerStyle(.menu) } else { picker.pickerStyle(.segmented) }

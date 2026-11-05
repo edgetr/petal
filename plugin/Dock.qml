@@ -1082,7 +1082,7 @@ Item {
   readonly property string chatName: providerName(chatProvider)
   function providerName(p) { return p === "codex" ? "Codex" : p === "claude" ? "Claude" : "AI" }
   function providerPath(p) { return p === "codex" ? settingsAdapter.codexPath : p === "claude" ? settingsAdapter.claudePath : "" }
-  function providerMark(p) { return Qt.resolvedUrl(p === "codex" ? "assets/codex.svg" : "assets/claude.svg") }
+  function providerMark(p) { return Qt.resolvedUrl(p === "codex" ? "assets/openai.svg" : "assets/claude.svg") }
   onChatProviderChanged: root.refreshUsage(root.chatProvider)
   onProvidersChanged: { root.refreshUsage(); root.loadCodexModels() }
 
@@ -1136,6 +1136,22 @@ Item {
       }
     }
     onExited: Qt.callLater(root.nextUsage)
+  }
+
+  // Which model Codex uses when Petal names none: its own config's `model`
+  // (~/.codex/config.toml, top level), else the first model it lists.
+  property string codexConfigText: ""
+  FileView {
+    path: root.home + "/.codex/config.toml"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.codexConfigText = text()
+  }
+  readonly property string codexDefault: {
+    var top = root.codexConfigText.split(/^\s*\[/m)[0]
+    var m = /^\s*model\s*=\s*"([^"]+)"/m.exec(top)
+    return m ? m[1] : (root.codexModels.length ? root.codexModels[0].id : "")
   }
 
   // ── Codex's models, from Codex itself (`codex debug models`) ───────────

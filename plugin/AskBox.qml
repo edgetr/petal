@@ -59,15 +59,17 @@ PanelWindow {
   readonly property string aiName: box.dock ? box.dock.chatName : "Claude"
   readonly property string modelKey: provider === "codex" ? "codexModel" : "chatModel"
   readonly property string effortKey: provider === "codex" ? "codexEffort" : "chatEffort"
-  // Codex: Default plus its first four listed models; each model has its own efforts.
+  // Codex: the newest model of each family; each model has its own efforts.
+  // Codex's model: the one chosen, else the one Codex uses by default.
+  readonly property string codexCurrent: (box.settings && box.settings.codexModel) || (box.dock ? box.dock.codexDefault : "")
   readonly property var codexModel: {
     var list = box.dock ? box.dock.codexModels : []
-    var id = box.settings ? box.settings.codexModel : ""
+    var id = box.codexCurrent
     for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i]
     return null
   }
   readonly property var models: provider === "codex"
-    ? [["", "Default"]].concat(box.latestCodex(box.dock ? box.dock.codexModels : [], box.settings ? box.settings.codexModel : ""))
+    ? box.latestCodex(box.dock ? box.dock.codexModels : [], box.codexCurrent)
     : [["haiku", "Haiku"], ["sonnet", "Sonnet"], ["opus", "Opus"], ["fable", "Fable"]]
   readonly property var efforts: provider === "codex"
     ? (box.codexModel && box.codexModel.efforts.length ? box.codexModel.efforts : ["low", "medium", "high", "xhigh"])
@@ -218,7 +220,7 @@ PanelWindow {
               visible: box.provider === "codex"
               width: parent.width
               options: box.models
-              current: box.settings ? box.settings[box.modelKey] : ""
+              current: box.codexCurrent
               onPicked: value => box.settings[box.modelKey] = value
             }
           }
@@ -311,7 +313,7 @@ PanelWindow {
           spacing: Math.round(6 * Style.fontScale)
 
           QuietButton {
-            text: (box.settings ? box.modelName(box.settings[box.modelKey]) + " · " + box.settings[box.effortKey] : "") + (box.optionsOpen ? "  ⌃" : "  ⌄")
+            text: (box.settings ? box.modelName(box.provider === "codex" ? box.codexCurrent : box.settings[box.modelKey]) + " · " + box.settings[box.effortKey] : "") + (box.optionsOpen ? "  ⌃" : "  ⌄")
             active: box.optionsOpen
             onClicked: box.optionsOpen = !box.optionsOpen
           }

@@ -278,9 +278,23 @@ final class PetalApp {
         }
     }
 
-    /// The models to offer for an AI: Claude's aliases, or Default plus Codex's own list.
+    /// The models to offer for an AI: Claude's aliases, or Codex's newest of each family.
     func models(for provider: Provider) -> [(String, String)] {
-        provider == .codex ? [("", "Default")] + latestCodex() : provider.models
+        provider == .codex ? latestCodex() : provider.models
+    }
+
+    /// The model an AI uses now: the one chosen, else (Codex) the one Codex uses by default: its own config's
+    /// `model` (~/.codex/config.toml, top level), else the first model it lists.
+    func currentModel(for provider: Provider) -> String {
+        let chosen = config.string(provider.modelSetting)
+        guard provider == .codex, chosen.isEmpty else { return chosen }
+        let path = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".codex/config.toml")
+        let top = ((try? String(contentsOf: path, encoding: .utf8)) ?? "").components(separatedBy: "\n[").first ?? ""
+        for line in top.split(separator: "\n") {
+            let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+            if parts.count == 2, parts[0] == "model" { return parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
+        }
+        return codexModels.first?.id ?? ""
     }
 
     /// The newest Codex model of each family (Sol, Astra, Terra, Luna), in Codex's order, named "6.1 Sol"; the model
@@ -306,7 +320,7 @@ final class PetalApp {
             }
         }
         var out = order.compactMap { best[$0] }.map { ($0.id, parts($0).label) }
-        let chosen = config.string("codexModel")
+        let chosen = currentModel(for: .codex)
         if !chosen.isEmpty, !out.contains(where: { $0.0 == chosen }), let mine = codexModels.first(where: { $0.id == chosen }) {
             out.append((mine.id, parts(mine).label))
         }
@@ -315,7 +329,7 @@ final class PetalApp {
 
     /// The efforts the chosen model takes.
     func efforts(for provider: Provider) -> [String] {
-        guard provider == .codex, let model = codexModels.first(where: { $0.id == config.string("codexModel") }), !model.efforts.isEmpty
+        guard provider == .codex, let model = codexModels.first(where: { $0.id == currentModel(for: .codex) }), !model.efforts.isEmpty
         else { return provider.efforts }
         return model.efforts
     }

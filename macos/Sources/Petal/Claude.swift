@@ -383,7 +383,7 @@ struct ClaudePanelView: View {
 
     private var modelName: String {
         guard let provider else { return "" }
-        let model = app.config.string(provider.modelSetting)
+        let model = app.currentModel(for: provider)
         return app.models(for: provider).first { $0.0 == model }?.1 ?? (model.isEmpty ? "Default" : model)
     }
 
@@ -406,12 +406,12 @@ struct ClaudePanelView: View {
                 OptionRow(title: "Model") {
                     if provider == .codex {
                         // Codex lists more models than fit side by side.
-                        Picker("", selection: Binding(get: { app.config.string(provider.modelSetting) }, set: { app.config.set(provider.modelSetting, $0) })) {
+                        Picker("", selection: Binding(get: { app.currentModel(for: provider) }, set: { app.config.set(provider.modelSetting, $0) })) {
                             ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
                         }
                         .pickerStyle(.menu).labelsHidden().fixedSize()
                     } else {
-                        Picker("", selection: Binding(get: { app.config.string(provider.modelSetting) }, set: { app.config.set(provider.modelSetting, $0) })) {
+                        Picker("", selection: Binding(get: { app.currentModel(for: provider) }, set: { app.config.set(provider.modelSetting, $0) })) {
                             ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
                         }
                         .pickerStyle(.segmented).labelsHidden()

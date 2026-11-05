@@ -190,14 +190,30 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// Each AI's mark: Claude's from Petal's assets; others a plain symbol.
+/// OpenAI's mark for Codex, one color: drawn as a template, so it follows light and dark like the text around it.
+struct OpenAIMark: View {
+    static let image: NSImage? = Bundle.main.url(forResource: "openai", withExtension: "svg").flatMap { NSImage(contentsOf: $0) }.map {
+        $0.isTemplate = true
+        return $0
+    }
+
+    var body: some View {
+        if let image = Self.image {
+            Image(nsImage: image).resizable().scaledToFit()
+        } else {
+            Image(systemName: "chevron.left.forwardslash.chevron.right").resizable().scaledToFit().fontWeight(.bold)
+        }
+    }
+}
+
+/// Each AI's mark, from Petal's assets.
 struct ProviderMark: View {
     let provider: Provider?
 
     var body: some View {
         switch provider {
         case .claude?: ClaudeMark()
-        case .codex?: Image(systemName: "chevron.left.forwardslash.chevron.right").resizable().scaledToFit().fontWeight(.bold)
+        case .codex?: OpenAIMark()
         case nil: Image(systemName: "sparkle").resizable().scaledToFit()
         }
     }
