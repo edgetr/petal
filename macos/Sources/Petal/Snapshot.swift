@@ -81,18 +81,38 @@ enum Snapshot {
             views.append(("settings-\(section.rawValue)", AnyView(SettingsView(selection: section)), CGSize(width: 920, height: 700)))
         }
         try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
-        for (name, view, size) in views {
-            let content = view.environment(app).environment(\.colorScheme, .dark).environment(\.snapshotting, true)
-                .frame(width: size?.width, height: size?.height)
-                .background(Color(white: 0.16))
-            let renderer = ImageRenderer(content: content)
-            renderer.scale = 1
-            guard let image = renderer.nsImage, let tiff = image.tiffRepresentation,
-                  let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { continue }
-            let path = (folder as NSString).appendingPathComponent(name + ".png")
-            try? png.write(to: URL(fileURLWithPath: path))
-            print(path)
+        // Magnification: drawn once to find where everything is, then with the pointer over the third app.
+        Magnifier.forced = true
+        let magnified = ScreenDock()
+        magnified.desktop = 1
+        magnified.mode = dock.mode
+        magnified.items = dock.items
+        magnified.stageSlots = dock.stageSlots
+        _ = render(AnyView(DockView(dock: magnified)), app: app, size: nil)
+        if magnified.items.count > 2, let frame = magnified.magnifier.frames[magnified.items[2].id]?.rect {
+            magnified.magnifier.preview(pointer: frame.midX + frame.width * 0.25)
         }
+        write(render(AnyView(DockView(dock: magnified)), app: app, size: nil), name: "dock-magnified", folder: folder)
+        Magnifier.forced = false
+        for (name, view, size) in views {
+            write(render(view, app: app, size: size), name: name, folder: folder)
+        }
+    }
+
+    private static func render(_ view: AnyView, app: PetalApp, size: CGSize?) -> NSImage? {
+        let content = view.environment(app).environment(\.colorScheme, .dark).environment(\.snapshotting, true)
+            .frame(width: size?.width, height: size?.height)
+            .background(Color(white: 0.16))
+        let renderer = ImageRenderer(content: content)
+        renderer.scale = 1
+        return renderer.nsImage
+    }
+
+    private static func write(_ image: NSImage?, name: String, folder: String) {
+        guard let tiff = image?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
+        let path = (folder as NSString).appendingPathComponent(name + ".png")
+        try? png.write(to: URL(fileURLWithPath: path))
+        print(path)
     }
 }
 
