@@ -277,6 +277,7 @@ PanelWindow {
           spacing: Math.round(10 * Style.fontScale)
 
           Image {
+            id: markImage
             anchors.verticalCenter: parent.verticalCenter
             width: Math.round(20 * Style.fontScale)
             height: width
@@ -285,7 +286,7 @@ PanelWindow {
             RotationAnimation on rotation {
               running: !!box.chat && box.chat.running
               from: 0; to: 360; duration: 2400; loops: Animation.Infinite
-              onRunningChanged: if (!running) parent.rotation = 0
+              onRunningChanged: if (!running) markImage.rotation = 0
             }
           }
           Text {
