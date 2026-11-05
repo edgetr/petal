@@ -67,14 +67,40 @@ PanelWindow {
     return null
   }
   readonly property var models: provider === "codex"
-    ? [["", "Default"]].concat((box.dock ? box.dock.codexModels : []).map(function(m) { return [m.id, box.modelLabel(m.name)] }))
+    ? [["", "Default"]].concat(box.latestCodex(box.dock ? box.dock.codexModels : [], box.settings ? box.settings.codexModel : ""))
     : [["haiku", "Haiku"], ["sonnet", "Sonnet"], ["opus", "Opus"], ["fable", "Fable"]]
   readonly property var efforts: provider === "codex"
     ? (box.codexModel && box.codexModel.efforts.length ? box.codexModel.efforts : ["low", "medium", "high", "xhigh"])
     : ["low", "medium", "high", "xhigh", "max"]
 
-  // Codex's names mix "GPT-6.1-Sol" and "GPT-6.1 Terra"; show them all the second way.
-  function modelLabel(name) { return String(name || "").replace(/^(GPT-[\d.]+)-/, "$1 ") }
+  // Codex's models, shortest way: the newest of each family (Sol, Astra, Terra, Luna), in Codex's order, named
+  // "6.1 Sol". The model already chosen stays, even when it's an older one.
+  function latestCodex(list, current) {
+    var best = {}, order = []
+    function parts(m) {
+      var r = /^GPT-([\d.]+)[- ](.+)$/i.exec(String(m.name || ""))
+      return r ? { family: r[2].toLowerCase(), version: r[1], label: r[1] + " " + r[2] } : { family: m.id, version: "", label: m.name }
+    }
+    function newer(a, b) {
+      var x = a.split("."), y = b.split(".")
+      for (var i = 0; i < Math.max(x.length, y.length); i++) {
+        var p = Number(x[i] || 0), q = Number(y[i] || 0)
+        if (p !== q) return p > q
+      }
+      return false
+    }
+    list.forEach(function(m) {
+      var p = parts(m)
+      if (!best[p.family]) { order.push(p.family); best[p.family] = { m: m, p: p } }
+      else if (newer(p.version, best[p.family].p.version)) best[p.family] = { m: m, p: p }
+    })
+    var out = order.map(function(f) { return [best[f].m.id, best[f].p.label] })
+    if (current && !out.some(function(o) { return o[0] === current })) {
+      var mine = list.filter(function(m) { return m.id === current })[0]
+      if (mine) out.push([mine.id, parts(mine).label])
+    }
+    return out
+  }
 
   function modelName(id) {
     for (var i = 0; i < models.length; i++) if (models[i][0] === id) return models[i][1]

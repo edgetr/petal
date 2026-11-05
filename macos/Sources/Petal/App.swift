@@ -280,7 +280,37 @@ final class PetalApp {
 
     /// The models to offer for an AI: Claude's aliases, or Default plus Codex's own list.
     func models(for provider: Provider) -> [(String, String)] {
-        provider == .codex ? [("", "Default")] + codexModels.map { ($0.id, $0.name) } : provider.models
+        provider == .codex ? [("", "Default")] + latestCodex() : provider.models
+    }
+
+    /// The newest Codex model of each family (Sol, Astra, Terra, Luna), in Codex's order, named "6.1 Sol"; the model
+    /// already chosen stays even when it's older.
+    private func latestCodex() -> [(String, String)] {
+        func parts(_ m: CodexModel) -> (family: String, version: [Int], label: String) {
+            let pattern = try? NSRegularExpression(pattern: "^GPT-([\\d.]+)[- ](.+)$", options: .caseInsensitive)
+            let name = m.name as NSString
+            guard let match = pattern?.firstMatch(in: m.name, range: NSRange(location: 0, length: name.length)) else { return (m.id, [], m.name) }
+            let version = name.substring(with: match.range(at: 1)), family = name.substring(with: match.range(at: 2))
+            return (family.lowercased(), version.split(separator: ".").map { Int($0) ?? 0 }, "\(version) \(family)")
+        }
+        var best: [String: CodexModel] = [:]
+        var order: [String] = []
+        for model in codexModels {
+            let p = parts(model)
+            if let current = best[p.family] {
+                if p.version.lexicographicallyPrecedes(parts(current).version) || p.version == parts(current).version { continue }
+                best[p.family] = model
+            } else {
+                order.append(p.family)
+                best[p.family] = model
+            }
+        }
+        var out = order.compactMap { best[$0] }.map { ($0.id, parts($0).label) }
+        let chosen = config.string("codexModel")
+        if !chosen.isEmpty, !out.contains(where: { $0.0 == chosen }), let mine = codexModels.first(where: { $0.id == chosen }) {
+            out.append((mine.id, parts(mine).label))
+        }
+        return out
     }
 
     /// The efforts the chosen model takes.
