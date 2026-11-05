@@ -13,6 +13,14 @@ case "${1:-help}" in
   settings) omarchy-shell petal settings ;;
   edit)     "${EDITOR:-nvim}" "$config/modes.json" ;;
   restart)  omarchy restart shell ;;
+  update)
+    here="$(dirname "$(readlink -f "$0")")"
+    case "${2:-}" in
+      --check) "$here/../get.sh" --check ;;
+      --auto) "$here/../get.sh" --auto ;;
+      *) "$here/../get.sh" --update ;;
+    esac ;;
+  version)  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$(dirname "$(readlink -f "$0")")/../plugin/manifest.json" ;;
   logs)     quickshell log -n -p /usr/share/omarchy/shell 2>/dev/null | grep -i -E "petal|egesuren|DockWindow|Dock.qml|Brain|Signals|AppSearch|AskBox" | tail -n "${2:-40}" ;;
   *)
     cat <<'HELP'
@@ -25,6 +33,8 @@ petal search      open the add-apps search
 petal settings    open the dock's settings menu
 petal edit        edit ~/.config/petal/modes.json
 petal restart     restart Omarchy's shell (reloads Petal)
+petal update      update Petal from GitHub Releases (--check to only look)
+petal version     the installed version
 petal logs [n]    recent Petal log lines
 HELP
     ;;

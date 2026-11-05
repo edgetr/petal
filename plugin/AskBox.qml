@@ -18,10 +18,10 @@ PanelWindow {
   property bool optionsOpen: false
   readonly property var settings: dock ? dock.settings : null
   readonly property var chat: dock ? dock.chat : null
-  readonly property string uiFont: "Adwaita Sans"
+  readonly property string uiFont: dock ? dock.uiFont : "Adwaita Sans"
   readonly property color ink: Commons.Color.popups.text
   readonly property color soft: Qt.rgba(ink.r, ink.g, ink.b, 0.55)
-  readonly property color accent: Commons.Color.accent
+  readonly property color accent: dock ? dock.accent : Commons.Color.accent
 
   visible: open
   color: "transparent"
@@ -87,7 +87,7 @@ PanelWindow {
     x: Math.round((box.width - width) / 2)
     y: box.height - height - Math.round(104 * Style.fontScale)
     radius: Math.round(22 * Style.fontScale)
-    color: Qt.rgba(Commons.Color.popups.background.r, Commons.Color.popups.background.g, Commons.Color.popups.background.b, 0.74)
+    color: box.dock ? box.dock.popupFill : Qt.rgba(Commons.Color.popups.background.r, Commons.Color.popups.background.g, Commons.Color.popups.background.b, 0.74)
     border.width: 1
     border.color: Qt.rgba(1, 1, 1, 0.1)
 

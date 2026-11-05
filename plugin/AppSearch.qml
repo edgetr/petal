@@ -14,6 +14,8 @@ PanelWindow {
   id: search
 
   property var dock: null
+  readonly property color accent: dock ? dock.accent : Commons.Color.accent
+  readonly property string uiFont: dock ? dock.uiFont : "Adwaita Sans"
   property bool open: false
   property string query: ""
   property int selected: 0
@@ -124,7 +126,7 @@ PanelWindow {
     y: search.height - height - Math.round(110 * Style.fontScale)
     height: column.implicitHeight + padding * 2
     radius: Math.round(22 * Style.fontScale)
-    color: Qt.rgba(Commons.Color.popups.background.r, Commons.Color.popups.background.g, Commons.Color.popups.background.b, 0.74)
+    color: search.dock ? search.dock.popupFill : Qt.rgba(Commons.Color.popups.background.r, Commons.Color.popups.background.g, Commons.Color.popups.background.b, 0.74)
     padding: Style.spacing.lg
 
     // Clicks on the card stay on the card.
@@ -140,7 +142,7 @@ PanelWindow {
       width: Math.round(26 * Style.fontScale)
       height: width
       radius: width / 2
-      color: closeMouse.containsMouse ? Commons.Color.accent : Qt.rgba(1, 1, 1, 0.08)
+      color: closeMouse.containsMouse ? search.accent : Qt.rgba(1, 1, 1, 0.08)
 
       Text {
         anchors.centerIn: parent
@@ -171,8 +173,8 @@ PanelWindow {
         verticalAlignment: Text.AlignVCenter
         textFormat: Text.PlainText
         text: search.mode ? "Add to " + search.mode.name : "Add to the dock"
-        color: Commons.Color.accent
-        font.family: "Adwaita Sans"
+        color: search.accent
+        font.family: search.uiFont
         font.pixelSize: Style.font.title
         font.bold: true
       }
@@ -184,7 +186,7 @@ PanelWindow {
         radius: Style.cornerRadius
         color: Qt.rgba(1, 1, 1, 0.06)
         border.width: 1
-        border.color: input.activeFocus ? Commons.Color.accent : Qt.rgba(1, 1, 1, 0.12)
+        border.color: input.activeFocus ? search.accent : Qt.rgba(1, 1, 1, 0.12)
 
         Text {
           anchors.verticalCenter: parent.verticalCenter
@@ -193,7 +195,7 @@ PanelWindow {
           text: search.mode ? "Add an app or folder to " + search.mode.name + "…" : "Add an app or folder…"
           visible: input.text.length === 0
           color: Commons.Color.muted
-          font.family: "Adwaita Sans"
+          font.family: search.uiFont
           font.pixelSize: Style.font.title
         }
 
@@ -203,8 +205,8 @@ PanelWindow {
           x: Style.spacing.lg
           width: parent.width - Style.spacing.lg * 2
           color: Commons.Color.popups.text
-          selectionColor: Commons.Color.accent
-          font.family: "Adwaita Sans"
+          selectionColor: search.accent
+          font.family: search.uiFont
           font.pixelSize: Style.font.title
           clip: true
           onTextChanged: search.query = text
@@ -245,7 +247,7 @@ PanelWindow {
           width: list.width
           height: search.rowHeight
           radius: Style.cornerRadius
-          color: index === search.selected ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.22)
+          color: index === search.selected ? Qt.rgba(search.accent.r, search.accent.g, search.accent.b, 0.22)
             : rowMouse.containsMouse ? Style.hoverFill : "transparent"
 
           Image {
@@ -273,7 +275,7 @@ PanelWindow {
             text: row.modelData.type === "folder" && search.dock ? search.dock.tildePath(row.modelData.path) : row.modelData.name
             elide: Text.ElideMiddle
             color: Commons.Color.popups.text
-            font.family: "Adwaita Sans"
+            font.family: search.uiFont
             font.pixelSize: Style.font.title
           }
 
@@ -284,8 +286,8 @@ PanelWindow {
             anchors.rightMargin: Style.spacing.lg
             textFormat: Text.PlainText
             text: row.modelData.type === "folder" ? (row.pinned ? "Stack ✓" : "+ Stack") : (row.pinned ? "In dock ✓" : "+ Add")
-            color: row.pinned ? Commons.Color.accent : Commons.Color.muted
-            font.family: "Adwaita Sans"
+            color: row.pinned ? search.accent : Commons.Color.muted
+            font.family: search.uiFont
             font.pixelSize: Style.font.body
           }
 
@@ -307,7 +309,7 @@ PanelWindow {
         textFormat: Text.PlainText
         text: "Nothing matches"
         color: Commons.Color.muted
-        font.family: "Adwaita Sans"
+        font.family: search.uiFont
         font.pixelSize: Style.font.body
       }
     }

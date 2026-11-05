@@ -24,16 +24,36 @@ Item {
   // The latest request for permission: [{ tool, label, rules: [...] }]
   property var pendingAsk: []
 
+  // Petal's MCP server, started by Claude Code for every turn.
+  readonly property string mcpServer: String(Qt.resolvedUrl("mcp/petal-mcp.py")).replace(/^file:\/\//, "")
+  readonly property string mcpConfig: JSON.stringify({ mcpServers: { petal: { command: "python3", args: [agent.mcpServer] } } })
+
+  // The user's own standing instructions for Claude, if they wrote any.
+  FileView {
+    id: instructionsFile
+    path: Quickshell.env("HOME") + "/.config/petal/instructions.md"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+  }
+
   readonly property string systemPrompt: "You are Claude, running inside Petal, the user's dock on Omarchy "
     + "(Arch Linux with Hyprland; Hyprland config lives in ~/.config/hypr/; validate config changes with "
-    + "`hyprctl reload && hyprctl configerrors`; Omarchy has an `omarchy` CLI). Your replies show in a small panel above the dock: "
-    + "be brief and friendly, short paragraphs, no big headings. You work in the user's home folder. "
-    + "Petal's own config: ~/.config/petal/modes.json (focus modes: { defaultMode, workspaces: {\"<n>\": modeId}, modes: [{ id, name, "
-    + "icon (one Nerd Font glyph), color (#rrggbb, pink-family palette preferred), about, apps (desktop ids in dock order), sites "
-    + "(words found in browser tab titles), focusDelay (seconds), hold (bool: hold notifications from apps outside the mode), allow "
-    + "(desktop ids always let through) }] }) and ~/.config/petal/settings.json (feature switches). Petal reloads both on save. "
-    + "Desktop ids are .desktop file names (without .desktop) in /usr/share/applications or ~/.local/share/applications. "
-    + "If a command is blocked for approval, say in one line what it would do; the user can allow it from the panel."
+    + "`hyprctl reload && hyprctl configerrors`; Omarchy has an `omarchy` CLI). Your replies show in a small panel "
+    + "above the dock: be brief and friendly, short paragraphs, no big headings. You work in the user's home folder.\n\n"
+    + "Everything about the dock is customizable through you. Use the petal MCP tools: call petal_get_state first, "
+    + "then petal_set_settings (appearance: dockColor, dockOpacity, iconSize, accentColor, font, …; feature switches: "
+    + "bounce, badges, previews, …), petal_set_dock (position, auto-hide), petal_save_mode / petal_delete_mode "
+    + "(focus modes and their apps; get desktop ids from petal_list_apps). Changes apply instantly. "
+    + "If a request can't be done with settings, you may edit Petal's QML source (path in petal_get_state) and then "
+    + "call petal_reload; mention that a Petal update could replace source edits. "
+    + "You can also help with anything else on the computer: Omarchy, Hyprland, apps, files. "
+    + "If something needs the user's approval, say in one line what it would do; they can allow it from the panel."
+
+  function fullPrompt() {
+    var mine = String(instructionsFile.text() || "").trim()
+    return agent.systemPrompt + (mine ? "\n\nThe user's own instructions:\n" + mine : "")
+  }
 
   function reset() {
     agent.stop()
@@ -78,9 +98,11 @@ Item {
       "--effort", s.chatEffort || "medium",
       "--output-format", "stream-json", "--verbose",
       "--permission-mode", s.claudeAccess === "full" ? "bypassPermissions" : "auto",
-      "--append-system-prompt", agent.systemPrompt]
+      "--append-system-prompt", agent.fullPrompt()]
+    args.push("--mcp-config", agent.mcpConfig)
     if (agent.sessionId) args.push("--resume", agent.sessionId)
-    if (agent.allowed.length) args = args.concat(["--allowedTools"]).concat(agent.allowed)
+    // Petal's own tools never need asking.
+    args = args.concat(["--allowedTools", "mcp__petal"]).concat(agent.allowed)
     proc.command = ["bash", "-c", "p=\"$1\"; shift; printf '%s' \"$p\" | \"$@\"", "petal", prompt].concat(args)
     proc.running = true
   }
@@ -102,6 +124,15 @@ Item {
     case "WebSearch": return "Searching the web  " + String(input.query || "")
     case "WebFetch": return "Reading  " + String(input.url || "")
     case "TodoWrite": return "Planning"
+    case "mcp__petal__petal_get_state": return "Looking at your dock"
+    case "mcp__petal__petal_set_settings": return "Changing  " + Object.keys(input.settings || {}).join(", ")
+    case "mcp__petal__petal_reset_settings": return "Resetting settings"
+    case "mcp__petal__petal_set_dock": return "Moving the dock"
+    case "mcp__petal__petal_save_mode": return "Saving mode  " + String((input.mode || {}).name || (input.mode || {}).id || "")
+    case "mcp__petal__petal_delete_mode": return "Deleting mode  " + String(input.id || "")
+    case "mcp__petal__petal_list_apps": return "Looking up apps"
+    case "mcp__petal__petal_switch_mode": return "Switching to  " + String(input.id || "")
+    case "mcp__petal__petal_reload": return "Reloading Petal"
     default: return tool
     }
   }
@@ -125,7 +156,7 @@ Item {
     if (m.type === "assistant" && m.message && m.message.content) {
       m.message.content.forEach(function(c) {
         if (c.type === "text" && String(c.text).trim()) messages.append({ kind: "claude", text: String(c.text).trim(), detail: "" })
-        else if (c.type === "tool_use") messages.append({ kind: "step", text: agent.describe(c.name, c.input), detail: "" })
+        else if (c.type === "tool_use" && c.name !== "ToolSearch") messages.append({ kind: "step", text: agent.describe(c.name, c.input), detail: "" })
       })
     } else if (m.type === "result") {
       var denials = m.permission_denials || []

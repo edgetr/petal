@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Hyprland
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import "DockModel.js" as DockModel
 
 // Petal: an AI-native dock with focus modes. Each workspace remembers its
@@ -77,6 +78,25 @@ Item {
       property bool stacks: true
       property list<string> stackFolders: ["~/Downloads", "~/Pictures/Screenshots"]
       property bool trash: true
+      // Appearance. Colors are "#rrggbb" ("" follows the Omarchy theme);
+      // sizes are in points (scaled with the display).
+      property string dockColor: ""
+      property real dockOpacity: 0.45
+      property string dockBorderColor: "#ffffff"
+      property real dockBorderOpacity: 0.28
+      property int dockRadius: -1
+      property bool dockSheen: true
+      property int dockMargin: -1
+      property int iconSize: 36
+      property int iconPadding: -1
+      property real idleOpacity: 0.7
+      property bool separators: true
+      property real hoverLiftAmount: 0.05
+      property real glowStrength: 1.0
+      property string accentColor: ""
+      property string popupColor: ""
+      property real popupOpacity: 0.74
+      property string font: "Adwaita Sans"
       // Modes and AI
       property bool modes: true
       property bool focusGuard: true
@@ -84,6 +104,7 @@ Item {
       property bool holdNotifications: true
       property bool ai: true
       property bool claudeUsage: true
+      property bool autoUpdate: true
       property string claudePath: ""
       // The Claude panel's chat (Claude Code CLI): model alias, effort
       // (low … max), and access: "auto" (Claude Code's auto mode: safe actions
@@ -92,6 +113,14 @@ Item {
       property string chatEffort: "medium"
       property string claudeAccess: "auto"
     }
+  }
+
+  // The look every Petal surface shares, from the settings above.
+  readonly property color accent: settingsAdapter.accentColor ? Qt.color(settingsAdapter.accentColor) : Commons.Color.accent
+  readonly property string uiFont: settingsAdapter.font || "Adwaita Sans"
+  readonly property color popupFill: {
+    var base = settingsAdapter.popupColor ? Qt.color(settingsAdapter.popupColor) : Commons.Color.popups.background
+    return Qt.rgba(base.r, base.g, base.b, settingsAdapter.popupOpacity)
   }
 
   function toggleSetting(name) {
@@ -379,6 +408,8 @@ Item {
       var item = byKey[w.key]
       if (!item) {
         if (w.minimized && separateMinimized) continue
+        // An app that belongs to another mode only shows in its own mode.
+        if (root.settings.modes && root.modeOwning(w.key, modeId)) continue
         if (root.settings.thisWorkspaceOnly && !w.minimized && w.workspaceId !== wsId) continue
         item = byKey[w.key] = { key: w.key, pinned: false, windows: [], here: 0 }
         items.push(item)
@@ -776,13 +807,11 @@ Item {
       // Only if that window is still in front.
       var now = Hyprland.activeToplevel
       if (!r || !now || String(now.address) !== address) return
-      if (r.mode === mode.id) {
-        root.lastOkAddress = address
-        root.card = { kind: "fit", title: title, icon: icon, target: mode.id, mode: mode.id, reason: String(r.reason || ""), key: browser ? "" : key, autoClose: browser }
-      } else if (r.mode && root.modeById(r.mode)) {
+      // Only speak up when it clearly belongs to another mode.
+      if (r.mode && r.mode !== mode.id && root.modeById(r.mode)) {
         root.card = { kind: "guard", title: title, icon: icon, target: r.mode, ws: wsId, mode: mode.id, reason: String(r.reason || ""), snoozeKey: snoozeKey, address: address }
       } else {
-        root.card = { kind: "none", title: title, icon: icon, ws: wsId, mode: mode.id, reason: String(r.reason || ""), snoozeKey: snoozeKey, address: address, key: browser ? "" : key }
+        root.lastOkAddress = address
       }
     })
   }
@@ -864,6 +893,40 @@ Item {
     var h = Math.floor(mins / 60)
     if (h < 48) return h + "h " + (mins % 60) + "m"
     return Math.round(h / 24) + "d"
+  }
+
+  // ── Updates (GitHub Releases) ──────────────────────────────────────────
+  // A little after start and every 6 hours, `petal update --auto` installs a
+  // newer release if there is one (source checkouts are left alone); a card
+  // then offers to restart the shell to load it.
+  Process {
+    id: updateProc
+    command: [root.home + "/.local/bin/petal", "update", "--auto"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        try {
+          var r = JSON.parse(String(text).trim().split("\n").pop())
+          if (r.status === "updated") root.card = { kind: "update", title: "Petal " + r.version, version: r.version, icon: Qt.resolvedUrl("assets/petal.svg") }
+        } catch (e) {}
+      }
+    }
+  }
+
+  Timer {
+    interval: 6 * 60 * 60 * 1000
+    repeat: true
+    running: settingsAdapter.autoUpdate
+    onTriggered: if (!updateProc.running) updateProc.running = true
+  }
+
+  Timer {
+    interval: 2 * 60 * 1000
+    running: settingsAdapter.autoUpdate
+    onTriggered: if (!updateProc.running) updateProc.running = true
+  }
+
+  function restartShell() {
+    Util.execDetached("omarchy restart shell")
   }
 
   // ── Claude chat (the Claude panel) ─────────────────────────────────────

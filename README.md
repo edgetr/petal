@@ -1,7 +1,10 @@
 # Petal
 
-**An AI-native, liquid-glass dock for [Omarchy](https://omarchy.org).**
+**An AI-native dock for [Omarchy](https://omarchy.org).**
 Focus modes per workspace, a dock that knows what you're doing, and Claude Code built in.
+Want it different? Just ask Claude.
+
+**[Download →](https://petal-dock.vercel.app)** · [Releases](https://github.com/edgetr/petal/releases)
 
 ![Petal dock](docs/dock.png)
 
@@ -18,9 +21,12 @@ Focus modes per workspace, a dock that knows what you're doing, and Claude Code 
   mode with a count. Your mode's own apps come through normally, buttons and all. Claude flags
   held messages that can't wait.
 - **Claude, in the dock.** The Claude button opens a real Claude Code chat. Ask it to add a mode,
-  fix a config, find a file or explain why your laptop is slow. It reads, searches and edits
-  files and runs safe commands on its own (Claude Code's auto mode); anything risky comes back as
-  **Allow / Don't allow**. Or switch on full access. One model and effort setting, right in the panel.
+  restyle the dock, fix a config, find a file or explain why your laptop is slow. It reads, edits
+  and runs safe commands on its own (Claude Code's auto mode); anything risky comes back as
+  **Allow / Don't allow**. Or switch on full access.
+- **Customize anything by asking.** Petal ships an MCP server that Claude gets automatically, so
+  "make the dock background black", "bigger icons", "stop the bouncing" or "move the dock to the
+  left" just work. If a setting can't do it, Claude can edit Petal's own code.
 - **Usage ring.** A ring around the Claude button shows how much of your Claude Code limit is
   used (pink, amber at 70%, red at 90%). Hover for numbers; the panel shows when it resets.
 - **A good dock, too:** unread badges, a single bounce when an app needs you, download progress
@@ -28,7 +34,8 @@ Focus modes per workspace, a dock that knows what you're doing, and Claude Code 
   the trash), live window previews, minimized windows (Super+M) as thumbnails, now playing,
   folder stacks, app-colored glow, hover lift, auto-hide, every screen.
 
-Every feature is a switch: right-click the "+" or the dock's glass.
+Right-click the dock for the few settings you'll touch often (position, auto-hide, focus cards,
+holding notifications). Everything else: ask Claude.
 
 <p>
   <img src="docs/claude.png" width="49%" alt="Claude panel">
@@ -46,12 +53,39 @@ Every feature is a switch: right-click the "+" or the dock's glass.
 
 ## Install
 
+**One line** (or use the download button on [the website](https://petal-dock.vercel.app)):
+
+```bash
+curl -fsSL https://petal-dock.vercel.app/install.sh | bash
+```
+
+This downloads the latest [release](https://github.com/edgetr/petal/releases), checks its
+checksum, installs it to `~/.local/share/petal`, and restarts Omarchy's shell. Turn off
+Omarchy's own dock if it is on, so you don't have two.
+
+**Updates are automatic:** Petal checks GitHub Releases a couple of minutes after starting and
+every 6 hours, installs a newer version, and offers to restart the shell. Or run `petal update`.
+(Ask Claude to turn auto-update off if you'd rather not.)
+
+### Manual download
+
+Download `Petal-linux.tar.gz` from [Releases](https://github.com/edgetr/petal/releases/latest),
+then:
+
+```bash
+tar -xzf Petal-linux.tar.gz && cd petal && ./install.sh && omarchy restart shell
+```
+
+### Build from source
+
 ```bash
 git clone https://github.com/edgetr/petal ~/Dev/Petal
 cd ~/Dev/Petal
 ./install.sh
 omarchy restart shell
 ```
+
+A source install isn't auto-updated; use `git pull && petal restart`.
 
 `install.sh`:
 
@@ -61,9 +95,17 @@ omarchy restart shell
 4. finds your `claude` CLI and writes its path to `~/.config/petal/settings.json`
 5. enables the plugin in `~/.config/omarchy/shell.json`
 
-Then turn off Omarchy's own dock if it is on, so you don't have two.
+### Releasing (maintainers)
 
-Updating: `git pull && petal restart`.
+Bump `version` in `plugin/manifest.json`, commit, then tag and push:
+
+```bash
+git tag v3.2.0 && git push origin v3.2.0
+```
+
+The release workflow builds `Petal-<version>-linux.tar.gz`, `Petal-linux.tar.gz` and
+`latest.json` (version, URL, SHA-256), which every installed Petal checks for updates.
+macOS and Windows builds will join the same `latest.json` later.
 
 ## First steps
 
@@ -72,13 +114,20 @@ Updating: `git pull && petal restart`.
    Right-click an app and use **In modes** to put it in several modes.
 3. **Right-click a mode** to make it hold notifications, set it as default, or delete it.
    Turn on *Countdown to leave* in settings if you want a delay before leaving focus modes.
-4. **Click the Claude button** and try *"Add a Gaming mode with Steam and Discord"*.
+4. **Click the Claude button** and try *"Add a Gaming mode with Steam and Discord"* or
+   *"Make the dock background black"*.
 
-## Configuration
+## Customizing
 
-Everything lives in `~/.config/petal/` and reloads live when saved.
+The easy way is to ask Claude. Under the hood, everything lives in `~/.config/petal/` and
+reloads live when saved:
 
-### `modes.json`
+- **`settings.json`**: appearance (`dockColor`, `dockOpacity`, `dockRadius`, `iconSize`,
+  `accentColor`, `font`, `popupColor`, …) and feature switches (`bounce`, `badges`, `previews`,
+  `appGlow`, `autoUpdate`, …), plus the Claude panel's `chatModel`, `chatEffort` and
+  `claudeAccess` (`auto` or `full`). The full list with descriptions is in
+  [`plugin/mcp/petal-mcp.py`](plugin/mcp/petal-mcp.py).
+- **`modes.json`**: your modes:
 
 ```jsonc
 {
@@ -101,22 +150,18 @@ Everything lives in `~/.config/petal/` and reloads live when saved.
 }
 ```
 
-Desktop ids are `.desktop` file names without the extension, from `/usr/share/applications` or
-`~/.local/share/applications`. Apps that aren't installed are skipped.
+- **`instructions.md`** (optional): your own standing instructions for Claude, added to every
+  chat ("Always answer in Turkish", "I use Helium, not Chrome", …).
 
-### `settings.json`
+### The Petal MCP server
 
-Feature switches (the same as the settings menu) plus:
+`plugin/mcp/petal-mcp.py` is a dependency-free MCP server with tools to read Petal's state, change
+settings and modes, move the dock and reload it. The Claude panel connects it automatically. To
+use it from any Claude Code session too:
 
-| key | default | |
-|---|---|---|
-| `chatModel` | `"sonnet"` | Claude panel model: `haiku`, `sonnet`, `opus`, `fable` |
-| `chatEffort` | `"medium"` | `low`, `medium`, `high`, `xhigh`, `max` |
-| `claudeAccess` | `"auto"` | `"auto"`: Claude Code's auto mode (safe actions run, risky ones ask); `"full"`: bypass all permission checks |
-| `claudePath` | found by install.sh | path to the `claude` CLI |
-| `stackFolders` | Downloads, Screenshots | folder stacks |
-
-Position and auto-hide come from Omarchy's dock settings (`omarchy-dock position|autohide`).
+```bash
+claude mcp add petal -- python3 ~/.local/share/petal/current/plugin/mcp/petal-mcp.py
+```
 
 ## The `petal` command
 
@@ -129,6 +174,8 @@ petal search      open the add-apps search
 petal settings    open the settings menu
 petal edit        edit modes.json
 petal restart     restart Omarchy's shell (reloads Petal)
+petal update      update from GitHub Releases (--check to only look)
+petal version     the installed version
 ```
 
 ## Privacy

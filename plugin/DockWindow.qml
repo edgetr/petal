@@ -12,8 +12,7 @@ import qs.Ui
 import "DockModel.js" as DockModel
 
 // One screen's Petal dock: mode pills, the mode's apps, "+",
-// now playing, minimized windows, folder stacks and the trash, on a pink
-// liquid-glass pill. Every extra can be switched off in the settings menu
+// now playing, minimized windows, folder stacks and the trash. Every extra can be switched off in the settings menu
 // (right-click "+" or the glass). Cards above it ask before you drift out of
 // a focus mode.
 PanelWindow {
@@ -26,7 +25,12 @@ PanelWindow {
   function opt(name) { return !!window.settings && window.settings[name] === true }
 
   readonly property string glyphFont: "JetBrainsMono Nerd Font"
-  readonly property string uiFont: "Adwaita Sans"
+  readonly property string uiFont: dock ? dock.uiFont : "Adwaita Sans"
+  readonly property color accent: dock ? dock.accent : Commons.Color.accent
+  function setting(name, fallback) {
+    var v = window.settings ? window.settings[name] : undefined
+    return v === undefined || v === null ? fallback : v
+  }
   readonly property int popRadius: Math.round(16 * Style.fontScale)
 
   // ── Where we are ──────────────────────────────────────────────────────
@@ -38,10 +42,10 @@ PanelWindow {
   readonly property bool isFocusedScreen: Hyprland.focusedMonitor === window.monitor
   readonly property var mode: dock && opt("modes") ? dock.modeForWorkspace(workspaceId) : null
   readonly property string modeId: mode ? mode.id : (dock && dock.modes.length ? dock.modes[0].id : "")
-  readonly property color modeTint: mode ? window.tint(mode.color) : Commons.Color.accent
+  readonly property color modeTint: mode ? window.tint(mode.color) : window.accent
 
   function tint(c) {
-    return c ? Qt.color(c) : Commons.Color.accent
+    return c ? Qt.color(c) : window.accent
   }
 
   // ── This screen's apps ────────────────────────────────────────────────
@@ -132,12 +136,12 @@ PanelWindow {
   property bool dropHover: false
 
   // ── Sizes ─────────────────────────────────────────────────────────────
-  readonly property int gap: Style.spacing.xs
+  readonly property int gap: setting("dockMargin", -1) >= 0 ? Math.round(setting("dockMargin", 0) * Style.fontScale) : Style.spacing.xs
   readonly property int pillPad: Style.spacing.xs
-  readonly property int iconSize: Math.round(36 * Style.fontScale)
-  readonly property int iconInset: Style.spacing.md
+  readonly property int iconSize: Math.round(Math.max(16, setting("iconSize", 36)) * Style.fontScale)
+  readonly property int iconInset: setting("iconPadding", -1) >= 0 ? Math.round(setting("iconPadding", 0) * Style.fontScale) : Style.spacing.md
   readonly property int slotSize: iconSize + iconInset * 2
-  readonly property real idleOpacity: 0.7
+  readonly property real idleOpacity: setting("idleOpacity", 0.7)
   readonly property int liftRoom: Math.round(iconSize * 0.3)
   readonly property int thumbWidth: Math.round(200 * Style.fontScale)
   readonly property int thumbHeight: Math.round(124 * Style.fontScale)
@@ -153,7 +157,7 @@ PanelWindow {
   readonly property real inwardX: position === "left" ? 1 : position === "right" ? -1 : 0
   readonly property real inwardY: position === "top" ? 1 : position === "bottom" ? -1 : 0
 
-  readonly property color glassFill: Qt.rgba(Commons.Color.popups.background.r, Commons.Color.popups.background.g, Commons.Color.popups.background.b, 0.74)
+  readonly property color glassFill: dock ? dock.popupFill : Qt.rgba(Commons.Color.popups.background.r, Commons.Color.popups.background.g, Commons.Color.popups.background.b, 0.74)
   readonly property color ink: Commons.Color.popups.text
   readonly property color soft: Qt.rgba(ink.r, ink.g, ink.b, 0.55)
 
@@ -471,17 +475,21 @@ PanelWindow {
       onClicked: window.openSettingsMenu(null)
     }
 
-    // Liquid glass: a translucent body (blurred by a Hyprland layer rule), a
-    // bright rim, a soft top sheen, and a faint wash of the mode's color.
+    // The dock's body: a translucent fill (blurred by a Hyprland layer rule),
+    // a rim, a soft top sheen, and a faint wash of the mode's color. All of
+    // it comes from the appearance settings.
     Rectangle {
       id: pill
+      readonly property color base: window.setting("dockColor", "") ? Qt.color(window.setting("dockColor", "")) : Commons.Color.bar.background
+      readonly property color rim: Qt.color(window.setting("dockBorderColor", "#ffffff"))
       anchors.fill: parent
-      radius: Math.min(width, height) / 2.6
-      color: Qt.rgba(Commons.Color.bar.background.r, Commons.Color.bar.background.g, Commons.Color.bar.background.b, 0.45)
-      border.width: 1
-      border.color: Qt.rgba(1, 1, 1, 0.28)
+      radius: window.setting("dockRadius", -1) >= 0 ? Math.min(Math.round(window.setting("dockRadius", 0) * Style.fontScale), Math.min(width, height) / 2) : Math.min(width, height) / 2.6
+      color: Qt.rgba(base.r, base.g, base.b, window.setting("dockOpacity", 0.45))
+      border.width: window.setting("dockBorderOpacity", 0.28) > 0 ? 1 : 0
+      border.color: Qt.rgba(rim.r, rim.g, rim.b, window.setting("dockBorderOpacity", 0.28))
 
       Rectangle {
+        visible: window.setting("dockSheen", true)
         anchors.fill: parent
         anchors.margins: 1
         radius: pill.radius - 1
@@ -583,7 +591,7 @@ PanelWindow {
     readonly property real lift: window.opt("hoverLift") && hovered ? 1 : 0
     property real liftShown: lift
     Behavior on liftShown { NumberAnimation { duration: Style.duration(140); easing.type: Easing.OutCubic } }
-    readonly property real iconScale: 1 + 0.12 * liftShown
+    readonly property real iconScale: 1 + window.setting("hoverLiftAmount", 0.05) * liftShown
 
     width: window.slotSize
     height: window.slotSize
@@ -606,8 +614,8 @@ PanelWindow {
     property Item slot: null
     property real extraX: 0
     property real extraY: 0
-    x: window.iconInset + extraX + (slot ? window.inwardX * slot.liftShown * window.iconSize * 0.14 : 0)
-    y: window.iconInset + extraY + (slot ? window.inwardY * slot.liftShown * window.iconSize * 0.14 : 0)
+    x: window.iconInset + extraX + (slot ? window.inwardX * slot.liftShown * window.iconSize * window.setting("hoverLiftAmount", 0.05) * 1.2 : 0)
+    y: window.iconInset + extraY + (slot ? window.inwardY * slot.liftShown * window.iconSize * window.setting("hoverLiftAmount", 0.05) * 1.2 : 0)
     width: window.iconSize
     height: window.iconSize
     sourceSize: Qt.size(window.iconSize * 2.4, window.iconSize * 2.4)
@@ -624,6 +632,7 @@ PanelWindow {
     height: window.vertical ? Style.spacing.lg * 2 + 1 : window.slotSize
 
     Rectangle {
+      visible: window.setting("separators", true)
       anchors.centerIn: parent
       width: window.vertical ? parent.width * 0.6 : 1
       height: window.vertical ? 1 : parent.height * 0.6
@@ -673,7 +682,7 @@ PanelWindow {
       return -1
     }
     readonly property real fraction: window.countdown ? Math.max(0, Math.min(1, (window.dock.pending.deadline - window.dock.now) / window.dock.pending.total)) : 0
-    readonly property color activeHue: list.length ? window.tint(list[activeIndex].color) : Commons.Color.accent
+    readonly property color activeHue: list.length ? window.tint(list[activeIndex].color) : window.accent
     readonly property int trackLength: list.length * seg + pad * 2
     readonly property int trackDepth: seg + pad * 2
 
@@ -815,7 +824,7 @@ PanelWindow {
     id: askSlot
     readonly property int size: Math.round(window.iconSize * 0.95)
     readonly property real used: window.dock ? window.dock.usageWorst : -1
-    readonly property color ringColor: used >= 0.9 ? "#ff4d6d" : used >= 0.7 ? "#ffb347" : Commons.Color.accent
+    readonly property color ringColor: used >= 0.9 ? "#ff4d6d" : used >= 0.7 ? "#ffb347" : window.accent
     property string tip: {
       // The ring shows what's used; the tooltip, what's left.
       var t = "Claude"
@@ -946,7 +955,7 @@ PanelWindow {
     // App-colored glow: the icon's own color, sampled from a tiny copy of it
     // (theme icons come from an image provider the color quantizer can't read).
     property color sampled: "transparent"
-    readonly property color appColor: window.opt("appGlow") && sampled.a > 0 ? sampled : Commons.Color.accent
+    readonly property color appColor: window.opt("appGlow") && sampled.a > 0 ? sampled : window.accent
 
     Canvas {
       id: sampler
@@ -1098,7 +1107,7 @@ PanelWindow {
         anchors.centerIn: parent
         width: window.slotSize
         height: window.slotSize
-        opacity: appSlot.focusedApp ? 0.75 : (appSlot.hovered ? 0.55 : 0.32)
+        opacity: (appSlot.focusedApp ? 0.75 : (appSlot.hovered ? 0.55 : 0.32)) * Math.max(0, Math.min(1, window.setting("glowStrength", 1)))
         Behavior on opacity { NumberAnimation { duration: 200 } }
         preferredRendererType: Shape.CurveRenderer
         ShapePath {
@@ -1192,8 +1201,8 @@ PanelWindow {
     }
 
     ClippingRectangle {
-      x: window.iconInset + window.inwardX * mediaSlot.liftShown * window.iconSize * 0.14
-      y: window.iconInset + window.inwardY * mediaSlot.liftShown * window.iconSize * 0.14
+      x: window.iconInset + window.inwardX * mediaSlot.liftShown * window.iconSize * window.setting("hoverLiftAmount", 0.05) * 1.2
+      y: window.iconInset + window.inwardY * mediaSlot.liftShown * window.iconSize * window.setting("hoverLiftAmount", 0.05) * 1.2
       width: window.iconSize
       height: window.iconSize
       radius: Math.round(window.iconSize * 0.24)
@@ -1206,7 +1215,7 @@ PanelWindow {
         visible: art.status !== Image.Ready
         textFormat: Text.PlainText
         text: "󰝚"
-        color: Commons.Color.accent
+        color: window.accent
         font.family: window.glyphFont
         font.pixelSize: Math.round(window.iconSize * 0.5)
       }
@@ -1250,7 +1259,7 @@ PanelWindow {
           width: 2
           radius: 1
           anchors.bottom: parent.bottom
-          color: Commons.Color.accent
+          color: window.accent
           height: parent.height * 0.4
           SequentialAnimation on height {
             running: !!mediaSlot.p && mediaSlot.p.isPlaying && !Style.reduceMotion
@@ -1275,8 +1284,8 @@ PanelWindow {
     }
 
     ClippingRectangle {
-      x: window.iconInset - 2 + window.inwardX * minSlot.liftShown * window.iconSize * 0.14
-      y: window.iconInset - 2 + window.inwardY * minSlot.liftShown * window.iconSize * 0.14
+      x: window.iconInset - 2 + window.inwardX * minSlot.liftShown * window.iconSize * window.setting("hoverLiftAmount", 0.05) * 1.2
+      y: window.iconInset - 2 + window.inwardY * minSlot.liftShown * window.iconSize * window.setting("hoverLiftAmount", 0.05) * 1.2
       width: window.iconSize + 4
       height: window.iconSize + 4
       radius: Math.round(window.iconSize * 0.18)
@@ -1335,7 +1344,7 @@ PanelWindow {
       readonly property int dotSize: Math.max(4, Math.round(window.iconSize * 0.13))
       visible: window.stackPath === stackSlot.path
       width: dotSize; height: dotSize; radius: dotSize / 2
-      color: Commons.Color.accent
+      color: window.accent
       x: (parent.width - width) / 2
       y: window.position === "top" ? 1 : parent.height - height - 1
     }
@@ -1436,7 +1445,7 @@ PanelWindow {
     readonly property var target: c && c.target && window.dock ? window.dock.modeById(c.target) : null
     readonly property var here: c && window.dock ? window.dock.modeById(c.mode || window.modeId) : null
     readonly property int wait: here && window.opt("countdown") ? Number(here.focusDelay || 0) : 0
-    readonly property color hue: target ? window.tint(target.color) : Commons.Color.accent
+    readonly property color hue: target ? window.tint(target.color) : window.accent
 
     visible: !!c && window.isFocusedScreen && window.shown
     width: Math.max(Math.round(330 * Style.fontScale), cardColumn.implicitWidth) + padding * 2
@@ -1496,8 +1505,9 @@ PanelWindow {
               if (!c) return ""
               var esc = function(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;") }
               var dim = "<font color='" + Commons.Color.muted + "'>"
+              if (c.kind === "update") return "<b>Petal updated to " + esc(c.version) + "</b>"
               if (c.kind === "held") return "<b>" + esc(c.n.summary) + "</b>" + dim + " · " + esc(c.n.app) + (c.allowedHere ? "" : " · held for " + esc(guardCard.target ? guardCard.target.name : "later")) + "</font>"
-              if (c.kind === "guard") return "<b>" + esc(c.title) + "</b>" + dim + " · belongs to " + esc(guardCard.target ? guardCard.target.name : "") + "</font>"
+              if (c.kind === "guard") return "<b>" + esc(c.title) + "</b>" + dim + " · is for " + esc(guardCard.target ? guardCard.target.name : "") + "</font>"
               if (c.kind === "fit") return "<b>" + esc(c.title) + "</b>" + dim + " · fits " + esc(guardCard.target ? guardCard.target.name : "") + "</font>"
               return "<b>" + esc(c.title) + "</b>" + dim + " · not in any mode</font>"
             }
@@ -1517,7 +1527,8 @@ PanelWindow {
               var c = guardCard.c
               if (!c) return ""
               if (c.kind === "held") return String(c.n.body || "")
-              if (c.kind === "guard") return "Stay focused, or switch?"
+              if (c.kind === "guard") return "You're in " + (guardCard.here ? guardCard.here.name : "another mode") + " mode."
+              if (c.kind === "update") return "Restart the shell to finish (a second or two)."
               return ""
             }
           }
@@ -1540,19 +1551,20 @@ PanelWindow {
         spacing: Style.spacing.sm
 
         CardButton {
-          text: !guardCard.c ? "" : guardCard.c.kind === "held" ? (guardCard.c.allowedHere ? "OK" : "Later") : guardCard.c.kind === "fit" ? "OK" : "Stay"
+          text: !guardCard.c ? "" : guardCard.c.kind === "update" ? "Later" : guardCard.c.kind === "held" ? (guardCard.c.allowedHere ? "OK" : "Later") : "Stay in " + (guardCard.here ? guardCard.here.name : "this mode")
           onClicked: window.dock.cardStay()
         }
         CardButton {
-          visible: !!guardCard.c && (guardCard.c.kind === "none" || (guardCard.c.kind === "fit" && !!guardCard.c.key))
-          text: !guardCard.c ? "" : guardCard.c.kind === "fit" ? "Keep in " + (guardCard.target ? guardCard.target.name : "") : "Allow for an hour"
-          onClicked: window.dock.cardAllow()
+          visible: !!guardCard.c && guardCard.c.kind === "update"
+          primary: true
+          text: "Restart now"
+          onClicked: { window.dock.card = null; window.dock.restartShell() }
         }
         CardButton {
           visible: !!guardCard.c && (guardCard.c.kind === "guard" || guardCard.c.kind === "held") && !!guardCard.target
           primary: true
           hue: guardCard.hue
-          text: guardCard.target ? "Go to " + guardCard.target.name + (guardCard.wait > 0 ? " (" + guardCard.wait + "s wait)" : "") : ""
+          text: guardCard.target ? "Switch to " + guardCard.target.name + (guardCard.wait > 0 ? " (" + guardCard.wait + "s)" : "") : ""
           onClicked: window.dock.cardGo()
         }
       }
@@ -1563,7 +1575,7 @@ PanelWindow {
     id: button
     property string text: ""
     property bool primary: false
-    property color hue: Commons.Color.accent
+    property color hue: window.accent
     signal clicked()
     height: Math.round(window.rowHeight * 0.9)
     width: buttonText.implicitWidth + Style.spacing.lg * 2
@@ -1703,7 +1715,7 @@ PanelWindow {
             radius: Style.cornerRadius
             color: Qt.rgba(0, 0, 0, 0.25)
             border.width: tileMouse.containsMouse ? 2 : 1
-            border.color: tileMouse.containsMouse ? Commons.Color.accent : Qt.rgba(1, 1, 1, 0.12)
+            border.color: tileMouse.containsMouse ? window.accent : Qt.rgba(1, 1, 1, 0.12)
             clip: true
 
             ScreencopyView {
@@ -1772,7 +1784,7 @@ PanelWindow {
     width: Math.round(window.rowHeight * 0.75)
     height: width
     radius: width / 2
-    color: tbMouse.containsMouse ? Commons.Color.accent : Qt.rgba(1, 1, 1, 0.1)
+    color: tbMouse.containsMouse ? window.accent : Qt.rgba(1, 1, 1, 0.1)
 
     Text {
       anchors.centerIn: parent
@@ -1829,7 +1841,7 @@ PanelWindow {
         leftPadding: Style.spacing.md
         textFormat: Text.PlainText
         text: window.baseName(window.stackPath)
-        color: Commons.Color.accent
+        color: window.accent
         font.family: window.uiFont
         font.pixelSize: Style.font.title
         font.bold: true
@@ -1919,94 +1931,68 @@ PanelWindow {
   }
 
   // ── Settings: every feature switch, in three columns ──────────────────
-  readonly property var settingsColumns: [
-    [["Modes", [["modes", "Focus modes"], ["countdown", "Countdown to leave"], ["focusGuard", "Focus cards"], ["holdNotifications", "Hold notifications"]]],
-     ["Claude", [["ai", "Sort with Claude"], ["claudeUsage", "Usage ring"]]],
-     ["Look", [["tooltips", "Tooltips"], ["hoverLift", "Hover lift"], ["appGlow", "App glow"]]]],
-    [["Apps", [["thisWorkspaceOnly", "This workspace only"], ["previews", "Window previews"], ["minimized", "Minimized windows"],
-               ["badges", "Badges"], ["bounce", "Bounce"], ["progress", "Progress rings"],
-               ["quickActions", "Quick actions"], ["recentFiles", "Recent files"], ["dropToOpen", "Drop to open"]]]],
-    [["Extras", [["nowPlaying", "Now playing"], ["stacks", "Folder stacks"], ["trash", "Trash"]]]]
-  ]
-
+  // Settings: only what you'd reach for. Everything else (bounce, badges,
+  // glow, previews, …) is one sentence to Claude away.
   Glass {
     id: settingsCard
 
     visible: window.contentShown && window.settingsMenu
-    width: settingsRow.implicitWidth + padding * 2
-    height: settingsRow.implicitHeight + padding * 2
+    width: Math.round(250 * Style.fontScale) + padding * 2
+    height: settingsColumn.implicitHeight + padding * 2
     x: window.popupX(window.menuSlot, settingsCard)
     y: window.popupY(window.menuSlot, settingsCard)
     radius: window.popRadius
-    color: window.glassFill
-    padding: Style.spacing.sm
+    padding: Math.round(6 * Style.fontScale)
 
-    Row {
-      id: settingsRow
+    Column {
+      id: settingsColumn
       x: settingsCard.contentLeftInset
       y: settingsCard.contentTopInset
-      spacing: Style.spacing.md
+      width: settingsCard.width - settingsCard.padding * 2
 
-      Repeater {
-        model: window.settingsColumns
-
-        delegate: Column {
-          id: settingsColumn
-          required property var modelData
-          required property int index
-          width: Math.round(200 * Style.fontScale)
-
-          Repeater {
-            model: settingsColumn.modelData
-            delegate: Column {
-              id: section
-              required property var modelData
-              width: parent.width
-
-              MenuHeader { text: section.modelData[0] }
-
-              Repeater {
-                model: section.modelData[1]
-                delegate: MenuRow {
-                  required property var modelData
-                  text: modelData[1]
-                  toggle: true
-                  checked: window.opt(modelData[0])
-                  keepOpen: true
-                  onTriggered: window.dock.toggleSetting(modelData[0])
-                }
-              }
-            }
-          }
-
-          // Last column: where the dock sits.
-          MenuHeader { visible: settingsColumn.index === 2; text: "Position" }
-
-          MenuChips {
-            visible: settingsColumn.index === 2
-            options: [["left", "Left"], ["bottom", "Bottom"], ["right", "Right"], ["top", "Top"]]
-            current: window.position
-            onPicked: value => Util.execDetached("omarchy-dock position " + value)
-          }
-
-          MenuRow {
-            visible: settingsColumn.index === 2
-            text: Commons.I18n.t("dock.autoHide")
-            toggle: true
-            checked: window.autohide
-            keepOpen: true
-            onTriggered: Util.execDetached("omarchy-dock autohide " + (window.autohide ? "off" : "on"))
-          }
-
-          MenuHeader { visible: settingsColumn.index === 2; text: " " }
-
-          MenuRow {
-            visible: settingsColumn.index === 2
-            text: "Open Claude…"
-            onTriggered: window.dock.openAsk("")
-          }
-
-        }
+      MenuHeader { text: "Position" }
+      MenuChips {
+        options: [["left", "Left"], ["bottom", "Bottom"], ["right", "Right"], ["top", "Top"]]
+        current: window.position
+        onPicked: value => Util.execDetached("omarchy-dock position " + value)
+      }
+      MenuRow {
+        text: Commons.I18n.t("dock.autoHide")
+        toggle: true
+        checked: window.autohide
+        keepOpen: true
+        onTriggered: Util.execDetached("omarchy-dock autohide " + (window.autohide ? "off" : "on"))
+      }
+      MenuRow {
+        text: "Focus cards"
+        toggle: true
+        checked: window.opt("focusGuard")
+        keepOpen: true
+        onTriggered: window.dock.toggleSetting("focusGuard")
+      }
+      MenuRow {
+        text: "Hold notifications"
+        toggle: true
+        checked: window.opt("holdNotifications")
+        keepOpen: true
+        onTriggered: window.dock.toggleSetting("holdNotifications")
+      }
+      MenuSeparator {}
+      MenuRow {
+        text: "Anything else? Ask Claude…"
+        onTriggered: window.dock.openAsk("")
+      }
+      Text {
+        width: parent.width
+        leftPadding: Math.round(10 * Style.fontScale)
+        rightPadding: Math.round(10 * Style.fontScale)
+        bottomPadding: Math.round(6 * Style.fontScale)
+        wrapMode: Text.Wrap
+        textFormat: Text.PlainText
+        text: "Like “stop the icons bouncing” or “turn off the app glow”."
+        color: window.soft
+        font.family: window.uiFont
+        font.pixelSize: Math.round(11.5 * Style.fontScale)
       }
     }
   }
@@ -2263,7 +2249,7 @@ PanelWindow {
           width: chipLabel.implicitWidth + Math.round(13 * Style.fontScale)
           height: Math.round(24 * Style.fontScale)
           radius: height / 2
-          color: on ? Qt.rgba(Commons.Color.accent.r, Commons.Color.accent.g, Commons.Color.accent.b, 0.85) : (chipMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : Qt.rgba(1, 1, 1, 0.05))
+          color: on ? Qt.rgba(window.accent.r, window.accent.g, window.accent.b, 0.85) : (chipMouse.containsMouse ? Qt.rgba(1, 1, 1, 0.1) : Qt.rgba(1, 1, 1, 0.05))
           Text {
             id: chipLabel
             anchors.centerIn: parent
@@ -2329,7 +2315,7 @@ PanelWindow {
         visible: row.toggle
         anchors.fill: parent
         radius: height / 2
-        color: row.checked ? Commons.Color.accent : Qt.rgba(1, 1, 1, 0.14)
+        color: row.checked ? window.accent : Qt.rgba(1, 1, 1, 0.14)
         Behavior on color { ColorAnimation { duration: 140 } }
         Rectangle {
           width: parent.height - 4
@@ -2348,7 +2334,7 @@ PanelWindow {
         anchors.centerIn: parent
         textFormat: Text.PlainText
         text: "✓"
-        color: Commons.Color.accent
+        color: window.accent
         font.family: window.uiFont
         font.pixelSize: Math.round(13 * Style.fontScale)
       }
