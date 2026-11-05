@@ -61,7 +61,7 @@ SETTINGS_SCHEMA = {
     # Modes and AI
     "modes": (True, "Focus modes (the mode switcher and per-mode apps)."),
     "countdown": (False, "Wait out a mode's focusDelay before leaving it."),
-    "focusGuard": (True, "Focus cards: ask when the window in front belongs to another mode."),
+    "focusGuard": (False, "Focus cards: ask when the window in front belongs to another mode."),
     "holdNotifications": (True, "In modes with hold=true, hold notifications from other apps."),
     "ai": (True, "Use Claude Haiku to sort unknown windows and notifications into modes."),
     "claudeUsage": (True, "Claude usage ring around the Claude button."),

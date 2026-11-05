@@ -123,7 +123,9 @@ PanelWindow {
     return mode
   }
   readonly property bool shown: !!dock && fullscreenMode < 2
-  readonly property bool autohide: !!dock && (dock.autohide || fullscreenMode === 1)
+  // Auto-hide is exactly the setting. With it off, the dock keeps its own strip
+  // of the screen (windows, maximized ones too, fit beside it).
+  readonly property bool autohide: !!dock && dock.autohide
   property bool revealed: false
   readonly property bool menuOpen: menuItem !== null || settingsMenu || trashMenu || stackMenuPath !== "" || modeMenu !== null || mediaMenu
   readonly property bool stackOpen: stackPath !== ""
@@ -347,7 +349,7 @@ PanelWindow {
   WlrLayershell.layer: WlrLayer.Top
   WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
   exclusionMode: ExclusionMode.Normal
-  exclusiveZone: 0
+  exclusiveZone: !window.shown || window.autohide ? 0 : window.gap * 2 + window.slotSize + window.pillPad * 2
 
   anchors {
     top: window.position !== "bottom"

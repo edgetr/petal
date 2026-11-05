@@ -37,7 +37,7 @@ holding notifications). Everything else: ask Claude.
 
 ## Requirements
 
-- **Omarchy 4.5+** (Hyprland, and Omarchy's Quickshell-based shell, which hosts Petal as a plugin)
+- **Omarchy 4.5+**. Petal is a plugin for Omarchy's shell (Quickshell on Hyprland), so it runs on Omarchy only, not on other Linux setups.
 - `busctl` (systemd), `gio`, `python3`: all on a stock Omarchy install
 - **Optional, for the AI features:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
   (`claude` CLI), logged in. Petal uses your existing Claude Code login and plan, and its

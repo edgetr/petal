@@ -99,7 +99,7 @@ Item {
       property string font: "Adwaita Sans"
       // Modes and AI
       property bool modes: true
-      property bool focusGuard: true
+      property bool focusGuard: false
       property bool countdown: false
       property bool holdNotifications: true
       property bool ai: true
