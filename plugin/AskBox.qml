@@ -18,6 +18,7 @@ PanelWindow {
   property bool optionsOpen: false
   // "Describe your day": what you write becomes your modes.
   property bool describing: false
+  property real emptyFull: 0
   readonly property var settings: dock ? dock.settings : null
   readonly property var chat: dock ? dock.chat : null
   readonly property string uiFont: dock ? dock.uiFont : "Adwaita Sans"
@@ -152,15 +153,18 @@ PanelWindow {
 
     readonly property int pad: Math.round(18 * Style.fontScale)
     width: Math.round(560 * Style.fontScale)
-    // One height for every state (suggestions, describing your day, options, a conversation): the header and the
-    // text box never move; what's between them has its own room, and a long conversation scrolls in it.
-    height: Math.round(Math.min(box.height * 0.7, 480 * Style.fontScale))
+    // The bottom (and the text box) never moves. The suggestions, describing your day and the options share one
+    // height, the larger of what they need, so switching between them moves nothing; a conversation grows the
+    // panel upward only once it needs more room, up to half the screen, then scrolls.
+    height: column.implicitHeight + pad * 2
     x: Math.round((box.width - width) / 2)
     y: box.height - height - Math.round(104 * Style.fontScale)
     radius: Math.round(22 * Style.fontScale)
     color: box.dock ? box.dock.popupFill : Qt.rgba(Commons.Color.popups.background.r, Commons.Color.popups.background.g, Commons.Color.popups.background.b, 0.74)
     border.width: 1
     border.color: Qt.rgba(1, 1, 1, 0.1)
+
+    Behavior on height { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
 
     // Clicks on the card stay on the card (and close the dropdown).
     MouseArea { anchors.fill: parent; onClicked: box.optionsOpen = false }
@@ -169,7 +173,8 @@ PanelWindow {
     Rectangle {
         id: optionsSheet
         z: 10
-        visible: opacity > 0
+        // Laid out even when closed (just clear, and not taking clicks), so its height can set the panel's.
+        enabled: box.optionsOpen
         opacity: box.optionsOpen ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 140 } }
         transform: Translate { y: box.optionsOpen ? 0 : -6; Behavior on y { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } } }
@@ -329,12 +334,18 @@ PanelWindow {
 
       // ── Body: everything between the header and the text box ──
       Item {
-        id: body
+        id: bodyArea
         width: parent.width
-        height: card.height - card.pad * 2 - Math.round(28 * Style.fontScale) - Math.round(42 * Style.fontScale) - column.spacing * 2
+        readonly property real minimum: Math.max(optionsSheet.height, box.emptyFull)
+        height: Math.min(Math.round(box.height * 0.5),
+                         Math.max(minimum, box.chat && box.chat.messages.count > 0 ? log.contentHeight : emptyState.implicitHeight))
 
       // ── Empty state ──
       Column {
+        id: emptyState
+        // Its height with the suggestions (not while describing your day, which is shorter) sets the minimum.
+        onImplicitHeightChanged: if (!box.describing && implicitHeight > 0) box.emptyFull = implicitHeight
+        Component.onCompleted: box.emptyFull = implicitHeight
         visible: !box.chat || box.chat.messages.count === 0
         width: parent.width
         // The options open over the chat; what's under them fades out instead of peeking from below.
