@@ -12,7 +12,7 @@ final class Updater {
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var checking = false
 
-    static let releases = URL(string: "https://api.github.com/repos/edgetr/petal/releases?per_page=30")!
+    static let releases = URL(string: "https://api.github.com/repos/edgetr/petal/releases?per_page=100")!
 
     var isDevelopmentBuild: Bool { Bundle.main.bundlePath.contains("/macos/build/") }
 
@@ -48,7 +48,7 @@ final class Updater {
         }
     }
 
-    struct Release { let version: String; let url: URL; let sha256: String }
+    struct Release: Sendable { let version: String; let url: URL; let sha256: String }
 
     private static func latest() async throws -> Release? {
         var request = URLRequest(url: releases)
@@ -78,6 +78,12 @@ final class Updater {
 
     private func install(_ release: Release) async throws {
         let (file, _) = try await URLSession.shared.download(from: release.url)
+        let bundle = Bundle.main.bundleURL
+        // Checking, unpacking and swapping take a moment; none of it on the dock's thread.
+        try await Task.detached { try Self.swap(in: file, release: release, over: bundle) }.value
+    }
+
+    nonisolated private static func swap(in file: URL, release: Release, over bundle: URL) throws {
         let data = try Data(contentsOf: file)
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         guard digest == release.sha256 else { throw UpdateError("the download didn't match its checksum") }
@@ -93,10 +99,10 @@ final class Updater {
         guard unzip.terminationStatus == 0, FileManager.default.fileExists(atPath: app.path) else {
             throw UpdateError("the download had no Petal.app")
         }
-        _ = try FileManager.default.replaceItemAt(Bundle.main.bundleURL, withItemAt: app)
+        _ = try FileManager.default.replaceItemAt(bundle, withItemAt: app)
     }
 
-    struct UpdateError: LocalizedError {
+    struct UpdateError: LocalizedError, Sendable {
         let message: String
         init(_ message: String) { self.message = message }
         var errorDescription: String? { message }

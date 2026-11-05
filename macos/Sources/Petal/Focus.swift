@@ -109,7 +109,7 @@ final class FocusGuard {
         close(card)
         guard card.kind == .guardCard, let lastOk, lastOk != card.bundleID,
               let running = NSRunningApplication.runningApplications(withBundleIdentifier: lastOk).first else { return }
-        running.activate(from: .current, options: [])
+        Windows.bringForward(running)
     }
 
     /// Switch: dismiss, snooze, and put the Desktop in the card's mode.

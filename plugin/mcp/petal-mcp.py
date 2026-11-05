@@ -214,7 +214,8 @@ def t_get_state(_):
         "current_mode": petal("current") if MAC else run("omarchy-shell", "petal", "current"),
         "dock": dock_config(),
         "files": {"settings": SETTINGS, "modes": MODES, "instructions": INSTRUCTIONS,
-                  "plugin_source": os.environ.get("PETAL_SOURCE", "") if MAC else PLUGIN_DIR},
+                  "plugin_source": os.environ.get("PETAL_SOURCE", "") if MAC else PLUGIN_DIR,
+                  **({"app": os.environ.get("PETAL_APP", "")} if MAC else {})},
     }
 
 

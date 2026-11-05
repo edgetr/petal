@@ -182,6 +182,12 @@ final class Config {
     // MARK: Files
 
     private func update(_ file: URL, _ change: (inout [String: Any]) -> Void) {
+        // A file that's there but isn't valid JSON (half-written by an editor, say) is left alone, not replaced
+        // by the one key being changed.
+        if FileManager.default.fileExists(atPath: file.path), Self.parse(file) == nil {
+            NSSound.beep()
+            return
+        }
         var root = Self.readObject(file)
         change(&root)
         Self.writeObject(root, to: file)
@@ -228,10 +234,11 @@ final class Config {
         }
     }
 
-    static func readObject(_ url: URL) -> [String: Any] {
-        guard let data = try? Data(contentsOf: url),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
-        return object
+    static func readObject(_ url: URL) -> [String: Any] { parse(url) ?? [:] }
+
+    static func parse(_ url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
     static func writeObject(_ object: [String: Any], to url: URL) {

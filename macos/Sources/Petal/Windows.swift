@@ -22,6 +22,21 @@ struct AppWindow: Identifiable, Equatable {
 enum Windows {
     static var trusted: Bool { AXIsProcessTrusted() }
 
+    /// Every Accessibility call gives up after 0.3 s, so a hung app can't hang the dock. Called once at start.
+    static func limitWaiting() {
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.3)
+    }
+
+    /// Brings an app forward. Petal's dock never becomes the active app, and macOS lets only the active app hand
+    /// activation on, so this goes through Launch Services, which may always do it.
+    static func bringForward(_ app: NSRunningApplication) {
+        guard let url = app.bundleURL else { app.activate(); return }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.addsToRecentItems = false
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+    }
+
     /// Shows macOS's own prompt, once, pointing at the Accessibility list.
     static func askForPermission() {
         let key = "AXTrustedCheckOptionPrompt"   // kAXTrustedCheckOptionPrompt, which Swift 6 calls unsafe to share
@@ -45,7 +60,7 @@ enum Windows {
                 AXValueGetValue(size, .cgSize, &extent)
                 frame = CGRect(origin: point, size: extent)
             }
-            result.append(AppWindow(id: "\(pid)-\(index)-\(title)", pid: pid, title: title, minimized: minimized,
+            result.append(AppWindow(id: "\(pid)-\(index)", pid: pid, title: title, minimized: minimized,
                                     frame: frame, element: window))
         }
         return result
@@ -56,7 +71,7 @@ enum Windows {
         if window.minimized { AXUIElementSetAttributeValue(window.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
         AXUIElementPerformAction(window.element, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window.element, kAXMainAttribute as CFString, kCFBooleanTrue)
-        NSRunningApplication(processIdentifier: window.pid)?.activate(from: .current, options: [])
+        if let app = NSRunningApplication(processIdentifier: window.pid) { bringForward(app) }
     }
 
     static func minimize(_ window: AppWindow) {

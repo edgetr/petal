@@ -43,15 +43,19 @@ enum SystemDock {
         }
     }
 
-    static func replace() {
+    /// Hides macOS's Dock, only once its own settings are saved. Returns false, leaving it alone, if they can't be.
+    @discardableResult
+    static func replace() -> Bool {
         if !isReplaced {
             var saved: [String: Any] = [:]
             for (key, _) in keys { saved[key] = read(key) ?? NSNull() }
             Config.writeObject(saved, to: backup)
+            guard isReplaced else { return false }
         }
         write("autohide", "-bool", "true")
         write("autohide-delay", "-float", "1000")
         restartDock()
+        return true
     }
 
     static func restore() {

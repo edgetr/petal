@@ -48,7 +48,7 @@ enum Menus {
             }
         }
         if config.bool("recentFiles") {
-            let recent = Apps.recentFiles(item.id, limit: 6)
+            let recent = Apps.recent(item.id)
             if !recent.isEmpty {
                 menu.addItem(header("Recent"))
                 for url in recent {
@@ -158,7 +158,6 @@ enum Menus {
             NSApp.activate()
             if alert.runModal() == .alertFirstButtonReturn { Stacks.emptyTrash() }
         }
-        empty.isEnabled = !app.signals.trashEmpty
         menu.addItem(empty)
         pop(menu)
     }

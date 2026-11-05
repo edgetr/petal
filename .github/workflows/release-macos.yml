@@ -1,5 +1,5 @@
 # Push a tag like macos-v1.0.0 (matching macos/VERSION) to publish Petal for macOS.
-# Builds Petal.app (signed ad hoc: Petal has no Apple Developer ID), zips it, writes latest-macos.json (what the
+# Builds Petal.app, zips it, writes latest-macos.json (what the
 # Mac updater and get.sh read), and creates the GitHub Release. Uses only the workflow's own GITHUB_TOKEN.
 #
 # The release is never marked "latest": Omarchy's updater reads the latest release, which must stay a Linux one.
@@ -15,6 +15,8 @@ permissions:
 jobs:
   macos:
     runs-on: macos-26
+    env:
+      HAS_SIGNING: ${{ secrets.MACOS_SIGNING_P12 != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -23,6 +25,26 @@ jobs:
           v="${GITHUB_REF_NAME#macos-v}"
           m="$(cat macos/VERSION)"
           [ "$v" = "$m" ] || { echo "Tag $v doesn't match macos/VERSION $m"; exit 1; }
+
+      # Petal has no Apple Developer ID. With a self-made signing certificate stored in the MACOS_SIGNING_P12 secret
+      # (base64 .p12, password in MACOS_SIGNING_PASSWORD), every release carries the same signature, so macOS keeps
+      # the permissions people gave Petal (Accessibility, Screen Recording) across updates. Without it, ad hoc.
+      - name: Signing certificate
+        env:
+          P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+        if: env.HAS_SIGNING == 'true'
+        run: |
+          keychain="$RUNNER_TEMP/petal.keychain-db"
+          security create-keychain -p petal "$keychain"
+          security set-keychain-settings "$keychain"
+          security unlock-keychain -p petal "$keychain"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/petal.p12"
+          security import "$RUNNER_TEMP/petal.p12" -k "$keychain" -P "$PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k petal "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -p codesigning "$keychain" | awk 'NR==1 {print $2}')"
+          echo "PETAL_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
 
       - name: Build
         run: macos/build.sh

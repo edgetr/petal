@@ -307,6 +307,10 @@ struct DockSettings: View {
             } choose: { app.useDock("macos") }
         }
 
+        Text("Removing Petal? Choose macOS’s Dock first, or run `petal restore-dock` afterwards: Petal keeps your own Dock’s settings until then.")
+            .font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 6)
+            .fixedSize(horizontal: false, vertical: true)
+
         Card(title: "Where it sits") {
             Picker("Position", selection: Binding(get: { app.config.position }, set: { app.config.setDock("position", $0) })) {
                 Text("Bottom").tag("bottom")

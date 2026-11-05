@@ -16,7 +16,37 @@ enum Apps {
     private static var cachedList: [InstalledApp]?
     private static var listedAt = Date.distantPast
 
-    static func url(_ id: String) -> URL? { NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) }
+    private static var urls: [String: URL?] = [:]
+    private static var urlsAt = Date()
+    private static var recents: [String: [URL]] = [:]
+    private static var fetching: Set<String> = []
+
+    /// Where an app is installed, asked of Launch Services at most once a minute per app.
+    static func url(_ id: String) -> URL? {
+        if Date().timeIntervalSince(urlsAt) > 60 { urls = [:]; urlsAt = Date() }
+        if let known = urls[id] { return known }
+        let found = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id)
+        urls[id] = found
+        return found
+    }
+
+    /// An app's recent files as last looked up; hovering an app looks them up again, off the main thread.
+    static func recent(_ id: String) -> [URL] { recents[id] ?? [] }
+
+    static func prefetchRecent(_ id: String) {
+        guard !fetching.contains(id) else { return }
+        fetching.insert(id)
+        let appURL = url(id)
+        DispatchQueue.global(qos: .utility).async {
+            let found = recentFiles(appURL: appURL, limit: 6)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    recents[id] = found
+                    fetching.remove(id)
+                }
+            }
+        }
+    }
 
     static func name(_ id: String) -> String {
         if let name = names[id] { return name }
@@ -73,8 +103,8 @@ enum Apps {
     }
 
     /// Files people opened lately that this app can open, newest first (macOS keeps no public per-app list).
-    static func recentFiles(_ id: String, limit: Int = 8) -> [URL] {
-        guard let url = url(id), let types = Bundle(url: url)?.infoDictionary?["CFBundleDocumentTypes"] as? [[String: Any]] else { return [] }
+    nonisolated static func recentFiles(appURL: URL?, limit: Int = 8) -> [URL] {
+        guard let url = appURL, let types = Bundle(url: url)?.infoDictionary?["CFBundleDocumentTypes"] as? [[String: Any]] else { return [] }
         let utis = Set(types.flatMap { $0["LSItemContentTypes"] as? [String] ?? [] }).filter { $0 != "public.data" && $0 != "public.item" }
         guard !utis.isEmpty else { return [] }
         let predicate = utis.map { "kMDItemContentTypeTree == '\($0)'" }.joined(separator: " || ")

@@ -23,6 +23,7 @@ final class Agent {
     @ObservationIgnored private var allowed: [String] = []
     @ObservationIgnored private var process: Process?
     @ObservationIgnored private var errorText = ""
+    @ObservationIgnored private var runID = UUID()   // a stopped run's late lines don't belong to the next chat
 
     var app: PetalApp { PetalApp.shared }
 
@@ -35,6 +36,7 @@ final class Agent {
     }
 
     func allow() {
+        guard !running, !pendingAsk.isEmpty else { return }
         for denial in pendingAsk { for rule in denial.rules where !allowed.contains(rule) { allowed.append(rule) } }
         pendingAsk = []
         messages.append(Message(kind: .step, text: "Allowed"))
@@ -56,6 +58,7 @@ final class Agent {
 
     func reset() {
         stop()
+        runID = UUID()
         messages = []
         sessionID = nil
         allowed = []
@@ -71,7 +74,8 @@ final class Agent {
         var arguments = ["-p", "--model", config.string("chatModel"), "--effort", config.string("chatEffort"),
                          "--output-format", "stream-json", "--verbose",
                          "--permission-mode", config.string("claudeAccess") == "full" ? "bypassPermissions" : "auto",
-                         "--append-system-prompt", systemPrompt, "--mcp-config", mcpConfig]
+                         "--append-system-prompt", systemPrompt]
+        if Self.hasPython { arguments += ["--mcp-config", mcpConfig] }
         if let sessionID { arguments += ["--resume", sessionID] }
         arguments += ["--allowedTools", "mcp__petal"] + allowed
 
@@ -87,22 +91,34 @@ final class Agent {
         errorText = ""
 
         let buffer = LineBuffer()
+        let id = UUID()
+        runID = id
+        let deliver = { (lines: [String]) in
+            guard !lines.isEmpty else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.runID == id else { return }
+                    for line in lines { self.handle(line) }
+                }
+            }
+        }
         output.fileHandleForReading.readabilityHandler = { handle in
             let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
-            let lines = buffer.lines(adding: chunk)
-            guard !lines.isEmpty else { return }
-            DispatchQueue.main.async { MainActor.assumeIsolated { for line in lines { self.handle(line) } } }
+            deliver(buffer.lines(adding: chunk))
         }
         error.fileHandleForReading.readabilityHandler = { handle in
             let text = String(decoding: handle.availableData, as: UTF8.self)
             DispatchQueue.main.async { MainActor.assumeIsolated { self.errorText += text } }
         }
         process.terminationHandler = { finished in
+            // The last chunk (often the result, with any permission denials) may still be unread.
+            output.fileHandleForReading.readabilityHandler = nil
+            error.fileHandleForReading.readabilityHandler = nil
+            deliver(buffer.lines(adding: output.fileHandleForReading.readDataToEndOfFile() + Data("\n".utf8)))
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    output.fileHandleForReading.readabilityHandler = nil
-                    error.fileHandleForReading.readabilityHandler = nil
+                    guard self.runID == id else { return }
                     self.running = false
                     self.process = nil
                     let status = finished.terminationStatus
@@ -199,12 +215,28 @@ final class Agent {
         }
     }
 
+    /// /usr/bin/python3 runs Petal's tools only with Apple's command line tools installed; without them it's a stub
+    /// that asks to install them, every time.
+    static let hasPython: Bool = {
+        let check = Process()
+        check.executableURL = URL(fileURLWithPath: "/usr/bin/xcode-select")
+        check.arguments = ["-p"]
+        check.standardOutput = FileHandle.nullDevice
+        check.standardError = FileHandle.nullDevice
+        guard (try? check.run()) != nil else { return false }
+        check.waitUntilExit()
+        return check.terminationStatus == 0
+    }()
+
     private var systemPrompt: String {
         var prompt = """
         You are Claude, running inside Petal, the user's dock on macOS. Your replies show in a small panel above the dock: be brief and friendly, short paragraphs, no big headings. You work in the user's home folder.
 
-        Everything about the dock is customizable through you. Use the petal MCP tools: call petal_get_state first, then petal_set_settings (appearance: dockColor, iconSize, accentColor, …; feature switches: bounce, badges, previews, …), petal_set_dock (position, auto-hide), petal_save_mode / petal_delete_mode (focus modes and their apps; apps are bundle identifiers, get them from petal_list_apps; mode icons are SF Symbol names), petal_switch_mode (puts the current Desktop in a mode). Every Desktop has its own mode. Changes apply instantly. If a request can't be done with settings and Petal's source is on this Mac (path in petal_get_state), you may edit its Swift source, rebuild it with macos/build.sh, and call petal_reload; mention that a Petal update could replace source edits. You can also help with anything else on the Mac: apps, files, macOS settings (defaults, AppleScript, the shell). If something needs the user's approval, say in one line what it would do; they can allow it from the panel.
+        Everything about the dock is customizable through you. Use the petal MCP tools: call petal_get_state first, then petal_set_settings (appearance: dockColor, iconSize, accentColor, …; feature switches: bounce, badges, previews, …), petal_set_dock (position, auto-hide), petal_save_mode / petal_delete_mode (focus modes and their apps; apps are bundle identifiers, get them from petal_list_apps; mode icons are SF Symbol names), petal_switch_mode (puts the current Desktop in a mode). Every Desktop has its own mode. Changes apply instantly. If a request can't be done with settings and Petal's source is on this Mac (path in petal_get_state), you may edit its Swift source, rebuild it with macos/build.sh, copy macos/build/Petal.app over the running app (its path is files.app in petal_get_state), and call petal_reload; mention that a Petal update could replace source edits. You can also help with anything else on the Mac: apps, files, macOS settings (defaults, AppleScript, the shell). If something needs the user's approval, say in one line what it would do; they can allow it from the panel.
         """
+        if !Self.hasPython {
+            prompt += "\n\nPetal's tools aren't available on this Mac (they need Apple's command line tools: `xcode-select --install`). Change Petal by editing its files directly instead: ~/.config/petal/settings.json, modes.json (apps are bundle ids; workspaces are Desktop numbers) and dock.json (position, autoHide). Petal reloads them within a second."
+        }
         let notes = (try? String(contentsOf: app.config.instructionsFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !notes.isEmpty { prompt += "\n\nThe user's own instructions:\n" + notes }
         return prompt
@@ -218,11 +250,14 @@ final class Agent {
     }
 }
 
-/// Collects a process's output and hands back whole lines. Only the pipe's reader thread uses it.
+/// Collects a process's output and hands back whole lines (the pipe's reader and the exit handler both feed it).
 final class LineBuffer: @unchecked Sendable {
     private var data = Data()
+    private let lock = NSLock()
 
     func lines(adding chunk: Data) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
         data.append(chunk)
         var lines: [String] = []
         while let newline = data.firstIndex(of: 0x0A) {
@@ -245,7 +280,7 @@ final class InputPanel: NSPanel {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         contentView = hosting
         isFloatingPanel = true
-        level = .floating
+        level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) + 2)
         backgroundColor = .clear
         isOpaque = false
         hasShadow = false
@@ -598,6 +633,15 @@ final class AppSearch {
         let path: String
     }
 
+    /// Results for the current query, worked out once per query rather than on every hover.
+    var cachedResults: [Result] {
+        if cache.query != query || cache.mode != mode?.apps {
+            cache = (query, mode?.apps, results)
+        }
+        return cache.results
+    }
+    @ObservationIgnored private var cache: (query: String, mode: [String]?, results: [Result]) = ("\u{0}", nil, [])
+
     var results: [Result] {
         let q = query.trimmingCharacters(in: .whitespaces)
         var list: [Result] = []
@@ -647,7 +691,7 @@ struct AppSearchView: View {
 
     var body: some View {
         @Bindable var search = search
-        let results = search.results
+        let results = search.cachedResults
         let accent = Color(nsColor: app.accent)
         VStack(alignment: .leading, spacing: 12) {
             HStack {

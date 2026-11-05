@@ -22,8 +22,18 @@ final class Signals {
     @ObservationIgnored private var tick = 0
     @ObservationIgnored private var asking = false
 
+    @ObservationIgnored private var watched: [String] = []
+
+    /// Watches the stack folders for downloads again when they change.
+    func watch(_ folders: [String]) {
+        guard folders != watched else { return }
+        watched = folders
+        watchDownloads(in: folders)
+    }
+
     func start(watchFolders: [String]) {
         timer?.invalidate()
+        watched = watchFolders
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.poll() }
         }
@@ -67,7 +77,7 @@ final class Signals {
         } else if playing.player == "com.apple.Music" {
             NowPlaying.queue.async {
                 var error: NSDictionary?
-                let data = NSAppleScript(source: "tell application \"Music\" to get raw data of artwork 1 of current track")?
+                let data = NSAppleScript(source: "if application \"Music\" is running then tell application \"Music\" to get raw data of artwork 1 of current track")?
                     .executeAndReturnError(&error).data
                 DispatchQueue.main.async { MainActor.assumeIsolated { self.artwork = data.flatMap(NSImage.init(data:)) } }
             }
@@ -115,10 +125,11 @@ final class Signals {
         subscribers = []
         for folder in folders {
             let url = URL(fileURLWithPath: (folder as NSString).expandingTildeInPath)
+            // Foundation may call these on any thread.
             let subscriber = Progress.addSubscriber(forFileURL: url) { [weak self] progress in
-                MainActor.assumeIsolated { self?.track(progress, in: folder) }
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.track(progress, in: folder) } }
                 return { [weak self] in
-                    MainActor.assumeIsolated { self?.untrack(progress) }
+                    DispatchQueue.main.async { MainActor.assumeIsolated { self?.untrack(progress) } }
                 }
             }
             subscribers.append(subscriber)
@@ -147,7 +158,8 @@ final class Signals {
             byFolder[entry.folder, default: (0, 0)].done += max(0, entry.progress.fractionCompleted)
             byFolder[entry.folder, default: (0, 0)].count += 1
         }
-        progress = byFolder.mapValues { $0.done / max(1, $0.count) }
+        let rounded = byFolder.mapValues { (($0.done / max(1, $0.count)) * 50).rounded() / 50 }
+        if rounded != progress { progress = rounded }
     }
 }
 
@@ -168,6 +180,7 @@ struct NowPlaying: Equatable {
             let app = id == "com.spotify.client" ? "Spotify" : "Music"
             let artwork = id == "com.spotify.client" ? "artwork url of current track" : "\"\""
             let script = """
+            if application "\(app)" is not running then return ""
             tell application "\(app)"
               if player state is stopped then return ""
               set sep to ASCII character 31
@@ -189,7 +202,8 @@ struct NowPlaying: Equatable {
         let app = player == "com.spotify.client" ? "Spotify" : "Music"
         queue.async {
             var error: NSDictionary?
-            NSAppleScript(source: "tell application \"\(app)\" to \(command)")?.executeAndReturnError(&error)
+            NSAppleScript(source: "if application \"\(app)\" is running then tell application \"\(app)\" to \(command)")?
+                .executeAndReturnError(&error)
         }
     }
 }

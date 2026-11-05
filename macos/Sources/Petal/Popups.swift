@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import Observation
 import SwiftUI
 
@@ -54,9 +55,12 @@ final class Tooltips {
         panel.interactive = false
         return panel
     }()
+    private var shownFor = ""
 
     func show(_ text: String?, over id: String, in dock: ScreenDock?) {
         let app = PetalApp.shared
+        if text == nil && id != shownFor { return }   // leaving one icon after entering the next
+        shownFor = id
         guard let text, !text.isEmpty, app.config.bool("tooltips"), let dock, dock.dragging == nil, dock.openPopup == nil,
               !app.popups.anyOpen, let panelRef = dock.panel, let slot = panelRef.screenFrame(of: id) else {
             panel.hide()
@@ -123,8 +127,8 @@ final class Popups {
     var previewFrame: CGRect? { kind == "preview" ? panel.frame : nil }
 
     func show(_ card: FocusCard) {
-        self.card = card
         guard let dock = PetalApp.shared.docks.focusedDock, let panelRef = dock.panel else { return }
+        self.card = card
         closeAll()
         panelRef.reveal()
         let pill = panelRef.frame
@@ -149,8 +153,12 @@ final class Previews {
     @ObservationIgnored private var refresh: Timer?
     @ObservationIgnored private(set) var showing: String?
 
-    func hover(_ item: DockItem?, in dock: ScreenDock) {
+    @ObservationIgnored private var hoveredID = ""
+
+    func hover(_ item: DockItem?, in dock: ScreenDock, id: String = "") {
         let app = PetalApp.shared
+        if item == nil && !id.isEmpty && id != hoveredID { return }   // leaving one icon after entering the next
+        hoveredID = item?.id ?? ""
         showTask?.cancel()
         if let item, item.windows > 0, app.config.bool("previews"), dock.dragging == nil, app.popups.card == nil,
            app.popups.kind != "stack" {
@@ -189,6 +197,8 @@ final class Previews {
 
     func close() {
         refresh?.invalidate()
+        let minimized = Set(PetalApp.shared.docks.panels.values.flatMap { $0.dock.minimized.map(\.id) })
+        thumbnails = thumbnails.filter { minimized.contains($0.key) }
         if showing != nil, PetalApp.shared.popups.kind == "preview" { PetalApp.shared.popups.closeAll() }
         showing = nil
     }
@@ -332,7 +342,7 @@ struct StackRow: View {
     var body: some View {
         HStack(spacing: 10) {
             Group {
-                if Stacks.isImage(entry.url), let image = NSImage(contentsOf: entry.url) {
+                if Stacks.isImage(entry.url), let image = Thumbnails.shared.image(for: entry.url) {
                     Image(nsImage: image).resizable().scaledToFill()
                 } else {
                     Image(nsImage: Apps.icon(file: entry.url)).resizable()
@@ -436,5 +446,35 @@ struct CardView: View {
         case .guardCard:
             Text("This Desktop is in \(card.here?.name ?? "this") mode. Go back to what you were doing, or switch the Desktop to \(card.target?.name ?? "it").")
         }
+    }
+}
+
+/// Small pictures of image files for stacks, made off the main thread and kept.
+@MainActor @Observable
+final class Thumbnails {
+    static let shared = Thumbnails()
+    private var images: [URL: NSImage] = [:]
+    @ObservationIgnored private var making: Set<URL> = []
+
+    func image(for url: URL) -> NSImage? {
+        if let image = images[url] { return image }
+        guard !making.contains(url) else { return nil }
+        making.insert(url)
+        DispatchQueue.global(qos: .userInitiated).async {
+            var picture: NSImage?
+            if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+               let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                                                          kCGImageSourceThumbnailMaxPixelSize: 96,
+                                                                          kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary) {
+                picture = NSImage(cgImage: cg, size: NSSize(width: cg.width / 2, height: cg.height / 2))
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if self.images.count > 300 { self.images = [:] }
+                    self.images[url] = picture ?? NSWorkspace.shared.icon(forFile: url.path)
+                }
+            }
+        }
+        return nil
     }
 }

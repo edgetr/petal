@@ -36,6 +36,8 @@ final class ScreenDock {
 final class DockController {
     private(set) var panels: [CGDirectDisplayID: DockPanel] = [:]
     private var timer: Timer?
+    private var minimizedAt = Date.distantPast
+    private var minimizedCache: [AppWindow] = []
     var shown = false
 
     var app: PetalApp { PetalApp.shared }
@@ -80,7 +82,15 @@ final class DockController {
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
             if let id = app.bundleIdentifier, running[id] == nil { running[id] = app }
         }
-        let minimizedAll = config.bool("minimized") ? Self.minimizedWindows(Array(running.values)) : []
+        if config.bool("minimized") {
+            if Date().timeIntervalSince(minimizedAt) > 3 {
+                minimizedAt = Date()
+                minimizedCache = Self.minimizedWindows(Array(running.values))
+            }
+        } else {
+            minimizedCache = []
+        }
+        let minimizedAll = minimizedCache
         let modesOn = config.bool("modes")
         app.updateLaunching(snapshot)
 
@@ -142,7 +152,13 @@ final class DockController {
     }
 
     /// The dock on the screen with the window in front: where cards go.
-    var focusedDock: ScreenDock? { dock(for: NSScreen.main) }
+    var focusedDock: ScreenDock? {
+        guard let front = NSWorkspace.shared.frontmostApplication,
+              let frame = WindowList.current().onScreenFrames(pid: front.processIdentifier).first else { return dock(for: NSScreen.main) }
+        let top = NSScreen.screens.first?.frame.maxY ?? 0
+        let center = CGPoint(x: frame.midX, y: top - frame.midY)
+        return dock(for: NSScreen.screens.first { $0.frame.contains(center) })
+    }
 
     func revealAll() {
         for panel in panels.values { panel.reveal() }
@@ -159,7 +175,7 @@ final class DockController {
         }
         let windows = Windows.windows(of: running.processIdentifier)
         guard !windows.isEmpty else {
-            if item.windows == 0 { launch(item.id) } else { running.activate(from: .current, options: []) }
+            if item.windows == 0 { launch(item.id) } else { Windows.bringForward(running) }
             return
         }
         let onScreen = WindowList.current().onScreenFrames(pid: running.processIdentifier)
@@ -188,7 +204,7 @@ final class DockController {
     /// New window: the app comes forward and gets ⌘N, as its own File menu would.
     func newWindow(_ id: String) {
         guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: id).first else { launch(id); return }
-        running.activate(from: .current, options: [])
+        Windows.bringForward(running)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             let source = CGEventSource(stateID: .combinedSessionState)
             for down in [true, false] {
@@ -352,11 +368,20 @@ final class DockPanel: NSPanel {
         case "right": origin = CGPoint(x: area.maxX - size.width - gap, y: visible.midY - size.height / 2)
         default: origin = CGPoint(x: area.midX - size.width / 2, y: area.minY + gap)
         }
-        if tucked {   // slide past the edge
-            switch config.position {
-            case "left": origin.x = area.minX - size.width
-            case "right": origin.x = area.maxX
-            default: origin.y = area.minY - size.height
+        // Tucked away, it slides a little toward the edge and fades out (sliding off the edge would put it on a
+        // display arranged next to this one).
+        let shift: CGFloat = tucked ? 12 : 0
+        switch config.position {
+        case "left": origin.x -= shift
+        case "right": origin.x += shift
+        default: origin.y -= shift
+        }
+        ignoresMouseEvents = tucked
+        let alpha: CGFloat = tucked ? 0 : 1
+        if alphaValue != alpha {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = tucked ? 0.12 : 0.18
+                animator().alphaValue = alpha
             }
         }
         let frame = NSRect(origin: origin, size: size).integral
@@ -750,7 +775,8 @@ struct AppSlot: View {
             hover: { on in
                 hovering = on
                 app.tooltips.show(on ? Apps.name(item.id) : nil, over: item.id, in: dock)
-                app.previews.hover(on ? item : nil, in: dock)
+                app.previews.hover(on ? item : nil, in: dock, id: item.id)
+                if on && app.config.bool("recentFiles") { Apps.prefetchRecent(item.id) }
             },
             drag: { delta, ended in drag(delta, ended: ended) },
             files: config.bool("dropToOpen") ? { urls in app.docks.launch(item.id, files: urls) } : nil,
@@ -800,8 +826,8 @@ struct AppSlot: View {
         if dock.dragging == nil {
             guard abs(delta) >= 6 else { return }
             app.popups.closeAll()
-            app.previews.hover(nil, in: dock)
-            app.tooltips.show(nil, over: "", in: dock)
+            app.previews.hover(nil, in: dock, id: item.id)
+            app.tooltips.hide()
             dock.dragging = item.id
         }
         dock.dragOffset = delta
@@ -961,7 +987,7 @@ struct Equalizer: View {
     let icon: CGFloat
 
     var body: some View {
-        TimelineView(.animation) { context in
+        TimelineView(.animation(minimumInterval: 1 / 15)) { context in
             let t = context.date.timeIntervalSinceReferenceDate
             HStack(alignment: .bottom, spacing: 2) {
                 ForEach(0..<3) { i in

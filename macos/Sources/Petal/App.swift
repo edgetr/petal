@@ -57,7 +57,12 @@ final class PetalApp {
     var overlayOpen: Bool { claude.isOpen || popups.card != nil }
 
     func start() {
-        config.onChange = { [weak self] in self?.docks.refresh() }
+        Windows.limitWaiting()
+        config.onChange = { [weak self] in
+            guard let self else { return }
+            docks.refresh()
+            signals.watch(Stacks.resolve(config.strings("stackFolders")))
+        }
         registerIPC()
         ipc.start()
         usage.start { [weak self] in self?.config.bool("claudeUsage") ?? false }
@@ -83,7 +88,13 @@ final class PetalApp {
         config.setDock("dock", which)
         if which == "petal" {
             // PETAL_KEEP_DOCK=1 leaves macOS's Dock alone, for working on Petal next to it.
-            if ProcessInfo.processInfo.environment["PETAL_KEEP_DOCK"] != "1" { SystemDock.replace() }
+            if ProcessInfo.processInfo.environment["PETAL_KEEP_DOCK"] != "1" && !SystemDock.replace() {
+                let alert = NSAlert()
+                alert.messageText = "Petal couldn't save your Dock's settings"
+                alert.informativeText = "So it left macOS's Dock as it is. Check that ~/.config/petal can be written to."
+                NSApp.activate()
+                alert.runModal()
+            }
             docks.show(true)
         } else {
             docks.show(false)
@@ -107,7 +118,7 @@ final class PetalApp {
     /// halves what's left.
     func requestMode(_ id: String, desktop: Int) {
         let current = config.mode(forDesktop: desktop)
-        if current?.id == id { pendingMode = nil; return }
+        if current?.id == id { stay(); return }
         if var pending = pendingMode, pending.desktop == desktop, pending.mode == id {
             let left = pending.deadline.timeIntervalSinceNow / 2
             if left < 1.5 { apply(id, desktop: desktop); return }
@@ -171,6 +182,7 @@ final class PetalApp {
             if !$0.contains($1) { $0.append($1) }
         }.joined(separator: ":")
         environment["PETAL_SOCKET"] = IPC.path
+        environment["PETAL_APP"] = Bundle.main.bundlePath
         // A source checkout, for Claude to change Petal itself when a setting can't (rebuilt with macos/build.sh).
         if let source = ["\(home)/petal", "\(home)/Projects/Petal"].first(where: {
             FileManager.default.fileExists(atPath: $0 + "/macos/Package.swift")

@@ -14,7 +14,15 @@ VERSION="$(cat VERSION)"
 IDENTITY="${PETAL_SIGN_IDENTITY:--}"
 APP="build/Petal.app"
 
-swift build -c release --arch arm64 --arch x86_64 2>&1 | grep -E "error|warning: " | grep -v x86_64 || true
+log="$(mktemp)"
+if ! swift build -c release --arch arm64 --arch x86_64 >"$log" 2>&1; then
+  grep -E "error" "$log" || tail -20 "$log"
+  rm -f "$log"
+  echo "build failed" >&2
+  exit 1
+fi
+grep -E "warning: " "$log" | grep -v x86_64 || true
+rm -f "$log"
 BIN="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/Petal"
 
 rm -rf "$APP"

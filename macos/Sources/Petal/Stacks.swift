@@ -41,6 +41,8 @@ enum Stacks {
 
     static var trash: URL { FileManager.default.homeDirectoryForCurrentUser.appending(path: ".Trash") }
 
+    /// Whether the Trash looks empty. macOS hides its contents from apps without Full Disk Access; then it counts
+    /// as empty, and "Empty Trash…" stays available (Finder checks).
     static var trashIsEmpty: Bool {
         ((try? FileManager.default.contentsOfDirectory(atPath: trash.path)) ?? []).filter { !$0.hasPrefix(".") }.isEmpty
     }
@@ -53,14 +55,21 @@ enum Stacks {
 
     static func isImage(_ url: URL) -> Bool { imageTypes.contains(url.pathExtension.lowercased()) }
 
+    /// Finder answers Apple events in its own time, so they're sent off the main thread.
+    private static let finder = DispatchQueue(label: "petal.finder")
+
     static func openTrash() {
-        var error: NSDictionary?
-        NSAppleScript(source: "tell application \"Finder\"\nopen trash\nactivate\nend tell")?.executeAndReturnError(&error)
+        finder.async {
+            var error: NSDictionary?
+            NSAppleScript(source: "tell application \"Finder\"\nopen trash\nactivate\nend tell")?.executeAndReturnError(&error)
+        }
     }
 
     static func emptyTrash() {
-        var error: NSDictionary?
-        NSAppleScript(source: "tell application \"Finder\" to empty trash")?.executeAndReturnError(&error)
+        finder.async {
+            var error: NSDictionary?
+            NSAppleScript(source: "tell application \"Finder\" to empty trash")?.executeAndReturnError(&error)
+        }
     }
 }
 
