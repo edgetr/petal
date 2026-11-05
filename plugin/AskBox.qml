@@ -137,7 +137,16 @@ PanelWindow {
       + "haven't changed. Then tell me in two lines what you made."
   }
 
+  // Markdown joins lines that only a single line break separates; replies mean them as separate lines ("one per
+  // line"), so each becomes a hard break. Code blocks are left as they are.
+  function keepLines(text) {
+    return String(text || "").split(/(```[\s\S]*?```)/).map(function(part, i) {
+      return i % 2 ? part : part.replace(/([^\n])\n(?!\n)/g, "$1  \n")
+    }).join("")
+  }
+
   function startDescribing() {
+    box.optionsOpen = false
     box.describing = true
     input.text = ""
     input.forceActiveFocus()
@@ -523,7 +532,7 @@ PanelWindow {
             wrapMode: entry.kind === "step" ? Text.NoWrap : Text.Wrap
             elide: entry.kind === "step" ? Text.ElideRight : Text.ElideNone
             textFormat: entry.kind === "claude" ? Text.MarkdownText : Text.PlainText
-            text: entry.kind === "step" ? "›  " + entry.text : entry.text
+            text: entry.kind === "step" ? "›  " + entry.text : entry.kind === "claude" ? box.keepLines(entry.text) : entry.text
             color: entry.kind === "error" ? "#ff6b8a" : entry.kind === "step" ? box.soft : box.ink
             font.family: box.uiFont
             font.pixelSize: Math.round((entry.kind === "step" ? 12 : 13.5) * Style.fontScale)
