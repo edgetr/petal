@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# petal: control the Petal dock from a terminal (or from an agent).
+set -euo pipefail
+config="$HOME/.config/petal"
+
+case "${1:-help}" in
+  mode)     omarchy-shell petal mode "${2:?usage: petal mode <id>}" ;;
+  stay)     omarchy-shell petal stay ;;
+  current)  omarchy-shell petal current ;;
+  modes)    python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); [print(m["id"], "-", m["name"], "|", ", ".join(m.get("apps",[]))) for m in d["modes"]]' "$config/modes.json" ;;
+  ask)      omarchy-shell petal ask ;;
+  search)   omarchy-shell petal search ;;
+  settings) omarchy-shell petal settings ;;
+  edit)     "${EDITOR:-nvim}" "$config/modes.json" ;;
+  restart)  omarchy restart shell ;;
+  logs)     quickshell log -n -p /usr/share/omarchy/shell 2>/dev/null | grep -i -E "petal|egesuren|DockWindow|Dock.qml|Brain|Signals|AppSearch|AskBox" | tail -n "${2:-40}" ;;
+  *)
+    cat <<'HELP'
+petal mode <id>   switch this workspace to a mode (waits out a focus countdown)
+petal stay        cancel a countdown
+petal current     print this workspace's mode
+petal modes       list modes and their apps
+petal ask         open "✦ Change modes with Claude"
+petal search      open the add-apps search
+petal settings    open the dock's settings menu
+petal edit        edit ~/.config/petal/modes.json
+petal restart     restart Omarchy's shell (reloads Petal)
+petal logs [n]    recent Petal log lines
+HELP
+    ;;
+esac
