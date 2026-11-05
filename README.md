@@ -72,8 +72,8 @@ tar -xzf Petal-linux.tar.gz && cd petal && ./install.sh && omarchy restart shell
 ### Build from source
 
 ```bash
-git clone https://github.com/edgetr/petal ~/Dev/Petal
-cd ~/Dev/Petal
+git clone https://github.com/edgetr/petal ~/Projects/Petal
+cd ~/Projects/Petal
 ./install.sh
 omarchy restart shell
 ```

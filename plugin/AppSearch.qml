@@ -44,7 +44,7 @@ PanelWindow {
   readonly property string home: Quickshell.env("HOME")
   readonly property var mode: dock ? dock.focusedMode : null
 
-  // Typed a path ("~/Dev/", "/mnt/")? List the folders in it.
+  // Typed a path ("~/Projects/", "/mnt/")? List the folders in it.
   readonly property string typedPath: {
     var q = search.query.trim()
     if (q.indexOf("~") === 0) q = search.home + q.slice(1)
