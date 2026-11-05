@@ -13,6 +13,7 @@ import glob
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -259,7 +260,12 @@ def recent_logs(n):
     if not runs:
         return []
     code, out = run("quickshell", "log", os.path.join(runs[-1], "log.qslog"), timeout=15)
-    lines = [l for l in out.splitlines() if any(w in l for w in ("petal", "egesuren", "DockWindow", "Dock.qml", "Brain", "Agent", "AskBox", "Signals"))]
+    # Without the terminal colors, and without Quickshell's notice that a plugin lives outside its config folder,
+    # which it prints for every user plugin.
+    plain = (re.sub(r"\x1b\[[0-9;]*m", "", l) for l in out.splitlines())
+    lines = [l for l in plain if "qmlscanner" not in l
+             and any(w in l for w in ("petal", "egesuren", "DockWindow", "Dock.qml", "Brain", "Agent", "AskBox", "Signals",
+                                      "Activity.qml", "Hypr.qml", "PetalPanel", "BarWidget"))]
     return lines[-n:]
 
 
