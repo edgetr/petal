@@ -87,6 +87,7 @@ final class DockController {
             refreshInBackground()   // the minimized windows
         } else {
             WindowEvents.shared.stopListening("dock")
+            setMissionControl(false)
             for panel in panels.values { panel.close() }
             panels = [:]
         }
@@ -120,9 +121,53 @@ final class DockController {
         case .quit:
             minimizedByApp[event.pid] = nil
             minimizedChanged[event.pid] = nil
+        case .missionControl:
+            setMissionControl(true)
+        case .missionControlEnded:
+            setMissionControl(false)
         default:
             break   // apps launching, quitting, hiding, another Desktop: the NSWorkspace observers above
         }
+    }
+
+    // MARK: Mission Control
+
+    /// Mission Control (or App Exposé) is open. macOS's Dock always comes out there, whatever its own settings say
+    /// (no setting keeps it away, and it's the Dock that draws Mission Control), so Petal's dock steps aside while
+    /// it's open: one dock on the screen, not two. Comes back the moment it closes.
+    private(set) var missionControl = false
+    private var missionControlCheck: Timer?
+
+    private func setMissionControl(_ on: Bool) {
+        guard on != missionControl else { return }
+        missionControl = on
+        if on {
+            app.popups.closeAll()   // nothing of the dock's left floating over Mission Control
+        }
+        app.previews.hold(on)
+        for panel in panels.values { panel.aside = on }
+        missionControlCheck?.invalidate()
+        missionControlCheck = nil
+        guard on else { return }
+        // A safety net, should the Dock not say Mission Control closed (it was restarted, say): while it's open the
+        // Dock has a window on the screen; once it has none, Petal's dock comes back.
+        missionControlCheck = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Self.lookQueue.async {
+                let open = Self.systemDockOnScreen()
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { if !open { self?.setMissionControl(false) } }
+                }
+            }
+        }
+        missionControlCheck?.tolerance = 0.3
+    }
+
+    /// Whether macOS's Dock has a window on the screen: it does while Mission Control is open, and not while it's
+    /// hidden for Petal. Asks the window server: off the main thread.
+    nonisolated private static func systemDockOnScreen() -> Bool {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first,
+              let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else { return false }
+        return windows.contains { $0[kCGWindowOwnerPID as String] as? pid_t == dock.processIdentifier }
     }
 
     private func look(_ cause: LookSchedule.Cause) {
@@ -295,6 +340,7 @@ final class DockController {
                 dock.desktop = desktop
             }
             panel.fullScreen = showing.fullScreen
+            panel.aside = missionControl   // a screen joining while Mission Control is open
             let mode = modesOn ? config.mode(forDesktop: dock.desktop ?? 1) : config.modes.first
             Perf.span("refresh: set mode") { if mode != dock.mode { dock.mode = mode } }
             let here = Set(snapshot.apps(on: screen))
@@ -758,7 +804,15 @@ final class DockPanel: NSPanel {
     /// Out of the way until the pointer reaches the edge: auto-hide, or a full-screen app.
     var hides: Bool { config.autoHide || fullScreen }
 
-    var tucked: Bool { hides && !dock.revealed && !busy }
+    /// Mission Control is open, where macOS's own Dock comes out: this one steps aside until it closes.
+    var aside = false {
+        didSet {
+            guard aside != oldValue, let screenRef else { return }
+            place(on: screenRef)
+        }
+    }
+
+    var tucked: Bool { aside || (hides && !dock.revealed && !busy) }
 
     func place(on screen: NSScreen) {
         screenRef = screen
@@ -875,7 +929,7 @@ final class DockPanel: NSPanel {
         updateMouseThrough()
         guard hides, let screen = screenRef else {
             if !dock.revealed { dock.revealed = true }
-            if contentFrame.contains(NSEvent.mouseLocation) { dock.magnifier.wake() }
+            if !aside && contentFrame.contains(NSEvent.mouseLocation) { dock.magnifier.wake() }
             return
         }
         let mouse = NSEvent.mouseLocation
@@ -1631,7 +1685,12 @@ struct TrashSlot: View {
             .scaleEffect(fileOver ? 1.2 : 1)
             .lift(hovering, icon: icon)
             .slotFrame(dock, "trash")
-            .slotMouse(SlotMouse(left: { Stacks.openTrash() }, right: { Menus.trash() },
+            .slotMouse(SlotMouse(left: {
+                                   // The tooltip and any preview go with the click, as they do for an app.
+                                   app.popups.closeAll()
+                                   app.previews.hover(nil, in: dock)
+                                   Stacks.openTrash()
+                               }, right: { Menus.trash() },
                                hover: { on in
                                    hovering = on
                                    app.tooltips.show(on ? "Trash" : nil, over: "trash", in: dock)
