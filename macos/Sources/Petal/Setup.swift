@@ -118,7 +118,8 @@ final class TextBox: @unchecked Sendable {
 
 /// Keeps macOS's Dock from staying hidden when Petal can't give it back itself: a small job macOS runs every
 /// 30 seconds that, when Petal isn't running (a crash, Force Quit) and the Dock's own settings are still saved,
-/// puts them back. If Petal.app has been deleted, it also removes itself.
+/// puts them back. It does the same for Do Not Disturb that Petal turned on while holding notifications (Quiet). If
+/// Petal.app has been deleted, it also removes itself.
 @MainActor
 enum DockGuard {
     static let label = "tech.edgetr.petal.guard"
@@ -127,8 +128,14 @@ enum DockGuard {
     static func install() {
         let app = Bundle.main.bundlePath
         let backup = Config.folder.appending(path: "macos-dock.json").path
+        let quiet = Quiet.marker.path
+        let off = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Petal/quiet-off.txt").path
         let script = """
-        app='\(app)'; backup='\(backup)'; plist='\(plist.path)'
+        app='\(app)'; backup='\(backup)'; plist='\(plist.path)'; quiet='\(quiet)'; off='\(off)'
+        if [ -f "$quiet" ] && ! pgrep -qx Petal; then
+          if grep -q shortcut "$quiet"; then mkdir -p "$(dirname "$off")"; printf off > "$off"; shortcuts run '\(Quiet.shortcutName)' --input-path "$off"; fi
+          rm -f "$quiet"
+        fi
         if [ ! -d "$app" ] && [ ! -f "$backup" ]; then launchctl bootout gui/$(id -u)/\(label) 2>/dev/null; rm -f "$plist"; exit 0; fi
         [ -f "$backup" ] || exit 0
         if [ -d "$app" ] && pgrep -qx Petal; then exit 0; fi

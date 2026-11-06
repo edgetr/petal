@@ -137,9 +137,16 @@ Item {
       property string font: "Adwaita Sans"
       // Modes and AI
       property bool modes: true
-      property bool focusGuard: false
-      property bool countdown: false
+      property bool focusGuard: true
+      property bool countdown: true
+      property bool blockDistractions: true
+      property bool peeks: true
       property bool holdNotifications: true
+      property bool urgentNotifications: true
+      property bool modeWindows: false
+      property bool tiling: false
+      property int tilingGaps: 8
+      property var tilingFloat: []
       property bool ai: true
       property bool claudeUsage: true
       property bool autoUpdate: true

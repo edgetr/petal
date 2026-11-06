@@ -4,7 +4,7 @@ import AppKit
 /// Omarchy, so any agent (T3 Code, Claude Code, Codex in a terminal) or person can drive the dock from a shell.
 enum CLI {
     static let commands: Set<String> = ["mode", "stay", "current", "desktop", "ask", "chat", "search", "settings", "reveal", "check",
-                                        "dock", "restart", "version", "update", "modes", "get", "set", "restore-dock", "help",
+                                        "dock", "restart", "version", "update", "modes", "get", "set", "restore-dock", "restore-windows", "help",
                                         "recipe", "suggest", "summary", "overview", "personal"]
 
     static let help = """
@@ -27,6 +27,7 @@ enum CLI {
     petal doctor [--fix]      check Petal, and repair what it safely can
     petal report "<what>"     tell Petal's maker what went wrong (a GitHub issue; shown to you first)
     petal restore-dock        give macOS its Dock back, even if Petal crashed
+    petal restore-windows     bring back every window put away for another mode, even if Petal crashed
     petal personal …          your own changes to Petal's code, kept through updates (petal personal help)
     """
 
@@ -67,6 +68,8 @@ enum CLI {
             print(MCP.petal("chat", rest.joined(separator: " ")))
         case "personal":
             Personal.command(rest)
+        case "restore-windows":
+            restoreWindows()
         case "mode":
             guard let id = rest.first else { fail("usage: petal mode <id>") }
             print(MCP.petal("mode", id))
@@ -107,6 +110,24 @@ enum CLI {
         default:
             fail("usage: petal recipe export [<file>] | petal recipe import <file> [--look]")
         }
+    }
+
+    /// The running Petal brings the windows back; without it, this command does, if the terminal may move windows.
+    static func restoreWindows() {
+        MainActor.assumeIsolated { restoreWindowsHere() }   // CLI.run runs on the main thread (main.swift)
+    }
+
+    @MainActor private static func restoreWindowsHere() {
+        let reply = MCP.petal("restoreWindows")
+        if reply.hasPrefix("Brought back") || reply.hasPrefix("No windows") { print(reply); return }
+        guard AXIsProcessTrusted() else {
+            let waiting = Parking.waiting()
+            if waiting == 0 { print("No windows were waiting off-screen."); return }
+            fail("\(waiting) window\(waiting == 1 ? " is" : "s are") waiting off-screen, and this terminal isn't allowed to move windows "
+                 + "(System Settings > Privacy & Security > Accessibility). Open Petal: it brings them back as it starts.")
+        }
+        let count = Parking.restoreEverything()
+        print(count == 0 ? "No windows were waiting off-screen." : "Brought back \(count) window\(count == 1 ? "" : "s").")
     }
 
     static func output(_ value: Any?) {

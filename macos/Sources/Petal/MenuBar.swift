@@ -2,12 +2,15 @@ import AppKit
 import Observation
 import SwiftUI
 
-/// Petal's mark in the menu bar (`menuBarIcon`): this Desktop's mode and the others, every Desktop, settings, and
-/// updates. When a new Petal is ready, the mark gets a dot and the menu offers the restart and what's new.
+/// Petal in the menu bar (`menuBarIcon`): the current mode's icon and name (Petal's mark when modes are off), with a
+/// menu of this Desktop's mode and the others, every Desktop, settings, and updates. When a new Petal is ready, the
+/// icon gets a dot and the menu offers the restart and what's new.
 @MainActor
 final class MenuBar: NSObject, NSMenuDelegate {
     private var item: NSStatusItem?
     private var shownDot = false
+    private var shownMode: Mode?
+    private var mode: Mode?
 
     var app: PetalApp { PetalApp.shared }
 
@@ -20,24 +23,63 @@ final class MenuBar: NSObject, NSMenuDelegate {
     func refresh() {
         let wanted = app.config.bool("menuBarIcon")
         if wanted && item == nil {
-            let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+            let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
             let menu = NSMenu()
             menu.delegate = self
             item.menu = menu
             item.button?.image = Self.mark(dot: false)
+            item.button?.imagePosition = .imageLeading
             item.button?.toolTip = "Petal"
             self.item = item
             shownDot = false
+            shownMode = nil
         } else if !wanted, let item {
             NSStatusBar.system.removeStatusItem(item)
             self.item = nil
         }
         let dot = app.updater.ready != nil
-        if let item, dot != shownDot {
-            item.button?.image = Self.mark(dot: dot)
-            item.button?.toolTip = dot ? "Petal: an update is ready" : "Petal"
+        let mode = app.docks.shown && app.config.bool("modes") ? self.mode : nil
+        if let item, dot != shownDot || mode != shownMode {
+            if let mode {
+                item.button?.image = Self.modeImage(mode.icon, dot: dot)
+                item.button?.title = mode.name
+                item.button?.toolTip = dot ? "Petal: an update is ready" : "Petal: \(mode.name)"
+            } else {
+                item.button?.image = Self.mark(dot: dot)
+                item.button?.title = ""
+                item.button?.toolTip = dot ? "Petal: an update is ready" : "Petal"
+            }
             shownDot = dot
+            shownMode = mode
         }
+    }
+
+    /// The mode in front changed (the dock calls this as it refreshes).
+    func show(mode: Mode?) {
+        guard mode != self.mode else { return }
+        self.mode = mode
+        refresh()
+    }
+
+    /// A mode's SF Symbol as a menu bar template image, with the update dot; a Nerd Font glyph (from an Omarchy
+    /// modes.json) has no symbol, so Petal's mark stands in.
+    static func modeImage(_ symbol: String, dot: Bool) -> NSImage {
+        guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium)) else { return mark(dot: dot) }
+        guard dot else {
+            base.isTemplate = true
+            return base
+        }
+        let size = NSSize(width: base.size.width + 4, height: max(base.size.height, 16))
+        let image = NSImage(size: size, flipped: false) { rect in
+            base.draw(in: NSRect(x: 0, y: (rect.height - base.size.height) / 2, width: base.size.width, height: base.size.height))
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: NSRect(x: rect.maxX - 5, y: rect.maxY - 5, width: 5, height: 5)).fill()
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = "update ready"
+        return image
     }
 
     private func observe() {
@@ -159,7 +201,7 @@ final class ReleaseNotes {
         }()
         self.window = window
         window.title = "What’s New in Petal \(version)"
-        window.contentView = NSHostingView(rootView: ReleaseNotesView(version: version).environment(PetalApp.shared))
+        window.setGlassContent(ReleaseNotesView(version: version).environment(PetalApp.shared))
         window.center()
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
@@ -186,7 +228,7 @@ struct ReleaseNotesView: View {
 
     var body: some View {
         ZStack {
-            Wallpaper()
+            Backdrop()
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 14) {
                     Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 52, height: 52)

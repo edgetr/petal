@@ -44,7 +44,90 @@ final class GlassPanel: NSPanel {
         orderFrontRegardless()
     }
 
+    /// Shows a card next to `slot` (a mode button), with its tail pointing at it: above it on a bottom dock, beside
+    /// it on a side dock. The card is laid out once to find its place, then again with the tail where the button is.
+    func show<Content: View>(pointingAt slot: CGRect, dock: DockPanel, gap: CGFloat = 4, content: (Tail) -> Content) {
+        let position = PetalApp.shared.config.position
+        let edge: Tail.Edge = position == "left" ? .leading : position == "right" ? .trailing : .bottom
+        hosting.rootView = AnyView(content(Tail(edge: edge, offset: 0)).environment(PetalApp.shared))
+        hosting.layoutSubtreeIfNeeded()
+        let size = hosting.fittingSize
+        let screen = dock.screenRef ?? NSScreen.main ?? NSScreen.screens[0]
+        let area = screen.frame.insetBy(dx: 8, dy: 8)
+        var origin: CGPoint
+        switch edge {
+        case .leading: origin = CGPoint(x: slot.maxX + gap, y: slot.midY - size.height / 2)
+        case .trailing: origin = CGPoint(x: slot.minX - gap - size.width, y: slot.midY - size.height / 2)
+        case .bottom: origin = CGPoint(x: slot.midX - size.width / 2, y: slot.maxY + gap)
+        }
+        origin.x = min(max(origin.x, area.minX), area.maxX - size.width)
+        origin.y = min(max(origin.y, area.minY), area.maxY - size.height)
+        // How far the button is from the card's middle (SwiftUI counts y downward).
+        let offset = edge == .bottom ? slot.midX - (origin.x + size.width / 2) : (origin.y + size.height / 2) - slot.midY
+        hosting.rootView = AnyView(content(Tail(edge: edge, offset: offset)).environment(PetalApp.shared))
+        setFrame(NSRect(origin: origin, size: size).integral, display: true)
+        ignoresMouseEvents = !interactive
+        orderFrontRegardless()
+    }
+
+    /// Fully visible again, also stopping a fade that's under way (setting alphaValue alone wouldn't).
+    static func opaque(_ panel: NSWindow) {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            panel.animator().alphaValue = 1
+        }
+    }
+
     func hide() { orderOut(nil) }
+}
+
+/// The small triangle on a card that points at the mode button it's about.
+struct Tail: Equatable {
+    enum Edge { case bottom, leading, trailing }
+    var edge: Edge
+    var offset: CGFloat
+    static let size: CGFloat = 9
+}
+
+/// A rounded card with its tail.
+struct CardShape: Shape {
+    let tail: Tail?
+    var radius: CGFloat = 16
+
+    func path(in rect: CGRect) -> Path {
+        guard let tail else { return RoundedRectangle(cornerRadius: radius, style: .continuous).path(in: rect) }
+        var body = rect
+        switch tail.edge {
+        case .bottom: body.size.height -= Tail.size
+        case .leading: body.origin.x += Tail.size; body.size.width -= Tail.size
+        case .trailing: body.size.width -= Tail.size
+        }
+        let path = RoundedRectangle(cornerRadius: radius, style: .continuous).path(in: body)
+        let half = Tail.size
+        var point = Path()
+        switch tail.edge {
+        case .bottom:
+            let x = min(max(body.midX + tail.offset, body.minX + radius + half), body.maxX - radius - half)
+            point.move(to: CGPoint(x: x - half, y: body.maxY - 1))
+            point.addLine(to: CGPoint(x: x, y: rect.maxY))
+            point.addLine(to: CGPoint(x: x + half, y: body.maxY - 1))
+        case .leading, .trailing:
+            let y = min(max(body.midY + tail.offset, body.minY + radius + half), body.maxY - radius - half)
+            let base = tail.edge == .leading ? body.minX + 1 : body.maxX - 1
+            point.move(to: CGPoint(x: base, y: y - half))
+            point.addLine(to: CGPoint(x: tail.edge == .leading ? rect.minX : rect.maxX, y: y))
+            point.addLine(to: CGPoint(x: base, y: y + half))
+        }
+        point.closeSubpath()
+        return path.union(point)
+    }
+}
+
+extension View {
+    /// Room inside the card for its tail.
+    func roomForTail(_ tail: Tail?) -> some View {
+        padding(tail?.edge == .bottom ? .bottom : tail?.edge == .leading ? .leading : .trailing, tail == nil ? 0 : Tail.size)
+    }
 }
 
 /// The slot's name, on a small glass pill outside the dock, with no delay.
@@ -83,6 +166,8 @@ final class Popups {
     private(set) var kind: String?           // "stack", "preview"
     private(set) var card: FocusCard?
     @ObservationIgnored private weak var openDock: ScreenDock?
+    @ObservationIgnored private var keys: Any?
+    @ObservationIgnored private var fade: DispatchWorkItem?
 
     var anyOpen: Bool { kind != nil || card != nil }
 
@@ -91,6 +176,13 @@ final class Popups {
             MainActor.assumeIsolated {
                 guard let self, self.kind == "stack" else { return }
                 if !self.panel.frame.contains(NSEvent.mouseLocation) { self.closeAll() }
+            }
+        }
+        // Escape answers a card the way × does (cards never take the keyboard from the app in front).
+        keys = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard event.keyCode == 53, let card = self?.card else { return }
+                PetalApp.shared.focus.dismiss(card)
             }
         }
     }
@@ -126,18 +218,41 @@ final class Popups {
 
     var previewFrame: CGRect? { kind == "preview" ? panel.frame : nil }
 
+    /// One card at a time; a newer one replaces an older one. A card about a mode points at that mode's button.
     func show(_ card: FocusCard) {
         guard let dock = PetalApp.shared.docks.focusedDock, let panelRef = dock.panel else { return }
         self.card = card
         closeAll()
         panelRef.reveal()
-        let pill = panelRef.frame
-        cardPanel.show(CardView(card: card), over: CGRect(x: pill.midX - 1, y: pill.minY, width: 2, height: pill.height), dock: panelRef)
+        fade?.cancel()
+        GlassPanel.opaque(cardPanel)
+        if let mode = card.pointsAt, let slot = panelRef.screenFrame(of: "mode:\(mode)") {
+            cardPanel.show(pointingAt: slot, dock: panelRef) { CardView(card: card, tail: $0) }
+        } else {
+            let pill = panelRef.frame
+            cardPanel.show(CardView(card: card), over: CGRect(x: pill.midX - 1, y: pill.minY, width: 2, height: pill.height), dock: panelRef)
+        }
+        // A peek fades out by itself.
+        if card.kind == .peek {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.card?.id == card.id else { return }
+                NSAnimationContext.runAnimationGroup({ context in
+                    context.duration = 0.4
+                    self.cardPanel.animator().alphaValue = 0
+                }, completionHandler: {
+                    MainActor.assumeIsolated { if self.card?.id == card.id { self.dismissCard() } }
+                })
+            }
+            fade = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: work)
+        }
     }
 
     func dismissCard() {
+        fade?.cancel()
         card = nil
         cardPanel.hide()
+        GlassPanel.opaque(cardPanel)
     }
 }
 
@@ -365,10 +480,10 @@ struct StackRow: View {
 
 // MARK: - Cards
 
-/// A card over the dock: a focus card (Omarchy's guard card), a suggested mode, a mode just made from one, or the
-/// weekly summary. Updates are in the menu bar, not here.
+/// A card over the dock: a focus card (block, move or peek), a held notification that can't wait, a suggested mode,
+/// a mode just made from one, or the weekly summary. Updates are in the menu bar, not here.
 struct FocusCard: Identifiable, Equatable {
-    enum Kind { case guardCard, suggestion, made, summary }
+    enum Kind { case block, move, peek, note, suggestion, made, summary }
     let id = UUID()
     let kind: Kind
     var bundleID = ""
@@ -377,62 +492,44 @@ struct FocusCard: Identifiable, Equatable {
     var here: Mode?
     var reason = ""
     var desktop: Int?
-    var snoozeKey = ""
+    var front: Front?
+    var note: HeldNote?
     var suggestion: Insights.Suggestion?
     var summary: Insights.Summary?
     var working = false
 
     static func == (a: FocusCard, b: FocusCard) -> Bool { a.id == b.id && a.working == b.working && a.kind == b.kind }
+
+    /// The mode button the card points at: the mode it's about; a peek's is the mode you're in.
+    var pointsAt: String? {
+        switch kind {
+        case .block, .move, .note: target?.id
+        case .peek: here?.id
+        default: nil
+        }
+    }
 }
 
 struct CardView: View {
     @Environment(PetalApp.self) private var app
     let card: FocusCard
+    var tail: Tail? = nil
 
     var body: some View {
         Group {
             switch card.kind {
-            case .guardCard: guardCard
+            case .block, .move, .peek: FrontCard(card: card)
+            case .note: NoteCard(card: card)
             case .suggestion, .made: suggestionCard
             case .summary: SummaryCard(card: card)
             }
         }
-        .padding(16)
-        .frame(minWidth: 330, maxWidth: 420)
-        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .padding(card.kind == .peek ? 12 : 16)
+        .frame(minWidth: card.kind == .peek ? 0 : 300, maxWidth: card.kind == .peek || card.kind == .note || card.kind == .block || card.kind == .move ? 380 : 420)
+        .fixedSize(horizontal: card.kind == .peek, vertical: false)
+        .roomForTail(tail)
+        .glassEffect(.regular, in: CardShape(tail: tail))
         .padding(6)
-    }
-
-    // MARK: Focus
-
-    private var guardCard: some View {
-        VStack(alignment: .trailing, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(nsImage: Apps.icon(card.bundleID)).resizable().frame(width: 30, height: 30)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("\(Text(card.title).bold()) belongs to \(card.target?.name ?? "another mode").").font(.system(size: 13))
-                    Text("This Desktop is in \(card.here?.name ?? "this") mode. Go back to what you were doing, or switch the Desktop to \(card.target?.name ?? "it").")
-                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(3).fixedSize(horizontal: false, vertical: true)
-                    if !card.reason.isEmpty {
-                        Text("✦ " + card.reason).font(.system(size: 11)).foregroundStyle(Color(nsColor: card.target?.color ?? app.accent))
-                    }
-                }
-                Spacer(minLength: 0)
-                RoundButton(symbol: "xmark") { app.focus.close(card) }
-            }
-            HStack(spacing: 8) {
-                Button("Go back") { app.focus.stay(card) }.buttonStyle(.glass)
-                if let target = card.target {
-                    Button(switchLabel(target)) { app.focus.go(card) }
-                        .buttonStyle(.glassProminent).tint(Color(nsColor: target.color))
-                }
-            }
-        }
-    }
-
-    private func switchLabel(_ target: Mode) -> String {
-        let delay = Int(card.here?.focusDelay ?? 0)
-        return "Switch to \(target.name)" + (app.config.bool("countdown") && delay > 0 ? " (\(delay)s)" : "")
     }
 
     // MARK: Suggestions

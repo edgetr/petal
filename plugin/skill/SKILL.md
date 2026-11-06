@@ -32,8 +32,12 @@ Use, in this order:
 
 - `settings.json`: settings; `petal_get_state` (or `petal doctor --json`) lists every key with its default and help.
 - `modes.json`: `{"defaultMode", "workspaces": {"<n>": "<mode id>"}, "modes": [{"id", "name", "icon", "color",
-  "about", "apps", "sites", "focusDelay", "hold", "allow"}]}`. On Omarchy apps are desktop ids and icons Nerd Font
-  glyphs; on macOS apps are bundle ids, icons SF Symbol names, and workspace numbers are Desktop numbers.
+  "about", "apps", "sites", "distracting", "focusDelay", "hold", "allow"}]}`. On Omarchy apps are desktop ids and icons
+  Nerd Font glyphs; on macOS apps are bundle ids, icons SF Symbol names, and workspace numbers are Desktop numbers. An
+  `apps` entry that's an `https://` address is a website shortcut (the site's own icon, with a globe badge).
+  `distracting` marks a mode like Social or Gaming (missing: the AI decides once and writes it); `focusDelay` is
+  only a distracting mode's wait to get in (30 s if 0). `allow` holds apps and sites that are fine in the mode
+  without being in its dock ("Keep it here" on a card adds them).
 - `dock.json` (macOS): `position` (bottom, left, right), `autoHide`, `dock` (petal or macos), `keepWindowsClear`.
   On Omarchy, position and auto-hide live in Omarchy's shell config (`omarchy-dock position|autohide`).
 - `instructions.md`: the user's own notes for the AI in Petal's panel.
@@ -52,6 +56,11 @@ More that shapes a dock:
 - **Activity, suggestions and the weekly summary** (`activityLog`, `suggestModes`, `summary`) are private and local:
   which app is in front, a line a minute, never titles; `activityLog: false` stops it.
 - **Magnification** (macOS: `magnification`, `magnificationAmount`) and Petal's menu bar icon (`menuBarIcon`).
+- **Each mode's own windows** (`modeWindows`, off by default): switching mode swaps the windows and tabs. On macOS
+  the other modes' windows wait just off-screen on the same Desktop (`petal restore-windows` brings every one back);
+  on Omarchy each mode has its own workspace.
+- **Tiling** (macOS: `tiling`, `tilingGaps`, `tilingFloat`): Petal tiles the mode's windows like Hyprland;
+  Control-Option-arrows focus, with Shift swap, Control-Option-T floats a window, Control-Option-R rebalances.
 
 ## When something's wrong
 
@@ -72,8 +81,17 @@ and `… report`. Logs: `petal logs` (Omarchy's shell log; on macOS the system l
 - Petal's AI is optional and uses the user's own Claude Code or Codex (`aiProviders`, `chatProvider`). Its usage
   counts toward the user's own plan.
 - On macOS, Petal hides macOS's Dock while it runs and gives it back on quit; `petal restore-dock` gives it back by
-  hand. Permissions it may need: Accessibility (window lists, badges, focus cards) and Screen Recording (previews).
-- Focus cards ("x.com belongs to Social") appear only in modes with `focusDelay` above 0, with `focusGuard` on.
+  hand. Permissions it may need: Accessibility (window lists, badges, focus cards, per-mode windows, tiling), Screen
+  Recording (previews), Automation for each browser (reading and closing a tab), and Full Disk Access (reading
+  notifications, to hold them).
+- Focus cards (`focusGuard`): what's in front that belongs to a distracting mode is blocked ("x.com · belongs to
+  Social": Stay closes the tab or hides the app; Go to Social starts its wait); something from another mode gets
+  "fits Design · Move to Design?" with Keep it here; something new is sorted by the AI once (kept in its mode's
+  `sites` or `allow`), and a peek says where it went (`peeks`). Only distracting modes wait to get in
+  (`countdown`); each extra press halves the wait.
+- Held notifications (`holdNotifications`, a mode's `hold`): they wait on their mode with a count; one that can't
+  wait pops out of its mode's button (`urgentNotifications`). On macOS Petal reads them from Notification Center's
+  database (Full Disk Access) and keeps macOS's banners away while holding; `petal doctor` says whether it can.
 
 ## Changing Petal itself
 

@@ -1,14 +1,17 @@
 # Petal: project and agent guide
 
-Updated 2026-11-05. This file holds Petal's current rules for every coding agent (Claude, Codex, Gemini, opencode). It states the decision that applies now, not its history.
+Updated 2026-11-06. This file holds Petal's current rules for every coding agent (Claude, Codex, Gemini, opencode). It states the decision that applies now, not its history.
 
 ## Project
 
 Petal is an AI-native dock for Omarchy, with a focus mode for every workspace and Claude built in. On Omarchy it is a plugin for Omarchy's shell (Quickshell/QML on Hyprland 0.56, Lua config). Petal for macOS (macOS 26 and later, in `macos/`) is being built: a native app that replaces macOS's Dock and gives every Desktop its own mode. Windows is not planned.
 
 - **Focus modes:** each mode has its own apps (the dock's order), color, icon and rules. Every workspace remembers its mode, so switching workspace swaps the dock.
-- **Focus cards** (off by default): when the window in front doesn't belong to the mode, a card says so ("x.com belongs to Social") with Go back / Switch. Petal knows the mode's apps; anything new is sorted by Claude Haiku.
-- **Held notifications:** in a mode that holds them, notifications from apps outside the mode are taken off Omarchy's screen and wait on their mode with a count. The mode's own apps show natively. There is no Do Not Disturb.
+- **Distracting modes:** a mode like Social or Gaming is `distracting` (the AI decides once when it isn't set). Only these wait to get in (30 s, Stay cancels, each extra press halves it); every other mode switches at once.
+- **Focus cards** (on by default): what's in front that belongs to a distracting mode is blocked ("x.com · belongs to Social": Stay closes the tab or hides the app, or Go to Social with its wait); something from another mode gets "fits Design · Move to Design?" with Keep it here, which Petal remembers. Anything new is sorted once by the AI (Claude Haiku, or Codex's newest Luna) and saved into its mode; a peek card says where it went.
+- **Held notifications:** in a mode that holds them, notifications from apps outside the mode are kept off the screen and wait on their mode with a count; one that can't wait pops out of its mode's button. Clicking one goes to its mode and opens the app.
+- **Each mode's own windows** (`modeWindows`, off by default): switching mode swaps the windows and tabs. On Omarchy each mode has its own workspace; on macOS the other modes' windows wait just off-screen. macOS also has a built-in tiling window manager (`tiling`, off by default).
+- **Website shortcuts:** an `https://` address in a mode's apps is a dock item with the site's own icon and a globe badge.
 - **AI in the dock, optional:** the AI button opens a chat with the user's own Claude Code or Codex (their own CLI and plan; `aiProviders` picks Claude, Codex, both or none, and `chatProvider` the one the chat uses). Petal's MCP server lets it change any setting or mode; when a setting can't do it, it may edit Petal's code. A ring around the button shows that AI's usage.
 - **A good dock:** badges, bounce, download progress, quick actions and recent files, drops, window previews, minimized windows, now playing, folder stacks, auto-hide, one dock per screen.
 - **Settings menu:** the right-click menu stays tiny (position, auto-hide, focus cards, hold notifications). Everything else is changed by asking Claude.
@@ -101,7 +104,7 @@ Add no dependency beyond what a stock Omarchy install has, or a Swift package to
 
 ### Petal for macOS
 
-A native app in `macos/` (Swift Package Manager; `macos/build.sh` builds `macos/build/Petal.app`), the same product as on Omarchy, feature for feature, except held notifications. `macos/Sources/Petal/`:
+A native app in `macos/` (Swift Package Manager; `macos/build.sh` builds `macos/build/Petal.app`), the same product as on Omarchy, feature for feature. `macos/Sources/Petal/`:
 
 - `App.swift`: `PetalApp`, which everything shares: which dock is showing (Petal or macOS's), opening at login, mode switching with the countdown, launching, finding `claude`, the IPC functions. `main.swift` starts it as a background app (no menu bar, no Dock icon).
 - `Config.swift`: `modes.json`, `settings.json` and `dock.json` in `~/.config/petal/`, read again within a second of any change. Its `defaults` list is the third copy of the settings (see below).
@@ -109,8 +112,9 @@ A native app in `macos/` (Swift Package Manager; `macos/build.sh` builds `macos/
 - `Popups.swift`: tooltips, window previews, stack popovers and cards (focus and update) as glass panels over the dock. `Menus.swift`: every right-click menu, as macOS menus.
 - `Providers.swift`: the AI apps Petal can use, each the person's own local install and account, as T3 Code uses them: Claude Code and Codex. Everything that differs between them (installer, sign-in, chat arguments, events, quick calls) is one `Provider` case; a new one (Grok, …) is a new case.
 - `Claude.swift`: the chat panel (Agent.qml and AskBox.qml: Claude keeps Omarchy's CLI arguments, stream-json, resume and Allow flow; Codex runs `codex exec --json`, resumed by thread id, with its sandbox or Full access instead of an Allow card) and the "+" search.
-- `Focus.swift`: focus cards and Brain, with Omarchy's exact prompts, sent to the chosen AI's quick setting (Claude Haiku; Codex at low effort).
+- `Focus.swift`: Brain, with Omarchy's exact prompts, sent to the chosen AI's quick setting (Claude Haiku; Codex's newest Luna at low effort). `Guard.swift`: the focus guard (what's in front, the block, move and peek cards, the AI's answers kept in `~/Library/Application Support/Petal/sorted.json`); `Cards.swift` draws them with a tail at their mode. `Switcher.swift`: the mode pill and the countdown pill with Stay. `Browsers.swift`: the front tab's address and closing it (AppleScript for Chromium browsers and Safari, Accessibility for Firefox and Zen). `Sites.swift`: website shortcuts and their icons (`~/Library/Caches/Petal/sites`). `Notifications.swift` (reading Notification Center's database with Full Disk Access, holding, Petal's own banner) and `Quiet.swift` (Do Not Disturb while holding: a signed Shortcut, else closing macOS's banners through Accessibility; always given back on quit, and by the Dock guard after a crash). `FocusSettings.swift`: their settings.
 - `Windows.swift` (Accessibility: window lists, minimized windows, raising one window, the front window's title), `Spaces.swift` (which Desktop each screen shows, through SkyLight's private `SLSCopyManagedDisplaySpaces`, read-only, looked up at run time), `Signals.swift` (badges from macOS's hidden Dock, download progress through `NSProgress`, now playing from Music and Spotify), `Stacks.swift`, `Apps.swift`, `Usage.swift` (Claude Code's login from the Keychain, the same usage endpoint as Omarchy's collector).
+- `Parking.swift` (`modeWindows`: each window belongs to a mode; switching mode parks the other modes' windows a point from their screen's bottom-right corner and brings this mode's back; `moveWindow`, `moveTab` for browsers through AppleScript, and the `parkedWindowFocused` hook for the focus guard; `~/Library/Application Support/Petal/parked.json` holds every parked window's frame, so quitting, turning it off, `petal restore-windows` and the next launch after a crash bring them back), `Tiling.swift` (`tiling`: dwindle layout per Desktop and mode, Control-Option keys, drag to swap), `WindowLayout.swift` (their pure maths, checked by `macos/checks/run.sh` without moving a window). Window ids come from the private `_AXUIElementGetWindow`, looked up at run time; `WindowEvents` in `Windows.swift` holds the Accessibility observers they share.
 - `SystemDock.swift`: hides macOS's Dock (auto-hide, 1000-second delay), only once the owner's own Dock settings are saved in `~/.config/petal/macos-dock.json`, and gives them back on quit, when killed, or on the next launch. The Dock guard (`~/Library/LaunchAgents/tech.edgetr.petal.guard.plist`, every 30 s) gives them back when Petal isn't running or has been deleted, and removes itself once Petal is gone. `petal restore-dock` does the same by hand. "Import Dock" reads the Dock's apps and folders.
 - `Activity.swift` (the private activity history in `~/Library/Application Support/Petal/activity.jsonl`, and Insights: suggestions and the summary; `PETAL_ACTIVITY` points elsewhere for testing), `Suggestions.swift` (their cards), `Recipe.swift` / `RecipeViews.swift` (`.petal` files, the import preview, the share sheet), `Automation.swift` (the schedule and a mode's Shortcut), `Hotkeys.swift` (Control-Option shortcuts through Carbon), `Magnify.swift` (magnification by transforms only, driven by a display link), `MenuBar.swift` (the menu bar mark, updates, what's new), `Overview.swift` (every Desktop and its mode), `SettingsExtras.swift`. Updates are announced in the menu bar, never with a dock card. `state.json` beside the history remembers when a suggestion or summary was last shown.
 - `SettingsWindow.swift` and `Onboarding.swift`: the settings window and the first-run welcome. `Setup.swift`: getting Claude ready (installs Claude Code with Anthropic's installer when it's missing, and runs `claude auth login`, which finishes in the browser), and the Dock guard. `MCP.swift`: Claude's Petal tools (`Petal --mcp`). `Updater.swift`: updates from `macos-v*` releases. `IPC.swift`: the socket. `Snapshot.swift`: `--snapshot`.
@@ -126,7 +130,7 @@ How it maps to Omarchy:
 - **AI is optional.** `aiProviders` lists the AIs the person chose (`claude`, `codex`, both, or `[]` for none: the dock works whole without AI); `chatProvider` is the one the chat, usage ring and sorting use. The welcome window starts with whichever are already installed switched on. For each one chosen, the welcome and settings windows install it with its maker's own installer and run its sign-in (`claude auth login`, `codex login`), which finishes in the browser. Nobody types a command.
 - **Usage ring:** Claude's from the usage endpoint; Codex's from the rate limits in its newest session log (`~/.codex/sessions`).
 - **Settings window:** the Mac has one (the owner asked for it), over the person's own wallpaper, blurred, on Liquid Glass; its first field still asks Claude. The right-click menu stays tiny.
-- **No held notifications:** macOS lets no app read or hide another app's notifications.
+- **Held notifications, around Apple's rules:** macOS gives no API for another app's notifications, so Petal reads Notification Center's own database (Full Disk Access) and keeps macOS's banners away while a mode holds (Do Not Disturb through a Shortcut Petal adds, else closing the banners through Accessibility). The private DoNotDisturb framework needs an Apple entitlement and is refused. If none works, Petal holds nothing and says so.
 - **Quick actions:** macOS doesn't let other apps read an app's own Dock menu, so an app's right-click menu lists its windows and New Window instead.
 - **Install:** `get.sh` on a Mac installs Petal.app from the newest `macos-v` release into /Applications. A download by curl isn't quarantined, so it opens without Gatekeeper's prompt; a zip downloaded in a browser needs System Settings > Privacy & Security > Open Anyway once.
 
@@ -159,10 +163,11 @@ The `JsonAdapter` in `Dock.qml`, `SETTINGS_SCHEMA` in `petal-mcp.py` and `Config
 { "defaultMode": "<id>", "workspaces": { "<n>": "<id>" },
   "modes": [ { "id", "name", "icon": "<Nerd Font glyph>", "color": "#rrggbb",
     "about": "what it's for (Claude sorts activity with this)",
-    "apps": ["<desktop id>", ...],          // dock order
-    "sites": ["<word in tab titles>", ...],
-    "focusDelay": <seconds, 0 = no guard>,
-    "hold": <bool>, "allow": ["<desktop id>"] } ] }
+    "apps": ["<desktop id>", "https://github.com", ...],   // dock order; an address is a website shortcut
+    "sites": ["<domain or word in tab titles>", ...],
+    "distracting": <bool>,                // missing: the AI decides once
+    "focusDelay": <seconds>,              // a distracting mode's wait to get in (30 if 0)
+    "hold": <bool>, "allow": ["<desktop id or site>"] } ] }
 ```
 
 Desktop ids are the file names in `/usr/share/applications` or `~/.local/share/applications`, minus `.desktop`. On macOS, `apps` holds bundle identifiers (`com.apple.Safari`), `icon` an SF Symbol name (`hammer`), and the workspace numbers are Desktop numbers. When the owner asks to change their modes, edit this file; Petal reloads it.
@@ -202,6 +207,7 @@ Desktop ids are the file names in `/usr/share/applications` or `~/.local/share/a
 - **Drive it:** `omarchy-shell petal <fn>` calls the IPC functions in `Dock.qml` (`mode`, `modeAt`, `ask`, `chat`, `panel <page>`, `held`, `describe`, `testCard`, `testSuggest`, `testSummary`, `testToast`, `testBounce`, `close`, …); `bin/petal` wraps the common ones. On macOS, `testCard suggest|summary` and `petal overview`.
 - **macOS:** `macos/build.sh`, then run `macos/build/Petal.app/Contents/MacOS/Petal` (`PETAL_KEEP_DOCK=1` leaves macOS's Dock alone). `printf '["current"]\n' | nc -U ~/.config/petal/petal.sock` talks to it. After quitting, `defaults read com.apple.dock autohide` shows the owner's Dock setting is back.
 - **macOS without touching the screen:** `Petal --snapshot <folder>` draws every view (dock, settings pages, welcome, Claude panel, search, cards, stacks) into PNGs. Native controls and scroll views draw as placeholders there; check those live. Don't test on the owner's screen while they're in a call or sharing it.
+- **Window maths:** `macos/checks/run.sh` checks tiling and parking layouts as pure functions. Per-mode windows and tiling move real windows: try them live only on the owner's say-so.
 - **MCP:** run `petal-mcp.py` with a `tools/list` request on stdin after changing it.
 - **Site:** `python3 -m http.server 8104` from `site/`, then look at 1440px and 390px, in light and dark.
 - **Reporting:** say what was seen working on the real dock and what was not checked.

@@ -11,12 +11,26 @@ struct Mode: Equatable, Identifiable {
     var about: String
     var apps: [String]
     var sites: [String]
+    /// A distracting mode's wait to get in, in seconds (30 when 0); other modes ignore it.
     var focusDelay: Double
     var allow: [String]
     /// A Shortcut (Shortcuts app) to run when the Desktop in front enters this mode.
     var shortcut: String = ""
+    /// A mode that pulls you away from work (Social, Gaming): getting in takes its wait, and elsewhere its apps and
+    /// sites are blocked. nil until the AI has decided (see `isDistracting`).
+    var distracting: Bool? = nil
+    /// Notifications from apps outside the mode wait on their own mode.
+    var hold = false
 
     var hex: String { color.hex }
+
+    /// Distracting, or, before the AI has decided, a mode named like one.
+    var isDistracting: Bool {
+        distracting ?? ["social", "gaming", "games", "entertainment"].contains { $0 == id.lowercased() || $0 == name.lowercased() }
+    }
+
+    /// The wait to get into a distracting mode.
+    var wait: Double { focusDelay > 0 ? focusDelay : 30 }
 }
 
 /// Petal's files in ~/.config/petal, the same folder and formats as on Omarchy:
@@ -28,7 +42,7 @@ struct Mode: Equatable, Identifiable {
 /// Each is read again within a second of changing on disk, whoever changed it (the settings window, Claude, an editor).
 @MainActor @Observable
 final class Config {
-    static let folder = URL(fileURLWithPath: NSHomeDirectory()).appending(path: ".config/petal")
+    nonisolated static let folder = URL(fileURLWithPath: NSHomeDirectory()).appending(path: ".config/petal")
     @ObservationIgnored let modesFile = folder.appending(path: "modes.json")
     @ObservationIgnored let settingsFile = folder.appending(path: "settings.json")
     @ObservationIgnored let dockFile = folder.appending(path: "dock.json")
@@ -41,8 +55,9 @@ final class Config {
         "font": "Adwaita Sans", "tooltips": true, "hoverLift": true, "appGlow": true, "thisWorkspaceOnly": true,
         "previews": true, "minimized": true, "badges": true, "bounce": true, "progress": true, "quickActions": true,
         "recentFiles": true, "dropToOpen": true, "nowPlaying": true, "stacks": true,
-        "stackFolders": ["~/Downloads", "~/Pictures/Screenshots"], "trash": true, "modes": true, "countdown": false,
-        "focusGuard": false, "holdNotifications": true, "ai": true, "claudeUsage": true, "autoUpdate": true,
+        "stackFolders": ["~/Downloads", "~/Pictures/Screenshots"], "trash": true, "modes": true, "countdown": true,
+        "focusGuard": true, "blockDistractions": true, "peeks": true, "holdNotifications": true, "urgentNotifications": true,
+        "modeWindows": false, "tiling": false, "tilingGaps": 8, "tilingFloat": [String](), "ai": true, "claudeUsage": true, "autoUpdate": true,
         "claudePath": "", "chatModel": "sonnet", "chatEffort": "medium", "claudeAccess": "auto",
         "aiProviders": ["claude"], "otherAgents": true,
         "shortcuts": true, "schedule": [Any](), "activityLog": true, "suggestModes": true, "summary": true,
@@ -125,11 +140,11 @@ final class Config {
         update(modesFile) { $0["defaultMode"] = id }
     }
 
-    /// Writes one mode back, adding it if it is new. Fields Petal for macOS doesn't use (hold) are kept.
+    /// Writes one mode back, adding it if it is new. Fields Petal for macOS doesn't use (hyprland) are kept.
     func save(_ mode: Mode) {
         update(modesFile) { root in
             var list = root["modes"] as? [[String: Any]] ?? []
-            var entry = list.first { $0["id"] as? String == mode.id } ?? ["hold": false]
+            var entry = list.first { $0["id"] as? String == mode.id } ?? [:]
             entry["id"] = mode.id
             entry["name"] = mode.name
             entry["icon"] = mode.icon
@@ -140,6 +155,8 @@ final class Config {
             entry["focusDelay"] = mode.focusDelay
             entry["allow"] = mode.allow
             entry["shortcut"] = mode.shortcut.isEmpty ? nil : mode.shortcut
+            entry["distracting"] = mode.distracting
+            entry["hold"] = mode.hold
             if let index = list.firstIndex(where: { $0["id"] as? String == mode.id }) { list[index] = entry } else { list.append(entry) }
             root["modes"] = list
         }
@@ -164,6 +181,30 @@ final class Config {
     func removeApp(_ app: String, from mode: String) {
         guard var entry = self.mode(id: mode) else { return }
         entry.apps.removeAll { $0 == app }
+        save(entry)
+    }
+
+    /// "Keep it here": an app or site that's fine in this mode without being in its dock.
+    func allow(_ thing: String, in mode: String) {
+        guard var entry = self.mode(id: mode), entry.id == mode, !entry.allow.contains(thing) else { return }
+        entry.allow.append(thing)
+        save(entry)
+    }
+
+    /// The AI's answer for a mode that didn't say whether it's distracting; nothing else in the mode changes.
+    func setDistracting(_ value: Bool, for id: String) {
+        update(modesFile) { root in
+            var list = root["modes"] as? [[String: Any]] ?? []
+            guard let index = list.firstIndex(where: { $0["id"] as? String == id }), list[index]["distracting"] == nil else { return }
+            list[index]["distracting"] = value
+            root["modes"] = list
+        }
+    }
+
+    /// A site the AI sorted into a mode.
+    func addSite(_ domain: String, to mode: String) {
+        guard var entry = self.mode(id: mode), entry.id == mode, !entry.sites.contains(where: { $0.caseInsensitiveCompare(domain) == .orderedSame }) else { return }
+        entry.sites.append(domain)
         save(entry)
     }
 
@@ -215,7 +256,8 @@ final class Config {
                         color: NSColor(hex: m["color"] as? String) ?? .systemPink, about: m["about"] as? String ?? "",
                         apps: (m["apps"] as? [String] ?? []).map { $0.trimmingCharacters(in: .whitespaces) },
                         sites: m["sites"] as? [String] ?? [], focusDelay: (m["focusDelay"] as? NSNumber)?.doubleValue ?? 0,
-                        allow: m["allow"] as? [String] ?? [], shortcut: m["shortcut"] as? String ?? "")
+                        allow: m["allow"] as? [String] ?? [], shortcut: m["shortcut"] as? String ?? "",
+                        distracting: m["distracting"] as? Bool, hold: m["hold"] as? Bool ?? false)
         }
         settings = Self.readObject(settingsFile)
         dock = Self.readObject(dockFile)
@@ -243,14 +285,14 @@ final class Config {
         }
     }
 
-    static func readObject(_ url: URL) -> [String: Any] { parse(url) ?? [:] }
+    nonisolated static func readObject(_ url: URL) -> [String: Any] { parse(url) ?? [:] }
 
-    static func parse(_ url: URL) -> [String: Any]? {
+    nonisolated static func parse(_ url: URL) -> [String: Any]? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
-    static func writeObject(_ object: [String: Any], to url: URL) {
+    nonisolated static func writeObject(_ object: [String: Any], to url: URL) {
         guard let data = try? JSONSerialization.data(withJSONObject: object,
                                                      options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else { return }
         try? (data + Data("\n".utf8)).write(to: url, options: .atomic)

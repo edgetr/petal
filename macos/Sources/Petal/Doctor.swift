@@ -108,6 +108,38 @@ enum Doctor {
             note("warn", "dock", "The guard that gives macOS its Dock back if Petal crashes isn't installed.", fixed: fix ? "installed it" : nil)
         }
 
+        // Per-mode windows: none left off-screen. The Dock guard runs without Accessibility, so it can't move
+        // windows; after a crash, Petal's next launch brings them back (or `petal restore-windows`).
+        let waiting = Parking.waiting()
+        if waiting > 0 && !running {
+            var fixed: String?
+            if fix && AXIsProcessTrusted() { fixed = "brought back \(Parking.restoreEverything())" }
+            note("error", "windows", "\(waiting) window\(waiting == 1 ? " is" : "s are") waiting off-screen since Petal last quit unexpectedly. "
+                 + "Open Petal, or run petal restore-windows, to bring them back.", fixed: fixed)
+        } else if settings["modeWindows"] as? Bool == true {
+            note("ok", "windows", "Each mode keeps its own windows. If Petal ever quits unexpectedly, its next launch brings back "
+                 + "the windows it had put away; the Dock guard can't move windows, so it doesn't.")
+        }
+
+        // Held notifications: the running Petal says whether it can hold them (macOS gives Petal.app its permissions,
+        // not this command).
+        let holdWanted = settings["holdNotifications"] as? Bool ?? true
+        let holdingModes = (Config.parse(modesURL)?["modes"] as? [[String: Any]] ?? []).filter { $0["hold"] as? Bool == true }
+        if holdWanted && !holdingModes.isEmpty && running {
+            let reply = MCP.petal("holding")
+            if let status = try? JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any] {
+                if status["works"] as? Bool == true {
+                    note("ok", "notes", "Holding notifications works (\(status["way"] as? String == "closer" ? "Petal closes macOS's banners" : "Do Not Disturb while holding")).")
+                } else {
+                    note("warn", "notes", "Petal holds no notifications. \(status["why"] as? String ?? "") Petal's settings, under Focus, show how.")
+                }
+            }
+        }
+        if FileManager.default.fileExists(atPath: Quiet.marker.path) && !running {
+            if fix { Quiet.turnOff(wait: true) }
+            note("warn", "notes", "Do Not Disturb that Petal turned on is still on, and Petal isn't running.", fixed: fix ? "turned it off" : nil)
+        }
+
         // The AI apps.
         let chosen = (settings["aiProviders"] as? [String] ?? Config.defaults["aiProviders"] as? [String] ?? []).compactMap(Provider.init(rawValue:))
         if chosen.isEmpty { note("ok", "ai", "No AI chosen: Petal works as a dock without it.") }

@@ -9,13 +9,13 @@ final class Welcome {
     private var window: NSWindow?
 
     func show() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 800),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 920),
                               styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: WelcomeView { [weak self] in self?.window?.close() }.environment(PetalApp.shared))
+        window.setGlassContent(WelcomeView { [weak self] in self?.window?.close() }.environment(PetalApp.shared))
         window.center()
         self.window = window
         NSApp.activate()
@@ -30,14 +30,15 @@ struct WelcomeView: View {
     @State private var atLogin = true
     @State private var day = ""
     @State private var tick = 0
+    @State private var askingBrowsers = false
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var body: some View {
         let accent = SettingsSection.dock.tint
         ZStack {
-            Wallpaper()
-            VStack(spacing: 18) {
-                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 112, height: 112)
+            Backdrop()
+            VStack(spacing: 14) {
+                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 84, height: 84)
                     .shadow(color: .black.opacity(0.35), radius: 20, y: 10)
                 VStack(spacing: 6) {
                     Text("Meet Petal").font(.system(size: 32, weight: .bold))
@@ -83,6 +84,18 @@ struct WelcomeView: View {
                                 Button("Allow…") { Windows.askForPermission() }.buttonStyle(.glass)
                             }
                         } extra: { EmptyView() }
+                        step(symbol: "bell.badge", title: "Let Petal see notifications",
+                             detail: "Optional. To hold them in modes that hold them. macOS calls it Full Disk Access.") {
+                            if app.notes.canRead {
+                                AllowedLabel()
+                            } else {
+                                Button("Open Settings…") { NotificationAccessRow.openSettings() }.buttonStyle(.glass)
+                            }
+                        } extra: { EmptyView() }
+                        step(symbol: "safari", title: "Let Petal see your tabs",
+                             detail: "Optional. Which site a tab is on, to keep distracting ones in their mode. Each browser asks once.") {
+                            BrowserAccessButton(asking: $askingBrowsers)
+                        } extra: { EmptyView() }
                         step(symbol: "rectangle.dashed.badge.record", title: "Window previews",
                              detail: "Optional. A still of each window when you hover its app.") {
                             let _ = tick
@@ -121,10 +134,10 @@ struct WelcomeView: View {
                 }
                 Text("You can switch back any time in Petal’s settings.").font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            .padding(36)
+            .padding(28)
         }
-        .frame(width: 640, height: 800)
-        .onReceive(timer) { _ in tick += 1 }
+        .frame(width: 640, height: 920)
+        .onReceive(timer) { _ in tick += 1; if tick % 2 == 0 { app.browsers.refresh() } }
         .task {
             // Start with the AIs already on this Mac switched on, and none otherwise: it's optional.
             for provider in Provider.allCases { await app.lookFor(provider) }
