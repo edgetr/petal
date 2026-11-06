@@ -255,16 +255,33 @@ final class Popups {
         panel.place(over: slot, dock: dock)
     }
 
-    func showPreview(_ item: DockItem, in dock: ScreenDock) {
-        guard let slot = dock.panel?.screenFrame(of: item.id) else { return }
-        if kind == "stack" { return }
+    /// A preview over a slot: an app's windows (`id` is its bundle id), or the music controls over the now-playing
+    /// tile (`id` is "media").
+    func showPreview(_ id: String, in dock: ScreenDock) {
+        guard kind != "stack", let slot = dock.panel?.screenFrame(of: id) else { return }
         kind = "preview"
         openDock = dock
+        anchor = id
         PetalApp.shared.tooltips.hide()
-        panel.show(PreviewView(bundleID: item.id) { [weak self] in self?.closeAll() }, over: slot, dock: dock.panel)
+        panel.show(PreviewView(id: id) { [weak self] in self?.closeAll() }, over: slot, dock: dock.panel)
     }
 
-    var previewFrame: CGRect? { kind == "preview" ? panel.frame : nil }
+    /// The pointer is over the open preview, or on its way there from its slot: across the dock's glass and the
+    /// gap above it, which aren't the slot and aren't the preview.
+    var pointerNearPreview: Bool {
+        guard kind == "preview" else { return false }
+        let mouse = NSEvent.mouseLocation
+        let frame = panel.frame
+        if frame.insetBy(dx: -4, dy: -4).contains(mouse) { return true }
+        guard let anchor, let slot = openDock?.panel?.screenFrame(of: anchor) else { return false }
+        let corridor: CGRect
+        switch PetalApp.shared.config.position {
+        case "left": corridor = CGRect(x: slot.minX, y: slot.minY, width: frame.minX - slot.minX, height: slot.height)
+        case "right": corridor = CGRect(x: frame.maxX, y: slot.minY, width: slot.maxX - frame.maxX, height: slot.height)
+        default: corridor = CGRect(x: slot.minX, y: slot.minY, width: slot.width, height: frame.minY - slot.minY)
+        }
+        return corridor.standardized.insetBy(dx: -4, dy: -4).contains(mouse)
+    }
 
     /// One card at a time; a newer one replaces an older one. A card about a mode points at that mode's button.
     func show(_ card: FocusCard) {
@@ -307,51 +324,124 @@ final class Popups {
 // MARK: - Previews
 
 /// Window previews: after 380 ms over an app with windows; swapping straight to another app's; gone 220 ms after
-/// the pointer leaves both the app and the preview.
+/// the pointer leaves both the app and the preview. The now-playing tile shows the music controls the same way, and
+/// a music app's preview has them above its windows.
 @MainActor @Observable
 final class Previews {
+    static let media = "media"
+
     private(set) var thumbnails: [String: NSImage] = [:]
+    /// The windows the open preview shows, listed off the main thread.
+    private(set) var windows: [AppWindow] = []
+    /// Pictures of the windows (Screen Recording), or their titles in a list.
+    private(set) var pictures = false
     @ObservationIgnored private var showTask: DispatchWorkItem?
     @ObservationIgnored private var hideTask: DispatchWorkItem?
     @ObservationIgnored private var refresh: Timer?
     @ObservationIgnored private(set) var showing: String?
-
+    @ObservationIgnored private var capturing = false
     @ObservationIgnored private var hoveredID = ""
+    /// Accessibility answers each app in its own time (up to 0.3 s for a busy one), so windows are listed here.
+    nonisolated private static let queue = DispatchQueue(label: "petal.previews", qos: .userInitiated)
 
     func hover(_ item: DockItem?, in dock: ScreenDock, id: String = "") {
         let app = PetalApp.shared
         if item == nil && !id.isEmpty && id != hoveredID { return }   // leaving one icon after entering the next
         hoveredID = item?.id ?? ""
         showTask?.cancel()
-        if let item, item.windows > 0, app.config.bool("previews"), dock.dragging == nil, app.popups.card == nil,
-           app.popups.kind != "stack" {
-            hideTask?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.open(item, in: dock) }
-            showTask = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + (showing == nil ? 0.38 : 0), execute: work)
+        if let item, item.windows > 0 || playing(item.id), app.config.bool("previews"), canOpen(in: dock) {
+            schedule(item.id, in: dock)
         } else {
             scheduleHide()
         }
     }
 
-    private func open(_ item: DockItem, in dock: ScreenDock) {
-        // The window server counts windows Accessibility can't reach (another Desktop, hidden): with none to show,
-        // no preview, rather than an empty bubble.
-        guard !windows(of: item.id).isEmpty else { return scheduleHide() }
-        showing = item.id
-        PetalApp.shared.popups.showPreview(item, in: dock)
-        capture(item.id)
+    /// The pointer on the now-playing tile.
+    func hoverMedia(_ on: Bool, in dock: ScreenDock) {
+        if !on && hoveredID != Self.media { return }
+        hoveredID = on ? Self.media : ""
+        showTask?.cancel()
+        if on, canOpen(in: dock) { schedule(Self.media, in: dock) } else { scheduleHide() }
+    }
+
+    private func canOpen(in dock: ScreenDock) -> Bool {
+        dock.dragging == nil && PetalApp.shared.popups.card == nil && PetalApp.shared.popups.kind != "stack"
+    }
+
+    private func schedule(_ id: String, in dock: ScreenDock) {
+        hideTask?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.open(id, in: dock) }
+        showTask = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + (showing == nil ? 0.38 : 0), execute: work)
+    }
+
+    /// The music controls belong over this app's icon: it's the player with a song.
+    private func playing(_ id: String) -> Bool {
+        PetalApp.shared.config.bool("nowPlaying") && PetalApp.shared.signals.nowPlaying?.player == id
+    }
+
+    private func open(_ id: String, in dock: ScreenDock) {
+        if id == Self.media {
+            guard PetalApp.shared.signals.nowPlaying != nil else { return scheduleHide() }
+            return show(id, windows: [], in: dock)
+        }
+        list(id) { [weak self] found in
+            // The pointer moved on while Accessibility answered.
+            guard let self, self.hoveredID == id else { return }
+            // The window server counts windows Accessibility can't reach (another Desktop, hidden), and none at all
+            // without Accessibility: with none to show, no preview, rather than an empty bubble.
+            guard !found.isEmpty || self.playing(id) else { return self.scheduleHide() }
+            self.show(id, windows: found, in: dock)
+        }
+    }
+
+    private func show(_ id: String, windows found: [AppWindow], in dock: ScreenDock) {
+        showing = id
+        windows = found
+        pictures = Capture.allowed
+        PetalApp.shared.popups.showPreview(id, in: dock)
+        capture(found)
         refresh?.invalidate()
         refresh = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { if let id = self?.showing { self?.capture(id) } }
+            MainActor.assumeIsolated { self?.again() }
         }
+    }
+
+    /// Once a second while it's open: the windows again (one may have closed), and new pictures of them.
+    private func again() {
+        guard let id = showing else { return }
+        if id == Self.media {
+            if PetalApp.shared.signals.nowPlaying == nil { close() }
+            return
+        }
+        list(id) { [weak self] found in
+            guard let self, self.showing == id else { return }
+            if found.isEmpty && !self.playing(id) { return self.close() }
+            if found != self.windows {
+                self.windows = found
+                PetalApp.shared.popups.refit()
+            }
+            self.capture(found)
+        }
+    }
+
+    private func list(_ bundleID: String, _ done: @escaping ([AppWindow]) -> Void) {
+        Self.queue.async {
+            let found = Array(Self.windows(of: bundleID).prefix(6))
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(found) } }
+        }
+    }
+
+    /// Every window of an app, through Accessibility (empty without it).
+    nonisolated static func windows(of bundleID: String) -> [AppWindow] {
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).flatMap { Windows.windows(of: $0.processIdentifier) }
     }
 
     private func scheduleHide() {
         hideTask?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            if let frame = PetalApp.shared.popups.previewFrame, frame.insetBy(dx: -4, dy: -4).contains(NSEvent.mouseLocation) {
+            if PetalApp.shared.popups.pointerNearPreview {
                 self.scheduleHide()
                 return
             }
@@ -371,41 +461,61 @@ final class Previews {
         refresh = nil
         let minimized = Set(PetalApp.shared.docks.panels.values.flatMap { $0.dock.minimized.map(\.id) })
         thumbnails = thumbnails.filter { minimized.contains($0.key) }
+        windows = []
         showing = nil
     }
 
-    func windows(of bundleID: String) -> [AppWindow] {
-        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).flatMap { Windows.windows(of: $0.processIdentifier) }
-    }
-
-    private func capture(_ bundleID: String) {
-        let list = Array(windows(of: bundleID).prefix(6))
+    /// Each window's id in the window server ties it to ScreenCaptureKit's window exactly; the frame is the fallback.
+    private func capture(_ list: [AppWindow]) {
+        guard !list.isEmpty, Capture.allowed, !capturing else { return }
+        capturing = true
+        let targets = list.map { (window: $0, number: Windows.id(of: $0.element)) }
         Task {
-            let pictures = await Capture.capture(list)
+            let pictures = await Capture.capture(targets)
+            capturing = false
             for (id, image) in pictures { thumbnails[id] = image }
         }
     }
 
     /// A still of a minimized window, taken once.
     func snapshot(_ window: AppWindow) {
-        guard thumbnails[window.id] == nil else { return }
+        guard thumbnails[window.id] == nil, Capture.allowed else { return }
+        let target = (window: window, number: Windows.id(of: window.element))
         Task {
-            let pictures = await Capture.capture([window])
+            let pictures = await Capture.capture([target])
             for (id, image) in pictures { thumbnails[id] = image }
         }
+    }
+
+    /// What `Petal --snapshot` draws a preview with.
+    func preview(windows: [AppWindow], pictures: Bool, thumbnails: [String: NSImage] = [:]) {
+        self.windows = windows
+        self.pictures = pictures
+        self.thumbnails = thumbnails
     }
 }
 
 struct PreviewView: View {
     @Environment(PetalApp.self) private var app
-    let bundleID: String
+    let id: String
     let done: () -> Void
 
     var body: some View {
-        let windows = Array(app.previews.windows(of: bundleID).prefix(6))
-        HStack(spacing: 12) {
-            ForEach(windows) { window in
-                PreviewTile(window: window, image: app.previews.thumbnails[window.id], done: done)
+        let windows = id == Previews.media ? [] : app.previews.windows
+        VStack(alignment: .leading, spacing: 12) {
+            if app.config.bool("nowPlaying"), let playing = app.signals.nowPlaying, id == Previews.media || id == playing.player {
+                MediaControls(playing: playing)
+            }
+            if !windows.isEmpty {
+                if app.previews.pictures {
+                    HStack(spacing: 12) {
+                        ForEach(windows) { window in
+                            PreviewTile(window: window, image: app.previews.thumbnails[window.id], done: done)
+                        }
+                    }
+                } else {
+                    WindowTitles(windows: windows, done: done)
+                }
             }
         }
         .padding(12)
@@ -427,21 +537,14 @@ struct PreviewTile: View {
                 if let image {
                     Image(nsImage: image).resizable().scaledToFit().padding(3)
                 } else {
-                    VStack(spacing: 6) {
-                        Image(systemName: "macwindow").font(.system(size: 28)).foregroundStyle(.secondary)
-                        if !Capture.allowed {
-                            Text("Allow Screen Recording\nfor previews").font(.system(size: 10)).multilineTextAlignment(.center)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+                    Image(systemName: window.minimized ? "minus.rectangle" : "macwindow").font(.system(size: 28)).foregroundStyle(.secondary)
                 }
             }
             .frame(width: 200, height: 124)
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(hovering ? Color(nsColor: PetalApp.shared.accent) : .white.opacity(0.12),
                                                                     lineWidth: hovering ? 2 : 1))
             HStack(spacing: 6) {
-                Text(window.title.isEmpty ? "Window" : window.title + (window.minimized ? " (minimized)" : ""))
-                    .font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
+                Text(WindowTitles.title(window)).font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 4)
                 if !window.minimized { RoundButton(symbol: "minus") { Windows.minimize(window) } }
                 RoundButton(symbol: "xmark") { Windows.close(window) }
@@ -451,6 +554,109 @@ struct PreviewTile: View {
         .contentShape(.rect)
         .onHover { hovering = $0 }
         .onTapGesture { Windows.focus(window); done() }
+    }
+}
+
+/// Without Screen Recording, a preview lists the windows by name, with a way to have their pictures.
+struct WindowTitles: View {
+    @Environment(PetalApp.self) private var app
+    let windows: [AppWindow]
+    let done: () -> Void
+
+    static func title(_ window: AppWindow) -> String {
+        (window.title.isEmpty ? "Window" : window.title) + (window.minimized ? " (minimized)" : "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(windows) { window in WindowRow(window: window, done: done) }
+            Divider().padding(.vertical, 4)
+            Button {
+                done()
+                app.settings.show(.permissions)
+            } label: {
+                Label("Show pictures of windows…", systemImage: "rectangle.dashed.badge.record")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 8).padding(.vertical, 4).contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+        }
+        .frame(width: 280)
+    }
+}
+
+struct WindowRow: View {
+    let window: AppWindow
+    let done: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: window.minimized ? "minus.rectangle" : "macwindow").font(.system(size: 12)).foregroundStyle(.secondary)
+                .frame(width: 16)
+            Text(WindowTitles.title(window)).font(.system(size: 13)).lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 4)
+            if hovering {
+                if !window.minimized { RoundButton(symbol: "minus") { Windows.minimize(window) } }
+                RoundButton(symbol: "xmark") { Windows.close(window) }
+            }
+        }
+        .frame(height: 22)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(hovering ? .white.opacity(0.08) : .clear, in: .rect(cornerRadius: 9))
+        .contentShape(.rect)
+        .onHover { hovering = $0 }
+        .onTapGesture { Windows.focus(window); done() }
+    }
+}
+
+/// What's playing, with previous, play or pause, and next: over the now-playing tile, and over a music app's windows.
+struct MediaControls: View {
+    @Environment(PetalApp.self) private var app
+    let playing: NowPlaying
+
+    var body: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.08))
+                if let artwork = app.signals.artwork {
+                    Image(nsImage: artwork).resizable().scaledToFill()
+                } else {
+                    Image(systemName: "music.note").font(.system(size: 18)).foregroundStyle(Color(nsColor: app.accent))
+                }
+            }
+            .frame(width: 40, height: 40)
+            .clipShape(.rect(cornerRadius: 8))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(playing.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                Text(playing.artist).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+            }
+            .frame(width: 150, alignment: .leading)
+            HStack(spacing: 2) {
+                MediaButton(symbol: "backward.fill") { app.signals.control("previous track") }
+                MediaButton(symbol: playing.playing ? "pause.fill" : "play.fill", size: 17) { app.signals.control("playpause") }
+                MediaButton(symbol: "forward.fill") { app.signals.control("next track") }
+            }
+        }
+    }
+}
+
+struct MediaButton: View {
+    let symbol: String
+    var size: CGFloat = 13
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: size)).contentTransition(.symbolEffect(.replace))
+                .frame(width: 30, height: 30)
+                .background(hovering ? .white.opacity(0.12) : .clear, in: .circle)
+                .contentShape(.circle)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
     }
 }
 

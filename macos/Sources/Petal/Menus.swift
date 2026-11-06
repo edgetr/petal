@@ -39,7 +39,7 @@ enum Menus {
         let name = Apps.name(item.id)
         var listed = false
         if config.bool("quickActions"), item.running {
-            let windows = app.previews.windows(of: item.id)
+            let windows = Previews.windows(of: item.id)
             if !windows.isEmpty {
                 menu.addItem(header("Windows"))
                 for window in windows.prefix(10) {
@@ -182,8 +182,8 @@ enum Menus {
     static func media(_ playing: NowPlaying) {
         let menu = NSMenu()
         menu.addItem(header(Apps.name(playing.player)))
-        menu.addItem(ClosureMenuItem(title: "Previous") { NowPlaying.send("previous track", to: playing.player) })
-        menu.addItem(ClosureMenuItem(title: "Next") { NowPlaying.send("next track", to: playing.player) })
+        menu.addItem(ClosureMenuItem(title: "Previous") { app.signals.control("previous track") })
+        menu.addItem(ClosureMenuItem(title: "Next") { app.signals.control("next track") })
         menu.addItem(ClosureMenuItem(title: "Show Player") { app.docks.launch(playing.player) })
         pop(menu)
     }

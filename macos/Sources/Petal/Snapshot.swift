@@ -76,7 +76,26 @@ enum Snapshot {
         app.signals.preview(trashEmpty: false, fresh: Set(stackFolders.prefix(1)),
                             nowPlaying: NowPlaying(player: "com.spotify.client", title: "Pyramid Song", artist: "Radiohead", playing: true, artwork: nil))
         write(render(AnyView(DockView(dock: dock)), app: app, size: nil), name: "dock-extras", folder: folder)
+        // Over the now-playing tile: the song and its controls. Over Spotify's icon: the controls above its windows.
+        write(render(AnyView(PreviewView(id: Previews.media) {}), app: app, size: nil), name: "preview-media", folder: folder)
+        let me = AXUIElementCreateApplication(getpid())
+        let sampleWindows = ["Liked Songs", "Radiohead – OK Computer", ""].enumerated().map { index, title in
+            AppWindow(id: "sample-\(index)", pid: getpid(), title: title, minimized: index == 2, frame: .zero, element: me)
+        }
+        let picture = NSImage(size: NSSize(width: 240, height: 150), flipped: false) { rect in
+            NSColor(white: 0.12, alpha: 1).setFill(); rect.fill()
+            NSColor(red: 0.11, green: 0.73, blue: 0.33, alpha: 1).setFill(); NSRect(x: 0, y: 0, width: 56, height: rect.height).fill()
+            NSColor(white: 0.3, alpha: 1).setFill()
+            for row in 0..<5 { NSRect(x: 72, y: 120 - CGFloat(row) * 22, width: 140, height: 10).fill() }
+            return true
+        }
+        app.previews.preview(windows: Array(sampleWindows.prefix(2)), pictures: true, thumbnails: ["sample-0": picture])
+        write(render(AnyView(PreviewView(id: "com.spotify.client") {}), app: app, size: nil), name: "preview-music", folder: folder)
         app.signals.preview(trashEmpty: true, fresh: [], nowPlaying: nil)
+        // Without Screen Recording: the windows by name.
+        app.previews.preview(windows: sampleWindows, pictures: false)
+        write(render(AnyView(PreviewView(id: "com.apple.Safari") {}), app: app, size: nil), name: "preview-titles", folder: folder)
+        app.previews.preview(windows: [], pictures: false)
         // The sites' own icons, fetched from the sites (up to 10 s).
         let samples = ["https://github.com", "https://www.figma.com"]
         for id in samples { _ = Sites.shared.icon(id) }

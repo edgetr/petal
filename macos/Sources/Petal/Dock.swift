@@ -1046,12 +1046,13 @@ struct NowPlayingSlot: View {
         }
         .lift(hovering, icon: icon)
         .slotFrame(dock, "media")
-        .slotMouse(SlotMouse(left: { NowPlaying.send("playpause", to: playing.player) },
+        .slotMouse(SlotMouse(left: { app.signals.control("playpause") },
                            right: { Menus.media(playing) },
-                           middle: { NowPlaying.send("next track", to: playing.player) },
+                           middle: { app.signals.control("next track") },
                            hover: { on in
                                hovering = on
-                               app.tooltips.show(on ? "\(playing.title) — \(playing.artist)" : nil, over: "media", in: dock)
+                               // The song and its controls, in a pop-over that stays while the pointer moves into it.
+                               app.previews.hoverMedia(on, in: dock)
                            }))
     }
 }

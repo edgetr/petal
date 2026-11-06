@@ -181,13 +181,14 @@ enum Capture {
 
     static func askForPermission() { CGRequestScreenCaptureAccess() }
 
-    /// One picture per window, matched to Accessibility's windows by app and frame.
-    static func capture(_ windows: [AppWindow], height: CGFloat = 150) async -> [String: NSImage] {
+    /// One picture per window, matched to Accessibility's windows by their window server id, else by app and frame.
+    static func capture(_ windows: [(window: AppWindow, number: CGWindowID?)], height: CGFloat = 150) async -> [String: NSImage] {
         guard allowed, let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         else { return [:] }
         var result: [String: NSImage] = [:]
-        for window in windows {
-            guard let match = content.windows.first(where: {
+        for (window, number) in windows {
+            let byNumber = number.flatMap { number in content.windows.first { $0.windowID == number } }
+            guard let match = byNumber ?? content.windows.first(where: {
                 $0.owningApplication?.processID == window.pid && $0.windowLayer == 0
                     && abs($0.frame.minX - window.frame.minX) < 4 && abs($0.frame.minY - window.frame.minY) < 4
                     && abs($0.frame.width - window.frame.width) < 4

@@ -72,23 +72,38 @@ final class Signals {
         tick += 1
         if tick % 2 == 0 { readBadges() }
         if trashPolled && tick % 5 == 0 { folders.look(Stacks.trashFolder) }
-        if tick % 2 == 1 && !asking {
-            // Apple events wait for a busy player, so they never run on the dock's thread.
-            asking = true
-            NowPlaying.queue.async {
-                let current = NowPlaying.current()
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        self.asking = false
-                        if current != self.nowPlaying {
-                            let newTrack = current?.title != self.nowPlaying?.title || current?.player != self.nowPlaying?.player
-                            self.nowPlaying = current
-                            if newTrack { self.loadArtwork(current) }
-                        }
+        if tick % 2 == 1 && !asking { askNowPlaying() }
+    }
+
+    /// Apple events wait for a busy player, so they never run on the dock's thread.
+    private func askNowPlaying() {
+        asking = true
+        NowPlaying.queue.async {
+            let current = NowPlaying.current()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.asking = false
+                    if current != self.nowPlaying {
+                        let newTrack = current?.title != self.nowPlaying?.title || current?.player != self.nowPlaying?.player
+                        self.nowPlaying = current
+                        if newTrack { self.loadArtwork(current) }
                     }
                 }
             }
         }
+    }
+
+    /// The music controls: "previous track", "playpause" or "next track", sent to the player off the main thread.
+    /// Play and pause show at once; the player is asked again right after the command (the same queue, so in order),
+    /// so a new song shows without waiting for the next look.
+    func control(_ command: String) {
+        guard let playing = nowPlaying else { return }
+        NowPlaying.send(command, to: playing.player)
+        if command == "playpause" {
+            nowPlaying = NowPlaying(player: playing.player, title: playing.title, artist: playing.artist, playing: !playing.playing,
+                                    artwork: playing.artwork)
+        }
+        askNowPlaying()
     }
 
     /// Spotify gives a link to the cover; Music gives the picture itself.
