@@ -108,6 +108,19 @@ enum Doctor {
             note("warn", "dock", "The guard that gives macOS its Dock back if Petal crashes isn't installed.", fixed: fix ? "installed it" : nil)
         }
 
+        // Per-mode windows: none left off-screen. The Dock guard runs without Accessibility, so it can't move
+        // windows; after a crash, Petal's next launch brings them back (or `petal restore-windows`).
+        let waiting = Parking.waiting()
+        if waiting > 0 && !running {
+            var fixed: String?
+            if fix && AXIsProcessTrusted() { fixed = "brought back \(Parking.restoreEverything())" }
+            note("error", "windows", "\(waiting) window\(waiting == 1 ? " is" : "s are") waiting off-screen since Petal last quit unexpectedly. "
+                 + "Open Petal, or run petal restore-windows, to bring them back.", fixed: fixed)
+        } else if settings["modeWindows"] as? Bool == true {
+            note("ok", "windows", "Each mode keeps its own windows. If Petal ever quits unexpectedly, its next launch brings back "
+                 + "the windows it had put away; the Dock guard can't move windows, so it doesn't.")
+        }
+
         // The AI apps.
         let chosen = (settings["aiProviders"] as? [String] ?? Config.defaults["aiProviders"] as? [String] ?? []).compactMap(Provider.init(rawValue:))
         if chosen.isEmpty { note("ok", "ai", "No AI chosen: Petal works as a dock without it.") }
