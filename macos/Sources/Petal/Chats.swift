@@ -80,6 +80,7 @@ struct ChatsList: View {
                             panel.chatsOpen = false
                             app.claude.restore(chat)
                         } delete: {
+                            app.claude.forget(chat)
                             Chats.delete(chat)
                             chats.removeAll { $0.id == chat.id }
                         }

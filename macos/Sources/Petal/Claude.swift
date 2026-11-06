@@ -31,6 +31,11 @@ final class Agent {
     let noteID = UUID()
     /// The window the note is stuck to; nil for a chat stuck to none.
     var place: NotePlace? { didSet { if place != oldValue { keep() } } }
+    /// The AI the chat's first message was asked with, before it has a session (a note waiting for a slot keeps it).
+    @ObservationIgnored private var askedWith: Provider?
+    /// The window a kept chat was stuck to, kept in its saves until the note sticks to a window again (or learns
+    /// it's gone): a chat picked from the list never loses its window while that's being checked.
+    @ObservationIgnored var keptPlace: NotePlace?
     /// Messages sent while `ClaudePanel.atOnce` other notes worked, in order: they go once one of them is done.
     private(set) var waiting: [String] = []
     @ObservationIgnored private var chatProvider: Provider?
@@ -68,6 +73,7 @@ final class Agent {
         }
         pendingAsk = []
         steering = max(0, steering - 1)
+        if sessionID == nil, askedWith == nil { askedWith = app.chatProvider }
         messages.append(Message(kind: .user, text: prompt))
         admit(prompt)
     }
@@ -140,6 +146,8 @@ final class Agent {
 
     func reset() {
         endRun()
+        askedWith = nil
+        keptPlace = nil
         chatID = UUID()
         messages = []
         sessionID = nil
@@ -160,7 +168,7 @@ final class Agent {
         chatProvider = provider
         let title = first.text.components(separatedBy: "\n").first { !$0.hasPrefix(">") && !$0.hasPrefix("From ") && !$0.isEmpty } ?? first.text
         return SavedChat(id: chatID, title: String(title.prefix(80)), provider: provider?.rawValue ?? "", session: sessionID,
-                         updated: Date(), lines: lines, place: place)
+                         updated: Date(), lines: lines, place: place ?? keptPlace)
     }
 
     private static func name(_ kind: Kind) -> String {
@@ -171,6 +179,8 @@ final class Agent {
     /// `switchProvider`: the chat's AI becomes the one chosen (picked from the list), not only this chat's.
     func restore(_ chat: SavedChat, switchProvider: Bool = true) {
         endRun()
+        askedWith = nil
+        keptPlace = chat.place
         pendingAsk = []
         allowed = []
         chatID = chat.id
@@ -187,7 +197,7 @@ final class Agent {
     /// The AI this chat's session belongs to, while it has one (and that AI is still chosen): a note carries on with
     /// its own AI, whichever the panel last chose for another.
     var ownProvider: Provider? {
-        guard sessionID != nil, let provider = sessionProvider, app.providers.contains(provider) else { return nil }
+        guard let provider = sessionID != nil ? sessionProvider : askedWith, app.providers.contains(provider) else { return nil }
         return provider
     }
 
@@ -571,6 +581,8 @@ final class ClaudePanel {
     @ObservationIgnored var lastFront: (pid: pid_t, window: CGWindowID?)?
     @ObservationIgnored var pendingOpen: StickyNote?
     @ObservationIgnored var pendingTicket = 0
+    /// The app a note's window is being brought forward in: another app coming forward stops its retries.
+    @ObservationIgnored var bringing: pid_t?
     @ObservationIgnored var savedPlaces: [String: SavedChat] = [:]
     @ObservationIgnored var listening = false
     /// The one chat stuck to no window (no app in front, or sticky notes off).

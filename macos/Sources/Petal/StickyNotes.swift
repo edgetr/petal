@@ -131,7 +131,7 @@ extension ClaudePanel {
     /// window if that's still there; with them off (or its window gone), it's the loose chat.
     func restoreNote(_ chat: SavedChat) {
         cancelPending()
-        savedPlaces = savedPlaces.filter { $0.value.id != chat.id }
+        // Its link to its window (savedPlaces) stays: opening the AI there finds the note holding the chat.
         guard notesOn else {
             // With notes off the loose chat is the chat: it becomes the one holding this one (stuck to no window).
             if let note = live(chat: chat.id) {
@@ -163,8 +163,9 @@ extension ClaudePanel {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Shown only if the panel wasn't closed (or something else opened) meanwhile.
-                    guard ticket == self.pendingTicket else { return self.prune() }   // picked another, or closed
-                    if there && self.notesOn { _ = self.attach(note, place) }
+                    // Picked another, or closed: the chat keeps its window in its saves and its link for that window.
+                    guard ticket == self.pendingTicket else { return self.prune() }
+                    if there && self.notesOn { _ = self.attach(note, place) } else if !there { note.agent.keptPlace = nil }
                     if ticket == self.pendingTicket { self.present(note) }
                     self.prune()
                 }
@@ -177,6 +178,11 @@ extension ClaudePanel {
     /// when that window opens the AI.
     func prune() {
         let keep = { (note: StickyNote) in note === self.current || note === self.loose || note.agent.running || note.ready || !note.agent.waiting.isEmpty }
+        // A window's link to a chat let go here holds the chat as it is now, never an older copy.
+        for note in notes where !keep(note) {
+            guard let chat = note.agent.saved else { continue }
+            for (key, value) in savedPlaces where value.id == chat.id { savedPlaces[key] = chat }
+        }
         notes.removeAll { !keep($0) && ($0.windowGone || $0.place == nil) }
         let idle = notes.filter { !keep($0) && $0.attached }
         for old in idle.dropLast(30) {
@@ -288,6 +294,11 @@ extension ClaudePanel {
 
     private func appCameForward(_ running: NSRunningApplication) {
         let pid = running.processIdentifier
+        // Another app came forward while a note's window was being brought: its retries stop now.
+        if let bringing, pid != bringing, pid != ProcessInfo.processInfo.processIdentifier {
+            self.bringing = nil
+            NoteFocus.cancel()
+        }
         guard notesOn, pid != ProcessInfo.processInfo.processIdentifier, notes.contains(where: { $0.attached }) else { return }
         Self.frontWindow(of: pid) { window, _ in
             guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
@@ -302,6 +313,9 @@ extension ClaudePanel {
         if let pending = pendingOpen, let place = pending.place {
             if place.matches(pid: pid, window: pending.windowGone ? nil : window) {
                 pendingOpen = nil
+                // Its window is in front: no more retries (they'd fight a switch the person makes next).
+                bringing = nil
+                NoteFocus.cancel()
                 // After the app has finished coming forward, so its window taking focus doesn't close the note; and
                 // only if nothing else was opened meanwhile and the window is still in front.
                 let ticket = pendingTicket
@@ -332,7 +346,14 @@ extension ClaudePanel {
     func cancelPending() {
         pendingOpen = nil
         pendingTicket += 1
+        bringing = nil
         NoteFocus.cancel()
+    }
+
+    /// A chat deleted from the list stays deleted: no window brings it back, and a note holding it starts afresh.
+    func forget(_ chat: SavedChat) {
+        savedPlaces = savedPlaces.filter { $0.value.id != chat.id }
+        for note in notes where note.agent.chatID == chat.id { note.agent.reset() }
     }
 
     private func stepAway() {
@@ -433,6 +454,7 @@ extension ClaudePanel {
                     self.present(note, key: true, fromIcon: true)
                 }
             }
+            self.bringing = place.pid
             Self.bringForward(pid: place.pid, window: place.window, app: running.bundleURL)
         }
         let desktop = place.desktop ?? app.docks.focusedDock?.desktop
