@@ -566,6 +566,10 @@ struct ClaudePanelView: View {
         .onChange(of: panel.optionsOpen) { _, open in if open { panel.chatsOpen = false }; DispatchQueue.main.async { panel.fit() } }
         .onChange(of: panel.chatsOpen) { _, open in if open { panel.optionsOpen = false }; DispatchQueue.main.async { panel.fit() } }
         .onChange(of: panel.attachments.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
+        // Typing a message: the options (or the chats list) step aside for the conversation, no click needed.
+        .onChange(of: panel.draft) { _, text in
+            if !text.isEmpty && (panel.optionsOpen || panel.chatsOpen) { panel.optionsOpen = false; panel.chatsOpen = false }
+        }
         .onChange(of: panel.quotes.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: app.assist.pending?.id) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .dropDestination(for: URL.self) { urls, _ in
@@ -780,6 +784,8 @@ struct ClaudePanelView: View {
             panel.attachments = []
         }
         panel.draft = ""
+        panel.optionsOpen = false
+        panel.chatsOpen = false
         agent.send(text)
     }
 }
