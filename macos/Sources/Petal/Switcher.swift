@@ -19,8 +19,12 @@ struct ModeSwitcher: View {
                 ModeButton(dock: dock, mode: mode, size: size, pending: pending?.mode == mode.id ? pending : nil)
             }
             if let pending {
+                // It grows in from its left edge as the dock opens up, and goes at once when it closes, so the
+                // dock closing up never runs over it.
                 StayPill(pending: pending, size: size, vertical: dock.vertical)
-                    .transition(.scale(scale: 0.6, anchor: dock.vertical ? .top : .leading).combined(with: .opacity))
+                    .transition(.asymmetric(
+                        insertion: .scale(scale: 0.6, anchor: dock.vertical ? .top : .leading).combined(with: .opacity),
+                        removal: .opacity.animation(.easeOut(duration: 0.08))))
             }
         }
         .padding(3)
@@ -38,6 +42,7 @@ struct ModeButton: View {
     let size: CGFloat
     let pending: PendingMode?
     @State private var hovering = false
+    @State private var pressed = false
 
     var body: some View {
         let active = dock.mode?.id == mode.id
@@ -46,7 +51,11 @@ struct ModeButton: View {
         content(active: active, wide: wide)
             .frame(minWidth: size, minHeight: size, maxHeight: size)
             .fixedSize()
+            // Growing into a pill or shrinking back to a circle, what it shows stays inside its own outline, so
+            // it never runs over the buttons beside it.
+            .clipShape(.capsule)
             .contentShape(.capsule)
+            .pressed(pressed)
             .overlay(alignment: .topTrailing) {
                 if held > 0 && !active {
                     Text(held > 99 ? "99+" : "\(held)")
@@ -67,7 +76,8 @@ struct ModeButton: View {
                 hover: { on in
                     hovering = on
                     app.tooltips.show(on && !wide ? mode.name : nil, over: "mode:\(mode.id)", in: dock)
-                }))
+                },
+                press: { pressed = $0 }))
             .animation(.easeOut(duration: 0.15), value: hovering)
             .animation(.easeOut(duration: 0.2), value: held)
     }
@@ -75,23 +85,21 @@ struct ModeButton: View {
     @ViewBuilder private func content(active: Bool, wide: Bool) -> some View {
         let color = Color(nsColor: mode.color)
         if let pending {
-            TimelineView(.animation(minimumInterval: 1 / 30)) { context in
-                let left = max(0, pending.deadline.timeIntervalSince(context.date))
-                let done = 1 - left / max(0.1, pending.total)
-                if wide {
-                    pill(text: "\(mode.name) \(Self.clock(left))", fill: done)
-                } else {
-                    ZStack {
-                        Circle().fill(.white.opacity(0.08))
-                        Circle().trim(from: 0, to: done).stroke(color, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                            .rotationEffect(.degrees(-90))
-                        ModeIcon(icon: mode.icon, size: size * 0.46).foregroundStyle(.white)
-                    }
-                    .frame(width: size, height: size)
+            // The fill runs on Core Animation; the words change once a second.
+            if wide {
+                TimelineView(SecondsLeft(deadline: pending.deadline)) { context in
+                    pill(text: "\(mode.name) \(Self.clock(max(0, pending.deadline.timeIntervalSince(context.date))))", pending: pending)
                 }
+            } else {
+                ZStack {
+                    Circle().fill(.white.opacity(0.08))
+                    CountdownFill(color: mode.color, pending: pending, ring: true)
+                    ModeIcon(icon: mode.icon, size: size * 0.46).foregroundStyle(.white)
+                }
+                .frame(width: size, height: size)
             }
         } else if wide {
-            pill(text: mode.name, fill: 1)
+            pill(text: mode.name, pending: nil)
         } else {
             ZStack {
                 Circle().fill(active ? color : .white.opacity(hovering ? 0.12 : 0))
@@ -102,8 +110,8 @@ struct ModeButton: View {
         }
     }
 
-    /// The mode's icon and name in white on its color; `fill` is how much of it is colored, left to right.
-    private func pill(text: String, fill: Double) -> some View {
+    /// The mode's icon and name in white on its color; while it waits, the color fills it left to right.
+    private func pill(text: String, pending: PendingMode?) -> some View {
         let color = Color(nsColor: mode.color)
         return HStack(spacing: size * 0.18) {
             ModeIcon(icon: mode.icon, size: size * 0.42)
@@ -114,13 +122,7 @@ struct ModeButton: View {
         .padding(.trailing, size * 0.38)
         .frame(height: size)
         .background {
-            GeometryReader { box in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(color.opacity(0.28))
-                    Rectangle().fill(color).frame(width: box.size.width * min(1, max(0, fill)))
-                }
-                .clipShape(.capsule)
-            }
+            if let pending { CountdownFill(color: mode.color, pending: pending) } else { Capsule().fill(color) }
         }
         .overlay(Capsule().strokeBorder(Color(nsColor: mode.color.blended(withFraction: 0.25, of: .white) ?? mode.color).opacity(0.8), lineWidth: 1))
     }
@@ -139,6 +141,7 @@ struct StayPill: View {
     let size: CGFloat
     var vertical = false
     @State private var hovering = false
+    @State private var pressed = false
 
     var body: some View {
         Text("Stay")
@@ -148,6 +151,7 @@ struct StayPill: View {
             .frame(width: vertical ? size : nil, height: size)
             .background(.white.opacity(hovering ? 1 : 0.92), in: .capsule)
             .fixedSize()
-            .slotMouse(SlotMouse(left: { app.stay() }, hover: { hovering = $0 }))
+            .pressed(pressed)
+            .slotMouse(SlotMouse(left: { app.stay() }, hover: { hovering = $0 }, press: { pressed = $0 }))
     }
 }

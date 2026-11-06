@@ -22,6 +22,10 @@ MainActor.assumeIsolated {
         SystemDock.restore()
         exit(0)
     }
+    if arguments.contains("--bench-dock") {
+        app.setActivationPolicy(.prohibited)
+        DockBench.run()
+    }
     if arguments.contains("--bench") {
         app.setActivationPolicy(.prohibited)
         Bench.run()

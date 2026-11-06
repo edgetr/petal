@@ -27,6 +27,9 @@ final class ScreenDock {
     @ObservationIgnored var order: [String] = []
     @ObservationIgnored var frames: [String: CGRect] = [:]   // slot frames in the panel, top-left origin
     @ObservationIgnored weak var panel: DockPanel?
+    /// Every mode's apps as this screen would show them, for the layer strip's rows made ahead of time.
+    @ObservationIgnored var rows: [String: [DockItem]] = [:]
+    @ObservationIgnored weak var strip: AppStripView?
     let magnifier = Magnifier()
 
     init() { magnifier.dock = self }
@@ -290,6 +293,17 @@ final class DockController {
             for other in others where !dock.order.contains(other.id) { dock.order.append(other.id) }
             let ordered = pinned + dock.order.compactMap { key in others.first { $0.id == key } }
             Perf.span("refresh: set items") { if ordered != dock.items { dock.items = ordered } }
+            // The layer strip keeps every mode's row ready: each mode's apps, then the running apps in no mode.
+            if DockStrip.shared.layers {
+                let loose = ordered.filter { !$0.pinned }
+                var rows: [String: [DockItem]] = [:]
+                for other in modesOn ? config.modes : Array(config.modes.prefix(1)) where other.id != mode?.id {
+                    var seen = Set<String>()
+                    rows[other.id] = other.apps.filter { Apps.shows($0) && seen.insert($0).inserted }.map { item($0, pinned: true) } + loose
+                }
+                rows[mode?.id ?? ""] = ordered
+                dock.rows = rows
+            }
             if dock.minimized != minimizedAll { dock.minimized = minimizedAll }
 
             // The stage is as long as the most apps any mode would show here, so switching never moves the rest.
@@ -534,7 +548,7 @@ final class DockPanel: NSPanel {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         dock.panel = self
         hosting = DockHostingView(rootView: AnyView(DockView(dock: dock).environment(PetalApp.shared)))
-        contentView = hosting
+        contentView = DockHostingView.container(hosting)
         isFloatingPanel = true
         level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)))
         backgroundColor = .clear
@@ -559,12 +573,21 @@ final class DockPanel: NSPanel {
 
     var config: Config { PetalApp.shared.config }
 
+    /// The dock's content (the glass and the clear room around it), centered in the panel. The panel itself is as
+    /// long as the screen's edge, so it never resizes while the dock grows or shrinks: SwiftUI animates the glass
+    /// around its centre instead. Its clear parts let clicks through to the windows below.
+    var contentFrame: CGRect {
+        let size = measured ?? frame.size
+        return CGRect(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2, width: size.width, height: size.height)
+    }
+
     /// The glass itself, without the clear room around it for lifting and bouncing icons: tooltips, previews and
     /// stacks sit just above this, as they do over macOS's Dock.
     var glassFrame: CGRect {
         let room = DockView.outer(config)
-        return CGRect(x: frame.minX + room.leading, y: frame.minY + room.bottom,
-                      width: frame.width - room.leading - room.trailing, height: frame.height - room.top - room.bottom)
+        let content = contentFrame
+        return CGRect(x: content.minX + room.leading, y: content.minY + room.bottom,
+                      width: content.width - room.leading - room.trailing, height: content.height - room.top - room.bottom)
     }
 
     /// The gap between the dock and the screen's edge (Omarchy's `gap`).
@@ -578,22 +601,28 @@ final class DockPanel: NSPanel {
     func place(on screen: NSScreen) {
         screenRef = screen
         // Measured again only when the dock's content says its size may have changed: once a second, nothing has.
-        let size: CGSize
+        let content: CGSize
         if let measured, !hosting.sizeChanged {
-            size = measured
+            content = measured
         } else {
-            hosting.layoutSubtreeIfNeeded()
-            size = hosting.fittingSize
-            measured = size
-            hosting.sizeChanged = false
+            content = hosting.measure()
+            measured = content
         }
+        // Only the dock's thickness comes from its content; along the edge the panel is the screen's length.
         let area = screen.frame
         let visible = screen.visibleFrame
         var origin: CGPoint
+        let size: CGSize
         switch config.position {
-        case "left": origin = CGPoint(x: area.minX + gap, y: visible.midY - size.height / 2)
-        case "right": origin = CGPoint(x: area.maxX - size.width - gap, y: visible.midY - size.height / 2)
-        default: origin = CGPoint(x: area.midX - size.width / 2, y: area.minY + gap)
+        case "left":
+            size = CGSize(width: content.width, height: visible.height)
+            origin = CGPoint(x: area.minX + gap, y: visible.minY)
+        case "right":
+            size = CGSize(width: content.width, height: visible.height)
+            origin = CGPoint(x: area.maxX - content.width - gap, y: visible.minY)
+        default:
+            size = CGSize(width: area.width, height: content.height)
+            origin = CGPoint(x: area.minX, y: area.minY + gap)
         }
         // Tucked away, it slides a little toward the edge and fades out (sliding off the edge would put it on a
         // display arranged next to this one).
@@ -639,7 +668,7 @@ final class DockPanel: NSPanel {
     private func followMouse() {
         guard config.autoHide, let screen = screenRef else {
             if !dock.revealed { dock.revealed = true }
-            if frame.contains(NSEvent.mouseLocation) { dock.magnifier.wake() }
+            if contentFrame.contains(NSEvent.mouseLocation) { dock.magnifier.wake() }
             return
         }
         let mouse = NSEvent.mouseLocation
@@ -651,7 +680,7 @@ final class DockPanel: NSPanel {
         case "right": atEdge = mouse.x >= area.maxX - depth && mouse.y >= area.minY && mouse.y <= area.maxY
         default: atEdge = mouse.y <= area.minY + depth && mouse.x >= area.minX && mouse.x <= area.maxX
         }
-        let over = frame.insetBy(dx: -8, dy: -8).contains(mouse)
+        let over = contentFrame.insetBy(dx: -8, dy: -8).contains(mouse)
         if over && !tucked { dock.magnifier.wake() }
         if !dock.revealed && atEdge {
             dock.revealed = true
@@ -721,8 +750,15 @@ struct DockView: View {
         }
         .padding(outer)
         .fixedSize()
-        .animation(.easeOut(duration: 0.22), value: dock.items.map(\.id))
+        // Centered in a panel that never resizes, so the glass grows and shrinks around its centre in the same
+        // animation as what changed inside it: the window never moves under it.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // (The layer strip animates its own apps, and its stage never changes size with them.)
+        .animation(.easeOut(duration: 0.22), value: DockStrip.shared.layers && !snapshotting ? [] : dock.items.map(\.id))
         .animation(.easeOut(duration: 0.22), value: dock.minimized.map(\.id))
+        .animation(.easeOut(duration: 0.24), value: dock.mode?.id)
+        .animation(.easeOut(duration: 0.24), value: app.pendingMode?.mode)
+        .animation(.easeOut(duration: 0.22), value: app.signals.nowPlaying == nil)
     }
 
     /// Room around the glass: for its shadow, and inward for icons lifting and bouncing.
@@ -759,6 +795,16 @@ struct DockView: View {
     /// The mode's apps, the rest, and "+", centered on a stage as long as the fullest mode.
     @ViewBuilder private func stage(_ layout: AnyLayout) -> some View {
         let length = CGFloat(dock.stageSlots) * slot
+        if DockStrip.shared.layers && !snapshotting {
+            AppStrip(dock: dock, length: length, slot: slot)
+                .stripRoom(dock, icon: icon, slot: slot)
+                .frame(width: dock.vertical ? slot : length, height: dock.vertical ? length : slot)
+        } else {
+            swiftUIStage(layout, length: length)
+        }
+    }
+
+    @ViewBuilder private func swiftUIStage(_ layout: AnyLayout, length: CGFloat) -> some View {
         layout {
             ForEach(Array(dock.items.enumerated()), id: \.element.id) { index, item in
                 AppSlot(dock: dock, item: item, index: index, icon: icon, slot: slot)
@@ -798,6 +844,13 @@ struct SlotFrame: ViewModifier {
 extension View {
     func slotFrame(_ dock: ScreenDock, _ id: String) -> some View { modifier(SlotFrame(dock: dock, id: id)) }
 
+    /// Pressed: a little darker and smaller the moment the button goes down, as macOS's Dock does.
+    func pressed(_ on: Bool) -> some View {
+        brightness(on ? -0.22 : 0)
+            .scaleEffect(on ? 0.92 : 1)
+            .animation(.easeOut(duration: on ? 0.06 : 0.14), value: on)
+    }
+
     /// The icon lifts and grows inward under the pointer.
     func lift(_ hovering: Bool, icon: CGFloat) -> some View {
         let config = PetalApp.shared.config
@@ -820,6 +873,7 @@ struct ClaudeButton: View {
     let dock: ScreenDock
     let size: CGFloat
     @State private var hovering = false
+    @State private var pressed = false
 
     var body: some View {
         ZStack {
@@ -829,13 +883,14 @@ struct ClaudeButton: View {
             if app.config.bool("claudeUsage") { UsageRing(usage: app.usage, size: size, line: 2.5, track: false) }
         }
         .frame(width: size, height: size)
+        .pressed(pressed)
         .animation(.easeOut(duration: 0.12), value: hovering)
         .slotFrame(dock, "claude")
         .slotMouse(SlotMouse(left: { app.claude.open(asking: nil) }, right: { Menus.settings(for: dock) },
                            hover: { on in
                                hovering = on
                                app.tooltips.show(on ? app.usageTooltip : nil, over: "claude", in: dock)
-                           }))
+                           }, press: { pressed = $0 }))
     }
 }
 
@@ -893,6 +948,7 @@ struct AppSlot: View {
     let slot: CGFloat
     @State private var hovering = false
     @State private var fileOver = false
+    @State private var pressed = false
     @State private var hop: CGFloat = 0
 
     var body: some View {
@@ -909,6 +965,7 @@ struct AppSlot: View {
                     .animation(.easeOut(duration: 0.2), value: item.active)
             }
             DockIcon(id: item.id, size: icon)
+                .pressed(pressed)
                 .opacity((item.running || !item.pinned || Sites.isWeb(item.id) ? 1 : config.number("idleOpacity")) * (fileOver ? 0.6 : 1))
                 .modifier(Pulse(on: launching, floor: config.number("idleOpacity")))
                 .overlay(alignment: .topTrailing) {
@@ -945,7 +1002,8 @@ struct AppSlot: View {
             },
             drag: { delta, ended in drag(delta, ended: ended) },
             files: config.bool("dropToOpen") ? { urls in app.docks.launch(item.id, files: urls) } : nil,
-            fileOver: { fileOver = $0 }))
+            fileOver: { fileOver = $0 },
+            press: { pressed = $0 }))
         .onChange(of: app.signals.bounces[item.id]) { _, _ in bounce() }
     }
 
@@ -1103,6 +1161,7 @@ struct AddSlot: View {
     let dock: ScreenDock
     let icon: CGFloat
     @State private var hovering = false
+    @State private var pressed = false
 
     var body: some View {
         let color = Color(nsColor: dock.mode?.color ?? PetalApp.shared.accent)
@@ -1113,13 +1172,14 @@ struct AddSlot: View {
                 .frame(width: icon * 0.8, height: icon * 0.8)
             Image(systemName: "plus").font(.system(size: icon * 0.36, weight: .bold)).foregroundStyle(color)
         }
+        .pressed(pressed)
         .lift(hovering, icon: icon)
         .slotFrame(dock, "add")
         .slotMouse(SlotMouse(left: { app.popups.closeAll(); app.search.open(in: dock) }, right: { Menus.settings(for: dock) },
                            hover: { on in
                                hovering = on
                                app.tooltips.show(on ? (dock.mode.map { "Add apps to \($0.name)" } ?? "Add apps") : nil, over: "add", in: dock)
-                           }))
+                           }, press: { pressed = $0 }))
     }
 }
 
@@ -1163,24 +1223,7 @@ struct NowPlayingSlot: View {
     }
 }
 
-struct Equalizer: View {
-    let icon: CGFloat
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 15)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            HStack(alignment: .bottom, spacing: 2) {
-                ForEach(0..<3) { i in
-                    let period = 0.52 + Double(i) * 0.16
-                    let phase = (sin(t * .pi * 2 / period) + 1) / 2
-                    Capsule().fill(Color(nsColor: PetalApp.shared.accent))
-                        .frame(width: 2, height: max(2, max(4, icon * 0.16) * (i == 1 ? 1 : 0.7) * phase))
-                }
-            }
-            .frame(height: max(4, icon * 0.16), alignment: .bottom)
-        }
-    }
-}
+// The equalizer is in Motion.swift.
 
 struct MinimizedSlot: View {
     @Environment(PetalApp.self) private var app
@@ -1301,6 +1344,9 @@ struct SlotMouse: NSViewRepresentable {
     var drag: ((CGFloat, Bool) -> Void)? = nil
     var files: (([URL]) -> Void)? = nil
     var fileOver: (Bool) -> Void = { _ in }
+    /// The button went down (true) or up, or a drag took over (false): for feedback the moment it's pressed. What a
+    /// click does still happens on the way up, so a press can turn into a drag.
+    var press: (Bool) -> Void = { _ in }
 
     func makeNSView(context: Context) -> MouseView { MouseView() }
     func updateNSView(_ view: MouseView, context: Context) { view.handlers = self }
@@ -1339,6 +1385,7 @@ struct SlotMouse: NSViewRepresentable {
         override func mouseDown(with event: NSEvent) {
             down = NSEvent.mouseLocation
             dragging = false
+            handlers?.press(true)
         }
 
         override func mouseDragged(with event: NSEvent) {
@@ -1346,11 +1393,15 @@ struct SlotMouse: NSViewRepresentable {
             let point = NSEvent.mouseLocation
             let vertical = PetalApp.shared.config.position != "bottom"
             let delta = vertical ? down.y - point.y : point.x - down.x
-            if abs(point.x - down.x) > 4 || abs(point.y - down.y) > 4 { dragging = true }
+            if !dragging && (abs(point.x - down.x) > 4 || abs(point.y - down.y) > 4) {
+                dragging = true
+                handlers?.press(false)
+            }
             if dragging { drag(delta, false) }
         }
 
         override func mouseUp(with event: NSEvent) {
+            if !dragging { handlers?.press(false) }
             if dragging { handlers?.drag?(0, true) } else { handlers?.left() }
             down = nil
             dragging = false
@@ -1412,8 +1463,33 @@ struct ModeIcon: View {
 final class DockHostingView: NSHostingView<AnyView> {
     var sizeChanged = true
 
+    required init(rootView: AnyView) {
+        super.init(rootView: rootView)
+        // Only its size for measuring: no minimum or maximum that would make the window follow the content.
+        sizingOptions = [.intrinsicContentSize]
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
     override func invalidateIntrinsicContentSize() {
         super.invalidateIntrinsicContentSize()
         sizeChanged = true
+    }
+
+    /// The content's own size (the glass and the room around it), laid out now.
+    func measure() -> CGSize {
+        layoutSubtreeIfNeeded()
+        sizeChanged = false
+        return intrinsicContentSize
+    }
+
+    /// A plain view holding the hosting view at its full size, so the window's size is the panel's alone.
+    static func container(_ hosting: DockHostingView) -> NSView {
+        let container = NSView()
+        hosting.translatesAutoresizingMaskIntoConstraints = true
+        hosting.autoresizingMask = [.width, .height]
+        container.addSubview(hosting)
+        return container
     }
 }

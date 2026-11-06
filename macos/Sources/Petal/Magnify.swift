@@ -116,6 +116,7 @@ final class Magnifier {
         }
         anchorSpread = Self.spread(at: next.pointer, spread)
         state = next
+        dock?.strip?.magnify()   // the layer strip moves its icons itself
     }
 
     /// How much growth lies before `position` along the dock.
