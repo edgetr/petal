@@ -16,8 +16,36 @@ struct UsageLimit: Equatable {
 @MainActor @Observable
 final class Usage {
     /// Kept per AI, so switching shows the right one straight away and a slow check can't land on the wrong one.
-    private(set) var limitsBy: [Provider: [UsageLimit]] = [:]
+    private(set) var limitsBy: [Provider: [UsageLimit]] = [:] { didSet { save() } }
     private(set) var helpBy: [Provider: String] = [:]
+    /// Anthropic's usage check answers a few times an hour at most: asked at most every 2 minutes, and not again
+    /// until it says after it refuses (429).
+    @ObservationIgnored private var claudeAsked: Date?
+    @ObservationIgnored private var claudeWait: Date?
+
+    init() { load() }
+
+    /// The last limits seen, kept through a restart (the check may not answer again for minutes).
+    private static let store = "usageLimits"
+
+    private func save() {
+        let plain = limitsBy.mapValues { $0.map { ["label": $0.label, "percent": $0.percent, "resets": $0.resetsAt?.timeIntervalSince1970 ?? 0] } }
+        UserDefaults.standard.set(Dictionary(uniqueKeysWithValues: plain.map { ($0.key.rawValue, $0.value) }), forKey: Self.store)
+    }
+
+    private func load() {
+        let saved = UserDefaults.standard.dictionary(forKey: Self.store) as? [String: [[String: Any]]] ?? [:]
+        for (key, list) in saved {
+            guard let provider = Provider(rawValue: key) else { continue }
+            limitsBy[provider] = list.compactMap { item in
+                guard let label = item["label"] as? String, let percent = item["percent"] as? Double else { return nil }
+                let resets = (item["resets"] as? Double).flatMap { $0 > 0 ? Date(timeIntervalSince1970: $0) : nil }
+                // A window that has reset since is unused again.
+                if let resets, resets < Date() { return UsageLimit(label: label, percent: 0, resetsAt: nil) }
+                return UsageLimit(label: label, percent: percent, resetsAt: resets)
+            }
+        }
+    }
 
     var limits: [UsageLimit] { PetalApp.shared.chatProvider.flatMap { limitsBy[$0] } ?? [] }
     var help: String { PetalApp.shared.chatProvider.flatMap { helpBy[$0] } ?? "" }
@@ -103,6 +131,10 @@ final class Usage {
     }
 
     private func refreshClaude() async {
+        let now = Date()
+        if let claudeWait, now < claudeWait { return }
+        if let claudeAsked, now.timeIntervalSince(claudeAsked) < 120, limitsBy[.claude]?.isEmpty == false { return }
+        claudeAsked = now
         guard let token = await Self.accessToken() else {
             helpBy[.claude] = "Sign in to Claude Code to see your usage."
             return
@@ -114,6 +146,13 @@ final class Usage {
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let status = (response as? HTTPURLResponse)?.statusCode else {
             helpBy[.claude] = "Couldn't reach Anthropic. Trying again shortly."
+            return
+        }
+        if status == 429 {
+            // Asked too often: wait as long as it says (5 minutes if it doesn't), and keep showing the last numbers.
+            let after = ((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After")).flatMap(Double.init) ?? 300
+            claudeWait = Date().addingTimeInterval(max(60, after))
+            if limitsBy[.claude]?.isEmpty != false { helpBy[.claude] = "Anthropic's usage check is busy; trying again in a few minutes." }
             return
         }
         guard status == 200, let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

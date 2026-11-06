@@ -2,8 +2,9 @@ import Foundation
 
 /// Petal replaces macOS's Dock while it runs: the Dock is set to hide, and to wait 1000 seconds before it shows,
 /// which keeps it out of sight. A full-screen app shows macOS's Dock whatever its wait, as the pointer pushes on its
-/// edge, so it also moves to an edge Petal's dock isn't on, at its smallest: reaching for Petal's dock there never
-/// brings it up under Petal's. Quitting Petal gives it back exactly as it was.
+/// edge, so its showing is also slowed to a crawl (`autohide-time-modifier`), at its smallest: reaching for Petal's
+/// dock there, it barely starts to rise before you've moved on. It stays on its own edge, the bottom, since macOS
+/// minimizes windows toward it. Quitting Petal gives it back exactly as it was.
 ///
 /// The Dock's own settings are saved to ~/.config/petal/macos-dock.json before they change, and that file is the
 /// promise to put them back: if Petal crashes, the next launch keeps the saved settings (it doesn't save the hidden
@@ -11,7 +12,9 @@ import Foundation
 @MainActor
 enum SystemDock {
     private static let backup = Config.folder.appending(path: "macos-dock.json")
-    private static let keys = [("autohide", "-bool"), ("autohide-delay", "-float"), ("orientation", "-string"), ("tilesize", "-float")]
+    /// What Petal changes, saved first. (`orientation` is only put back: an earlier Petal moved the Dock to a side.)
+    private static let keys = [("autohide", "-bool"), ("autohide-delay", "-float"), ("autohide-time-modifier", "-float"),
+                               ("tilesize", "-float"), ("orientation", "-string")]
 
     static var isReplaced: Bool { FileManager.default.fileExists(atPath: backup.path) }
 
@@ -59,20 +62,12 @@ enum SystemDock {
         }
         write("autohide", "-bool", "true")
         write("autohide-delay", "-float", "1000")
-        write("orientation", "-string", aside)
+        write("autohide-time-modifier", "-float", "1000")
         write("tilesize", "-float", "16")
+        // Its own edge, as the person had it.
+        if let side = saved["orientation"] as? String { write("orientation", "-string", side) } else { defaults("delete", "com.apple.dock", "orientation") }
         restartDock()
         return true
-    }
-
-    /// The edge for macOS's Dock: one Petal's dock isn't on.
-    private static var aside: String { PetalApp.shared.config.position == "left" ? "right" : "left" }
-
-    /// Petal's dock moved to another edge: macOS's moves off it.
-    static func follow() {
-        guard isReplaced, read("orientation") as? String != aside else { return }
-        write("orientation", "-string", aside)
-        restartDock()
     }
 
     static func restore() {

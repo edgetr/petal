@@ -156,6 +156,10 @@ enum DockGuard {
         fi
         delay="$(plutil -extract autohide-delay raw -o - "$backup" 2>/dev/null)"
         case "$delay" in ''|*[!0-9.]*) defaults delete com.apple.dock autohide-delay 2>/dev/null ;; *) defaults write com.apple.dock autohide-delay -float "$delay" ;; esac
+        if grep -q '"autohide-time-modifier"' "$backup"; then
+          pace="$(plutil -extract autohide-time-modifier raw -o - "$backup" 2>/dev/null)"
+          case "$pace" in ''|*[!0-9.]*) defaults delete com.apple.dock autohide-time-modifier 2>/dev/null ;; *) defaults write com.apple.dock autohide-time-modifier -float "$pace" ;; esac
+        fi
         if grep -q '"orientation"' "$backup"; then
           side="$(plutil -extract orientation raw -o - "$backup" 2>/dev/null)"
           case "$side" in left|right|bottom) defaults write com.apple.dock orientation -string "$side" ;; *) defaults delete com.apple.dock orientation 2>/dev/null ;; esac
