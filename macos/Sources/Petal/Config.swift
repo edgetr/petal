@@ -24,6 +24,10 @@ struct Mode: Equatable, Identifiable {
 
     var hex: String { color.hex }
 
+    /// My Dock (macOS's Dock, imported): everything the person uses, the default rather than a focus mode, so it
+    /// has no focus cards and nothing in it is sorted.
+    var isEverything: Bool { id == "dock" }
+
     /// Distracting, or, before the AI has decided, a mode named like one.
     var isDistracting: Bool {
         distracting ?? ["social", "gaming", "games", "entertainment"].contains { $0 == id.lowercased() || $0 == name.lowercased() }

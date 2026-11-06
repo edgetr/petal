@@ -112,7 +112,7 @@ final class FocusGuard {
 
     /// Steps 1–4 for what's in front.
     func evaluate(_ front: Front, mode: Mode, desktop: Int, asked: Bool = false) {
-        if mode.isDistracting { return ok(front.bundleID) }
+        if mode.isDistracting || mode.isEverything { return ok(front.bundleID) }
         let owners = Self.owners(of: front, in: config.modes)
         if owners.contains(where: { $0.id == mode.id }) { return ok(front.bundleID) }
         if let owner = owners.first(where: \.isDistracting) ?? owners.first {

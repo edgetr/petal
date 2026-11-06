@@ -111,6 +111,34 @@ enum Windows {
         return value(window, kAXTitleAttribute) ?? ""
     }
 
+    /// Presses the app's menu item whose shortcut is ⌘ plus `key` (no other modifiers), the way choosing it from the
+    /// menu would. Returns false when there's none, or no Accessibility. Off the main thread.
+    nonisolated static func pressMenuItem(pid: pid_t, key: String) -> Bool {
+        guard trusted else { return false }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.5)
+        guard let bar: AXUIElement = value(app, kAXMenuBarAttribute),
+              let menus: [AXUIElement] = value(bar, kAXChildrenAttribute) else { return false }
+        func find(_ element: AXUIElement, depth: Int) -> AXUIElement? {
+            guard depth < 4, let children: [AXUIElement] = value(element, kAXChildrenAttribute) else { return nil }
+            for child in children {
+                if let char: String = value(child, kAXMenuItemCmdCharAttribute), char.uppercased() == key,
+                   let modifiers: Int = value(child, kAXMenuItemCmdModifiersAttribute), modifiers == 0,
+                   (value(child, kAXEnabledAttribute) as Bool?) != false {
+                    return child
+                }
+                if let found = find(child, depth: depth + 1) { return found }
+            }
+            return nil
+        }
+        for menu in menus.dropFirst() {   // the first is the app's own menu (About, Quit)
+            if let item = find(menu, depth: 0) {
+                return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
+            }
+        }
+        return false
+    }
+
     nonisolated static func value<T>(_ element: AXUIElement, _ attribute: String) -> T? {
         var raw: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) == .success, let raw else { return nil }

@@ -426,12 +426,18 @@ final class DockController {
         if Sites.isWeb(id) { Sites.open(id); return }
         guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: id).first else { launch(id); return }
         Windows.bringForward(running)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            let source = CGEventSource(stateID: .combinedSessionState)
-            for down in [true, false] {
-                let event = CGEvent(keyboardEventSource: source, virtualKey: 0x2D, keyDown: down)   // N
-                event?.flags = .maskCommand
-                event?.postToPid(running.processIdentifier)
+        let pid = running.processIdentifier
+        // The app's own menu item for ⌘N (File › New Window, in any language), pressed through Accessibility; an
+        // app without one gets the keystroke, once it's in front.
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard !Windows.pressMenuItem(pid: pid, key: "N") else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                let source = CGEventSource(stateID: .combinedSessionState)
+                for down in [true, false] {
+                    let event = CGEvent(keyboardEventSource: source, virtualKey: 0x2D, keyDown: down)   // N
+                    event?.flags = .maskCommand
+                    event?.postToPid(pid)
+                }
             }
         }
     }
@@ -540,6 +546,7 @@ final class DockPanel: NSPanel {
     let dock = ScreenDock()
     private var hosting: DockHostingView!
     private var measured: CGSize?
+    private var measuredShape = ""
     private var hideAt: Date?
     private var mouseTimer: Timer?
     private(set) weak var screenRef: NSScreen?
@@ -576,8 +583,13 @@ final class DockPanel: NSPanel {
     /// clear rest of the panel, and not at all while tucked away.
     func updateMouseThrough() {
         let wanted = tucked || !contentFrame.insetBy(dx: -2, dy: -2).contains(NSEvent.mouseLocation)
-        if ignoresMouseEvents != wanted { ignoresMouseEvents = wanted }
+        guard ignoresMouseEvents != wanted else { return }
+        ignoresMouseEvents = wanted
+        if wanted { NotificationCenter.default.post(name: Self.mouseLeft, object: self) }
     }
+
+    /// Posted as the dock stops taking the mouse: whatever was hovered in it isn't any more.
+    static let mouseLeft = Notification.Name("PetalDockMouseLeft")
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
@@ -619,6 +631,9 @@ final class DockPanel: NSPanel {
     func place(on screen: NSScreen) {
         screenRef = screen
         // Measured again only when the dock's content says its size may have changed: once a second, nothing has.
+        // A new position (or icon size) lays the dock out the other way: the last measure doesn't hold.
+        let shape = "\(config.position)|\(config.number("iconSize"))|\(config.number("iconPadding"))|\(config.number("dockMargin"))"
+        if shape != measuredShape { measured = nil; measuredShape = shape }
         let content: CGSize
         if let measured, !hosting.sizeChanged {
             content = measured
@@ -1395,11 +1410,34 @@ struct SlotMouse: NSViewRepresentable {
             area = new
         }
 
+        private var inside = false
+        private var leftObserver: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let leftObserver { NotificationCenter.default.removeObserver(leftObserver) }
+            leftObserver = nil
+            guard let window else { return }
+            // The dock stops taking the mouse as the pointer leaves it, sometimes before macOS says the pointer left
+            // this slot: a slot would stay hovered (a mode button kept its highlight). The dock says so instead.
+            leftObserver = NotificationCenter.default.addObserver(forName: DockPanel.mouseLeft, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.inside else { return }
+                    self.inside = false
+                    self.handlers?.hover(false)
+                }
+            }
+        }
+
         override func mouseEntered(with event: NSEvent) {
             (window as? DockPanel)?.dock.magnifier.wake()
+            inside = true
             handlers?.hover(true)
         }
-        override func mouseExited(with event: NSEvent) { handlers?.hover(false) }
+        override func mouseExited(with event: NSEvent) {
+            inside = false
+            handlers?.hover(false)
+        }
 
         override func mouseDown(with event: NSEvent) {
             down = NSEvent.mouseLocation

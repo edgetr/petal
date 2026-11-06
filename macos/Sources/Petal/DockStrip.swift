@@ -90,6 +90,7 @@ final class AppStripView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if window != nil { observe() }
+        watchMouseLeaving()
     }
 
     override func viewDidChangeBackingProperties() {
@@ -355,6 +356,17 @@ final class AppStripView: NSView {
     }
     override func mouseMoved(with event: NSEvent) { updateHover() }
     override func mouseExited(with event: NSEvent) { setHover(nil) }
+
+    /// See SlotMouse: the dock says when the pointer has left it, in case macOS doesn't get to.
+    private func watchMouseLeaving() {
+        if let leftObserver { NotificationCenter.default.removeObserver(leftObserver) }
+        leftObserver = nil
+        guard let window else { return }
+        leftObserver = NotificationCenter.default.addObserver(forName: DockPanel.mouseLeft, object: window, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.setHover(nil) }
+        }
+    }
+    private var leftObserver: Any?
 
     private func updateHover() {
         guard let window, dragging == false, dock?.dragging == nil else { return }
