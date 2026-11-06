@@ -194,6 +194,13 @@ final class Agent {
         case "mcp__petal__petal_list_apps": return "Looking up apps"
         case "mcp__petal__petal_switch_mode": return "Switching to  " + (input["id"] as? String ?? "")
         case "mcp__petal__petal_reload": return "Reloading Petal"
+        case "mcp__petal__petal_look": return (input["screenshot"] as? String ?? "").isEmpty ? "Looking at what's in front" : "Looking at your screen"
+        case "mcp__petal__petal_apps": return ((input["action"] as? String ?? "open").capitalized) + "  " + (input["app"] as? String ?? input["open"] as? String ?? "")
+        case "mcp__petal__petal_windows": return (input["action"] as? String ?? "list") == "list" ? "Looking at your windows" : "Arranging windows"
+        case "mcp__petal__petal_trash": return input["undo"] as? Bool == true ? "Putting files back" : "Moving to the Trash"
+        case "mcp__petal__petal_remember": return "Remembering  " + (input["text"] as? String ?? "")
+        case "mcp__petal__petal_forget": return "Forgetting"
+        case "mcp__petal__petal_memories": return "Looking at what I remember"
         default: return name
         }
     }
@@ -203,9 +210,17 @@ final class Agent {
         You are \(provider.name), running inside Petal, the user's dock on macOS. Your replies show in a small panel above the dock: be brief and friendly, short paragraphs, no big headings. You work in the user's home folder.
 
         Everything about the dock is customizable through you. Use the petal MCP tools: call petal_get_state first, then petal_set_settings (appearance: dockColor, iconSize, accentColor, …; feature switches: bounce, badges, previews, …), petal_set_dock (position, auto-hide), petal_save_mode / petal_delete_mode (focus modes and their apps; apps are bundle identifiers, get them from petal_list_apps; mode icons are SF Symbol names), petal_switch_mode (puts the current Desktop in a mode), petal_export_recipe / petal_import_recipe (share a dock as a .petal file, or add one someone shared), petal_suggestions and petal_summary (from the user's private activity history). A mode's shortcut field names a Shortcut (Shortcuts app) that runs when a Desktop enters the mode, such as one that turns on a Focus; the schedule setting switches modes by the clock. Every Desktop has its own mode. Changes apply instantly. If a request can't be done with settings or modes, you may change Petal's own code, and the change is kept through updates: run `\(Bundle.main.executableURL?.resolvingSymlinksInPath().path ?? "petal") personal init` (once; it prints where Petal's source is), edit the Swift there, then `… personal save "<what changed, in a few words>"`, which builds, installs and restarts Petal (`… personal undo` takes the last change back). Never copy anything over Petal.app yourself, and never edit the app's files. You can also help with anything else on the Mac: apps, files, macOS settings (defaults, AppleScript, the shell). If something needs the user's approval, say in one line what it would do; they can allow it from the panel. If something about Petal itself is broken, run `\(Bundle.main.executablePath ?? "Petal") doctor` (and `… doctor --fix`); the petal skill says more.
+
+        You're also the user's helper on this Mac, through Petal's tools (Petal holds the Mac's permissions; you don't need any). petal_look shows what they're looking at: the app and window in front, a browser tab's address and title, selected text, and a screenshot when seeing helps (read the PNG path it returns). When they say this, here, or what I'm looking at, look first. A tab's address is there to research from (search the web for similar things, read the page). petal_apps and petal_windows open, quit, bring forward, minimize, close and arrange apps and windows. petal_trash moves files to the Trash: never delete files any other way (no rm). Petal asks the user before quitting, closing or trashing; if they decline, say OK and don't find another way. Files the user hands you arrive as paths: read them (PDFs too) and do what they ask; save an edited copy next to the original with a new name unless they say to replace it.
+
+        Memory: below is what you remember about this user. When you learn something lasting that will help later (a preference, a habit, how they like things done, what a mode is for), save it yourself with petal_remember (learned: true; with the mode's id when it's about one mode) and say so in a word or two. When they say remember or forget something, do it with petal_remember or petal_forget. Forget what turns out wrong or out of date. Never keep passwords, secrets, or anything private they wouldn't want kept.
+
+        When the user says something in Petal is broken or odd, fix it for them without asking them to type anything: run `\(Bundle.main.executablePath ?? "Petal") doctor` and `… logs`, check petal_get_state, fix what settings can, and change Petal's code with personal (above) when it takes that. Then tell them in plain words what was wrong and what you did.
         """
         let notes = (try? String(contentsOf: app.config.instructionsFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !notes.isEmpty { prompt += "\n\nThe user's own instructions:\n" + notes }
+        let remembered = app.assist.memoryBrief
+        if !remembered.isEmpty { prompt += "\n\nWhat you remember about this user ([id] for petal_forget):\n" + remembered }
         return prompt
     }
 
@@ -324,17 +339,25 @@ final class ClaudePanel {
     let agent = Agent()
     var draft = ""
     var optionsOpen = false
+    /// Files handed to the AI (dropped on its button or on the panel): sent with the next message.
+    var attachments: [URL] = []
     private(set) var isOpen = false
     @ObservationIgnored private var panel: InputPanel?
 
-    func open(asking text: String?, send: Bool = true) {
+    func open(asking text: String?, send: Bool = true, attaching files: [URL] = []) {
         let app = PetalApp.shared
+        for file in files where !attachments.contains(file) { attachments.append(file) }
         Task { await app.usage.refresh() }
         // Codex's models, if they couldn't be read at launch (Codex installed or signed in since).
         if app.chatProvider == .codex && app.codexModels.isEmpty { app.loadCodexModels() }
         if panel == nil {
             let panel = InputPanel()
-            panel.onClose = { [weak self] in self?.isOpen = false; self?.optionsOpen = false }
+            panel.onClose = { [weak self] in
+                self?.isOpen = false
+                self?.optionsOpen = false
+                // A question still waiting goes to the dock, where it can be answered.
+                if PetalApp.shared.assist.pending != nil { PetalApp.shared.popups.show(FocusCard(kind: .ask)) }
+            }
             self.panel = panel
         }
         isOpen = true
@@ -366,7 +389,9 @@ struct ClaudePanelView: View {
 
     var agent: Agent { panel.agent }
 
-    static let suggestions = ["Add a Gaming mode to my dock", "Why is my Mac slow right now?", "Make my dock icons a bit bigger"]
+    static let suggestions = ["Explain what I'm looking at", "Tidy up my Downloads", "Something in Petal isn't working right"]
+    /// With files handed over: what people most often want done with them.
+    static let fileSuggestions = ["Summarize it", "What are the key points?", "Make it shorter and clearer"]
 
     var body: some View {
         @Bindable var panel = panel
@@ -382,6 +407,10 @@ struct ClaudePanelView: View {
                 if panel.optionsOpen { options.transition(.opacity.combined(with: .offset(y: -6))) }
             }
             .frame(minHeight: 180, alignment: .top)
+            if let request = app.assist.pending {
+                AskRequestView(request: request).padding(12).background(.white.opacity(0.06), in: .rect(cornerRadius: 14))
+            }
+            if !panel.attachments.isEmpty { attachmentsRow }
             input
         }
         // Exactly this wide whatever it shows: content a little too wide for it (Claude's rows and Codex's differ)
@@ -394,6 +423,12 @@ struct ClaudePanelView: View {
         .onChange(of: agent.messages.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: agent.running) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: panel.optionsOpen) { _, _ in DispatchQueue.main.async { panel.fit() } }
+        .onChange(of: panel.attachments.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
+        .onChange(of: app.assist.pending?.id) { _, _ in DispatchQueue.main.async { panel.fit() } }
+        .dropDestination(for: URL.self) { urls, _ in
+            for url in urls where url.isFileURL && !panel.attachments.contains(url) { panel.attachments.append(url) }
+            return !urls.isEmpty
+        }
         .onExitCommand {
             if panel.optionsOpen { panel.optionsOpen = false } else { panel.close() }
         }
@@ -483,10 +518,11 @@ struct ClaudePanelView: View {
 
     private var empty: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Ask anything. \(provider?.name ?? "It") can change your dock and modes, your Mac's settings, or your files.")
-                .font(.system(size: 13)).foregroundStyle(.secondary).padding(.bottom, 6)
-            ForEach(Self.suggestions, id: \.self) { suggestion in
-                SuggestionRow(text: suggestion) { agent.send(suggestion) }
+            Text(panel.attachments.isEmpty ? "Ask anything. \(provider?.name ?? "It") sees what you're looking at, and can work with your apps, windows, files and dock. Drop a file here to hand it over."
+                 : "What should \(provider?.name ?? "it") do with \(panel.attachments.count == 1 ? "it" : "them")?")
+                .font(.system(size: 13)).foregroundStyle(.secondary).padding(.bottom, 6).fixedSize(horizontal: false, vertical: true)
+            ForEach(panel.attachments.isEmpty ? Self.suggestions : Self.fileSuggestions, id: \.self) { suggestion in
+                SuggestionRow(text: suggestion) { panel.draft = suggestion; submit() }
             }
         }
     }
@@ -538,9 +574,34 @@ struct ClaudePanelView: View {
         .overlay(Capsule().strokeBorder(focused ? Color(nsColor: app.accent).opacity(0.6) : .white.opacity(0.1)))
     }
 
+    private var attachmentsRow: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 6) {
+                ForEach(panel.attachments, id: \.self) { url in
+                    HStack(spacing: 6) {
+                        Image(nsImage: NSWorkspace.shared.icon(forFile: url.path)).resizable().frame(width: 16, height: 16)
+                        Text(url.lastPathComponent).font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
+                        Button { panel.attachments.removeAll { $0 == url } } label: {
+                            Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 10).frame(height: 28)
+                    .glassEffect(.clear, in: .capsule)
+                }
+            }
+        }
+        .scrollIndicators(.never)
+    }
+
     private func submit() {
         guard !agent.running else { return }
-        let text = panel.draft
+        var text = panel.draft
+        if !panel.attachments.isEmpty {
+            if text.trimmingCharacters(in: .whitespaces).isEmpty { text = "What's in \(panel.attachments.count == 1 ? "this file" : "these files")?" }
+            text += "\n\nFiles I'm handing you:\n" + panel.attachments.map(\.path).joined(separator: "\n")
+            panel.attachments = []
+        }
         panel.draft = ""
         agent.send(text)
     }

@@ -91,6 +91,10 @@ SETTINGS_SCHEMA = {
     "claudeAccess": ("auto", "Claude panel permissions: auto (safe actions run, risky ones ask) or full."),
     "aiProviders": (["claude"], "The AI apps Petal uses, each the user's own install and account: claude, codex, both, or none ([] = no AI; the dock still works)."),
     "otherAgents": (True, "Let the user's other AI sessions (T3 Code, Claude Code or Codex in a terminal) change Petal: its MCP server, skill and `petal` command are set up for them."),
+    "aiMemory": (True, "Petal AI remembers what helps, everywhere or per mode: what the user asks it to, and what it notices (memory.json). petal_remember / petal_forget / petal_memories."),
+    "aiLearns": (True, "Once a day Petal AI learns from how each mode is used (its apps, how long) and remembers it; a quick call to the chat AI's small model."),
+    "dailySummary": ("", "A card with the day in the user's modes at this time each day (\"HH:MM\"; empty for none), with a line from Petal AI."),
+    "aiAllowed": ([], "What Petal AI may do without asking first (the user chose Always on its card): quit, close, trash."),
     "shortcuts": (True, "Petal's keyboard shortcuts: switch mode (1-9), open the AI panel, open the + search. Never takes one already in use."),
     "schedule": ([], "Modes by time: [{mode, days: [1-7, 1 = Monday], from: \"HH:MM\", to: \"HH:MM\"}]. When a block starts, the focused workspace switches to that mode."),
     "activityLog": (True, "Keep a private, local history of which app is in front (never titles), for suggestions and the weekly summary."),
@@ -750,6 +754,41 @@ def not_yet(_):
     raise ValueError("This needs a newer Petal.")
 
 
+def assist(name):
+    """Petal AI's tools on macOS: the running Petal does them, with its own permissions (and asks first)."""
+    def run(args):
+        reply = petal("assist", name, json.dumps(args))
+        try:
+            out = json.loads(reply)
+        except ValueError:
+            raise ValueError(reply or "Petal isn't running")
+        if isinstance(out, dict) and out.get("error"):
+            raise ValueError(out["error"])
+        return out
+    return run
+
+
+# Petal AI on the Mac: seeing what's in front and acting on the Mac through Petal's permissions. (Omarchy: later.)
+ASSIST_TOOLS = {
+    "petal_look": (assist("petal_look"), "What the user is looking at now: the app and window in front, the browser tab's address and title, selected text, the current mode and which apps are open. screenshot: \"window\" (the front window, or app's) or \"screen\" saves a PNG and returns its path to read. clipboard: true adds the clipboard's text. Use it when the user says this, here, what I'm looking at.",
+                   {"screenshot": {"type": "string", "enum": ["", "window", "screen"]}, "app": {"type": "string", "description": "look at this app instead of the one in front"},
+                    "clipboard": {"type": "boolean"}}),
+    "petal_apps": (assist("petal_apps"), "Open, quit, hide or bring forward an app (by name or bundle id); open with `open` set opens that address or file (in `app` if given). Quitting asks the user first.",
+                   {"action": {"type": "string", "enum": ["open", "quit", "hide", "focus"]}, "app": {"type": "string"}, "open": {"type": "string", "description": "an https:// address or a file path"}}),
+    "petal_windows": (assist("petal_windows"), "The user's windows: list them (id, app, title, minimized, here = on this Desktop), or focus, minimize, close (asks first) or arrange one (layout: left, right, top, bottom, full, center; the dock's room is kept). Pick a window by its id from list, or a word of its title, within `app`.",
+                      {"action": {"type": "string", "enum": ["list", "focus", "minimize", "close", "arrange"]}, "app": {"type": "string"},
+                       "window": {"type": "string"}, "layout": {"type": "string", "enum": ["left", "right", "top", "bottom", "full", "center"]}}),
+    "petal_trash": (assist("petal_trash"), "Move files or folders to the Trash (asks the user first); never delete files any other way. undo: true puts the last ones back.",
+                    {"paths": {"type": "array", "items": {"type": "string"}}, "undo": {"type": "boolean"}}),
+    "petal_remember": (assist("petal_remember"), "Remember something that will help with this user later: a preference, a habit, how they like things done. mode: a mode id to keep it to that mode (\"\" for everywhere). learned: true when you noticed it yourself rather than being asked. Keep each one short.",
+                       {"text": {"type": "string"}, "mode": {"type": "string"}, "learned": {"type": "boolean"}}),
+    "petal_forget": (assist("petal_forget"), "Forget a memory: by its id, or every one containing `text`. Do it when the user says to, or when one turns out wrong or out of date.",
+                     {"id": {"type": "string"}, "text": {"type": "string"}}),
+    "petal_memories": (assist("petal_memories"), "What Petal AI remembers about the user (everywhere, and per mode); mode limits it to one mode's and the everywhere ones.",
+                       {"mode": {"type": "string"}}),
+}
+
+
 TOOLS = {
     "petal_get_state": (t_get_state, "Everything about the user's Petal dock: all settings (with help text and current values), modes, current mode, position/auto-hide and file paths. Call this first.", {}),
     "petal_set_settings": (t_set_settings, "Change one or more Petal settings (appearance like dockColor/dockOpacity/iconSize/accentColor, and feature switches like bounce/badges). Applies instantly.",
@@ -776,6 +815,10 @@ TOOLS = {
     "petal_reload": (t_reload, "Restart Petal to load a rebuilt Petal.app (settings and modes don't need this)." if MAC
                      else "Restart Omarchy's shell to load edits to Petal's own source code (settings and modes don't need this).", {}),
 }
+
+
+if MAC:
+    TOOLS.update(ASSIST_TOOLS)
 
 
 def version():

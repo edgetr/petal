@@ -384,6 +384,11 @@ enum Insights {
     static func summary(lastWeek: Bool, now: Date = Date()) -> Summary {
         let to = lastWeek ? weekStart(now) : now
         let from = lastWeek ? to.addingTimeInterval(-7 * 86400) : now.addingTimeInterval(-7 * 86400)
+        return summary(from: from, to: to, title: lastWeek ? "Last week" : "The last 7 days")
+    }
+
+    /// Any stretch of time (the day's summary is today's).
+    static func summary(from: Date, to: Date, title: String) -> Summary {
         let entries = entries(since: from.timeIntervalSince1970).filter { $0.t < to.timeIntervalSince1970 }
         let names = Dictionary(modes.compactMap { m in (m["id"] as? String).map { ($0, m["name"] as? String ?? $0) } }, uniquingKeysWith: { a, _ in a })
         var perMode: [String: [String: Int]] = [:]
@@ -400,6 +405,6 @@ enum Insights {
             Summary.ModeTime(id: id, name: names[id] ?? id.capitalized, minutes: apps.values.reduce(0, +),
                              apps: apps.filter { !ignored.contains($0.key) }.sorted { $0.value > $1.value }.prefix(3).map { ($0.key, $0.value) })
         }.filter { $0.minutes >= 5 }.sorted { $0.minutes > $1.minutes }
-        return Summary(title: lastWeek ? "Last week" : "The last 7 days", from: from, to: to, modes: modes, cardsShown: shown, wentBack: back)
+        return Summary(title: title, from: from, to: to, modes: modes, cardsShown: shown, wentBack: back)
     }
 }

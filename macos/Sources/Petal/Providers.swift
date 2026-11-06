@@ -80,7 +80,10 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                              "--permission-mode", chat.fullAccess ? "bypassPermissions" : "auto",
                              "--append-system-prompt", chat.instructions, "--mcp-config", config]
             if let session = chat.session { arguments += ["--resume", session] }
-            return arguments + ["--allowedTools", "mcp__petal"] + chat.allowed
+            // Petal's tools, and looking into Petal itself (its health check and log), need no asking.
+            let petal = chat.tools
+            return arguments + ["--allowedTools", "mcp__petal", "Bash(petal doctor:*)", "Bash(petal logs:*)",
+                                "Bash(\(petal) doctor:*)", "Bash(\(petal) logs:*)"] + chat.allowed
         case .codex:
             var arguments = ["exec", "--json", "--skip-git-repo-check", "-C", NSHomeDirectory()]
             arguments += chat.fullAccess ? ["--dangerously-bypass-approvals-and-sandbox"] : ["--sandbox", "workspace-write"]
@@ -89,7 +92,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                           "-c", "developer_instructions=\(Self.toml(chat.instructions))",
                           "-c", "mcp_servers.petal.command=\(Self.toml(chat.tools))",
                           "-c", "mcp_servers.petal.args=[\"--mcp\"]",
-                          "-c", "mcp_servers.petal.default_tools_approval_mode=\"approve\""]
+                          "-c", "mcp_servers.petal.default_tools_approval_mode=\"approve\"",
+                          // A tool that asks the person first may wait for them.
+                          "-c", "mcp_servers.petal.tool_timeout_sec=180"]
             if let session = chat.session { arguments += ["resume", session] }
             return arguments + ["-"]
         }

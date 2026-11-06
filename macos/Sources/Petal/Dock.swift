@@ -1085,7 +1085,11 @@ struct ClaudeButton: View {
                            hover: { on in
                                hovering = on
                                app.tooltips.show(on ? app.usageTooltip : nil, over: "claude", in: dock)
-                           }, press: { pressed = $0 }))
+                           },
+                           // A file dropped on it goes to the AI: "summarize it", "what's in it?".
+                           files: { urls in app.claude.open(asking: nil, attaching: urls) },
+                           fileOver: { over in hovering = over },
+                           press: { pressed = $0 }))
     }
 }
 

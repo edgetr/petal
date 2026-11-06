@@ -53,6 +53,8 @@ final class PetalApp {
     @ObservationIgnored private var arrival: (() -> Void)?
     /// Held notifications, Do Not Disturb while holding, and Petal's own banners (Notifications.swift).
     let notes = Notes()
+    /// Petal AI's powers on the Mac: looking, acting (asked first), the Trash, memory, the day's summary.
+    let assist = Assist()
     /// Reading and closing browser tabs (Browsers.swift).
     @ObservationIgnored let browsers = Browsers()
     /// Where each AI app is installed, when it is.
@@ -110,6 +112,7 @@ final class PetalApp {
         Apps.warm()
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.search.prepare() }
         notes.start()
+        assist.start()
         Skill.install()
         Windows.startManaging()
         if !config.welcomed {
@@ -419,6 +422,11 @@ final class PetalApp {
     /// What `bin/petal` and Claude's tools can ask the running Petal (IpcHandler in Dock.qml).
     private func registerIPC() {
         ipc.on("current") { [unowned self] _ in docks.focusedDock?.mode?.id ?? config.defaultMode }
+        // Petal AI's tools (`Petal --mcp` asks here): ["assist", tool, json]; one that changes something waits for the
+        // person to allow it.
+        ipc.onLater("assist") { [unowned self] args, reply in
+            assist.handle(args.first ?? "", args.dropFirst().first ?? "{}", reply: reply)
+        }
         ipc.on("bench") { args in LiveBench.start(quiet: args.first == "quiet") }
 
         ipc.on("mode") { [unowned self] args in

@@ -727,10 +727,93 @@ struct ClaudeSettings: View {
             Card(title: "In the background") {
                 SettingToggle(key: "claudeUsage", title: "Usage ring", detail: "Around the \(provider.name) button, every 5 minutes.")
                 SettingToggle(key: "ai", title: "Sort new apps and sites", detail: "\(provider.name) decides which mode something new belongs to.")
+                DailySummaryRow()
+            }
+            MemoryCard()
+            if !app.config.strings("aiAllowed").isEmpty {
+                Card(title: "Allowed without asking", footer: "You chose Always for these. Take one away and Petal AI asks again.") {
+                    ForEach(app.config.strings("aiAllowed"), id: \.self) { kind in
+                        HStack {
+                            Text(AllowedKinds.name(kind)).font(.system(size: 13))
+                            Spacer()
+                            RoundButton(symbol: "xmark") { app.config.set("aiAllowed", app.config.strings("aiAllowed").filter { $0 != kind }) }
+                        }
+                    }
+                }
             }
             Card(title: "Your notes for \(provider.name)", footer: "\(provider.name) reads these every time you ask it something.") {
                 InstructionsEditor()
             }
+        }
+    }
+}
+
+/// What Petal AI remembers, everywhere and per mode, each with a way to forget it.
+struct MemoryCard: View {
+    @Environment(PetalApp.self) private var app
+
+    var body: some View {
+        Card(title: "Memory", footer: "Petal AI keeps what helps it help you, so you don't have to say it twice. All of it is here; ask it to forget anything.") {
+            SettingToggle(key: "aiMemory", title: "Remember what helps", detail: "What you ask it to, and what it notices along the way.")
+            SettingToggle(key: "aiLearns", title: "Learn from each mode", detail: "Once a day, from the apps you use in it and for how long.")
+            if app.config.bool("aiMemory") {
+                if app.assist.memories.isEmpty {
+                    Text("Nothing yet.").font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+                ForEach(app.assist.memories) { memory in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(memory.text).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        Text(app.config.modes.first { $0.id == memory.mode }?.name ?? "Everywhere")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                        RoundButton(symbol: "xmark") { app.assist.forget(id: memory.id, matching: nil) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The day's summary: on or off, and when.
+struct DailySummaryRow: View {
+    @Environment(PetalApp.self) private var app
+
+    var body: some View {
+        let time = app.config.string("dailySummary")
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Summary of the day").font(.system(size: 13))
+                Text("A card with your day in each mode, and a line from Petal AI.").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if !time.isEmpty {
+                DatePicker("", selection: Binding(get: { Self.date(time) }, set: { app.config.set("dailySummary", Self.text($0)) }),
+                           displayedComponents: .hourAndMinute).labelsHidden().datePickerStyle(.field)
+            }
+            Toggle("", isOn: Binding(get: { !time.isEmpty }, set: { app.config.set("dailySummary", $0 ? "18:00" : "") }))
+                .toggleStyle(.switch).labelsHidden()
+        }
+    }
+
+    static func date(_ text: String) -> Date {
+        let parts = text.split(separator: ":").compactMap { Int($0) }
+        return Calendar.current.date(bySettingHour: parts.first ?? 18, minute: parts.dropFirst().first ?? 0, second: 0, of: Date()) ?? Date()
+    }
+
+    static func text(_ date: Date) -> String {
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return String(format: "%02d:%02d", parts.hour ?? 18, parts.minute ?? 0)
+    }
+}
+
+/// What the kinds of thing Petal AI asks about are called.
+enum AllowedKinds {
+    static func name(_ kind: String) -> String {
+        switch kind {
+        case "quit": "Quitting apps"
+        case "close": "Closing windows"
+        case "trash": "Moving files to the Trash"
+        default: kind
         }
     }
 }

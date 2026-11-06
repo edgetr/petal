@@ -338,8 +338,10 @@ final class Popups {
     }
 
     func dismissCard() {
+        let asking = card?.kind == .ask
         fade?.cancel()
         card = nil
+        if asking { PetalApp.shared.assist.cardClosed() }
         cardPanel.hide()   // made opaque again as the next card shows
     }
 }
@@ -841,7 +843,7 @@ struct RightClick: NSViewRepresentable {
 /// A card over the dock: a focus card (block, move or peek), a held notification that can't wait, a suggested mode,
 /// a mode just made from one, or the weekly summary. Updates are in the menu bar, not here.
 struct FocusCard: Identifiable, Equatable {
-    enum Kind { case block, move, peek, note, suggestion, made, summary }
+    enum Kind { case block, move, peek, note, suggestion, made, summary, ask }
     let id = UUID()
     let kind: Kind
     var bundleID = ""
@@ -880,6 +882,7 @@ struct CardView: View {
             case .note: NoteCard(card: card)
             case .suggestion, .made: suggestionCard
             case .summary: SummaryCard(card: card)
+            case .ask: AskCard()
             }
         }
         .padding(card.kind == .peek ? 12 : 16)
@@ -946,6 +949,44 @@ struct AppIcons: View {
 }
 
 /// The weekly summary: time in each mode, its top apps, and how focus cards went. Plain and kind.
+/// Petal AI wants to do something that changes things: Allow once, Always (for this kind), or Don't. The chat panel
+/// shows the same question in the conversation when it's open.
+struct AskCard: View {
+    @Environment(PetalApp.self) private var app
+
+    var body: some View {
+        if let request = app.assist.pending {
+            AskRequestView(request: request)
+        }
+    }
+}
+
+struct AskRequestView: View {
+    @Environment(PetalApp.self) private var app
+    let request: Assist.Request
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                ProviderMark(provider: app.chatProvider).frame(width: 18, height: 18)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(request.title).font(.system(size: 13, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+                    if !request.detail.isEmpty {
+                        Text(request.detail).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            HStack(spacing: 8) {
+                Spacer()
+                Button("Don't") { app.assist.choose(.no) }.buttonStyle(.glass)
+                Button("Always") { app.assist.choose(.always) }.buttonStyle(.glass)
+                Button("Allow") { app.assist.choose(.once) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
+            }
+        }
+    }
+}
+
 struct SummaryCard: View {
     @Environment(PetalApp.self) private var app
     let card: FocusCard
@@ -956,6 +997,9 @@ struct SummaryCard: View {
                 Text(card.summary?.title ?? "Your week").font(.system(size: 13, weight: .bold))
                 Spacer()
                 RoundButton(symbol: "xmark") { app.popups.dismissCard() }
+            }
+            if !card.reason.isEmpty {
+                Text("✦ " + card.reason).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
             }
             if let summary = card.summary { SummaryRows(summary: summary) }
             HStack {

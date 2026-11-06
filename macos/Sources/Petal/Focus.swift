@@ -72,7 +72,8 @@ final class Brain {
         }.joined(separator: "\n")
     }
 
-    private func ask(_ prompt: String, key: String, done: @escaping ([String: Any]?) -> Void) {
+    /// One quick JSON call (answers cached by `key`).
+    func ask(_ prompt: String, key: String, done: @escaping ([String: Any]?) -> Void) {
         if let cached = cache[key] { return done(cached) }
         queue.append((prompt, key, done))
         next()

@@ -63,7 +63,7 @@ final class Config {
         "focusGuard": true, "blockDistractions": true, "peeks": true, "holdNotifications": true, "urgentNotifications": true,
         "modeWindows": false, "tiling": false, "tilingGaps": 8, "tilingFloat": [String](), "ai": true, "claudeUsage": true, "autoUpdate": true,
         "claudePath": "", "chatModel": "sonnet", "chatEffort": "medium", "claudeAccess": "auto",
-        "aiProviders": ["claude"], "otherAgents": true,
+        "aiProviders": ["claude"], "otherAgents": true, "aiMemory": true, "aiLearns": true, "dailySummary": "", "aiAllowed": [Any](),
         "shortcuts": true, "schedule": [Any](), "activityLog": true, "suggestModes": true, "summary": true,
         "magnification": false, "magnificationAmount": 0.5, "menuBarIcon": true, "chatProvider": "claude", "codexModel": "", "codexEffort": "medium", "codexPath": "",
     ]

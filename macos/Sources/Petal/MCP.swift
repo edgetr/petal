@@ -176,6 +176,15 @@ enum MCP {
         case "petal_summary":
             guard Insights.setting("activityLog") else { return ["note": "The activity history is off (activityLog)."] }
             return Insights.summary(lastWeek: false).json
+        case "petal_look", "petal_apps", "petal_windows", "petal_trash", "petal_remember", "petal_forget", "petal_memories":
+            // Petal itself does these, with its own permissions (and asks the person first where it should).
+            let json = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
+            let reply = petal(["assist", name, json])
+            guard let data = reply.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) else {
+                throw Failure(reply.isEmpty ? "Petal isn't running" : reply)
+            }
+            if let error = (object as? [String: Any])?["error"] as? String { throw Failure(error) }
+            return object
         case "petal_reload":
             return ["ok": true, "note": petal("restart") + "; the Claude panel closes."]
         default:
