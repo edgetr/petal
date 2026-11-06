@@ -98,7 +98,7 @@ SETTINGS_SCHEMA = {
     "selectionAsk": (True, "macOS: selecting text in any app brings up a small \"Ask Petal AI\" button by it; clicking it quotes the text in the chat. (Also in every app's Services menu.) Never in apps kept private or password fields."),
     "aiNotes": (True, "macOS: AI sticky notes. Each chat sticks to the window it was opened on and looks at that window even after the user moves on; several notes can work at once (up to 4), a note done while away nudges its app's icon (and its mode), and coming back to the window brings its note back. Off: one chat that looks at whatever is in front."),
     "chatWhileWorking": ("steer", "Writing in the AI chat while it works: steer (it stops where it is and carries on from the new message) or queue (sent once it's done)."),
-    "finderInDock": (True, "macOS: Finder first among the dock's apps in every mode, as macOS's Dock keeps it (so it never appears at the end and moves the rest)."),
+    "finderInDock": (True, "macOS: Finder as its own button next to the AI button, the same in every mode (never among the apps, so it never appears at the end and moves the rest)."),
     "replyDrafts": (True, "Entering a mode with held messages that need an answer, Petal AI drafts replies in the user's own style (learned from the replies they edit), shown on a card; it never sends anything."),
     "aiAllowed": ([], "What Petal AI may do without asking first (the user chose Always on its card): quit, close, trash, tidy."),
     "routines": (True, "macOS: run the user's routines (routines.json): what Petal does by itself when a file lands in a folder, an app opens, a mode starts or at a time. Made with petal_routine_save."),
