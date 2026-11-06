@@ -622,6 +622,9 @@ final class Routines {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     quick(prompt, "r|\(routine.id)|\(rule)|\(key)") { answer in
+                        // The rule changed while the AI answered: its answer is for the old rule, so nothing is
+                        // learned or moved by it.
+                        guard rule == self.ruleVersion[routine.id, default: 0] else { return finish(nil) }
                         let picked = (answer?["folders"] as? [String: Any])?["1"] ?? answer?["folder"]
                         guard let name = Self.folderName(picked, among: folders.map(\.name)) else { return finish(nil) }
                         self.learn(routine.id, [key: name])
@@ -642,6 +645,7 @@ final class Routines {
     /// for the ones whose names it hasn't seen.
     func plan(_ routine: Routine, _ action: Action, done: @escaping (Plan?) -> Void) {
         guard let source = Self.url(routine.source(action)) else { return done(nil) }
+        let rule = ruleVersion[routine.id, default: 0]   // what's learned below is for this rule
         let trigger = routine.trigger
         let into = action.kind == "move" ? (Self.url(action.to, base: source) ?? source)
             : (action.into.isEmpty ? source : (Self.url(action.into, base: source) ?? source))
@@ -685,14 +689,15 @@ final class Routines {
             let chunks = stride(from: 0, to: asking.count, by: 40).map { Array(asking[$0..<min($0 + 40, asking.count)]) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    self.ask(chunks, routine: routine, into: into, folders: folders, plan: plan, done: done)
+                    self.ask(chunks, routine: routine, rule: rule, into: into, folders: folders, plan: plan, done: done)
                 }
             }
         }
     }
 
-    private func ask(_ chunks: [[(url: URL, name: String, facts: String)]], routine: Routine, into: URL,
+    private func ask(_ chunks: [[(url: URL, name: String, facts: String)]], routine: Routine, rule: Int, into: URL,
                      folders: [(name: String, samples: [String])], plan: Plan, done: @escaping (Plan?) -> Void) {
+        guard rule == ruleVersion[routine.id, default: 0] else { return done(nil) }   // the rule changed meanwhile
         guard let chunk = chunks.first, let quick else { return done(plan) }
         var plan = plan
         // Folders this plan makes count as there for the next chunk, so similar files share them.
@@ -701,8 +706,11 @@ final class Routines {
             seen.append((item.folder.lastPathComponent, [item.file.lastPathComponent]))
         }
         let prompt = Self.prompt(words: routine.words, into: into, folders: seen, files: chunk.map { ($0.name, $0.facts) })
-        let key = "rb|\(routine.id)|\(ruleVersion[routine.id, default: 0])|" + chunk.map(\.name).joined(separator: "|")
+        let key = "rb|\(routine.id)|\(rule)|" + chunk.map(\.name).joined(separator: "|")
         quick(prompt, key) { answer in
+            // The rule changed while the AI answered: this plan is for the old rule, so nothing in it is learned or
+            // moved.
+            guard rule == self.ruleVersion[routine.id, default: 0] else { return done(nil) }
             let picks = answer?["folders"] as? [String: Any] ?? [:]
             var patterns: [String: String] = [:]
             for (index, file) in chunk.enumerated() {
@@ -717,7 +725,7 @@ final class Routines {
                 patterns[Self.pattern(file.name)] = name
             }
             if answer != nil { self.learn(routine.id, patterns) }
-            self.ask(Array(chunks.dropFirst()), routine: routine, into: into, folders: seen, plan: plan, done: done)
+            self.ask(Array(chunks.dropFirst()), routine: routine, rule: rule, into: into, folders: seen, plan: plan, done: done)
         }
     }
 

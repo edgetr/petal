@@ -303,9 +303,12 @@ final class Assist {
         } else if let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first {
             // The screen without the apps kept private, and without Petal's own windows: its previews, banners,
             // cards and stacks can show what's in those apps (and the chat itself needn't be in the picture).
+            // Notification banners too: they belong to Notification Center, not their app, and can show a private
+            // app's messages.
             let me = ProcessInfo.processInfo.processIdentifier
-            filter = SCContentFilter(display: display, excludingApplications: content.applications.filter { hiding.contains($0.processID) || $0.processID == me },
-                                     exceptingWindows: [])
+            filter = SCContentFilter(display: display, excludingApplications: content.applications.filter {
+                hiding.contains($0.processID) || $0.processID == me || $0.bundleIdentifier == "com.apple.notificationcenterui"
+            }, exceptingWindows: [])
             size = CGSize(width: display.width, height: display.height)
         } else { return nil }
         let configuration = SCStreamConfiguration()
