@@ -65,7 +65,7 @@ struct QuietRow: View {
         StepRow(symbol: "moon.fill", title: "Keep macOS's banners away", detail: detail(quiet.way)) {
             if quiet.addingShortcut {
                 ProgressView().controlSize(.small)
-            } else if quiet.way == .focus || quiet.way == .shortcut {
+            } else if quiet.way == .shortcut {
                 AllowedLabel(text: "Ready")
             } else {
                 Button("Add Shortcut…") { quiet.addShortcut() }.buttonStyle(.glass)
@@ -75,7 +75,6 @@ struct QuietRow: View {
 
     private func detail(_ way: Quiet.Way?) -> String {
         switch way {
-        case .focus: "Petal turns on Do Not Disturb while a mode holds notifications."
         case .shortcut: "The Petal Do Not Disturb shortcut turns on Do Not Disturb while a mode holds notifications."
         case .closer: "Petal closes macOS's banners as they come. Add Petal's Do Not Disturb shortcut so they don't show at all."
         case nil: "Add Petal's Do Not Disturb shortcut: Shortcuts asks once."

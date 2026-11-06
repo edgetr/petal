@@ -13,13 +13,12 @@ import Observation
 /// Petal never turns off a Do Not Disturb the person turned on themselves.
 @MainActor @Observable
 final class Quiet {
-    enum Way: String { case focus, shortcut, closer }
+    enum Way: String { case shortcut, closer }
 
     nonisolated static let shortcutName = "Petal Do Not Disturb"
     /// While Petal has Do Not Disturb on: which way turned it on, so whoever comes next can turn it off.
     nonisolated static let marker = Config.folder.appending(path: "quiet.json")
 
-    private(set) var focusWorks = false
     private(set) var shortcutInstalled = false
     private(set) var addingShortcut = false
     @ObservationIgnored private(set) var on = false
@@ -29,16 +28,13 @@ final class Quiet {
 
     /// The way Petal keeps banners away now, or nil when none can.
     var way: Way? {
-        if focusWorks { return .focus }
         if shortcutInstalled { return .shortcut }
         return Windows.trusted ? .closer : nil
     }
 
     func refresh() {
         Task {
-            let focus = await Task.detached { FocusAssertion.works() }.value
             let installed = await Task.detached { Self.shortcutIsInstalled() }.value
-            focusWorks = focus
             shortcutInstalled = installed
         }
     }
@@ -57,7 +53,6 @@ final class Quiet {
             if way != .closer && Self.focusIsOn() && !FileManager.default.fileExists(atPath: Self.marker.path) { return }
             Config.writeObject(["way": way.rawValue], to: Self.marker)
             switch way {
-            case .focus: Task.detached { FocusAssertion.set(true) }
             case .shortcut: Self.runShortcut(true, wait: false)
             case .closer: startCloser()
             }
@@ -91,7 +86,6 @@ final class Quiet {
             return
         }
         switch way {
-        case .focus: FocusAssertion.set(false)
         case .shortcut: runShortcut(false, wait: wait)
         case .closer: break
         }
@@ -260,53 +254,5 @@ final class Quiet {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         return String(decoding: data, as: UTF8.self)
-    }
-}
-
-/// macOS's Do Not Disturb assertion, through the private DoNotDisturb framework, looked up at run time like SkyLight
-/// in Spaces.swift. Its daemon answers only apps Apple gave a private entitlement; for any other, `works()` is false.
-enum FocusAssertion {
-    private typealias ForClient = @convention(c) (AnyClass, Selector, NSString) -> AnyObject?
-    private typealias WithError = @convention(c) (AnyObject, Selector, UnsafeMutablePointer<NSError?>) -> AnyObject?
-    private typealias Details = @convention(c) (AnyClass, Selector, NSString, NSString, AnyObject?) -> AnyObject?
-    private typealias Take = @convention(c) (AnyObject, Selector, AnyObject, UnsafeMutablePointer<NSError?>) -> AnyObject?
-    private typealias Invalidate = @convention(c) (AnyObject, Selector, UnsafeMutablePointer<NSError?>) -> Bool
-
-    private static let loaded = dlopen("/System/Library/PrivateFrameworks/DoNotDisturb.framework/DoNotDisturb", RTLD_LAZY) != nil
-    private static let client = "tech.edgetr.petal" as NSString
-
-    private static func service(_ name: String) -> AnyObject? {
-        guard loaded, let type = NSClassFromString(name), let method = class_getClassMethod(type, NSSelectorFromString("serviceForClientIdentifier:")) else { return nil }
-        return unsafeBitCast(method_getImplementation(method), to: ForClient.self)(type, NSSelectorFromString("serviceForClientIdentifier:"), client)
-    }
-
-    private static func implementation<T>(_ object: AnyObject, _ selector: Selector, as: T.Type) -> T? {
-        guard let type = object_getClass(object), let method = class_getInstanceMethod(type, selector) else { return nil }
-        return unsafeBitCast(method_getImplementation(method), to: T.self)
-    }
-
-    /// Whether the daemon answers Petal at all: a read of the current state.
-    static func works() -> Bool {
-        guard let state = service("DNDStateService") else { return false }
-        let selector = NSSelectorFromString("queryCurrentStateWithError:")
-        guard let query = implementation(state, selector, as: WithError.self) else { return false }
-        var error: NSError?
-        return query(state, selector, &error) != nil && error == nil
-    }
-
-    static func set(_ on: Bool) {
-        guard let assertions = service("DNDModeAssertionService") else { return }
-        var error: NSError?
-        if on {
-            let make = NSSelectorFromString("userRequestedAssertionDetailsWithIdentifier:modeIdentifier:lifetime:")
-            guard let type = NSClassFromString("DNDModeAssertionDetails"), let method = class_getClassMethod(type, make),
-                  let details = unsafeBitCast(method_getImplementation(method), to: Details.self)(type, make, "tech.edgetr.petal.hold",
-                                                                                                "com.apple.donotdisturb.mode.default", nil) else { return }
-            let take = NSSelectorFromString("takeModeAssertionWithDetails:error:")
-            _ = implementation(assertions, take, as: Take.self)?(assertions, take, details, &error)
-        } else {
-            let invalidate = NSSelectorFromString("invalidateAllActiveModeAssertionsWithError:")
-            _ = implementation(assertions, invalidate, as: Invalidate.self)?(assertions, invalidate, &error)
-        }
     }
 }
