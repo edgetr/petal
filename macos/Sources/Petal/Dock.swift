@@ -713,6 +713,13 @@ struct SlotFrame: ViewModifier {
 extension View {
     func slotFrame(_ dock: ScreenDock, _ id: String) -> some View { modifier(SlotFrame(dock: dock, id: id)) }
 
+    /// Pressed: a little darker and smaller the moment the button goes down, as macOS's Dock does.
+    func pressed(_ on: Bool) -> some View {
+        brightness(on ? -0.22 : 0)
+            .scaleEffect(on ? 0.92 : 1)
+            .animation(.easeOut(duration: on ? 0.06 : 0.14), value: on)
+    }
+
     /// The icon lifts and grows inward under the pointer.
     func lift(_ hovering: Bool, icon: CGFloat) -> some View {
         let config = PetalApp.shared.config
@@ -735,6 +742,7 @@ struct ClaudeButton: View {
     let dock: ScreenDock
     let size: CGFloat
     @State private var hovering = false
+    @State private var pressed = false
 
     var body: some View {
         ZStack {
@@ -744,13 +752,14 @@ struct ClaudeButton: View {
             if app.config.bool("claudeUsage") { UsageRing(usage: app.usage, size: size, line: 2.5, track: false) }
         }
         .frame(width: size, height: size)
+        .pressed(pressed)
         .animation(.easeOut(duration: 0.12), value: hovering)
         .slotFrame(dock, "claude")
         .slotMouse(SlotMouse(left: { app.claude.open(asking: nil) }, right: { Menus.settings(for: dock) },
                            hover: { on in
                                hovering = on
                                app.tooltips.show(on ? app.usageTooltip : nil, over: "claude", in: dock)
-                           }))
+                           }, press: { pressed = $0 }))
     }
 }
 
@@ -808,6 +817,7 @@ struct AppSlot: View {
     let slot: CGFloat
     @State private var hovering = false
     @State private var fileOver = false
+    @State private var pressed = false
     @State private var hop: CGFloat = 0
 
     var body: some View {
@@ -824,6 +834,7 @@ struct AppSlot: View {
                     .animation(.easeOut(duration: 0.2), value: item.active)
             }
             DockIcon(id: item.id, size: icon)
+                .pressed(pressed)
                 .opacity((item.running || !item.pinned || Sites.isWeb(item.id) ? 1 : config.number("idleOpacity")) * (fileOver ? 0.6 : 1))
                 .modifier(Pulse(on: launching, floor: config.number("idleOpacity")))
                 .overlay(alignment: .topTrailing) {
@@ -860,7 +871,8 @@ struct AppSlot: View {
             },
             drag: { delta, ended in drag(delta, ended: ended) },
             files: config.bool("dropToOpen") ? { urls in app.docks.launch(item.id, files: urls) } : nil,
-            fileOver: { fileOver = $0 }))
+            fileOver: { fileOver = $0 },
+            press: { pressed = $0 }))
         .onChange(of: app.signals.bounces[item.id]) { _, _ in bounce() }
     }
 
@@ -1018,6 +1030,7 @@ struct AddSlot: View {
     let dock: ScreenDock
     let icon: CGFloat
     @State private var hovering = false
+    @State private var pressed = false
 
     var body: some View {
         let color = Color(nsColor: dock.mode?.color ?? PetalApp.shared.accent)
@@ -1028,13 +1041,14 @@ struct AddSlot: View {
                 .frame(width: icon * 0.8, height: icon * 0.8)
             Image(systemName: "plus").font(.system(size: icon * 0.36, weight: .bold)).foregroundStyle(color)
         }
+        .pressed(pressed)
         .lift(hovering, icon: icon)
         .slotFrame(dock, "add")
         .slotMouse(SlotMouse(left: { app.popups.closeAll(); app.search.open(in: dock) }, right: { Menus.settings(for: dock) },
                            hover: { on in
                                hovering = on
                                app.tooltips.show(on ? (dock.mode.map { "Add apps to \($0.name)" } ?? "Add apps") : nil, over: "add", in: dock)
-                           }))
+                           }, press: { pressed = $0 }))
     }
 }
 
@@ -1077,24 +1091,7 @@ struct NowPlayingSlot: View {
     }
 }
 
-struct Equalizer: View {
-    let icon: CGFloat
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 15)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            HStack(alignment: .bottom, spacing: 2) {
-                ForEach(0..<3) { i in
-                    let period = 0.52 + Double(i) * 0.16
-                    let phase = (sin(t * .pi * 2 / period) + 1) / 2
-                    Capsule().fill(Color(nsColor: PetalApp.shared.accent))
-                        .frame(width: 2, height: max(2, max(4, icon * 0.16) * (i == 1 ? 1 : 0.7) * phase))
-                }
-            }
-            .frame(height: max(4, icon * 0.16), alignment: .bottom)
-        }
-    }
-}
+// The equalizer is in Motion.swift.
 
 struct MinimizedSlot: View {
     @Environment(PetalApp.self) private var app
@@ -1196,6 +1193,9 @@ struct SlotMouse: NSViewRepresentable {
     var drag: ((CGFloat, Bool) -> Void)? = nil
     var files: (([URL]) -> Void)? = nil
     var fileOver: (Bool) -> Void = { _ in }
+    /// The button went down (true) or up, or a drag took over (false): for feedback the moment it's pressed. What a
+    /// click does still happens on the way up, so a press can turn into a drag.
+    var press: (Bool) -> Void = { _ in }
 
     func makeNSView(context: Context) -> MouseView { MouseView() }
     func updateNSView(_ view: MouseView, context: Context) { view.handlers = self }
@@ -1234,6 +1234,7 @@ struct SlotMouse: NSViewRepresentable {
         override func mouseDown(with event: NSEvent) {
             down = NSEvent.mouseLocation
             dragging = false
+            handlers?.press(true)
         }
 
         override func mouseDragged(with event: NSEvent) {
@@ -1241,11 +1242,15 @@ struct SlotMouse: NSViewRepresentable {
             let point = NSEvent.mouseLocation
             let vertical = PetalApp.shared.config.position != "bottom"
             let delta = vertical ? down.y - point.y : point.x - down.x
-            if abs(point.x - down.x) > 4 || abs(point.y - down.y) > 4 { dragging = true }
+            if !dragging && (abs(point.x - down.x) > 4 || abs(point.y - down.y) > 4) {
+                dragging = true
+                handlers?.press(false)
+            }
             if dragging { drag(delta, false) }
         }
 
         override func mouseUp(with event: NSEvent) {
+            if !dragging { handlers?.press(false) }
             if dragging { handlers?.drag?(0, true) } else { handlers?.left() }
             down = nil
             dragging = false
