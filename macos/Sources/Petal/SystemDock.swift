@@ -2,9 +2,8 @@ import Foundation
 
 /// Petal replaces macOS's Dock while it runs: the Dock is set to hide, and to wait 1000 seconds before it shows,
 /// which keeps it out of sight. A full-screen app shows macOS's Dock whatever its wait, as the pointer pushes on its
-/// edge, so its showing is also slowed to a crawl (`autohide-time-modifier`): reaching for Petal's
-/// dock there, it barely starts to rise before you've moved on. It stays on its own edge, the bottom, since macOS
-/// minimizes windows toward it. Quitting Petal gives it back exactly as it was.
+/// edge; that can't be turned off (slowing its showing left its labels stuck on the screen). It stays on its own edge
+/// and size, since macOS minimizes windows toward it. Quitting Petal gives it back exactly as it was.
 ///
 /// The Dock's own settings are saved to ~/.config/petal/macos-dock.json before they change, and that file is the
 /// promise to put them back: if Petal crashes, the next launch keeps the saved settings (it doesn't save the hidden
@@ -62,7 +61,8 @@ enum SystemDock {
         }
         write("autohide", "-bool", "true")
         write("autohide-delay", "-float", "1000")
-        write("autohide-time-modifier", "-float", "1000")
+        // Its own pace (an earlier Petal slowed its showing to a crawl for full screen, which left its labels stuck).
+        if let pace = saved["autohide-time-modifier"] as? Double { write("autohide-time-modifier", "-float", "\(pace)") } else { defaults("delete", "com.apple.dock", "autohide-time-modifier") }
         // Its own size (an earlier Petal made it smallest): about as wide as Petal's dock, which holds the same apps,
         // so a window minimizes toward its right end, where Petal keeps minimized windows.
         if let size = saved["tilesize"] as? Double { write("tilesize", "-float", "\(size)") } else { defaults("delete", "com.apple.dock", "tilesize") }

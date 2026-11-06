@@ -368,9 +368,9 @@ final class InputPanel: NSPanel {
 
     /// Centered on the screen with the pointer, just above the dock: it comes out of the dock rather than floating
     /// over it.
-    func show<Content: View>(_ content: Content) {
+    func show<Content: View>(_ content: Content, from anchor: CGRect? = nil) {
         load(content)
-        showAgain()
+        showAgain(from: anchor)
     }
 
     /// Makes and lays out the view without showing it, so the first opening is as quick as the rest.
@@ -380,15 +380,44 @@ final class InputPanel: NSPanel {
     }
 
     /// Shows what it showed last, placed again over the dock.
-    func showAgain() {
-        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
+    /// `anchor`: the dock button it was opened from (screen coordinates): on a bottom dock it opens above that
+    /// button (kept on the screen) and grows out of it; otherwise centered over the dock.
+    func showAgain(from anchor: CGRect? = nil) {
+        let screen = anchor.flatMap { a in NSScreen.screens.first { $0.frame.intersects(a) } }
+            ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
         // The content's own 10-point margin around the glass, then 6 points of space over the dock.
         let above = Self.dockReach(on: screen) + 6 - 10
-        setFrame(NSRect(x: screen.frame.midX - size.width / 2, y: screen.frame.minY + above, width: size.width, height: size.height).integral,
-                 display: true)
+        let bottomDock = PetalApp.shared.config.position == "bottom"
+        var x = screen.frame.midX - size.width / 2
+        if bottomDock, let anchor {
+            x = min(max(anchor.midX - size.width / 2, screen.visibleFrame.minX + 4), screen.visibleFrame.maxX - size.width - 4)
+        }
+        setFrame(NSRect(x: x, y: screen.frame.minY + above, width: size.width, height: size.height).integral, display: true)
         makeKeyAndOrderFront(nil)
+        if let anchor { popIn(from: CGPoint(x: anchor.midX - frame.minX, y: bottomDock ? 0 : size.height / 2)) }
+    }
+
+    /// Grows out of `point` (in the panel), quickly, fading in.
+    private func popIn(from point: CGPoint) {
+        hosting.wantsLayer = true
+        guard let layer = hosting.layer else { return }
+        let pivot = CGPoint(x: point.x - layer.anchorPoint.x * layer.bounds.width, y: point.y - layer.anchorPoint.y * layer.bounds.height)
+        var from = CATransform3DMakeTranslation(pivot.x, pivot.y, 0)
+        from = CATransform3DScale(from, 0.6, 0.6, 1)
+        from = CATransform3DTranslate(from, -pivot.x, -pivot.y, 0)
+        let grow = CABasicAnimation(keyPath: "transform")
+        grow.fromValue = from
+        grow.toValue = CATransform3DIdentity
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        let group = CAAnimationGroup()
+        group.animations = [grow, fade]
+        group.duration = 0.22
+        group.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)
+        layer.add(group, forKey: "popIn")
     }
 
     /// How far the dock reaches up from the screen's bottom: Petal's (gap, its 2-point margin, the glass's 4-point
@@ -472,7 +501,7 @@ final class ClaudePanel {
         }
         app.tooltips.hide()
         app.popups.closeAll()
-        panel?.show(ClaudePanelView(panel: self))
+        panel?.show(ClaudePanelView(panel: self), from: app.docks.focusedDock?.panel?.screenFrame(of: "claude"))
     }
 
     func openOptions() {
@@ -906,10 +935,11 @@ final class AppSearch {
         opens += 1
         app.tooltips.hide()
         // The view is made once; opening again only shows it, reset to an empty query.
-        if let panel { panel.showAgain() } else {
+        let from = (dock ?? app.docks.focusedDock)?.panel?.screenFrame(of: "add")
+        if let panel { panel.showAgain(from: from) } else {
             let panel = InputPanel()
             self.panel = panel
-            panel.show(AppSearchView(search: self))
+            panel.show(AppSearchView(search: self), from: from)
         }
     }
 
