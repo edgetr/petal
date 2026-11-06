@@ -289,6 +289,8 @@ final class DockController {
 
     /// The apps with a place in the dock, by bundle id. Asking each running process for this costs several
     /// milliseconds, so it's done off the main thread with each look at the windows.
+    static let finder = "com.apple.finder"
+
     nonisolated static func runningApps() -> [String: NSRunningApplication] {
         var running: [String: NSRunningApplication] = [:]
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
@@ -351,6 +353,9 @@ final class DockController {
                 DockItem(id: bundleID, pinned: pinned, running: running[bundleID] != nil, windows: snapshot.count[bundleID] ?? 0,
                          here: here.contains(bundleID), active: bundleID == frontmost)
             }
+            // Finder first, in every mode, as macOS's Dock keeps it: it never comes and goes at the end and moves the rest.
+            let finder = config.bool("finderInDock") ? [item(Self.finder, pinned: true)] : []
+            items += finder
             for bundleID in mode?.apps ?? [] where Apps.shows(bundleID) && !items.contains(where: { $0.id == bundleID }) {
                 items.append(item(bundleID, pinned: true))
             }
@@ -373,7 +378,8 @@ final class DockController {
                 var rows: [String: [DockItem]] = [:]
                 for other in modesOn ? config.modes : Array(config.modes.prefix(1)) where other.id != mode?.id {
                     var seen = Set<String>()
-                    rows[other.id] = other.apps.filter { Apps.shows($0) && seen.insert($0).inserted }.map { item($0, pinned: true) } + loose
+                    seen.formUnion(finder.map(\.id))
+                    rows[other.id] = finder + other.apps.filter { Apps.shows($0) && seen.insert($0).inserted }.map { item($0, pinned: true) } + loose
                 }
                 rows[mode?.id ?? ""] = ordered
                 dock.rows = rows
@@ -382,7 +388,7 @@ final class DockController {
 
             // The stage is as long as the most apps any mode would show here, so switching never moves the rest.
             let longest = Perf.span("refresh: stage") { config.modes.map { m in m.apps.filter(Apps.shows).count }.max() ?? 0 }
-            let slots = max(longest, ordered.count) + 1
+            let slots = max(longest + finder.count, ordered.count) + 1
             if slots != dock.stageSlots { dock.stageSlots = slots }
 
             Perf.span("refresh: place panel") { panel.place(on: screen) }
@@ -611,11 +617,13 @@ final class DockController {
     /// Dropping an app at a new place saves the new order as the mode's apps. Dragging an app that isn't in the
     /// mode into place adds it.
     func move(_ id: String, to index: Int, in dock: ScreenDock) {
-        guard let mode = dock.mode, let from = dock.items.firstIndex(where: { $0.id == id }) else { return }
+        // Finder stays first; nothing goes before it.
+        guard id != Self.finder, let mode = dock.mode, let from = dock.items.firstIndex(where: { $0.id == id }) else { return }
         var keys = dock.items.map(\.id)
         keys.remove(at: from)
-        keys.insert(id, at: min(max(0, index), keys.count))
-        let shown = keys.filter { key in key == id || dock.items.first { $0.id == key }?.pinned == true }
+        let first = keys.first == Self.finder ? 1 : 0
+        keys.insert(id, at: min(max(first, index), keys.count))
+        let shown = keys.filter { key in key != Self.finder && (key == id || dock.items.first { $0.id == key }?.pinned == true) }
         var updated = mode
         updated.apps = shown + mode.apps.filter { !shown.contains($0) }
         config.save(updated)
