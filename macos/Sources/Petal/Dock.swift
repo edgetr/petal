@@ -218,6 +218,7 @@ final class DockController {
             launch(item.id)
             return
         }
+        if Parking.activate(item.id) { return }   // each mode keeps its own windows
         let windows = Windows.windows(of: running.processIdentifier)
         guard !windows.isEmpty else {
             if item.windows == 0 { launch(item.id) } else { Windows.bringForward(running) }

@@ -94,6 +94,7 @@ final class PetalApp {
         menuBar.start()
         aiSetup.refreshAll()
         Skill.install()
+        Windows.startManaging()
         if !config.welcomed {
             welcome.show()
         } else {
@@ -102,6 +103,7 @@ final class PetalApp {
     }
 
     func stop() {
+        Windows.stopManaging()
         ipc.stop()
         claude.agent.stop()
         SystemDock.restore()
@@ -180,6 +182,8 @@ final class PetalApp {
     private func apply(_ id: String, desktop: Int) {
         stay()
         config.setMode(id, forDesktop: desktop)
+        Parking.modeChanged(desktop: desktop)
+        Tiling.modeChanged(desktop: desktop)
         if let card = popups.card, card.target?.id == id { popups.dismissCard() }
     }
 

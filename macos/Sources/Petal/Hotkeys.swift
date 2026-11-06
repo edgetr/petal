@@ -55,6 +55,17 @@ final class Hotkeys {
         if taken != self.taken { self.taken = taken }
     }
 
+    /// A key another part of Petal holds (tiling's, ids from 200 up, which `fire` sends to Tiling). Nil when macOS
+    /// or another app already has the combination.
+    func register(_ code: Int, modifiers: UInt32, id: UInt32) -> EventHotKeyRef? {
+        installHandler()
+        if Self.systemShortcuts().contains(Self.combo(code, modifiers)) { return nil }
+        var ref: EventHotKeyRef?
+        let status = RegisterEventHotKey(UInt32(code), modifiers, EventHotKeyID(signature: OSType(0x5045_544C), id: id),
+                                         GetApplicationEventTarget(), OptionBits(kEventHotKeyExclusive), &ref)
+        return status == noErr ? ref : nil
+    }
+
     private func installHandler() {
         guard handler == nil else { return }
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -79,6 +90,8 @@ final class Hotkeys {
             guard Int(key) <= modes.count,
                   let desktop = app.docks.focusedDock?.desktop ?? Spaces.desktop(on: NSScreen.main ?? NSScreen.screens[0]) else { return }
             app.requestMode(modes[Int(key) - 1].id, desktop: desktop)
+        case 200...:
+            Tiling.hotkey(key)
         default:
             break
         }
