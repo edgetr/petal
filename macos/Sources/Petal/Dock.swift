@@ -561,6 +561,22 @@ final class DockPanel: NSPanel {
         mouseTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.followMouse() }
         }
+        // The panel runs the screen's whole edge so it never resizes; only the dock itself takes the mouse, and the
+        // clear rest lets clicks through to the windows below. Pointer moves anywhere set it at once.
+        let follow: (NSEvent) -> Void = { [weak self] _ in MainActor.assumeIsolated { self?.updateMouseThrough() } }
+        mouseMonitors = [
+            NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged], handler: follow) as Any,
+            NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { follow($0); return $0 } as Any,
+        ]
+    }
+
+    private var mouseMonitors: [Any] = []
+
+    /// Takes the mouse only over the dock (its glass and the room above it for lifting icons), never over the
+    /// clear rest of the panel, and not at all while tucked away.
+    func updateMouseThrough() {
+        let wanted = tucked || !contentFrame.insetBy(dx: -2, dy: -2).contains(NSEvent.mouseLocation)
+        if ignoresMouseEvents != wanted { ignoresMouseEvents = wanted }
     }
 
     override var canBecomeKey: Bool { false }
@@ -568,6 +584,8 @@ final class DockPanel: NSPanel {
 
     override func close() {
         mouseTimer?.invalidate()
+        for monitor in mouseMonitors { NSEvent.removeMonitor(monitor) }
+        mouseMonitors = []
         super.close()
     }
 
@@ -632,7 +650,7 @@ final class DockPanel: NSPanel {
         case "right": origin.x += shift
         default: origin.y -= shift
         }
-        ignoresMouseEvents = tucked
+        updateMouseThrough()
         let alpha: CGFloat = tucked ? 0 : 1
         if alphaValue != alpha {
             NSAnimationContext.runAnimationGroup { context in
@@ -666,6 +684,7 @@ final class DockPanel: NSPanel {
 
     /// Auto-hide: the dock comes out when the pointer meets its edge, and goes 150 ms after it leaves.
     private func followMouse() {
+        updateMouseThrough()
         guard config.autoHide, let screen = screenRef else {
             if !dock.revealed { dock.revealed = true }
             if contentFrame.contains(NSEvent.mouseLocation) { dock.magnifier.wake() }
