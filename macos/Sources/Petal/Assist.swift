@@ -20,6 +20,7 @@ final class Assist {
         let kind: String      // what Always remembers: "quit", "close", "trash"
         let title: String     // "Quit Spotify"
         let detail: String    // a line more, or ""
+        var secret = false    // asks the person for a secret (the vault), typed into the card
     }
 
     struct Memory: Identifiable, Equatable {
@@ -32,6 +33,8 @@ final class Assist {
 
     private(set) var pending: Request?
     private(set) var memories: [Memory] = []
+    /// What Petal AI did, newest first (AssistMore.swift).
+    var history: [Done] = []
     @ObservationIgnored private var answer: ((Bool) -> Void)?
     @ObservationIgnored private var giveUp: DispatchWorkItem?
     @ObservationIgnored private var trashed: [(from: URL, to: URL)] = []
@@ -43,6 +46,7 @@ final class Assist {
 
     func start() {
         loadMemories()
+        loadHistory()
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.minute() }
         }
@@ -53,10 +57,13 @@ final class Assist {
     enum Choice { case once, always, no }
 
     /// Allowed already (Full access, or Always for this kind), or asked with a card; `done` hears the answer.
-    func ask(_ kind: String, _ title: String, detail: String = "", done: @escaping (Bool) -> Void) {
-        if config.string("claudeAccess") == "full" || config.strings("aiAllowed").contains(kind) { return done(true) }
+    /// `always`: asked even with Full access (the vault). `secret`: the card takes a secret, handed to `typed`.
+    func ask(_ kind: String, _ title: String, detail: String = "", always: Bool = false, secret: Bool = false,
+             typed: ((String) -> Void)? = nil, done: @escaping (Bool) -> Void) {
+        if !secret, (!always && config.string("claudeAccess") == "full") || config.strings("aiAllowed").contains(kind) { return done(true) }
         settle(false)   // one question at a time: a newer one replaces an older one, which is declined
-        let request = Request(kind: kind, title: title, detail: detail)
+        secretTyped = typed
+        let request = Request(kind: kind, title: title, detail: detail, secret: secret)
         pending = request
         answer = done
         // In the chat when it's open (the card shows there); over the dock otherwise (another AI session asking).
@@ -66,8 +73,15 @@ final class Assist {
         DispatchQueue.main.asyncAfter(deadline: .now() + 120, execute: work)
     }
 
-    func choose(_ choice: Choice) {
+    @ObservationIgnored private var secretTyped: ((String) -> Void)?
+
+    func choose(_ choice: Choice, secret: String = "") {
         guard let pending else { return }
+        if pending.secret, choice != .no {
+            guard !secret.isEmpty else { return }
+            secretTyped?(secret)
+        }
+        secretTyped = nil
         if choice == .always {
             var allowed = config.strings("aiAllowed")
             if !allowed.contains(pending.kind) { allowed.append(pending.kind); config.set("aiAllowed", allowed) }
@@ -112,16 +126,21 @@ final class Assist {
             let text = (args["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return fail("Nothing to remember.") }
             let memory = remember(text, mode: args["mode"] as? String ?? "", learned: args["learned"] as? Bool ?? false)
+            did("Remembered “\(memory.text)”", undo: .forget(memory.id))
             send(["remembered": memory.text, "id": memory.id, "mode": memory.mode.isEmpty ? "everywhere" : memory.mode])
         case "petal_forget":
             let gone = forget(id: args["id"] as? String, matching: args["text"] as? String)
+            for memory in gone { did("Forgot “\(memory.text)”", undo: .remember(memory.text, memory.mode)) }
             send(["forgot": gone.map(\.text)])
         case "petal_show":
             do {
-                let file = try Pages.show(title: args["title"] as? String ?? "Petal", markdown: args["markdown"] as? String,
+                let title = args["title"] as? String ?? "Petal"
+                let file = try Pages.show(title: title, markdown: args["markdown"] as? String,
                                           html: args["html"] as? String, path: args["path"] as? String)
+                did("Made a page: \(title)", undo: .open(file.path, title))
                 send(["opened": file.path])
             } catch { fail(error.localizedDescription) }
+        case "petal_vault": vault(args, send, fail)
         case "petal_memories":
             let mode = args["mode"] as? String
             send(["memories": memories.filter { mode == nil || $0.mode == mode || $0.mode.isEmpty }.map(record)])
@@ -143,6 +162,11 @@ final class Assist {
         if args["clipboard"] as? Bool == true { result["clipboard"] = NSPasteboard.general.string(forType: .string).map { String($0.prefix(4000)) } ?? "" }
         guard let front else { return send(result) }
         result["app"] = ["name": front.localizedName ?? "", "id": front.bundleIdentifier ?? ""]
+        // An app the person keeps private (passwords, a bank): only its name, nothing of what's in it.
+        if neverLook(front.bundleIdentifier) {
+            result["private"] = "The user keeps this app private: Petal doesn't look at what's in it."
+            return send(result)
+        }
         let pid = front.processIdentifier
         let shot = args["screenshot"] as? String ?? ((args["screenshot"] as? Bool) == true ? "window" : "")
         Self.queue.async {
@@ -157,10 +181,12 @@ final class Assist {
                 MainActor.assumeIsolated {
                     result["window"] = title
                     if !selected.isEmpty { result["selectedText"] = String(selected.prefix(8000)) }
+                    let hidden = self.privatePIDs
                     let finish = {
                         guard !shot.isEmpty else { return send(result) }
                         Task {
-                            if let path = await Self.screenshot(shot == "screen" ? nil : number) {
+                            if let path = await Self.screenshot(shot == "screen" ? nil : number, hiding: hidden) {
+                                self.did(shot == "screen" ? "Looked at your screen" : "Looked at \(front.localizedName ?? "a window")")
                                 result["screenshot"] = path
                                 result["screenshotNote"] = "A PNG of the \(shot == "screen" ? "screen" : "window"); read it to see it."
                             } else {
@@ -197,7 +223,7 @@ final class Assist {
     }
 
     /// A picture of one window (its number), or of the main screen, saved in Petal's caches; its path.
-    nonisolated private static func screenshot(_ window: CGWindowID?) async -> String? {
+    nonisolated private static func screenshot(_ window: CGWindowID?, hiding: Set<pid_t> = []) async -> String? {
         guard CGPreflightScreenCaptureAccess(),
               let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true) else { return nil }
         let filter: SCContentFilter
@@ -206,7 +232,8 @@ final class Assist {
             filter = SCContentFilter(desktopIndependentWindow: match)
             size = match.frame.size
         } else if let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first {
-            filter = SCContentFilter(display: display, excludingWindows: [])
+            // The screen without the apps kept private.
+            filter = SCContentFilter(display: display, excludingApplications: content.applications.filter { hiding.contains($0.processID) }, exceptingWindows: [])
             size = CGSize(width: display.width, height: display.height)
         } else { return nil }
         let configuration = SCStreamConfiguration()
@@ -260,6 +287,7 @@ final class Assist {
                 ask("quit", "Quit \(label)", detail: "It asks to save anything unsaved.") { allowed in
                     guard allowed else { return send(["declined": "The person didn't allow quitting \(label)."]) }
                     running.terminate()
+                    self.did("Quit \(label)")
                     send(["quit": label])
                 }
             }
@@ -294,8 +322,9 @@ final class Assist {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     if action == "list" {
+                        let hidden = self.privatePIDs
                         return send(["windows": found.map { w in
-                            ["id": w.id, "app": NSRunningApplication(processIdentifier: w.pid)?.localizedName ?? "", "title": w.title,
+                            ["id": w.id, "app": NSRunningApplication(processIdentifier: w.pid)?.localizedName ?? "", "title": hidden.contains(w.pid) ? "" : w.title,
                              "minimized": w.minimized, "here": self.app.docks.isOnScreen(w)] as [String: Any]
                         }])
                     }
@@ -310,6 +339,7 @@ final class Assist {
                         self.ask("close", "Close “\(label)”", detail: "Its app asks to save anything unsaved.") { allowed in
                             guard allowed else { return send(["declined": "The person didn't allow closing it."]) }
                             Windows.close(window)
+                            self.did("Closed “\(label)”")
                             send(["closed": label])
                         }
                     case "arrange":
@@ -364,6 +394,8 @@ final class Assist {
                 MainActor.assumeIsolated {
                     self.trashed = moved.map { (from: $0.key, to: $0.value) }
                     if let error, moved.isEmpty { return fail(error.localizedDescription) }
+                    self.did(moved.count == 1 ? "Moved “\(moved.keys.first?.lastPathComponent ?? "")” to the Trash" : "Moved \(moved.count) items to the Trash",
+                             undo: .putBack(moved.map { [$0.key.path, $0.value.path] }))
                     send(["trashed": moved.keys.map(\.path), "undo": "petal_trash with undo: true puts them back"])
                 }
             }

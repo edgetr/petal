@@ -730,6 +730,9 @@ struct ClaudeSettings: View {
                 DailySummaryRow()
             }
             MemoryCard()
+            VaultCard()
+            PrivacyCard()
+            AIHistoryCard()
             if !app.config.strings("aiAllowed").isEmpty {
                 Card(title: "Allowed without asking", footer: "You chose Always for these. Take one away and Petal AI asks again.") {
                     ForEach(app.config.strings("aiAllowed"), id: \.self) { kind in
@@ -770,6 +773,90 @@ struct MemoryCard: View {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Everything Petal AI did, newest first, with Undo where it can be undone.
+struct AIHistoryCard: View {
+    @Environment(PetalApp.self) private var app
+
+    var body: some View {
+        Card(title: "What Petal AI did", footer: app.assist.history.isEmpty ? "Things it does on your Mac show here, each with a way back." : nil) {
+            if app.assist.history.isEmpty {
+                Text("Nothing yet.").font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            ForEach(app.assist.history.prefix(30)) { done in
+                HStack(spacing: 8) {
+                    Text(done.text).font(.system(size: 13)).strikethrough(done.undone).foregroundStyle(done.undone ? .secondary : .primary)
+                        .lineLimit(2)
+                    Spacer(minLength: 8)
+                    Text(done.at, style: .relative).font(.system(size: 11)).foregroundStyle(.secondary)
+                    if let undo = done.undo, !done.undone {
+                        if case .open = undo {
+                            Button("Open") { app.assist.undo(done) }.buttonStyle(.glass).controlSize(.small)
+                        } else {
+                            Button("Undo") { app.assist.undo(done) }.buttonStyle(.glass).controlSize(.small)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Secrets Petal AI can use without seeing them: their names, and adding or removing one.
+struct VaultCard: View {
+    @State private var names = Assist.vaultNames()
+    @State private var name = ""
+    @State private var secret = ""
+
+    var body: some View {
+        Card(title: "Vault", footer: "Passwords and keys Petal AI can type in for you, after asking each time. They stay in your Keychain; the AI never sees them.") {
+            ForEach(names, id: \.self) { item in
+                HStack {
+                    Image(systemName: "key.fill").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(item).font(.system(size: 13))
+                    Spacer()
+                    RoundButton(symbol: "xmark") { Assist.vaultRemove(item); names = Assist.vaultNames() }
+                }
+            }
+            HStack(spacing: 8) {
+                TextField("Name, such as GitHub password", text: $name).textFieldStyle(.roundedBorder)
+                SecureField("Secret", text: $secret).textFieldStyle(.roundedBorder)
+                Button("Add") {
+                    Assist.vaultSave(name.trimmingCharacters(in: .whitespaces), secret)
+                    name = ""; secret = ""
+                    names = Assist.vaultNames()
+                }
+                .buttonStyle(.glass).disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || secret.isEmpty)
+            }
+        }
+    }
+}
+
+/// Apps Petal AI never looks into: it gets their name, never their windows, text or a picture of them.
+struct PrivacyCard: View {
+    @Environment(PetalApp.self) private var app
+
+    var body: some View {
+        let ids = app.config.strings("aiNeverLook")
+        Card(title: "Kept private", footer: "Petal AI sees only these apps' names: never their windows, text or a picture of them.") {
+            ForEach(ids, id: \.self) { id in
+                HStack(spacing: 8) {
+                    Image(nsImage: Apps.icon(id)).resizable().frame(width: 18, height: 18)
+                    Text(Apps.name(id)).font(.system(size: 13))
+                    Spacer()
+                    RoundButton(symbol: "xmark") { app.config.set("aiNeverLook", ids.filter { $0 != id }) }
+                }
+            }
+            Menu("Add an app") {
+                ForEach(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !ids.contains($0.bundleIdentifier ?? "") }
+                    .compactMap { app in app.bundleIdentifier.map { ($0, app.localizedName ?? $0) } }.sorted { $0.1 < $1.1 }, id: \.0) { id, name in
+                    Button(name) { app.config.set("aiNeverLook", ids + [id]) }
+                }
+            }
+            .fixedSize()
         }
     }
 }

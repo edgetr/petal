@@ -22,7 +22,9 @@ final class GlassPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
     }
 
-    override var canBecomeKey: Bool { false }
+    /// Takes typing (a card asking for a secret), without bringing Petal forward.
+    var takesKeys = false
+    override var canBecomeKey: Bool { takesKeys }
 
     func show<Content: View>(_ content: Content, over slot: CGRect, dock: DockPanel?, gap: CGFloat = 8) {
         hosting.rootView = AnyView(content.environment(PetalApp.shared))
@@ -336,6 +338,9 @@ final class Popups {
             let pill = panelRef.frame
             cardPanel.show(CardView(card: card), over: CGRect(x: pill.midX - 1, y: pill.minY, width: 2, height: pill.height), dock: panelRef)
         }
+        // A card asking for a secret takes the keyboard for it.
+        cardPanel.takesKeys = card.kind == .ask && PetalApp.shared.assist.pending?.secret == true
+        if cardPanel.takesKeys { cardPanel.makeKey() }
         // A peek fades out by itself.
         if card.kind == .peek {
             let work = DispatchWorkItem { [weak self] in
@@ -983,6 +988,7 @@ struct AskCard: View {
 struct AskRequestView: View {
     @Environment(PetalApp.self) private var app
     let request: Assist.Request
+    @State private var secret = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -996,11 +1002,19 @@ struct AskRequestView: View {
                 }
                 Spacer(minLength: 0)
             }
+            if request.secret {
+                SecureField("Type it here", text: $secret).textFieldStyle(.roundedBorder).onSubmit { app.assist.choose(.once, secret: secret) }
+            }
             HStack(spacing: 8) {
                 Spacer()
                 Button("Don't") { app.assist.choose(.no) }.buttonStyle(.glass)
-                Button("Always") { app.assist.choose(.always) }.buttonStyle(.glass)
-                Button("Allow") { app.assist.choose(.once) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
+                if request.secret {
+                    Button("Save") { app.assist.choose(.once, secret: secret) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
+                        .disabled(secret.isEmpty)
+                } else {
+                    Button("Always") { app.assist.choose(.always) }.buttonStyle(.glass)
+                    Button("Allow") { app.assist.choose(.once) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
+                }
             }
         }
     }
