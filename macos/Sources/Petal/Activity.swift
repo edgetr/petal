@@ -89,7 +89,12 @@ final class ActivityLog {
 
     nonisolated static func state() -> [String: Any] { MCP.read(stateFile) ?? [:] }
 
+    /// One writer at a time: the AI's spending and the stacks' last opening each read, change and write it.
+    nonisolated private static let stateLock = NSLock()
+
     nonisolated static func setState(_ key: String, _ value: Any) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try? MCP.update(stateFile) { $0[key] = value }
     }

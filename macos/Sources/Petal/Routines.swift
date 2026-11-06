@@ -212,6 +212,17 @@ final class Routines {
     /// Each move as it happens, before the history has it: Petal quitting mid-batch never loses a way back.
     nonisolated static var journalFile: URL { stateFolder.appending(path: "routines-moving.json") }
 
+    /// Drops from the journal only the moves the history on disk has; anything else (a run still going, a history
+    /// that didn't save) stays for the next launch to recover. On `io`.
+    nonisolated static func pruneJournal() {
+        guard var list = Config.parse(journalFile)?["moves"] as? [[String: String]] else { return }
+        let saved = Set((Config.parse(logFile)?["entries"] as? [[String: Any]] ?? []).flatMap { entry in
+            (entry["moves"] as? [[String: String]] ?? []).map { ($0["from"] ?? "") + "→" + ($0["to"] ?? "") }
+        })
+        list.removeAll { saved.contains(($0["from"] ?? "") + "→" + ($0["to"] ?? "")) }
+        if list.isEmpty { try? FileManager.default.removeItem(at: journalFile) } else { Config.writeObject(["moves": list], to: journalFile) }
+    }
+
     nonisolated static func journal(_ move: Move) {
         var list = (Config.parse(journalFile)?["moves"] as? [[String: String]]) ?? []
         list.append(["from": move.from, "to": move.to])
@@ -280,7 +291,7 @@ final class Routines {
                     }
                     self.log = log
                     if !unrecorded.isEmpty { self.saveLog() }
-                    Self.io.async { try? FileManager.default.removeItem(at: Self.journalFile) }
+                    Self.io.async { Self.pruneJournal() }
                     self.learned = learned
                     self.stamp = stamp
                     self.watch()
@@ -487,12 +498,8 @@ final class Routines {
                          at: Date(), moves: moves, made: made), at: 0)
         if log.count > 300 { log.removeLast(log.count - 300) }
         saveLog()
-        // In the history now (written first, on the same queue): the journal goes once the file on disk has it.
-        let recorded = log[0].id
-        Self.io.async {
-            let saved = (Config.parse(Self.logFile)?["entries"] as? [[String: Any]] ?? []).contains { $0["id"] as? String == recorded }
-            if saved { try? FileManager.default.removeItem(at: Self.journalFile) }
-        }
+        // In the history now (written first, on the same queue): its moves leave the journal once the file has them.
+        Self.io.async { Self.pruneJournal() }
         setLastRun(routine.id, Date(), result: text)
     }
 
@@ -873,6 +880,7 @@ final class Routines {
             let n = plan.items.count
             // Nothing to move there: the routine's other actions still run.
             guard n > 0 else {
+                self.plans[id] = nil
                 return self.execute(routine, file: nil, approved: plan) { moves in
                     send(["moved": moves.count, "note": "Nothing to move in its first folder; its other actions ran."])
                 }
@@ -1028,7 +1036,9 @@ final class Routines {
         let all = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? []
         let files = all.compactMap { url -> (URL, Date)? in
             guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true,
-                  !FolderWatch.partial.contains(url.pathExtension.lowercased()) else { return nil }
+                  !FolderWatch.partial.contains(url.pathExtension.lowercased()),
+                  // Still downloading: a partial file beside it (Firefox's song.mp3 beside song.mp3.part).
+                  !FolderWatch.partial.contains(where: { FileManager.default.fileExists(atPath: url.path + "." + $0) }) else { return nil }
             return (url, values.addedToDirectoryDate ?? values.contentModificationDate ?? .distantPast)
         }
         // As the folder is written (/var, not /private/var), so a put-back file's folder is the one being watched.

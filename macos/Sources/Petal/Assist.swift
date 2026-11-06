@@ -193,7 +193,7 @@ final class Assist {
                     let finish = {
                         guard !shot.isEmpty else { return send(result) }
                         Task {
-                            if let path = await Self.screenshot(shot == "screen" ? nil : number, hiding: hidden) {
+                            if let path = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", hiding: hidden) {
                                 self.did(shot == "screen" ? "Looked at your screen" : "Looked at \(front.localizedName ?? "a window")")
                                 result["screenshot"] = path
                                 result["screenshotNote"] = "A PNG of the \(shot == "screen" ? "screen" : "window"); read it to see it."
@@ -231,12 +231,15 @@ final class Assist {
     }
 
     /// A picture of one window (its number), or of the main screen, saved in Petal's caches; its path.
-    nonisolated private static func screenshot(_ window: CGWindowID?, hiding: Set<pid_t> = []) async -> String? {
+    /// `window` nil is the whole screen; a window that can't be found is no picture, never the screen instead.
+    nonisolated private static func screenshot(_ window: CGWindowID?, screen: Bool = false, hiding: Set<pid_t> = []) async -> String? {
+        guard screen || window != nil else { return nil }
         guard CGPreflightScreenCaptureAccess(),
               let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true) else { return nil }
         let filter: SCContentFilter
         let size: CGSize
-        if let window, let match = content.windows.first(where: { $0.windowID == window }) {
+        if !screen {
+            guard let window, let match = content.windows.first(where: { $0.windowID == window }) else { return nil }
             filter = SCContentFilter(desktopIndependentWindow: match)
             size = match.frame.size
         } else if let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first {

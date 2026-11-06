@@ -78,7 +78,12 @@ enum Windows {
     /// This window is raised last, after its app comes forward, and once more a moment later: bringing an app
     /// forward through Launch Services asks it to reopen, and an app like Zoom answers by showing its main window
     /// over the one asked for.
+    /// Each focus request; a later one makes an earlier one's delayed retries stand down.
+    private static var focusing = 0
+
     static func focus(_ window: AppWindow, onScreen: Bool = false) {
+        focusing += 1
+        let ticket = focusing
         if window.minimized { AXUIElementSetAttributeValue(window.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
         let raise = {
             AXUIElementPerformAction(window.element, kAXRaiseAction as CFString)
@@ -99,13 +104,13 @@ enum Windows {
         // front a moment later, Launch Services brings it, which always works.
         if forward {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                guard NSWorkspace.shared.frontmostApplication?.processIdentifier != window.pid else { return }
+                guard ticket == focusing, NSWorkspace.shared.frontmostApplication?.processIdentifier != window.pid else { return }
                 bringForward(app)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { raise() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { if ticket == focusing { raise() } }
             }
         }
         for delay in forward ? [0.12] : [0.15, 0.4] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { raise() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { if ticket == focusing { raise() } }
         }
     }
 

@@ -102,6 +102,10 @@ enum MCP {
             if changes["claudeAccess"] as? String == "full", current["claudeAccess"] as? String != "full" {
                 throw Failure("Only the person can turn on Full access, in the chat's options or Petal's settings.")
             }
+            if changes.keys.contains("aiNeverLook"), !(changes["aiNeverLook"] is [String]) {
+                throw Failure("aiNeverLook is a list of app ids.")
+            }
+            if changes.keys.contains("aiAllowed"), !(changes["aiAllowed"] is [String]) { throw Failure("aiAllowed is a list.") }
             if let hidden = changes["aiNeverLook"] as? [String] {
                 let had = Set(current["aiNeverLook"] as? [String] ?? (schema["aiNeverLook"]?.first as? [String] ?? []))
                 if !had.isSubset(of: Set(hidden)) { throw Failure("Only the person can take an app off the private list, in Petal's settings.") }

@@ -181,6 +181,9 @@ final class DockController {
             setPolling()
             return
         }
+        // Now and then, every app's minimized windows: a minimize whose event never came is caught.
+        polls += 1
+        if polls % 6 == 0 { readAllMinimized = true }
         look(.poll)
     }
 
@@ -220,6 +223,7 @@ final class DockController {
     /// catches a window the app listed late.
     private var minimizedChanged: [pid_t: Double] = [:]
     private var readAllMinimized = true
+    private var polls = 0
 
     private func minimizedToRead() -> (all: Bool, changed: Set<pid_t>) {
         guard config.bool("minimized"), eventsLive else {
@@ -229,12 +233,13 @@ final class DockController {
             return (false, [])
         }
         let now = Self.now
+        let changed = Set(minimizedChanged.keys)   // every app marked is read at least once
         minimizedChanged = minimizedChanged.filter { now - $0.value < LookSchedule.followUp + 1 }
         if readAllMinimized {
             readAllMinimized = false
             return (true, [])
         }
-        return (false, Set(minimizedChanged.keys))
+        return (false, changed)
     }
 
     /// The apps with a place in the dock, by bundle id. Asking each running process for this costs several

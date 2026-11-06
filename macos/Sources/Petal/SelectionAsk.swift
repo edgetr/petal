@@ -112,6 +112,8 @@ final class SelectionAsk {
 
     private func hide() {
         hideLater?.cancel()
+        looking += 1   // a look still on its way is for a selection that's gone
+        found = nil
         panel.hide()
     }
 }

@@ -31,6 +31,13 @@ final class Drafts {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Petal/writing-style.json")
     }
 
+    /// Another mode in front: drafts still on their way for the last one are dropped.
+    func modeChanged() {
+        batch += 1
+        if !drafts.isEmpty, app.popups.card?.kind == .reply { app.popups.dismissCard() }
+        drafts = []
+    }
+
     /// Entering `mode` with `notes` held for it: draft what needs an answer.
     func prepare(_ notes: [HeldNote], for mode: Mode) {
         guard app.config.bool("replyDrafts"), app.focus.brain.enabled else { return }
@@ -59,7 +66,7 @@ final class Drafts {
                 if answer?["needsReply"] as? Bool == true, let reply = (answer?["reply"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !reply.isEmpty {
                     self.drafts.append(Draft(note: note, original: reply, text: reply))
                 }
-                if self.asking == 0, !self.drafts.isEmpty {
+                if self.asking == 0, !self.drafts.isEmpty, self.app.docks.focusedDock?.mode?.id == mode.id {
                     self.app.popups.show(FocusCard(kind: .reply, target: mode))
                 }
             }

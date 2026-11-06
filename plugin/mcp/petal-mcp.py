@@ -276,6 +276,9 @@ def t_set_settings(args):
         raise ValueError("Only the person can allow more, with Always on Petal's card or in its settings.")
     if changes.get("claudeAccess") == "full" and settings.get("claudeAccess") != "full":
         raise ValueError("Only the person can turn on Full access, in the chat's options or Petal's settings.")
+    for key in ("aiNeverLook", "aiAllowed"):
+        if key in changes and not (isinstance(changes[key], list) and all(isinstance(v, str) for v in changes[key])):
+            raise ValueError("%s is a list." % key)
     if "aiNeverLook" in changes and not set(settings.get("aiNeverLook", SETTINGS_SCHEMA["aiNeverLook"][0])) <= set(changes["aiNeverLook"] or []):
         raise ValueError("Only the person can take an app off the private list, in Petal's settings.")
     settings.update(changes)

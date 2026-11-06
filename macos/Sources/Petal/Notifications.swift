@@ -173,6 +173,7 @@ final class Notes {
         let mode = currentMode?.id
         guard mode != shownMode else { return }
         shownMode = mode
+        app.drafts.modeChanged()
         guard let mode, let current = currentMode else { return }
         let waiting = held(in: mode)
         guard !waiting.isEmpty else { return }
