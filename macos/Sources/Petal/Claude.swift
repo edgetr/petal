@@ -552,30 +552,23 @@ struct ClaudePanelView: View {
         VStack(alignment: .leading, spacing: 10) {
             if app.providers.count > 1 {
                 OptionRow(title: "Chat with") {
-                    Picker("", selection: Binding(get: { provider.rawValue }, set: {
+                    Segments(options: app.providers.map { ($0.rawValue, $0.name) }, selection: Binding(get: { provider.rawValue }, set: {
                         app.config.set("chatProvider", $0)
                         agent.reset()
                         Task { await app.usage.refresh() }
-                    })) {
-                        ForEach(app.providers) { Text($0.name).tag($0.rawValue) }
-                    }
-                    .pickerStyle(.segmented).labelsHidden().fixedSize().frame(maxWidth: .infinity)
+                    }))
                 }
             }
             if app.models(for: provider).count > 1 {
                 OptionRow(title: "Model") {
                     // Claude's four names, or Codex's newest of each family ("6.1 Sol"): side by side either way.
-                    Picker("", selection: Binding(get: { app.currentModel(for: provider) }, set: { app.config.set(provider.modelSetting, $0) })) {
-                        ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
-                    }
-                    .pickerStyle(.segmented).labelsHidden().segments(app.models(for: provider).count)
+                    Segments(options: app.models(for: provider), selection: Binding(get: { app.currentModel(for: provider) },
+                                                                                   set: { app.config.set(provider.modelSetting, $0) }))
                 }
             }
             OptionRow(title: "Effort") {
-                Picker("", selection: Binding(get: { app.config.string(provider.effortSetting) }, set: { app.config.set(provider.effortSetting, $0) })) {
-                    ForEach(app.efforts(for: provider), id: \.self) { Text($0).tag($0) }
-                }
-                .pickerStyle(.segmented).labelsHidden().segments(app.efforts(for: provider).count)
+                Segments(options: app.efforts(for: provider).map { ($0, $0) }, selection: Binding(get: { app.config.string(provider.effortSetting) },
+                                                                                                  set: { app.config.set(provider.effortSetting, $0) }))
             }
             OptionRow(title: "Full access") {
                 let full = app.config.string("claudeAccess") == "full"
@@ -708,10 +701,36 @@ struct ClaudePanelView: View {
     }
 }
 
-extension View {
-    /// A segmented picker as wide as its segments, each the same width whoever's choices they are: Claude's five
-    /// efforts and Codex's six look alike, rather than stretching to the row's end.
-    func segments(_ count: Int) -> some View { frame(width: CGFloat(count) * 66).frame(maxWidth: .infinity) }
+/// Choices side by side, every segment the same width whatever its words or which one is chosen (macOS's segmented
+/// control sizes each to its label, in bold when chosen, so choosing reshuffled them), with the choice's highlight
+/// sliding to it. Centered in its row, so rows of choices line up.
+struct Segments: View {
+    let options: [(String, String)]
+    @Binding var selection: String
+    static let width: CGFloat = 66
+    @Namespace private var space
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(options, id: \.0) { id, label in
+                let chosen = id == selection
+                Text(label).font(.system(size: 12.5, weight: .medium)).lineLimit(1).minimumScaleFactor(0.8)
+                    .foregroundStyle(chosen ? .white : .primary.opacity(0.85))
+                    .frame(width: Self.width, height: 24)
+                    .background {
+                        if chosen {
+                            RoundedRectangle(cornerRadius: 7).fill(Color(nsColor: PetalApp.shared.accent))
+                                .matchedGeometryEffect(id: "chosen", in: space)
+                        }
+                    }
+                    .contentShape(.rect)
+                    .onTapGesture { withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) { selection = id } }
+            }
+        }
+        .padding(2)
+        .background(.white.opacity(0.07), in: .rect(cornerRadius: 9))
+        .frame(maxWidth: .infinity)
+    }
 }
 
 struct OptionRow<Content: View>: View {

@@ -162,7 +162,9 @@ enum CLI {
 @MainActor
 enum OtherAgents {
     static func connect(paths: [Provider: String]) {
-        guard let executable = Bundle.main.executableURL?.resolvingSymlinksInPath().path else { return }
+        guard let executable = Bundle.main.executableURL?.resolvingSymlinksInPath().path,
+              // Only an installed Petal.app registers itself; a build or test copy never takes over.
+              executable.hasSuffix("Petal.app/Contents/MacOS/Petal"), !executable.contains("/build/"), !executable.contains("/tmp/") else { return }
         Skill.install()
         linkCommand(executable)
         let environment = PetalApp.shared.childEnvironment
@@ -173,6 +175,8 @@ enum OtherAgents {
 
     /// ~/.local/bin/petal → Petal's executable, unless something else already has that name.
     static func linkCommand(_ executable: String) {
+        // Only an installed Petal.app: a bare build or a test copy running for a moment must never take the link.
+        guard executable.hasSuffix("Petal.app/Contents/MacOS/Petal"), !executable.contains("/build/"), !executable.contains("/tmp/") else { return }
         let bin = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin")
         let link = bin.appending(path: "petal")
         if let existing = try? FileManager.default.destinationOfSymbolicLink(atPath: link.path) {

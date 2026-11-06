@@ -2,9 +2,18 @@ import AppKit
 
 // Started through a link (~/.local/bin/petal): run again as the app itself, so Bundle.main is Petal.app (its
 // Info.plist, tools and id) rather than the folder the link is in.
-if let path = Bundle.main.executableURL?.path {
+// (The path macOS ran, not Bundle.main's idea of it: through a link Bundle.main may have no executable at all.)
+var executableSize: UInt32 = 0
+_NSGetExecutablePath(nil, &executableSize)
+var executableBuffer = [CChar](repeating: 0, count: Int(executableSize) + 1)
+if _NSGetExecutablePath(&executableBuffer, &executableSize) == 0 {
+    let path = String(cString: executableBuffer)
     let real = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
-    if real != path { execv(real, CommandLine.unsafeArgv) }   // returns only if it couldn't
+    if real != URL(fileURLWithPath: path).standardizedFileURL.path {
+        // argv[0] too: macOS finds the main bundle from it.
+        var argv: [UnsafeMutablePointer<CChar>?] = [strdup(real)] + CommandLine.arguments.dropFirst().map { strdup($0) } + [nil]
+        execv(real, &argv)   // returns only if it couldn't
+    }
 }
 
 // `Petal --mcp`: Claude's Petal tools on stdin and stdout, started by the Claude panel's session.
