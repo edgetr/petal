@@ -145,6 +145,7 @@ enum Snapshot {
             """, link: nil))), CGSize(width: 560, height: 600)))
         views.append(("describe-day", AnyView(DescribeDaySheet()), nil))
         views.append(("settings-windows", AnyView(VStack { WindowsCard(showTiling: true) }.padding(20)), CGSize(width: 640, height: 420)))
+        views.append(("settings-api-keys", AnyView(VStack(spacing: 14) { ForEach(Provider.allCases) { APIKeyCard(provider: $0) } }.padding(20)), CGSize(width: 640, height: 420)))
         for dot in [false, true] {
             let mark = MenuBar.mark(dot: dot)
             views.append(("menubar\(dot ? "-dot" : "")", AnyView(HStack(spacing: 16) {

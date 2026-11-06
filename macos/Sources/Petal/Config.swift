@@ -66,6 +66,7 @@ final class Config {
         "aiProviders": ["claude"], "otherAgents": true, "aiMemory": true, "aiLearns": true, "dailySummary": "", "aiAllowed": [Any](),
         "shortcuts": true, "schedule": [Any](), "activityLog": true, "suggestModes": true, "summary": true,
         "magnification": false, "magnificationAmount": 0.5, "menuBarIcon": true, "chatProvider": "claude", "codexModel": "", "codexEffort": "medium", "codexPath": "",
+        "claudeAuth": "subscription", "codexAuth": "subscription",
     ]
 
     private(set) var modes: [Mode] = []

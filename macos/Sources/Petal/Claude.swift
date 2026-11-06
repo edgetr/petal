@@ -13,10 +13,15 @@ final class Agent {
         let id = UUID()
         let kind: Kind
         let text: String
-        init(kind: Kind, text: String) { self.kind = kind; self.text = text }
+        var opensSettings = false   // an error that Settings › AI fixes (a key or sign-in), with a button there
+        init(kind: Kind, text: String, opensSettings: Bool = false) { self.kind = kind; self.text = text; self.opensSettings = opensSettings }
     }
     struct Denial: Equatable { let tool: String; let label: String; let rules: [String] }
-    enum Event { case session(String), text(String), step(String), denials([Denial]), error(String), finished }
+    enum Event {
+        case session(String), text(String), step(String), denials([Denial]), error(String), finished
+        /// The API refused the key or sign-in; what a turn cost (Claude Code's figure), or Codex's tokens to price.
+        case authFailed, cost(Double), tokens(input: Int, cached: Int, output: Int)
+    }
 
     private(set) var messages: [Message] = []
     private(set) var running = false
@@ -26,6 +31,7 @@ final class Agent {
     @ObservationIgnored private var allowed: [String] = []
     @ObservationIgnored private var process: Process?
     @ObservationIgnored private var errorText = ""
+    @ObservationIgnored private var authFailed = false   // this run's key or sign-in was refused, already said
     @ObservationIgnored private var runID = UUID()   // a stopped run's late lines don't belong to the next chat
 
     var app: PetalApp { PetalApp.shared }
@@ -77,16 +83,23 @@ final class Agent {
             messages.append(Message(kind: .error, text: "Petal couldn't find \(provider.appName). Set it up in Petal's settings, under AI."))
             return
         }
+        // On an API key with none saved, say so rather than quietly using the subscription.
+        guard app.aiReady(provider) else {
+            messages.append(Message(kind: .error, text: "\(provider.name) is set to use an API key, and there isn't one yet. Add it in Settings › AI, or switch back to your subscription.", opensSettings: true))
+            return
+        }
         if sessionProvider != provider { sessionID = nil; allowed = []; sessionProvider = provider }
         let config = app.config
-        let chat = Provider.Chat(model: config.string(provider.modelSetting), effort: config.string(provider.effortSetting),
+        var chat = Provider.Chat(model: config.string(provider.modelSetting), effort: config.string(provider.effortSetting),
                                  fullAccess: config.string("claudeAccess") == "full", instructions: instructions(provider),
                                  tools: Bundle.main.executablePath ?? "", session: sessionID, allowed: allowed)
+        chat.api = app.usesAPIKey(provider)
+        authFailed = false
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = provider.chatArguments(chat)
-        process.environment = app.childEnvironment
+        process.environment = app.aiEnvironment(provider)
         process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         let input = Pipe(), output = Pipe(), error = Pipe()
         process.standardInput = input
@@ -127,7 +140,7 @@ final class Agent {
                     self.process = nil
                     let status = finished.terminationStatus
                     let detail = self.errorText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if status != 0 && status != 15 && !detail.isEmpty {
+                    if status != 0 && status != 15 && !detail.isEmpty && !self.authFailed {
                         self.messages.append(Message(kind: .error, text: String(detail.suffix(300))))
                     }
                 }
@@ -156,6 +169,20 @@ final class Agent {
             messages.append(Message(kind: .ask, text: denials.map(\.label).joined(separator: "\n")))
         case .error(let text): messages.append(Message(kind: .error, text: text))
         case .finished: Task { await app.usage.refresh() }
+        case .authFailed:
+            guard !authFailed, let provider = sessionProvider else { return }
+            authFailed = true
+            stop()
+            messages.append(Message(kind: .error, text: app.usesAPIKey(provider)
+                ? "\(provider.keyMaker) didn't accept your API key. Check it in Settings › AI."
+                : "\(provider.appName) isn't signed in anymore. Sign in again from Settings › AI.", opensSettings: true))
+        case .cost(let dollars):
+            if let provider = sessionProvider, app.usesAPIKey(provider) { app.usage.addSpend(dollars, for: provider) }
+        case .tokens(let input, let cached, let output):
+            guard let provider = sessionProvider, app.usesAPIKey(provider) else { return }
+            let model = app.config.string(provider.modelSetting)
+            app.usage.addSpend(APIPricing.codex(model: model.isEmpty ? (app.codexModels.first?.id ?? "") : model,
+                                                input: input, cached: cached, output: output), for: provider)
         }
     }
 
@@ -453,6 +480,8 @@ struct ClaudePanelView: View {
                 Text("\(Int(((1 - worst.percent) * 100).rounded()))% left" + (worst.resetsAt.map { " · resets in " + PetalApp.until($0) } ?? ""))
                     .font(.system(size: 12))
                     .foregroundStyle(worst.percent >= 0.9 ? Color(red: 1, green: 0.42, blue: 0.54) : .secondary)
+            } else if let spent = app.usage.spentText {
+                Text(spent).font(.system(size: 12)).foregroundStyle(.secondary)
             }
             Spacer()
             // The model and effort, on clear glass as × is; the chevron turns up while the options are open.
@@ -685,7 +714,12 @@ struct MessageView: View {
         case .step:
             Text("›  " + message.text).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
         case .error:
-            Text(message.text).font(.system(size: 13.5)).foregroundStyle(Color(red: 1, green: 0.42, blue: 0.54)).textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(message.text).font(.system(size: 13.5)).foregroundStyle(Color(red: 1, green: 0.42, blue: 0.54)).textSelection(.enabled)
+                if message.opensSettings {
+                    Button("Open Settings › AI") { app.settings.show(.claude) }.buttonStyle(.glass)
+                }
+            }
         case .ask:
             VStack(alignment: .leading, spacing: 8) {
                 Text("Claude wants to").font(.system(size: 12)).foregroundStyle(.secondary)

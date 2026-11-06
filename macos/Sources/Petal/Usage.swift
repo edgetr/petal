@@ -23,7 +23,47 @@ final class Usage {
     @ObservationIgnored private var claudeAsked: Date?
     @ObservationIgnored private var claudeWait: Date?
 
-    init() { load() }
+    init() { load(); loadSpend() }
+
+    // MARK: Spent on an API key
+
+    /// What Petal's own runs spent on an API key this calendar month, per AI: Claude Code's own figure for each
+    /// answer, and Codex's tokens at approximate list prices (APIPricing). Kept in state.json beside the activity
+    /// history ("aiSpend"), never in settings.
+    private(set) var spentBy: [Provider: Double] = [:]
+    @ObservationIgnored private var spentMonth = ""
+    @ObservationIgnored private let spendQueue = DispatchQueue(label: "tech.edgetr.petal.spend", qos: .utility)
+
+    private static func month(_ date: Date = Date()) -> String {
+        let parts = Calendar.current.dateComponents([.year, .month], from: date)
+        return String(format: "%04d-%02d", parts.year ?? 0, parts.month ?? 0)
+    }
+
+    private func loadSpend() {
+        let saved = ActivityLog.state()["aiSpend"] as? [String: Any] ?? [:]
+        spentMonth = saved["month"] as? String ?? Self.month()
+        for provider in Provider.allCases { spentBy[provider] = saved[provider.rawValue] as? Double }
+        if spentMonth != Self.month() { spentMonth = Self.month(); spentBy = [:] }
+    }
+
+    func addSpend(_ dollars: Double, for provider: Provider) {
+        guard dollars > 0, dollars.isFinite else { return }
+        if spentMonth != Self.month() { spentMonth = Self.month(); spentBy = [:] }
+        spentBy[provider, default: 0] += dollars
+        var record: [String: Any] = ["month": spentMonth]
+        for (key, value) in spentBy { record[key.rawValue] = value }
+        spendQueue.async { ActivityLog.setState("aiSpend", record) }
+    }
+
+    /// "$1.20 this month" for an AI on an API key; nil on a subscription.
+    func spentText(_ provider: Provider) -> String? {
+        guard PetalApp.shared.usesAPIKey(provider) else { return nil }
+        let spent = spentMonth == Self.month() ? spentBy[provider] ?? 0 : 0
+        return (spent > 0 && spent < 0.01 ? "Under $0.01" : String(format: "$%.2f", spent)) + " this month"
+    }
+
+    /// The chat's AI's.
+    var spentText: String? { PetalApp.shared.chatProvider.flatMap(spentText) }
 
     /// The last limits seen, kept through a restart (the check may not answer again for minutes).
     private static let store = "usageLimits"
@@ -47,7 +87,11 @@ final class Usage {
         }
     }
 
-    var limits: [UsageLimit] { PetalApp.shared.chatProvider.flatMap { limitsBy[$0] } ?? [] }
+    /// On an API key there are no plan limits (the ring stays empty); what's spent shows instead.
+    var limits: [UsageLimit] {
+        guard let provider = PetalApp.shared.chatProvider, !PetalApp.shared.usesAPIKey(provider) else { return [] }
+        return limitsBy[provider] ?? []
+    }
     var help: String { PetalApp.shared.chatProvider.flatMap { helpBy[$0] } ?? "" }
     @ObservationIgnored private var timer: Timer?
 
@@ -78,6 +122,7 @@ final class Usage {
     }
 
     func refresh(_ provider: Provider) async {
+        guard !PetalApp.shared.usesAPIKey(provider) else { return }
         switch provider {
         case .claude: await refreshClaude()
         case .codex: await refreshCodex()

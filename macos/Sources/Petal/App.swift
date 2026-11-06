@@ -32,6 +32,8 @@ final class PetalApp {
     let search = AppSearch()
     let updater = Updater()
     let aiSetup = AISetup()
+    /// API keys saved in the Keychain, and checking that one works (APIKeys.swift).
+    let apiKeyCheck = APIKeyCheck()
     let insights = InsightsController()
     @ObservationIgnored let activity = ActivityLog()
     @ObservationIgnored let tooltips = Tooltips()
@@ -265,6 +267,7 @@ final class PetalApp {
 
     var usageTooltip: String {
         (chatProvider?.name ?? "AI") + usage.limits.map { " · \($0.label.replacingOccurrences(of: " (7-day)", with: "")) \(Int(((1 - $0.percent) * 100).rounded()))% left" }.joined()
+            + (usage.spentText.map { " · " + $0 } ?? "")
     }
 
     static func until(_ date: Date) -> String {

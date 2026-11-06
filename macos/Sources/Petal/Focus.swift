@@ -10,7 +10,8 @@ final class Brain {
 
     var enabled: Bool {
         let app = PetalApp.shared
-        return app.config.bool("ai") && app.chatProvider.flatMap { app.paths[$0] } != nil
+        guard app.config.bool("ai"), let provider = app.chatProvider else { return false }
+        return app.paths[provider] != nil && app.aiReady(provider)
     }
 
     func classifyWindow(app: String, title: String, key: String? = nil, done: @escaping ([String: Any]?) -> Void) {
@@ -81,12 +82,21 @@ final class Brain {
 
     private func next() {
         guard !busy, !queue.isEmpty, let provider = PetalApp.shared.chatProvider, let path = PetalApp.shared.paths[provider] else { return }
+        // On an API key with none saved, nothing is asked (and nothing falls back to the subscription).
+        guard PetalApp.shared.aiReady(provider) else {
+            let waiting = queue
+            queue = []
+            for job in waiting { job.done(nil) }
+            return
+        }
         busy = true
         let job = queue.removeFirst()
-        let environment = PetalApp.shared.childEnvironment
+        let environment = PetalApp.shared.aiEnvironment(provider)
+        let api = PetalApp.shared.usesAPIKey(provider)
         var arguments = provider.quickArguments
         // Codex's quick calls go to its newest Luna, its small fast model, at low effort.
-        if provider == .codex, let luna = PetalApp.shared.quickCodexModel { arguments.insert(contentsOf: ["-m", luna], at: arguments.count - 1) }
+        let luna = provider == .codex ? PetalApp.shared.quickCodexModel : nil
+        if let luna { arguments.insert(contentsOf: ["-m", luna], at: arguments.count - 1) }
         DispatchQueue.global().async {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: path)
@@ -98,18 +108,22 @@ final class Brain {
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
             var answer: [String: Any]?
+            var spent: Double?
             if (try? process.run()) != nil {
                 input.fileHandleForWriting.write(Data(job.prompt.utf8))
                 try? input.fileHandleForWriting.close()
                 let data = output.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()
-                let text = provider.quickReply(String(decoding: data, as: UTF8.self))
+                let raw = String(decoding: data, as: UTF8.self)
+                let text = provider.quickReply(raw)
+                if api { spent = provider.quickSpend(raw, model: luna ?? "") }
                 if process.terminationStatus == 0, let start = text.firstIndex(of: "{"), let end = text.lastIndex(of: "}") {
                     answer = try? JSONSerialization.jsonObject(with: Data(text[start...end].utf8)) as? [String: Any]
                 }
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    if let spent { PetalApp.shared.usage.addSpend(spent, for: provider) }
                     if let answer { self.cache[job.key] = answer }
                     job.done(answer)
                     self.busy = false

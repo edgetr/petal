@@ -179,6 +179,10 @@ Item {
       property string codexModel: ""
       property string codexEffort: "medium"
       property string codexPath: ""
+      // How Petal's own runs of each AI pay: "subscription" (the person's
+      // sign-in) or "api" (an API key kept in the Keychain; macOS for now).
+      property string claudeAuth: "subscription"
+      property string codexAuth: "subscription"
     }
   }
 
