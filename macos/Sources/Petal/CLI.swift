@@ -4,7 +4,7 @@ import AppKit
 /// Omarchy, so any agent (T3 Code, Claude Code, Codex in a terminal) or person can drive the dock from a shell.
 enum CLI {
     static let commands: Set<String> = ["mode", "stay", "current", "desktop", "ask", "chat", "search", "settings", "reveal", "check",
-                                        "dock", "restart", "version", "update", "modes", "get", "set", "restore-dock", "restore-windows", "help", "logs",
+                                        "dock", "restart", "version", "update", "modes", "get", "set", "restore-dock", "restore-windows", "help", "logs", "chats",
                                         "recipe", "suggest", "summary", "overview", "personal", "bench"]
 
     static let help = """
@@ -16,6 +16,7 @@ enum CLI {
     petal set <key> <value>   change a setting (value as JSON: true, 44, "#d9367f", ["~/Downloads"])
     petal dock [petal|macos]  which dock is showing, or switch
     petal ask | chat <text>   open the AI panel, or ask it something
+    petal chats               your kept chats with Petal AI, to read again or carry on
     petal search | settings   open the "+" search, or Petal's settings
     petal restart | update    restart Petal, or check for a new one
     petal recipe export [<file>]           share your dock: modes, apps and look in a .petal file

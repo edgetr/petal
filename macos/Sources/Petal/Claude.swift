@@ -23,8 +23,11 @@ final class Agent {
         case authFailed, cost(Double), tokens(input: Int, cached: Int, output: Int)
     }
 
-    private(set) var messages: [Message] = []
+    private(set) var messages: [Message] = [] { didSet { keep() } }
     private(set) var running = false
+    /// This chat, as it's kept (Chats.swift): saved as it goes, so it can be read again and carried on.
+    private(set) var chatID = UUID()
+    @ObservationIgnored private var chatProvider: Provider?
     private(set) var pendingAsk: [Denial] = []
     @ObservationIgnored private var sessionID: String?
     @ObservationIgnored private var sessionProvider: Provider?
@@ -68,10 +71,43 @@ final class Agent {
     func reset() {
         stop()
         runID = UUID()
+        chatID = UUID()
         messages = []
         sessionID = nil
         allowed = []
         pendingAsk = []
+    }
+
+    /// Saves this chat (from its first message on), with its session to resume.
+    private func keep() {
+        let lines = messages.filter { $0.kind != .ask }.map { SavedChat.Line(kind: Self.name($0.kind), text: $0.text) }
+        guard let first = messages.first(where: { $0.kind == .user }) else { return }
+        let provider = sessionProvider ?? chatProvider ?? app.chatProvider
+        chatProvider = provider
+        let title = first.text.components(separatedBy: "\n").first { !$0.hasPrefix(">") && !$0.hasPrefix("From ") && !$0.isEmpty } ?? first.text
+        Chats.save(SavedChat(id: chatID, title: String(title.prefix(80)), provider: provider?.rawValue ?? "", session: sessionID,
+                             updated: Date(), lines: lines))
+    }
+
+    private static func name(_ kind: Kind) -> String {
+        switch kind { case .user: "user"; case .claude: "ai"; case .step: "step"; case .ask: "ask"; case .error: "error" }
+    }
+
+    /// A kept chat, back: its messages, and its session, so the next message carries it on (with its own AI).
+    func restore(_ chat: SavedChat) {
+        stop()
+        runID = UUID()
+        pendingAsk = []
+        allowed = []
+        chatID = chat.id
+        sessionID = chat.session
+        sessionProvider = Provider(rawValue: chat.provider)
+        chatProvider = sessionProvider
+        if let provider = sessionProvider, provider != app.chatProvider, app.providers.contains(provider) {
+            app.config.set("chatProvider", provider.rawValue)
+        }
+        let kinds: [String: Kind] = ["user": .user, "ai": .claude, "step": .step, "error": .error]
+        messages = chat.lines.compactMap { line in kinds[line.kind].map { Message(kind: $0, text: line.text) } }
     }
 
     private func run(_ prompt: String) {
@@ -159,7 +195,8 @@ final class Agent {
 
     private func apply(_ event: Event) {
         switch event {
-        case .session(let id): sessionID = id
+        case .session(let id):
+            if sessionID != id { sessionID = id; keep() }
         case .text(let text):
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty { messages.append(Message(kind: .claude, text: trimmed)) }
@@ -385,6 +422,8 @@ final class ClaudePanel {
     let agent = Agent()
     var draft = ""
     var optionsOpen = false
+    /// The kept chats, in place of the conversation.
+    var chatsOpen = false
     /// Files handed to the AI (dropped on its button or on the panel): sent with the next message.
     var attachments: [URL] = []
     /// Passages quoted from any app (Ask Petal AI / Add to Petal AI): sent with the next message.
@@ -418,6 +457,7 @@ final class ClaudePanel {
             panel.onClose = { [weak self] in
                 self?.isOpen = false
                 self?.optionsOpen = false
+                self?.chatsOpen = false
                 // A question still waiting goes to the dock, where it can be answered.
                 if PetalApp.shared.assist.pending != nil { PetalApp.shared.popups.show(FocusCard(kind: .ask)) }
             }
@@ -468,8 +508,9 @@ struct ClaudePanelView: View {
             ZStack(alignment: .top) {
                 Group { if agent.messages.isEmpty { empty } else { conversation } }
                     .frame(maxWidth: .infinity, alignment: .top)
-                    .opacity(panel.optionsOpen ? 0 : 1)
+                    .opacity(panel.optionsOpen || panel.chatsOpen ? 0 : 1)
                 if panel.optionsOpen { options.transition(.opacity.combined(with: .offset(y: -6))) }
+                else if panel.chatsOpen { ChatsList(panel: panel).transition(.opacity.combined(with: .offset(y: -6))) }
             }
             .frame(minHeight: 180, alignment: .top)
             if let request = app.assist.pending {
@@ -487,7 +528,8 @@ struct ClaudePanelView: View {
         .onAppear { focused = true }
         .onChange(of: agent.messages.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: agent.running) { _, _ in DispatchQueue.main.async { panel.fit() } }
-        .onChange(of: panel.optionsOpen) { _, _ in DispatchQueue.main.async { panel.fit() } }
+        .onChange(of: panel.optionsOpen) { _, open in if open { panel.chatsOpen = false }; DispatchQueue.main.async { panel.fit() } }
+        .onChange(of: panel.chatsOpen) { _, open in if open { panel.optionsOpen = false }; DispatchQueue.main.async { panel.fit() } }
         .onChange(of: panel.attachments.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: panel.quotes.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: app.assist.pending?.id) { _, _ in DispatchQueue.main.async { panel.fit() } }
@@ -496,9 +538,10 @@ struct ClaudePanelView: View {
             return !urls.isEmpty
         }
         .onExitCommand {
-            if panel.optionsOpen { panel.optionsOpen = false } else { panel.close() }
+            if panel.optionsOpen { panel.optionsOpen = false } else if panel.chatsOpen { panel.chatsOpen = false } else { panel.close() }
         }
         .animation(.easeOut(duration: 0.16), value: panel.optionsOpen)
+        .animation(.easeOut(duration: 0.16), value: panel.chatsOpen)
     }
 
     private var header: some View {
@@ -532,8 +575,13 @@ struct ClaudePanelView: View {
             }
             .buttonStyle(.plain)
             if !agent.messages.isEmpty {
-                Button("New chat") { agent.reset() }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
+                Button("New chat") { agent.reset(); panel.chatsOpen = false }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
             }
+            // The kept chats: read one again, or carry it on.
+            RoundButton(symbol: panel.chatsOpen ? "bubble.left.and.text.bubble.right.fill" : "clock.arrow.circlepath", size: 22) {
+                panel.chatsOpen.toggle()
+            }
+            .help("Your chats")
             RoundButton(symbol: "xmark", size: 22) { panel.close() }
         }
         .frame(height: 28)

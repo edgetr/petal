@@ -436,6 +436,8 @@ final class PetalApp {
         ipc.onLater("assist") { [unowned self] args, reply in
             assist.handle(args.first ?? "", args.dropFirst().first ?? "{}", reply: reply)
         }
+        // The kept chats, open in the AI panel.
+        ipc.on("chats") { [unowned self] _ in claude.open(asking: nil); claude.chatsOpen = true; return "ok" }
         ipc.on("bench") { args in LiveBench.start(quiet: args.first == "quiet") }
 
         ipc.on("mode") { [unowned self] args in
