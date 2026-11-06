@@ -315,13 +315,15 @@ final class Assist {
                 // An address or a file, in its app (or the one named).
                 let url = target.contains("://") ? URL(string: target) : URL(fileURLWithPath: (target as NSString).expandingTildeInPath)
                 guard let url else { return fail("That isn't an address or a file.") }
-                let configuration = NSWorkspace.OpenConfiguration()
-                if !name.isEmpty, let appURL = Apps.url(Self.bundleID(name)) {
-                    NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: configuration)
-                } else {
-                    NSWorkspace.shared.open(url)
-                }
-                return send(["opened": target])
+                let appURL = name.isEmpty ? nil : Apps.url(Self.bundleID(name))
+                // Launch Services may wait on the disk or the app: off the main thread.
+                return Self.off({
+                    if let appURL {
+                        NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: NSWorkspace.OpenConfiguration())
+                    } else {
+                        NSWorkspace.shared.open(url)
+                    }
+                }) { send(["opened": target]) }
             }
             let id = Self.bundleID(name)
             guard Apps.url(id) != nil else { return fail("No app called \(name) is installed.") }
@@ -331,18 +333,36 @@ final class Assist {
             guard let running = running(name) else { return fail("\(name) isn't open.") }
             let label = running.localizedName ?? name
             switch action {
-            case "hide": running.hide(); send(["hidden": label])
-            case "focus": Windows.bringForward(running); send(["focused": label])
+            // Each asks the app (or Launch Services): off the main thread, the answer back on it.
+            case "hide": Self.off({ running.hide() }) { send(["hidden": label]) }
+            case "focus":
+                let url = running.bundleURL
+                Self.off({
+                    guard let url else { return }
+                    let configuration = NSWorkspace.OpenConfiguration()
+                    configuration.activates = true
+                    configuration.addsToRecentItems = false
+                    NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+                }) { if url == nil { running.activate() }; send(["focused": label]) }
             default:
                 ask("quit", "Quit \(label)", detail: "It asks to save anything unsaved.") { allowed in
                     guard allowed else { return send(["declined": "The person didn't allow quitting \(label)."]) }
-                    running.terminate()
-                    self.did("Quit \(label)")
-                    send(["quit": label])
+                    Self.off({ running.terminate() }) {
+                        self.did("Quit \(label)")
+                        send(["quit": label])
+                    }
                 }
             }
         default:
             fail("action is open, quit, hide or focus")
+        }
+    }
+
+    /// Does `work` (which waits on another app) off the main thread, then `then` back on it.
+    nonisolated private static func off(_ work: @escaping () -> Void, then: @escaping @MainActor () -> Void) {
+        queue.async {
+            work()
+            DispatchQueue.main.async { MainActor.assumeIsolated { then() } }
         }
     }
 
@@ -386,13 +406,23 @@ final class Assist {
                     let label = window.title.isEmpty || self.privatePIDs.contains(window.pid) ? appName : window.title
                     switch action {
                     case "focus": Windows.focus(window, onScreen: self.app.docks.isOnScreen(window)); send(["focused": label])
-                    case "minimize": Windows.minimize(window); send(["minimized": label])
+                    case "minimize":
+                        // Accessibility waits on the app (a hung one for its timeout): never on the main thread.
+                        let element = window.element
+                        Self.off({ AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue) }) {
+                            send(["minimized": label])
+                        }
                     case "close":
                         self.ask("close", "Close “\(label)”", detail: "Its app asks to save anything unsaved.") { allowed in
                             guard allowed else { return send(["declined": "The person didn't allow closing it."]) }
-                            Windows.close(window)
-                            self.did("Closed “\(label)”")
-                            send(["closed": label])
+                            let element = window.element
+                            Self.off({
+                                guard let button: AXUIElement = Windows.value(element, kAXCloseButtonAttribute) else { return }
+                                AXUIElementPerformAction(button, kAXPressAction as CFString)
+                            }) {
+                                self.did("Closed “\(label)”")
+                                send(["closed": label])
+                            }
                         }
                     case "arrange":
                         let layout = args["layout"] as? String ?? "full"

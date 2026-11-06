@@ -426,6 +426,9 @@ final class DockController {
         }
         var moves: [(pid: pid_t, number: CGWindowID, from: CGRect, to: CGRect)] = []
         for window in snapshot.onScreenWindows {
+            // Parked by its mode (Parking): its frame there is Parking's, not the person's, so its record (and the
+            // frame from before Petal touched it) stays as it is until it comes back.
+            if Parking.parked[window.number] != nil { continue }
             let now = window.frame
             var before = now
             if let record = cleared[window.number] {
@@ -444,7 +447,7 @@ final class DockController {
             record.saw(now)
             record.saw(target)
             cleared[window.number] = record
-            if moving, Parking.parked[window.number] == nil { moves.append((window.pid, window.number, now, target)) }
+            if moving { moves.append((window.pid, window.number, now, target)) }
         }
         // Windows that closed: nothing to give back.
         cleared = cleared.filter { snapshot.numbers.contains($0.key) }

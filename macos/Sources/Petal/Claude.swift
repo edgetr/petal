@@ -172,6 +172,9 @@ final class Agent {
     func unqueue(_ index: Int) { if queued.indices.contains(index) { queued.remove(at: index) } }
 
     func reset() {
+        // Cleared without saving: the chat left (kept as it was, follow-ups and all) is never saved half-cleared.
+        switching = true
+        defer { switching = false }
         endRun()
         askedWith = nil
         keptPlace = nil
@@ -182,9 +185,12 @@ final class Agent {
         pendingAsk = []
     }
 
+    /// While one chat is swapped for another: nothing is saved until the new one is whole.
+    @ObservationIgnored private var switching = false
+
     /// Saves this chat (from its first message on), with its session to resume.
     private func keep() {
-        guard let chat = saved else { return }
+        guard !switching, let chat = saved else { return }
         Chats.save(chat)
         // A window's link to this chat holds it as it is now, never an older copy.
         if PetalApp.started { PetalApp.shared.claude.chatSaved(chat) }
@@ -211,6 +217,8 @@ final class Agent {
     /// A kept chat, back: its messages, and its session, so the next message carries it on (with its own AI).
     /// `switchProvider`: the chat's AI becomes the one chosen (picked from the list), not only this chat's.
     func restore(_ chat: SavedChat, switchProvider: Bool = true) {
+        switching = true
+        defer { switching = false }
         endRun()
         askedWith = nil
         keptPlace = chat.place
@@ -767,7 +775,8 @@ struct ClaudePanelView: View {
             // The window this note is stuck to.
             if let place = agent.place { NotePlaceLine(place: place, gone: panel.current.windowGone).padding(.top, -6) }
             ZStack(alignment: .top) {
-                Group { if agent.messages.isEmpty { empty } else { conversation } }
+                // A chat with only messages still to send (kept from before Petal quit) shows them, with Send now.
+        Group { if agent.messages.isEmpty && agent.queued.isEmpty { empty } else { conversation } }
                     .frame(maxWidth: .infinity, alignment: .top)
                     .opacity(panel.optionsOpen || panel.chatsOpen ? 0 : 1)
                 if panel.optionsOpen { options.transition(.opacity.combined(with: .offset(y: -6))) }
