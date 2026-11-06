@@ -487,7 +487,7 @@ struct StackView: View {
                 Text("Empty").foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.vertical, 16)
             }
             ForEach(entries) { entry in
-                StackRow(entry: entry) { NSWorkspace.shared.open(entry.url); done() }
+                StackRow(entry: entry, done: done) { NSWorkspace.shared.open(entry.url); done() }
             }
             Divider().padding(.vertical, 4)
             Button {
@@ -508,6 +508,7 @@ struct StackView: View {
 
 struct StackRow: View {
     let entry: Stacks.Entry
+    let done: () -> Void
     let open: () -> Void
     @State private var hovering = false
 
@@ -531,7 +532,25 @@ struct StackRow: View {
         .contentShape(.rect)
         .onHover { hovering = $0 }
         .onTapGesture(perform: open)
+        .overlay { RightClick { Menus.file(entry.url, done: done) } }
         .onDrag { NSItemProvider(contentsOf: entry.url) ?? NSItemProvider() }
+    }
+}
+
+/// Catches right clicks over a view and lets every other click, hover and drag through to it.
+struct RightClick: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> Catcher { Catcher() }
+    func updateNSView(_ view: Catcher, context: Context) { view.action = action }
+
+    final class Catcher: NSView {
+        var action: (() -> Void)?
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            NSApp.currentEvent?.type == .rightMouseDown ? super.hitTest(point) : nil
+        }
+        override func rightMouseDown(with event: NSEvent) { action?() }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     }
 }
 
