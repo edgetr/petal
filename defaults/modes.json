@@ -28,7 +28,8 @@
         "vercel",
         "linear"
       ],
-      "focusDelay": 15,
+      "distracting": false,
+      "focusDelay": 0,
       "hold": true,
       "allow": []
     },
@@ -52,7 +53,8 @@
         "overleaf",
         "wikipedia"
       ],
-      "focusDelay": 30,
+      "distracting": false,
+      "focusDelay": 0,
       "hold": true,
       "allow": []
     },
@@ -84,7 +86,8 @@
         "tiktok",
         "twitch"
       ],
-      "focusDelay": 0,
+      "distracting": true,
+      "focusDelay": 30,
       "hold": false,
       "allow": []
     }

@@ -73,9 +73,16 @@ SETTINGS_SCHEMA = {
     "trash": (True, "Trash in the dock."),
     # Modes and AI
     "modes": (True, "Focus modes (the mode switcher and per-mode apps)."),
-    "countdown": (False, "Wait out a mode's focusDelay before leaving it."),
-    "focusGuard": (False, "Focus cards: ask when the window in front belongs to another mode."),
-    "holdNotifications": (True, "In modes with hold=true, hold notifications from other apps."),
+    "countdown": (True, "Entering a distracting mode (distracting=true, like Social) takes its focusDelay wait, with Stay; each extra press halves what's left. Other modes switch at once."),
+    "focusGuard": (True, "Focus cards: when what's in front belongs to another mode, a card says so (Stay, or go there). Something no mode knows yet is checked by the AI first."),
+    "blockDistractions": (True, "In other modes, apps and sites of a distracting mode don't stay open: the card offers Stay (the tab closes or the app hides) or Go to <mode> (with its wait)."),
+    "peeks": (True, "A small card that fades by itself shows what the AI decided about something new (\"tidepool.dev · Fits Building · API docs for an incident tool\")."),
+    "holdNotifications": (True, "In modes with hold=true, hold notifications from apps outside the mode; they wait on their mode with a count. On macOS this needs Full Disk Access (to read them) and Do Not Disturb (to keep macOS's banners away); Petal shows the mode's own ones itself."),
+    "urgentNotifications": (True, "A held notification that can't wait (the AI decides) pops out of its mode's icon as a card: Later, or Go to <mode>."),
+    "modeWindows": (False, "Each mode keeps its own windows and tabs, and switching mode swaps them. macOS: on one Desktop, other modes' windows wait just off-screen. Omarchy: each mode has its own workspace."),
+    "tiling": (False, "macOS: Petal tiles the windows of the mode in front, like a tiling window manager (Omarchy already tiles with Hyprland)."),
+    "tilingGaps": (8, "macOS: space between tiled windows and around them, in points."),
+    "tilingFloat": ([], "macOS: bundle ids of apps whose windows never tile."),
     "ai": (True, "Use Claude Haiku to sort unknown windows and notifications into modes."),
     "claudeUsage": (True, "Claude usage ring around the Claude button."),
     "autoUpdate": (True, "Install new Petal releases automatically (then offer a restart)."),
@@ -103,11 +110,12 @@ MODE_FIELDS = {
     "icon": "an SF Symbol name, like hammer" if MAC else "one Nerd Font glyph or emoji",
     "color": "#rrggbb",
     "about": "what the mode is for (used to sort activity into it)",
-    "apps": ("bundle ids" if MAC else "desktop ids") + ", in dock order",
-    "sites": "words or domains found in browser tab titles that belong to this mode",
-    "focusDelay": "seconds of countdown before leaving (if countdowns are on); 0 also turns focus cards off in this mode",
-    "hold": "Omarchy only: hold notifications from apps outside the mode" if MAC else "hold notifications from apps outside the mode",
-    "allow": "bundle ids focus cards always accept in this mode" if MAC else "desktop ids whose notifications always come through",
+    "apps": ("bundle ids" if MAC else "desktop ids") + ", in dock order; an https:// address is a website shortcut (shown with a globe badge)",
+    "sites": "domains (x.com) or words in tab titles that belong to this mode; the AI adds a domain when it sorts a new site here",
+    "distracting": "true for modes that pull you away (Social, Gaming): entering one takes its wait, and in other modes its apps and sites are blocked. Missing = the AI decides once and saves it",
+    "focusDelay": "a distracting mode's wait in seconds before you're in it (30 if 0 or missing); ignored for other modes",
+    "hold": "hold notifications from apps outside the mode",
+    "allow": "apps (" + ("bundle ids" if MAC else "desktop ids") + ") and sites (domains or title words) that are fine in this mode without being in its dock; \"Keep it here\" on a card adds one, and their notifications come through",
     "shortcut": "macOS: the name of a Shortcut (Shortcuts app) to run when a Desktop enters this mode, e.g. one that turns on a Focus",
     "hyprland": "Omarchy: this mode's look for its workspaces: {borderColor: \"#rrggbb\" or \"mode\", gapsIn, gapsOut, wallpaper}",
 }
@@ -310,7 +318,7 @@ def t_save_mode(args):
             break
     else:
         new = {"name": mid.title(), "icon": "●", "color": "#ff5fae", "about": "", "apps": [], "sites": [],
-               "focusDelay": 0, "hold": False, "allow": []}
+               "focusDelay": 0, "distracting": False, "hold": False, "allow": []}
         new.update(mode)
         data["modes"].append(new)
     if not data.get("defaultMode"):
