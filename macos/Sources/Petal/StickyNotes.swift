@@ -55,6 +55,9 @@ extension ClaudePanel {
 
     func note(withID id: String) -> StickyNote? { notes.first { $0.id.uuidString == id } }
 
+    /// The note holding a kept chat, if one does: a chat is only ever carried on by one note.
+    func live(chat id: UUID) -> StickyNote? { notes.first { $0.agent.chatID == id } }
+
     // MARK: Which note
 
     /// The note for the window in front: the one stuck to it, one kept from before (Petal restarted), or a new one.
@@ -70,12 +73,10 @@ extension ClaudePanel {
         }
     }
 
-    /// The note not stuck to any window (no app in front, or sticky notes off).
+    /// The one chat stuck to no window: kept, so closing and opening again (or turning notes off) never loses it.
     var looseNote: StickyNote {
-        if let loose = notes.first(where: { $0.place == nil }) { return loose }
-        let note = StickyNote()
-        notes.append(note)
-        return note
+        if !notes.contains(where: { $0 === loose }) { notes.append(loose) }
+        return loose
     }
 
     private func note(for front: NSRunningApplication, window: CGWindowID?, title: String) -> StickyNote {
@@ -88,36 +89,82 @@ extension ClaudePanel {
         }
         let app = PetalApp.shared
         let dock = app.docks.focusedDock
-        let place = NotePlace(pid: pid, app: front.bundleIdentifier ?? "", appName: front.localizedName ?? "",
+        var place = NotePlace(pid: pid, app: front.bundleIdentifier ?? "", appName: front.localizedName ?? "",
                               window: window, title: title, mode: dock?.mode?.id ?? "", desktop: dock?.desktop)
-        let note = StickyNote()
-        // A chat this window had before Petal last started, carried on.
+        // A chat this window had before Petal last started, carried on: by the note that already holds it (picked
+        // from the list since), or a new one.
         if let window, let saved = savedPlaces.removeValue(forKey: Self.key(pid, window)) {
-            note.agent.restore(saved, switchProvider: false)
-            note.place = NotePlace(pid: pid, app: place.app, appName: place.appName, window: window,
-                                   title: title.isEmpty ? saved.place?.title ?? "" : title, mode: saved.place?.mode ?? place.mode,
-                                   desktop: saved.place?.desktop ?? place.desktop)
-        } else {
-            note.place = place
+            if title.isEmpty { place.title = saved.place?.title ?? "" }
+            place.mode = saved.place?.mode ?? place.mode
+            place.desktop = saved.place?.desktop ?? place.desktop
+            let note = live(chat: saved.id) ?? StickyNote()
+            if !notes.contains(where: { $0 === note }) {
+                note.agent.restore(saved, switchProvider: false)
+                notes.append(note)
+            }
+            if note === loose {
+                // The loose chat had picked it up: it moves to this window (unless it's working; then it stays).
+                let fresh = StickyNote()
+                if !loose.agent.running { fresh.agent.restore(saved, switchProvider: false); loose.agent.reset() }
+                return attach(fresh, place)
+            }
+            return attach(note, place)
         }
-        notes.append(note)
+        return attach(StickyNote(), place)
+    }
+
+    private func attach(_ note: StickyNote, _ place: NotePlace) -> StickyNote {
+        note.place = place
+        note.windowGone = false
+        if !notes.contains(where: { $0 === note }) { notes.append(note) }
         prune()
         listenIfNeeded()
         return note
     }
 
+    /// A chat picked from the list: the note holding it, else carried on. With notes on, it sticks again to its
+    /// window if that's still there; with them off (or its window gone), it's the loose chat.
+    func restoreNote(_ chat: SavedChat) {
+        if let note = live(chat: chat.id) { return present(note) }
+        savedPlaces = savedPlaces.filter { $0.value.id != chat.id }
+        guard notesOn else {
+            loose.agent.restore(chat)
+            return present(looseNote)
+        }
+        let note = StickyNote()
+        note.agent.restore(chat)
+        notes.append(note)
+        guard let place = chat.place, let window = place.window,
+              NSRunningApplication(processIdentifier: place.pid)?.bundleIdentifier == place.app,
+              !notes.contains(where: { $0.attached && $0.place?.pid == place.pid && $0.place?.window == window })
+        else { return present(note) }
+        Self.windowQueue.async {
+            let there = Windows.windows(of: place.pid).contains { $0.id == "\(place.pid)-w\(window)" }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if there { _ = self.attach(note, place) }
+                    self.present(note)
+                }
+            }
+        }
+    }
+
     /// Notes nobody can come back to (their window gone, idle, read) are let go: they're kept in Chats.
     private func prune() {
-        notes.removeAll { $0 !== current && $0.windowGone && !$0.agent.running && !$0.ready && $0.agent.waiting == nil }
-        let idle = notes.filter { $0 !== current && !$0.agent.running && !$0.ready && $0.agent.waiting == nil && $0.place != nil }
+        let keep = { (note: StickyNote) in note === self.current || note === self.loose || note.agent.running || note.ready || !note.agent.waiting.isEmpty }
+        notes.removeAll { !keep($0) && $0.windowGone }
+        let idle = notes.filter { !keep($0) && $0.place != nil }
         for old in idle.dropLast(30) { notes.removeAll { $0 === old } }
     }
 
     static func key(_ pid: pid_t, _ window: CGWindowID) -> String { "\(pid)-\(window)" }
 
+    /// Where notes do their Accessibility work (looking up and bringing forward windows), never the main thread.
+    nonisolated static let windowQueue = DispatchQueue(label: "petal.notes.windows", qos: .userInitiated)
+
     /// The focused window of an app, its number and title, off the main thread.
     static func frontWindow(of pid: pid_t, _ done: @escaping @MainActor (CGWindowID?, String) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
+        windowQueue.async {
             var number: CGWindowID?
             var title = ""
             if Windows.trusted {
@@ -158,8 +205,19 @@ extension ClaudePanel {
                 let key = Self.key(place.pid, window)
                 if found[key] == nil { found[key] = chat }   // newest first
             }
-            self?.savedPlaces = found
+            // Chats already carried on by a note since Petal started stay with it.
+            self?.savedPlaces = found.filter { self?.live(chat: $0.value.id) == nil }
         }
+    }
+
+    /// `aiNotes` changed (or any setting did): with notes off, nothing listens, nudges or takes the app's click.
+    func notesSettingChanged() {
+        listenIfNeeded()
+        guard !notesOn, pendingOpen != nil || notes.contains(where: { $0.ready || $0.away }) else { return }
+        cancelPending()
+        for note in notes { note.ready = false; note.away = false }
+        updateReady()
+        if PetalApp.shared.popups.card?.kind == .noteReady { PetalApp.shared.popups.dismissCard() }
     }
 
     /// Window events (focus moving between an app's windows, a window closing), heard only while a note is stuck to
@@ -179,7 +237,7 @@ extension ClaudePanel {
         switch event.kind {
         case .focused:
             // Another window of the app in front.
-            guard event.pid == NSWorkspace.shared.frontmostApplication?.processIdentifier else { return }
+            guard notesOn, event.pid == NSWorkspace.shared.frontmostApplication?.processIdentifier else { return }
             frontChanged(event.pid, event.window)
         case .closed:
             guard let window = event.window else { return }
@@ -204,11 +262,19 @@ extension ClaudePanel {
     /// when the person left or is done, comes back (without taking the keyboard from the app).
     private func frontChanged(_ pid: pid_t, _ window: CGWindowID?) {
         lastFront = (pid, window)
-        if let pending = pendingOpen, pending.place.map({ $0.matches(pid: pid, window: pending.windowGone ? nil : window) }) == true {
-            pendingOpen = nil
-            // After the app has finished coming forward, so its window taking focus doesn't close the note.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { self.present(pending, key: true, fromIcon: true) }
-            return
+        if let pending = pendingOpen, let place = pending.place {
+            if place.matches(pid: pid, window: pending.windowGone ? nil : window) {
+                pendingOpen = nil
+                // After the app has finished coming forward, so its window taking focus doesn't close the note; and
+                // only if nothing else was opened meanwhile and the window is still in front.
+                let ticket = pendingTicket
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                    guard ticket == self.pendingTicket, self.inFront(place) else { return }
+                    self.present(pending, key: true, fromIcon: true)
+                }
+                return
+            }
+            if pid != place.pid { cancelPending() }   // the person went to another app meanwhile
         }
         if isOpen, current.attached, let place = current.place, !place.matches(pid: pid, window: window) {
             stepAway()
@@ -216,6 +282,19 @@ extension ClaudePanel {
         if !isOpen, let note = notes.first(where: { ($0.away || $0.ready) && $0.attached && $0.place?.matches(pid: pid, window: window) == true }) {
             present(note, key: false, fromIcon: true)
         }
+    }
+
+    /// The note's window is the one in front, as far as Petal has heard.
+    private func inFront(_ place: NotePlace) -> Bool {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == place.pid else { return false }
+        guard let front = lastFront else { return true }
+        return place.matches(pid: front.pid, window: front.window)
+    }
+
+    /// A note waiting for its window to come forward isn't opened after all.
+    func cancelPending() {
+        pendingOpen = nil
+        pendingTicket += 1
     }
 
     private func stepAway() {
@@ -264,9 +343,10 @@ extension ClaudePanel {
         }
     }
 
-    /// A note waiting for room starts once fewer than `atOnce` work.
+    /// Notes waiting for room start, in order, while fewer than `atOnce` work. Called whenever a run ends or is
+    /// ended (a new chat, a chat picked from the list).
     func startWaiting() {
-        for note in notes where note.agent.waiting != nil && working < Self.atOnce { note.agent.runWaiting() }
+        for note in notes where !note.agent.waiting.isEmpty && working < Self.atOnce { note.agent.runWaiting() }
     }
 
     func updateReady() {
@@ -279,52 +359,99 @@ extension ClaudePanel {
     }
 
     /// The app's icon was clicked and one of its notes is done: its window comes forward (in its mode) and the note
-    /// opens on it. False when no note of that app is waiting.
+    /// opens on it. False when no note of that app is waiting (or notes are off): the click does what it always does.
     func openReady(app bundleID: String) -> Bool {
-        guard let note = notes.first(where: { $0.ready && $0.place?.app == bundleID }), let place = note.place else { return false }
+        guard notesOn, let note = notes.first(where: { $0.ready && $0.place?.app == bundleID }), let place = note.place else { return false }
         go(to: note, place: place)
         return true
     }
 
-    /// Brings a note's window forward (switching to its mode first when it's in another) and opens the note on it.
+    /// Brings a note's window forward and opens the note on it. When the Desktop the note was asked on has left the
+    /// note's mode, that Desktop (not the one showing) goes back to it first.
     func go(to note: StickyNote, place: NotePlace) {
         let app = PetalApp.shared
         app.popups.dismissCard()
+        cancelPending()
         guard !note.windowGone, let running = NSRunningApplication(processIdentifier: place.pid), !running.isTerminated else {
             return present(note, key: true)
         }
         let bring = {
             // Its window is in front already: nothing to wait for.
-            if NSWorkspace.shared.frontmostApplication?.processIdentifier == place.pid, let front = self.lastFront,
-               front.pid == place.pid, front.window == place.window {
-                return self.present(note, key: true, fromIcon: true)
-            }
+            if self.inFront(place), self.lastFront?.window == place.window { return self.present(note, key: true, fromIcon: true) }
             self.pendingOpen = note
-            // Shown anyway if the window never says it's in front (another Desktop, a slow app).
+            let ticket = self.pendingTicket
+            // If the window never says it's in front (another Desktop, a slow app), it's asked once more; the note
+            // opens only when its window really is in front.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                if self.pendingOpen === note { self.pendingOpen = nil; self.present(note, key: true, fromIcon: true) }
-            }
-            DispatchQueue.global(qos: .userInitiated).async {
-                let window = Windows.windows(of: place.pid).first { $0.id == "\(place.pid)-w\(place.window ?? 0)" }
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        if let window { Windows.focus(window, onScreen: app.docks.isOnScreen(window)) } else { Windows.bringForward(running) }
-                    }
+                guard ticket == self.pendingTicket, self.pendingOpen === note else { return }
+                self.pendingOpen = nil
+                guard NSWorkspace.shared.frontmostApplication?.processIdentifier == place.pid else { return }
+                Self.frontWindow(of: place.pid) { window, _ in
+                    guard ticket == self.pendingTicket, place.matches(pid: place.pid, window: window),
+                          NSWorkspace.shared.frontmostApplication?.processIdentifier == place.pid else { return }
+                    self.lastFront = (place.pid, window)
+                    self.present(note, key: true, fromIcon: true)
                 }
             }
+            Self.bringForward(pid: place.pid, window: place.window, app: running.bundleURL)
         }
-        let here = app.docks.focusedDock
-        if !place.mode.isEmpty, place.mode != here?.mode?.id, app.config.modes.contains(where: { $0.id == place.mode }),
-           let desktop = here?.desktop {
+        let desktop = place.desktop ?? app.docks.focusedDock?.desktop
+        if let desktop, !place.mode.isEmpty, app.config.modes.contains(where: { $0.id == place.mode }),
+           app.config.mode(forDesktop: desktop)?.id != place.mode {
             app.requestMode(place.mode, desktop: desktop, then: bring)
         } else {
             bring()
         }
     }
 
+    /// Brings one window forward, all of it on `windowQueue` (Accessibility and Launch Services may wait on the
+    /// app): unminimized, raised, its app in front; through Launch Services when it isn't on the screen (another
+    /// Desktop, which macOS then switches to). The pointer stays where it is.
+    nonisolated static func bringForward(pid: pid_t, window number: CGWindowID?, app url: URL?) {
+        windowQueue.async {
+            let element = Windows.windows(of: pid).first { $0.id == "\(pid)-w\(number ?? 0)" }?.element
+            let raise = {
+                guard let element else { return }
+                AXUIElementPerformAction(element, kAXRaiseAction as CFString)
+                AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
+                AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            }
+            let launch = {
+                guard let url else { return }
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = true
+                configuration.addsToRecentItems = false
+                NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+            }
+            var minimized = false
+            if let element {
+                minimized = Windows.value(element, kAXMinimizedAttribute) ?? false
+                if minimized { AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
+            }
+            let shown = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? [])
+                .contains { ($0[kCGWindowNumber as String] as? UInt32) == number }
+            raise()
+            var forward = false
+            if element != nil, shown, !minimized {
+                let app = AXUIElementCreateApplication(pid)
+                AXUIElementSetMessagingTimeout(app, 0.3)
+                forward = AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
+            }
+            if !forward { launch() }
+            raise()
+            // Some apps say yes to coming forward and don't, or show another window as they reopen: once more.
+            windowQueue.asyncAfter(deadline: .now() + 0.15) {
+                if forward, NSWorkspace.shared.frontmostApplication?.processIdentifier != pid { launch() }
+                raise()
+            }
+            windowQueue.asyncAfter(deadline: .now() + 0.4) { raise() }
+        }
+    }
+
     /// "Open here": the note, over this dock, without going to its window or mode.
     func openHere(_ id: UUID) {
         PetalApp.shared.popups.dismissCard()
+        cancelPending()
         guard let note = notes.first(where: { $0.id == id }) else { return }
         present(note, key: true)
     }

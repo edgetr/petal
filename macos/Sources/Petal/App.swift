@@ -106,6 +106,7 @@ final class PetalApp {
             Perf.span("onChange: signals.watch") { self.signals.watch(Stacks.resolve(self.config.strings("stackFolders"))) }
             Perf.span("onChange: hotkeys") { self.hotkeys.refresh() }
             Perf.span("onChange: menuBar") { self.menuBar.refresh() }
+            self.claude.notesSettingChanged()   // sticky notes turned off: no listening, nudges or taking app clicks
 
         }
         registerIPC()

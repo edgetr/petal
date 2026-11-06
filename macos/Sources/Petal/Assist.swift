@@ -168,14 +168,17 @@ final class Assist {
         let named = args["app"] as? String ?? ""
         let place = named.isEmpty && args["front"] as? Bool != true ? place : nil
         let stuck = place.flatMap { p in NSRunningApplication(processIdentifier: p.pid).flatMap { $0.bundleIdentifier == p.app && !$0.isTerminated ? $0 : nil } }
-        let front = stuck ?? frontApp(named: named)
-        let wanted = stuck == nil ? nil : place?.window
+        let front = place == nil ? frontApp(named: named) : stuck
+        let wanted = place?.window
         var result: [String: Any] = [:]
         if let place, let mode = config.modes.first(where: { $0.id == place.mode }) { result["mode"] = ["id": mode.id, "name": mode.name] }
         else if let mode = app.docks.focusedDock?.mode { result["mode"] = ["id": mode.id, "name": mode.name] }
-        if place != nil {
-            result["note"] = stuck == nil ? "The app this note was asked on has quit; this is what's in front now."
-                : "This is the window the note is stuck to; the user may be looking at something else now (front: true shows that)."
+        if let place {
+            // A note's window that's gone is said so, and nothing else is looked at in its place.
+            guard stuck != nil else {
+                return send(["note": "This note's window is closed: \(place.appName) has quit. front: true looks at what's in front now."])
+            }
+            result["note"] = "This is the window the note is stuck to; the user may be looking at something else now (front: true shows that)."
         }
         result["onScreen"] = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !$0.isHidden }
             .compactMap(\.localizedName)).sorted()
@@ -195,19 +198,24 @@ final class Assist {
             var window: AXUIElement? = Windows.value(element, kAXFocusedWindowAttribute)
             let focusedID = window.flatMap { Windows.id(of: $0) }
             // A note's own window, when it isn't its app's focused one (or is gone: then the focused one, said so).
-            var gone = false
             if let wanted, wanted != focusedID {
                 let all: [AXUIElement] = Windows.value(element, kAXWindowsAttribute) ?? []
-                if let match = all.first(where: { Windows.id(of: $0) == wanted }) { window = match } else { gone = true }
+                guard let match = all.first(where: { Windows.id(of: $0) == wanted }) else {
+                    let name = front.localizedName ?? "its app"
+                    return DispatchQueue.main.async {
+                        send(["note": "This note's window is closed (it was in \(name)). front: true looks at what's in front now."])
+                    }
+                }
+                window = match
             }
             let number = window.flatMap { Windows.id(of: $0) }
             let title: String = window.flatMap { Windows.value($0, kAXTitleAttribute) } ?? ""
+            let frame = window.flatMap { Windows.frame(of: $0) } ?? .zero
             let focused: AXUIElement? = number == focusedID ? Windows.value(element, kAXFocusedUIElementAttribute) : nil
             let selected: String = focused.flatMap { Windows.value($0, kAXSelectedTextAttribute) } ?? ""
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     result["window"] = title
-                    if gone { result["note"] = "The note's window is closed; this is \(front.localizedName ?? "its app")'s window in front." }
                     if !selected.isEmpty { result["selectedText"] = String(selected.prefix(8000)) }
                     let hidden = self.privatePIDs
                     let finish = {
@@ -224,7 +232,8 @@ final class Assist {
                         }
                     }
                     guard Browsers.kind(front.bundleIdentifier ?? "") != nil else { return finish() }
-                    self.app.browsers.frontURL(of: front, window: number == focusedID ? nil : title) { url in
+                    let other = number == focusedID ? nil : Browsers.Window(number: number, title: title, frame: frame)
+                    self.app.browsers.frontURL(of: front, window: other) { url in
                         MainActor.assumeIsolated {
                             if let url { result["tab"] = ["url": url, "title": title] }
                             finish()
@@ -278,10 +287,11 @@ final class Assist {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         // Only the newest few are kept.
         let old = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.creationDateKey])) ?? []
-        for file in old.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }).dropFirst(5) { try? FileManager.default.removeItem(at: file) }
-        let url = folder.appending(path: "look-\(Int(Date().timeIntervalSince1970)).png")
+        for file in old.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }).dropFirst(10) { try? FileManager.default.removeItem(at: file) }
+        // Its own name (two notes looking in the same second never share a picture), in time order for the above.
+        let url = folder.appending(path: "look-\(Int(Date().timeIntervalSince1970 * 1000))-\(UUID().uuidString.prefix(8)).png")
         let rep = NSBitmapImageRep(cgImage: image)
-        guard let data = rep.representation(using: .png, properties: [:]), (try? data.write(to: url)) != nil else { return nil }
+        guard let data = rep.representation(using: .png, properties: [:]), (try? data.write(to: url, options: .atomic)) != nil else { return nil }
         return url.path
     }
 

@@ -100,27 +100,76 @@ final class Browsers {
 
     // MARK: Reading
 
-    /// The front tab's address, or nil (not a browser, not allowed yet, or no answer). `window`: the title of another
-    /// of its windows (a sticky note's), whose tab is wanted instead; Firefox and Zen answer only for the front one.
-    func frontURL(of app: NSRunningApplication, window: String? = nil, done: @escaping (String?) -> Void) {
+    /// One of a browser's windows as Accessibility sees it: the window server's number, title and frame (top left).
+    struct Window: Sendable {
+        let number: CGWindowID?
+        let title: String
+        let frame: CGRect
+    }
+
+    /// The front tab's address, or nil (not a browser, not allowed yet, or no answer). `window`: another of its
+    /// windows (a sticky note's), whose tab is wanted instead; Firefox and Zen answer only for the front one.
+    func frontURL(of app: NSRunningApplication, window: Window? = nil, done: @escaping (String?) -> Void) {
         guard let id = app.bundleIdentifier, let kind = Self.kind(id) else { return done(nil) }
         switch kind {
         case .gecko:
             done(window == nil ? Self.geckoAddress(pid: app.processIdentifier) : nil)
         case .chromium, .safari:
             let tab = kind == .safari ? "current tab" : "active tab"
-            var source = "tell application id \"\(id)\" to return URL of \(tab) of front window"
-            if let window, !window.isEmpty {
-                // The window whose name is the title (Chromium's title may add the browser's name after it).
-                let name = window.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-                source = "tell application id \"\(id)\"\nrepeat with w in windows\nset n to name of w\nif n is not \"\" and (n is \"\(name)\" or \"\(name)\" starts with n) then return URL of \(tab) of w\nend repeat\nend tell\nreturn \"\""
-            }
+            let source = window == nil ? "tell application id \"\(id)\" to return URL of \(tab) of front window"
+                : Self.windowsScript(id, tab: tab)
             queue.async {
                 // Never a surprise prompt: only a browser that already said yes is asked.
-                let url = Self.access(id) == .allowed ? Self.run(source) : nil
+                let answer = Self.access(id) == .allowed ? Self.run(source) : nil
+                let url = window.map { Self.url(in: answer ?? "", for: $0) } ?? answer
                 DispatchQueue.main.async { done(url) }
             }
         }
+    }
+
+    /// Every window's id, name, bounds and tab address, one per line (the separators set outside the browser's
+    /// own words, where Safari's `tab` is a tab, not the character).
+    private static func windowsScript(_ id: String, tab: String) -> String {
+        """
+        set out to ""
+        set sep to tab
+        set nl to linefeed
+        tell application id "\(id)"
+        repeat with w in windows
+        try
+        set b to bounds of w
+        set out to out & (id of w) & sep & (name of w) & sep & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b) & sep & (URL of \(tab) of w) & nl
+        end try
+        end repeat
+        end tell
+        return out
+        """
+    }
+
+    /// The tab address of the one window that is `window`: by the window server's number (Safari's window id is
+    /// it), else by the same frame and title. Two windows alike, or none: no address rather than a wrong one.
+    nonisolated static func url(in listing: String, for window: Window) -> String? {
+        struct Row { let id: UInt32?; let name: String; let frame: CGRect; let url: String }
+        let rows: [Row] = listing.split(separator: "\n").compactMap { line in
+            let parts = line.components(separatedBy: "\t")
+            guard parts.count >= 4 else { return nil }
+            let b = parts[2].split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+            guard b.count == 4 else { return nil }
+            return Row(id: UInt32(parts[0]), name: parts[1], frame: CGRect(x: b[0], y: b[1], width: b[2] - b[0], height: b[3] - b[1]),
+                       url: parts[3...].joined(separator: "\t"))
+        }
+        if let number = window.number {
+            let same = rows.filter { $0.id == number }
+            if same.count == 1 { return same[0].url }
+        }
+        func near(_ a: CGRect, _ b: CGRect) -> Bool {
+            abs(a.minX - b.minX) <= 2 && abs(a.minY - b.minY) <= 2 && abs(a.width - b.width) <= 2 && abs(a.height - b.height) <= 2
+        }
+        let title = window.title
+        let matches = rows.filter { row in
+            near(row.frame, window.frame) && !row.name.isEmpty && (row.name == title || title.hasPrefix(row.name))
+        }
+        return matches.count == 1 ? matches[0].url : nil
     }
 
     // MARK: Closing

@@ -1203,7 +1203,7 @@ struct ClaudeButton: View {
         .animation(.spring(response: 0.32, dampingFraction: 0.6), value: fileOver)
         .slotFrame(dock, "claude")
         // A second click closes what the first opened.
-        .slotMouse(SlotMouse(left: { if app.claude.isOpen { app.claude.close() } else { app.claude.open(asking: nil) } }, right: { Menus.settings(for: dock) },
+        .slotMouse(SlotMouse(left: { app.claude.toggle() }, right: { Menus.settings(for: dock) },
                            hover: { on in
                                hovering = on
                                app.tooltips.show(on ? app.usageTooltip : nil, over: "claude", in: dock)

@@ -31,8 +31,8 @@ final class Agent {
     let noteID = UUID()
     /// The window the note is stuck to; nil for a chat stuck to none.
     var place: NotePlace? { didSet { if place != oldValue { keep() } } }
-    /// A message sent while `ClaudePanel.atOnce` other notes worked: it goes once one of them is done.
-    private(set) var waiting: String?
+    /// Messages sent while `ClaudePanel.atOnce` other notes worked, in order: they go once one of them is done.
+    private(set) var waiting: [String] = []
     @ObservationIgnored private var chatProvider: Provider?
     private(set) var pendingAsk: [Denial] = []
     @ObservationIgnored private var sessionID: String?
@@ -69,20 +69,28 @@ final class Agent {
         pendingAsk = []
         steering = max(0, steering - 1)
         messages.append(Message(kind: .user, text: prompt))
-        // Several notes may work at once, up to a few; the next waits its turn.
-        if app.claude.working >= ClaudePanel.atOnce {
-            waiting = prompt
-            messages.append(Message(kind: .step, text: "Waiting: \(ClaudePanel.atOnce) other notes are working. This starts when one is done."))
+        admit(prompt)
+    }
+
+    /// Runs now, or (with `ClaudePanel.atOnce` other notes working, or messages already waiting) waits its turn.
+    private func admit(_ prompt: String) {
+        if !waiting.isEmpty || app.claude.working >= ClaudePanel.atOnce {
+            if waiting.isEmpty {
+                messages.append(Message(kind: .step, text: "Waiting: \(ClaudePanel.atOnce) other notes are working. This starts when one is done."))
+            }
+            waiting.append(prompt)
             return
         }
         run(prompt)
     }
 
-    /// The message that waited for room, sent now.
+    /// The messages that waited for room: the first runs now, the rest follow it as queued messages do.
     func runWaiting() {
-        guard let prompt = waiting, !running else { return }
-        waiting = nil
-        run(prompt)
+        guard !waiting.isEmpty, !running else { return }
+        let first = waiting.removeFirst()
+        queued.append(contentsOf: waiting)
+        waiting = []
+        run(first)
     }
 
     /// The chat's first words, as the chats list shows it.
@@ -97,7 +105,7 @@ final class Agent {
         for denial in pendingAsk { for rule in denial.rules where !allowed.contains(rule) { allowed.append(rule) } }
         pendingAsk = []
         messages.append(Message(kind: .step, text: "Allowed"))
-        run("I approved that. Go ahead and run it, then continue.")
+        admit("I approved that. Go ahead and run it, then continue.")
     }
 
     func deny() {
@@ -117,12 +125,15 @@ final class Agent {
 
     /// The run under way, ended and forgotten: its late lines and its ending belong to no chat now.
     private func endRun() {
+        let freed = running
         stop()
         process = nil
         running = false
         runID = UUID()
         queued = []
-        waiting = nil
+        waiting = []
+        // Its place among the notes working is free: one waiting for it starts.
+        if freed { DispatchQueue.main.async { PetalApp.shared.claude.startWaiting() } }
     }
 
     /// Takes a message out of the queue (or back from steering) before it's sent.
@@ -548,13 +559,17 @@ final class ClaudePanel {
     @ObservationIgnored var closeReason: CloseReason?
     @ObservationIgnored var lastFront: (pid: pid_t, window: CGWindowID?)?
     @ObservationIgnored var pendingOpen: StickyNote?
+    @ObservationIgnored var pendingTicket = 0
     @ObservationIgnored var savedPlaces: [String: SavedChat] = [:]
     @ObservationIgnored var listening = false
+    /// The one chat stuck to no window (no app in front, or sticky notes off).
+    @ObservationIgnored let loose: StickyNote
 
     init() {
         let note = StickyNote()
         notes = [note]
         current = note
+        loose = note
     }
 
     func quote(_ text: String, from source: String) {
@@ -585,7 +600,15 @@ final class ClaudePanel {
         Task { await app.usage.refresh() }
         // Codex's models, if they couldn't be read at launch (Codex installed or signed in since).
         if app.chatProvider == .codex && app.codexModels.isEmpty { app.loadCodexModels() }
+        cancelPending()
         noteForFront { note in self.present(note, asking: text, send: send) }
+    }
+
+    /// The AI button or its shortcut: opens the note in front, gives the keyboard to one showing without it, or closes.
+    func toggle() {
+        if isOpen, let panel, !panel.isKeyWindow { panel.makeKeyAndOrderFront(nil) }
+        else if isOpen { close() }
+        else { open(asking: nil) }
     }
 
     /// Shows a note in the panel. `key: false` leaves the keyboard with the app in front (a note back with its window).
@@ -631,14 +654,8 @@ final class ClaudePanel {
         }
     }
 
-    /// A chat picked from the list: its note if it's still one, else carried on as a chat stuck to no window.
-    func restore(_ chat: SavedChat) {
-        if let note = notes.first(where: { $0.agent.chatID == chat.id }) { return present(note) }
-        let note = StickyNote()
-        note.agent.restore(chat)
-        notes.append(note)
-        present(note)
-    }
+    /// A chat picked from the list (StickyNotes.swift).
+    func restore(_ chat: SavedChat) { restoreNote(chat) }
 
     /// A note's turn ended (Agent).
     func agentFinished(_ agent: Agent) {
@@ -654,7 +671,7 @@ final class ClaudePanel {
     }
 
     func close() {
-        if closeReason == nil { closeReason = .purpose }
+        if closeReason == nil { closeReason = .purpose; cancelPending() }
         panel?.close()
         closeReason = nil
     }

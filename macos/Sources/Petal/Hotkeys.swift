@@ -82,7 +82,7 @@ final class Hotkeys {
     private func fire(_ key: UInt32) {
         switch key {
         case Self.ask:
-            if app.claude.isOpen { app.claude.close() } else { app.claude.open(asking: nil) }
+            app.claude.toggle()
         case Self.search:
             if app.search.isOpen { app.search.close() } else { app.search.open(in: nil) }
         case 1...9:
