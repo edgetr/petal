@@ -23,6 +23,8 @@ final class ScreenDock {
     private(set) var appCount = 0
     var minimized: [AppWindow] = []
     var stageSlots = 0
+    /// Finder, for its own button (FinderButton): running, its windows, in front.
+    var finder = DockItem(id: DockController.finder, pinned: true, running: true, windows: 0, here: false, active: false)
     /// The icons' size here: the setting's, or smaller when that many wouldn't fit along the screen's edge (as
     /// macOS's Dock does). DockPanel.place works it out.
     var icon: CGFloat = 36
@@ -353,13 +355,15 @@ final class DockController {
                 DockItem(id: bundleID, pinned: pinned, running: running[bundleID] != nil, windows: snapshot.count[bundleID] ?? 0,
                          here: here.contains(bundleID), active: bundleID == frontmost)
             }
-            // Finder first, in every mode, as macOS's Dock keeps it: it never comes and goes at the end and moves the rest.
-            let finder = config.bool("finderInDock") ? [item(Self.finder, pinned: true)] : []
-            items += finder
-            for bundleID in mode?.apps ?? [] where Apps.shows(bundleID) && !items.contains(where: { $0.id == bundleID }) {
+            // Finder is its own button by the AI button (FinderButton), the same in every mode: never among the apps.
+            let finder: [DockItem] = []
+            let finderButton = config.bool("finderInDock")
+            for bundleID in mode?.apps ?? [] where Apps.shows(bundleID) && !items.contains(where: { $0.id == bundleID })
+                && !(finderButton && bundleID == Self.finder) {
                 items.append(item(bundleID, pinned: true))
             }
-            for bundleID in snapshot.order where running[bundleID] != nil && !items.contains(where: { $0.id == bundleID }) {
+            for bundleID in snapshot.order where running[bundleID] != nil && !items.contains(where: { $0.id == bundleID })
+                && !(finderButton && bundleID == Self.finder) {
                 if modesOn && otherModes.contains(bundleID) { continue }
                 if config.bool("thisWorkspaceOnly") && !here.contains(bundleID) { continue }
                 items.append(item(bundleID, pinned: false))
@@ -372,13 +376,15 @@ final class DockController {
             for other in others where !dock.order.contains(other.id) { dock.order.append(other.id) }
             let ordered = pinned + dock.order.compactMap { key in others.first { $0.id == key } }
             Perf.span("refresh: set items") { if ordered != dock.items { dock.items = ordered } }
+            let finderNow = item(Self.finder, pinned: true)
+            if finderNow != dock.finder { dock.finder = finderNow }
             // The layer strip keeps every mode's row ready: each mode's apps, then the running apps in no mode.
             if DockStrip.shared.layers {
                 let loose = ordered.filter { !$0.pinned }
                 var rows: [String: [DockItem]] = [:]
                 for other in modesOn ? config.modes : Array(config.modes.prefix(1)) where other.id != mode?.id {
                     var seen = Set<String>()
-                    seen.formUnion(finder.map(\.id))
+                    if finderButton { seen.insert(Self.finder) }
                     rows[other.id] = finder + other.apps.filter { Apps.shows($0) && seen.insert($0).inserted }.map { item($0, pinned: true) } + loose
                 }
                 rows[mode?.id ?? ""] = ordered
@@ -387,7 +393,9 @@ final class DockController {
             if dock.minimized != minimizedAll { dock.minimized = minimizedAll }
 
             // The stage is as long as the most apps any mode would show here, so switching never moves the rest.
-            let longest = Perf.span("refresh: stage") { config.modes.map { m in m.apps.filter(Apps.shows).count }.max() ?? 0 }
+            let longest = Perf.span("refresh: stage") {
+                config.modes.map { m in m.apps.filter { Apps.shows($0) && !(finderButton && $0 == Self.finder) }.count }.max() ?? 0
+            }
             let slots = max(longest + finder.count, ordered.count) + 1
             if slots != dock.stageSlots { dock.stageSlots = slots }
 
@@ -979,6 +987,8 @@ struct DockView: View {
     var inset: CGFloat { config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5 }
     var slot: CGFloat { icon + inset * 2 }
 
+    static let finderSlot = "finder"
+
     var body: some View {
         let layout = dock.vertical ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 0))
         let modesOn = config.bool("modes") && !config.modes.isEmpty
@@ -992,6 +1002,9 @@ struct DockView: View {
             }
             if !app.providers.isEmpty && (config.bool("ai") || config.bool("claudeUsage")) {
                 ClaudeButton(dock: dock, size: icon * 0.95).frame(width: slot, height: slot).magnified(dock, "claude")
+            }
+            if config.bool("finderInDock") {
+                FinderButton(dock: dock, size: icon * 0.95).frame(width: slot, height: slot).magnified(dock, Self.finderSlot)
             }
             if modesOn { Separator(vertical: dock.vertical, slot: slot).magnified(dock, "separator:modes", scales: false) }
             stage(layout)
@@ -1216,6 +1229,70 @@ struct ClaudeButton: View {
                            fileOver: { over in fileOver = over },
                            dropOperation: .generic,
                            press: { pressed = $0 }))
+    }
+}
+
+/// Finder, as its own button by the AI button, the same in every mode (macOS's Dock keeps Finder first too): Petal's
+/// own mark for it on clear glass, a dot while it has windows, Finder's menu on a right-click, and files dropped on it
+/// shown in Finder.
+struct FinderButton: View {
+    @Environment(PetalApp.self) private var app
+    let dock: ScreenDock
+    let size: CGFloat
+    @State private var hovering = false
+    @State private var pressed = false
+
+    var body: some View {
+        let item = dock.finder
+        ZStack(alignment: .bottom) {
+            FinderMark().stroke(.white.opacity(0.9), style: StrokeStyle(lineWidth: max(1.4, size * 0.045), lineCap: .round, lineJoin: .round))
+                .frame(width: size * 0.5, height: size * 0.5)
+                .frame(width: size, height: size)
+                .scaleEffect(hovering ? 1.08 : 1)
+            if item.windows > 0 {
+                Circle().fill(.white.opacity(item.active ? 0.95 : 0.6)).frame(width: 4, height: 4).offset(y: size * 0.12)
+            }
+        }
+        .frame(width: size, height: size)
+        .clearGlass(in: .circle, pressed: pressed)
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .slotFrame(dock, DockView.finderSlot)
+        .slotMouse(SlotMouse(left: {
+                                 app.popups.closeAll()
+                                 app.tooltips.hide()
+                                 // Its windows forward; none open, a new one, as macOS's Dock does.
+                                 if item.windows > 0 { app.docks.activate(item) } else { NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory())) }
+                             },
+                             right: { Menus.app(item, in: dock) },
+                             hover: { on in
+                                 hovering = on
+                                 app.tooltips.show(on ? "Finder" : nil, over: DockView.finderSlot, in: dock)
+                             },
+                             files: { urls in NSWorkspace.shared.activateFileViewerSelecting(urls) },
+                             press: { pressed = $0 }))
+    }
+}
+
+/// Petal's mark for Finder: its face in a few lines (the outline, the profile down the middle, the eyes, the smile).
+struct FinderMark: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let w = rect.width, h = rect.height
+        p.addRoundedRect(in: rect, cornerSize: CGSize(width: w * 0.24, height: h * 0.24), style: .continuous)
+        // The profile: down from the top, a nose to the left, back, down to the bottom.
+        p.move(to: CGPoint(x: rect.minX + w * 0.54, y: rect.minY))
+        p.addLine(to: CGPoint(x: rect.minX + w * 0.46, y: rect.minY + h * 0.5))
+        p.addLine(to: CGPoint(x: rect.minX + w * 0.55, y: rect.minY + h * 0.52))
+        p.addLine(to: CGPoint(x: rect.minX + w * 0.52, y: rect.maxY))
+        // The eyes.
+        p.move(to: CGPoint(x: rect.minX + w * 0.27, y: rect.minY + h * 0.28))
+        p.addLine(to: CGPoint(x: rect.minX + w * 0.27, y: rect.minY + h * 0.4))
+        p.move(to: CGPoint(x: rect.minX + w * 0.73, y: rect.minY + h * 0.28))
+        p.addLine(to: CGPoint(x: rect.minX + w * 0.73, y: rect.minY + h * 0.4))
+        // The smile.
+        p.move(to: CGPoint(x: rect.minX + w * 0.22, y: rect.minY + h * 0.66))
+        p.addQuadCurve(to: CGPoint(x: rect.minX + w * 0.78, y: rect.minY + h * 0.66), control: CGPoint(x: rect.midX, y: rect.minY + h * 0.86))
+        return p
     }
 }
 

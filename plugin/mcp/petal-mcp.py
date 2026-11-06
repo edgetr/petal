@@ -97,7 +97,7 @@ SETTINGS_SCHEMA = {
     "aiNeverLook": (["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"], "Apps Petal AI never looks into (bundle ids): petal_look gives only their name, window lists leave out their titles, and screenshots leave them out."),
     "selectionAsk": (True, "macOS: selecting text in any app brings up a small \"Ask Petal AI\" button by it; clicking it quotes the text in the chat. (Also in every app's Services menu.) Never in apps kept private or password fields."),
     "chatWhileWorking": ("steer", "Writing in the AI chat while it works: steer (it stops where it is and carries on from the new message) or queue (sent once it's done)."),
-    "finderInDock": (True, "macOS: Finder first among the dock's apps in every mode, as macOS's Dock keeps it (so it never appears at the end and moves the rest)."),
+    "finderInDock": (True, "macOS: Finder as its own button next to the AI button, the same in every mode (never among the apps, so it never appears at the end and moves the rest)."),
     "replyDrafts": (True, "Entering a mode with held messages that need an answer, Petal AI drafts replies in the user's own style (learned from the replies they edit), shown on a card; it never sends anything."),
     "aiAllowed": ([], "What Petal AI may do without asking first (the user chose Always on its card): quit, close, trash, tidy."),
     "routines": (True, "macOS: run the user's routines (routines.json): what Petal does by itself when a file lands in a folder, an app opens, a mode starts or at a time. Made with petal_routine_save."),
