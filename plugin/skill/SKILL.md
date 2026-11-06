@@ -20,6 +20,10 @@ Use, in this order:
 1. Petal's MCP tools, when the `petal` server is connected: `petal_get_state` first, then `petal_set_settings`,
    `petal_set_dock`, `petal_save_mode`, `petal_delete_mode`, `petal_set_default_mode`, `petal_switch_mode`,
    `petal_list_apps`, `petal_reload`, `petal_reset_settings` (every setting back to its default: ask first).
+   On macOS also Petal AI's tools, done by the running Petal with its own permissions: `petal_look` (what's in front:
+   app, window, browser tab address, selected text; a screenshot when asked), `petal_apps`, `petal_windows`,
+   `petal_trash` (the Trash, never deleting; quitting, closing and trashing ask the user first), and memory:
+   `petal_remember`, `petal_forget`, `petal_memories` (everywhere or per mode).
    Changes apply instantly. `petal_export_recipe` / `petal_import_recipe` share a dock as a `.petal` file (modes,
    apps by name, look; nothing personal) or add one someone shared (`look: true` also takes its look; say what it
    adds before importing); `petal_suggestions` and `petal_summary` read the
