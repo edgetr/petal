@@ -90,7 +90,9 @@ final class PetalApp {
         Windows.limitWaiting()
         config.onChange = { [weak self] in
             guard let self else { return }
-            Perf.span("onChange: docks.refresh") { self.docks.refresh() }
+            // The last look at the windows, at once; a fresh one off the main thread.
+            Perf.span("onChange: docks.refresh") { self.docks.refresh(quick: true) }
+            Perf.span("onChange: look") { self.docks.refreshInBackground() }
             Perf.span("onChange: signals.watch") { self.signals.watch(Stacks.resolve(self.config.strings("stackFolders"))) }
             Perf.span("onChange: hotkeys") { self.hotkeys.refresh() }
             Perf.span("onChange: menuBar") { self.menuBar.refresh() }
@@ -117,6 +119,7 @@ final class PetalApp {
     }
 
     func stop() {
+        config.flush()
         Windows.stopManaging()
         notes.stop()
         ipc.stop()
@@ -341,14 +344,19 @@ final class PetalApp {
     func currentModel(for provider: Provider) -> String {
         let chosen = config.string(provider.modelSetting)
         guard provider == .codex, chosen.isEmpty else { return chosen }
+        // Read at most every 10 s: the settings window asks on every redraw, and the disk mustn't hold it up.
+        if let known = codexDefault, Date().timeIntervalSince(known.at) < 10 { return known.model ?? codexModels.first?.id ?? "" }
         let path = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".codex/config.toml")
         let top = ((try? String(contentsOf: path, encoding: .utf8)) ?? "").components(separatedBy: "\n[").first ?? ""
+        var found: String?
         for line in top.split(separator: "\n") {
             let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-            if parts.count == 2, parts[0] == "model" { return parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
+            if parts.count == 2, parts[0] == "model" { found = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"")); break }
         }
-        return codexModels.first?.id ?? ""
+        codexDefault = (Date(), found)
+        return found ?? codexModels.first?.id ?? ""
     }
+    @ObservationIgnored private var codexDefault: (at: Date, model: String?)?
 
     /// The newest Codex model of each family (Sol, Astra, Terra, Luna), in Codex's order, named "6.1 Sol"; the model
     /// already chosen stays even when it's older.
@@ -410,7 +418,8 @@ final class PetalApp {
     /// What `bin/petal` and Claude's tools can ask the running Petal (IpcHandler in Dock.qml).
     private func registerIPC() {
         ipc.on("current") { [unowned self] _ in docks.focusedDock?.mode?.id ?? config.defaultMode }
-        ipc.on("bench") { _ in LiveBench.start() }
+        ipc.on("bench") { args in LiveBench.start(quiet: args.first == "quiet") }
+
         ipc.on("mode") { [unowned self] args in
             guard let id = args.first, config.modes.contains(where: { $0.id == id }) else { return "no such mode" }
             guard let desktop = docks.focusedDock?.desktop ?? Spaces.desktop(on: NSScreen.main ?? NSScreen.screens[0]) else {

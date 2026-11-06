@@ -135,6 +135,9 @@ final class Config {
     /// file is written a moment later, off the main thread, so switching mode never waits for the disk.
     func setMode(_ id: String, forDesktop number: Int) {
         workspaces[String(number)] = id
+        var map = modesRoot["workspaces"] as? [String: Any] ?? [:]
+        map[String(number)] = id
+        modesRoot["workspaces"] = map
         let file = modesFile
         writing += 1
         Self.writer.async {
@@ -257,24 +260,57 @@ final class Config {
 
     // MARK: Files
 
-    private func update(_ file: URL, _ change: (inout [String: Any]) -> Void) {
-        Self.writer.sync {}   // a mode switch still being saved goes first
-        // A file that's there but isn't valid JSON (half-written by an editor, say) is left alone, not replaced
-        // by the one key being changed.
-        if FileManager.default.fileExists(atPath: file.path), Self.parse(file) == nil {
-            NSSound.beep()
-            return
-        }
-        var root = Self.readObject(file)
+    /// A change takes effect at once, in memory: the dock, the settings window and the menus show it in the same
+    /// frame. The file is written a moment later, off the main thread, in order with every other write (reading,
+    /// changing and writing a file took the main thread several milliseconds, and the settings window stuttered).
+    private func update(_ file: URL, _ change: @escaping (inout [String: Any]) -> Void) {
+        var root = file == settingsFile ? settings : file == dockFile ? dock : modesRoot
         change(&root)
-        Self.writeObject(root, to: file)
-        reload()
-        stamps = currentStamps()
-        onChange?()
+        Perf.span("config: in memory") {
+            if file == settingsFile { settings = root } else if file == dockFile { dock = root } else { use(modes: root) }
+        }
+        // Someone else changed a file in the last second, before the watcher read it: read it once this is written.
+        let stale = writing == 0 && currentStamps() != stamps
+        writing += 1
+        Self.writer.async {
+            // A file that's there but isn't valid JSON (half-written by an editor, say) is left alone, not replaced
+            // by the one key being changed.
+            let valid = !FileManager.default.fileExists(atPath: file.path) || Self.parse(file) != nil
+            if valid {
+                var disk = Self.readObject(file)
+                change(&disk)
+                Self.writeObject(disk, to: file)
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let config = PetalApp.shared.config
+                    config.writing -= 1
+                    if !valid { NSSound.beep() }
+                    if !valid || stale {
+                        config.reload()   // what's on disk stands
+                        config.onChange?()
+                    }
+                    if config.writing == 0 { config.stamps = config.currentStamps() }
+                }
+            }
+        }
+        Perf.span("config: onChange") { onChange?() }
     }
 
+    /// Waits for every write still under way (on quit).
+    func flush() { Self.writer.sync {} }
+
+    /// modes.json as read, for changes made in memory before it's written.
+    @ObservationIgnored private var modesRoot: [String: Any] = [:]
+
     private func reload() {
-        let root = Self.readObject(modesFile)
+        use(modes: Self.readObject(modesFile))
+        settings = Self.readObject(settingsFile)
+        dock = Self.readObject(dockFile)
+    }
+
+    private func use(modes root: [String: Any]) {
+        modesRoot = root
         defaultMode = root["defaultMode"] as? String ?? ""
         workspaces = (root["workspaces"] as? [String: Any] ?? [:]).compactMapValues { $0 as? String }
         modes = (root["modes"] as? [[String: Any]] ?? []).compactMap { m in
@@ -286,8 +322,6 @@ final class Config {
                         allow: m["allow"] as? [String] ?? [], shortcut: m["shortcut"] as? String ?? "",
                         distracting: m["distracting"] as? Bool, hold: m["hold"] as? Bool ?? false)
         }
-        settings = Self.readObject(settingsFile)
-        dock = Self.readObject(dockFile)
     }
 
     /// Looks for changes once a second. Modification times catch both ways a file gets written: replaced whole (as

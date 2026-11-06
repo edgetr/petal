@@ -30,9 +30,12 @@ final class GlassPanel: NSPanel {
     }
 
     /// Places what it shows over `slot` again, without making its view anew.
-    func place(over slot: CGRect, dock: DockPanel?, gap: CGFloat = 8) {
-        hosting.layoutSubtreeIfNeeded()
-        let size = hosting.fittingSize
+    func place(over slot: CGRect, dock: DockPanel?, gap: CGFloat = 8, size known: CGSize? = nil, front: Bool = true) {
+        let size: CGSize
+        if let known { size = known } else {
+            hosting.layoutSubtreeIfNeeded()
+            size = hosting.fittingSize
+        }
         let screen = dock?.screenRef ?? NSScreen.main ?? NSScreen.screens[0]
         let area = screen.frame.insetBy(dx: gap, dy: gap)
         let edge = dock?.glassFrame ?? slot
@@ -46,7 +49,8 @@ final class GlassPanel: NSPanel {
         origin.y = min(max(origin.y, area.minY), area.maxY - size.height)
         setFrame(NSRect(origin: origin, size: size).integral, display: true)
         ignoresMouseEvents = !interactive
-        orderFrontRegardless()
+        if alphaValue != 1 { Self.opaque(self) }
+        if front || !isVisible { orderFrontRegardless() }
     }
 
     /// Shows a card next to `slot` (a mode button), with its tail pointing at it: above it on a bottom dock, beside
@@ -72,6 +76,7 @@ final class GlassPanel: NSPanel {
         hosting.rootView = AnyView(content(Tail(edge: edge, offset: offset)).environment(PetalApp.shared))
         setFrame(NSRect(origin: origin, size: size).integral, display: true)
         ignoresMouseEvents = !interactive
+        if alphaValue != 1 { Self.opaque(self) }
         orderFrontRegardless()
     }
 
@@ -83,7 +88,18 @@ final class GlassPanel: NSPanel {
         }
     }
 
-    func hide() { orderOut(nil) }
+    /// Gone from sight, letting the mouse through, and showing nothing (so nothing in it keeps drawing), but still
+    /// on the screen: taking a window with macOS's glass off the screen waits on the window server for up to half
+    /// a second, which held the dock up every time a preview, a card or a tooltip went away.
+    func hide() {
+        guard alphaValue != 0 || !ignoresMouseEvents else { return }
+        alphaValue = 0
+        ignoresMouseEvents = true
+        hosting.rootView = AnyView(EmptyView())
+    }
+
+    /// Showing, not just on the screen (see `hide`).
+    var shown: Bool { isVisible && alphaValue > 0 }
 }
 
 /// The small triangle on a card that points at the mode button it's about.
@@ -135,18 +151,23 @@ extension View {
     }
 }
 
-/// The slot's name, on a small glass pill outside the dock, with no delay.
+/// The slot's name, on a small glass pill outside the dock, with no delay. AppKit's own glass and a label, sized
+/// from the words at once, so the pill is where the pointer is in the same frame (a SwiftUI pill learnt its new
+/// words a frame later, and moving fast across the icons left it behind).
 @MainActor
 final class Tooltips {
     private let panel: GlassPanel = {
         let panel = GlassPanel()
         panel.interactive = false
+        panel.ignoresMouseEvents = true
         return panel
     }()
+    private let glass = NSGlassEffectView()
+    private let label = NSTextField(labelWithString: "")
     private var shownFor = ""
-    /// One tooltip, its words changed in place: making its glass anew for every icon made it jump.
-    private let words = TooltipWords()
     private var made = false
+    /// Room around the glass, as the SwiftUI pills keep for its edge.
+    private static let margin: CGFloat = 6
 
     func show(_ text: String?, over id: String, in dock: ScreenDock?) {
         let app = PetalApp.shared
@@ -154,34 +175,37 @@ final class Tooltips {
         shownFor = id
         guard let text, !text.isEmpty, app.config.bool("tooltips"), let dock, dock.dragging == nil, dock.openPopup == nil,
               !app.popups.anyOpen, let panelRef = dock.panel, let slot = panelRef.screenFrame(of: id) else {
-            panel.hide()
+            hide()
             return
         }
-        words.text = text
-        if made {
-            panel.place(over: slot, dock: panelRef, gap: 2)
-        } else {
-            made = true
-            panel.show(TooltipView(words: words), over: slot, dock: panelRef, gap: 2)
-        }
+        if !made { make() }
+        label.stringValue = text
+        let words = label.intrinsicContentSize
+        let pill = CGSize(width: ceil(words.width) + 24, height: ceil(words.height) + 12)
+        let size = CGSize(width: pill.width + Self.margin * 2, height: pill.height + Self.margin * 2)
+        glass.frame = CGRect(x: Self.margin, y: Self.margin, width: pill.width, height: pill.height)
+        glass.cornerRadius = pill.height / 2
+        label.frame = CGRect(x: 12, y: (pill.height - ceil(words.height)) / 2, width: ceil(words.width), height: ceil(words.height))
+        panel.place(over: slot, dock: panelRef, gap: 2, size: size, front: false)
     }
 
-    func hide() { panel.hide() }
-}
-
-@MainActor @Observable
-final class TooltipWords {
-    var text = ""
-}
-
-struct TooltipView: View {
-    let words: TooltipWords
-
-    var body: some View {
-        Text(words.text).font(.system(size: 12, weight: .medium)).padding(.horizontal, 12).padding(.vertical, 6)
-            .glassEffect(.regular, in: .capsule).padding(6)
-            .transaction { $0.animation = nil }
+    private func make() {
+        made = true
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = .labelColor
+        label.lineBreakMode = .byClipping
+        let content = NSView()
+        content.addSubview(label)
+        glass.contentView = content
+        glass.style = .regular
+        let container = NSView()
+        container.addSubview(glass)
+        panel.contentView = container
     }
+
+    /// See-through rather than taken off the screen: ordering a window with macOS's glass out (and back in) waits on
+    /// the window server for most of half a second, which moving across the icons did at every one.
+    func hide() { panel.alphaValue = 0 }   // see GlassPanel.hide
 }
 
 /// Stacks, previews and cards: one open at a time; clicking elsewhere closes the stack.
@@ -251,7 +275,7 @@ final class Popups {
 
     /// Fits the stack or preview to what it shows now, over the same slot.
     func refit() {
-        guard kind != nil, let anchor, let dock = openDock?.panel, let slot = dock.screenFrame(of: anchor), panel.isVisible else { return }
+        guard kind != nil, let anchor, let dock = openDock?.panel, let slot = dock.screenFrame(of: anchor), panel.shown else { return }
         panel.place(over: slot, dock: dock)
     }
 
@@ -316,8 +340,7 @@ final class Popups {
     func dismissCard() {
         fade?.cancel()
         card = nil
-        cardPanel.hide()
-        GlassPanel.opaque(cardPanel)
+        cardPanel.hide()   // made opaque again as the next card shows
     }
 }
 
@@ -341,19 +364,60 @@ final class Previews {
     @ObservationIgnored private(set) var showing: String?
     @ObservationIgnored private var capturing = false
     @ObservationIgnored private var hoveredID = ""
-    /// Accessibility answers each app in its own time (up to 0.3 s for a busy one), so windows are listed here.
-    nonisolated private static let queue = DispatchQueue(label: "petal.previews", qos: .userInitiated)
+    /// Each app's windows as last listed, so moving to the next icon swaps the preview at once; listed again behind it.
+    @ObservationIgnored private var listed: [String: [AppWindow]] = [:]
+    /// While a menu from the dock is open, nothing opens behind it.
+    @ObservationIgnored private var held = false
+    /// Accessibility answers each app in its own time (up to 0.3 s for a busy one), so windows are listed here, each
+    /// app on its own: a slow one never holds up the next.
+    nonisolated private static let queue = DispatchQueue(label: "petal.previews", qos: .userInitiated, attributes: .concurrent)
 
     func hover(_ item: DockItem?, in dock: ScreenDock, id: String = "") {
         let app = PetalApp.shared
         if item == nil && !id.isEmpty && id != hoveredID { return }   // leaving one icon after entering the next
         hoveredID = item?.id ?? ""
         showTask?.cancel()
+        guard !held else { return }
         if let item, item.windows > 0 || playing(item.id), app.config.bool("previews"), canOpen(in: dock) {
+            if showing != nil && showing != item.id {
+                // Already showing another app's: this one's at once if its windows are known, else the tooltip
+                // until they are (never the last app's preview lingering over this icon).
+                if let known = listed[item.id], !known.isEmpty || playing(item.id) {
+                    hideTask?.cancel()
+                    show(item.id, windows: known, in: dock)
+                    again()   // and listed anew, in case they changed since
+                    return
+                }
+                close()
+            }
+            prefetch(item.id)
             schedule(item.id, in: dock)
+        } else if item != nil {
+            // The pointer is on another icon, not on its way to the preview: it goes now.
+            hideTask?.cancel()
+            close()
         } else {
             scheduleHide()
         }
+    }
+
+    /// A menu opens from the dock: no preview now, none waiting to open behind it, until it closes.
+    func hold(_ on: Bool) {
+        held = on
+        guard on else { return }
+        showTask?.cancel()
+        hideTask?.cancel()
+        hoveredID = ""
+        close()
+    }
+
+    /// The windows `id` had when last listed (for its menu).
+    func knownWindows(_ id: String) -> [AppWindow]? { listed[id] }
+
+    /// Lists an app's windows as the pointer reaches it, so they're ready when its preview opens.
+    private func prefetch(_ id: String) {
+        guard id != Self.media else { return }
+        list(id) { [weak self] found in self?.listed[id] = found }
     }
 
     /// The pointer on the now-playing tile.
@@ -370,7 +434,10 @@ final class Previews {
 
     private func schedule(_ id: String, in dock: ScreenDock) {
         hideTask?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.open(id, in: dock) }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.held, self.hoveredID == id else { return }
+            self.open(id, in: dock)
+        }
         showTask = work
         DispatchQueue.main.asyncAfter(deadline: .now() + (showing == nil ? 0.38 : 0), execute: work)
     }
@@ -385,9 +452,13 @@ final class Previews {
             guard PetalApp.shared.signals.nowPlaying != nil else { return scheduleHide() }
             return show(id, windows: [], in: dock)
         }
+        if let known = listed[id], !known.isEmpty {
+            show(id, windows: known, in: dock)   // listed as the pointer arrived; `again` lists them anew
+            return
+        }
         list(id) { [weak self] found in
             // The pointer moved on while Accessibility answered.
-            guard let self, self.hoveredID == id else { return }
+            guard let self, self.hoveredID == id, !self.held else { return }
             // The window server counts windows Accessibility can't reach (another Desktop, hidden), and none at all
             // without Accessibility: with none to show, no preview, rather than an empty bubble.
             guard !found.isEmpty || self.playing(id) else { return self.scheduleHide() }
@@ -428,7 +499,12 @@ final class Previews {
     private func list(_ bundleID: String, _ done: @escaping ([AppWindow]) -> Void) {
         Self.queue.async {
             let found = Array(Self.windows(of: bundleID).prefix(6))
-            DispatchQueue.main.async { MainActor.assumeIsolated { done(found) } }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    PetalApp.shared.previews.listed[bundleID] = found
+                    done(found)
+                }
+            }
         }
     }
 

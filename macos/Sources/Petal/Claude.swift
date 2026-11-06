@@ -301,6 +301,7 @@ final class InputPanel: NSPanel {
         let config = PetalApp.shared.config
         if config.whichDock == "macos" { return max(0, screen.visibleFrame.minY - screen.frame.minY) }
         guard config.position != "left", config.position != "right" else { return 0 }
+        if let reach = PetalApp.shared.docks.reach(on: screen) { return reach }
         let gap = config.number("dockMargin") >= 0 ? config.number("dockMargin") : 4
         let icon = max(16, config.number("iconSize"))
         let inset = config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5

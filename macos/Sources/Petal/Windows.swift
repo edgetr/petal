@@ -3,7 +3,7 @@ import ApplicationServices
 
 /// An app's window, as Accessibility sees it.
 struct AppWindow: Identifiable, Equatable {
-    let id: String          // pid and position in the app's window list, stable while the window stays
+    let id: String          // pid and the window server's number for it (else its place in the app's list)
     let pid: pid_t
     let title: String
     let minimized: Bool
@@ -50,9 +50,12 @@ enum Windows {
         guard let list: [AXUIElement] = value(app, kAXWindowsAttribute) else { return [] }
         var result: [AppWindow] = []
         for (index, window) in list.enumerated() {
-            guard let role: String = value(window, kAXSubroleAttribute), role == kAXStandardWindowSubrole as String else { continue }
-            let title: String = value(window, kAXTitleAttribute) ?? ""
             let minimized: Bool = value(window, kAXMinimizedAttribute) ?? false
+            // Only the person's own windows, not dialogs or palettes. A minimized window calls itself a dialog
+            // (macOS 26 and later), so minimized ones count whatever they say.
+            let role: String? = value(window, kAXSubroleAttribute)
+            guard role == kAXStandardWindowSubrole as String || minimized else { continue }
+            let title: String = value(window, kAXTitleAttribute) ?? ""
             var frame = CGRect.zero
             if let position: AXValue = value(window, kAXPositionAttribute), let size: AXValue = value(window, kAXSizeAttribute) {
                 var point = CGPoint.zero, extent = CGSize.zero
@@ -60,7 +63,9 @@ enum Windows {
                 AXValueGetValue(size, .cgSize, &extent)
                 frame = CGRect(origin: point, size: extent)
             }
-            result.append(AppWindow(id: "\(pid)-\(index)", pid: pid, title: title, minimized: minimized,
+            // The window server's number stays with the window as others open, close and minimize around it.
+            let key = id(of: window).map { "\(pid)-w\($0)" } ?? "\(pid)-\(index)"
+            result.append(AppWindow(id: key, pid: pid, title: title, minimized: minimized,
                                     frame: frame, element: window))
         }
         return result
@@ -239,7 +244,7 @@ extension Windows {
     }
 
     /// A window's frame now (top-left origin), asked of the app itself.
-    static func frame(of element: AXUIElement) -> CGRect? {
+    nonisolated static func frame(of element: AXUIElement) -> CGRect? {
         guard let position: AXValue = value(element, kAXPositionAttribute), let size: AXValue = value(element, kAXSizeAttribute) else { return nil }
         var point = CGPoint.zero, extent = CGSize.zero
         AXValueGetValue(position, .cgPoint, &point)
@@ -264,7 +269,7 @@ extension Windows {
     /// enhanced interface (for VoiceOver and the like) animate every move, so it's off for the moment of the move, as
     /// Rectangle and AeroSpace do. Returns the frame the app accepted.
     @discardableResult
-    static func place(_ element: AXUIElement, pid: pid_t, _ frame: CGRect, size: Bool = true) -> CGRect? {
+    nonisolated static func place(_ element: AXUIElement, pid: pid_t, _ frame: CGRect, size: Bool = true) -> CGRect? {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.3)
         let enhanced: Bool = value(app, "AXEnhancedUserInterface") ?? false
@@ -311,11 +316,10 @@ extension Windows {
         guard PetalApp.started else { return visible }
         let app = PetalApp.shared, config = app.config
         guard app.docks.shown, !config.autoHide, !respectClear || config.keepWindowsClear else { return visible }
-        // The same strip as Dock.swift's keepWindowsClear keeps.
-        let gap = config.number("dockMargin") >= 0 ? config.number("dockMargin") : 4
-        let icon = max(16, config.number("iconSize"))
-        let inset = config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5
-        let reserve = gap * 2 + 2 + icon + inset * 2 + 8
+        // The same strip as Dock.swift's keepWindowsClear keeps: up to the dock's glass.
+        let top = NSScreen.screens.first?.frame.maxY ?? 0
+        let screen = NSScreen.screens.first { ScreenArea.toAX($0.frame, mainTop: top).equalTo(frame, within: 1) }
+        guard let reserve = app.docks.reach(on: screen) else { return visible }
         return ScreenArea.usable(visible: visible, screen: frame, position: config.position, reserve: reserve)
     }
 }
@@ -426,8 +430,11 @@ final class AXWatcher: @unchecked Sendable {
     private var running = false
     private var generation = 0   // retries from before a stop are dropped
 
+    /// On the app itself: windows opening, focus, hiding, and (as well as on each window, for one not watched yet)
+    /// minimizing, so a minimized window reaches the dock even if its own observer was never added.
     private static let appNotifications = [kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification,
-                                           kAXApplicationHiddenNotification, kAXApplicationShownNotification]
+                                           kAXApplicationHiddenNotification, kAXApplicationShownNotification,
+                                           kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
     private static let windowNotifications = [kAXUIElementDestroyedNotification, kAXMovedNotification, kAXResizedNotification,
                                               kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
 

@@ -39,7 +39,8 @@ enum Menus {
         let name = Apps.name(item.id)
         var listed = false
         if config.bool("quickActions"), item.running {
-            let windows = Previews.windows(of: item.id)
+            // Listed as the pointer reached the icon; asking Accessibility again here would hold the menu up.
+            let windows = app.previews.knownWindows(item.id) ?? Previews.windows(of: item.id)
             if !windows.isEmpty {
                 menu.addItem(header("Windows"))
                 for window in windows.prefix(10) {
@@ -292,8 +293,9 @@ enum Menus {
     /// At the pointer, as the dock's own menus open.
     private static func pop(_ menu: NSMenu) {
         app.tooltips.hide()
-        app.previews.close()
+        app.previews.hold(true)   // none behind the menu, nor one that was about to open
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        app.previews.hold(false)
     }
 }
 

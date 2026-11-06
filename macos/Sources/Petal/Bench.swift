@@ -81,11 +81,12 @@ enum LiveBench {
     static let file = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Logs/Petal/bench.json")
     private(set) static var running = false
 
-    static func start() -> String {
+    /// `quiet`: only the steps that leave the apps and the mode alone (hovering icons, a setting back and forth).
+    static func start(quiet: Bool = false) -> String {
         guard !running else { return "already running" }
         running = true
         Perf.spans = [:]
-        Task { await run(); running = false }
+        Task { await run(quiet: quiet); running = false }
         return "started"
     }
 
@@ -116,12 +117,13 @@ enum LiveBench {
                 "runs": Double(sorted.count)]
     }
 
-    private static func run() async {
+    private static func run(quiet: Bool) async {
         let app = PetalApp.shared
         var results: [String: Any] = [:]
         guard let dock = app.docks.focusedDock, let panel = dock.panel, let desktop = dock.desktop else { return }
         let front = NSWorkspace.shared.frontmostApplication
         let startMode = dock.mode?.id
+        if !quiet {
 
         // 1. Bringing a running app forward, as a click on its icon does: until it's the app in front.
         var activate: [Double] = []
@@ -202,9 +204,45 @@ enum LiveBench {
             refresh.append(ms(start))
         }
         results["dock refresh (main thread)"] = summary(refresh)
+        }
+
+        // 5. Sweeping the pointer across the icons, as a quick move does: each icon's hover (its lift, tooltip and
+        // preview swap) until drawn, 40 ms apart.
+        if let strip = dock.strip {
+            var hovering: [Double] = []
+            for _ in 0..<2 {
+                for id in strip.shownOrder.prefix(14) {
+                    let start = now()
+                    Perf.span("hover: state") { strip.benchHover(id) }
+                    Perf.span("hover: draw") { draw(panel) }
+                    hovering.append(ms(start))
+                    try? await Task.sleep(for: .milliseconds(40))
+                }
+                strip.benchHover(nil)
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+            app.tooltips.hide()
+            app.previews.close()
+            results["hover an icon"] = summary(hovering)
+        }
+
+        // 6. A setting changing, as the settings window changes it: Claude and Codex for the chat, back and forth.
+        if app.providers.count > 1, let chat = app.chatProvider {
+            var setting: [Double] = []
+            for _ in 0..<3 {
+                for provider in app.providers + [chat] {
+                    let start = now()
+                    Perf.span("setting: state") { app.config.set("chatProvider", provider.rawValue) }
+                    Perf.span("setting: draw") { draw(app.settings.window) }
+                    setting.append(ms(start))
+                    try? await Task.sleep(for: .milliseconds(120))
+                }
+            }
+            results["change a setting"] = summary(setting)
+        }
 
 
-        if let front { _ = front.activate() ; Windows.bringForward(front) }
+        if !quiet, let front { _ = front.activate() ; Windows.bringForward(front) }
         results["at"] = ISO8601DateFormatter().string(from: Date())
         results["steps"] = Perf.spans.mapValues(summary)
         Perf.spans = [:]

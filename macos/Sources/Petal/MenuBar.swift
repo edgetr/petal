@@ -41,8 +41,9 @@ final class MenuBar: NSObject, NSMenuDelegate {
         let mode = app.docks.shown && app.config.bool("modes") ? self.mode : nil
         if let item, dot != shownDot || mode != shownMode {
             if let mode {
+                // The mode's symbol only: its name is on the dock already.
                 item.button?.image = Self.modeImage(mode.icon, dot: dot)
-                item.button?.title = mode.name
+                item.button?.title = ""
                 item.button?.toolTip = dot ? "Petal: an update is ready" : "Petal: \(mode.name)"
             } else {
                 item.button?.image = Self.mark(dot: dot)

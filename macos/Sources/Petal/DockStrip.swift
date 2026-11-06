@@ -148,7 +148,7 @@ final class AppStripView: NSView {
     private func sync() {
         guard let dock else { return }
         let config = app.config
-        let icon = max(16, config.number("iconSize"))
+        let icon = dock.icon   // the setting's, or smaller to fit along the screen's edge
         let inset = config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5
         let now = Look(icon: icon, slot: icon + inset * 2, position: config.position, scale: window?.backingScaleFactor ?? 2,
                        glow: config.bool("appGlow"), accent: app.accent)
@@ -375,13 +375,19 @@ final class AppStripView: NSView {
         setHover(inside ? tile(at: point)?.id : nil)
     }
 
+    /// `petal bench`: the pointer reaching an icon, without moving it.
+    func benchHover(_ id: String?) { setHover(id) }
+
+    /// The apps in the row showing, in order.
+    var shownOrder: [String] { current?.order ?? [] }
+
     private func setHover(_ id: String?) {
         guard id != hovered, let dock else { return }
         let old = hovered
         hovered = id
         if let old { hover(old, false, dock) }
         if let id { hover(id, true, dock) }
-        applyLift()
+        Perf.span("hover: lift") { applyLift() }
     }
 
     private func hover(_ id: String, _ on: Bool, _ dock: ScreenDock) {
@@ -394,10 +400,12 @@ final class AppStripView: NSView {
             if !on { app.tooltips.show(nil, over: id, in: dock); app.previews.hover(nil, in: dock, id: id) }
             return
         }
-        if on { dock.magnifier.wake() }
-        app.tooltips.show(on ? Apps.name(item.id) : nil, over: item.id, in: dock)
-        app.previews.hover(on ? item : nil, in: dock, id: item.id)
-        if on && app.config.bool("recentFiles") { Apps.prefetchRecent(item.id) }
+        if on { Perf.span("hover: magnifier") { dock.magnifier.wake() } }
+        // The preview first: the last app's goes (or this one's swaps in) before the tooltip asks whether one is open.
+        Perf.span("hover: preview") { app.previews.hover(on ? item : nil, in: dock, id: item.id) }
+        let name = Perf.span("hover: name") { on ? Apps.name(item.id) : nil }
+        Perf.span("hover: tooltip") { app.tooltips.show(name, over: item.id, in: dock) }
+        if on && app.config.bool("recentFiles") { Perf.span("hover: recent") { Apps.prefetchRecent(item.id) } }
     }
 
     private func applyLift() {

@@ -29,6 +29,7 @@ enum CLI {
     petal restore-dock        give macOS its Dock back, even if Petal crashed
     petal bench               time the dock's clicks (brings apps forward and switches modes for ~15 s;
                               results in ~/Library/Logs/Petal/bench.json)
+    petal bench quiet         only hovering the icons and a setting back and forth (no app or mode changes)
     petal restore-windows     bring back every window put away for another mode, even if Petal crashed
     petal personal …          your own changes to Petal's code, kept through updates (petal personal help)
     """

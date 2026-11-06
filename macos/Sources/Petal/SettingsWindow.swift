@@ -7,7 +7,7 @@ import SwiftUI
 /// first field still asks the AI (when there is one).
 @MainActor
 final class SettingsWindow {
-    private var window: NSWindow?
+    private(set) var window: NSWindow?
 
     func show(_ section: SettingsSection = .dock) {
         if window == nil {

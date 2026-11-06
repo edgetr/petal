@@ -20,6 +20,9 @@ final class ScreenDock {
     var items: [DockItem] = []
     var minimized: [AppWindow] = []
     var stageSlots = 0
+    /// The icons' size here: the setting's, or smaller when that many wouldn't fit along the screen's edge (as
+    /// macOS's Dock does). DockPanel.place works it out.
+    var icon: CGFloat = 36
     var dragging: String?
     var dragOffset: CGFloat = 0
     var revealed = true
@@ -52,6 +55,10 @@ final class DockController {
         let center = NSWorkspace.shared.notificationCenter
         // Another app in front changes only which icon is active: the last look at the windows does, at once.
         center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh(quick: true) }
+        }
+        // Another Desktop, or a full-screen app's Space: the dock steps aside (or comes back) at once.
+        center.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh(quick: true) }
         }
         // Apps opening, quitting, hiding, and another Desktop: look at the windows again, off the main thread.
@@ -103,6 +110,10 @@ final class DockController {
             look(.window)
         case .moved, .resized:
             look(.movement)
+        case .focused:
+            // A window minimizing hands focus to another: the next look reads this app's minimized windows too, in
+            // case the minimize itself went unheard.
+            minimizedChanged[event.pid] = Self.now
         case .quit:
             minimizedByApp[event.pid] = nil
             minimizedChanged[event.pid] = nil
@@ -171,13 +182,15 @@ final class DockController {
     }
 
     private func startLook() {
-        let pids = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map(\.processIdentifier)
-        let read = minimizedToRead(pids)
+        // Which apps' minimized windows to read: every app's, or those with a window event lately. Asking each
+        // process whether it's a regular app costs milliseconds, so the list of apps is made off the main thread.
+        let read = minimizedToRead()
         Self.lookQueue.async { [weak self] in
             let snapshot = WindowList.current()
             let running = Self.runningApps()
+            let pids = running.values.map(\.processIdentifier).sorted()   // by launch, so minimized windows keep their order
             var minimized: [pid_t: [AppWindow]] = [:]
-            for pid in read { minimized[pid] = Windows.windows(of: pid).filter(\.minimized) }
+            for pid in pids where read.all || read.changed.contains(pid) { minimized[pid] = Windows.windows(of: pid).filter(\.minimized) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self else { return }
@@ -205,20 +218,20 @@ final class DockController {
     private var minimizedChanged: [pid_t: Double] = [:]
     private var readAllMinimized = true
 
-    private func minimizedToRead(_ pids: [pid_t]) -> [pid_t] {
+    private func minimizedToRead() -> (all: Bool, changed: Set<pid_t>) {
         guard config.bool("minimized"), eventsLive else {
             minimizedByApp = [:]
             minimizedChanged = [:]
             readAllMinimized = true   // read every app again once the setting or Accessibility is back
-            return []
+            return (false, [])
         }
         let now = Self.now
         minimizedChanged = minimizedChanged.filter { now - $0.value < LookSchedule.followUp + 1 }
         if readAllMinimized {
             readAllMinimized = false
-            return pids
+            return (true, [])
         }
-        return pids.filter { minimizedChanged[$0] != nil }
+        return (false, Set(minimizedChanged.keys))
     }
 
     /// The apps with a place in the dock, by bundle id. Asking each running process for this costs several
@@ -263,10 +276,12 @@ final class DockController {
             let panel = panels[id] ?? DockPanel()
             panels[id] = panel
             let dock = panel.dock
-            let desktop = Perf.span("refresh: desktop") { Spaces.desktop(on: screen) }
+            let showing = Perf.span("refresh: desktop") { Spaces.showing(on: screen) }
+            let desktop = showing.desktop
             if desktop != nil || dock.mode == nil {   // a full-screen app keeps the mode of the Desktop before it
                 dock.desktop = desktop
             }
+            panel.fullScreen = showing.fullScreen
             let mode = modesOn ? config.mode(forDesktop: dock.desktop ?? 1) : config.modes.first
             Perf.span("refresh: set mode") { if mode != dock.mode { dock.mode = mode } }
             let here = Set(snapshot.apps(on: screen))
@@ -313,50 +328,123 @@ final class DockController {
 
             Perf.span("refresh: place panel") { panel.place(on: screen) }
         }
-        if config.keepWindowsClear && !config.autoHide { Perf.span("refresh: keep windows clear") { keepWindowsClear(snapshot) } }
+        Perf.span("refresh: keep windows clear") { keepWindowsClear(snapshot) }
         Perf.span("refresh: automation") { app.automation.modeShown(dock(for: NSScreen.main)?.mode?.id) }
         Perf.span("refresh: menu bar") { app.menuBar.show(mode: dock(for: NSScreen.main)?.mode) }
         Perf.span("refresh: notes") { app.notes.update() }
     }
 
     /// macOS keeps no room for a dock other than its own, so windows would run under Petal's. While auto-hide is
-    /// off, a window reaching into the dock's strip is shortened to end above it (or narrowed, for a side dock); one
-    /// too small to shorten is moved out instead. Omarchy reserves the same strip for its dock.
+    /// off, a window reaching into the dock's strip is shortened to end where the dock's glass begins (or narrowed,
+    /// for a side dock); one too small to shorten is moved out instead. Omarchy reserves the same strip for its dock.
+    ///
+    /// Petal remembers each window's frame from before it touched it. A new position (or icon size) starts again
+    /// from that frame, so windows never shrink step by step as the dock moves around; turning this off, or
+    /// auto-hide on, or the window's screen going full screen, gives it back. A window moved or resized since is
+    /// the person's, and forgotten.
     private func keepWindowsClear(_ snapshot: WindowList) {
         guard Windows.trusted else { return }
+        let on = config.keepWindowsClear && !config.autoHide
+        guard on || !cleared.isEmpty else { return }
         let top = NSScreen.screens.first?.frame.maxY ?? 0
-        for panel in panels.values {
-            guard let screen = panel.screenRef else { continue }
-            let icon = max(16, config.number("iconSize"))
-            let inset = config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5
-            let reserve = panel.gap * 2 + 2 + icon + inset * 2 + 8
-            let area = screen.frame
-            // The screen in Accessibility's coordinates (top-left origin).
-            let screenAX = CGRect(x: area.minX, y: top - area.maxY, width: area.width, height: area.height)
-            for window in snapshot.onScreenWindows where screenAX.intersects(window.frame) {
-                let f = window.frame
-                var target = f
-                switch config.position {
-                case "left":
-                    let limit = screenAX.minX + reserve
-                    guard f.minX < limit - 2, f.maxX > limit else { continue }
-                    target = f.width - (limit - f.minX) >= 300 ? CGRect(x: limit, y: f.minY, width: f.maxX - limit, height: f.height)
-                        : CGRect(x: limit, y: f.minY, width: f.width, height: f.height)
-                case "right":
-                    let limit = screenAX.maxX - reserve
-                    guard f.maxX > limit + 2, f.minX < limit else { continue }
-                    target = limit - f.minX >= 300 ? CGRect(x: f.minX, y: f.minY, width: limit - f.minX, height: f.height)
-                        : CGRect(x: limit - f.width, y: f.minY, width: f.width, height: f.height)
-                default:
-                    let limit = screenAX.maxY - reserve
-                    guard f.maxY > limit + 2, f.minY < limit else { continue }
-                    target = limit - f.minY >= 200 ? CGRect(x: f.minX, y: f.minY, width: f.width, height: limit - f.minY)
-                        : CGRect(x: f.minX, y: max(screenAX.minY + 30, limit - f.height), width: f.width, height: f.height)
+        let docks = panels.values.compactMap { panel -> (panel: DockPanel, screen: CGRect)? in
+            guard let area = panel.screenRef?.frame else { return nil }
+            return (panel, CGRect(x: area.minX, y: top - area.maxY, width: area.width, height: area.height))   // top-left origin
+        }
+        var moves: [(pid: pid_t, number: CGWindowID, to: CGRect)] = []
+        for window in snapshot.onScreenWindows {
+            let now = window.frame
+            var before = now
+            if let record = cleared[window.number] {
+                // A frame Petal gave it, or one it had on the way (the look may be a moment old): still Petal's
+                // doing. Any other frame is the person's.
+                if record.knows(now) { before = record.before } else { cleared[window.number] = nil }
+            }
+            var target = before
+            let center = CGPoint(x: before.midX, y: before.midY)
+            if on, let dock = docks.first(where: { $0.screen.contains(center) }), !dock.panel.fullScreen {
+                target = Self.clear(before, screen: dock.screen, reach: dock.panel.reach, position: config.position)
+            }
+            let moving = !target.equalTo(now, within: 2)
+            guard moving || cleared[window.number] != nil || !target.equalTo(before, within: 1) else { continue }
+            var record = cleared[window.number] ?? Cleared(before: before)
+            record.saw(now)
+            record.saw(target)
+            cleared[window.number] = record
+            if moving { moves.append((window.pid, window.number, target)) }
+        }
+        // Windows that closed: nothing to give back.
+        cleared = cleared.filter { snapshot.numbers.contains($0.key) }
+        guard !moves.isEmpty else { return }
+        // Accessibility waits on each app: never on the main thread.
+        Self.clearQueue.async {
+            for move in moves {
+                let app = AXUIElementCreateApplication(move.pid)
+                AXUIElementSetMessagingTimeout(app, 0.3)
+                let list: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
+                guard let element = list.first(where: { Windows.id(of: $0) == move.number }) else { continue }
+                let actual = Windows.place(element, pid: move.pid, move.to)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        // Where the app let it go (an app may keep a minimum size), which is now Petal's frame for it.
+                        guard let controller = PetalApp.shared.docks, let actual else { return }
+                        controller.cleared[move.number]?.saw(actual)
+                    }
                 }
-                guard let ax = Windows.windows(of: window.pid).first(where: { !$0.minimized && $0.frame.equalTo(f, within: 4) }) else { continue }
-                Windows.setFrame(ax, target)
             }
         }
+    }
+
+    /// A window kept clear of the dock: its own frame from before, and the frames it has had since through Petal
+    /// (the ones Petal gave it, where it was moving from, where the app let it go). Kept until the window closes or
+    /// the person moves it, so a look at the windows from a moment before a move never mistakes Petal's frame for
+    /// theirs.
+    struct Cleared {
+        var before: CGRect
+        private var frames: [CGRect] = []
+
+        init(before: CGRect) { self.before = before }
+
+        func knows(_ frame: CGRect) -> Bool {
+            before.equalTo(frame, within: 4) || frames.contains { $0.equalTo(frame, within: 4) }
+        }
+
+        mutating func saw(_ frame: CGRect) {
+            guard !knows(frame) else { return }
+            frames.append(frame)
+            if frames.count > 12 { frames.removeFirst() }
+        }
+    }
+
+    /// The frame `f` keeps clear of a dock reaching `reach` in from `screen`'s edge (both top-left origin).
+    nonisolated static func clear(_ f: CGRect, screen: CGRect, reach: CGFloat, position: String) -> CGRect {
+        switch position {
+        case "left":
+            let limit = screen.minX + reach
+            guard f.minX < limit - 1, f.maxX > limit else { return f }
+            return f.maxX - limit >= 300 ? CGRect(x: limit, y: f.minY, width: f.maxX - limit, height: f.height)
+                : CGRect(x: limit, y: f.minY, width: f.width, height: f.height)
+        case "right":
+            let limit = screen.maxX - reach
+            guard f.maxX > limit + 1, f.minX < limit else { return f }
+            return limit - f.minX >= 300 ? CGRect(x: f.minX, y: f.minY, width: limit - f.minX, height: f.height)
+                : CGRect(x: limit - f.width, y: f.minY, width: f.width, height: f.height)
+        default:
+            let limit = screen.maxY - reach
+            guard f.maxY > limit + 1, f.minY < limit else { return f }
+            return limit - f.minY >= 200 ? CGRect(x: f.minX, y: f.minY, width: f.width, height: limit - f.minY)
+                : CGRect(x: f.minX, y: max(screen.minY + 30, limit - f.height), width: f.width, height: f.height)
+        }
+    }
+
+    /// Windows kept clear of the dock, by window number: the frame each had before and the one Petal gave it.
+    private var cleared: [CGWindowID: Cleared] = [:]
+    nonisolated private static let clearQueue = DispatchQueue(label: "petal.windows.clear", qos: .userInitiated)
+
+    /// How far the dock on `screen` reaches in from its edge: where windows kept clear of it end.
+    func reach(on screen: NSScreen?) -> CGFloat? {
+        guard shown, let screen, let id = screen.displayID, let panel = panels[id], !panel.fullScreen else { return nil }
+        return panel.reach
     }
 
     func dock(for screen: NSScreen?) -> ScreenDock? {
@@ -477,7 +565,9 @@ final class DockController {
 struct WindowList {
     var count: [String: Int] = [:]
     var order: [String] = []                      // apps by their first window
-    private var onScreen: [(bundleID: String, pid: pid_t, frame: CGRect)] = []
+    /// Every app window's number, on any Desktop or minimized.
+    var numbers: Set<CGWindowID> = []
+    private var onScreen: [(bundleID: String, pid: pid_t, frame: CGRect, number: CGWindowID)] = []
 
     static func current() -> WindowList {
         var list = WindowList()
@@ -502,8 +592,10 @@ struct WindowList {
             }
             guard !bundleID.isEmpty else { continue }
             let isOnScreen = window[kCGWindowIsOnscreen as String] as? Bool ?? false
+            let number = window[kCGWindowNumber as String] as? CGWindowID ?? 0
             list.count[bundleID, default: 0] += 1
-            if isOnScreen { list.onScreen.append((bundleID, pid, bounds)) }
+            list.numbers.insert(number)
+            if isOnScreen { list.onScreen.append((bundleID, pid, bounds, number)) }
             if !list.order.contains(bundleID) { list.order.append(bundleID) }
         }
         return list
@@ -523,7 +615,7 @@ struct WindowList {
     func onScreenFrames(pid: pid_t) -> [CGRect] { onScreen.filter { $0.pid == pid }.map(\.frame) }
 
     /// Every app window on screen, top-left origin as Accessibility counts.
-    var onScreenWindows: [(pid: pid_t, frame: CGRect)] { onScreen.map { ($0.pid, $0.frame) } }
+    var onScreenWindows: [(pid: pid_t, frame: CGRect, number: CGWindowID)] { onScreen.map { ($0.pid, $0.frame, $0.number) } }
 }
 
 extension CGRect {
@@ -614,7 +706,7 @@ final class DockPanel: NSPanel {
     /// The glass itself, without the clear room around it for lifting and bouncing icons: tooltips, previews and
     /// stacks sit just above this, as they do over macOS's Dock.
     var glassFrame: CGRect {
-        let room = DockView.outer(config)
+        let room = DockView.outer(config, icon: dock.icon)
         let content = contentFrame
         return CGRect(x: content.minX + room.leading, y: content.minY + room.bottom,
                       width: content.width - room.leading - room.trailing, height: content.height - room.top - room.bottom)
@@ -623,27 +715,51 @@ final class DockPanel: NSPanel {
     /// The gap between the dock and the screen's edge (Omarchy's `gap`).
     var gap: CGFloat { config.number("dockMargin") >= 0 ? config.number("dockMargin") : 4 }
 
+    /// How far the glass reaches in from the screen's edge: windows kept clear of the dock end right there.
+    var reach: CGFloat {
+        let size = measured ?? frame.size
+        let room = DockView.outer(config, icon: dock.icon)
+        switch config.position {
+        case "left": return gap + size.width - room.trailing
+        case "right": return gap + size.width - room.leading
+        default: return gap + size.height - room.top
+        }
+    }
+
     /// Something open over the dock keeps it out while auto-hide is on.
     var busy: Bool { dock.openPopup != nil || dock.dragging != nil || PetalApp.shared.overlayOpen }
 
-    var tucked: Bool { config.autoHide && !dock.revealed && !busy }
+    /// The screen shows a full-screen app: the dock keeps out of its way and comes out at the screen's edge, as
+    /// macOS's does there.
+    var fullScreen = false {
+        didSet {
+            guard fullScreen != oldValue else { return }
+            dock.revealed = !hides
+            hideAt = nil
+        }
+    }
+
+    /// Out of the way until the pointer reaches the edge: auto-hide, or a full-screen app.
+    var hides: Bool { config.autoHide || fullScreen }
+
+    var tucked: Bool { hides && !dock.revealed && !busy }
 
     func place(on screen: NSScreen) {
         screenRef = screen
         // Measured again only when the dock's content says its size may have changed: once a second, nothing has.
         // A new position (or icon size) lays the dock out the other way: the last measure doesn't hold.
-        let shape = "\(config.position)|\(config.number("iconSize"))|\(config.number("iconPadding"))|\(config.number("dockMargin"))"
+        let shape = "\(config.position)|\(config.number("iconSize"))|\(config.number("iconPadding"))|\(config.number("dockMargin"))|\(screen.frame)"
         if shape != measuredShape { measured = nil; measuredShape = shape }
+        let area = screen.frame
+        let visible = screen.visibleFrame
         let content: CGSize
         if let measured, !hosting.sizeChanged {
             content = measured
         } else {
-            content = hosting.measure()
+            content = fit(along: config.position == "bottom" ? area.width - 16 : visible.height - 16)
             measured = content
         }
         // Only the dock's thickness comes from its content; along the edge the panel is the screen's length.
-        let area = screen.frame
-        let visible = screen.visibleFrame
         var origin: CGPoint
         let size: CGSize
         switch config.position {
@@ -691,6 +807,47 @@ final class DockPanel: NSPanel {
         if let screenRef { place(on: screenRef) }
     }
 
+    /// Measures the dock with the icons as large as the setting asks, or, when that many wouldn't fit in `room`
+    /// along the screen's edge, as large as fits (not under 16 points), as macOS's Dock does. The dock's length is
+    /// the icons' share, which grows with them, plus a fixed part (padding, the mode's name): two measures tell
+    /// both, so the second guess fits.
+    private func fit(along room: CGFloat) -> CGSize {
+        let wanted = max(16, config.number("iconSize"))
+        func length(_ size: CGSize) -> CGFloat { config.position == "bottom" ? size.width : size.height }
+        func measure(at icon: CGFloat) -> CGSize {
+            if dock.icon != icon {
+                dock.icon = icon
+                hosting.rootView = hosting.rootView   // laid out again now, at the new size
+            }
+            return hosting.measure()
+        }
+        var icon = min(dock.icon, wanted)
+        var size = measure(at: icon)
+        // Grown back to the setting when there's room again (fewer apps): measured there first.
+        if icon < wanted, length(size) < room {
+            let full = measure(at: wanted)
+            if length(full) <= room { return full }
+            let perPoint = (length(full) - length(size)) / (wanted - icon)
+            icon = perPoint > 0 ? min(wanted, floor(icon + (room - length(size)) / perPoint)) : icon
+            size = measure(at: icon)
+        }
+        guard length(size) > room, icon > 16 else { return size }
+        // Too long: a first guess as if all of it grew with the icons, then the line through both measures.
+        let first = (icon, length(size))
+        icon = max(16, floor(icon * room / length(size)))
+        size = measure(at: icon)
+        if length(size) > room, icon > 16, first.0 != icon {
+            let perPoint = (first.1 - length(size)) / (first.0 - icon)
+            if perPoint > 0 { icon = max(16, floor(icon - (length(size) - room) / perPoint)) }
+            size = measure(at: icon)
+        }
+        while length(size) > room, icon > 16 {   // rounding: a point at a time
+            icon -= 1
+            size = measure(at: icon)
+        }
+        return size
+    }
+
     /// The slot `id` in screen coordinates.
     func screenFrame(of id: String) -> CGRect? {
         guard let rect = dock.frames[id] else { return nil }
@@ -700,7 +857,7 @@ final class DockPanel: NSPanel {
     /// Auto-hide: the dock comes out when the pointer meets its edge, and goes 150 ms after it leaves.
     private func followMouse() {
         updateMouseThrough()
-        guard config.autoHide, let screen = screenRef else {
+        guard hides, let screen = screenRef else {
             if !dock.revealed { dock.revealed = true }
             if contentFrame.contains(NSEvent.mouseLocation) { dock.magnifier.wake() }
             return
@@ -740,7 +897,7 @@ struct DockView: View {
     let dock: ScreenDock
 
     var config: Config { app.config }
-    var icon: CGFloat { max(16, config.number("iconSize")) }
+    var icon: CGFloat { dock.icon }
     var inset: CGFloat { config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5 }
     var slot: CGFloat { icon + inset * 2 }
 
@@ -797,11 +954,10 @@ struct DockView: View {
 
     /// Room around the glass: for its shadow, and inward for icons lifting and bouncing.
     /// With magnification, it's room for the largest icons too, so the panel never resizes while they grow.
-    private var outer: EdgeInsets { Self.outer(config) }
+    private var outer: EdgeInsets { Self.outer(config, icon: icon) }
 
     /// The room around the glass (see `outer`), for anything placed by the glass rather than by the panel.
-    static func outer(_ config: Config) -> EdgeInsets {
-        let icon = max(16, config.number("iconSize"))
+    static func outer(_ config: Config, icon: CGFloat) -> EdgeInsets {
         let slot = icon + (config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5) * 2
         var room = icon * 0.55
         var along: CGFloat = 10
@@ -1030,8 +1186,8 @@ struct AppSlot: View {
             middle: { app.docks.newWindow(item.id) },
             hover: { on in
                 hovering = on
-                app.tooltips.show(on ? Apps.name(item.id) : nil, over: item.id, in: dock)
                 app.previews.hover(on ? item : nil, in: dock, id: item.id)
+                app.tooltips.show(on ? Apps.name(item.id) : nil, over: item.id, in: dock)
                 if on && app.config.bool("recentFiles") { Apps.prefetchRecent(item.id) }
             },
             drag: { delta, ended in drag(delta, ended: ended) },
