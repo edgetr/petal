@@ -184,7 +184,8 @@ enum MCP {
             var json = Insights.summary(from: from, to: to, title: "From \(format.string(from: from))").json
             json["byDay"] = Insights.byDay(from: from, to: to)
             return json
-        case "petal_look", "petal_apps", "petal_windows", "petal_trash", "petal_remember", "petal_forget", "petal_memories", "petal_show", "petal_vault":
+        case "petal_look", "petal_apps", "petal_windows", "petal_trash", "petal_remember", "petal_forget", "petal_memories", "petal_show", "petal_vault",
+             "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
             // Petal itself does these, with its own permissions (and asks the person first where it should).
             let json = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
             let reply = petal(["assist", name, json])

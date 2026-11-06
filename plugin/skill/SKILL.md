@@ -23,7 +23,11 @@ Use, in this order:
    On macOS also Petal AI's tools, done by the running Petal with its own permissions: `petal_look` (what's in front:
    app, window, browser tab address, selected text; a screenshot when asked), `petal_apps`, `petal_windows`,
    `petal_trash` (the Trash, never deleting; quitting, closing and trashing ask the user first), and memory:
-   `petal_remember`, `petal_forget`, `petal_memories` (everywhere or per mode).
+   `petal_remember`, `petal_forget`, `petal_memories` (everywhere or per mode); and routines, what Petal does by
+   itself from the user's own words ("keep my Downloads tidy", "when I open Figma, switch to Design"):
+   `petal_routine_save` (their words, plus the trigger and actions you fill in), `petal_routines`,
+   `petal_routine_run` (`dryRun: true` shows what it would do with the files there now), `petal_routine_undo` (puts
+   moved files back), `petal_routine_delete`. Routines only move files, never delete them.
    Changes apply instantly. `petal_export_recipe` / `petal_import_recipe` share a dock as a `.petal` file (modes,
    apps by name, look; nothing personal) or add one someone shared (`look: true` also takes its look; say what it
    adds before importing); `petal_suggestions` and `petal_summary` read the
@@ -46,6 +50,8 @@ Use, in this order:
 - `dock.json` (macOS): `position` (bottom, left, right), `autoHide`, `dock` (petal or macos), `keepWindowsClear`.
   On Omarchy, position and auto-hide live in Omarchy's shell config (`omarchy-dock position|autohide`).
 - `instructions.md`: the user's own notes for the AI in Petal's panel.
+- `routines.json` (macOS): the routines; change them with the routine tools rather than by hand. What they did is in
+  `~/Library/Application Support/Petal/routines-log.json`.
 
 Keep the JSON valid: Petal won't overwrite a file it can't read, and won't apply it either.
 

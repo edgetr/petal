@@ -59,6 +59,8 @@ final class PetalApp {
     let assist = Assist()
     /// Replies drafted for held messages, in the person's own style.
     let drafts = Drafts()
+    /// Routines in the person's own words: what Petal does by itself when a file lands, an app opens, a mode starts.
+    let routines = Routines()
     /// Reading and closing browser tabs (Browsers.swift).
     @ObservationIgnored let browsers = Browsers()
     /// Where each AI app is installed, when it is.
@@ -117,6 +119,7 @@ final class PetalApp {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.search.prepare() }
         notes.start()
         assist.start()
+        routines.start()
         Skill.install()
         Windows.startManaging()
         if !config.welcomed {
@@ -128,6 +131,7 @@ final class PetalApp {
 
     func stop() {
         config.flush()
+        Routines.flush()
         Windows.stopManaging()
         notes.stop()
         ipc.stop()

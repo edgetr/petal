@@ -96,7 +96,8 @@ SETTINGS_SCHEMA = {
     "dailySummary": ("", "A card with the day in the user's modes at this time each day (\"HH:MM\"; empty for none), with a line from Petal AI."),
     "aiNeverLook": (["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"], "Apps Petal AI never looks into (bundle ids): petal_look gives only their name, window lists leave out their titles, and screenshots leave them out."),
     "replyDrafts": (True, "Entering a mode with held messages that need an answer, Petal AI drafts replies in the user's own style (learned from the replies they edit), shown on a card; it never sends anything."),
-    "aiAllowed": ([], "What Petal AI may do without asking first (the user chose Always on its card): quit, close, trash."),
+    "aiAllowed": ([], "What Petal AI may do without asking first (the user chose Always on its card): quit, close, trash, tidy."),
+    "routines": (True, "macOS: run the user's routines (routines.json): what Petal does by itself when a file lands in a folder, an app opens, a mode starts or at a time. Made with petal_routine_save."),
     "shortcuts": (True, "Petal's keyboard shortcuts: switch mode (1-9), open the AI panel, open the + search. Never takes one already in use."),
     "schedule": ([], "Modes by time: [{mode, days: [1-7, 1 = Monday], from: \"HH:MM\", to: \"HH:MM\"}]. When a block starts, the focused workspace switches to that mode."),
     "activityLog": (True, "Keep a private, local history of which app is in front (never titles), for suggestions and the weekly summary."),
@@ -795,6 +796,21 @@ ASSIST_TOOLS = {
                     {"action": {"type": "string", "enum": ["list", "use", "request"]}, "name": {"type": "string"}, "why": {"type": "string"}}),
     "petal_memories": (assist("petal_memories"), "What Petal AI remembers about the user (everywhere, and per mode); mode limits it to one mode's and the everywhere ones.",
                        {"mode": {"type": "string"}}),
+    "petal_routines": (assist("petal_routines"), "The user's routines (what Petal does by itself: id, their words, trigger, actions, on, last run) and the latest of what they did (history; canPutBack).", {}),
+    "petal_routine_save": (assist("petal_routine_save"),
+                           "Make a routine from what the user asked, or change one (id). words: their own words. You fill trigger and actions from them, once; Petal runs it without AI except for sorting files by what they are. "
+                           "trigger.on: \"file\" (a file lands in folder, e.g. ~/Downloads, ~/Desktop or screenshots; types: kinds pdf, image, video, audio, archive, installer, document, code or extensions; named: words in its name; both optional), "
+                           "\"app\" (app: name or bundle id; when: \"opens\" or \"front\"), \"mode\" (mode: a mode id), \"time\" (at: \"HH:MM\"; days: 1 = Monday … 7, empty = every day). "
+                           "actions, in order: {do: \"sort\", by: \"ai\" (by what each file is; the quick AI picks an existing subfolder or names a new one for similar files) or \"kind\" (Images, PDFs, …), into: where the subfolders go (the files' folder by default)}, "
+                           "{do: \"move\", to: a folder (a name alone is inside the files' folder)}, {do: \"mode\", mode}, {do: \"open\", apps: names, bundle ids or https:// addresses}, {do: \"hide\", apps}, {do: \"shortcut\", name}. "
+                           "sort and move act on the new file; with an app, mode or time trigger they take folder's files. Files are only moved, never deleted. It acts on new files only: when the answer says files are there now, offer petal_routine_run.",
+                           {"id": {"type": "string"}, "name": {"type": "string", "description": "a short name"}, "words": {"type": "string"},
+                            "trigger": {"type": "object"}, "actions": {"type": "array", "items": {"type": "object"}}, "on": {"type": "boolean"}}),
+    "petal_routine_run": (assist("petal_routine_run"), "Run a routine now on the files already in its folder. dryRun: true says what it would move where, moving nothing; without it, it does it (Petal asks the user first when it's 10 files or more). A routine that moves no files just runs its actions.",
+                          {"id": {"type": "string"}, "dryRun": {"type": "boolean"}}),
+    "petal_routine_undo": (assist("petal_routine_undo"), "Put back the files a routine moved: the latest run that can be, or entry (a history id from petal_routines).",
+                           {"entry": {"type": "string"}}),
+    "petal_routine_delete": (assist("petal_routine_delete"), "Delete a routine (what it moved stays where it is, and can still be put back).", {"id": {"type": "string"}}),
 }
 
 

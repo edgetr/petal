@@ -37,6 +37,10 @@ MainActor.assumeIsolated {
         app.setActivationPolicy(.prohibited)
         Bench.run()
     }
+    if arguments.contains("--routines-check") {
+        app.setActivationPolicy(.prohibited)
+        RoutinesCheck.run(ai: arguments.contains("--ai"))
+    }
     if let index = arguments.firstIndex(of: "--snapshot"), arguments.count > index + 1 {
         app.setActivationPolicy(.prohibited)
         Snapshot.run(to: arguments[index + 1])

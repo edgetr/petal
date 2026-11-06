@@ -30,7 +30,7 @@ final class SettingsWindow {
 }
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case dock, modes, claude, focus, apps, look, permissions, about
+    case dock, modes, claude, routines, focus, apps, look, permissions, about
     var id: String { rawValue }
 
     var title: String {
@@ -38,6 +38,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dock: "Dock"
         case .modes: "Modes"
         case .claude: "AI"
+        case .routines: "Routines"
         case .focus: "Focus"
         case .apps: "Apps & Extras"
         case .look: "Look"
@@ -51,6 +52,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dock: "dock.rectangle"
         case .modes: "circle.hexagongrid.fill"
         case .claude: "sparkles"
+        case .routines: "wand.and.sparkles"
         case .focus: "scope"
         case .apps: "square.grid.2x2.fill"
         case .look: "paintbrush.pointed.fill"
@@ -64,6 +66,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dock: Color(red: 0.85, green: 0.21, blue: 0.50)
         case .modes: Color(red: 0.69, green: 0.55, blue: 1.0)
         case .claude: Color(red: 0.85, green: 0.47, blue: 0.34)
+        case .routines: Color(red: 0.95, green: 0.68, blue: 0.22)
         case .focus: Color(red: 0.30, green: 0.68, blue: 0.95)
         case .apps: Color(red: 0.35, green: 0.78, blue: 0.55)
         case .look: Color(red: 1.0, green: 0.62, blue: 0.48)
@@ -77,6 +80,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dock: "Choose your dock, and where it sits."
         case .modes: "Each Desktop has its own mode, with its own apps."
         case .claude: "Claude, Codex, or no AI at all."
+        case .routines: "What Petal does by itself, in your words."
         case .focus: "Gentle cards when you drift from your mode."
         case .apps: "What the dock shows besides your apps."
         case .look: "Size, motion and color."
@@ -195,6 +199,7 @@ struct SettingsView: View {
         case .dock: DockSettings()
         case .modes: ModesSettings()
         case .claude: ClaudeSettings()
+        case .routines: RoutinesSettings()
         case .focus: FocusSettings()
         case .apps: AppsSettings()
         case .look: LookSettings()
@@ -908,6 +913,7 @@ enum AllowedKinds {
         case "quit": "Quitting apps"
         case "close": "Closing windows"
         case "trash": "Moving files to the Trash"
+        case "tidy": "Tidying many files at once"
         default: kind
         }
     }
