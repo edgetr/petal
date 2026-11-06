@@ -559,11 +559,12 @@ def duration(minutes):
     return "%d h" % round(hours) if hours >= 10 else ("%.1f h" % hours).replace(".0 h", " h")
 
 
-def t_summary(_):
-    """The 7 days before today (on a Monday, last week): time in each mode, top apps, focus cards."""
+def t_summary(args):
+    """The `days` (7 by default, up to 30) before today: time in each mode, top apps, focus cards."""
+    days = max(1, min(30, int((args or {}).get("days") or 7)))
     today = time.localtime()
     end = time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, 0, 0, -1))
-    start = end - 7 * DAY
+    start = end - days * DAY
     rows = [r for r in read_activity(start) if r["t"] < end]
     modes = {m.get("id"): m for m in read_json(MODES, {}).get("modes", [])}
     names = app_names()
@@ -784,6 +785,8 @@ ASSIST_TOOLS = {
                        {"text": {"type": "string"}, "mode": {"type": "string"}, "learned": {"type": "boolean"}}),
     "petal_forget": (assist("petal_forget"), "Forget a memory: by its id, or every one containing `text`. Do it when the user says to, or when one turns out wrong or out of date.",
                      {"id": {"type": "string"}, "text": {"type": "string"}}),
+    "petal_show": (assist("petal_show"), "Open a page in its own window, kept so it can be opened again: a summary of their month, a report, a table, a chart. markdown, or html (a whole page; charts as inline SVG, no outside scripts or images), or path to an .html file you wrote. Say in one line what's on it.",
+                   {"title": {"type": "string"}, "markdown": {"type": "string"}, "html": {"type": "string"}, "path": {"type": "string"}}),
     "petal_memories": (assist("petal_memories"), "What Petal AI remembers about the user (everywhere, and per mode); mode limits it to one mode's and the everywhere ones.",
                        {"mode": {"type": "string"}}),
 }
@@ -811,7 +814,8 @@ TOOLS = {
     "petal_import_recipe": (globals().get("t_import_recipe", not_yet), "Add the modes from a recipe file (.petal) someone shared, and optionally its look. Apps are matched to what's installed; the rest are listed as missing.",
                             {"path": {"type": "string"}, "look": {"type": "boolean", "description": "also use its look and features"}}),
     "petal_suggestions": (globals().get("t_suggestions", not_yet), "Modes Petal would suggest from the user's activity (new modes, or apps to add to a mode).", {}),
-    "petal_summary": (globals().get("t_summary", not_yet), "Last week in the user's modes: time in each, top apps, focus cards.", {}),
+    "petal_summary": (globals().get("t_summary", not_yet), "The user's time in each mode (top apps, focus cards) over the last `days` (7 by default; up to 30, the history kept)" + (", or from/to (YYYY-MM-DD), with a day-by-day breakdown (byDay) for charts." if MAC else "."),
+                      {"days": {"type": "integer"}, **({"from": {"type": "string"}, "to": {"type": "string"}} if MAC else {})}),
     "petal_reload": (t_reload, "Restart Petal to load a rebuilt Petal.app (settings and modes don't need this)." if MAC
                      else "Restart Omarchy's shell to load edits to Petal's own source code (settings and modes don't need this).", {}),
 }

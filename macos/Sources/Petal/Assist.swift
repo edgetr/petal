@@ -116,6 +116,12 @@ final class Assist {
         case "petal_forget":
             let gone = forget(id: args["id"] as? String, matching: args["text"] as? String)
             send(["forgot": gone.map(\.text)])
+        case "petal_show":
+            do {
+                let file = try Pages.show(title: args["title"] as? String ?? "Petal", markdown: args["markdown"] as? String,
+                                          html: args["html"] as? String, path: args["path"] as? String)
+                send(["opened": file.path])
+            } catch { fail(error.localizedDescription) }
         case "petal_memories":
             let mode = args["mode"] as? String
             send(["memories": memories.filter { mode == nil || $0.mode == mode || $0.mode.isEmpty }.map(record)])

@@ -387,6 +387,17 @@ enum Insights {
         return summary(from: from, to: to, title: lastWeek ? "Last week" : "The last 7 days")
     }
 
+    /// Minutes in each mode, day by day (for charts of a month).
+    static func byDay(from: Date, to: Date) -> [[String: Any]] {
+        let format = DateFormatter()
+        format.dateFormat = "yyyy-MM-dd"
+        var days: [String: [String: Int]] = [:]
+        for entry in entries(since: from.timeIntervalSince1970) where entry.t < to.timeIntervalSince1970 && entry.card == nil && !entry.mode.isEmpty {
+            days[format.string(from: Date(timeIntervalSince1970: entry.t)), default: [:]][entry.mode, default: 0] += 1
+        }
+        return days.keys.sorted().map { ["date": $0, "minutes": days[$0] ?? [:]] }
+    }
+
     /// Any stretch of time (the day's summary is today's).
     static func summary(from: Date, to: Date, title: String) -> Summary {
         let entries = entries(since: from.timeIntervalSince1970).filter { $0.t < to.timeIntervalSince1970 }

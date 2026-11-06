@@ -175,8 +175,16 @@ enum MCP {
             return ["suggestions": Insights.suggestions().map(\.json)]
         case "petal_summary":
             guard Insights.setting("activityLog") else { return ["note": "The activity history is off (activityLog)."] }
-            return Insights.summary(lastWeek: false).json
-        case "petal_look", "petal_apps", "petal_windows", "petal_trash", "petal_remember", "petal_forget", "petal_memories":
+            // The last `days` (up to the 30 the history keeps), or from/to (YYYY-MM-DD); the last 7 days by default.
+            let format = DateFormatter()
+            format.dateFormat = "yyyy-MM-dd"
+            let days = min(30, max(1, (args["days"] as? NSNumber)?.intValue ?? 7))
+            let to = (args["to"] as? String).flatMap(format.date).map { $0.addingTimeInterval(86400) } ?? Date()
+            let from = (args["from"] as? String).flatMap(format.date) ?? to.addingTimeInterval(-Double(days) * 86400)
+            var json = Insights.summary(from: from, to: to, title: "From \(format.string(from: from))").json
+            json["byDay"] = Insights.byDay(from: from, to: to)
+            return json
+        case "petal_look", "petal_apps", "petal_windows", "petal_trash", "petal_remember", "petal_forget", "petal_memories", "petal_show":
             // Petal itself does these, with its own permissions (and asks the person first where it should).
             let json = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
             let reply = petal(["assist", name, json])
