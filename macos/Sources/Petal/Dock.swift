@@ -39,7 +39,6 @@ final class ScreenDock {
 final class DockController {
     private(set) var panels: [CGDirectDisplayID: DockPanel] = [:]
     private var timer: Timer?
-    private var minimizedAt = Date.distantPast
     private var minimizedCache: [AppWindow] = []
     var shown = false
 
@@ -57,58 +56,171 @@ final class DockController {
                      NSWorkspace.didTerminateApplicationNotification, NSWorkspace.didHideApplicationNotification,
                      NSWorkspace.didUnhideApplicationNotification] {
             center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refreshInBackground(force: true) }
+                MainActor.assumeIsolated { self?.refreshInBackground() }
             }
         }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil,
                                                queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.refresh() } }
-        // Windows opening, closing and minimizing send no notification to other apps, so look again now and then.
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refreshInBackground() }
-        }
     }
 
     func show(_ on: Bool) {
         shown = on
-        if on { refresh() } else {
+        if on {
+            // Windows opening, closing, minimizing and moving, as they happen (with Accessibility).
+            WindowEvents.shared.listen("dock") { [weak self] event in self?.handle(event) }
+            eventsLive = WindowEvents.shared.live
+            readAllMinimized = true   // nothing was heard while hidden
+            refresh()
+            refreshInBackground()   // the minimized windows
+        } else {
+            WindowEvents.shared.stopListening("dock")
             for panel in panels.values { panel.close() }
             panels = [:]
         }
+        setPolling()
     }
 
-    /// Looks at the windows off the main thread, then refreshes with what it found: the once-a-second refresh. The
-    /// window server can take a moment to answer (hundreds of milliseconds while apps launch), and the dock never
-    /// waits for it.
-    func refreshInBackground(force: Bool = false) {
+    // MARK: Looking at the windows
+
+    /// Looks at the windows off the main thread, then refreshes with what it found. The window server can take a
+    /// moment to answer (hundreds of milliseconds while apps launch), and the dock never waits for it.
+    func refreshInBackground() { look(.now) }
+
+    private var schedule = LookSchedule()
+    private var trailing: DispatchWorkItem?
+    private var eventsLive = false
+    private var pollInterval: Double = 0
+    nonisolated private static var now: Double { ProcessInfo.processInfo.systemUptime }
+
+    /// A window opened, closed, minimized, came back, moved or resized (WindowEvents, with Accessibility).
+    private func handle(_ event: WindowEvents.Event) {
+        switch event.kind {
+        case .created, .closed, .minimized, .unminimized:
+            minimizedChanged[event.pid] = Self.now
+            look(.window)
+        case .moved, .resized:
+            look(.movement)
+        case .quit:
+            minimizedByApp[event.pid] = nil
+            minimizedChanged[event.pid] = nil
+        default:
+            break   // apps launching, quitting, hiding, another Desktop: the NSWorkspace observers above
+        }
+    }
+
+    private func look(_ cause: LookSchedule.Cause) {
         guard shown else { return }
-        if looking { lookAgain = lookAgain || force; return }
-        looking = true
+        if schedule.note(cause, at: Self.now) { startLook() }
+        armTrailing()
+    }
+
+    /// One timer for the next timed look. While a drag keeps pushing it later, the timer isn't remade for every
+    /// step: it fires, finds the look not due yet, and waits again. A sooner one (after the gap) remakes it.
+    private func armTrailing() {
+        guard let due = schedule.due else { return }
+        if trailing != nil, let armed = armedFor, armed <= due + 0.001 { return }
+        trailing?.cancel()
+        armedFor = due
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.trailing = nil
+                self.armedFor = nil
+                if self.shown, self.schedule.fire(at: Self.now) { self.startLook() }
+                self.armTrailing()
+            }
+        }
+        trailing = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, due - Self.now), execute: work)
+    }
+    private var armedFor: Double?
+
+    /// The timer: once a second without Accessibility's events (or while an app is launching, to end its pulse on
+    /// time), every 5 s with them, as a safety net. It also notices Accessibility being allowed or taken away.
+    private func setPolling() {
+        guard shown else {
+            timer?.invalidate()
+            timer = nil
+            pollInterval = 0
+            return
+        }
+        let interval = LookSchedule.interval(events: eventsLive, launching: !app.launching.isEmpty)
+        guard interval != pollInterval else { return }
+        pollInterval = interval
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        timer?.tolerance = interval / 10
+    }
+
+    private func tick() {
+        WindowEvents.shared.checkPermission()
+        if WindowEvents.shared.live != eventsLive {
+            // Accessibility was just allowed (or taken away): read every app's minimized windows again.
+            eventsLive = WindowEvents.shared.live
+            readAllMinimized = true
+            look(.now)
+            setPolling()
+            return
+        }
+        look(.poll)
+    }
+
+    private func startLook() {
         let pids = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map(\.processIdentifier)
-        let wantsMinimized = config.bool("minimized") && Date().timeIntervalSince(minimizedAt) > 3
-        if wantsMinimized { minimizedAt = Date() }
-        Self.lookQueue.async {
+        let read = minimizedToRead(pids)
+        Self.lookQueue.async { [weak self] in
             let snapshot = WindowList.current()
             let running = Self.runningApps()
-            let minimized = wantsMinimized ? Self.minimizedWindows(pids) : nil
+            var minimized: [pid_t: [AppWindow]] = [:]
+            for pid in read { minimized[pid] = Windows.windows(of: pid).filter(\.minimized) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    let docks = PetalApp.shared.docks!
-                    docks.looking = false
-                    if let minimized { docks.minimizedCache = minimized }
-                    docks.lastRunning = running
-                    docks.refresh(with: snapshot)
-                    if docks.lookAgain {
-                        docks.lookAgain = false
-                        docks.refreshInBackground()
-                    }
+                    guard let self else { return }
+                    let alive = Set(pids)
+                    for (pid, windows) in minimized { self.minimizedByApp[pid] = windows }
+                    self.minimizedByApp = self.minimizedByApp.filter { alive.contains($0.key) }
+                    self.minimizedCache = pids.flatMap { self.minimizedByApp[$0] ?? [] }
+                    self.lastRunning = running
+                    self.refresh(with: snapshot)
+                    if self.schedule.finished(at: Self.now) { self.startLook() }
+                    self.armTrailing()
+                    self.setPolling()
                 }
             }
         }
     }
 
+    // MARK: Minimized windows
+
+    /// Each app's minimized windows, across Desktops and modes. Read again only for an app whose windows opened,
+    /// closed, minimized or came back (and once for every app when the events start), never by scanning every app.
+    private var minimizedByApp: [pid_t: [AppWindow]] = [:]
+    /// Apps with a window event lately, by when: each look in the second after reads them, so the trailing look
+    /// catches a window the app listed late.
+    private var minimizedChanged: [pid_t: Double] = [:]
+    private var readAllMinimized = true
+
+    private func minimizedToRead(_ pids: [pid_t]) -> [pid_t] {
+        guard config.bool("minimized"), eventsLive else {
+            minimizedByApp = [:]
+            minimizedChanged = [:]
+            readAllMinimized = true   // read every app again once the setting or Accessibility is back
+            return []
+        }
+        let now = Self.now
+        minimizedChanged = minimizedChanged.filter { now - $0.value < LookSchedule.followUp + 1 }
+        if readAllMinimized {
+            readAllMinimized = false
+            return pids
+        }
+        return pids.filter { minimizedChanged[$0] != nil }
+    }
+
     /// The apps with a place in the dock, by bundle id. Asking each running process for this costs several
     /// milliseconds, so it's done off the main thread with each look at the windows.
-    nonisolated private static func runningApps() -> [String: NSRunningApplication] {
+    nonisolated static func runningApps() -> [String: NSRunningApplication] {
         var running: [String: NSRunningApplication] = [:]
         for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
             if let id = app.bundleIdentifier, running[id] == nil { running[id] = app }
@@ -116,10 +228,9 @@ final class DockController {
         return running
     }
     @ObservationIgnored private var lastRunning: [String: NSRunningApplication]?
-    @ObservationIgnored private var lookAgain = false
     nonisolated private static let lookQueue = DispatchQueue(label: "petal.windows", qos: .userInitiated)
-    @ObservationIgnored private var looking = false
-    /// The last look at the windows (at most a second old), for refreshes that only change what the dock shows.
+    /// The last look at the windows, for refreshes that only change what the dock shows. Windows opening, closing
+    /// and moving keep it current through Accessibility's events (without them, it's at most a second old).
     @ObservationIgnored private var lastSnapshot: WindowList?
 
     /// `quick`: what changed is the mode or a setting, not the windows, so the last look at them does.
@@ -234,12 +345,6 @@ final class DockController {
         }
     }
 
-    /// Every minimized window of the running apps, across Desktops and modes (off the main thread).
-    nonisolated private static func minimizedWindows(_ pids: [pid_t]) -> [AppWindow] {
-        guard Windows.trusted else { return [] }
-        return pids.flatMap { Windows.windows(of: $0).filter(\.minimized) }
-    }
-
     func dock(for screen: NSScreen?) -> ScreenDock? {
         guard let id = (screen ?? NSScreen.main)?.displayID else { return panels.values.first?.dock }
         return panels[id]?.dock ?? panels.values.first?.dock
@@ -247,7 +352,7 @@ final class DockController {
 
     /// The dock on the screen with the window in front: where cards go.
     /// The dock on the screen of the window in front. One screen has one dock; with more, the last look at the
-    /// windows (at most a second old) says where the window in front is, so asking costs nothing.
+    /// windows says where the window in front is, so asking costs nothing.
     var focusedDock: ScreenDock? {
         if panels.count == 1 { return panels.values.first?.dock }
         guard let front = NSWorkspace.shared.frontmostApplication,
@@ -292,6 +397,7 @@ final class DockController {
     func launch(_ id: String, files: [URL] = []) {
         guard let url = Apps.url(id) else { return }
         app.launching[id] = (Date(), (lastSnapshot ?? WindowList.current()).count[id] ?? 0)
+        setPolling()   // once a second until its window shows
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         if files.isEmpty {

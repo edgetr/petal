@@ -26,6 +26,24 @@ enum Bench {
             time("search \"\(query)\"") { _ = Apps.search(query) }
         }
         time("window list (CGWindowList)") { _ = WindowList.current() }
+        // What the dock's timer did once a second before events, and now does every 5 s (or once a second without
+        // Accessibility): a look at the windows, off the main thread.
+        time("a look (windows + running apps)") { _ = WindowList.current(); _ = DockController.runningApps() }
+        time("minimized windows, every app (AX)", runs: 3) {
+            for app in running { _ = Windows.windows(of: app.processIdentifier).filter(\.minimized) }
+        }
+        if Windows.trusted {
+            // Watching every app's windows: the observers are added on their own thread; the main thread only asks.
+            let start = DispatchTime.now().uptimeNanoseconds
+            AXWatcher.shared.start()
+            var counts = AXWatcher.shared.counts()   // waits for the observers to be added
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+            print(String(format: "%-34@ %8.2f ms   (%d apps, %d windows, off the main thread)", "watching every app (AX observers)" as NSString,
+                         ms, counts.apps, counts.windows))
+            AXWatcher.shared.stop()
+            counts = AXWatcher.shared.counts()
+            print("stopped watching: \(counts.apps) apps, \(counts.windows) windows")
+        }
         time("windows of every app (AX)", runs: 3) {
             for app in running { _ = Windows.windows(of: app.processIdentifier) }
         }
