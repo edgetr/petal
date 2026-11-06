@@ -225,7 +225,8 @@ final class Agent {
                                  tools: Bundle.main.executablePath ?? "", session: sessionID, allowed: allowed)
         chat.api = app.usesAPIKey(provider)
         // A note's tools answer about its window: Petal --mcp passes this on with every call.
-        if place != nil, config.bool("aiNotes") { chat.note = noteID.uuidString }
+        // Every chat: Petal finds its note's window when a tool is called, so a note that moves follows at once.
+        chat.note = noteID.uuidString
         authFailed = false
 
         let process = Process()

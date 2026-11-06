@@ -125,7 +125,7 @@ extension ClaudePanel {
         note.place = place
         note.windowGone = false
         if !notes.contains(where: { $0 === note }) { notes.append(note) }
-        prune()
+        prune(sparing: note)   // the note being opened is never let go before it shows
         listenIfNeeded()
         return note
     }
@@ -183,8 +183,10 @@ extension ClaudePanel {
     /// Notes nobody can come back to (their window gone, or stuck to none: chats read from the list) are let go,
     /// and past 30 idle ones the oldest too. All are kept in Chats; one whose window is still open is found again
     /// when that window opens the AI.
-    func prune() {
-        let keep = { (note: StickyNote) in note === self.current || note === self.loose || note.agent.running || note.ready || !note.agent.waiting.isEmpty }
+    func prune(sparing spared: StickyNote? = nil) {
+        let keep = { (note: StickyNote) in
+            note === spared || note === self.current || note === self.loose || note.agent.running || note.ready || !note.agent.waiting.isEmpty
+        }
         // A window's link to a chat let go here holds the chat as it is now, never an older copy.
         for note in notes where !keep(note) {
             guard let chat = note.agent.saved else { continue }

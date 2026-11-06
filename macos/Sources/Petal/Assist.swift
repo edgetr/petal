@@ -124,7 +124,8 @@ final class Assist {
         }
         let fail = { (text: String) in send(["error": text]) }
         switch name {
-        case "petal_look": look(args, place: note.flatMap { app.claude.note(withID: $0) }?.place, send)
+        // The note's window as it is now (a note stuck to none, or notes off: what's in front).
+        case "petal_look": look(args, place: app.claude.notesOn ? note.flatMap { app.claude.note(withID: $0) }?.place : nil, send)
         case "petal_apps": apps(args, send, fail)
         case "petal_windows": windows(args, send, fail)
         case "petal_trash": trash(args, send, fail)
