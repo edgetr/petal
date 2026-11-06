@@ -3,12 +3,17 @@ import Observation
 import ServiceManagement
 import SwiftUI
 
-/// A mode switch waiting out the mode's focusDelay (the countdown setting).
+/// A switch into a distracting mode, waiting out its wait (the countdown setting).
 struct PendingMode: Equatable {
     let desktop: Int
     let mode: String
     var deadline: Date
     var total: Double
+
+    /// Another click halves the time left; under 1.5 s it's nil: switch now.
+    static func halved(_ left: Double) -> Double? {
+        left / 2 < 1.5 ? nil : left / 2
+    }
 }
 
 /// Petal for macOS: everything the dock, its popups, Claude and the settings window share.
@@ -45,6 +50,11 @@ final class PetalApp {
     var launching: [String: (start: Date, windows: Int)] = [:]
     var pendingMode: PendingMode?
     @ObservationIgnored private var countdown: Timer?
+    @ObservationIgnored private var arrival: (() -> Void)?
+    /// Held notifications, Do Not Disturb while holding, and Petal's own banners (Notifications.swift).
+    let notes = Notes()
+    /// Reading and closing browser tabs (Browsers.swift).
+    @ObservationIgnored let browsers = Browsers()
     /// Where each AI app is installed, when it is.
     private(set) var paths: [Provider: String] = [:]
 
@@ -93,6 +103,7 @@ final class PetalApp {
         automation.start()
         menuBar.start()
         aiSetup.refreshAll()
+        notes.start()
         Skill.install()
         if !config.welcomed {
             welcome.show()
@@ -102,6 +113,7 @@ final class PetalApp {
     }
 
     func stop() {
+        notes.stop()
         ipc.stop()
         claude.agent.stop()
         SystemDock.restore()
@@ -143,21 +155,26 @@ final class PetalApp {
 
     // MARK: Modes
 
-    /// Puts a Desktop in a mode. With countdown on, leaving a guarded mode waits out its delay; asking again
-    /// halves what's left.
-    func requestMode(_ id: String, desktop: Int) {
+    /// Puts a Desktop in a mode. Getting into a distracting mode (with countdown on) waits out its wait; each
+    /// extra ask halves what's left, and under 1.5 s it switches now. `then` runs once the Desktop is in the mode
+    /// (opening a held notification's app); Stay drops it.
+    func requestMode(_ id: String, desktop: Int, then: (() -> Void)? = nil) {
         let current = config.mode(forDesktop: desktop)
-        if current?.id == id { stay(); return }
+        if current?.id == id { stay(); then?(); return }
+        guard let target = config.modes.first(where: { $0.id == id }) else { return }
         if var pending = pendingMode, pending.desktop == desktop, pending.mode == id {
-            let left = pending.deadline.timeIntervalSinceNow / 2
-            if left < 1.5 { apply(id, desktop: desktop); return }
+            if let then { arrival = then }
+            guard let left = PendingMode.halved(pending.deadline.timeIntervalSinceNow) else { apply(id, desktop: desktop); return }
             pending.deadline = Date().addingTimeInterval(left)
             pendingMode = pending
             return
         }
-        if config.bool("countdown"), let delay = current?.focusDelay, delay > 0 {
-            pendingMode = PendingMode(desktop: desktop, mode: id, deadline: Date().addingTimeInterval(delay), total: delay)
-            countdown?.invalidate()
+        if config.bool("countdown") && target.isDistracting {
+            stay()
+            arrival = then
+            pendingMode = PendingMode(desktop: desktop, mode: id, deadline: Date().addingTimeInterval(target.wait), total: target.wait)
+            // No card about the mode while its countdown runs.
+            if let card = popups.card, card.target?.id == id { popups.dismissCard() }
             countdown = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self, let pending = self.pendingMode else { return }
@@ -165,12 +182,14 @@ final class PetalApp {
                 }
             }
         } else {
+            arrival = then
             apply(id, desktop: desktop)
         }
     }
 
     func stay() {
         pendingMode = nil
+        arrival = nil
         countdown?.invalidate()
     }
 
@@ -178,9 +197,12 @@ final class PetalApp {
     func setModeNow(_ id: String, desktop: Int) { apply(id, desktop: desktop) }
 
     private func apply(_ id: String, desktop: Int) {
+        let then = arrival
         stay()
         config.setMode(id, forDesktop: desktop)
-        if let card = popups.card, card.target?.id == id { popups.dismissCard() }
+        if let card = popups.card, card.target?.id == id, card.kind != .note { popups.dismissCard() }
+        docks.refresh()
+        then?()
     }
 
     // MARK: Describe your day
@@ -387,13 +409,20 @@ final class PetalApp {
             switch args.first {
             case "suggest": insights.showSuggestion(marking: false)
             case "summary": insights.showSummary()
+            case "move", "peek", "note":
+                guard let card = FocusCard.sample(args[0], app: self) else { return "no such mode" }
+                popups.show(card)
             default:
-                popups.show(FocusCard(kind: .guardCard, bundleID: "net.imput.helium", title: "x.com",
-                                      target: config.mode(id: "social"), here: docks.focusedDock?.mode,
-                                      reason: "Social feed, not work", desktop: docks.focusedDock?.desktop))
+                guard let card = FocusCard.sample("block", app: self) else { return "no such mode" }
+                popups.show(card)
             }
             return "ok"
         }
+        ipc.on("testBanner") { [unowned self] _ in notes.banners.sample(); return "ok" }
+        ipc.on("held") { [unowned self] _ in
+            config.modes.map { "\($0.id) \(notes.held(in: $0.id).count)" }.joined(separator: "\n")
+        }
+        ipc.on("holding") { [unowned self] _ in notes.status.json }
         ipc.on("overview") { [unowned self] _ in overview.show(); return "ok" }
         ipc.on("summary") { [unowned self] _ in insights.showSummary(); return "ok" }
         ipc.on("recipe") { [unowned self] args in

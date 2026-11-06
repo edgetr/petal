@@ -89,7 +89,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
       </dict>
     </dict>
   </array>
-  <key>NSAppleEventsUsageDescription</key><string>Petal shows what's playing in Music and Spotify, and opens and empties the Trash in Finder.</string>
+  <key>NSAppleEventsUsageDescription</key><string>Petal reads which site a browser tab is on, to keep distracting ones in their mode, and closes one when you choose Stay. It also shows what's playing in Music and Spotify, and opens and empties the Trash in Finder.</string>
 </dict>
 </plist>
 PLIST

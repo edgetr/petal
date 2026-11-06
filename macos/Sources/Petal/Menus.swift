@@ -33,6 +33,7 @@ enum Menus {
     }
 
     static func app(_ item: DockItem, in dock: ScreenDock) {
+        if Sites.isWeb(item.id) { return site(item, in: dock) }
         let menu = NSMenu()
         let name = Apps.name(item.id)
         var listed = false
@@ -99,17 +100,41 @@ enum Menus {
             menu.addItem(ClosureMenuItem(title: "Use on this Desktop") { app.requestMode(mode.id, desktop: desktop) })
         }
         menu.addItem(toggle("Default mode", config.defaultMode == mode.id) { config.setDefaultMode(mode.id) })
-        if config.bool("countdown") {
-            menu.addItem(header("Countdown to leave"))
-            for (title, seconds) in [("Off", 0.0), ("15s", 15), ("30s", 30), ("1m", 60)] {
+        menu.addItem(toggle("Distracting", mode.isDistracting) {
+            var updated = mode
+            updated.distracting = !mode.isDistracting
+            config.save(updated)
+        })
+        if mode.isDistracting && config.bool("countdown") {
+            menu.addItem(header("Wait to get in"))
+            for (title, seconds) in [("15s", 15.0), ("30s", 30), ("1m", 60), ("2m", 120)] {
                 let row = ClosureMenuItem(title: title) {
                     var updated = mode
                     updated.focusDelay = seconds
                     config.save(updated)
                 }
-                row.state = mode.focusDelay == seconds ? .on : .off
+                row.state = mode.wait == seconds ? .on : .off
                 menu.addItem(row)
             }
+        }
+        if config.bool("holdNotifications") {
+            menu.addItem(toggle("Hold notifications", mode.hold) {
+                var updated = mode
+                updated.hold = !mode.hold
+                config.save(updated)
+            })
+        }
+        // What's waiting on this mode: clicking one goes there and opens it.
+        let held = app.notes.held(in: mode.id)
+        if !held.isEmpty {
+            menu.addItem(header("Held for \(mode.name)"))
+            for note in held.suffix(10).reversed() {
+                let text = [note.title, note.body].filter { !$0.isEmpty }.joined(separator: " — ")
+                let row = ClosureMenuItem(title: text.count > 60 ? String(text.prefix(59)) + "…" : text) { app.notes.open(note) }
+                row.image = icon(Apps.icon(Notes.appID(note.app)))
+                menu.addItem(row)
+            }
+            menu.addItem(ClosureMenuItem(title: "Clear") { app.notes.clear(mode.id) })
         }
         menu.addItem(ClosureMenuItem(title: "All Desktops…") { app.overview.show() })
         menu.addItem(.separator())
@@ -128,6 +153,27 @@ enum Menus {
                 NSApp.activate()
                 if alert.runModal() == .alertFirstButtonReturn { config.delete(mode: mode.id) }
             })
+        }
+        pop(menu)
+    }
+
+    /// A website shortcut: open it, and which modes have it.
+    static func site(_ item: DockItem, in dock: ScreenDock) {
+        let menu = NSMenu()
+        menu.addItem(header(Apps.name(item.id)))
+        menu.addItem(ClosureMenuItem(title: "Open in Browser") { Sites.open(item.id) })
+        if let mode = dock.mode, mode.apps.contains(item.id) {
+            menu.addItem(ClosureMenuItem(title: "Remove from \(mode.name)") { config.removeApp(item.id, from: mode.id) })
+        }
+        if config.bool("modes") && config.modes.count > 1 {
+            menu.addItem(header("In modes"))
+            for mode in config.modes {
+                let row = toggle(mode.name, mode.apps.contains(item.id)) {
+                    if mode.apps.contains(item.id) { config.removeApp(item.id, from: mode.id) } else { config.addApp(item.id, to: mode.id) }
+                }
+                row.image = symbol(mode.icon, color: mode.color)
+                menu.addItem(row)
+            }
         }
         pop(menu)
     }

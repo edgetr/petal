@@ -398,7 +398,7 @@ struct PetalDockSketch: View {
                 .foregroundStyle(mode.map { Color(nsColor: $0.color) } ?? .pink)
                 .frame(width: 22, height: 22)
                 .glassEffect(.regular, in: .circle)
-            ForEach((mode?.apps ?? []).filter { Apps.url($0) != nil }.prefix(6), id: \.self) { id in
+            ForEach((mode?.apps ?? []).filter(Apps.shows).prefix(6), id: \.self) { id in
                 Image(nsImage: Apps.icon(id)).resizable().frame(width: 22, height: 22)
             }
             Image(systemName: "sparkle").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
@@ -503,7 +503,7 @@ struct ModeCard: View {
                 }
             }
             HStack(spacing: -5) {
-                ForEach(mode.apps.filter { Apps.url($0) != nil }.prefix(7), id: \.self) { id in
+                ForEach(mode.apps.filter(Apps.shows).prefix(7), id: \.self) { id in
                     Image(nsImage: Apps.icon(id)).resizable().frame(width: 30, height: 30)
                 }
                 if mode.apps.isEmpty { Text("No apps yet").font(.system(size: 11)).foregroundStyle(.secondary) }
@@ -592,12 +592,23 @@ struct ModeEditor: View {
                     .padding(.vertical, 4)
                 }
             }
-            TextField("Sites, comma separated (words in tab titles: github, docs)", text: $sitesText)
-            HStack {
-                Text("Focus card after")
-                Slider(value: $mode.focusDelay, in: 0...120, step: 5)
-                Text(mode.focusDelay == 0 ? "never" : "\(Int(mode.focusDelay)) s").monospacedDigit().frame(width: 52)
+            TextField("Sites, comma separated (domains like github.com, or words in tab titles)", text: $sitesText)
+            Toggle(isOn: Binding(get: { mode.isDistracting }, set: { mode.distracting = $0 })) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Distracting")
+                    Text("Pulls you away from work, like social media or games. Getting in takes a wait, and in other modes its apps and sites are blocked.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
             }
+            .toggleStyle(.switch)
+            if mode.isDistracting {
+                HStack {
+                    Text("Wait to get in")
+                    Slider(value: Binding(get: { mode.wait }, set: { mode.focusDelay = $0 }), in: 5...120, step: 5)
+                    Text("\(Int(mode.wait)) s").monospacedDigit().frame(width: 52)
+                }
+            }
+            Toggle("Hold notifications from other apps", isOn: $mode.hold).toggleStyle(.switch)
             ShortcutPicker(name: $mode.shortcut)
             HStack {
                 if !isNew {
@@ -739,15 +750,7 @@ struct InstructionsEditor: View {
 
 // MARK: - Focus, apps, look
 
-struct FocusSettings: View {
-    var body: some View {
-        Card(footer: "When the window in front belongs to another mode, a card says so: \"x.com belongs to Social\", with Go back and Switch. Each mode sets how long to wait.") {
-            SettingToggle(key: "focusGuard", title: "Focus cards")
-            SettingToggle(key: "countdown", title: "Wait before leaving a mode", detail: "Switching to another mode waits out the mode's own delay.")
-        }
-        HistoryCard()
-    }
-}
+// FocusSettings is in FocusSettings.swift.
 
 struct AppsSettings: View {
     @Environment(PetalApp.self) private var app
@@ -850,9 +853,13 @@ struct PermissionsSettings: View {
                    granted: Windows.trusted) { Windows.askForPermission() }
         Permission(symbol: "rectangle.dashed.badge.record", title: "Screen Recording", detail: "Window previews. Petal never records; it takes a still of a window when you hover its app.",
                    granted: Capture.allowed) { Capture.askForPermission() }
+        Permission(symbol: "bell.badge", title: "Full Disk Access", detail: "Seeing notifications, to hold them in modes that hold them. Petal only reads Notification Center's list.",
+                   granted: app.notes.canRead) { NotificationAccessRow.openSettings() }
+        Permission(symbol: "safari", title: "Browsers", detail: "Which site a tab is on, and closing a distracting one. Each browser asks once.",
+                   granted: Browsers.installed().isEmpty ? nil : app.browsers.allAllowed) { app.browsers.askAll {} }
         Permission(symbol: "music.note", title: "Music and Spotify", detail: "Now playing. macOS asks the first time a player is open.",
                    granted: nil) {}
-            .onReceive(timer) { _ in tick += 1 }
+            .onReceive(timer) { _ in tick += 1; app.browsers.refresh() }
     }
 }
 
