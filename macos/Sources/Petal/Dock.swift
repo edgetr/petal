@@ -795,10 +795,11 @@ struct AppSlot: View {
         let color = Color(nsColor: config.bool("appGlow") ? AppColor.of(item.id) : app.accent)
         let launching = app.launching[item.id] != nil
         ZStack {
+            // Only the app in front glows, softly; a halo around every open app read as a pale haze over the icons.
             if config.bool("appGlow") && item.running {
-                RadialGradient(colors: [color.opacity(0.55), color.opacity(0.18), .clear], center: .center,
-                               startRadius: 0, endRadius: slot * 0.62)
-                    .opacity((item.active ? 0.75 : hovering ? 0.55 : 0.32) * min(1, max(0, config.number("glowStrength"))))
+                RadialGradient(colors: [color.opacity(0.45), color.opacity(0.12), .clear], center: .center,
+                               startRadius: 0, endRadius: slot * 0.6)
+                    .opacity((item.active ? 0.6 : 0) * min(1, max(0, config.number("glowStrength"))))
                     .animation(.easeOut(duration: 0.2), value: item.active)
             }
             DockIcon(id: item.id, size: icon)

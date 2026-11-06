@@ -273,8 +273,14 @@ final class InputPanel: NSPanel {
     /// Centered on the screen with the pointer, just above the dock: it comes out of the dock rather than floating
     /// over it.
     func show<Content: View>(_ content: Content) {
-        hosting.rootView = AnyView(content.environment(PetalApp.shared))
+        load(content)
         showAgain()
+    }
+
+    /// Makes and lays out the view without showing it, so the first opening is as quick as the rest.
+    func load<Content: View>(_ content: Content) {
+        hosting.rootView = AnyView(content.environment(PetalApp.shared))
+        hosting.layoutSubtreeIfNeeded()
     }
 
     /// Shows what it showed last, placed again over the dock.
@@ -443,18 +449,11 @@ struct ClaudePanelView: View {
             }
             if app.models(for: provider).count > 1 {
                 OptionRow(title: "Model") {
-                    if provider == .codex {
-                        // Codex lists more models than fit side by side.
-                        Picker("", selection: Binding(get: { app.currentModel(for: provider) }, set: { app.config.set(provider.modelSetting, $0) })) {
-                            ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
-                        }
-                        .pickerStyle(.menu).labelsHidden().fixedSize()
-                    } else {
-                        Picker("", selection: Binding(get: { app.currentModel(for: provider) }, set: { app.config.set(provider.modelSetting, $0) })) {
-                            ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
-                        }
-                        .pickerStyle(.segmented).labelsHidden()
+                    // Claude's four names, or Codex's newest of each family ("6.1 Sol"): side by side either way.
+                    Picker("", selection: Binding(get: { app.currentModel(for: provider) }, set: { app.config.set(provider.modelSetting, $0) })) {
+                        ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
                     }
+                    .pickerStyle(.segmented).labelsHidden()
                 }
             }
             OptionRow(title: "Effort") {
@@ -647,6 +646,14 @@ final class AppSearch {
     /// Counts openings, so the reused view puts the cursor back in its field.
     private(set) var opens = 0
     @ObservationIgnored private var panel: InputPanel?
+
+    /// At launch: the panel and its view made ahead, hidden.
+    func prepare() {
+        guard panel == nil else { return }
+        let panel = InputPanel()
+        self.panel = panel
+        panel.load(AppSearchView(search: self))
+    }
 
     func open(in dock: ScreenDock?) {
         let app = PetalApp.shared

@@ -26,6 +26,11 @@ final class GlassPanel: NSPanel {
 
     func show<Content: View>(_ content: Content, over slot: CGRect, dock: DockPanel?, gap: CGFloat = 8) {
         hosting.rootView = AnyView(content.environment(PetalApp.shared))
+        place(over: slot, dock: dock, gap: gap)
+    }
+
+    /// Places what it shows over `slot` again, without making its view anew.
+    func place(over slot: CGRect, dock: DockPanel?, gap: CGFloat = 8) {
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
         let screen = dock?.screenRef ?? NSScreen.main ?? NSScreen.screens[0]
@@ -139,6 +144,9 @@ final class Tooltips {
         return panel
     }()
     private var shownFor = ""
+    /// One tooltip, its words changed in place: making its glass anew for every icon made it jump.
+    private let words = TooltipWords()
+    private var made = false
 
     func show(_ text: String?, over id: String, in dock: ScreenDock?) {
         let app = PetalApp.shared
@@ -149,12 +157,31 @@ final class Tooltips {
             panel.hide()
             return
         }
-        panel.show(Text(text).font(.system(size: 12, weight: .medium)).padding(.horizontal, 12).padding(.vertical, 6)
-                    .glassEffect(.regular, in: .capsule).padding(6),
-                   over: slot, dock: panelRef, gap: 2)
+        words.text = text
+        if made {
+            panel.place(over: slot, dock: panelRef, gap: 2)
+        } else {
+            made = true
+            panel.show(TooltipView(words: words), over: slot, dock: panelRef, gap: 2)
+        }
     }
 
     func hide() { panel.hide() }
+}
+
+@MainActor @Observable
+final class TooltipWords {
+    var text = ""
+}
+
+struct TooltipView: View {
+    let words: TooltipWords
+
+    var body: some View {
+        Text(words.text).font(.system(size: 12, weight: .medium)).padding(.horizontal, 12).padding(.vertical, 6)
+            .glassEffect(.regular, in: .capsule).padding(6)
+            .transaction { $0.animation = nil }
+    }
 }
 
 /// Stacks, previews and cards: one open at a time; clicking elsewhere closes the stack.

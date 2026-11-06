@@ -105,6 +105,7 @@ final class PetalApp {
         menuBar.start()
         aiSetup.refreshAll()
         Apps.warm()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.search.prepare() }
         notes.start()
         Skill.install()
         Windows.startManaging()
