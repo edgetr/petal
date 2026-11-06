@@ -355,7 +355,10 @@ extension Windows {
 final class WindowEvents {
     static let shared = WindowEvents()
 
-    enum Kind { case created, closed, focused, minimized, unminimized, moved, resized, activated, launched, quit, hidden, shown, space, screens }
+    /// `missionControl`: Mission Control (or App Exposé) opened; `missionControlEnded`: it closed. macOS's Dock says
+    /// so through Accessibility.
+    enum Kind { case created, closed, focused, minimized, unminimized, moved, resized, activated, launched, quit, hidden, shown, space, screens,
+                     missionControl, missionControlEnded }
     struct Event {
         let kind: Kind
         let pid: pid_t
@@ -383,6 +386,7 @@ final class WindowEvents {
     func checkPermission() {
         let wanted = !listeners.isEmpty && Windows.trusted
         if wanted != live { wanted ? start() : stop() }
+        if live { AXWatcher.shared.watchDock() }   // after Petal restarts macOS's Dock, for Mission Control
     }
 
     fileprivate func send(_ event: Event) {
@@ -448,6 +452,8 @@ final class AXWatcher: @unchecked Sendable {
 
     private var runLoop: CFRunLoop!
     private var observers: [pid_t: AXObserver] = [:]
+    /// macOS's Dock (0 until it's watched), watched only for Mission Control, never for its windows.
+    private var dockPID: pid_t = 0
     private var windowIDs: [AXUIElement: CGWindowID] = [:]
     private var running = false
     private var generation = 0   // retries from before a stop are dropped
@@ -459,6 +465,11 @@ final class AXWatcher: @unchecked Sendable {
                                            kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
     private static let windowNotifications = [kAXUIElementDestroyedNotification, kAXMovedNotification, kAXResizedNotification,
                                               kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
+    /// On macOS's Dock, which draws Mission Control: it opening (all windows, or one app's), and closing. Showing the
+    /// desktop counts as closing, since the Dock doesn't come out for it. (yabai watches the same four.)
+    private static let dockID = "com.apple.dock"
+    private static let missionControlOpened = ["AXExposeShowAllWindows", "AXExposeShowFrontWindows"]
+    private static let missionControlClosed = ["AXExposeExit", "AXExposeShowDesktop"]
 
     private init() {
         let ready = DispatchSemaphore(value: 0)
@@ -498,6 +509,7 @@ final class AXWatcher: @unchecked Sendable {
             }
             observers = [:]
             windowIDs = [:]
+            dockPID = 0
         }
     }
 
@@ -505,11 +517,22 @@ final class AXWatcher: @unchecked Sendable {
         perform { [self] in observe(app, attempt: 0, generation: generation) }
     }
 
+    /// Watches macOS's Dock again if it isn't watched: Petal restarts it when it hides it, and macOS may not say
+    /// when it's back. Asks Launch Services, so it's on this thread.
+    func watchDock() {
+        perform { [self] in
+            guard running, dockPID == 0,
+                  let dock = NSRunningApplication.runningApplications(withBundleIdentifier: Self.dockID).first else { return }
+            observe(dock, attempt: 0, generation: generation)
+        }
+    }
+
     func forget(_ pid: pid_t) {
         perform { [self] in
             if let observer = observers.removeValue(forKey: pid) {
                 CFRunLoopRemoveSource(runLoop, AXObserverGetRunLoopSource(observer), .defaultMode)
             }
+            if pid == dockPID { dockPID = 0 }
             windowIDs = windowIDs.filter { element, _ in
                 var owner: pid_t = 0
                 return AXUIElementGetPid(element, &owner) == .success && owner != pid
@@ -535,7 +558,8 @@ final class AXWatcher: @unchecked Sendable {
 
     private func observe(_ app: NSRunningApplication, attempt: Int, generation: Int) {
         let pid = app.processIdentifier
-        guard running, generation == self.generation, observers[pid] == nil, app.activationPolicy == .regular,
+        let isDock = app.bundleIdentifier == Self.dockID
+        guard running, generation == self.generation, observers[pid] == nil, app.activationPolicy == .regular || isDock,
               pid != ProcessInfo.processInfo.processIdentifier, !app.isTerminated else { return }
         var created: AXObserver?
         let callback: AXObserverCallback = { _, element, notification, _ in
@@ -545,7 +569,8 @@ final class AXWatcher: @unchecked Sendable {
         let element = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(element, 0.3)
         var added = 0
-        for name in Self.appNotifications where AXObserverAddNotification(observer, element, name as CFString, nil) == .success { added += 1 }
+        let names = isDock ? Self.missionControlOpened + Self.missionControlClosed : Self.appNotifications
+        for name in names where AXObserverAddNotification(observer, element, name as CFString, nil) == .success { added += 1 }
         guard added > 0 else {
             // An app that has only just launched may not answer yet: try again a few times.
             if attempt < 5 {
@@ -557,10 +582,11 @@ final class AXWatcher: @unchecked Sendable {
         }
         CFRunLoopAddSource(runLoop, AXObserverGetRunLoopSource(observer), .defaultMode)
         observers[pid] = observer
-        watchAll(pid)
+        if isDock { dockPID = pid } else { watchAll(pid) }
     }
 
     private func watchAll(_ pid: pid_t) {
+        guard pid != dockPID else { return }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.3)
         for window in Windows.value(app, kAXWindowsAttribute) as [AXUIElement]? ?? [] where windowIDs[window] == nil {
@@ -605,6 +631,8 @@ final class AXWatcher: @unchecked Sendable {
         case kAXResizedNotification: send(.resized, window: windowIDs[element], element: element)
         case kAXApplicationHiddenNotification: send(.hidden)
         case kAXApplicationShownNotification: send(.shown)
+        case _ where Self.missionControlOpened.contains(name): send(.missionControl)
+        case _ where Self.missionControlClosed.contains(name): send(.missionControlEnded)
         default: break
         }
     }

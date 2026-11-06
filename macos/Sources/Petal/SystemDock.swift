@@ -2,8 +2,10 @@ import Foundation
 
 /// Petal replaces macOS's Dock while it runs: the Dock is set to hide, and to wait 1000 seconds before it shows,
 /// which keeps it out of sight. A full-screen app shows macOS's Dock whatever its wait, as the pointer pushes on its
-/// edge; that can't be turned off (slowing its showing left its labels stuck on the screen). It stays on its own edge
-/// and size, since macOS minimizes windows toward it. Quitting Petal gives it back exactly as it was.
+/// edge; that can't be turned off (slowing its showing left its labels stuck on the screen). Mission Control and App
+/// Exposé show it too, and no Dock setting stops that either, so Petal's dock steps aside there instead (Dock.swift).
+/// It stays on its own edge and size, since macOS minimizes windows toward it. Quitting Petal gives it back exactly
+/// as it was.
 ///
 /// The Dock's own settings are saved to ~/.config/petal/macos-dock.json before they change, and that file is the
 /// promise to put them back: if Petal crashes, the next launch keeps the saved settings (it doesn't save the hidden

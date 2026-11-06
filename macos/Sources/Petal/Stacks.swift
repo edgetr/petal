@@ -76,10 +76,23 @@ enum Stacks {
     /// Finder answers Apple events in its own time, so they're sent off the main thread.
     private static let finder = DispatchQueue(label: "petal.finder")
 
+    /// Opens the Trash in Finder, as macOS's Dock does: Launch Services hands Finder the Trash folder, and Finder
+    /// comes forward with that window, nothing else moving. (Telling Finder to `activate` through AppleScript could
+    /// bring it forward before its Trash window was open, with only the desktop in front, which macOS takes for a
+    /// click on the wallpaper when "Click wallpaper to reveal desktop" is on: every window slid away.)
     static func openTrash() {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.addsToRecentItems = false
+        NSWorkspace.shared.open(trash, configuration: configuration)
+        // Without Full Disk Access, Finder is how Petal tells whether the Trash is empty: asked once here (macOS asks
+        // the person the first time), so the dock's Trash can show it. Asking Finder this brings nothing forward.
         finder.async {
-            var error: NSDictionary?
-            NSAppleScript(source: "tell application \"Finder\"\nopen trash\nactivate\nend tell")?.executeAndReturnError(&error)
+            if (try? FileManager.default.contentsOfDirectory(atPath: trash.path)) == nil {
+                var error: NSDictionary?
+                NSAppleScript(source: "tell application \"Finder\" to return count of items of trash")?.executeAndReturnError(&error)
+            }
+            DispatchQueue.main.async { MainActor.assumeIsolated { PetalApp.shared.signals.lookAtTrash() } }
         }
     }
 
