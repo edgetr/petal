@@ -210,12 +210,14 @@ final class AppStripView: NSView {
             config = app.config
             self.look = look
             launching = Set(app.launching.keys)
-            badges = app.config.bool("badges") ? app.signals.badges : [:]
+            var badges = app.config.bool("badges") ? app.signals.badges : [:]
+            for id in app.claude.readyApps { badges[id] = "✦" }   // a sticky note done while away
+            self.badges = badges
             dragging = dock.dragging
             dragOffset = dock.dragOffset
             idle = app.config.number("idleOpacity")
             glowStrength = min(1, max(0, app.config.number("glowStrength")))
-            showBadges = app.config.bool("badges")
+            showBadges = app.config.bool("badges") || !app.claude.readyApps.isEmpty
         }
     }
 

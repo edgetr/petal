@@ -486,6 +486,7 @@ final class DockController {
     /// first, then minimized ones, then the rest. The pointer never moves.
     func activate(_ item: DockItem) {
         if Sites.isWeb(item.id) { Sites.open(item.id); return }
+        if app.claude.openReady(app: item.id) { return }   // its note is done: its window, and the note on it
         guard item.running, let running = NSRunningApplication.runningApplications(withBundleIdentifier: item.id).first else {
             launch(item.id)
             return
@@ -1254,7 +1255,8 @@ struct AppSlot: View {
                 .opacity((item.running || !item.pinned || Sites.isWeb(item.id) ? 1 : config.number("idleOpacity")) * (fileOver ? 0.6 : 1))
                 .modifier(Pulse(on: launching, floor: config.number("idleOpacity")))
                 .overlay(alignment: .topTrailing) {
-                    if config.bool("badges"), let badge = app.signals.badges[item.id] {
+                    // A sticky note done while away shows over the app's own badge until it's opened.
+                    if let badge = app.claude.readyApps.contains(item.id) ? "✦" : config.bool("badges") ? app.signals.badges[item.id] : nil {
                         Badge(text: badge, icon: icon).offset(x: icon * 0.12, y: -icon * 0.12)
                     }
                 }

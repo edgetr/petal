@@ -114,7 +114,8 @@ final class Assist {
     // MARK: The tools
 
     /// One of Petal AI's tools, from `Petal --mcp` (["assist", name, json]); the reply is one line of JSON.
-    func handle(_ name: String, _ json: String, reply: @escaping @MainActor (String) -> Void) {
+    /// `note`: the sticky note whose chat asks (PETAL_NOTE), so looking looks at its window.
+    func handle(_ name: String, _ json: String, note: String? = nil, reply: @escaping @MainActor (String) -> Void) {
         let args = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
         let send: (Any) -> Void = { result in
             let object: Any = JSONSerialization.isValidJSONObject(result) ? result : ["result": "\(result)"]
@@ -123,7 +124,7 @@ final class Assist {
         }
         let fail = { (text: String) in send(["error": text]) }
         switch name {
-        case "petal_look": look(args, send)
+        case "petal_look": look(args, place: note.flatMap { app.claude.note(withID: $0) }?.place, send)
         case "petal_apps": apps(args, send, fail)
         case "petal_windows": windows(args, send, fail)
         case "petal_trash": trash(args, send, fail)
@@ -161,10 +162,21 @@ final class Assist {
 
     /// What's in front: the app, its window, the browser's tab, selected text, the mode, the other windows showing;
     /// with `screenshot` ("window" or "screen") a picture saved where the AI can read it, and the clipboard if asked.
-    private func look(_ args: [String: Any], _ send: @escaping (Any) -> Void) {
-        let front = frontApp(named: args["app"] as? String)
+    /// A sticky note (`place`) looks at its own window instead, wherever the person is now, unless it asks for an app
+    /// or for what's in front (`front`).
+    private func look(_ args: [String: Any], place: NotePlace? = nil, _ send: @escaping (Any) -> Void) {
+        let named = args["app"] as? String ?? ""
+        let place = named.isEmpty && args["front"] as? Bool != true ? place : nil
+        let stuck = place.flatMap { p in NSRunningApplication(processIdentifier: p.pid).flatMap { $0.bundleIdentifier == p.app && !$0.isTerminated ? $0 : nil } }
+        let front = stuck ?? frontApp(named: named)
+        let wanted = stuck == nil ? nil : place?.window
         var result: [String: Any] = [:]
-        if let mode = app.docks.focusedDock?.mode { result["mode"] = ["id": mode.id, "name": mode.name] }
+        if let place, let mode = config.modes.first(where: { $0.id == place.mode }) { result["mode"] = ["id": mode.id, "name": mode.name] }
+        else if let mode = app.docks.focusedDock?.mode { result["mode"] = ["id": mode.id, "name": mode.name] }
+        if place != nil {
+            result["note"] = stuck == nil ? "The app this note was asked on has quit; this is what's in front now."
+                : "This is the window the note is stuck to; the user may be looking at something else now (front: true shows that)."
+        }
         result["onScreen"] = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !$0.isHidden }
             .compactMap(\.localizedName)).sorted()
         if args["clipboard"] as? Bool == true { result["clipboard"] = NSPasteboard.general.string(forType: .string).map { String($0.prefix(4000)) } ?? "" }
@@ -180,14 +192,22 @@ final class Assist {
         Self.queue.async {
             let element = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(element, 0.3)
-            let window: AXUIElement? = Windows.value(element, kAXFocusedWindowAttribute)
-            let title: String = window.flatMap { Windows.value($0, kAXTitleAttribute) } ?? ""
-            let focused: AXUIElement? = Windows.value(element, kAXFocusedUIElementAttribute)
-            let selected: String = focused.flatMap { Windows.value($0, kAXSelectedTextAttribute) } ?? ""
+            var window: AXUIElement? = Windows.value(element, kAXFocusedWindowAttribute)
+            let focusedID = window.flatMap { Windows.id(of: $0) }
+            // A note's own window, when it isn't its app's focused one (or is gone: then the focused one, said so).
+            var gone = false
+            if let wanted, wanted != focusedID {
+                let all: [AXUIElement] = Windows.value(element, kAXWindowsAttribute) ?? []
+                if let match = all.first(where: { Windows.id(of: $0) == wanted }) { window = match } else { gone = true }
+            }
             let number = window.flatMap { Windows.id(of: $0) }
+            let title: String = window.flatMap { Windows.value($0, kAXTitleAttribute) } ?? ""
+            let focused: AXUIElement? = number == focusedID ? Windows.value(element, kAXFocusedUIElementAttribute) : nil
+            let selected: String = focused.flatMap { Windows.value($0, kAXSelectedTextAttribute) } ?? ""
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     result["window"] = title
+                    if gone { result["note"] = "The note's window is closed; this is \(front.localizedName ?? "its app")'s window in front." }
                     if !selected.isEmpty { result["selectedText"] = String(selected.prefix(8000)) }
                     let hidden = self.privatePIDs
                     let finish = {
@@ -204,7 +224,7 @@ final class Assist {
                         }
                     }
                     guard Browsers.kind(front.bundleIdentifier ?? "") != nil else { return finish() }
-                    self.app.browsers.frontURL(of: front) { url in
+                    self.app.browsers.frontURL(of: front, window: number == focusedID ? nil : title) { url in
                         MainActor.assumeIsolated {
                             if let url { result["tab"] = ["url": url, "title": title] }
                             finish()
@@ -233,7 +253,8 @@ final class Assist {
     /// A picture of one window (its number), or of the main screen, saved in Petal's caches; its path.
     nonisolated private static func screenshot(_ window: CGWindowID?, hiding: Set<pid_t> = []) async -> String? {
         guard CGPreflightScreenCaptureAccess(),
-              let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true) else { return nil }
+              // One window may be behind others or on another Desktop (a note's): every window is listed then.
+              let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: window == nil) else { return nil }
         let filter: SCContentFilter
         let size: CGSize
         if let window, let match = content.windows.first(where: { $0.windowID == window }) {
@@ -469,10 +490,10 @@ final class Assist {
         return gone
     }
 
-    /// What the chat is told it remembers: everywhere, then the mode in front.
-    var memoryBrief: String {
+    /// What the chat is told it remembers: everywhere, then the mode in front (or a note's own mode).
+    func memoryBrief(mode id: String? = nil) -> String {
         guard config.bool("aiMemory") else { return "" }
-        let mode = app.docks.focusedDock?.mode
+        let mode = id.flatMap { id in config.modes.first { $0.id == id } } ?? app.docks.focusedDock?.mode
         let general = memories.filter { $0.mode.isEmpty }
         let here = memories.filter { !$0.mode.isEmpty && $0.mode == mode?.id }
         var text = ""

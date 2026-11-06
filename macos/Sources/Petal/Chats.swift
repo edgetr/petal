@@ -11,6 +11,8 @@ struct SavedChat: Codable, Identifiable, Equatable {
     var session: String?
     var updated: Date
     var lines: [Line]
+    /// The window a sticky note was stuck to (nil for a chat stuck to none, and chats from before notes).
+    var place: NotePlace?
 }
 
 @MainActor
@@ -75,8 +77,8 @@ struct ChatsList: View {
                 VStack(spacing: 2) {
                     ForEach(shown) { chat in
                         ChatRow(chat: chat, current: chat.id == app.claude.agent.chatID) {
-                            app.claude.agent.restore(chat)
                             panel.chatsOpen = false
+                            app.claude.restore(chat)
                         } delete: {
                             Chats.delete(chat)
                             chats.removeAll { $0.id == chat.id }
@@ -105,6 +107,10 @@ private struct ChatRow: View {
             ProviderMark(provider: Provider(rawValue: chat.provider)).frame(width: 14, height: 14).opacity(0.8)
             Text(chat.title).font(.system(size: 13, weight: current ? .semibold : .regular)).lineLimit(1)
             Spacer(minLength: 8)
+            // A note: the app it was stuck to.
+            if let place = chat.place, !place.app.isEmpty {
+                Image(nsImage: Apps.icon(place.app)).resizable().frame(width: 14, height: 14).help(place.appName)
+            }
             Text(chat.updated, format: .relative(presentation: .named)).font(.system(size: 11)).foregroundStyle(.secondary)
             if hovering { RoundButton(symbol: "trash", size: 20, action: delete) }
         }

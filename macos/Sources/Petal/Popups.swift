@@ -867,7 +867,7 @@ struct RightClick: NSViewRepresentable {
 /// A card over the dock: a focus card (block, move or peek), a held notification that can't wait, a suggested mode,
 /// a mode just made from one, or the weekly summary. Updates are in the menu bar, not here.
 struct FocusCard: Identifiable, Equatable {
-    enum Kind { case block, move, peek, note, suggestion, made, summary, ask, reply }
+    enum Kind { case block, move, peek, note, suggestion, made, summary, ask, reply, noteReady }
     let id = UUID()
     let kind: Kind
     var bundleID = ""
@@ -881,13 +881,15 @@ struct FocusCard: Identifiable, Equatable {
     var suggestion: Insights.Suggestion?
     var summary: Insights.Summary?
     var working = false
+    /// A sticky note done in another mode (noteReady).
+    var noteID: UUID?
 
     static func == (a: FocusCard, b: FocusCard) -> Bool { a.id == b.id && a.working == b.working && a.kind == b.kind }
 
     /// The mode button the card points at: the mode it's about; a peek's is the mode you're in.
     var pointsAt: String? {
         switch kind {
-        case .block, .move, .note: target?.id
+        case .block, .move, .note, .noteReady: target?.id
         case .peek: here?.id
         default: nil
         }
@@ -908,10 +910,11 @@ struct CardView: View {
             case .summary: SummaryCard(card: card)
             case .ask: AskCard()
             case .reply: ReplyCard(card: card)
+            case .noteReady: NoteReadyCard(card: card)
             }
         }
         .padding(card.kind == .peek ? 12 : 16)
-        .frame(minWidth: card.kind == .peek ? 0 : 300, maxWidth: card.kind == .peek || card.kind == .note || card.kind == .block || card.kind == .move ? 380 : 420)
+        .frame(minWidth: card.kind == .peek ? 0 : 300, maxWidth: card.kind == .peek || card.kind == .note || card.kind == .noteReady || card.kind == .block || card.kind == .move ? 380 : 420)
         .fixedSize(horizontal: card.kind == .peek, vertical: false)
         .roomForTail(tail)
         .glassEffect(.regular, in: CardShape(tail: tail))

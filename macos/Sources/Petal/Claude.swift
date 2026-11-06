@@ -27,6 +27,12 @@ final class Agent {
     private(set) var running = false
     /// This chat, as it's kept (Chats.swift): saved as it goes, so it can be read again and carried on.
     private(set) var chatID = UUID()
+    /// The sticky note this chat is (StickyNotes.swift): its tools are told, so they look at its window.
+    let noteID = UUID()
+    /// The window the note is stuck to; nil for a chat stuck to none.
+    var place: NotePlace? { didSet { if place != oldValue { keep() } } }
+    /// A message sent while `ClaudePanel.atOnce` other notes worked: it goes once one of them is done.
+    private(set) var waiting: String?
     @ObservationIgnored private var chatProvider: Provider?
     private(set) var pendingAsk: [Denial] = []
     @ObservationIgnored private var sessionID: String?
@@ -59,7 +65,27 @@ final class Agent {
         }
         pendingAsk = []
         messages.append(Message(kind: .user, text: prompt))
+        // Several notes may work at once, up to a few; the next waits its turn.
+        if app.claude.working >= ClaudePanel.atOnce {
+            waiting = prompt
+            messages.append(Message(kind: .step, text: "Waiting: \(ClaudePanel.atOnce) other notes are working. This starts when one is done."))
+            return
+        }
         run(prompt)
+    }
+
+    /// The message that waited for room, sent now.
+    func runWaiting() {
+        guard let prompt = waiting, !running else { return }
+        waiting = nil
+        run(prompt)
+    }
+
+    /// The chat's first words, as the chats list shows it.
+    var title: String {
+        guard let first = messages.first(where: { $0.kind == .user }) else { return "" }
+        let line = first.text.components(separatedBy: "\n").first { !$0.hasPrefix(">") && !$0.hasPrefix("From ") && !$0.isEmpty } ?? first.text
+        return String(line.prefix(80))
     }
 
     func allow() {
@@ -90,6 +116,7 @@ final class Agent {
         running = false
         runID = UUID()
         queued = []
+        waiting = nil
     }
 
     /// Takes a message out of the queue (or back from steering) before it's sent.
@@ -112,7 +139,7 @@ final class Agent {
         chatProvider = provider
         let title = first.text.components(separatedBy: "\n").first { !$0.hasPrefix(">") && !$0.hasPrefix("From ") && !$0.isEmpty } ?? first.text
         Chats.save(SavedChat(id: chatID, title: String(title.prefix(80)), provider: provider?.rawValue ?? "", session: sessionID,
-                             updated: Date(), lines: lines))
+                             updated: Date(), lines: lines, place: place))
     }
 
     private static func name(_ kind: Kind) -> String {
@@ -120,7 +147,8 @@ final class Agent {
     }
 
     /// A kept chat, back: its messages, and its session, so the next message carries it on (with its own AI).
-    func restore(_ chat: SavedChat) {
+    /// `switchProvider`: the chat's AI becomes the one chosen (picked from the list), not only this chat's.
+    func restore(_ chat: SavedChat, switchProvider: Bool = true) {
         endRun()
         pendingAsk = []
         allowed = []
@@ -128,7 +156,7 @@ final class Agent {
         sessionID = chat.session
         sessionProvider = Provider(rawValue: chat.provider)
         chatProvider = sessionProvider
-        if let provider = sessionProvider, provider != app.chatProvider, app.providers.contains(provider) {
+        if switchProvider, let provider = sessionProvider, provider != app.chatProvider, app.providers.contains(provider) {
             app.config.set("chatProvider", provider.rawValue)
         }
         let kinds: [String: Kind] = ["user": .user, "ai": .claude, "step": .step, "error": .error]
@@ -155,12 +183,16 @@ final class Agent {
                                  fullAccess: config.string("claudeAccess") == "full", instructions: instructions(provider),
                                  tools: Bundle.main.executablePath ?? "", session: sessionID, allowed: allowed)
         chat.api = app.usesAPIKey(provider)
+        // A note's tools answer about its window: Petal --mcp passes this on with every call.
+        if place != nil { chat.note = noteID.uuidString }
         authFailed = false
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = provider.chatArguments(chat)
-        process.environment = app.aiEnvironment(provider)
+        var environment = app.aiEnvironment(provider)
+        if let note = chat.note { environment["PETAL_NOTE"] = note }
+        process.environment = environment
         process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         let input = Pipe(), output = Pipe(), error = Pipe()
         process.standardInput = input
@@ -199,7 +231,8 @@ final class Agent {
                     guard self.runID == id else { return }
                     self.running = false
                     // What was written while it worked goes now (steering: straight after it stopped).
-                    if !self.queued.isEmpty, self.pendingAsk.isEmpty {
+                    let more = !self.queued.isEmpty && self.pendingAsk.isEmpty
+                    if more {
                         let next = self.queued.removeFirst()
                         DispatchQueue.main.async { self.send(next) }
                     }
@@ -209,6 +242,8 @@ final class Agent {
                     if status != 0 && status != 15 && !detail.isEmpty && !self.authFailed {
                         self.messages.append(Message(kind: .error, text: String(detail.suffix(300))))
                     }
+                    // The turn is over (not carried on by a queued message): a note's nudge, and room for one waiting.
+                    if !more { self.app.claude.agentFinished(self) }
                 }
             }
         }
@@ -327,7 +362,12 @@ final class Agent {
         """
         let notes = (try? String(contentsOf: app.config.instructionsFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !notes.isEmpty { prompt += "\n\nThe user's own instructions:\n" + notes }
-        let remembered = app.assist.memoryBrief
+        if let place {
+            let mode = app.config.modes.first { $0.id == place.mode }?.name
+            let window = app.assist.neverLook(place.app) || place.title.isEmpty ? "\(place.appName)'s window" : "\(place.appName)'s window “\(place.title)”"
+            prompt += "\n\nThis chat is a sticky note on one window: \(window)\(mode.map { ", in the \($0) mode" } ?? ""). When the user says this, here or what I'm looking at, they mean that window, even after they've gone to another app: petal_look looks at it (front: true looks at what's in front now instead). The user may read your reply later, from that window."
+        }
+        let remembered = app.assist.memoryBrief(mode: place?.mode)
         if !remembered.isEmpty { prompt += "\n\nWhat you remember about this user ([id] for petal_forget):\n" + remembered }
         return prompt
     }
@@ -398,9 +438,9 @@ final class InputPanel: NSPanel {
 
     /// Centered on the screen with the pointer, just above the dock: it comes out of the dock rather than floating
     /// over it.
-    func show<Content: View>(_ content: Content, from anchor: CGRect? = nil) {
+    func show<Content: View>(_ content: Content, from anchor: CGRect? = nil, key: Bool = true) {
         load(content)
-        showAgain(from: anchor)
+        showAgain(from: anchor, key: key)
     }
 
     /// Makes and lays out the view without showing it, so the first opening is as quick as the rest.
@@ -412,7 +452,8 @@ final class InputPanel: NSPanel {
     /// Shows what it showed last, placed again over the dock.
     /// `anchor`: the dock button it was opened from (screen coordinates): on a bottom dock it opens above that
     /// button (kept on the screen) and grows out of it; otherwise centered over the dock.
-    func showAgain(from anchor: CGRect? = nil) {
+    /// `key: false` shows it without taking the keyboard from the app in front (a note back with its window).
+    func showAgain(from anchor: CGRect? = nil, key: Bool = true) {
         let screen = anchor.flatMap { a in NSScreen.screens.first { $0.frame.intersects(a) } }
             ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
         hosting.layoutSubtreeIfNeeded()
@@ -425,7 +466,7 @@ final class InputPanel: NSPanel {
             x = min(max(anchor.midX - size.width / 2, screen.visibleFrame.minX + 4), screen.visibleFrame.maxX - size.width - 4)
         }
         setFrame(NSRect(x: x, y: screen.frame.minY + above, width: size.width, height: size.height).integral, display: true)
-        makeKeyAndOrderFront(nil)
+        if key { makeKeyAndOrderFront(nil) } else { orderFrontRegardless() }
         if let anchor { popIn(from: CGPoint(x: anchor.midX - frame.minX, y: bottomDock ? 0 : size.height / 2)) }
     }
 
@@ -475,71 +516,142 @@ final class InputPanel: NSPanel {
     }
 }
 
-/// The Claude panel (AskBox.qml).
+/// The Claude panel (AskBox.qml). With `aiNotes` on, it is a sticky note: the chat stuck to the window that was in
+/// front when it opened (StickyNotes.swift); every note keeps its own chat, and several can work at once.
 @MainActor @Observable
 final class ClaudePanel {
-    let agent = Agent()
-    var draft = ""
+    /// Every note this session; the panel shows `current`.
+    var notes: [StickyNote]
+    private(set) var current: StickyNote
+    var agent: Agent { current.agent }
+    var draft: String { get { current.draft } set { current.draft = newValue } }
     var optionsOpen = false
     /// The kept chats, in place of the conversation.
     var chatsOpen = false
     /// Files handed to the AI (dropped on its button or on the panel): sent with the next message.
-    var attachments: [URL] = []
+    var attachments: [URL] { get { current.attachments } set { current.attachments = newValue } }
     /// Passages quoted from any app (Ask Petal AI / Add to Petal AI): sent with the next message.
     struct Quote: Identifiable, Equatable { let id = UUID(); let text: String; let source: String }
-    var quotes: [Quote] = []
+    var quotes: [Quote] { get { current.quotes } set { current.quotes = newValue } }
+    /// Quotes and files handed over while the panel was closed: they go to the note it opens on next.
+    @ObservationIgnored private var incomingQuotes: [Quote] = []
+    @ObservationIgnored private var incomingFiles: [URL] = []
+    /// Apps and modes with a note that's done while the person was elsewhere (their nudges).
+    var readyApps: Set<String> = []
+    var readyModes: [String: Int] = [:]
+    @ObservationIgnored var closeReason: CloseReason?
+    @ObservationIgnored var lastFront: (pid: pid_t, window: CGWindowID?)?
+    @ObservationIgnored var pendingOpen: StickyNote?
+    @ObservationIgnored var savedPlaces: [String: SavedChat] = [:]
+    @ObservationIgnored var listening = false
+
+    init() {
+        let note = StickyNote()
+        notes = [note]
+        current = note
+    }
 
     func quote(_ text: String, from source: String) {
-        guard !quotes.contains(where: { $0.text == text }) else { return }
-        quotes.append(Quote(text: text, source: source))
-        if isOpen { fit() }
+        if isOpen {
+            guard !quotes.contains(where: { $0.text == text }) else { return }
+            quotes.append(Quote(text: text, source: source))
+            fit()
+        } else if !incomingQuotes.contains(where: { $0.text == text }) {
+            incomingQuotes.append(Quote(text: text, source: source))
+        }
     }
 
     /// Added without opening the chat: the AI button says so for a moment.
     func noteAdded() {
         let app = PetalApp.shared
         guard let dock = app.docks.focusedDock else { return }
-        app.tooltips.show(quotes.count == 1 ? "Added to Petal AI" : "\(quotes.count) passages for Petal AI", over: "claude", in: dock)
+        let count = incomingQuotes.count
+        app.tooltips.show(count == 1 ? "Added to Petal AI" : "\(count) passages for Petal AI", over: "claude", in: dock)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { app.tooltips.show(nil, over: "claude", in: dock) }
     }
     private(set) var isOpen = false
     @ObservationIgnored private var panel: InputPanel?
 
+    /// Opens the note of the window in front (a new one if it has none).
     func open(asking text: String?, send: Bool = true, attaching files: [URL] = []) {
         let app = PetalApp.shared
-        for file in files where !attachments.contains(file) { attachments.append(file) }
+        for file in files where !incomingFiles.contains(file) { incomingFiles.append(file) }
         Task { await app.usage.refresh() }
         // Codex's models, if they couldn't be read at launch (Codex installed or signed in since).
         if app.chatProvider == .codex && app.codexModels.isEmpty { app.loadCodexModels() }
+        noteForFront { note in self.present(note, asking: text, send: send) }
+    }
+
+    /// Shows a note in the panel. `key: false` leaves the keyboard with the app in front (a note back with its window).
+    /// `fromIcon`: it comes out of its app's icon (back with its window) rather than the AI button.
+    func present(_ note: StickyNote, asking text: String? = nil, send: Bool = true, key: Bool = true, fromIcon: Bool = false) {
+        let app = PetalApp.shared
         if panel == nil {
             let panel = InputPanel()
             panel.onClose = { [weak self] in
                 self?.isOpen = false
                 self?.optionsOpen = false
                 self?.chatsOpen = false
+                self?.closed()
                 // A question still waiting goes to the dock, where it can be answered.
                 if PetalApp.shared.assist.pending != nil { PetalApp.shared.popups.show(FocusCard(kind: .ask)) }
             }
             self.panel = panel
         }
+        let again = isOpen && current === note
+        current = note
+        for quote in incomingQuotes where !note.quotes.contains(where: { $0.text == quote.text }) { note.quotes.append(quote) }
+        for file in incomingFiles where !note.attachments.contains(file) { note.attachments.append(file) }
+        incomingQuotes = []
+        incomingFiles = []
+        note.away = false
+        if note.ready { note.ready = false; updateReady() }
+        if let card = app.popups.card, card.noteID == note.id { app.popups.dismissCard() }
         isOpen = true
         if let text, send {
-            agent.send(text)
-            draft = ""
-        } else {
-            draft = text ?? ""
+            note.agent.send(text)
+            note.draft = ""
+        } else if let text {
+            note.draft = text
         }
         app.tooltips.hide()
         app.popups.closeAll()
-        panel?.show(ClaudePanelView(panel: self), from: app.docks.focusedDock?.panel?.screenFrame(of: "claude"))
+        if again {
+            if key { panel?.makeKeyAndOrderFront(nil) }
+            fit()
+        } else {
+            let button = app.docks.focusedDock?.panel?.screenFrame(of: "claude")
+            panel?.show(ClaudePanelView(panel: self), from: fromIcon ? anchor(for: note) ?? button : button, key: key)
+        }
     }
+
+    /// A chat picked from the list: its note if it's still one, else carried on as a chat stuck to no window.
+    func restore(_ chat: SavedChat) {
+        if let note = notes.first(where: { $0.agent.chatID == chat.id }) { return present(note) }
+        let note = StickyNote()
+        note.agent.restore(chat)
+        notes.append(note)
+        present(note)
+    }
+
+    /// A note's turn ended (Agent).
+    func agentFinished(_ agent: Agent) {
+        guard let note = notes.first(where: { $0.agent === agent }) else { return }
+        finished(note)
+    }
+
+    func stopAll() { for note in notes { note.agent.stop() } }
 
     func openOptions() {
         open(asking: nil)
         optionsOpen = true
     }
 
-    func close() { panel?.close() }
+    func close() {
+        if closeReason == nil { closeReason = .purpose }
+        panel?.close()
+        closeReason = nil
+    }
 
     func fit() { panel?.fit() }
 }
@@ -564,6 +676,8 @@ struct ClaudePanelView: View {
         // up to half the screen, then scrolls. The options open over what's below the header.
         VStack(alignment: .leading, spacing: 14) {
             header
+            // The window this note is stuck to.
+            if let place = agent.place { NotePlaceLine(place: place, gone: panel.current.windowGone).padding(.top, -6) }
             ZStack(alignment: .top) {
                 Group { if agent.messages.isEmpty { empty } else { conversation } }
                     .frame(maxWidth: .infinity, alignment: .top)

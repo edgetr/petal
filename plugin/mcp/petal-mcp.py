@@ -96,6 +96,7 @@ SETTINGS_SCHEMA = {
     "dailySummary": ("", "A card with the day in the user's modes at this time each day (\"HH:MM\"; empty for none), with a line from Petal AI."),
     "aiNeverLook": (["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"], "Apps Petal AI never looks into (bundle ids): petal_look gives only their name, window lists leave out their titles, and screenshots leave them out."),
     "selectionAsk": (True, "macOS: selecting text in any app brings up a small \"Ask Petal AI\" button by it; clicking it quotes the text in the chat. (Also in every app's Services menu.) Never in apps kept private or password fields."),
+    "aiNotes": (True, "macOS: AI sticky notes. Each chat sticks to the window it was opened on and looks at that window even after the user moves on; several notes can work at once (up to 4), a note done while away nudges its app's icon (and its mode), and coming back to the window brings its note back. Off: one chat that looks at whatever is in front."),
     "chatWhileWorking": ("steer", "Writing in the AI chat while it works: steer (it stops where it is and carries on from the new message) or queue (sent once it's done)."),
     "replyDrafts": (True, "Entering a mode with held messages that need an answer, Petal AI drafts replies in the user's own style (learned from the replies they edit), shown on a card; it never sends anything."),
     "aiAllowed": ([], "What Petal AI may do without asking first (the user chose Always on its card): quit, close, trash, tidy."),
@@ -773,7 +774,9 @@ def not_yet(_):
 def assist(name):
     """Petal AI's tools on macOS: the running Petal does them, with its own permissions (and asks first)."""
     def run(args):
-        reply = petal("assist", name, json.dumps(args))
+        # A sticky note's chat (Petal sets PETAL_NOTE for its own) is answered about the note's window.
+        note = os.environ.get("PETAL_NOTE", "")
+        reply = petal("assist", name, json.dumps(args), *([note] if note else []))
         try:
             out = json.loads(reply)
         except ValueError:
@@ -786,9 +789,9 @@ def assist(name):
 
 # Petal AI on the Mac: seeing what's in front and acting on the Mac through Petal's permissions. (Omarchy: later.)
 ASSIST_TOOLS = {
-    "petal_look": (assist("petal_look"), "What the user is looking at now: the app and window in front, the browser tab's address and title, selected text, the current mode and which apps are open. screenshot: \"window\" (the front window, or app's) or \"screen\" saves a PNG and returns its path to read. clipboard: true adds the clipboard's text. Use it when the user says this, here, what I'm looking at.",
+    "petal_look": (assist("petal_look"), "What the user is looking at now: the app and window in front, the browser tab's address and title, selected text, the current mode and which apps are open. In a sticky note's chat it looks at the note's own window, even after the user has moved on (front: true looks at what's in front now instead). screenshot: \"window\" (the front window, or app's) or \"screen\" saves a PNG and returns its path to read. clipboard: true adds the clipboard's text. Use it when the user says this, here, what I'm looking at.",
                    {"screenshot": {"type": "string", "enum": ["", "window", "screen"]}, "app": {"type": "string", "description": "look at this app instead of the one in front"},
-                    "clipboard": {"type": "boolean"}}),
+                    "clipboard": {"type": "boolean"}, "front": {"type": "boolean", "description": "in a sticky note: what's in front now, not the note's window"}}),
     "petal_apps": (assist("petal_apps"), "Open, quit, hide or bring forward an app (by name or bundle id); open with `open` set opens that address or file (in `app` if given). Quitting asks the user first.",
                    {"action": {"type": "string", "enum": ["open", "quit", "hide", "focus"]}, "app": {"type": "string"}, "open": {"type": "string", "description": "an https:// address or a file path"}}),
     "petal_windows": (assist("petal_windows"), "The user's windows: list them (id, app, title, minimized, here = on this Desktop), or focus, minimize, close (asks first) or arrange one (layout: left, right, top, bottom, full, center; the dock's room is kept). Pick a window by its id from list, or a word of its title, within `app`.",

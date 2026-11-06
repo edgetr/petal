@@ -121,6 +121,7 @@ final class PetalApp {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.search.prepare() }
         notes.start()
         assist.start()
+        claude.startNotes()
         selection.start()
         routines.start()
         Skill.install()
@@ -140,7 +141,7 @@ final class PetalApp {
         Windows.stopManaging()
         notes.stop()
         ipc.stop()
-        claude.agent.stop()
+        claude.stopAll()
         SystemDock.restore()
     }
 
@@ -439,7 +440,7 @@ final class PetalApp {
         // Petal AI's tools (`Petal --mcp` asks here): ["assist", tool, json]; one that changes something waits for the
         // person to allow it.
         ipc.onLater("assist") { [unowned self] args, reply in
-            assist.handle(args.first ?? "", args.dropFirst().first ?? "{}", reply: reply)
+            assist.handle(args.first ?? "", args.dropFirst().first ?? "{}", note: args.dropFirst(2).first, reply: reply)
         }
         // The kept chats, open in the AI panel.
         ipc.on("chats") { [unowned self] _ in claude.open(asking: nil); claude.chatsOpen = true; return "ok" }

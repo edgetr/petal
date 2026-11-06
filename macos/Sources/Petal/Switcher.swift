@@ -59,6 +59,7 @@ struct ModeButton: View {
         let active = dock.mode?.id == mode.id
         let wide = !dock.vertical && (active || pending != nil)
         let held = app.notes.held(in: mode.id).count
+        let notes = app.claude.readyModes[mode.id] ?? 0   // sticky notes done in this mode while away
         content(active: active, wide: wide)
             .frame(minWidth: size, minHeight: size, maxHeight: size)
             .fixedSize()
@@ -83,6 +84,19 @@ struct ModeButton: View {
                         .transition(.scale.combined(with: .opacity))
                 }
             }
+            .overlay(alignment: .topLeading) {
+                if notes > 0 && !active {
+                    Text("✦")
+                        .font(.system(size: max(7, size * 0.22), weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: size * 0.38, height: size * 0.38)
+                        .background(Color(nsColor: mode.color), in: .circle)
+                        .overlay(Circle().strokeBorder(.white.opacity(0.85), lineWidth: 1))
+                        .offset(x: -size * 0.1, y: -size * 0.1)
+                        .transition(.scale.combined(with: .opacity))
+                        .help(notes == 1 ? "A note is ready here" : "\(notes) notes are ready here")
+                }
+            }
             .slotFrame(dock, "mode:\(mode.id)")
             .slotMouse(SlotMouse(
                 left: { if let desktop = dock.desktop { app.requestMode(mode.id, desktop: desktop) } },
@@ -94,6 +108,7 @@ struct ModeButton: View {
                 press: { pressed = $0 }))
             .animation(.easeOut(duration: 0.15), value: hovering)
             .animation(.easeOut(duration: 0.2), value: held)
+            .animation(.easeOut(duration: 0.2), value: notes)
     }
 
     @ViewBuilder private func content(active: Bool, wide: Bool) -> some View {

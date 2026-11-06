@@ -68,13 +68,16 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         let session: String?
         let allowed: [String]
         var api = false            // on an API key (APIKeys.swift)
+        var note: String?          // a sticky note's id: Petal's tools answer about its window
     }
 
     /// One turn of the chat; the prompt goes on stdin.
     func chatArguments(_ chat: Chat) -> [String] {
         switch self {
         case .claude:
-            let mcp: [String: Any] = ["mcpServers": ["petal": ["command": chat.tools, "args": ["--mcp"]]]]
+            var server: [String: Any] = ["command": chat.tools, "args": ["--mcp"]]
+            if let note = chat.note { server["env"] = ["PETAL_NOTE": note] }
+            let mcp: [String: Any] = ["mcpServers": ["petal": server]]
             let config = (try? JSONSerialization.data(withJSONObject: mcp, options: [.withoutEscapingSlashes])).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
             var arguments = ["-p", "--model", chat.model.isEmpty ? "sonnet" : chat.model, "--effort", chat.effort,
                              "--output-format", "stream-json", "--verbose",
@@ -96,6 +99,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                           "-c", "mcp_servers.petal.default_tools_approval_mode=\"approve\"",
                           // A tool that asks the person first may wait for them.
                           "-c", "mcp_servers.petal.tool_timeout_sec=180"]
+            if let note = chat.note { arguments += ["-c", "mcp_servers.petal.env={PETAL_NOTE=\(Self.toml(note))}"] }
             // On an API key: the commands Codex runs never see it (names with KEY in them stay out).
             if chat.api { arguments += ["-c", "shell_environment_policy.ignore_default_excludes=false"] }
             if let session = chat.session { arguments += ["resume", session] }

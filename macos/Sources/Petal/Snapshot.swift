@@ -22,6 +22,9 @@ enum Snapshot {
             .init(kind: .claude, text: "Done — icons are now **44 pt**, up from 36. Say *smaller* if it's too much."),
             .init(kind: .ask, text: "defaults write com.apple.finder AppleShowAllFiles -bool true"),
         ])
+        // A sticky note: the window it's stuck to shows under the header.
+        agent.place = NotePlace(pid: 0, app: "com.apple.Safari", appName: "Safari", window: 1, title: "Liquid Glass – Apple Developer",
+                                mode: dock.mode?.id ?? "", desktop: 1)
 
         let installed = Apps.installed().map(\.id)
         let pick = { (wanted: [String]) in wanted.filter(installed.contains) + installed.filter { !wanted.contains($0) } }
@@ -52,6 +55,11 @@ enum Snapshot {
             if let card = FocusCard.sample(kind, app: app, here: dock.mode, desktop: 1) {
                 views.append(("card-\(kind)", AnyView(CardView(card: card, tail: Tail(edge: .bottom, offset: kind == "peek" ? 0 : -90))), nil))
             }
+        }
+        if let other = app.config.modes.first(where: { $0.id != dock.mode?.id }) {
+            let card = FocusCard(kind: .noteReady, bundleID: "com.apple.Safari", title: "Compare these two plans", target: other,
+                                 reason: "Pricing – Linear", noteID: UUID())
+            views.append(("card-note-ready", AnyView(CardView(card: card, tail: Tail(edge: .bottom, offset: -90))), nil))
         }
         if let card = FocusCard.sample("block", app: app, here: dock.mode, desktop: 1) {
             views.append(("card-block-left", AnyView(CardView(card: card, tail: Tail(edge: .leading, offset: 20))), nil))

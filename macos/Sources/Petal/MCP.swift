@@ -206,7 +206,9 @@ enum MCP {
              "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
             // Petal itself does these, with its own permissions (and asks the person first where it should).
             let json = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
-            let reply = petal(["assist", name, json])
+            // A sticky note's chat (PETAL_NOTE, set by Petal for its own chats) is answered about the note's window.
+            let note = ProcessInfo.processInfo.environment["PETAL_NOTE"] ?? ""
+            let reply = petal(["assist", name, json] + (note.isEmpty ? [] : [note]))
             guard let data = reply.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) else {
                 throw Failure(reply.isEmpty ? "Petal isn't running" : reply)
             }

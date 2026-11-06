@@ -100,14 +100,21 @@ final class Browsers {
 
     // MARK: Reading
 
-    /// The front tab's address, or nil (not a browser, not allowed yet, or no answer).
-    func frontURL(of app: NSRunningApplication, done: @escaping (String?) -> Void) {
+    /// The front tab's address, or nil (not a browser, not allowed yet, or no answer). `window`: the title of another
+    /// of its windows (a sticky note's), whose tab is wanted instead; Firefox and Zen answer only for the front one.
+    func frontURL(of app: NSRunningApplication, window: String? = nil, done: @escaping (String?) -> Void) {
         guard let id = app.bundleIdentifier, let kind = Self.kind(id) else { return done(nil) }
         switch kind {
         case .gecko:
-            done(Self.geckoAddress(pid: app.processIdentifier))
+            done(window == nil ? Self.geckoAddress(pid: app.processIdentifier) : nil)
         case .chromium, .safari:
-            let source = "tell application id \"\(id)\" to return URL of \(kind == .safari ? "current tab" : "active tab") of front window"
+            let tab = kind == .safari ? "current tab" : "active tab"
+            var source = "tell application id \"\(id)\" to return URL of \(tab) of front window"
+            if let window, !window.isEmpty {
+                // The window whose name is the title (Chromium's title may add the browser's name after it).
+                let name = window.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+                source = "tell application id \"\(id)\"\nrepeat with w in windows\nset n to name of w\nif n is not \"\" and (n is \"\(name)\" or \"\(name)\" starts with n) then return URL of \(tab) of w\nend repeat\nend tell\nreturn \"\""
+            }
             queue.async {
                 // Never a surprise prompt: only a browser that already said yes is asked.
                 let url = Self.access(id) == .allowed ? Self.run(source) : nil
