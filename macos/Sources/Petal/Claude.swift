@@ -157,7 +157,10 @@ final class Agent {
 
     /// Saves this chat (from its first message on), with its session to resume.
     private func keep() {
-        if let chat = saved { Chats.save(chat) }
+        guard let chat = saved else { return }
+        Chats.save(chat)
+        // A window's link to this chat holds it as it is now, never an older copy.
+        if PetalApp.started { PetalApp.shared.claude.chatSaved(chat) }
     }
 
     /// This chat as it's kept (nil before its first message).
@@ -581,6 +584,8 @@ final class ClaudePanel {
     @ObservationIgnored var lastFront: (pid: pid_t, window: CGWindowID?)?
     @ObservationIgnored var pendingOpen: StickyNote?
     @ObservationIgnored var pendingTicket = 0
+    /// Counts chats picked from the list: one picked after another (before its window was checked) wins.
+    @ObservationIgnored var restoreTicket = 0
     /// The app a note's window is being brought forward in: another app coming forward stops its retries.
     @ObservationIgnored var bringing: pid_t?
     @ObservationIgnored var savedPlaces: [String: SavedChat] = [:]
@@ -625,7 +630,7 @@ final class ClaudePanel {
         if app.chatProvider == .codex && app.codexModels.isEmpty { app.loadCodexModels() }
         cancelPending()
         let ticket = pendingTicket
-        // Shown only if nothing closed or opened the panel meanwhile.
+        // Shown only if nothing closed or opened the panel meanwhile (closing, any way, cancels: `closed`).
         noteForFront { note in if ticket == self.pendingTicket { self.present(note, asking: text, send: send) } }
     }
 
@@ -698,7 +703,7 @@ final class ClaudePanel {
     }
 
     func close() {
-        if closeReason == nil { closeReason = .purpose; cancelPending() }
+        if closeReason == nil { closeReason = .purpose }
         panel?.close()
         closeReason = nil
     }

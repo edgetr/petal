@@ -102,17 +102,20 @@ extension ClaudePanel {
             if title.isEmpty { place.title = saved.place?.title ?? "" }
             place.mode = saved.place?.mode ?? place.mode
             place.desktop = saved.place?.desktop ?? place.desktop
-            let note = live(chat: saved.id) ?? StickyNote()
-            if !notes.contains(where: { $0 === note }) {
-                note.agent.restore(saved, switchProvider: false)
-                notes.append(note)
+            // A note holding the chat already (picked from the list since, maybe carried on) wins over the copy kept
+            // for the window: it moves to the window as it is, never replaced by an older copy.
+            if let note = live(chat: saved.id) {
+                if note === loose {
+                    // The loose chat goes with it; a new, empty one is the loose chat from now on.
+                    let fresh = StickyNote()
+                    notes.append(fresh)
+                    loose = fresh
+                }
+                return attach(note, place)
             }
-            if note === loose {
-                // The loose chat had picked it up: it moves to this window (unless it's working; then it stays).
-                let fresh = StickyNote()
-                if !loose.agent.running { fresh.agent.restore(saved, switchProvider: false); loose.agent.reset() }
-                return attach(fresh, place)
-            }
+            let note = StickyNote()
+            note.agent.restore(saved, switchProvider: false)
+            notes.append(note)
             return attach(note, place)
         }
         return attach(StickyNote(), place)
@@ -158,14 +161,18 @@ extension ClaudePanel {
               !notes.contains(where: { $0.attached && $0.place?.pid == place.pid && $0.place?.window == window })
         else { present(note); return prune() }
         let ticket = pendingTicket
+        restoreTicket += 1
+        let mine = restoreTicket
         Self.windowQueue.async {
             let there = Windows.windows(of: place.pid).contains { $0.id == "\(place.pid)-w\(window)" }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    // Shown only if the panel wasn't closed (or something else opened) meanwhile.
-                    // Picked another, or closed: the chat keeps its window in its saves and its link for that window.
-                    guard ticket == self.pendingTicket else { return self.prune() }
+                    // Another chat picked since: this one doesn't stick (it keeps its window in its saves and the
+                    // window's link to it).
+                    guard mine == self.restoreTicket else { return self.prune() }
                     if there && self.notesOn { _ = self.attach(note, place) } else if !there { note.agent.keptPlace = nil }
+                    // Shown only if the panel wasn't closed (any way) or something else opened meanwhile; else it
+                    // stays stuck to its window, quietly.
                     if ticket == self.pendingTicket { self.present(note) }
                     self.prune()
                 }
@@ -353,7 +360,18 @@ extension ClaudePanel {
     /// A chat deleted from the list stays deleted: no window brings it back, and a note holding it starts afresh.
     func forget(_ chat: SavedChat) {
         savedPlaces = savedPlaces.filter { $0.value.id != chat.id }
-        for note in notes where note.agent.chatID == chat.id { note.agent.reset() }
+        for note in notes where note.agent.chatID == chat.id {
+            note.agent.reset()
+            note.ready = false
+            note.away = false
+            if PetalApp.shared.popups.card?.noteID == note.id { PetalApp.shared.popups.dismissCard() }
+        }
+        updateReady()
+    }
+
+    /// A chat was saved: a window's link to it holds it as it is now.
+    func chatSaved(_ chat: SavedChat) {
+        for (key, value) in savedPlaces where value.id == chat.id { savedPlaces[key] = chat }
     }
 
     private func stepAway() {
@@ -364,6 +382,9 @@ extension ClaudePanel {
     /// The panel closed: on purpose (×, Escape, the AI button), stepping away, or a click elsewhere. A click
     /// elsewhere in the note's own window puts it away; going to another window, it comes back with this one.
     func closed() {
+        // However it closed, nothing opens it again behind the person's back: opens, restores and windows being
+        // brought forward are cancelled.
+        cancelPending()
         let reason = closeReason
         closeReason = nil
         let note = current
@@ -430,6 +451,7 @@ extension ClaudePanel {
     func go(to note: StickyNote, place: NotePlace) {
         let app = PetalApp.shared
         app.popups.dismissCard()
+        if isOpen { close() }   // first: its closing cancels what's pending, never this
         cancelPending()
         guard !note.windowGone, let running = NSRunningApplication(processIdentifier: place.pid), !running.isTerminated else {
             return present(note, key: true)
