@@ -661,6 +661,9 @@ def ai_name():
 
 def ai():
     """(provider, path, model, effort) for the AI the person chose, or None."""
+    # Petal says "none" when the chosen AI is on an API key with no key saved: no AI then, never the subscription.
+    if os.environ.get("PETAL_AI") == "none":
+        return None
     settings = read_json(os.path.join(CONFIG, "settings.json"), {})
     chosen = settings.get("aiProviders", ["claude"])
     provider = os.environ.get("PETAL_AI") or (settings.get("chatProvider") if settings.get("chatProvider") in chosen else (chosen or [None])[0])

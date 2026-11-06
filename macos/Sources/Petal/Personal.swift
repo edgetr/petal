@@ -87,7 +87,7 @@ enum Personal {
             if let effort = settings[provider.effortSetting] as? String, !effort.isEmpty { environment["PETAL_AI_EFFORT"] = effort }
             // On an API key, the merge runs on it too; chosen with no key saved, no AI merges (never the subscription).
             let api = settings[provider.authSetting] as? String == "api"
-            if api && !APIKeys.hasKey(provider) { environment["PETAL_AI_PATH"] = nil; environment["PETAL_AI"] = nil }
+            if api && !APIKeys.hasKey(provider) { environment["PETAL_AI_PATH"] = nil; environment["PETAL_AI"] = "none" }
             environment = APIKeys.environment(environment, for: provider, api: api)
         }
         return environment

@@ -801,6 +801,9 @@ final class Routines {
     }
 
     func delete(_ id: String) {
+        // Whatever it still has on its way (an AI answer, a queued file) is for a routine that's gone.
+        ruleVersion[id, default: 0] += 1
+        jobs.removeAll { $0.id == id }
         list.removeAll { $0.id == id }
         learned[id] = nil
         plans[id] = nil
