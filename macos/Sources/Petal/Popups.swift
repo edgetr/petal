@@ -80,6 +80,18 @@ final class GlassPanel: NSPanel {
         orderFrontRegardless()
     }
 
+    /// At the screen's top right, under the menu bar.
+    func showInCorner<Content: View>(_ content: Content, on screen: NSScreen) {
+        hosting.rootView = AnyView(content.environment(PetalApp.shared))
+        hosting.layoutSubtreeIfNeeded()
+        let size = hosting.fittingSize
+        let visible = screen.visibleFrame
+        setFrame(NSRect(x: visible.maxX - size.width - 8, y: visible.maxY - size.height - 4, width: size.width, height: size.height).integral, display: true)
+        ignoresMouseEvents = !interactive
+        if alphaValue != 1 { Self.opaque(self) }
+        orderFrontRegardless()
+    }
+
     /// Fully visible again, also stopping a fade that's under way (setting alphaValue alone wouldn't).
     static func opaque(_ panel: NSWindow) {
         NSAnimationContext.runAnimationGroup { context in
@@ -317,6 +329,9 @@ final class Popups {
         GlassPanel.opaque(cardPanel)
         if let mode = card.pointsAt, let slot = panelRef.screenFrame(of: "mode:\(mode)") {
             cardPanel.show(pointingAt: slot, dock: panelRef) { CardView(card: card, tail: $0) }
+        } else if [.summary, .suggestion, .made].contains(card.kind) {
+            // Nothing on the dock to point at: top right, out of the dock's way, as macOS's own notices sit.
+            cardPanel.showInCorner(CardView(card: card), on: panelRef.screenRef ?? NSScreen.main ?? NSScreen.screens[0])
         } else {
             let pill = panelRef.frame
             cardPanel.show(CardView(card: card), over: CGRect(x: pill.midX - 1, y: pill.minY, width: 2, height: pill.height), dock: panelRef)

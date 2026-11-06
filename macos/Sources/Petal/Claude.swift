@@ -263,6 +263,8 @@ final class InputPanel: NSPanel {
 
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        // Its size is Petal's to set (fit), never the window following its content from the wrong corner.
+        hosting.sizingOptions = []
         contentView = hosting
         isFloatingPanel = true
         level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) + 2)
@@ -327,9 +329,11 @@ final class InputPanel: NSPanel {
     func fit() {
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
-        guard size != frame.size else { return }
-        setFrame(NSRect(x: frame.midX - size.width / 2, y: frame.minY, width: size.width, height: size.height).integral, display: true,
-                 animate: false)
+        let screen = self.screen ?? NSScreen.main ?? NSScreen.screens[0]
+        let bottom = screen.frame.minY + Self.dockReach(on: screen) + 6 - 10
+        let target = NSRect(x: frame.midX - size.width / 2, y: bottom, width: size.width, height: size.height).integral
+        guard target != frame else { return }
+        setFrame(target, display: true, animate: false)
     }
 }
 
@@ -482,7 +486,7 @@ struct ClaudePanelView: View {
                     })) {
                         ForEach(app.providers) { Text($0.name).tag($0.rawValue) }
                     }
-                    .pickerStyle(.segmented).labelsHidden().fixedSize()
+                    .pickerStyle(.segmented).labelsHidden().fixedSize().frame(maxWidth: .infinity)
                 }
             }
             if app.models(for: provider).count > 1 {
@@ -610,7 +614,7 @@ struct ClaudePanelView: View {
 extension View {
     /// A segmented picker as wide as its segments, each the same width whoever's choices they are: Claude's five
     /// efforts and Codex's six look alike, rather than stretching to the row's end.
-    func segments(_ count: Int) -> some View { frame(width: CGFloat(count) * 73) }
+    func segments(_ count: Int) -> some View { frame(width: CGFloat(count) * 66).frame(maxWidth: .infinity) }
 }
 
 struct OptionRow<Content: View>: View {
