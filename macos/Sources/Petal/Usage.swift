@@ -64,24 +64,30 @@ final class Usage {
         helpBy[.codex] = found == nil ? "Use Codex once to see your usage." : ""
     }
 
+    /// The newest rate limits with numbers in them, from the newest session logs back. Many sessions carry none
+    /// (one opened and left, a quick `codex exec`), and some log the limits empty: those are passed over.
     nonisolated private static func codexLimits() -> [UsageLimit]? {
         let root = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".codex/sessions")
         let files = (FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey])?
             .compactMap { $0 as? URL }.filter { $0.pathExtension == "jsonl" }) ?? []
         let date = { (url: URL) in (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast }
-        guard let newest = files.max(by: { date($0) < date($1) }), let text = try? String(contentsOf: newest, encoding: .utf8) else { return nil }
-        for line in text.split(separator: "\n").reversed() where line.contains("\"rate_limits\"") {
-            guard let event = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                  let limits = find("rate_limits", in: event) as? [String: Any] else { continue }
-            var found: [UsageLimit] = []
-            for key in ["primary", "secondary"] {
-                guard let window = limits[key] as? [String: Any], let used = number(window["used_percent"]) else { continue }
-                let minutes = number(window["window_minutes"]) ?? 0
-                let label = minutes >= 10_000 ? "Weekly (7-day)" : minutes >= 300 ? "Session (5-hour)" : "Limit"
-                found.append(UsageLimit(label: label, percent: min(1, max(0, used / 100)),
-                                        resetsAt: number(window["resets_at"]).map { Date(timeIntervalSince1970: $0) }))
+        for file in files.sorted(by: { date($0) > date($1) }).prefix(40) {
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            for line in text.split(separator: "\n").reversed() where line.contains("\"rate_limits\"") {
+                guard let event = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                      let limits = find("rate_limits", in: event) as? [String: Any] else { continue }
+                var found: [UsageLimit] = []
+                for key in ["primary", "secondary"] {
+                    guard let window = limits[key] as? [String: Any], let used = number(window["used_percent"]) else { continue }
+                    let minutes = number(window["window_minutes"]) ?? 0
+                    let label = minutes >= 10_000 ? "Weekly (7-day)" : minutes >= 300 ? "Session (5-hour)" : "Limit"
+                    let resets = number(window["resets_at"]).map { Date(timeIntervalSince1970: $0) }
+                    // A window that has reset since is unused again.
+                    let percent = resets.map { $0 < Date() } == true ? 0 : min(1, max(0, used / 100))
+                    found.append(UsageLimit(label: label, percent: percent, resetsAt: resets.flatMap { $0 < Date() ? nil : $0 }))
+                }
+                if !found.isEmpty { return found }
             }
-            return found
         }
         return nil
     }

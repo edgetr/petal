@@ -456,14 +456,14 @@ struct ClaudePanelView: View {
                     Picker("", selection: Binding(get: { app.currentModel(for: provider) }, set: { app.config.set(provider.modelSetting, $0) })) {
                         ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
                     }
-                    .pickerStyle(.segmented).labelsHidden().fixedSize()
+                    .pickerStyle(.segmented).labelsHidden().segments(app.models(for: provider).count)
                 }
             }
             OptionRow(title: "Effort") {
                 Picker("", selection: Binding(get: { app.config.string(provider.effortSetting) }, set: { app.config.set(provider.effortSetting, $0) })) {
                     ForEach(app.efforts(for: provider), id: \.self) { Text($0).tag($0) }
                 }
-                .pickerStyle(.segmented).labelsHidden().fixedSize()
+                .pickerStyle(.segmented).labelsHidden().segments(app.efforts(for: provider).count)
             }
             OptionRow(title: "Full access") {
                 let full = app.config.string("claudeAccess") == "full"
@@ -544,6 +544,12 @@ struct ClaudePanelView: View {
         panel.draft = ""
         agent.send(text)
     }
+}
+
+extension View {
+    /// A segmented picker as wide as its segments, each the same width whoever's choices they are: Claude's five
+    /// efforts and Codex's six look alike, rather than stretching to the row's end.
+    func segments(_ count: Int) -> some View { frame(width: CGFloat(count) * 73) }
 }
 
 struct OptionRow<Content: View>: View {
