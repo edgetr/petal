@@ -4,7 +4,7 @@ import AppKit
 /// Omarchy, so any agent (T3 Code, Claude Code, Codex in a terminal) or person can drive the dock from a shell.
 enum CLI {
     static let commands: Set<String> = ["mode", "stay", "current", "desktop", "ask", "chat", "search", "settings", "reveal", "check",
-                                        "dock", "restart", "version", "update", "modes", "get", "set", "restore-dock", "restore-windows", "help",
+                                        "dock", "restart", "version", "update", "modes", "get", "set", "restore-dock", "restore-windows", "help", "logs",
                                         "recipe", "suggest", "summary", "overview", "personal", "bench"]
 
     static let help = """
@@ -27,6 +27,7 @@ enum CLI {
     petal doctor [--fix]      check Petal, and repair what it safely can
     petal report "<what>"     tell Petal's maker what went wrong (a GitHub issue; shown to you first)
     petal restore-dock        give macOS its Dock back, even if Petal crashed
+    petal logs [<minutes>]    Petal's own log, the last 30 minutes (or as many as asked)
     petal bench               time the dock's clicks (brings apps forward and switches modes for ~15 s;
                               results in ~/Library/Logs/Petal/bench.json)
     petal bench quiet         only hovering the icons and a setting back and forth (no app or mode changes)
@@ -73,6 +74,17 @@ enum CLI {
             Personal.command(rest)
         case "restore-windows":
             restoreWindows()
+        case "restore-dock":
+            // Done here, not by the running Petal: it has to work when Petal has crashed.
+            MainActor.assumeIsolated {
+                guard SystemDock.isReplaced else { print("macOS's Dock is already as you had it."); return }
+                SystemDock.restore()
+                print("macOS's Dock is back as you had it.")
+            }
+        case "logs":
+            let minutes = rest.first.flatMap(Int.init) ?? 30
+            let lines = MainActor.assumeIsolated { Doctor.logLines(minutes: minutes) }
+            print(lines.isEmpty ? "Nothing in Petal's log in the last \(minutes) minutes." : lines.joined(separator: "\n"))
         case "mode":
             guard let id = rest.first else { fail("usage: petal mode <id>") }
             print(MCP.petal("mode", id))
@@ -150,7 +162,7 @@ enum CLI {
 @MainActor
 enum OtherAgents {
     static func connect(paths: [Provider: String]) {
-        guard let executable = Bundle.main.executablePath else { return }
+        guard let executable = Bundle.main.executableURL?.resolvingSymlinksInPath().path else { return }
         Skill.install()
         linkCommand(executable)
         let environment = PetalApp.shared.childEnvironment
@@ -164,7 +176,9 @@ enum OtherAgents {
         let bin = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin")
         let link = bin.appending(path: "petal")
         if let existing = try? FileManager.default.destinationOfSymbolicLink(atPath: link.path) {
-            guard existing != executable, existing.contains("Petal.app") || existing.contains("/petal/") else { return }
+            // Petal's own link (or a broken one: pointing nowhere, or at itself) is made anew.
+            let broken = !FileManager.default.fileExists(atPath: link.path)
+            guard existing != executable, broken || existing.contains("Petal.app") || existing.contains("/petal/") else { return }
             try? FileManager.default.removeItem(at: link)
         } else if FileManager.default.fileExists(atPath: link.path) {
             return

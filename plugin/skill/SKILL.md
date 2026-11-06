@@ -19,9 +19,10 @@ Use, in this order:
 
 1. Petal's MCP tools, when the `petal` server is connected: `petal_get_state` first, then `petal_set_settings`,
    `petal_set_dock`, `petal_save_mode`, `petal_delete_mode`, `petal_set_default_mode`, `petal_switch_mode`,
-   `petal_list_apps`, `petal_reload`. Changes apply instantly. `petal_export_recipe` / `petal_import_recipe` share
-   a dock as a `.petal` file (modes, apps by name, look; nothing personal) or add one someone shared (`look: true`
-   also takes its look; say what it adds before importing); `petal_suggestions` and `petal_summary` read the
+   `petal_list_apps`, `petal_reload`, `petal_reset_settings` (every setting back to its default: ask first).
+   Changes apply instantly. `petal_export_recipe` / `petal_import_recipe` share a dock as a `.petal` file (modes,
+   apps by name, look; nothing personal) or add one someone shared (`look: true` also takes its look; say what it
+   adds before importing); `petal_suggestions` and `petal_summary` read the
    private activity history.
 2. The `petal` command: `petal get` (everything, with each setting's help), `petal set <key> <json value>`,
    `petal mode <id>`, `petal current`, `petal modes`, `petal dock petal|macos` (macOS), `petal restart`,
@@ -30,7 +31,7 @@ Use, in this order:
    `petal help` lists them all.
 3. The files in `~/.config/petal/`; Petal reloads them within a second:
 
-- `settings.json`: settings; `petal_get_state` (or `petal doctor --json`) lists every key with its default and help.
+- `settings.json`: settings; `petal_get_state` (or `petal get`) lists every key with its default and help.
 - `modes.json`: `{"defaultMode", "workspaces": {"<n>": "<mode id>"}, "modes": [{"id", "name", "icon", "color",
   "about", "apps", "sites", "distracting", "focusDelay", "hold", "allow"}]}`. On Omarchy apps are desktop ids and icons
   Nerd Font glyphs; on macOS apps are bundle ids, icons SF Symbol names, and workspace numbers are Desktop numbers. An
@@ -74,7 +75,8 @@ More that shapes a dock:
    Ask the user before reporting; never paste personal data into an issue.
 
 On macOS `petal` may not be on the PATH: the same commands are `/Applications/Petal.app/Contents/MacOS/Petal doctor`
-and `… report`. Logs: `petal logs` (Omarchy's shell log; on macOS the system log for Petal).
+and `… report`. Logs: `petal logs` (Omarchy's shell log; on macOS Petal's own messages in the system log, the last
+30 minutes, or `petal logs <minutes>`).
 
 ## Things to know
 

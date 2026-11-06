@@ -7,14 +7,32 @@ import Foundation
 ///     printf '["current"]\n' | nc -U ~/.config/petal/petal.sock
 @MainActor
 final class IPC {
-    static let path = Config.folder.appending(path: "petal.sock").path
+    nonisolated static let path = Config.folder.appending(path: "petal.sock").path
     typealias Handler = @MainActor ([String]) -> String
     private var handlers: [String: Handler] = [:]
     private var fd: Int32 = -1
 
     func on(_ name: String, _ handler: @escaping Handler) { handlers[name] = handler }
 
+    /// Another Petal answers on the socket already: this one mustn't take it from it.
+    nonisolated static func answering() -> Bool {
+        let probe = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard probe >= 0 else { return false }
+        defer { close(probe) }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8)
+        guard bytes.count < MemoryLayout.size(ofValue: address.sun_path) else { return false }
+        withUnsafeMutableBytes(of: &address.sun_path) { buffer in
+            for (i, byte) in bytes.enumerated() { buffer[i] = byte }
+        }
+        return withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(probe, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        } == 0
+    }
+
     func start() {
+        guard !Self.answering() else { return }
         unlink(Self.path)
         fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return }

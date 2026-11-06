@@ -1,5 +1,12 @@
 import AppKit
 
+// Started through a link (~/.local/bin/petal): run again as the app itself, so Bundle.main is Petal.app (its
+// Info.plist, tools and id) rather than the folder the link is in.
+if let path = Bundle.main.executableURL?.path {
+    let real = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    if real != path { execv(real, CommandLine.unsafeArgv) }   // returns only if it couldn't
+}
+
 // `Petal --mcp`: Claude's Petal tools on stdin and stdout, started by the Claude panel's session.
 if CommandLine.arguments.contains("--mcp") { MCP.run() }
 
@@ -35,10 +42,19 @@ MainActor.assumeIsolated {
         Snapshot.run(to: arguments[index + 1])
         exit(0)
     }
+    // Anything else typed after `petal` is a command it doesn't know: say so, rather than start a second dock.
+    // (macOS's own launch arguments start with "-": -NSDocumentRevisionsDebugMode, -psn_…)
+    if let first = arguments.dropFirst().first {
+        if ["-h", "--help", "-help"].contains(first) { print(CLI.help); exit(0) }
+        if !first.hasPrefix("-") {
+            FileHandle.standardError.write(Data("petal: no command \"\(first)\". These are the ones there are:\n\n\(CLI.help)\n".utf8))
+            exit(1)
+        }
+    }
 
     // One Petal at a time. A restart waits for the old one to finish giving the Dock back.
     let others = {
-        NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+        NSRunningApplication.runningApplications(withBundleIdentifier: "tech.edgetr.petal")
             .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
     }
     let deadline = Date().addingTimeInterval(5)

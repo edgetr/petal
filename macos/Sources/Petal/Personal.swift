@@ -74,6 +74,7 @@ enum Personal {
         environment["PETAL_PLATFORM"] = "macos"
         environment["PETAL_PERSONAL_SOURCE"] = source.path
         environment["PETAL_INSTALLED_VERSION"] = version
+        environment["PETAL_SOURCE_COMMIT"] = Bundle.main.object(forInfoDictionaryKey: "PetalSourceCommit") as? String ?? ""
         let settings = MCP.read(MCP.settingsFile) ?? [:]
         let chosen = (settings["aiProviders"] as? [String] ?? MCP.schema["aiProviders"]?.first as? [String] ?? ["claude"]).compactMap(Provider.init(rawValue:))
         let provider = Provider(rawValue: settings["chatProvider"] as? String ?? "").flatMap { chosen.contains($0) ? $0 : nil } ?? chosen.first
@@ -300,6 +301,9 @@ enum Personal {
         let rest = Array(arguments.dropFirst())
         setvbuf(stdout, nil, _IOLBF, 0)   // in order with the core's output, even through a pipe
         if ["help", "-h", "--help"].contains(command) { print(help); exit(0) }
+        guard Bundle.main.path(forResource: "petal-personal", ofType: nil, inDirectory: "personal") != nil else {
+            CLI.fail("This Petal.app is missing its petal-personal script; reinstall Petal.")
+        }
         if isDevelopmentBuild {
             CLI.fail("This Petal is built from a source checkout (\(Bundle.main.bundlePath.replacingOccurrences(of: NSHomeDirectory(), with: "~"))): change that checkout, and build it with macos/build.sh.")
         }

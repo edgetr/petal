@@ -139,7 +139,7 @@ How it maps to Omarchy:
 `bin/petal-personal` (`petal personal init | status | list | save | undo [n] | reset | restore | retry`) keeps the person's own changes to Petal's code through every update. A git repository of Petal's source (`~/.local/share/petal/source` on Omarchy, `~/Library/Application Support/Petal/source` on macOS): branch `upstream` holds released source, `mine` the person's commits on top. A release is committed onto upstream and `mine` is rebased onto it in a separate worktree; conflicts go to the person's chosen AI (its chat model: rare, and it needs a strong one), and the result must have no conflict markers and build (macOS) or bring the dock up (Omarchy, checked by `petal restart`), else the person keeps their Petal and is told. A backup ref (`refs/petal/backups/`) is taken before every rewrite.
 
 - **Omarchy:** the dock runs the source's `plugin/` while it's in use; `get.sh` and `install.sh` only look for `source/.git`, and the scripts stay the release's.
-- **macOS:** `Personal.swift` gets Apple's command line tools (`xcode-select --install`), builds with the source's `macos/build.sh` (`PETAL_ARCHS` set to this Mac's architecture), signs with "Petal (Personal)" (a certificate in Petal's own keychain under `~/Library/Application Support/Petal/signing`, made once per Mac, never the release certificate), and installs over Petal.app.
+- **macOS:** the source comes from the commit the app was built from (`build.sh` writes it into Info.plist as `PetalSourceCommit`), else the version's `macos-v` tag. `Personal.swift` gets Apple's command line tools (`xcode-select --install`), builds with the source's `macos/build.sh` (`PETAL_ARCHS` set to this Mac's architecture), signs with "Petal (Personal)" (a certificate in Petal's own keychain under `~/Library/Application Support/Petal/signing`, made once per Mac, never the release certificate), and installs over Petal.app.
 
 ### Every agent can change Petal
 
@@ -147,7 +147,7 @@ Any AI session the owner opens (Petal's own panel, T3 Code, Claude Code or Codex
 
 - **MCP:** Petal registers its server, `petal`, with Claude Code and Codex through their own `mcp add` (`install.sh` on Omarchy, every start on macOS).
 - **Skill:** `plugin/skill/SKILL.md`, in `~/.claude/skills/petal` and `~/.codex/skills/petal`: what Petal is, how to change it, how to fix it, and how to change its code.
-- **CLI:** `petal` (`bin/petal` on Omarchy; Petal.app's own executable linked as `~/.local/bin/petal` on macOS): `get`, `set`, `mode`, `doctor`, `report`, and the IPC functions.
+- **CLI:** `petal` (`bin/petal` on Omarchy; Petal.app's own executable linked as `~/.local/bin/petal` on macOS, which runs itself again from the app so it finds its own files): `get`, `set`, `mode`, `doctor`, `report`, `logs`, and the IPC functions. A word it doesn't know prints the commands and never starts a second dock; a second Petal never takes the socket from one that answers.
 
 Change the skill when Petal's files, tools or commands change, so agents stay right.
 
