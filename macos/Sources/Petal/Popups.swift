@@ -985,7 +985,8 @@ struct AskCard: View {
 
     var body: some View {
         if let request = app.assist.pending {
-            AskRequestView(request: request)
+            // Its own view per question: nothing typed for one is ever kept for the next.
+            AskRequestView(request: request).id(request.id)
         }
     }
 }
@@ -1008,17 +1009,17 @@ struct AskRequestView: View {
                 Spacer(minLength: 0)
             }
             if request.secret {
-                SecureField("Type it here", text: $secret).textFieldStyle(.roundedBorder).onSubmit { app.assist.choose(.once, secret: secret) }
+                SecureField("Type it here", text: $secret).textFieldStyle(.roundedBorder).onSubmit { app.assist.choose(.once, secret: secret, for: request.id) }
             }
             HStack(spacing: 8) {
                 Spacer()
-                Button("Don't") { app.assist.choose(.no) }.buttonStyle(.glass)
+                Button("Don't") { app.assist.choose(.no, for: request.id) }.buttonStyle(.glass)
                 if request.secret {
-                    Button("Save") { app.assist.choose(.once, secret: secret) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
+                    Button("Save") { app.assist.choose(.once, secret: secret, for: request.id) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
                         .disabled(secret.isEmpty)
                 } else {
-                    if !request.every { Button("Always") { app.assist.choose(.always) }.buttonStyle(.glass) }
-                    Button("Allow") { app.assist.choose(.once) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
+                    if !request.every { Button("Always") { app.assist.choose(.always, for: request.id) }.buttonStyle(.glass) }
+                    Button("Allow") { app.assist.choose(.once, for: request.id) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
                 }
             }
         }

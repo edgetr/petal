@@ -607,28 +607,15 @@ struct NotePlaceLine: View {
     }
 }
 
-/// Which request to bring a note's window forward is the newest: a counter behind a lock, so cancelling reaches
-/// it at once from any thread (never waiting behind a slow Accessibility call on the window queue).
+/// Which request to bring a note's window forward is the newest (`Generation`: cancelling reaches it at once from
+/// any thread, never waiting behind a slow Accessibility call). Its own counter: closing the panel, which cancels
+/// it, never stops the dock's own focusing of an app just clicked.
 enum NoteFocus {
-    private static let lock = NSLock()
-    nonisolated(unsafe) private static var newest = 0
-
-    /// A new request's number; every older one stops.
-    static func next() -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        newest += 1
-        return newest
-    }
-
-    static func cancel() { _ = next() }
-
+    private static let requests = Generation()
+    static func next() -> Int { requests.next() }
+    static func cancel() { requests.cancel() }
     /// Still the newest: checked right before every activate and raise.
-    static func current(_ request: Int) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return newest == request
-    }
+    static func current(_ request: Int) -> Bool { requests.current(request) }
 }
 
 /// An app's icon, never read from the disk on the main thread: the one Petal has already, else a plain one until

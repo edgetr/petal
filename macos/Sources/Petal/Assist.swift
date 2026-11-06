@@ -81,8 +81,10 @@ final class Assist {
 
     @ObservationIgnored private var secretTyped: ((String) -> Void)?
 
-    func choose(_ choice: Choice, secret: String = "") {
-        guard let pending else { return }
+    /// The answer to the question `id` (a newer question replaced an older one, which was answered Don't then: an
+    /// answer meant for the older one, or a secret typed for it, never goes to the newer).
+    func choose(_ choice: Choice, secret: String = "", for id: UUID? = nil) {
+        guard let pending, id == nil || pending.id == id else { return }
         if pending.secret, choice != .no {
             guard !secret.isEmpty else { return }
             secretTyped?(secret)
@@ -144,7 +146,7 @@ final class Assist {
             do {
                 let title = args["title"] as? String ?? "Petal"
                 let file = try Pages.show(title: title, markdown: args["markdown"] as? String,
-                                          html: args["html"] as? String, path: args["path"] as? String)
+                                          html: args["html"] as? String, path: args["path"] as? String, update: args["update"] as? String)
                 did("Made a page: \(title)", undo: .open(file.path, title))
                 send(["opened": file.path])
             } catch { fail(error.localizedDescription) }
@@ -276,8 +278,11 @@ final class Assist {
             filter = SCContentFilter(desktopIndependentWindow: match)
             size = match.frame.size
         } else if let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first {
-            // The screen without the apps kept private.
-            filter = SCContentFilter(display: display, excludingApplications: content.applications.filter { hiding.contains($0.processID) }, exceptingWindows: [])
+            // The screen without the apps kept private, and without Petal's own windows: its previews, banners,
+            // cards and stacks can show what's in those apps (and the chat itself needn't be in the picture).
+            let me = ProcessInfo.processInfo.processIdentifier
+            filter = SCContentFilter(display: display, excludingApplications: content.applications.filter { hiding.contains($0.processID) || $0.processID == me },
+                                     exceptingWindows: [])
             size = CGSize(width: display.width, height: display.height)
         } else { return nil }
         let configuration = SCStreamConfiguration()

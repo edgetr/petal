@@ -218,7 +218,9 @@ enum Pages {
     static let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Petal/pages")
 
     /// Shows a page: `markdown`, or `html` (a whole document, or a body), or a file at `path`. Returns its file.
-    static func show(title: String, markdown: String?, html: String?, path: String?) throws -> URL {
+    /// Each page is a new file (its title, and a few letters of its own, so two pages called the same never meet);
+    /// `update`, a page's file returned before, changes that page in place.
+    static func show(title: String, markdown: String?, html: String?, path: String?, update: String? = nil) throws -> URL {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let file: URL
         if let path, !path.isEmpty {
@@ -226,14 +228,21 @@ enum Pages {
             guard FileManager.default.fileExists(atPath: source.path) else { throw MCP.Failure("No file at \(path).") }
             let text = (try? String(contentsOf: source, encoding: .utf8)) ?? ""
             let isHTML = ["html", "htm"].contains(source.pathExtension.lowercased())
-            return try show(title: title, markdown: isHTML ? nil : text, html: isHTML ? text : nil, path: nil)
+            return try show(title: title, markdown: isHTML ? nil : text, html: isHTML ? text : nil, path: nil, update: update)
         }
         let body = html ?? Markdown.html(markdown ?? "")
         // A whole page keeps its own look, inside Petal's window; a body gets Petal's.
         let document = body.lowercased().contains("<html") ? body : template(title: title, body: body)
         let slug = title.lowercased().map { $0.isLetter || $0.isNumber ? $0 : "-" }.reduce("") { $0 + String($1) }
             .split(separator: "-").joined(separator: "-")
-        file = folder.appending(path: (slug.isEmpty ? "page" : String(slug.prefix(60))) + ".html")
+        let same = update.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath).standardizedFileURL }
+        if let same, same.deletingLastPathComponent().path == folder.standardizedFileURL.path, same.pathExtension == "html",
+           FileManager.default.fileExists(atPath: same.path) {
+            file = same
+        } else {
+            let unique = UUID().uuidString.prefix(6).lowercased()
+            file = folder.appending(path: (slug.isEmpty ? "page" : String(slug.prefix(60))) + "-\(unique).html")
+        }
         try document.write(to: file, atomically: true, encoding: .utf8)
         open(file, title: title)
         return file

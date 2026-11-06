@@ -13,6 +13,8 @@ struct SavedChat: Codable, Identifiable, Equatable {
     var lines: [Line]
     /// The window a sticky note was stuck to (nil for a chat stuck to none, and chats from before notes).
     var place: NotePlace?
+    /// Messages written but not sent yet when it was kept (Petal quit while it worked): shown as still to send.
+    var pending: [String]?
 }
 
 @MainActor

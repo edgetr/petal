@@ -51,8 +51,14 @@ final class Agent {
     var app: PetalApp { PetalApp.shared }
 
     /// Messages written while it works, sent once the run ends (queued), or at once by ending it (steering).
-    private(set) var queued: [String] = []
+    /// Kept with the chat (Chats.swift), so a quit while it works loses none; they're never sent by themselves at
+    /// launch, only with the person's next message or "Send now".
+    private(set) var queued: [String] = [] { didSet { if queued != oldValue { keep() } } }
     @ObservationIgnored private var steering = 0
+    /// Where the messages waiting for room begin in `messages`: saved as still to send, not as sent.
+    @ObservationIgnored private var waitingFrom: Int?
+    static let approved = "I approved that. Go ahead and run it, then continue."
+
 
     func send(_ text: String) {
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -74,17 +80,36 @@ final class Agent {
         pendingAsk = []
         steering = max(0, steering - 1)
         if sessionID == nil, askedWith == nil { askedWith = app.chatProvider }
+        let index = messages.count
         messages.append(Message(kind: .user, text: prompt))
-        admit(prompt)
+        admit(prompt, from: index)
+    }
+
+    /// The messages still to send (kept from before Petal quit, or written while it worked), now, with `text` after
+    /// them: all in one turn.
+    func sendQueued(with text: String? = nil) {
+        guard !running else { return }
+        var all = queued
+        if let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty { all.append(text) }
+        guard !all.isEmpty else { return }
+        queued = []
+        pendingAsk = []
+        if sessionID == nil, askedWith == nil { askedWith = app.chatProvider }
+        let index = messages.count
+        for text in all { messages.append(Message(kind: .user, text: text)) }
+        admit(all.joined(separator: "\n\n"), from: index)
     }
 
     /// Runs now, or (with `ClaudePanel.atOnce` other notes working, or messages already waiting) waits its turn.
-    private func admit(_ prompt: String) {
+    /// `index`: where its message is in the chat.
+    private func admit(_ prompt: String, from index: Int) {
         if !waiting.isEmpty || app.claude.working >= ClaudePanel.atOnce {
             if waiting.isEmpty {
+                waitingFrom = index
                 messages.append(Message(kind: .step, text: "Waiting: \(ClaudePanel.atOnce) other notes are working. This starts when one is done."))
             }
             waiting.append(prompt)
+            keep()
             return
         }
         run(prompt)
@@ -95,6 +120,7 @@ final class Agent {
         guard !waiting.isEmpty, !running else { return }
         let prompt = waiting.joined(separator: "\n\n")
         waiting = []
+        waitingFrom = nil
         run(prompt)
     }
 
@@ -110,7 +136,7 @@ final class Agent {
         for denial in pendingAsk { for rule in denial.rules where !allowed.contains(rule) { allowed.append(rule) } }
         pendingAsk = []
         messages.append(Message(kind: .step, text: "Allowed"))
-        admit("I approved that. Go ahead and run it, then continue.")
+        admit(Self.approved, from: messages.count)
     }
 
     func deny() {
@@ -137,6 +163,7 @@ final class Agent {
         runID = UUID()
         queued = []
         waiting = []
+        waitingFrom = nil
         // Its place among the notes working is free: one waiting for it starts.
         if freed { DispatchQueue.main.async { PetalApp.shared.claude.startWaiting() } }
     }
@@ -165,13 +192,16 @@ final class Agent {
 
     /// This chat as it's kept (nil before its first message).
     var saved: SavedChat? {
-        let lines = messages.filter { $0.kind != .ask }.map { SavedChat.Line(kind: Self.name($0.kind), text: $0.text) }
+        // Messages waiting for room aren't sent yet: they're kept as still to send, with what's queued.
+        let sent = waiting.isEmpty ? messages : Array(messages.prefix(min(waitingFrom ?? messages.count, messages.count)))
+        let lines = sent.filter { $0.kind != .ask }.map { SavedChat.Line(kind: Self.name($0.kind), text: $0.text) }
+        let pending = waiting.filter { $0 != Self.approved } + queued
         guard let first = messages.first(where: { $0.kind == .user }) else { return nil }
         let provider = sessionProvider ?? chatProvider ?? app.chatProvider
         chatProvider = provider
         let title = first.text.components(separatedBy: "\n").first { !$0.hasPrefix(">") && !$0.hasPrefix("From ") && !$0.isEmpty } ?? first.text
         return SavedChat(id: chatID, title: String(title.prefix(80)), provider: provider?.rawValue ?? "", session: sessionID,
-                         updated: Date(), lines: lines, place: place ?? keptPlace)
+                         updated: Date(), lines: lines, place: place ?? keptPlace, pending: pending.isEmpty ? nil : pending)
     }
 
     private static func name(_ kind: Kind) -> String {
@@ -195,6 +225,8 @@ final class Agent {
         }
         let kinds: [String: Kind] = ["user": .user, "ai": .claude, "step": .step, "error": .error]
         messages = chat.lines.compactMap { line in kinds[line.kind].map { Message(kind: $0, text: line.text) } }
+        // What was still to send when it was kept: waiting, never sent by itself.
+        queued = chat.pending ?? []
     }
 
     /// The AI this chat's session belongs to, while it has one (and that AI is still chosen): a note carries on with
@@ -743,7 +775,7 @@ struct ClaudePanelView: View {
             }
             .frame(minHeight: 180, alignment: .top)
             if let request = app.assist.pending {
-                AskRequestView(request: request).padding(12).background(.white.opacity(0.06), in: .rect(cornerRadius: 14))
+                AskRequestView(request: request).id(request.id).padding(12).background(.white.opacity(0.06), in: .rect(cornerRadius: 14))
             }
             if !panel.attachments.isEmpty || !panel.quotes.isEmpty { attachmentsRow }
             input
@@ -896,6 +928,14 @@ struct ClaudePanelView: View {
                             RoundButton(symbol: "xmark", size: 18) { agent.unqueue(index) }.help("Don't send it")
                         }
                     }
+                    // Left from before (Petal quit while it worked): sent with the next message, or now.
+                    if !agent.running && !agent.queued.isEmpty {
+                        HStack {
+                            Spacer()
+                            Button(agent.queued.count == 1 ? "Send it now" : "Send them now") { agent.sendQueued() }
+                                .buttonStyle(.glass).controlSize(.small)
+                        }
+                    }
                 }
                 .padding(.vertical, 2)
             }
@@ -993,7 +1033,8 @@ struct ClaudePanelView: View {
         panel.draft = ""
         panel.optionsOpen = false
         panel.chatsOpen = false
-        agent.send(text)
+        // Messages left to send go first, in the same turn.
+        if !agent.running && !agent.queued.isEmpty { agent.sendQueued(with: text) } else { agent.send(text) }
     }
 }
 

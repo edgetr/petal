@@ -1,6 +1,28 @@
 import AppKit
 import ApplicationServices
 
+/// A request counter any thread can bump or check at once (behind a lock): a newer request makes older ones stand
+/// down, even while they wait on an app that's slow to answer.
+final class Generation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var newest = 0
+
+    func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        newest += 1
+        return newest
+    }
+
+    func cancel() { _ = next() }
+
+    func current(_ request: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return newest == request
+    }
+}
+
 /// An app's window, as Accessibility sees it.
 struct AppWindow: Identifiable, Equatable {
     let id: String          // pid and the window server's number for it (else its place in the app's list)
@@ -78,39 +100,59 @@ enum Windows {
     /// This window is raised last, after its app comes forward, and once more a moment later: bringing an app
     /// forward through Launch Services asks it to reopen, and an app like Zoom answers by showing its main window
     /// over the one asked for.
-    /// Each focus request; a later one makes an earlier one's delayed retries stand down.
-    private static var focusing = 0
+    /// Each focus request; a later one makes an earlier one stand down, its delayed retries included. A counter
+    /// behind a lock, so a new request reaches it at once, never waiting behind an app that's slow to answer.
+    nonisolated static let focusing = Generation()
+    /// Where focusing happens: every Accessibility call and Launch Services, never on the dock's main thread.
+    nonisolated static let focusQueue = DispatchQueue(label: "petal.windows.focus", qos: .userInitiated)
 
     static func focus(_ window: AppWindow, onScreen: Bool = false) {
-        focusing += 1
-        let ticket = focusing
-        if window.minimized { AXUIElementSetAttributeValue(window.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
-        let raise = {
-            AXUIElementPerformAction(window.element, kAXRaiseAction as CFString)
-            AXUIElementSetAttributeValue(window.element, kAXMainAttribute as CFString, kCFBooleanTrue)
-            AXUIElementSetAttributeValue(window.element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-        }
-        raise()
-        guard let app = NSRunningApplication(processIdentifier: window.pid) else { return }
-        var forward = false
-        if onScreen && !window.minimized && !app.isHidden {
-            let element = AXUIElementCreateApplication(window.pid)
-            AXUIElementSetMessagingTimeout(element, 0.3)
-            forward = AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
-        }
-        if !forward { bringForward(app) }
-        raise()
-        // Some apps (Chromium browsers) say yes to coming forward through Accessibility and don't: if it isn't in
-        // front a moment later, Launch Services brings it, which always works.
-        if forward {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                guard ticket == focusing, NSWorkspace.shared.frontmostApplication?.processIdentifier != window.pid else { return }
-                bringForward(app)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { if ticket == focusing { raise() } }
+        let ticket = focusing.next()
+        let element = window.element, pid = window.pid, minimized = window.minimized
+        let app = NSRunningApplication(processIdentifier: window.pid)
+        let url = app?.bundleURL, hidden = app?.isHidden ?? false
+        focusQueue.async {
+            guard focusing.current(ticket) else { return }
+            if minimized { AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
+            let raise = {
+                guard focusing.current(ticket) else { return }
+                AXUIElementPerformAction(element, kAXRaiseAction as CFString)
+                AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
+                AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
             }
-        }
-        for delay in forward ? [0.12] : [0.15, 0.4] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { if ticket == focusing { raise() } }
+            let bring = {
+                guard focusing.current(ticket) else { return }
+                if let url {
+                    let configuration = NSWorkspace.OpenConfiguration()
+                    configuration.activates = true
+                    configuration.addsToRecentItems = false
+                    NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+                } else {
+                    DispatchQueue.main.async { app?.activate() }
+                }
+            }
+            raise()
+            guard app != nil else { return }
+            var forward = false
+            if onScreen && !minimized && !hidden && focusing.current(ticket) {
+                let element = AXUIElementCreateApplication(pid)
+                AXUIElementSetMessagingTimeout(element, 0.3)
+                forward = AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
+            }
+            if !forward { bring() }
+            raise()
+            // Some apps (Chromium browsers) say yes to coming forward through Accessibility and don't: if it isn't
+            // in front a moment later, Launch Services brings it, which always works.
+            if forward {
+                focusQueue.asyncAfter(deadline: .now() + 0.15) {
+                    guard NSWorkspace.shared.frontmostApplication?.processIdentifier != pid else { return }
+                    bring()
+                    focusQueue.asyncAfter(deadline: .now() + 0.2) { raise() }
+                }
+            }
+            for delay in forward ? [0.12] : [0.15, 0.4] {
+                focusQueue.asyncAfter(deadline: .now() + delay) { raise() }
+            }
         }
     }
 
