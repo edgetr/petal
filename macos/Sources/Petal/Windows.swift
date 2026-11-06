@@ -145,15 +145,15 @@ extension Windows {
     /// `_AXUIElementGetWindow`, the private call every window manager uses to tie an Accessibility window to the
     /// window server's id. Looked up at run time, so a macOS without it leaves per-mode windows and tiling idle
     /// instead of failing to launch.
-    private static let getWindow: GetWindow? = {
+    nonisolated private static let getWindow: GetWindow? = {
         guard let pointer = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow") else { return nil }   // RTLD_DEFAULT
         return unsafeBitCast(pointer, to: GetWindow.self)
     }()
 
-    static var canManage: Bool { getWindow != nil }
+    nonisolated static var canManage: Bool { getWindow != nil }
 
     /// The window server's id of an Accessibility window.
-    static func id(of element: AXUIElement) -> CGWindowID? {
+    nonisolated static func id(of element: AXUIElement) -> CGWindowID? {
         guard let getWindow else { return nil }
         var id: CGWindowID = 0
         return getWindow(element, &id) == .success && id != 0 ? id : nil
@@ -292,8 +292,11 @@ extension Windows {
     }
 }
 
-/// What windows do, for Parking and Tiling: macOS tells other apps nothing about windows opening, closing, moving or
-/// minimizing, except through an Accessibility observer on each app. Observers run only while something listens.
+/// What windows do, for the dock, Parking and Tiling: macOS tells other apps nothing about windows opening, closing,
+/// moving or minimizing, except through an Accessibility observer on each app. Observers run only while something
+/// listens and Petal may use Accessibility, and start or stop when that permission changes, without a restart. They
+/// live on a thread of their own (`AXWatcher`): adding one asks the app, and a hung app must never stall the dock.
+/// Listeners hear about them on the main thread.
 @MainActor
 final class WindowEvents {
     static let shared = WindowEvents()
@@ -307,34 +310,37 @@ final class WindowEvents {
     }
 
     private var listeners: [String: (Event) -> Void] = [:]
-    private var observers: [pid_t: AXObserver] = [:]
-    private var windowIDs: [AXUIElement: CGWindowID] = [:]
     private var tokens: [NSObjectProtocol] = []
-
-    private static let appNotifications = [kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification,
-                                           kAXApplicationHiddenNotification, kAXApplicationShownNotification]
-    private static let windowNotifications = [kAXUIElementDestroyedNotification, kAXMovedNotification, kAXResizedNotification,
-                                              kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
+    /// The observers are running: something listens, and Petal may use Accessibility.
+    private(set) var live = false
 
     func listen(_ key: String, _ handler: @escaping (Event) -> Void) {
-        let starting = listeners.isEmpty
         listeners[key] = handler
-        if starting { start() }
+        checkPermission()
     }
 
     func stopListening(_ key: String) {
         listeners[key] = nil
-        if listeners.isEmpty { stop() }
+        checkPermission()
     }
 
-    private func send(_ kind: Kind, pid: pid_t, window: CGWindowID? = nil, element: AXUIElement? = nil) {
-        let event = Event(kind: kind, pid: pid, window: window, element: element)
+    /// Starts the observers once Accessibility is allowed and someone listens, and stops them when it's taken away or
+    /// nobody does. The dock asks on its timer, so permission granted in System Settings takes effect within a second.
+    func checkPermission() {
+        let wanted = !listeners.isEmpty && Windows.trusted
+        if wanted != live { wanted ? start() : stop() }
+    }
+
+    fileprivate func send(_ event: Event) {
+        guard live else { return }   // one that left the observers' thread just before they stopped
         for handler in listeners.values { handler(event) }
     }
 
+    private func send(_ kind: Kind, pid: pid_t) { send(Event(kind: kind, pid: pid, window: nil, element: nil)) }
+
     private func start() {
-        guard Windows.trusted else { return }
-        for app in NSWorkspace.shared.runningApplications { observe(app) }
+        live = true
+        AXWatcher.shared.start()
         let center = NSWorkspace.shared.notificationCenter
         func on(_ name: Notification.Name, _ body: @escaping @MainActor (NSRunningApplication?) -> Void) {
             tokens.append(center.addObserver(forName: name, object: nil, queue: .main) { note in
@@ -344,24 +350,24 @@ final class WindowEvents {
         }
         on(NSWorkspace.didLaunchApplicationNotification) { [weak self] app in
             guard let self, let app else { return }
-            observe(app)
+            AXWatcher.shared.observe(app)
             send(.launched, pid: app.processIdentifier)
         }
         on(NSWorkspace.didTerminateApplicationNotification) { [weak self] app in
             guard let self, let app else { return }
-            forget(app.processIdentifier)
+            AXWatcher.shared.forget(app.processIdentifier)
+            Windows.forget(pid: app.processIdentifier)
             send(.quit, pid: app.processIdentifier)
         }
         on(NSWorkspace.didActivateApplicationNotification) { [weak self] app in
             guard let self, let app else { return }
-            observe(app)   // an app that wasn't ready when it launched
+            AXWatcher.shared.observe(app)   // an app that wasn't ready when it launched
             send(.activated, pid: app.processIdentifier)
         }
         on(NSWorkspace.activeSpaceDidChangeNotification) { [weak self] _ in
-            guard let self else { return }
             // Accessibility lists only the windows of the Desktops showing: those of the one just shown are new to it.
-            for pid in observers.keys { watchAll(pid) }
-            send(.space, pid: 0)
+            AXWatcher.shared.watchAll()
+            self?.send(.space, pid: 0)
         }
         tokens.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil,
                                                              queue: .main) { [weak self] _ in
@@ -370,26 +376,113 @@ final class WindowEvents {
     }
 
     private func stop() {
+        live = false
         for token in tokens {
             NSWorkspace.shared.notificationCenter.removeObserver(token)
             NotificationCenter.default.removeObserver(token)
         }
         tokens = []
-        for observer in observers.values {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        AXWatcher.shared.stop()
+    }
+}
+
+/// Every app's Accessibility observer, on a thread of its own with its own run loop. Adding an observer, listing an
+/// app's windows and asking a window's id all wait on the app (up to 0.3 s each, for one that hangs), so none of it
+/// happens on the main thread. Everything below runs on this thread; WindowEvents calls in through `perform`.
+final class AXWatcher: @unchecked Sendable {
+    static let shared = AXWatcher()
+
+    private var runLoop: CFRunLoop!
+    private var observers: [pid_t: AXObserver] = [:]
+    private var windowIDs: [AXUIElement: CGWindowID] = [:]
+    private var running = false
+    private var generation = 0   // retries from before a stop are dropped
+
+    private static let appNotifications = [kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification,
+                                           kAXApplicationHiddenNotification, kAXApplicationShownNotification]
+    private static let windowNotifications = [kAXUIElementDestroyedNotification, kAXMovedNotification, kAXResizedNotification,
+                                              kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
+
+    private init() {
+        let ready = DispatchSemaphore(value: 0)
+        let thread = Thread { [unowned self] in
+            runLoop = CFRunLoopGetCurrent()
+            RunLoop.current.add(NSMachPort(), forMode: .default)   // keeps the run loop waiting before any observer exists
+            ready.signal()
+            while true { RunLoop.current.run(mode: .default, before: .distantFuture) }
         }
-        observers = [:]
-        windowIDs = [:]
+        thread.name = "petal.window-events"
+        thread.qualityOfService = .userInitiated
+        thread.start()
+        ready.wait()
     }
 
-    private func observe(_ app: NSRunningApplication, attempt: Int = 0) {
+    private func perform(_ block: @escaping () -> Void) {
+        CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue, block)
+        CFRunLoopWakeUp(runLoop)
+    }
+
+    // MARK: Called from the main thread
+
+    func start() {
+        perform { [self] in
+            running = true
+            generation += 1
+            for app in NSWorkspace.shared.runningApplications { observe(app, attempt: 0, generation: generation) }
+        }
+    }
+
+    func stop() {
+        perform { [self] in
+            running = false
+            generation += 1
+            for observer in observers.values {
+                CFRunLoopRemoveSource(runLoop, AXObserverGetRunLoopSource(observer), .defaultMode)
+            }
+            observers = [:]
+            windowIDs = [:]
+        }
+    }
+
+    func observe(_ app: NSRunningApplication) {
+        perform { [self] in observe(app, attempt: 0, generation: generation) }
+    }
+
+    func forget(_ pid: pid_t) {
+        perform { [self] in
+            if let observer = observers.removeValue(forKey: pid) {
+                CFRunLoopRemoveSource(runLoop, AXObserverGetRunLoopSource(observer), .defaultMode)
+            }
+            windowIDs = windowIDs.filter { element, _ in
+                var owner: pid_t = 0
+                return AXUIElementGetPid(element, &owner) == .success && owner != pid
+            }
+        }
+    }
+
+    /// Watches every window not watched yet, of every app: after a Desktop change, which brings windows into view.
+    func watchAll() {
+        perform { [self] in for pid in Array(observers.keys) { watchAll(pid) } }
+    }
+
+    /// How many apps and windows are being watched (`Petal --bench`). Waits for this thread.
+    func counts() -> (apps: Int, windows: Int) {
+        var result = (0, 0)
+        let done = DispatchSemaphore(value: 0)
+        perform { [self] in result = (observers.count, windowIDs.count); done.signal() }
+        done.wait()
+        return result
+    }
+
+    // MARK: On this thread
+
+    private func observe(_ app: NSRunningApplication, attempt: Int, generation: Int) {
         let pid = app.processIdentifier
-        guard observers[pid] == nil, app.activationPolicy == .regular, pid != ProcessInfo.processInfo.processIdentifier,
-              !app.isTerminated else { return }
+        guard running, generation == self.generation, observers[pid] == nil, app.activationPolicy == .regular,
+              pid != ProcessInfo.processInfo.processIdentifier, !app.isTerminated else { return }
         var created: AXObserver?
         let callback: AXObserverCallback = { _, element, notification, _ in
-            let name = notification as String
-            MainActor.assumeIsolated { WindowEvents.shared.received(name, element) }
+            AXWatcher.shared.received(notification as String, element)
         }
         guard AXObserverCreate(pid, callback, &created) == .success, let observer = created else { return }
         let element = AXUIElementCreateApplication(pid)
@@ -399,14 +492,13 @@ final class WindowEvents {
         guard added > 0 else {
             // An app that has only just launched may not answer yet: try again a few times.
             if attempt < 5 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5 * Double(attempt + 1)) { [weak self] in
-                    guard let self, !self.listeners.isEmpty else { return }
-                    self.observe(app, attempt: attempt + 1)
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5 * Double(attempt + 1)) { [self] in
+                    perform { [self] in observe(app, attempt: attempt + 1, generation: generation) }
                 }
             }
             return
         }
-        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        CFRunLoopAddSource(runLoop, AXObserverGetRunLoopSource(observer), .defaultMode)
         observers[pid] = observer
         watchAll(pid)
     }
@@ -422,42 +514,40 @@ final class WindowEvents {
     private func watch(_ window: AXUIElement, pid: pid_t) {
         guard let observer = observers[pid], let id = Windows.id(of: window) else { return }
         windowIDs[window] = id
-        Windows.remember(window, as: id)
+        DispatchQueue.main.async { MainActor.assumeIsolated { Windows.remember(window, as: id) } }
         for name in Self.windowNotifications { AXObserverAddNotification(observer, window, name as CFString, nil) }
     }
 
-    private func forget(_ pid: pid_t) {
-        if let observer = observers.removeValue(forKey: pid) {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
-        }
-        windowIDs = windowIDs.filter { element, _ in
-            var owner: pid_t = 0
-            return AXUIElementGetPid(element, &owner) == .success && owner != pid
-        }
-        Windows.forget(pid: pid)
-    }
-
     private func received(_ name: String, _ element: AXUIElement) {
+        guard running else { return }
         var pid: pid_t = 0
         AXUIElementGetPid(element, &pid)
+        func send(_ kind: WindowEvents.Kind, window: CGWindowID? = nil, element: AXUIElement? = nil) {
+            let event = WindowEvents.Event(kind: kind, pid: pid, window: window, element: element)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if kind == .closed, let window { Windows.forget(window) }
+                    WindowEvents.shared.send(event)
+                }
+            }
+        }
         switch name {
         case kAXWindowCreatedNotification:
             watch(element, pid: pid)
-            send(.created, pid: pid, window: windowIDs[element], element: element)
+            send(.created, window: windowIDs[element], element: element)
         case kAXUIElementDestroyedNotification:
             // A closed window can't be asked its id any more: it's the one remembered for this element.
             guard let id = windowIDs.removeValue(forKey: element) else { return }
-            Windows.forget(id)
-            send(.closed, pid: pid, window: id)
+            send(.closed, window: id)
         case kAXFocusedWindowChangedNotification:
             if windowIDs[element] == nil { watch(element, pid: pid) }
-            send(.focused, pid: pid, window: windowIDs[element], element: element)
-        case kAXWindowMiniaturizedNotification: send(.minimized, pid: pid, window: windowIDs[element], element: element)
-        case kAXWindowDeminiaturizedNotification: send(.unminimized, pid: pid, window: windowIDs[element], element: element)
-        case kAXMovedNotification: send(.moved, pid: pid, window: windowIDs[element], element: element)
-        case kAXResizedNotification: send(.resized, pid: pid, window: windowIDs[element], element: element)
-        case kAXApplicationHiddenNotification: send(.hidden, pid: pid)
-        case kAXApplicationShownNotification: send(.shown, pid: pid)
+            send(.focused, window: windowIDs[element], element: element)
+        case kAXWindowMiniaturizedNotification: send(.minimized, window: windowIDs[element], element: element)
+        case kAXWindowDeminiaturizedNotification: send(.unminimized, window: windowIDs[element], element: element)
+        case kAXMovedNotification: send(.moved, window: windowIDs[element], element: element)
+        case kAXResizedNotification: send(.resized, window: windowIDs[element], element: element)
+        case kAXApplicationHiddenNotification: send(.hidden)
+        case kAXApplicationShownNotification: send(.shown)
         default: break
         }
     }
