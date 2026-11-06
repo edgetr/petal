@@ -753,16 +753,20 @@ struct MediaButton: View {
     }
 }
 
+/// A small round button (×, −) on clear glass over the glass it sits on; Petal's accent tints the glass under the
+/// pointer.
 struct RoundButton: View {
     let symbol: String
+    var size: CGFloat = 20
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 9, weight: .bold))
-                .frame(width: 20, height: 20)
-                .background(hovering ? Color(nsColor: PetalApp.shared.accent) : .white.opacity(0.1), in: .circle)
+            Image(systemName: symbol).font(.system(size: (size * 0.45).rounded(), weight: .bold))
+                .frame(width: size, height: size)
+                .glassEffect(hovering ? .clear.tint(Color(nsColor: PetalApp.shared.accent)).interactive() : .clear.interactive(), in: .circle)
+                .contentShape(.circle)
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }

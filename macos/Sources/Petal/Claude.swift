@@ -455,17 +455,26 @@ struct ClaudePanelView: View {
                     .foregroundStyle(worst.percent >= 0.9 ? Color(red: 1, green: 0.42, blue: 0.54) : .secondary)
             }
             Spacer()
+            // The model and effort, on clear glass as × is; the chevron turns up while the options are open.
             Button {
                 panel.optionsOpen.toggle()
             } label: {
-                Text("\(modelName) · \(provider.map { app.config.string($0.effortSetting) } ?? "")  \(panel.optionsOpen ? "⌃" : "⌄")")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Text("\(modelName) · \(provider.map { app.config.string($0.effortSetting) } ?? "")").font(.system(size: 12))
+                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
+                        .rotationEffect(.degrees(panel.optionsOpen ? 180 : 0))
+                }
+                .foregroundStyle(.secondary)
+                .padding(.leading, 10).padding(.trailing, 9)
+                .frame(height: 22)
+                .glassEffect(.clear.interactive(), in: .capsule)
+                .contentShape(.capsule)
             }
             .buttonStyle(.plain)
             if !agent.messages.isEmpty {
                 Button("New chat") { agent.reset() }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
             }
-            RoundButton(symbol: "xmark") { panel.close() }
+            RoundButton(symbol: "xmark", size: 22) { panel.close() }
         }
         .frame(height: 28)
     }
