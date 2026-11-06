@@ -638,12 +638,15 @@ Item {
       Util.execDetached(command)
     } else {
       root.warpOff = true
+      // The app is started detached (setsid -f, no stdio): run as warpProc's own
+      // process it would be the shell's child, and die with it on a shell restart,
+      // taking with it a terminal that's running `petal restart` before the shell is back.
       warpProc.command = ["bash", "-c",
         "nw=$(hyprctl getoption cursor:no_warps -j | jq -r .bool); "
         + "wc=$(hyprctl getoption cursor:warp_on_change_workspace -j | jq -r .int); "
         + "echo \"$nw $wc\"; "
         + "hyprctl eval 'hl.config({ cursor = { no_warps = true, warp_on_change_workspace = 0 } })' >/dev/null; "
-        + command]
+        + "setsid -f bash -c " + Util.shellQuote(command) + " </dev/null >/dev/null 2>&1"]
       warpProc.running = true
     }
     // A new app's window can take a moment to appear and take focus.
