@@ -1127,6 +1127,13 @@ struct StackSlot: View {
                     .rotationEffect(.degrees(-90)).frame(width: icon + 8, height: icon + 8)
             }
         }
+        .overlay(alignment: .topTrailing) {
+            // Something new since the stack was last opened: a dot, not a count. Counts are for unread messages.
+            if app.signals.fresh.contains(folder) && app.signals.progress[folder] == nil && dock.openPopup != key {
+                NewDot(icon: icon).offset(x: icon * 0.04, y: -icon * 0.04).transition(.scale.combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: app.signals.fresh.contains(folder))
         .lift(hovering, icon: icon)
         .overlay(alignment: .bottom) {
             if dock.openPopup == key { Circle().fill(Color(nsColor: app.accent)).frame(width: 4, height: 4).offset(y: 5) }
@@ -1139,6 +1146,18 @@ struct StackSlot: View {
                                hovering = on
                                app.tooltips.show(on ? Stacks.name(folder) : nil, over: key, in: dock)
                            }))
+    }
+}
+
+/// A small dot in Petal's accent: something new is in a stack.
+struct NewDot: View {
+    let icon: CGFloat
+
+    var body: some View {
+        let size = max(7, icon * 0.2)
+        Circle().fill(Color(nsColor: PetalApp.shared.accent))
+            .frame(width: size, height: size)
+            .overlay(Circle().strokeBorder(.white.opacity(0.85), lineWidth: 1.5))
     }
 }
 

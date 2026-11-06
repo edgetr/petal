@@ -192,6 +192,9 @@ final class Popups {
     @ObservationIgnored private var monitor: Any?
     private(set) var kind: String?           // "stack", "preview"
     private(set) var card: FocusCard?
+    /// The open stack's files.
+    @ObservationIgnored private(set) var stack: StackContents?
+    @ObservationIgnored private var anchor: String?
     @ObservationIgnored private weak var openDock: ScreenDock?
     @ObservationIgnored private var keys: Any?
     @ObservationIgnored private var fade: DispatchWorkItem?
@@ -215,23 +218,41 @@ final class Popups {
     }
 
     func closeAll() {
+        let wasPreview = kind == "preview"
         panel.hide()
         kind = nil
+        stack = nil
+        anchor = nil
         openDock?.openPopup = nil
         openDock = nil
         PetalApp.shared.tooltips.hide()
+        if wasPreview { PetalApp.shared.previews.closed() }
     }
 
+    /// The stack opens once its files are read, off the main thread (a few milliseconds), at the size they need.
     func toggleStack(_ folder: String, in dock: ScreenDock) {
         let key = "stack:\(folder)"
         if dock.openPopup == key { closeAll(); return }
         closeAll()
         PetalApp.shared.previews.hover(nil, in: dock)
-        guard let slot = dock.panel?.screenFrame(of: key) else { return }
+        guard dock.panel?.screenFrame(of: key) != nil else { return }
         kind = "stack"
         openDock = dock
+        anchor = key
         dock.openPopup = key
-        panel.show(StackView(folder: folder) { [weak self] in self?.closeAll() }, over: slot, dock: dock.panel)
+        let contents = StackContents(folder: folder)
+        stack = contents
+        PetalApp.shared.signals.opened(folder)
+        contents.load { [weak self] in
+            guard let self, self.stack === contents, let slot = dock.panel?.screenFrame(of: key) else { return }
+            self.panel.show(StackView(contents: contents) { [weak self] in self?.closeAll() }, over: slot, dock: dock.panel)
+        }
+    }
+
+    /// Fits the stack or preview to what it shows now, over the same slot.
+    func refit() {
+        guard kind != nil, let anchor, let dock = openDock?.panel, let slot = dock.screenFrame(of: anchor), panel.isVisible else { return }
+        panel.place(over: slot, dock: dock)
     }
 
     func showPreview(_ item: DockItem, in dock: ScreenDock) {
@@ -341,10 +362,15 @@ final class Previews {
     }
 
     func close() {
+        if showing != nil, PetalApp.shared.popups.kind == "preview" { PetalApp.shared.popups.closeAll() } else { closed() }
+    }
+
+    /// The preview's panel closed, however it closed (a click on the app closes every popup): stop taking pictures.
+    func closed() {
         refresh?.invalidate()
+        refresh = nil
         let minimized = Set(PetalApp.shared.docks.panels.values.flatMap { $0.dock.minimized.map(\.id) })
         thumbnails = thumbnails.filter { minimized.contains($0.key) }
-        if showing != nil, PetalApp.shared.popups.kind == "preview" { PetalApp.shared.popups.closeAll() }
         showing = nil
     }
 
@@ -448,11 +474,12 @@ struct RoundButton: View {
 
 struct StackView: View {
     @Environment(PetalApp.self) private var app
-    let folder: String
+    let contents: StackContents
     let done: () -> Void
 
     var body: some View {
-        let entries = Stacks.entries(folder, limit: 12)
+        let folder = contents.folder
+        let entries = contents.entries
         VStack(alignment: .leading, spacing: 2) {
             Text(Stacks.name(folder)).font(.system(size: 15, weight: .bold)).foregroundStyle(Color(nsColor: app.accent))
                 .padding(.horizontal, 8).padding(.bottom, 6)

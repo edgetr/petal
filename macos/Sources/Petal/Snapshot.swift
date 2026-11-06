@@ -41,7 +41,7 @@ enum Snapshot {
             ("claude-empty", AnyView(ClaudePanelView(panel: ClaudePanel())), nil),
             ("claude-chat", AnyView(ClaudePanelView(panel: app.claude)), nil),
             ("search", AnyView(AppSearchView(search: app.search)), nil),
-            ("stack", AnyView(StackView(folder: "~/Downloads") {}), nil),
+            ("stack", AnyView(StackView(contents: StackContents(folder: "~/Downloads", entries: Stacks.entries("~/Downloads", limit: 12))) {}), nil),
             ("card-suggest", AnyView(CardView(card: FocusCard(kind: .suggestion, suggestion: sampleNew))), nil),
             ("card-add", AnyView(CardView(card: FocusCard(kind: .suggestion, suggestion: sampleAdd))), nil),
             ("card-made", AnyView(CardView(card: FocusCard(kind: .made, target: app.config.modes.last, desktop: 1, suggestion: sampleNew))), nil),
@@ -71,6 +71,12 @@ enum Snapshot {
         }
         write(render(AnyView(DockView(dock: dock)), app: app, size: nil), name: "dock-held", folder: folder)
         for mode in app.config.modes { app.notes.clear(mode.id) }
+        // Stacks with something new, a full Trash, and a song playing.
+        let stackFolders = Stacks.resolve(app.config.strings("stackFolders"))
+        app.signals.preview(trashEmpty: false, fresh: Set(stackFolders.prefix(1)),
+                            nowPlaying: NowPlaying(player: "com.spotify.client", title: "Pyramid Song", artist: "Radiohead", playing: true, artwork: nil))
+        write(render(AnyView(DockView(dock: dock)), app: app, size: nil), name: "dock-extras", folder: folder)
+        app.signals.preview(trashEmpty: true, fresh: [], nowPlaying: nil)
         // The sites' own icons, fetched from the sites (up to 10 s).
         let samples = ["https://github.com", "https://www.figma.com"]
         for id in samples { _ = Sites.shared.icon(id) }
