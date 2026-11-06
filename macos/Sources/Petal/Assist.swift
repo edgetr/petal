@@ -232,7 +232,9 @@ final class Assist {
                         }
                     }
                     guard Browsers.kind(front.bundleIdentifier ?? "") != nil else { return finish() }
-                    let other = number == focusedID ? nil : Browsers.Window(number: number, title: title, frame: frame)
+                    // A note's tab is always its own window's (by id, or frame and title), never whichever window is
+                    // in front by the time the browser answers.
+                    let other = place == nil ? nil : Browsers.Window(number: number, title: title, frame: frame)
                     self.app.browsers.frontURL(of: front, window: other) { url in
                         MainActor.assumeIsolated {
                             if let url { result["tab"] = ["url": url, "title": title] }

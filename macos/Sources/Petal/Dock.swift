@@ -1242,9 +1242,11 @@ struct FinderButton: View {
     let size: CGFloat
     @State private var hovering = false
     @State private var pressed = false
+    @State private var hop: CGFloat = 0
 
     var body: some View {
         let item = dock.finder
+        let noteReady = app.claude.readyApps.contains(item.id)   // a sticky note on a Finder window is done
         ZStack(alignment: .bottom) {
             FinderMark().stroke(.white.opacity(0.9), style: StrokeStyle(lineWidth: max(1.4, size * 0.045), lineCap: .round, lineJoin: .round))
                 .frame(width: size * 0.5, height: size * 0.5)
@@ -1256,11 +1258,25 @@ struct FinderButton: View {
         }
         .frame(width: size, height: size)
         .clearGlass(in: .circle, pressed: pressed)
+        .overlay(alignment: .topTrailing) {
+            if noteReady { Badge(text: "✦", icon: size * 0.8).offset(x: size * 0.08, y: -size * 0.08) }
+        }
+        // The hop goes inward, away from the screen's edge.
+        .offset(x: app.config.position == "left" ? hop * size * 0.4 : app.config.position == "right" ? -hop * size * 0.4 : 0,
+                y: app.config.position == "bottom" ? -hop * size * 0.4 : 0)
         .animation(.easeOut(duration: 0.12), value: hovering)
+        .onChange(of: app.signals.bounces[item.id]) { _, _ in
+            guard app.config.bool("bounce") else { return }
+            withAnimation(.easeOut(duration: 0.22)) { hop = 1 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                withAnimation(.interpolatingSpring(stiffness: 260, damping: 9)) { hop = 0 }
+            }
+        }
         .slotFrame(dock, DockView.finderSlot)
         .slotMouse(SlotMouse(left: {
                                  app.popups.closeAll()
                                  app.tooltips.hide()
+                                 if app.claude.openReady(app: item.id) { return }
                                  // Its windows forward; none open, a new one, as macOS's Dock does.
                                  if item.windows > 0 { app.docks.activate(item) } else { NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory())) }
                              },

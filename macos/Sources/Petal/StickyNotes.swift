@@ -62,12 +62,17 @@ extension ClaudePanel {
 
     /// The note for the window in front: the one stuck to it, one kept from before (Petal restarted), or a new one.
     /// The window is looked up off the main thread (Accessibility may wait on the app).
-    func noteForFront(_ done: @escaping @MainActor (StickyNote) -> Void) {
+    func noteForFront(again: Bool = true, _ done: @escaping @MainActor (StickyNote) -> Void) {
         let me = ProcessInfo.processInfo.processIdentifier
         guard notesOn, let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != me,
               front.activationPolicy == .regular else { return done(looseNote) }
         let pid = front.processIdentifier
         Self.frontWindow(of: pid) { window, title in
+            guard self.notesOn else { return done(self.looseNote) }
+            // Another app came forward while its window was looked up: that one's, looked up once more.
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+                return again ? self.noteForFront(again: false, done) : done(self.looseNote)
+            }
             self.lastFront = (pid, window)
             done(self.note(for: front, window: window, title: title))
         }
@@ -125,36 +130,60 @@ extension ClaudePanel {
     /// A chat picked from the list: the note holding it, else carried on. With notes on, it sticks again to its
     /// window if that's still there; with them off (or its window gone), it's the loose chat.
     func restoreNote(_ chat: SavedChat) {
-        if let note = live(chat: chat.id) { return present(note) }
+        cancelPending()
         savedPlaces = savedPlaces.filter { $0.value.id != chat.id }
         guard notesOn else {
-            loose.agent.restore(chat)
-            return present(looseNote)
+            // With notes off the loose chat is the chat: it becomes the one holding this one (stuck to no window).
+            if let note = live(chat: chat.id) {
+                note.place = nil
+                note.windowGone = false
+                loose = note
+            } else if loose.agent.running {
+                let note = StickyNote()
+                note.agent.restore(chat)
+                notes.append(note)
+                loose = note
+            } else {
+                loose.agent.restore(chat)
+            }
+            present(looseNote)
+            return prune()
         }
+        if let note = live(chat: chat.id) { return present(note) }
         let note = StickyNote()
         note.agent.restore(chat)
         notes.append(note)
         guard let place = chat.place, let window = place.window,
               NSRunningApplication(processIdentifier: place.pid)?.bundleIdentifier == place.app,
               !notes.contains(where: { $0.attached && $0.place?.pid == place.pid && $0.place?.window == window })
-        else { return present(note) }
+        else { present(note); return prune() }
+        let ticket = pendingTicket
         Self.windowQueue.async {
             let there = Windows.windows(of: place.pid).contains { $0.id == "\(place.pid)-w\(window)" }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if there { _ = self.attach(note, place) }
-                    self.present(note)
+                    // Shown only if the panel wasn't closed (or something else opened) meanwhile.
+                    if there && self.notesOn { _ = self.attach(note, place) }
+                    if ticket == self.pendingTicket { self.present(note) }
+                    self.prune()
                 }
             }
         }
     }
 
-    /// Notes nobody can come back to (their window gone, idle, read) are let go: they're kept in Chats.
-    private func prune() {
+    /// Notes nobody can come back to (their window gone, or stuck to none: chats read from the list) are let go,
+    /// and past 30 idle ones the oldest too. All are kept in Chats; one whose window is still open is found again
+    /// when that window opens the AI.
+    func prune() {
         let keep = { (note: StickyNote) in note === self.current || note === self.loose || note.agent.running || note.ready || !note.agent.waiting.isEmpty }
-        notes.removeAll { !keep($0) && $0.windowGone }
-        let idle = notes.filter { !keep($0) && $0.place != nil }
-        for old in idle.dropLast(30) { notes.removeAll { $0 === old } }
+        notes.removeAll { !keep($0) && ($0.windowGone || $0.place == nil) }
+        let idle = notes.filter { !keep($0) && $0.attached }
+        for old in idle.dropLast(30) {
+            if let place = old.place, let window = place.window, let chat = old.agent.saved {
+                savedPlaces[Self.key(place.pid, window)] = chat
+            }
+            notes.removeAll { $0 === old }
+        }
     }
 
     static func key(_ pid: pid_t, _ window: CGWindowID) -> String { "\(pid)-\(window)" }
@@ -213,8 +242,9 @@ extension ClaudePanel {
     /// `aiNotes` changed (or any setting did): with notes off, nothing listens, nudges or takes the app's click.
     func notesSettingChanged() {
         listenIfNeeded()
-        guard !notesOn, pendingOpen != nil || notes.contains(where: { $0.ready || $0.away }) else { return }
-        cancelPending()
+        guard !notesOn else { return }
+        cancelPending()   // a note's window being brought forward (or a mode's countdown before it) opens nothing
+        guard notes.contains(where: { $0.ready || $0.away }) else { return }
         for note in notes { note.ready = false; note.away = false }
         updateReady()
         if PetalApp.shared.popups.card?.kind == .noteReady { PetalApp.shared.popups.dismissCard() }
@@ -291,10 +321,11 @@ extension ClaudePanel {
         return place.matches(pid: front.pid, window: front.window)
     }
 
-    /// A note waiting for its window to come forward isn't opened after all.
+    /// A note waiting for its window to come forward isn't opened after all (nor its window brought forward again).
     func cancelPending() {
         pendingOpen = nil
         pendingTicket += 1
+        Self.windowQueue.async { NoteFocus.request += 1 }
     }
 
     private func stepAway() {
@@ -375,11 +406,13 @@ extension ClaudePanel {
         guard !note.windowGone, let running = NSRunningApplication(processIdentifier: place.pid), !running.isTerminated else {
             return present(note, key: true)
         }
+        // Taken now, before any mode's countdown: anything opened, closed or turned off meanwhile cancels it.
+        let ticket = pendingTicket
         let bring = {
+            guard ticket == self.pendingTicket, self.notesOn else { return }
             // Its window is in front already: nothing to wait for.
             if self.inFront(place), self.lastFront?.window == place.window { return self.present(note, key: true, fromIcon: true) }
             self.pendingOpen = note
-            let ticket = self.pendingTicket
             // If the window never says it's in front (another Desktop, a slow app), it's asked once more; the note
             // opens only when its window really is in front.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
@@ -409,15 +442,18 @@ extension ClaudePanel {
     /// Desktop, which macOS then switches to). The pointer stays where it is.
     nonisolated static func bringForward(pid: pid_t, window number: CGWindowID?, app url: URL?) {
         windowQueue.async {
+            // A newer request (or a cancelled one) stops this one's retries from bringing its app back.
+            NoteFocus.request += 1
+            let request = NoteFocus.request
             let element = Windows.windows(of: pid).first { $0.id == "\(pid)-w\(number ?? 0)" }?.element
             let raise = {
-                guard let element else { return }
+                guard let element, request == NoteFocus.request else { return }
                 AXUIElementPerformAction(element, kAXRaiseAction as CFString)
                 AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
                 AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
             }
             let launch = {
-                guard let url else { return }
+                guard let url, request == NoteFocus.request else { return }
                 let configuration = NSWorkspace.OpenConfiguration()
                 configuration.activates = true
                 configuration.addsToRecentItems = false
@@ -465,6 +501,7 @@ extension ClaudePanel {
     /// The dock button the note comes out of: its app's icon when the dock shows it, else the AI button.
     func anchor(for note: StickyNote) -> CGRect? {
         let panel = PetalApp.shared.docks.focusedDock?.panel
+        if note.place?.app == "com.apple.finder", let frame = panel?.screenFrame(of: DockView.finderSlot) { return frame }
         if let app = note.place?.app, !app.isEmpty, let frame = panel?.screenFrame(of: app) { return frame }
         return panel?.screenFrame(of: "claude")
     }
@@ -480,7 +517,7 @@ struct NoteReadyCard: View {
         let color = Color(nsColor: target?.color ?? app.accent)
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 10) {
-                Image(nsImage: Apps.icon(card.bundleID)).resizable().frame(width: 28, height: 28)
+                AppIconView(id: card.bundleID, size: 28)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("\(Text(card.title.isEmpty ? Apps.name(card.bundleID) : card.title).bold()) · your note is ready")
                         .font(.system(size: 13)).lineLimit(2).fixedSize(horizontal: false, vertical: true)
@@ -509,10 +546,35 @@ struct NotePlaceLine: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(nsImage: Apps.icon(place.app)).resizable().frame(width: 14, height: 14)
+            AppIconView(id: place.app, size: 14)
             Text(gone ? "\(place.appName) · window closed" : [place.appName, place.title].filter { !$0.isEmpty }.joined(separator: " · "))
                 .font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
         }
         .help("This chat is stuck to this window: it looks at it, wherever you go.")
+    }
+}
+
+/// Which request to bring a note's window forward is the newest; only `ClaudePanel.windowQueue` touches it.
+enum NoteFocus {
+    nonisolated(unsafe) static var request = 0
+}
+
+/// An app's icon, never read from the disk on the main thread: the one Petal has already, else a plain one until
+/// it's loaded in the background.
+struct AppIconView: View {
+    let id: String
+    let size: CGFloat
+    @State private var image: NSImage?
+
+    var body: some View {
+        Group {
+            if let image = image ?? Apps.cachedIcon(id) {
+                Image(nsImage: image).resizable()
+            } else {
+                Image(systemName: "app").resizable().foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: size, height: size)
+        .task(id: id) { if Apps.cachedIcon(id) == nil { Apps.loadIcon(id) { image = $0 } } }
     }
 }

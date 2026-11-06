@@ -84,13 +84,12 @@ final class Agent {
         run(prompt)
     }
 
-    /// The messages that waited for room: the first runs now, the rest follow it as queued messages do.
+    /// The messages that waited for room, all in one turn (each is in the chat once already).
     func runWaiting() {
         guard !waiting.isEmpty, !running else { return }
-        let first = waiting.removeFirst()
-        queued.append(contentsOf: waiting)
+        let prompt = waiting.joined(separator: "\n\n")
         waiting = []
-        run(first)
+        run(prompt)
     }
 
     /// The chat's first words, as the chats list shows it.
@@ -150,13 +149,18 @@ final class Agent {
 
     /// Saves this chat (from its first message on), with its session to resume.
     private func keep() {
+        if let chat = saved { Chats.save(chat) }
+    }
+
+    /// This chat as it's kept (nil before its first message).
+    var saved: SavedChat? {
         let lines = messages.filter { $0.kind != .ask }.map { SavedChat.Line(kind: Self.name($0.kind), text: $0.text) }
-        guard let first = messages.first(where: { $0.kind == .user }) else { return }
+        guard let first = messages.first(where: { $0.kind == .user }) else { return nil }
         let provider = sessionProvider ?? chatProvider ?? app.chatProvider
         chatProvider = provider
         let title = first.text.components(separatedBy: "\n").first { !$0.hasPrefix(">") && !$0.hasPrefix("From ") && !$0.isEmpty } ?? first.text
-        Chats.save(SavedChat(id: chatID, title: String(title.prefix(80)), provider: provider?.rawValue ?? "", session: sessionID,
-                             updated: Date(), lines: lines, place: place))
+        return SavedChat(id: chatID, title: String(title.prefix(80)), provider: provider?.rawValue ?? "", session: sessionID,
+                         updated: Date(), lines: lines, place: place)
     }
 
     private static func name(_ kind: Kind) -> String {
@@ -563,7 +567,7 @@ final class ClaudePanel {
     @ObservationIgnored var savedPlaces: [String: SavedChat] = [:]
     @ObservationIgnored var listening = false
     /// The one chat stuck to no window (no app in front, or sticky notes off).
-    @ObservationIgnored let loose: StickyNote
+    @ObservationIgnored var loose: StickyNote
 
     init() {
         let note = StickyNote()
@@ -601,7 +605,9 @@ final class ClaudePanel {
         // Codex's models, if they couldn't be read at launch (Codex installed or signed in since).
         if app.chatProvider == .codex && app.codexModels.isEmpty { app.loadCodexModels() }
         cancelPending()
-        noteForFront { note in self.present(note, asking: text, send: send) }
+        let ticket = pendingTicket
+        // Shown only if nothing closed or opened the panel meanwhile.
+        noteForFront { note in if ticket == self.pendingTicket { self.present(note, asking: text, send: send) } }
     }
 
     /// The AI button or its shortcut: opens the note in front, gives the keyboard to one showing without it, or closes.

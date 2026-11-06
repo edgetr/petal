@@ -90,6 +90,24 @@ enum Apps {
 
     static func icon(file url: URL) -> NSImage { NSWorkspace.shared.icon(forFile: url.path) }
 
+    /// The icon if it's been read already (never touches the disk).
+    static func cachedIcon(_ id: String) -> NSImage? { icons[id] }
+
+    /// Reads an app's icon off the main thread, kept for next time (a plain one for an app that's gone).
+    static func loadIcon(_ id: String, _ done: @escaping @MainActor (NSImage) -> Void) {
+        if let icon = icons[id] { return done(icon) }
+        DispatchQueue.global(qos: .utility).async {
+            let icon = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id).map { NSWorkspace.shared.icon(forFile: $0.path) }
+                ?? NSImage(systemSymbolName: "app", accessibilityDescription: nil)!
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if icons[id] == nil { icons[id] = icon }
+                    done(icons[id] ?? icon)
+                }
+            }
+        }
+    }
+
     /// Every app in the usual places. Read once (ahead of time, by `warm`), then again off the main thread at most
     /// once a minute, so the "+" search never waits for the disk.
     static func installed() -> [InstalledApp] {
