@@ -33,14 +33,39 @@ enum Menus {
         pop(menu)
     }
 
+    /// An app's menu. Its windows (listed as the pointer reached the icon, or else now, off the main thread) and its
+    /// recent files' icons are gathered first, for 150 ms at most: past that, the menu opens without what isn't in.
     static func app(_ item: DockItem, in dock: ScreenDock) {
         if Sites.isWeb(item.id) { return site(item, in: dock) }
+        let known = app.previews.knownWindows(item.id)
+        let wantWindows = config.bool("quickActions") && item.running && known == nil
+        let recent = config.bool("recentFiles") ? Apps.recent(item.id) : []
+        guard wantWindows || !recent.isEmpty else { return appMenu(item, in: dock, windows: known ?? [], icons: [:]) }
+        let once = Once()
+        let open = { (windows: [AppWindow], icons: [URL: NSImage]) in
+            guard once.first() else { return }
+            appMenu(item, in: dock, windows: windows, icons: icons)
+        }
+        let id = item.id
+        openers.async {
+            let windows = wantWindows ? Previews.windows(of: id) : (known ?? [])
+            let icons = Dictionary(recent.map { ($0, NSWorkspace.shared.icon(forFile: $0.path)) }, uniquingKeysWith: { a, _ in a })
+            DispatchQueue.main.async { MainActor.assumeIsolated { open(windows, icons) } }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { open(known ?? [], [:]) }
+    }
+
+    /// The first of several ways something can finish is the one that counts (on the main thread).
+    private final class Once {
+        private var done = false
+        func first() -> Bool { defer { done = true }; return !done }
+    }
+
+    private static func appMenu(_ item: DockItem, in dock: ScreenDock, windows: [AppWindow], icons: [URL: NSImage]) {
         let menu = NSMenu()
         let name = Apps.name(item.id)
         var listed = false
         if config.bool("quickActions"), item.running {
-            // Listed as the pointer reached the icon; asking Accessibility again here would hold the menu up.
-            let windows = app.previews.knownWindows(item.id) ?? Previews.windows(of: item.id)
             if !windows.isEmpty {
                 menu.addItem(header("Windows"))
                 for window in windows.prefix(10) {
@@ -58,7 +83,7 @@ enum Menus {
                 menu.addItem(header("Recent"))
                 for url in recent {
                     let row = ClosureMenuItem(title: url.lastPathComponent) { app.docks.launch(item.id, files: [url]) }
-                    row.image = icon(NSWorkspace.shared.icon(forFile: url.path))
+                    row.image = icons[url].map(icon) ?? NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
                     menu.addItem(row)
                 }
                 listed = true

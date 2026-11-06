@@ -423,8 +423,10 @@ final class Routines {
 
     /// A routine's actions in order. With a file (it just arrived), the file actions move that file; without (a time,
     /// an app, a mode), they tidy their folder's files.
-    /// `approved`: a plan the person already saw and allowed (from a dry run), for the routine's first file action.
-    private func execute(_ routine: Routine, file: URL?, approved: Plan? = nil, done: @escaping ([Move]) -> Void) {
+    /// `approved`: how many files the person already allowed for the routine's first file action (from the plan they
+    /// saw). Each file action is planned when the run reaches it, after the actions before it are done (a Shortcut's
+    /// export is there by then); it asks again only when there are more files than they allowed.
+    private func execute(_ routine: Routine, file: URL?, approved: Int? = nil, done: @escaping ([Move]) -> Void) {
         var said: [String] = []
         var moves: [Move] = []
         var made: [String] = []
@@ -475,10 +477,8 @@ final class Routines {
                         }
                     }
                 }
-                if let plan = approved {
-                    approved = nil
-                    return plan.items.isEmpty ? step(index + 1) : use(plan, true)
-                }
+                let allowance = approved
+                approved = nil
                 plan(routine, action) { plan in
                     guard let plan, !plan.items.isEmpty else {
                         if let waiting = plan?.waitingForAI, !waiting.isEmpty {
@@ -486,7 +486,7 @@ final class Routines {
                         }
                         return step(index + 1)
                     }
-                    use(plan, false)
+                    use(plan, allowance.map { plan.items.count <= $0 } ?? false)
                 }
             }
         }
@@ -798,6 +798,13 @@ final class Routines {
     /// Adds or replaces a routine (checked first); in the check, without the rest of Petal.
     func save(_ routine: Routine) {
         if let index = list.firstIndex(where: { $0.id == routine.id }) {
+            // Its rule changed (its words, where it acts, where files go): what the AI answered for the old rule
+            // doesn't hold any more, so names like those are asked about again.
+            let old = list[index]
+            if old.words != routine.words || old.actions != routine.actions || old.trigger != routine.trigger, learned[routine.id] != nil {
+                learned[routine.id] = nil
+                saveLearned()
+            }
             var routine = routine
             routine.lastRun = list[index].lastRun
             routine.lastResult = list[index].lastResult
@@ -929,8 +936,9 @@ final class Routines {
             // Nothing to move there: the routine's other actions still run.
             guard n > 0 else {
                 self.plans[id] = nil
-                return self.execute(routine, file: nil, approved: plan) { moves in
-                    send(["moved": moves.count, "note": "Nothing to move in its first folder; its other actions ran."])
+                return self.execute(routine, file: nil, approved: 0) { moves in
+                    send(["moved": moves.count, "waitingForAI": plan.waitingForAI.count,
+                          "note": "Nothing to move in its first folder; its other actions ran."])
                 }
             }
             let where_ = plan.source.lastPathComponent
@@ -939,9 +947,10 @@ final class Routines {
             self.confirm(n >= 10, "Tidy \(n) files in \(where_)", detail) { allowed in
                 guard allowed else { return send(["declined": "The person didn't allow it."]) }
                 self.plans[id] = nil
-                // Every action of the routine, in order, with this plan for its first file action.
-                self.execute(routine, file: nil, approved: plan) { moves in
-                    send(["moved": moves.count, "into": Dictionary(counts.map { ($0.name, $0.count) }, uniquingKeysWith: +),
+                // Every action of the routine, in order; its first file action may move up to this many unasked.
+                self.execute(routine, file: nil, approved: n) { moves in
+                    let into = Dictionary(moves.map { (URL(fileURLWithPath: $0.to).deletingLastPathComponent().lastPathComponent, 1) }, uniquingKeysWith: +)
+                    send(["moved": moves.count, "into": into,
                           "leftAlone": plan.leftAlone.count, "waitingForAI": plan.waitingForAI.count, "notYet": plan.later,
                           "undo": "petal_routine_undo puts them back (or Put back in Petal's settings, Routines)"])
                 }

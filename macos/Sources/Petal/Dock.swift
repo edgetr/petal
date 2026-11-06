@@ -553,6 +553,7 @@ final class DockController {
     /// No windows: launch it. Windows: bring one forward, cycling through them on repeated clicks: this Desktop's
     /// first, then minimized ones, then the rest. The pointer never moves.
     func activate(_ item: DockItem) {
+        Windows.focusing.cancel()   // first, whatever this click turns out to be: an earlier one's focus stands down
         if Sites.isWeb(item.id) { Sites.open(item.id); return }
         if app.claude.openReady(app: item.id) { return }   // its note is done: its window, and the note on it
         guard item.running, let running = NSRunningApplication.runningApplications(withBundleIdentifier: item.id).first else {
@@ -1914,7 +1915,12 @@ struct SlotMouse: NSViewRepresentable {
 
         override func mouseUp(with event: NSEvent) {
             if !dragging { handlers?.press(false) }
-            if dragging { handlers?.drag?(0, true) } else { handlers?.left() }
+            if dragging { handlers?.drag?(0, true) } else {
+                // Any click on the dock (an app, a website, Finder, the AI button, "+", a mode): an earlier click
+                // still bringing a window forward stands down, so it can't come up over what this one opens.
+                Windows.focusing.cancel()
+                handlers?.left()
+            }
             down = nil
             dragging = false
         }

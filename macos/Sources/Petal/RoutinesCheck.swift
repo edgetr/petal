@@ -156,6 +156,28 @@ enum RoutinesCheck {
             let inWords = { (path: String) in fm.fileExists(atPath: words.appending(path: path).path) }
             check(inWords("Receipts/invoice 77.pdf") && inWords("random.png") && !inWords("Images") && sorted["waitingForAI"] as? Int == 1,
                   "no AI: learned answers first, the rest waits for the AI: \(sorted)")
+
+            // A changed rule forgets what it learned: the invoice isn't sent to Receipts again without asking.
+            fm.createFile(atPath: words.appending(path: "invoice 78.pdf").path, contents: Data(repeating: 65, count: 100))
+            _ = tool("petal_routine_save", ["id": wid, "words": "File invoices under Taxes; leave the rest"], routines)
+            let after = tool("petal_routine_run", ["id": wid], routines)
+            check(inWords("invoice 78.pdf") && after["waitingForAI"] as? Int == 2, "a changed rule asks again: \(after)")
+
+            // Each file action is planned when the run gets to it: a file that arrives after the dry run (an
+            // export) is sorted too.
+            let later = root.appending(path: "Later")
+            try? fm.createDirectory(at: later, withIntermediateDirectories: true)
+            fm.createFile(atPath: later.appending(path: "a.png").path, contents: Data(repeating: 65, count: 100))
+            let byKind = tool("petal_routine_save", ["words": "Sort by kind", "trigger": ["on": "time", "at": "03:00"],
+                                                    "actions": [["do": "sort", "by": "kind", "folder": later.path]]], routines)
+            let kid = (byKind["saved"] as? [String: Any])?["id"] as? String ?? ""
+            let shown = tool("petal_routine_run", ["id": kid, "dryRun": true], routines)
+            fm.createFile(atPath: later.appending(path: "b.pdf").path, contents: Data(repeating: 65, count: 100))
+            let done = tool("petal_routine_run", ["id": kid], routines)
+            let inLater = { (path: String) in fm.fileExists(atPath: later.appending(path: path).path) }
+            check(shown["wouldMove"] as? Int == 1 && done["moved"] as? Int == 2 && inLater("Images/a.png") && inLater("PDFs/b.pdf"),
+                  "planned when it runs, not from the dry run: \(done)")
+            _ = tool("petal_routine_delete", ["id": kid], routines)
             _ = tool("petal_routine_delete", ["id": wid], routines)
         }
         Routines.flush()
