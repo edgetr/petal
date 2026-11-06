@@ -93,6 +93,19 @@ enum MCP {
             let changes = args["settings"] as? [String: Any] ?? [:]
             let unknown = changes.keys.filter { schema[$0] == nil }.sorted()
             guard unknown.isEmpty else { throw Failure("Unknown settings: \(unknown.joined(separator: ", ")). Use petal_get_state to see them all.") }
+            // What Petal AI may do unasked, and what it may look at, are the person's to widen, never the AI's.
+            let current = read(settingsFile) ?? [:]
+            if let allowed = changes["aiAllowed"] as? [String] {
+                let had = Set(current["aiAllowed"] as? [String] ?? [])
+                if !Set(allowed).isSubset(of: had) { throw Failure("Only the person can allow more, with Always on Petal's card or in its settings.") }
+            }
+            if changes["claudeAccess"] as? String == "full", current["claudeAccess"] as? String != "full" {
+                throw Failure("Only the person can turn on Full access, in the chat's options or Petal's settings.")
+            }
+            if let hidden = changes["aiNeverLook"] as? [String] {
+                let had = Set(current["aiNeverLook"] as? [String] ?? (schema["aiNeverLook"]?.first as? [String] ?? []))
+                if !had.isSubset(of: Set(hidden)) { throw Failure("Only the person can take an app off the private list, in Petal's settings.") }
+            }
             try update(settingsFile) { $0.merge(changes) { _, new in new } }
             return ["ok": true, "changed": changes]
         case "petal_reset_settings":

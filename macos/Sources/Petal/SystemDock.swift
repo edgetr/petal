@@ -57,7 +57,9 @@ enum SystemDock {
         if !missing.isEmpty {
             for (key, _) in missing { saved[key] = read(key) ?? NSNull() }
             Config.writeObject(saved, to: backup)
-            guard isReplaced else { return false }
+            // Read back: every setting Petal changes must be saved before it changes one.
+            let written = Config.readObject(backup)
+            guard isReplaced, keys.allSatisfy({ written[$0.0] != nil }) else { return false }
         }
         write("autohide", "-bool", "true")
         write("autohide-delay", "-float", "1000")

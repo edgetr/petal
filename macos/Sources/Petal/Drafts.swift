@@ -32,7 +32,9 @@ final class Drafts {
     /// Entering `mode` with `notes` held for it: draft what needs an answer.
     func prepare(_ notes: [HeldNote], for mode: Mode) {
         guard app.config.bool("replyDrafts"), app.focus.brain.enabled else { return }
-        let messages = notes.filter { Self.messaging.contains(Notes.appID($0.app).lowercased()) && !$0.body.isEmpty }.suffix(3)
+        // Never an app kept private: its messages don't go to the AI.
+        let messages = notes.filter { Self.messaging.contains(Notes.appID($0.app).lowercased()) && !$0.body.isEmpty
+            && !app.assist.neverLook(Notes.appID($0.app)) }.suffix(3)
         guard !messages.isEmpty else { return }
         drafts = []
         asking = messages.count

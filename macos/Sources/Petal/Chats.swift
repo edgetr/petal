@@ -17,8 +17,11 @@ struct SavedChat: Codable, Identifiable, Equatable {
 enum Chats {
     static let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Petal/chats")
 
+    /// One at a time, in order: an older save can never land after a newer one.
+    nonisolated static let queue = DispatchQueue(label: "petal.chats", qos: .utility)
+
     static func save(_ chat: SavedChat) {
-        DispatchQueue.global(qos: .utility).async {
+        queue.async {
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             if let data = try? JSONEncoder().encode(chat) { try? data.write(to: folder.appending(path: chat.id.uuidString + ".json"), options: .atomic) }
         }
@@ -26,7 +29,7 @@ enum Chats {
 
     /// Newest first, without their messages' weight on the main thread: read in the background.
     static func list(_ done: @escaping @MainActor ([SavedChat]) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
+        queue.async {
             let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
             let chats = files.filter { $0.pathExtension == "json" }
                 .compactMap { try? JSONDecoder().decode(SavedChat.self, from: Data(contentsOf: $0)) }
@@ -38,8 +41,12 @@ enum Chats {
     }
 
     static func delete(_ chat: SavedChat) {
-        try? FileManager.default.removeItem(at: folder.appending(path: chat.id.uuidString + ".json"))
+        let file = folder.appending(path: chat.id.uuidString + ".json")
+        queue.async { try? FileManager.default.removeItem(at: file) }
     }
+
+    /// Every save still under way (on quit).
+    nonisolated static func flush() { queue.sync {} }
 }
 
 /// The chats list, in place of the conversation: each with its first words, its AI and when; one picked comes back.

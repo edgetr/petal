@@ -155,7 +155,7 @@ final class Config {
                 MainActor.assumeIsolated {
                     let config = PetalApp.shared.config
                     config.writing -= 1
-                    if config.writing == 0 { config.stamps = config.currentStamps() }
+                    config.accept(file)
                 }
             }
         }
@@ -292,7 +292,7 @@ final class Config {
                         config.reload()   // what's on disk stands
                         config.onChange?()
                     }
-                    if config.writing == 0 { config.stamps = config.currentStamps() }
+                    config.accept(file)
                 }
             }
         }
@@ -341,6 +341,14 @@ final class Config {
                 self.onChange?()
             }
         }
+    }
+
+    /// Petal's own write of `file` is in: its new stamp is known. Only that file's: a change to another one,
+    /// by someone else, is still read by the watcher.
+    func accept(_ file: URL) {
+        guard let index = [modesFile, settingsFile, dockFile].firstIndex(of: file) else { return }
+        if stamps.count < 3 { stamps = currentStamps() }
+        stamps[index] = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date
     }
 
     private func currentStamps() -> [Date?] {

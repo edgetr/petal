@@ -209,6 +209,15 @@ final class Routines {
         return Config.folder.appending(path: "routines.json")
     }
     nonisolated static var logFile: URL { stateFolder.appending(path: "routines-log.json") }
+    /// Each move as it happens, before the history has it: Petal quitting mid-batch never loses a way back.
+    nonisolated static var journalFile: URL { stateFolder.appending(path: "routines-moving.json") }
+
+    nonisolated static func journal(_ move: Move) {
+        var list = (Config.parse(journalFile)?["moves"] as? [[String: String]]) ?? []
+        list.append(["from": move.from, "to": move.to])
+        try? FileManager.default.createDirectory(at: stateFolder, withIntermediateDirectories: true)
+        Config.writeObject(["moves": list], to: journalFile)
+    }
     nonisolated static var learnedFile: URL { stateFolder.appending(path: "routines-sorted.json") }
 
     nonisolated private static func modified(_ url: URL) -> Date? {
@@ -255,10 +264,23 @@ final class Routines {
             let log = (Config.parse(Self.logFile)?["entries"] as? [[String: Any]] ?? []).compactMap(Entry.init)
             let learned = (Config.parse(Self.learnedFile) ?? [:]).compactMapValues { $0 as? [String: String] }
             let stamp = Self.modified(Self.file)
+            // Moves from a batch Petal quit in the middle of, not in the history yet: kept so they can be put back.
+            let known = Set(log.flatMap { $0.moves.map { $0.from + "→" + $0.to } })
+            let unrecorded = ((Config.parse(Self.journalFile)?["moves"] as? [[String: String]]) ?? [])
+                .compactMap { m in m["from"].flatMap { from in m["to"].map { Move(from: from, to: $0) } } }
+                .filter { !known.contains($0.from + "→" + $0.to) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.list = routines
+                    var log = log
+                    if !unrecorded.isEmpty {
+                        log.insert(Entry(id: String(UUID().uuidString.prefix(8)).lowercased(), routine: "", name: "A routine",
+                                         text: "Moved \(unrecorded.count) file\(unrecorded.count == 1 ? "" : "s") just before Petal quit",
+                                         at: Date(), moves: unrecorded, made: []), at: 0)
+                    }
                     self.log = log
+                    if !unrecorded.isEmpty { self.saveLog() }
+                    Self.io.async { try? FileManager.default.removeItem(at: Self.journalFile) }
                     self.learned = learned
                     self.stamp = stamp
                     self.watch()
@@ -380,7 +402,7 @@ final class Routines {
         let job = jobs.removeFirst()
         guard let routine = list.first(where: { $0.id == job.id }), routine.on else { return next() }
         working = true
-        execute(routine, file: job.file) { [weak self] in
+        execute(routine, file: job.file) { [weak self] _ in
             self?.working = false
             self?.next()
         }
@@ -388,13 +410,15 @@ final class Routines {
 
     /// A routine's actions in order. With a file (it just arrived), the file actions move that file; without (a time,
     /// an app, a mode), they tidy their folder's files.
-    private func execute(_ routine: Routine, file: URL?, done: @escaping () -> Void) {
+    /// `approved`: a plan the person already saw and allowed (from a dry run), for the routine's first file action.
+    private func execute(_ routine: Routine, file: URL?, approved: Plan? = nil, done: @escaping ([Move]) -> Void) {
         var said: [String] = []
         var moves: [Move] = []
         var made: [String] = []
+        var approved = approved
         func finish() {
             if !said.isEmpty { record(routine, said: said, moves: moves, made: made) }
-            done()
+            done(moves)
         }
         func step(_ index: Int) {
             guard index < routine.actions.count else { return finish() }
@@ -414,14 +438,29 @@ final class Routines {
                     step(index + 1)
                 }
             } else {
+                let use = { (plan: Plan, allowed: Bool) in
+                    // Many files ask first, however the routine was started (a time, an app, a mode, or by hand).
+                    self.confirm(!allowed && plan.items.count >= 10, "Tidy \(plan.items.count) files in \(plan.source.lastPathComponent)",
+                                 "\(routine.name). You can put them back.") { yes in
+                        guard yes else {
+                            said.append("left \(plan.items.count) files in \(plan.source.lastPathComponent) (not allowed)")
+                            return step(index + 1)
+                        }
+                        self.apply(plan) { done, folders in
+                            moves += done
+                            made += folders
+                            if !done.isEmpty { said.append(Self.tidied(done, in: plan.source)) }
+                            step(index + 1)
+                        }
+                    }
+                }
+                if let plan = approved {
+                    approved = nil
+                    return plan.items.isEmpty ? step(index + 1) : use(plan, true)
+                }
                 plan(routine, action) { plan in
                     guard let plan, !plan.items.isEmpty else { return step(index + 1) }
-                    self.apply(plan) { done, folders in
-                        moves += done
-                        made += folders
-                        if !done.isEmpty { said.append(Self.tidied(done, in: plan.source)) }
-                        step(index + 1)
-                    }
+                    use(plan, false)
                 }
             }
         }
@@ -448,6 +487,8 @@ final class Routines {
                          at: Date(), moves: moves, made: made), at: 0)
         if log.count > 300 { log.removeLast(log.count - 300) }
         saveLog()
+        // In the history now (written first, on the same queue): the journal can go.
+        Self.io.async { try? FileManager.default.removeItem(at: Self.journalFile) }
         setLastRun(routine.id, Date(), result: text)
     }
 
@@ -635,7 +676,7 @@ final class Routines {
         guard let index = id.flatMap({ id in log.firstIndex { $0.id == id } }) ?? (id == nil ? log.firstIndex(where: \.canUndo) : nil),
               log[index].canUndo else { return done([]) }
         let entry = log[index]
-        log[index].undone = true
+        log[index].undone = true   // for now; anything that can't come back keeps it open, below
         // The watchers leave the files coming back alone, and the AI asks again about names like these.
         for move in entry.moves {
             let from = URL(fileURLWithPath: move.from)
@@ -650,14 +691,31 @@ final class Routines {
         Self.io.async {
             let fm = FileManager.default
             var back: [String] = []
-            for move in entry.moves.reversed() where fm.fileExists(atPath: move.to) && !fm.fileExists(atPath: move.from) {
-                if (try? fm.moveItem(atPath: move.to, toPath: move.from)) != nil { back.append(move.from) }
+            var stuck: [Move] = []
+            for move in entry.moves.reversed() {
+                // Something is in its old place now, or it's gone from where it was put: it stays to try again.
+                guard fm.fileExists(atPath: move.to), !fm.fileExists(atPath: move.from),
+                      (try? fm.moveItem(atPath: move.to, toPath: move.from)) != nil else {
+                    if fm.fileExists(atPath: move.to) { stuck.append(move) }
+                    continue
+                }
+                back.append(move.from)
             }
             for folder in Set(entry.made) {
-                let left = ((try? fm.contentsOfDirectory(atPath: folder)) ?? ["?"]).filter { $0 != ".DS_Store" }
-                if left.isEmpty { try? fm.removeItem(atPath: folder) }
+                // rmdir only takes an empty folder, so a file that arrived a moment ago is never deleted with it.
+                try? fm.removeItem(atPath: folder + "/.DS_Store")
+                rmdir(folder)
             }
-            DispatchQueue.main.async { MainActor.assumeIsolated { done(back) } }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if !stuck.isEmpty, let index = self.log.firstIndex(where: { $0.id == entry.id }) {
+                        self.log[index].undone = false
+                        self.log[index].moves = stuck
+                        self.saveLog()
+                    }
+                    done(back)
+                }
+            }
         }
     }
 
@@ -817,8 +875,8 @@ final class Routines {
             self.confirm(n >= 10, "Tidy \(n) files in \(where_)", detail) { allowed in
                 guard allowed else { return send(["declined": "The person didn't allow it."]) }
                 self.plans[id] = nil
-                self.apply(plan) { moves, made in
-                    if !moves.isEmpty { self.record(routine, said: [Self.tidied(moves, in: plan.source)], moves: moves, made: made) }
+                // Every action of the routine, in order, with this plan for its first file action.
+                self.execute(routine, file: nil, approved: plan) { moves in
                     send(["moved": moves.count, "into": Dictionary(counts.map { ($0.name, $0.count) }, uniquingKeysWith: +),
                           "leftAlone": plan.leftAlone.count, "notYet": plan.later,
                           "undo": "petal_routine_undo puts them back (or Put back in Petal's settings, Routines)"])
@@ -1105,6 +1163,12 @@ final class Routines {
 
     /// Moves a file into a folder (made if it isn't there), never over another file: "name 2.pdf" instead.
     nonisolated static func move(_ file: URL, into folder: URL) -> (move: Move, made: Bool)? {
+        let result = moveOnly(file, into: folder)
+        if let result { journal(result.move) }
+        return result
+    }
+
+    nonisolated private static func moveOnly(_ file: URL, into folder: URL) -> (move: Move, made: Bool)? {
         let fm = FileManager.default
         guard fm.fileExists(atPath: file.path),
               file.deletingLastPathComponent().standardizedFileURL.path != folder.standardizedFileURL.path else { return nil }

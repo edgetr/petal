@@ -270,6 +270,13 @@ def t_set_settings(args):
     if unknown:
         raise ValueError("Unknown settings: %s. Use petal_get_state to see them all." % ", ".join(unknown))
     settings = read_json(SETTINGS, {})
+    # What Petal AI may do unasked, and what it may look at, are the person's to widen, never the AI's.
+    if "aiAllowed" in changes and not set(changes["aiAllowed"] or []) <= set(settings.get("aiAllowed", [])):
+        raise ValueError("Only the person can allow more, with Always on Petal's card or in its settings.")
+    if changes.get("claudeAccess") == "full" and settings.get("claudeAccess") != "full":
+        raise ValueError("Only the person can turn on Full access, in the chat's options or Petal's settings.")
+    if "aiNeverLook" in changes and not set(settings.get("aiNeverLook", SETTINGS_SCHEMA["aiNeverLook"][0])) <= set(changes["aiNeverLook"] or []):
+        raise ValueError("Only the person can take an app off the private list, in Petal's settings.")
     settings.update(changes)
     write_json(SETTINGS, settings)
     return {"ok": True, "changed": changes}

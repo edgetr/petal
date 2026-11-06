@@ -134,6 +134,7 @@ final class PetalApp {
 
     func stop() {
         config.flush()
+        Chats.flush()
         Routines.flush()
         Windows.stopManaging()
         notes.stop()

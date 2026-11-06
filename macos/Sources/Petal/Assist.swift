@@ -21,6 +21,7 @@ final class Assist {
         let title: String     // "Quit Spotify"
         let detail: String    // a line more, or ""
         var secret = false    // asks the person for a secret (the vault), typed into the card
+        var every = false     // asked every time: no Always
     }
 
     struct Memory: Identifiable, Equatable {
@@ -60,10 +61,11 @@ final class Assist {
     /// `always`: asked even with Full access (the vault). `secret`: the card takes a secret, handed to `typed`.
     func ask(_ kind: String, _ title: String, detail: String = "", always: Bool = false, secret: Bool = false,
              typed: ((String) -> Void)? = nil, done: @escaping (Bool) -> Void) {
-        if !secret, (!always && config.string("claudeAccess") == "full") || config.strings("aiAllowed").contains(kind) { return done(true) }
+        // `always` (the vault) asks every time: neither Full access nor an earlier Always skips it.
+        if !secret, !always, config.string("claudeAccess") == "full" || config.strings("aiAllowed").contains(kind) { return done(true) }
         settle(false)   // one question at a time: a newer one replaces an older one, which is declined
         secretTyped = typed
-        let request = Request(kind: kind, title: title, detail: detail, secret: secret)
+        let request = Request(kind: kind, title: title, detail: detail, secret: secret, every: always)
         pending = request
         answer = done
         // In the chat when it's open (the card shows there); over the dock otherwise (another AI session asking).
@@ -82,7 +84,7 @@ final class Assist {
             secretTyped?(secret)
         }
         secretTyped = nil
-        if choice == .always {
+        if choice == .always, !pending.every {
             var allowed = config.strings("aiAllowed")
             if !allowed.contains(pending.kind) { allowed.append(pending.kind); config.set("aiAllowed", allowed) }
         }

@@ -1013,7 +1013,7 @@ struct AskRequestView: View {
                     Button("Save") { app.assist.choose(.once, secret: secret) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
                         .disabled(secret.isEmpty)
                 } else {
-                    Button("Always") { app.assist.choose(.always) }.buttonStyle(.glass)
+                    if !request.every { Button("Always") { app.assist.choose(.always) }.buttonStyle(.glass) }
                     Button("Allow") { app.assist.choose(.once) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
                 }
             }

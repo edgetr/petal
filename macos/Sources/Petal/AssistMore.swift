@@ -50,8 +50,17 @@ extension Assist {
         guard let undo = done.undo else { return }
         switch undo {
         case .putBack(let pairs):
+            var stuck: [[String]] = []
             for pair in pairs where pair.count == 2 {
-                try? FileManager.default.moveItem(at: URL(fileURLWithPath: pair[1]), to: URL(fileURLWithPath: pair[0]))
+                let fm = FileManager.default
+                guard fm.fileExists(atPath: pair[1]) else { continue }   // emptied from the Trash: nothing to bring
+                if fm.fileExists(atPath: pair[0]) || (try? fm.moveItem(atPath: pair[1], toPath: pair[0])) == nil { stuck.append(pair) }
+            }
+            if !stuck.isEmpty, let index = history.firstIndex(where: { $0.id == done.id }) {
+                // Something is in the way: what couldn't come back stays to try again.
+                history[index].undo = .putBack(stuck)
+                saveHistory()
+                return
             }
         case .forget(let id): forget(id: id, matching: nil)
         case .remember(let text, let mode): remember(text, mode: mode, learned: false)

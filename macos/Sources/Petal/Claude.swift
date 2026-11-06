@@ -68,9 +68,16 @@ final class Agent {
         pendingAsk = [Denial(tool: "Bash", label: sample.last?.text ?? "", rules: [])]
     }
 
-    func reset() {
+    /// The run under way, ended and forgotten: its late lines and its ending belong to no chat now.
+    private func endRun() {
         stop()
+        process = nil
+        running = false
         runID = UUID()
+    }
+
+    func reset() {
+        endRun()
         chatID = UUID()
         messages = []
         sessionID = nil
@@ -95,8 +102,7 @@ final class Agent {
 
     /// A kept chat, back: its messages, and its session, so the next message carries it on (with its own AI).
     func restore(_ chat: SavedChat) {
-        stop()
-        runID = UUID()
+        endRun()
         pendingAsk = []
         allowed = []
         chatID = chat.id

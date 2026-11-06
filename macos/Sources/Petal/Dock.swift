@@ -359,7 +359,7 @@ final class DockController {
             guard let area = panel.screenRef?.frame else { return nil }
             return (panel, CGRect(x: area.minX, y: top - area.maxY, width: area.width, height: area.height))   // top-left origin
         }
-        var moves: [(pid: pid_t, number: CGWindowID, to: CGRect)] = []
+        var moves: [(pid: pid_t, number: CGWindowID, from: CGRect, to: CGRect)] = []
         for window in snapshot.onScreenWindows {
             let now = window.frame
             var before = now
@@ -379,7 +379,7 @@ final class DockController {
             record.saw(now)
             record.saw(target)
             cleared[window.number] = record
-            if moving { moves.append((window.pid, window.number, target)) }
+            if moving, Parking.parked[window.number] == nil { moves.append((window.pid, window.number, now, target)) }
         }
         // Windows that closed: nothing to give back.
         cleared = cleared.filter { snapshot.numbers.contains($0.key) }
@@ -390,7 +390,10 @@ final class DockController {
                 let app = AXUIElementCreateApplication(move.pid)
                 AXUIElementSetMessagingTimeout(app, 0.3)
                 let list: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
-                guard let element = list.first(where: { Windows.id(of: $0) == move.number }) else { continue }
+                guard let element = list.first(where: { Windows.id(of: $0) == move.number }),
+                      // Still where it was when this was decided: moved since (by the person, Parking, a newer
+                      // look), it's left alone.
+                      let there = Windows.frame(of: element), there.equalTo(move.from, within: 4) else { continue }
                 let actual = Windows.place(element, pid: move.pid, move.to)
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
