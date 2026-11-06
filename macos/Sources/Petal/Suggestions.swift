@@ -126,7 +126,7 @@ final class InsightsController {
             ?? Insights.palette.first { !used.contains($0) }.flatMap { NSColor(hex: $0) } ?? NSColor(hex: "#5fb8ff")!
         let about = (answer?["about"] as? String) ?? Insights.list(suggestion.apps.map(Apps.name))
         let mode = Mode(id: Self.uniqueID(name, taken: Set(config.modes.map(\.id))), name: name, icon: icon, color: color, about: about,
-                        apps: suggestion.apps, sites: [], focusDelay: 0, allow: [])
+                        apps: suggestion.apps, sites: [], focusDelay: 0, allow: [], distracting: answer?["distracting"] as? Bool)
         config.save(mode)
         return mode
     }

@@ -116,7 +116,7 @@ final class DockController {
                 DockItem(id: bundleID, pinned: pinned, running: running[bundleID] != nil, windows: snapshot.count[bundleID] ?? 0,
                          here: here.contains(bundleID), active: bundleID == frontmost)
             }
-            for bundleID in mode?.apps ?? [] where Apps.url(bundleID) != nil && !items.contains(where: { $0.id == bundleID }) {
+            for bundleID in mode?.apps ?? [] where Apps.shows(bundleID) && !items.contains(where: { $0.id == bundleID }) {
                 items.append(item(bundleID, pinned: true))
             }
             for bundleID in snapshot.order where running[bundleID] != nil && !items.contains(where: { $0.id == bundleID }) {
@@ -135,7 +135,7 @@ final class DockController {
             if dock.minimized != minimizedAll { dock.minimized = minimizedAll }
 
             // The stage is as long as the most apps any mode would show here, so switching never moves the rest.
-            let longest = config.modes.map { m in m.apps.filter { Apps.url($0) != nil }.count }.max() ?? 0
+            let longest = config.modes.map { m in m.apps.filter(Apps.shows).count }.max() ?? 0
             let slots = max(longest, ordered.count) + 1
             if slots != dock.stageSlots { dock.stageSlots = slots }
 
@@ -143,6 +143,8 @@ final class DockController {
         }
         if config.keepWindowsClear && !config.autoHide { keepWindowsClear(snapshot) }
         app.automation.modeShown(dock(for: NSScreen.main)?.mode?.id)
+        app.menuBar.show(mode: dock(for: NSScreen.main)?.mode)
+        app.notes.update()
     }
 
     /// macOS keeps no room for a dock other than its own, so windows would run under Petal's. While auto-hide is
@@ -214,6 +216,7 @@ final class DockController {
     /// No windows: launch it. Windows: bring one forward, cycling through them on repeated clicks: this Desktop's
     /// first, then minimized ones, then the rest. The pointer never moves.
     func activate(_ item: DockItem) {
+        if Sites.isWeb(item.id) { Sites.open(item.id); return }
         guard item.running, let running = NSRunningApplication.runningApplications(withBundleIdentifier: item.id).first else {
             launch(item.id)
             return
@@ -249,6 +252,7 @@ final class DockController {
 
     /// New window: the app comes forward and gets ⌘N, as its own File menu would.
     func newWindow(_ id: String) {
+        if Sites.isWeb(id) { Sites.open(id); return }
         guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: id).first else { launch(id); return }
         Windows.bringForward(running)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
@@ -628,93 +632,7 @@ extension View {
     }
 }
 
-// MARK: - Mode switcher
-
-/// One segment per mode; the active one is a circle in its color. Clicking puts this Desktop in that mode
-/// (waiting out the mode's delay when countdown is on); right-clicking opens the mode's menu.
-struct ModeSwitcher: View {
-    @Environment(PetalApp.self) private var app
-    @Namespace private var highlight
-    let dock: ScreenDock
-    let size: CGFloat
-
-    var body: some View {
-        let layout = dock.vertical ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 0))
-        HStack(spacing: 6) {
-            layout {
-                ForEach(app.config.modes) { mode in
-                    ModeSegment(dock: dock, mode: mode, size: size, highlight: highlight)
-                }
-            }
-            .padding(3)
-            .background(.white.opacity(0.07), in: .capsule)
-            .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 1))
-            if !dock.vertical, let pending = app.pendingMode, pending.desktop == dock.desktop {
-                StayPill(pending: pending, size: size)
-            }
-        }
-    }
-}
-
-struct ModeSegment: View {
-    @Environment(PetalApp.self) private var app
-    let dock: ScreenDock
-    let mode: Mode
-    let size: CGFloat
-    let highlight: Namespace.ID
-    @State private var hovering = false
-
-    var body: some View {
-        let active = dock.mode?.id == mode.id
-        let color = Color(nsColor: mode.color)
-        ZStack {
-            if active {
-                Circle().fill(color)
-                    .overlay(Circle().strokeBorder(Color(nsColor: mode.color.blended(withFraction: 0.25, of: .white) ?? mode.color), lineWidth: 1))
-                    .matchedGeometryEffect(id: "highlight", in: highlight)
-            }
-            ModeIcon(icon: mode.icon, size: size * 0.5)
-                .foregroundStyle(active ? .white : (hovering ? Color(nsColor: mode.color.blended(withFraction: 0.2, of: .white) ?? mode.color) : color))
-            if let pending = app.pendingMode, pending.desktop == dock.desktop, pending.mode == mode.id {
-                TimelineView(.animation) { context in
-                    let left = max(0, pending.deadline.timeIntervalSince(context.date)) / max(0.1, pending.total)
-                    Circle().trim(from: 0, to: left).stroke(color, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                }
-            }
-        }
-        .frame(width: size, height: size)
-        .contentShape(.circle)
-        .animation(.easeOut(duration: 0.24), value: active)
-        .slotFrame(dock, "mode:\(mode.id)")
-        .overlay(SlotMouse(
-            left: { if let desktop = dock.desktop { app.requestMode(mode.id, desktop: desktop) } },
-            right: { Menus.mode(mode, for: dock) },
-            hover: { on in
-                hovering = on
-                app.tooltips.show(on ? mode.name : nil, over: "mode:\(mode.id)", in: dock)
-            }))
-    }
-}
-
-struct StayPill: View {
-    @Environment(PetalApp.self) private var app
-    let pending: PendingMode
-    let size: CGFloat
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.25)) { context in
-            let left = Int(max(0, pending.deadline.timeIntervalSince(context.date)).rounded(.up))
-            Text("Stay · \(left / 60):\(String(format: "%02d", left % 60))")
-                .font(.system(size: 12, weight: .bold).monospacedDigit())
-                .foregroundStyle(Color(red: 0.16, green: 0.08, blue: 0.15))
-                .padding(.horizontal, 12)
-                .frame(height: size)
-                .background(.white.opacity(0.9), in: .capsule)
-                .onTapGesture { app.stay() }
-        }
-    }
-}
+// The mode switcher is in Switcher.swift.
 
 // MARK: - Claude button
 
@@ -810,8 +728,8 @@ struct AppSlot: View {
                     .opacity((item.active ? 0.75 : hovering ? 0.55 : 0.32) * min(1, max(0, config.number("glowStrength"))))
                     .animation(.easeOut(duration: 0.2), value: item.active)
             }
-            Image(nsImage: Apps.icon(item.id)).resizable().interpolation(.high).frame(width: icon, height: icon)
-                .opacity((item.running || !item.pinned ? 1 : config.number("idleOpacity")) * (fileOver ? 0.6 : 1))
+            DockIcon(id: item.id, size: icon)
+                .opacity((item.running || !item.pinned || Sites.isWeb(item.id) ? 1 : config.number("idleOpacity")) * (fileOver ? 0.6 : 1))
                 .modifier(Pulse(on: launching, floor: config.number("idleOpacity")))
                 .overlay(alignment: .topTrailing) {
                     if config.bool("badges"), let badge = app.signals.badges[item.id] {
@@ -905,6 +823,20 @@ struct AppSlot: View {
         withAnimation(.easeOut(duration: 0.22)) { hop = 1 }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
             withAnimation(.interpolatingSpring(stiffness: 260, damping: 9)) { hop = 0 }
+        }
+    }
+}
+
+/// An app's icon, or a website shortcut's (the site's icon, with a globe badge).
+struct DockIcon: View {
+    let id: String
+    let size: CGFloat
+
+    var body: some View {
+        if Sites.isWeb(id) {
+            SiteIcon(id: id, size: size)
+        } else {
+            Image(nsImage: Apps.icon(id)).resizable().interpolation(.high).frame(width: size, height: size)
         }
     }
 }

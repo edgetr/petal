@@ -125,7 +125,7 @@ struct DesktopTile: View {
                     Text(mode?.name ?? "No mode").font(.system(size: 15, weight: .semibold)).lineLimit(1)
                 }
                 HStack(spacing: -4) {
-                    ForEach((mode?.apps ?? []).filter { Apps.url($0) != nil }.prefix(6), id: \.self) { id in
+                    ForEach((mode?.apps ?? []).filter(Apps.shows).prefix(6), id: \.self) { id in
                         Image(nsImage: Apps.icon(id)).resizable().frame(width: 22, height: 22)
                     }
                 }

@@ -30,6 +30,9 @@ enum Apps {
         return found
     }
 
+    /// Something the dock can show: an installed app, or a website shortcut.
+    static func shows(_ id: String) -> Bool { Sites.isWeb(id) || url(id) != nil }
+
     /// An app's recent files as last looked up; hovering an app looks them up again, off the main thread.
     static func recent(_ id: String) -> [URL] { recents[id] ?? [] }
 
@@ -49,6 +52,7 @@ enum Apps {
     }
 
     static func name(_ id: String) -> String {
+        if Sites.isWeb(id) { return Sites.domain(id) ?? id }   // a website shortcut is called by its site
         if let name = names[id] { return name }
         guard let url = url(id) else { return id }
         let bundle = Bundle(url: url)
@@ -61,6 +65,7 @@ enum Apps {
     }
 
     static func icon(_ id: String) -> NSImage {
+        if Sites.isWeb(id) { return Sites.shared.tile(id) }
         if let icon = icons[id] { return icon }
         let icon = url(id).map { NSWorkspace.shared.icon(forFile: $0.path) } ?? NSImage(systemSymbolName: "app", accessibilityDescription: nil)!
         icons[id] = icon

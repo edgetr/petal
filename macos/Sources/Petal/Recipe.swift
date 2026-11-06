@@ -126,9 +126,12 @@ enum Recipe {
             taken.insert(id)
             var apps: [String] = [], missing: [String] = []
             for app in mode["apps"] as? [String] ?? [] {
+                // A website shortcut works on any computer.
+                if Sites.isWeb(app) { if !apps.contains(app) { apps.append(app) }; continue }
                 if let found = resolve(app) { if !apps.contains(found) { apps.append(found) } } else { missing.append(names[app] ?? app) }
             }
-            let allow = (mode["allow"] as? [String] ?? []).compactMap(resolve)
+            // Allowed apps that are here, and sites (which aren't apps anywhere).
+            let allow = (mode["allow"] as? [String] ?? []).compactMap { resolve($0) ?? (FocusGuard.looksLikeApp($0) || !$0.contains(".") ? nil : $0) }
             // A name that's already there gets a number too, so the two can be told apart.
             let given = mode["name"] as? String ?? original.capitalized
             var name = given, m = 2

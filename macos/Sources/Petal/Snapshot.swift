@@ -10,7 +10,7 @@ enum Snapshot {
         let dock = ScreenDock()
         dock.desktop = 1
         dock.mode = app.config.mode(forDesktop: 1)
-        dock.items = (dock.mode?.apps ?? []).filter { Apps.url($0) != nil }.prefix(7).enumerated().map { index, id in
+        dock.items = (dock.mode?.apps ?? []).filter(Apps.shows).prefix(7).enumerated().map { index, id in
             DockItem(id: id, pinned: true, running: index % 3 == 0, windows: index % 3 == 0 ? (index == 0 ? 2 : 1) : 0, here: true, active: index == 0)
         }
         dock.stageSlots = dock.items.count + 1
@@ -37,19 +37,68 @@ enum Snapshot {
 
         var views: [(String, AnyView, CGSize?)] = [
             ("dock", AnyView(DockView(dock: dock)), nil),
-            ("welcome", AnyView(WelcomeView {}), CGSize(width: 640, height: 720)),
+            ("welcome", AnyView(WelcomeView {}), CGSize(width: 640, height: 920)),
             ("claude-empty", AnyView(ClaudePanelView(panel: ClaudePanel())), nil),
             ("claude-chat", AnyView(ClaudePanelView(panel: app.claude)), nil),
             ("search", AnyView(AppSearchView(search: app.search)), nil),
-            ("card", AnyView(CardView(card: FocusCard(kind: .guardCard, bundleID: "net.imput.helium", title: "x.com",
-                                                      target: app.config.mode(id: "social"), here: dock.mode,
-                                                      reason: "Social feed, not work"))), nil),
             ("stack", AnyView(StackView(folder: "~/Downloads") {}), nil),
             ("card-suggest", AnyView(CardView(card: FocusCard(kind: .suggestion, suggestion: sampleNew))), nil),
             ("card-add", AnyView(CardView(card: FocusCard(kind: .suggestion, suggestion: sampleAdd))), nil),
             ("card-made", AnyView(CardView(card: FocusCard(kind: .made, target: app.config.modes.last, desktop: 1, suggestion: sampleNew))), nil),
             ("card-summary", AnyView(CardView(card: FocusCard(kind: .summary, summary: sampleSummary))), nil),
         ]
+        // The focus guard's cards and a notification that can't wait, each with its tail (bottom dock; then a side dock's).
+        for kind in ["block", "move", "peek", "note"] {
+            if let card = FocusCard.sample(kind, app: app, here: dock.mode, desktop: 1) {
+                views.append(("card-\(kind)", AnyView(CardView(card: card, tail: Tail(edge: .bottom, offset: kind == "peek" ? 0 : -90))), nil))
+            }
+        }
+        if let card = FocusCard.sample("block", app: app, here: dock.mode, desktop: 1) {
+            views.append(("card-block-left", AnyView(CardView(card: card, tail: Tail(edge: .leading, offset: 20))), nil))
+        }
+        // The mode switcher: a countdown into a distracting mode, with Stay; a website shortcut with its globe.
+        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        if let social = app.config.modes.first(where: { $0.isDistracting && $0.id != dock.mode?.id }) {
+            app.pendingMode = PendingMode(desktop: 1, mode: social.id, deadline: Date().addingTimeInterval(19), total: social.wait)
+            write(render(AnyView(DockView(dock: dock)), app: app, size: nil), name: "dock-countdown", folder: folder)
+            app.pendingMode = nil
+        }
+        // Held notifications waiting on two modes: counts on their buttons.
+        for (index, mode) in app.config.modes.filter({ $0.id != dock.mode?.id }).prefix(2).enumerated() {
+            for n in 0..<(index == 0 ? 3 : 1) {
+                app.notes.preview(HeldNote(id: Int64(index * 10 + n), app: "com.apple.mail", title: "", subtitle: "", body: "x", date: Date(), mode: mode.id))
+            }
+        }
+        write(render(AnyView(DockView(dock: dock)), app: app, size: nil), name: "dock-held", folder: folder)
+        for mode in app.config.modes { app.notes.clear(mode.id) }
+        // The sites' own icons, fetched from the sites (up to 10 s).
+        let samples = ["https://github.com", "https://www.figma.com"]
+        for id in samples { _ = Sites.shared.icon(id) }
+        let until = Date().addingTimeInterval(10)
+        while Date() < until && samples.contains(where: { Sites.shared.icon($0) == nil }) { RunLoop.main.run(until: Date().addingTimeInterval(0.2)) }
+        let sites = ScreenDock()
+        sites.desktop = 2
+        sites.mode = dock.mode
+        sites.items = Array(dock.items.prefix(3)) + ["https://github.com", "https://www.figma.com", "https://example.invalid"].map {
+            DockItem(id: $0, pinned: true, running: false, windows: 0, here: false, active: false)
+        }
+        sites.stageSlots = sites.items.count + 1
+        views.append(("dock-sites", AnyView(DockView(dock: sites)), nil))
+        views.append(("site-icons", AnyView(HStack(spacing: 14) {
+            ForEach(["https://github.com", "https://www.figma.com", "https://example.invalid"], id: \.self) { SiteIcon(id: $0, size: 64) }
+        }.padding(14)), nil))
+        views.append(("banner", AnyView(BannerView(notes: [FocusCard.sample("note", app: app, here: dock.mode)?.note].compactMap { $0 },
+                                                    heading: nil, color: nil, open: {})), nil))
+        if let social = app.config.modes.first(where: \.isDistracting), let note = FocusCard.sample("note", app: app, here: dock.mode)?.note {
+            views.append(("banner-held", AnyView(BannerView(notes: [note, note], heading: "2 notifications held for \(social.name)",
+                                                             color: social.color, open: {})), nil))
+        }
+        if let mode = dock.mode {
+            views.append(("menubar-mode", AnyView(HStack(spacing: 4) {
+                Image(nsImage: MenuBar.modeImage(mode.icon, dot: false)).renderingMode(.template).foregroundStyle(.white)
+                Text(mode.name).font(.system(size: 13)).foregroundStyle(.white)
+            }.padding(10)), nil))
+        }
         let recipeFile = URL(fileURLWithPath: folder).appending(path: "sample.petal")
         try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
         try? Data(##"{"petal":1,"name":"Ada's Omarchy","from":"omarchy","modes":[{"id":"building","name":"Building","icon":"x","color":"#b18cff","about":"code and terminals","apps":["com.mitchellh.ghostty","code","zed"]},{"id":"music","name":"Music","color":"#ff9f5f","about":"listening","apps":["spotify","steam"]}],"apps":{"com.mitchellh.ghostty":"Ghostty","code":"Visual Studio Code","zed":"Zed","spotify":"Spotify","steam":"Steam"},"settings":{"iconSize":48,"appGlow":false},"dock":{"position":"left","autoHide":true}}"##.utf8).write(to: recipeFile)

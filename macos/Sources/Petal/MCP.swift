@@ -129,7 +129,7 @@ enum MCP {
                     saved = modes[index]
                 } else {
                     var new: [String: Any] = ["name": id.capitalized, "icon": "circle.fill", "color": "#ff5fae", "about": "",
-                                              "apps": [], "sites": [], "focusDelay": 0, "hold": false, "allow": []]
+                                              "apps": [], "sites": [], "focusDelay": 0, "distracting": false, "hold": false, "allow": []]
                     new.merge(mode) { _, new in new }
                     modes.append(new)
                     saved = new
