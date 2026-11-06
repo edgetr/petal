@@ -227,6 +227,15 @@ final class LineBuffer: @unchecked Sendable {
         }
         return lines
     }
+
+    /// The text after the last newline, taken out.
+    func rest() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        let text = String(decoding: data, as: UTF8.self)
+        data.removeAll()
+        return text
+    }
 }
 
 // MARK: - The panel
@@ -265,6 +274,11 @@ final class InputPanel: NSPanel {
     /// over it.
     func show<Content: View>(_ content: Content) {
         hosting.rootView = AnyView(content.environment(PetalApp.shared))
+        showAgain()
+    }
+
+    /// Shows what it showed last, placed again over the dock.
+    func showAgain() {
         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
@@ -309,6 +323,8 @@ final class ClaudePanel {
     func open(asking text: String?, send: Bool = true) {
         let app = PetalApp.shared
         Task { await app.usage.refresh() }
+        // Codex's models, if they couldn't be read at launch (Codex installed or signed in since).
+        if app.chatProvider == .codex && app.codexModels.isEmpty { app.loadCodexModels() }
         if panel == nil {
             let panel = InputPanel()
             panel.onClose = { [weak self] in self?.isOpen = false; self?.optionsOpen = false }
@@ -628,6 +644,8 @@ final class AppSearch {
     var query = ""
     var selection = 0
     private(set) var mode: Mode?
+    /// Counts openings, so the reused view puts the cursor back in its field.
+    private(set) var opens = 0
     @ObservationIgnored private var panel: InputPanel?
 
     func open(in dock: ScreenDock?) {
@@ -635,12 +653,20 @@ final class AppSearch {
         mode = (dock ?? app.docks.focusedDock)?.mode
         query = ""
         selection = 0
-        if panel == nil { panel = InputPanel() }
+        opens += 1
         app.tooltips.hide()
-        panel?.show(AppSearchView(search: self))
+        // The view is made once; opening again only shows it, reset to an empty query.
+        if let panel { panel.showAgain() } else {
+            let panel = InputPanel()
+            self.panel = panel
+            panel.show(AppSearchView(search: self))
+        }
     }
 
     func close() { panel?.close() }
+
+    /// For `Bench`: the panel, to time how long it takes to draw.
+    var window: NSWindow? { panel }
 
     struct Result: Identifiable, Hashable {
         let id: String
@@ -733,7 +759,7 @@ struct AppSearchView: View {
                 .onChange(of: search.query) { _, _ in search.selection = 0 }
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(spacing: 2) {
+                    LazyVStack(spacing: 2) {
                         if results.isEmpty { Text("Nothing matches").foregroundStyle(.secondary).padding(.vertical, 20) }
                         ForEach(Array(results.enumerated()), id: \.element.id) { index, result in
                             SearchRow(result: result, selected: index == search.selection, added: search.added(result)) {
@@ -755,6 +781,7 @@ struct AppSearchView: View {
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
         .padding(10)
         .onAppear { focused = true }
+        .onChange(of: search.opens) { _, _ in focused = true }
         .onExitCommand { search.close() }
     }
 }

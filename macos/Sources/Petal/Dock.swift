@@ -48,18 +48,23 @@ final class DockController {
 
     init() {
         let center = NSWorkspace.shared.notificationCenter
+        // Another app in front changes only which icon is active: the last look at the windows does, at once.
+        center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh(quick: true) }
+        }
+        // Apps opening, quitting, hiding, and another Desktop: look at the windows again, off the main thread.
         for name in [NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.didLaunchApplicationNotification,
-                     NSWorkspace.didTerminateApplicationNotification, NSWorkspace.didActivateApplicationNotification,
-                     NSWorkspace.didHideApplicationNotification, NSWorkspace.didUnhideApplicationNotification] {
+                     NSWorkspace.didTerminateApplicationNotification, NSWorkspace.didHideApplicationNotification,
+                     NSWorkspace.didUnhideApplicationNotification] {
             center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refresh() }
+                MainActor.assumeIsolated { self?.refreshInBackground(force: true) }
             }
         }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil,
                                                queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.refresh() } }
         // Windows opening, closing and minimizing send no notification to other apps, so look again now and then.
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
+            MainActor.assumeIsolated { self?.refreshInBackground() }
         }
     }
 
@@ -71,43 +76,85 @@ final class DockController {
         }
     }
 
-    func refresh() {
+    /// Looks at the windows off the main thread, then refreshes with what it found: the once-a-second refresh. The
+    /// window server can take a moment to answer (hundreds of milliseconds while apps launch), and the dock never
+    /// waits for it.
+    func refreshInBackground(force: Bool = false) {
         guard shown else { return }
+        if looking { lookAgain = lookAgain || force; return }
+        looking = true
+        let pids = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map(\.processIdentifier)
+        let wantsMinimized = config.bool("minimized") && Date().timeIntervalSince(minimizedAt) > 3
+        if wantsMinimized { minimizedAt = Date() }
+        Self.lookQueue.async {
+            let snapshot = WindowList.current()
+            let running = Self.runningApps()
+            let minimized = wantsMinimized ? Self.minimizedWindows(pids) : nil
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let docks = PetalApp.shared.docks!
+                    docks.looking = false
+                    if let minimized { docks.minimizedCache = minimized }
+                    docks.lastRunning = running
+                    docks.refresh(with: snapshot)
+                    if docks.lookAgain {
+                        docks.lookAgain = false
+                        docks.refreshInBackground()
+                    }
+                }
+            }
+        }
+    }
+
+    /// The apps with a place in the dock, by bundle id. Asking each running process for this costs several
+    /// milliseconds, so it's done off the main thread with each look at the windows.
+    nonisolated private static func runningApps() -> [String: NSRunningApplication] {
+        var running: [String: NSRunningApplication] = [:]
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            if let id = app.bundleIdentifier, running[id] == nil { running[id] = app }
+        }
+        return running
+    }
+    @ObservationIgnored private var lastRunning: [String: NSRunningApplication]?
+    @ObservationIgnored private var lookAgain = false
+    nonisolated private static let lookQueue = DispatchQueue(label: "petal.windows", qos: .userInitiated)
+    @ObservationIgnored private var looking = false
+    /// The last look at the windows (at most a second old), for refreshes that only change what the dock shows.
+    @ObservationIgnored private var lastSnapshot: WindowList?
+
+    /// `quick`: what changed is the mode or a setting, not the windows, so the last look at them does.
+    func refresh(quick: Bool = false) {
+        refresh(with: quick ? (lastSnapshot ?? WindowList.current()) : Perf.span("refresh: window list") { WindowList.current() })
+    }
+
+    func refresh(with snapshot: WindowList) {
+        guard shown else { return }
+        lastSnapshot = snapshot
         let screens = NSScreen.screens
         let ids = Set(screens.compactMap(\.displayID))
         for (id, panel) in panels where !ids.contains(id) {
             panel.close()
             panels[id] = nil
         }
-        let snapshot = WindowList.current()
         let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        var running: [String: NSRunningApplication] = [:]
-        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
-            if let id = app.bundleIdentifier, running[id] == nil { running[id] = app }
-        }
-        if config.bool("minimized") {
-            if Date().timeIntervalSince(minimizedAt) > 3 {
-                minimizedAt = Date()
-                minimizedCache = Self.minimizedWindows(Array(running.values))
-            }
-        } else {
-            minimizedCache = []
-        }
+        // The last list of running apps, less any that quit since (a quit app's dot goes at once).
+        let running = Perf.span("refresh: running apps") { (lastRunning ?? Self.runningApps()).filter { !$0.value.isTerminated } }
+        if !config.bool("minimized") { minimizedCache = [] }
         let minimizedAll = minimizedCache
         let modesOn = config.bool("modes")
-        app.updateLaunching(snapshot)
+        Perf.span("refresh: launching") { app.updateLaunching(snapshot) }
 
         for screen in screens {
             guard let id = screen.displayID else { continue }
             let panel = panels[id] ?? DockPanel()
             panels[id] = panel
             let dock = panel.dock
-            let desktop = Spaces.desktop(on: screen)
+            let desktop = Perf.span("refresh: desktop") { Spaces.desktop(on: screen) }
             if desktop != nil || dock.mode == nil {   // a full-screen app keeps the mode of the Desktop before it
                 dock.desktop = desktop
             }
             let mode = modesOn ? config.mode(forDesktop: dock.desktop ?? 1) : config.modes.first
-            if mode != dock.mode { dock.mode = mode }
+            Perf.span("refresh: set mode") { if mode != dock.mode { dock.mode = mode } }
             let here = Set(snapshot.apps(on: screen))
             let otherModes = Set(config.modes.filter { $0.id != mode?.id }.flatMap(\.apps))
 
@@ -131,20 +178,20 @@ final class DockController {
             dock.order = dock.order.filter { key in others.contains { $0.id == key } }
             for other in others where !dock.order.contains(other.id) { dock.order.append(other.id) }
             let ordered = pinned + dock.order.compactMap { key in others.first { $0.id == key } }
-            if ordered != dock.items { dock.items = ordered }
+            Perf.span("refresh: set items") { if ordered != dock.items { dock.items = ordered } }
             if dock.minimized != minimizedAll { dock.minimized = minimizedAll }
 
             // The stage is as long as the most apps any mode would show here, so switching never moves the rest.
-            let longest = config.modes.map { m in m.apps.filter(Apps.shows).count }.max() ?? 0
+            let longest = Perf.span("refresh: stage") { config.modes.map { m in m.apps.filter(Apps.shows).count }.max() ?? 0 }
             let slots = max(longest, ordered.count) + 1
             if slots != dock.stageSlots { dock.stageSlots = slots }
 
-            panel.place(on: screen)
+            Perf.span("refresh: place panel") { panel.place(on: screen) }
         }
-        if config.keepWindowsClear && !config.autoHide { keepWindowsClear(snapshot) }
-        app.automation.modeShown(dock(for: NSScreen.main)?.mode?.id)
-        app.menuBar.show(mode: dock(for: NSScreen.main)?.mode)
-        app.notes.update()
+        if config.keepWindowsClear && !config.autoHide { Perf.span("refresh: keep windows clear") { keepWindowsClear(snapshot) } }
+        Perf.span("refresh: automation") { app.automation.modeShown(dock(for: NSScreen.main)?.mode?.id) }
+        Perf.span("refresh: menu bar") { app.menuBar.show(mode: dock(for: NSScreen.main)?.mode) }
+        Perf.span("refresh: notes") { app.notes.update() }
     }
 
     /// macOS keeps no room for a dock other than its own, so windows would run under Petal's. While auto-hide is
@@ -187,10 +234,10 @@ final class DockController {
         }
     }
 
-    /// Every minimized window of the running apps, across Desktops and modes.
-    private static func minimizedWindows(_ apps: [NSRunningApplication]) -> [AppWindow] {
+    /// Every minimized window of the running apps, across Desktops and modes (off the main thread).
+    nonisolated private static func minimizedWindows(_ pids: [pid_t]) -> [AppWindow] {
         guard Windows.trusted else { return [] }
-        return apps.flatMap { Windows.windows(of: $0.processIdentifier).filter(\.minimized) }
+        return pids.flatMap { Windows.windows(of: $0).filter(\.minimized) }
     }
 
     func dock(for screen: NSScreen?) -> ScreenDock? {
@@ -199,9 +246,13 @@ final class DockController {
     }
 
     /// The dock on the screen with the window in front: where cards go.
+    /// The dock on the screen of the window in front. One screen has one dock; with more, the last look at the
+    /// windows (at most a second old) says where the window in front is, so asking costs nothing.
     var focusedDock: ScreenDock? {
+        if panels.count == 1 { return panels.values.first?.dock }
         guard let front = NSWorkspace.shared.frontmostApplication,
-              let frame = WindowList.current().onScreenFrames(pid: front.processIdentifier).first else { return dock(for: NSScreen.main) }
+              let frame = (lastSnapshot ?? WindowList.current()).onScreenFrames(pid: front.processIdentifier).first
+        else { return dock(for: NSScreen.main) }
         let top = NSScreen.screens.first?.frame.maxY ?? 0
         let center = CGPoint(x: frame.midX, y: top - frame.midY)
         return dock(for: NSScreen.screens.first { $0.frame.contains(center) })
@@ -221,13 +272,13 @@ final class DockController {
             launch(item.id)
             return
         }
-        if Parking.activate(item.id) { return }   // each mode keeps its own windows
-        let windows = Windows.windows(of: running.processIdentifier)
+        if Perf.span("activate: parking", { Parking.activate(item.id) }) { return }   // each mode keeps its own windows
+        let windows = Perf.span("activate: windows (AX)") { Windows.windows(of: running.processIdentifier) }
         guard !windows.isEmpty else {
             if item.windows == 0 { launch(item.id) } else { Windows.bringForward(running) }
             return
         }
-        let onScreen = WindowList.current().onScreenFrames(pid: running.processIdentifier)
+        let onScreen = (lastSnapshot ?? WindowList.current()).onScreenFrames(pid: running.processIdentifier)
         func rank(_ w: AppWindow) -> Int { w.minimized ? 1 : (onScreen.contains { $0.equalTo(w.frame, within: 4) } ? 0 : 2) }
         let sorted = windows.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
         var pick = sorted[0]
@@ -235,12 +286,12 @@ final class DockController {
             let focused = Windows.frontTitle()
             if let index = sorted.firstIndex(where: { $0.title == focused && !$0.minimized }) { pick = sorted[(index + 1) % sorted.count] }
         }
-        Windows.focus(pick)
+        Perf.span("activate: focus") { Windows.focus(pick, onScreen: rank(pick) == 0) }
     }
 
     func launch(_ id: String, files: [URL] = []) {
         guard let url = Apps.url(id) else { return }
-        app.launching[id] = (Date(), WindowList.current().count[id] ?? 0)
+        app.launching[id] = (Date(), (lastSnapshot ?? WindowList.current()).count[id] ?? 0)
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         if files.isEmpty {
@@ -367,7 +418,8 @@ extension NSScreen {
 @MainActor
 final class DockPanel: NSPanel {
     let dock = ScreenDock()
-    private var hosting: NSHostingView<AnyView>!
+    private var hosting: DockHostingView!
+    private var measured: CGSize?
     private var hideAt: Date?
     private var mouseTimer: Timer?
     private(set) weak var screenRef: NSScreen?
@@ -375,7 +427,7 @@ final class DockPanel: NSPanel {
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         dock.panel = self
-        hosting = NSHostingView(rootView: AnyView(DockView(dock: dock).environment(PetalApp.shared)))
+        hosting = DockHostingView(rootView: AnyView(DockView(dock: dock).environment(PetalApp.shared)))
         contentView = hosting
         isFloatingPanel = true
         level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)))
@@ -401,6 +453,14 @@ final class DockPanel: NSPanel {
 
     var config: Config { PetalApp.shared.config }
 
+    /// The glass itself, without the clear room around it for lifting and bouncing icons: tooltips, previews and
+    /// stacks sit just above this, as they do over macOS's Dock.
+    var glassFrame: CGRect {
+        let room = DockView.outer(config)
+        return CGRect(x: frame.minX + room.leading, y: frame.minY + room.bottom,
+                      width: frame.width - room.leading - room.trailing, height: frame.height - room.top - room.bottom)
+    }
+
     /// The gap between the dock and the screen's edge (Omarchy's `gap`).
     var gap: CGFloat { config.number("dockMargin") >= 0 ? config.number("dockMargin") : 4 }
 
@@ -411,8 +471,16 @@ final class DockPanel: NSPanel {
 
     func place(on screen: NSScreen) {
         screenRef = screen
-        hosting.layoutSubtreeIfNeeded()
-        let size = hosting.fittingSize
+        // Measured again only when the dock's content says its size may have changed: once a second, nothing has.
+        let size: CGSize
+        if let measured, !hosting.sizeChanged {
+            size = measured
+        } else {
+            hosting.layoutSubtreeIfNeeded()
+            size = hosting.fittingSize
+            measured = size
+            hosting.sizeChanged = false
+        }
         let area = screen.frame
         let visible = screen.visibleFrame
         var origin: CGPoint
@@ -553,7 +621,12 @@ struct DockView: View {
 
     /// Room around the glass: for its shadow, and inward for icons lifting and bouncing.
     /// With magnification, it's room for the largest icons too, so the panel never resizes while they grow.
-    private var outer: EdgeInsets {
+    private var outer: EdgeInsets { Self.outer(config) }
+
+    /// The room around the glass (see `outer`), for anything placed by the glass rather than by the panel.
+    static func outer(_ config: Config) -> EdgeInsets {
+        let icon = max(16, config.number("iconSize"))
+        let slot = icon + (config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5) * 2
         var room = icon * 0.55
         var along: CGFloat = 10
         if Magnifier.enabled {
@@ -1204,5 +1277,16 @@ struct ModeIcon: View {
         } else {
             Text(icon.isEmpty ? "●" : icon).font(.system(size: size))   // a Nerd Font glyph from an Omarchy modes.json
         }
+    }
+}
+
+/// The dock's hosting view, which notes when SwiftUI says its content's size may have changed, so the dock is
+/// measured only then.
+final class DockHostingView: NSHostingView<AnyView> {
+    var sizeChanged = true
+
+    override func invalidateIntrinsicContentSize() {
+        super.invalidateIntrinsicContentSize()
+        sizeChanged = true
     }
 }

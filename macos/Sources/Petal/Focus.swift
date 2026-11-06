@@ -45,7 +45,7 @@ final class Brain {
         let apps = mode.apps.prefix(12).map(Apps.name).joined(separator: ", ")
         let prompt = """
         A focus mode in a dock is named "\(mode.name)". It's for: \(mode.about.isEmpty ? "(not said)" : mode.about). Its apps: \(apps.isEmpty ? "(none yet)" : apps).
-        Is it a mode that pulls you away from work, like social media, chat, videos or games?
+        Is it a mode that's mainly for distraction, like social media, chatting with friends, videos or games? An everyday or general mode with a mix of apps (work tools among them) is not.
         Reply with ONLY JSON: {"distracting": true|false}
         """
         ask(prompt, key: "d|\(mode.id)|\(mode.name)|\(mode.about)", done: done)

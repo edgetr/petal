@@ -5,7 +5,7 @@ import AppKit
 enum CLI {
     static let commands: Set<String> = ["mode", "stay", "current", "desktop", "ask", "chat", "search", "settings", "reveal", "check",
                                         "dock", "restart", "version", "update", "modes", "get", "set", "restore-dock", "restore-windows", "help",
-                                        "recipe", "suggest", "summary", "overview", "personal"]
+                                        "recipe", "suggest", "summary", "overview", "personal", "bench"]
 
     static let help = """
     petal mode <id>           put this Desktop in a mode (waits out a focus countdown)
@@ -27,6 +27,8 @@ enum CLI {
     petal doctor [--fix]      check Petal, and repair what it safely can
     petal report "<what>"     tell Petal's maker what went wrong (a GitHub issue; shown to you first)
     petal restore-dock        give macOS its Dock back, even if Petal crashed
+    petal bench               time the dock's clicks (brings apps forward and switches modes for ~15 s;
+                              results in ~/Library/Logs/Petal/bench.json)
     petal restore-windows     bring back every window put away for another mode, even if Petal crashed
     petal personal …          your own changes to Petal's code, kept through updates (petal personal help)
     """

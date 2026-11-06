@@ -30,7 +30,7 @@ final class GlassPanel: NSPanel {
         let size = hosting.fittingSize
         let screen = dock?.screenRef ?? NSScreen.main ?? NSScreen.screens[0]
         let area = screen.frame.insetBy(dx: gap, dy: gap)
-        let edge = dock?.frame ?? slot
+        let edge = dock?.glassFrame ?? slot
         var origin: CGPoint
         switch PetalApp.shared.config.position {
         case "left": origin = CGPoint(x: edge.maxX + gap, y: slot.midY - size.height / 2)
@@ -287,6 +287,9 @@ final class Previews {
     }
 
     private func open(_ item: DockItem, in dock: ScreenDock) {
+        // The window server counts windows Accessibility can't reach (another Desktop, hidden): with none to show,
+        // no preview, rather than an empty bubble.
+        guard !windows(of: item.id).isEmpty else { return scheduleHide() }
         showing = item.id
         PetalApp.shared.popups.showPreview(item, in: dock)
         capture(item.id)

@@ -22,6 +22,10 @@ MainActor.assumeIsolated {
         SystemDock.restore()
         exit(0)
     }
+    if arguments.contains("--bench") {
+        app.setActivationPolicy(.prohibited)
+        Bench.run()
+    }
     if let index = arguments.firstIndex(of: "--snapshot"), arguments.count > index + 1 {
         app.setActivationPolicy(.prohibited)
         Snapshot.run(to: arguments[index + 1])

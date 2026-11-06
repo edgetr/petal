@@ -90,10 +90,10 @@ final class PetalApp {
         Windows.limitWaiting()
         config.onChange = { [weak self] in
             guard let self else { return }
-            docks.refresh()
-            signals.watch(Stacks.resolve(config.strings("stackFolders")))
-            hotkeys.refresh()
-            menuBar.refresh()
+            Perf.span("onChange: docks.refresh") { self.docks.refresh() }
+            Perf.span("onChange: signals.watch") { self.signals.watch(Stacks.resolve(self.config.strings("stackFolders"))) }
+            Perf.span("onChange: hotkeys") { self.hotkeys.refresh() }
+            Perf.span("onChange: menuBar") { self.menuBar.refresh() }
         }
         registerIPC()
         ipc.start()
@@ -104,6 +104,7 @@ final class PetalApp {
         automation.start()
         menuBar.start()
         aiSetup.refreshAll()
+        Apps.warm()
         notes.start()
         Skill.install()
         Windows.startManaging()
@@ -226,11 +227,11 @@ final class PetalApp {
     private func apply(_ id: String, desktop: Int) {
         let then = arrival
         stay()
-        config.setMode(id, forDesktop: desktop)
-        Parking.modeChanged(desktop: desktop)
-        Tiling.modeChanged(desktop: desktop)
+        Perf.span("apply: config.setMode") { self.config.setMode(id, forDesktop: desktop) }
+        Perf.span("apply: parking") { Parking.modeChanged(desktop: desktop) }
+        Perf.span("apply: tiling") { Tiling.modeChanged(desktop: desktop) }
         if let card = popups.card, card.target?.id == id, card.kind != .note { popups.dismissCard() }
-        docks.refresh()
+        Perf.span("apply: docks.refresh") { self.docks.refresh(quick: true) }
         then?()
     }
 
@@ -408,6 +409,7 @@ final class PetalApp {
     /// What `bin/petal` and Claude's tools can ask the running Petal (IpcHandler in Dock.qml).
     private func registerIPC() {
         ipc.on("current") { [unowned self] _ in docks.focusedDock?.mode?.id ?? config.defaultMode }
+        ipc.on("bench") { _ in LiveBench.start() }
         ipc.on("mode") { [unowned self] args in
             guard let id = args.first, config.modes.contains(where: { $0.id == id }) else { return "no such mode" }
             guard let desktop = docks.focusedDock?.desktop ?? Spaces.desktop(on: NSScreen.main ?? NSScreen.screens[0]) else {

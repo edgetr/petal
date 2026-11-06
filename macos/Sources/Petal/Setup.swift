@@ -103,7 +103,17 @@ final class AISetup {
             finished.wait()
         }
         pipe.fileHandleForReading.readabilityHandler = nil
-        output.append(String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
+        // What's left in the pipe, then a last line with no newline yet: a long answer (Codex's model list is over
+        // half a megabyte on one line) can still be on its way when the process ends.
+        for text in buffer.lines(adding: pipe.fileHandleForReading.readDataToEndOfFile()) {
+            line?(text)
+            output.append(text + "\n")
+        }
+        let rest = buffer.rest()
+        if !rest.isEmpty {
+            line?(rest)
+            output.append(rest)
+        }
         return Result(status: process.terminationStatus, output: output.text)
     }
 }

@@ -20,7 +20,7 @@ struct AppWindow: Identifiable, Equatable {
 /// (System Settings > Privacy & Security > Accessibility); until then these answer empty and the dock still works.
 @MainActor
 enum Windows {
-    static var trusted: Bool { AXIsProcessTrusted() }
+    nonisolated static var trusted: Bool { AXIsProcessTrusted() }
 
     /// Every Accessibility call gives up after 0.3 s, so a hung app can't hang the dock. Called once at start.
     static func limitWaiting() {
@@ -43,7 +43,7 @@ enum Windows {
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
-    static func windows(of pid: pid_t) -> [AppWindow] {
+    nonisolated static func windows(of pid: pid_t) -> [AppWindow] {
         guard trusted else { return [] }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.3)   // a hung app mustn't hang the dock
@@ -67,11 +67,19 @@ enum Windows {
     }
 
     /// Brings one window forward: unminimizes it, raises it, and makes its app the active one. The pointer stays.
-    static func focus(_ window: AppWindow) {
+    /// Brings one window to the front. A window on this Desktop comes forward through Accessibility, at once; one
+    /// elsewhere (another Desktop, minimized) goes through Launch Services, which also switches Desktop.
+    static func focus(_ window: AppWindow, onScreen: Bool = false) {
         if window.minimized { AXUIElementSetAttributeValue(window.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
         AXUIElementPerformAction(window.element, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window.element, kAXMainAttribute as CFString, kCFBooleanTrue)
-        if let app = NSRunningApplication(processIdentifier: window.pid) { bringForward(app) }
+        guard let app = NSRunningApplication(processIdentifier: window.pid) else { return }
+        if onScreen && !window.minimized && !app.isHidden {
+            let element = AXUIElementCreateApplication(window.pid)
+            AXUIElementSetMessagingTimeout(element, 0.3)
+            if AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success { return }
+        }
+        bringForward(app)
     }
 
     /// Moves and resizes a window (top-left origin).
@@ -103,7 +111,7 @@ enum Windows {
         return value(window, kAXTitleAttribute) ?? ""
     }
 
-    static func value<T>(_ element: AXUIElement, _ attribute: String) -> T? {
+    nonisolated static func value<T>(_ element: AXUIElement, _ attribute: String) -> T? {
         var raw: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) == .success, let raw else { return nil }
         return raw as? T

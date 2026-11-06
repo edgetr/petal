@@ -127,14 +127,35 @@ final class Config {
         workspaces.filter { $0.value == mode }.compactMap { Int($0.key) }.sorted()
     }
 
-    /// Puts Desktop `number` in a mode, the way Omarchy remembers a workspace's mode.
+    /// Puts Desktop `number` in a mode, the way Omarchy remembers a workspace's mode. The dock sees it at once; the
+    /// file is written a moment later, off the main thread, so switching mode never waits for the disk.
     func setMode(_ id: String, forDesktop number: Int) {
-        update(modesFile) { root in
-            var map = root["workspaces"] as? [String: Any] ?? [:]
-            map[String(number)] = id
-            root["workspaces"] = map
+        workspaces[String(number)] = id
+        let file = modesFile
+        writing += 1
+        Self.writer.async {
+            // A file that's there but isn't valid JSON is left alone (see `update`).
+            if !FileManager.default.fileExists(atPath: file.path) || Self.parse(file) != nil {
+                var root = Self.readObject(file)
+                var map = root["workspaces"] as? [String: Any] ?? [:]
+                map[String(number)] = id
+                root["workspaces"] = map
+                Self.writeObject(root, to: file)
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let config = PetalApp.shared.config
+                    config.writing -= 1
+                    if config.writing == 0 { config.stamps = config.currentStamps() }
+                }
+            }
         }
     }
+
+    /// Writes from `setMode`, one after another, in order.
+    nonisolated private static let writer = DispatchQueue(label: "petal.config.write", qos: .userInitiated)
+    /// Writes not finished yet: the watcher waits for them, so Petal's own write isn't read back as someone's change.
+    @ObservationIgnored private var writing = 0
 
     func setDefaultMode(_ id: String) {
         update(modesFile) { $0["defaultMode"] = id }
@@ -221,7 +242,8 @@ final class Config {
         let apps = SystemDock.apps()
         var mode = self.mode(id: "dock").flatMap { $0.id == "dock" ? $0 : nil }
             ?? Mode(id: "dock", name: "My Dock", icon: "dock.rectangle", color: NSColor(hex: "#d9367f")!,
-                    about: "everyday apps, from macOS's Dock", apps: [], sites: [], focusDelay: 0, allow: [])
+                    about: "everyday apps, from macOS's Dock", apps: [], sites: [], focusDelay: 0, allow: [],
+                    distracting: false)
         mode.apps = apps
         save(mode)
         setDefaultMode("dock")
@@ -232,6 +254,7 @@ final class Config {
     // MARK: Files
 
     private func update(_ file: URL, _ change: (inout [String: Any]) -> Void) {
+        Self.writer.sync {}   // a mode switch still being saved goes first
         // A file that's there but isn't valid JSON (half-written by an editor, say) is left alone, not replaced
         // by the one key being changed.
         if FileManager.default.fileExists(atPath: file.path), Self.parse(file) == nil {
@@ -270,6 +293,7 @@ final class Config {
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                guard self.writing == 0 else { return }
                 let now = self.currentStamps()
                 guard now != self.stamps else { return }
                 self.stamps = now
