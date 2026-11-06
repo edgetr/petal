@@ -160,11 +160,12 @@ def run(*cmd):
         return str(e)
 
 
-def petal(*args):
-    """Asks the running Petal for macOS, over its socket, as `omarchy-shell petal` does on Omarchy."""
+def petal(*args, timeout=5):
+    """Asks the running Petal for macOS, over its socket, as `omarchy-shell petal` does on Omarchy. Running out of
+    time (`timeout` seconds) says so; it's never "Petal isn't running"."""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-            conn.settimeout(5)
+            conn.settimeout(timeout)
             conn.connect(SOCKET)
             conn.sendall((json.dumps(list(args)) + "\n").encode())
             reply = b""
@@ -174,6 +175,8 @@ def petal(*args):
                     break
                 reply += chunk
             return reply.decode().strip()
+    except socket.timeout:
+        return "Petal didn't answer in time"
     except OSError as e:
         return "Petal isn't running (%s)" % e
 
@@ -780,7 +783,8 @@ def assist(name):
     def run(args):
         # A sticky note's chat (Petal sets PETAL_NOTE for its own) is answered about the note's window.
         note = os.environ.get("PETAL_NOTE", "")
-        reply = petal("assist", name, json.dumps(args), *([note] if note else []))
+        # A card asking the person first waits up to 120 s: this waits longer, so their answer always arrives.
+        reply = petal("assist", name, json.dumps(args), *([note] if note else []), timeout=150)
         try:
             out = json.loads(reply)
         except ValueError:

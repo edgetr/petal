@@ -14,7 +14,9 @@ final class TextServices: NSObject {
     }
 
     private func take(_ pasteboard: NSPasteboard, open: Bool) {
-        guard let text = pasteboard.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
+        // Never a secret: what a password manager marks as one, or anything from an app kept private.
+        guard !Assist.isConcealed(pasteboard), !PetalApp.shared.assist.neverLook(NSWorkspace.shared.frontmostApplication?.bundleIdentifier),
+              let text = pasteboard.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
         let source = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
         let app = PetalApp.shared
         app.claude.quote(text, from: source)

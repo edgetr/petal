@@ -212,7 +212,8 @@ enum MCP {
             let json = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
             // A sticky note's chat (PETAL_NOTE, set by Petal for its own chats) is answered about the note's window.
             let note = ProcessInfo.processInfo.environment["PETAL_NOTE"] ?? ""
-            let reply = petal(["assist", name, json] + (note.isEmpty ? [] : [note]))
+            // A card asking the person first waits up to 120 s: this waits longer, so their answer always arrives.
+            let reply = petal(["assist", name, json] + (note.isEmpty ? [] : [note]), timeout: 150)
             guard let data = reply.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) else {
                 throw Failure(reply.isEmpty ? "Petal isn't running" : reply)
             }
@@ -252,10 +253,16 @@ enum MCP {
     /// Asks the running Petal over its socket, as petal-mcp.py does.
     static func petal(_ args: String...) -> String { petal(args) }
 
-    static func petal(_ args: [String]) -> String {
+    /// `timeout`: seconds to wait for the answer (nil waits as long as it takes). Running out of time says so; it's
+    /// never "Petal isn't running".
+    static func petal(_ args: [String], timeout: Int? = nil) -> String {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return "Petal isn't running" }
         defer { close(fd) }
+        if let timeout {
+            var limit = timeval(tv_sec: timeout, tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &limit, socklen_t(MemoryLayout<timeval>.size))
+        }
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         let bytes = Array(socket.utf8)
@@ -270,6 +277,7 @@ enum MCP {
         var buffer = [UInt8](repeating: 0, count: 4096)
         while true {
             let count = Darwin.read(fd, &buffer, buffer.count)
+            if count < 0, errno == EAGAIN || errno == EWOULDBLOCK { return "Petal didn't answer in time" }
             if count <= 0 { break }
             reply.append(buffer, count: count)
             if reply.last == 0x0A { break }

@@ -178,6 +178,7 @@ final class Agent {
         endRun()
         askedWith = nil
         keptPlace = nil
+        onDisk = false
         chatID = UUID()
         messages = []
         sessionID = nil
@@ -187,10 +188,18 @@ final class Agent {
 
     /// While one chat is swapped for another: nothing is saved until the new one is whole.
     @ObservationIgnored private var switching = false
+    /// This chat has a file in Chats (saved, or picked from there).
+    @ObservationIgnored private var onDisk = false
 
     /// Saves this chat (from its first message on), with its session to resume.
     private func keep() {
-        guard !switching, let chat = saved else { return }
+        guard !switching else { return }
+        guard let chat = saved else {
+            // Nothing left in it (its last message still to send taken out): its file goes, so it can't come back.
+            if onDisk { Chats.delete(id: chatID); onDisk = false }
+            return
+        }
+        onDisk = true
         Chats.save(chat)
         // A window's link to this chat holds it as it is now, never an older copy.
         if PetalApp.started { PetalApp.shared.claude.chatSaved(chat) }
@@ -202,10 +211,11 @@ final class Agent {
         let sent = waiting.isEmpty ? messages : Array(messages.prefix(min(waitingFrom ?? messages.count, messages.count)))
         let lines = sent.filter { $0.kind != .ask }.map { SavedChat.Line(kind: Self.name($0.kind), text: $0.text) }
         let pending = waiting.filter { $0 != Self.approved } + queued
-        guard let first = messages.first(where: { $0.kind == .user }) else { return nil }
+        // Its first words: the first message, sent or still to send (a chat may be only that).
+        guard let first = messages.first(where: { $0.kind == .user })?.text ?? pending.first else { return nil }
         let provider = sessionProvider ?? chatProvider ?? app.chatProvider
         chatProvider = provider
-        let title = first.text.components(separatedBy: "\n").first { !$0.hasPrefix(">") && !$0.hasPrefix("From ") && !$0.isEmpty } ?? first.text
+        let title = first.components(separatedBy: "\n").first { !$0.hasPrefix(">") && !$0.hasPrefix("From ") && !$0.isEmpty } ?? first
         return SavedChat(id: chatID, title: String(title.prefix(80)), provider: provider?.rawValue ?? "", session: sessionID,
                          updated: Date(), lines: lines, place: place ?? keptPlace, pending: pending.isEmpty ? nil : pending)
     }
@@ -222,6 +232,7 @@ final class Agent {
         endRun()
         askedWith = nil
         keptPlace = chat.place
+        onDisk = true
         pendingAsk = []
         allowed = []
         chatID = chat.id

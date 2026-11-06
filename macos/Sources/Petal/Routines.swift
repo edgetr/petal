@@ -435,8 +435,11 @@ final class Routines {
             guard index < routine.actions.count else { return finish() }
             let action = routine.actions[index]
             guard action.movesFiles else {
-                if let text = perform(action) { said.append(text) }
-                return step(index + 1)
+                // The next step waits for this one (opening, hiding: off the main thread) to finish.
+                return perform(action) { text in
+                    if let text { said.append(text) }
+                    step(index + 1)
+                }
             }
             if let file {
                 guard moves.isEmpty else { return step(index + 1) }   // already moved by an earlier action
@@ -504,40 +507,46 @@ final class Routines {
     }
 
     /// Switching mode, opening, hiding, a Shortcut: decided when the routine was made, so it costs nothing now.
-    private func perform(_ action: Action) -> String? {
-        guard !standalone else { return nil }
+    /// One action that isn't moving files; `done` hears what it did (nil: nothing to do). Opening addresses and
+    /// files and hiding apps wait on Launch Services and the apps: off the main thread, the answer back on it.
+    private func perform(_ action: Action, done: @escaping (String?) -> Void) {
+        guard !standalone else { return done(nil) }
         let app = PetalApp.shared
         switch action.kind {
         case "mode":
             guard let mode = app.config.modes.first(where: { $0.id == action.mode }), app.docks.focusedDock?.mode?.id != mode.id,
-                  let desktop = app.docks.focusedDock?.desktop ?? Spaces.desktop(on: NSScreen.main ?? NSScreen.screens[0]) else { return nil }
+                  let desktop = app.docks.focusedDock?.desktop ?? Spaces.desktop(on: NSScreen.main ?? NSScreen.screens[0]) else { return done(nil) }
             app.setModeNow(mode.id, desktop: desktop)
-            return "switched to \(mode.name)"
+            done("switched to \(mode.name)")
         case "open":
             var opened: [String] = []
+            var urls: [URL] = []
             for item in action.apps {
                 if item.contains("://"), let url = URL(string: item) {
-                    NSWorkspace.shared.open(url)
+                    urls.append(url)
                     opened.append(url.host ?? item)
                 } else if item.hasPrefix("/") || item.hasPrefix("~") {
-                    NSWorkspace.shared.open(URL(fileURLWithPath: (item as NSString).expandingTildeInPath))
+                    urls.append(URL(fileURLWithPath: (item as NSString).expandingTildeInPath))
                     opened.append((item as NSString).lastPathComponent)
                 } else if !NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == item }) {
-                    app.docks.launch(item)
+                    app.docks.launch(item)   // Launch Services' own asynchronous open
                     opened.append(Apps.name(item))
                 }
             }
-            return opened.isEmpty ? nil : "opened " + Insights.list(opened)
+            let said = opened.isEmpty ? nil : "opened " + Insights.list(opened)
+            guard !urls.isEmpty else { return done(said) }
+            Assist.off({ for url in urls { NSWorkspace.shared.open(url) } }) { done(said) }
         case "hide":
             let running = NSWorkspace.shared.runningApplications.filter { r in action.apps.contains { $0 == r.bundleIdentifier } && !r.isHidden }
-            running.forEach { $0.hide() }
-            return running.isEmpty ? nil : "hid " + Insights.list(running.compactMap(\.localizedName))
+            guard !running.isEmpty else { return done(nil) }
+            let said = "hid " + Insights.list(running.compactMap(\.localizedName))
+            Assist.off({ running.forEach { $0.hide() } }) { done(said) }
         case "shortcut":
-            guard !action.name.isEmpty else { return nil }
-            Shortcuts.run(action.name)
-            return "ran the Shortcut “\(action.name)”"
+            guard !action.name.isEmpty else { return done(nil) }
+            Shortcuts.run(action.name)   // runs `shortcuts` off the main thread
+            done("ran the Shortcut “\(action.name)”")
         default:
-            return nil
+            done(nil)
         }
     }
 

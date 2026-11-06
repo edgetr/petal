@@ -44,8 +44,10 @@ enum Chats {
         }
     }
 
-    static func delete(_ chat: SavedChat) {
-        let file = folder.appending(path: chat.id.uuidString + ".json")
+    static func delete(_ chat: SavedChat) { delete(id: chat.id) }
+
+    static func delete(id: UUID) {
+        let file = folder.appending(path: id.uuidString + ".json")
         queue.async { try? FileManager.default.removeItem(at: file) }
     }
 
