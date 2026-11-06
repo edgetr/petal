@@ -39,9 +39,24 @@ final class Agent {
 
     var app: PetalApp { PetalApp.shared }
 
+    /// Messages written while it works, sent once the run ends (queued), or at once by ending it (steering).
+    private(set) var queued: [String] = []
+
     func send(_ text: String) {
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, !running else { return }
+        guard !prompt.isEmpty else { return }
+        if running {
+            // While it works: steer (the run stops where it is and carries on from this message, in the same
+            // session), or queue (sent when it's done), as `chatWhileWorking` says.
+            if app.config.string("chatWhileWorking") == "queue" {
+                queued.append(prompt)
+            } else {
+                queued.insert(prompt, at: 0)
+                messages.append(Message(kind: .step, text: "Steering"))
+                stop()
+            }
+            return
+        }
         pendingAsk = []
         messages.append(Message(kind: .user, text: prompt))
         run(prompt)
@@ -74,7 +89,11 @@ final class Agent {
         process = nil
         running = false
         runID = UUID()
+        queued = []
     }
+
+    /// Takes a message out of the queue (or back from steering) before it's sent.
+    func unqueue(_ index: Int) { if queued.indices.contains(index) { queued.remove(at: index) } }
 
     func reset() {
         endRun()
@@ -179,6 +198,11 @@ final class Agent {
                 MainActor.assumeIsolated {
                     guard self.runID == id else { return }
                     self.running = false
+                    // What was written while it worked goes now (steering: straight after it stopped).
+                    if !self.queued.isEmpty, self.pendingAsk.isEmpty {
+                        let next = self.queued.removeFirst()
+                        DispatchQueue.main.async { self.send(next) }
+                    }
                     self.process = nil
                     let status = finished.terminationStatus
                     let detail = self.errorText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -693,6 +717,15 @@ struct ClaudePanelView: View {
                         MessageView(message: message, last: message.id == agent.messages.last?.id).id(message.id)
                     }
                     if agent.running { TypingDots().id("typing") }
+                    ForEach(Array(agent.queued.enumerated()), id: \.offset) { index, text in
+                        HStack(spacing: 6) {
+                            Spacer(minLength: 100)
+                            Text(text).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
+                                .padding(.horizontal, 12).padding(.vertical, 6)
+                                .background(.white.opacity(0.06), in: .rect(cornerRadius: 12))
+                            RoundButton(symbol: "xmark", size: 18) { agent.unqueue(index) }.help("Don't send it")
+                        }
+                    }
                 }
                 .padding(.vertical, 2)
             }
@@ -710,15 +743,19 @@ struct ClaudePanelView: View {
     private var input: some View {
         @Bindable var panel = panel
         return HStack(spacing: 8) {
-            TextField(agent.messages.isEmpty ? "Ask \(provider?.name ?? "AI")…" : "Reply…", text: $panel.draft)
+            TextField(agent.messages.isEmpty ? "Ask \(provider?.name ?? "AI")…"
+                      : agent.running ? (app.config.string("chatWhileWorking") == "queue" ? "Add to what's next…" : "Steer it…") : "Reply…",
+                      text: $panel.draft)
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
                 .focused($focused)
                 .onSubmit(submit)
+            // While it works: stop, or (with something written) steer or queue it.
+            let stops = agent.running && panel.draft.isEmpty
             Button {
-                if agent.running { agent.stop() } else { submit() }
+                if stops { agent.stop() } else { submit() }
             } label: {
-                Image(systemName: agent.running ? "stop.fill" : "arrow.up")
+                Image(systemName: stops ? "stop.fill" : "arrow.up")
                     .font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
                     .frame(width: 30, height: 30)
                     .background(Color(nsColor: app.accent), in: .circle)
@@ -768,8 +805,8 @@ struct ClaudePanelView: View {
     }
 
     private func submit() {
-        guard !agent.running else { return }
         var text = panel.draft
+        if agent.running && text.trimmingCharacters(in: .whitespaces).isEmpty && panel.quotes.isEmpty && panel.attachments.isEmpty { return }
         if !panel.quotes.isEmpty {
             if text.trimmingCharacters(in: .whitespaces).isEmpty { text = "What about this?" }
             let quoted = panel.quotes.map { q in
@@ -868,7 +905,8 @@ struct MessageView: View {
         case .user:
             HStack {
                 Spacer(minLength: 100)
-                Text(message.text).font(.system(size: 13.5)).textSelection(.enabled)
+                // Medium: on a 1x screen, regular text over glass gets only grey smoothing and reads soft.
+                Text(message.text).font(.system(size: 13.5, weight: .medium)).textSelection(.enabled)
                     .padding(.horizontal, 14).padding(.vertical, 8)
                     .background(accent.opacity(0.22), in: .rect(cornerRadius: 14))
             }

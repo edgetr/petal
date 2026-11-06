@@ -709,6 +709,10 @@ struct ClaudeSettings: View {
                 }
             }
             Card(title: "Chat") {
+                Picker("Writing while it works", selection: Binding(get: { app.config.string("chatWhileWorking") }, set: { app.config.set("chatWhileWorking", $0) })) {
+                    Text("Steers it").tag("steer")
+                    Text("Waits its turn").tag("queue")
+                }
                 if app.providers.count > 1 {
                     Picker("Chat with", selection: Binding(get: { provider.rawValue }, set: {
                         app.config.set("chatProvider", $0)

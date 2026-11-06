@@ -95,6 +95,15 @@ enum Windows {
         }
         if !forward { bringForward(app) }
         raise()
+        // Some apps (Chromium browsers) say yes to coming forward through Accessibility and don't: if it isn't in
+        // front a moment later, Launch Services brings it, which always works.
+        if forward {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                guard NSWorkspace.shared.frontmostApplication?.processIdentifier != window.pid else { return }
+                bringForward(app)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { raise() }
+            }
+        }
         for delay in forward ? [0.12] : [0.15, 0.4] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { raise() }
         }

@@ -166,6 +166,7 @@ Item {
       property string dailySummary: ""
       property var aiAllowed: []
       property bool replyDrafts: true
+      property string chatWhileWorking: "steer"
       property bool selectionAsk: true
       property var aiNeverLook: ["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"]
       property bool routines: true
