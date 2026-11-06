@@ -9,10 +9,15 @@ import Foundation
 final class IPC {
     nonisolated static let path = Config.folder.appending(path: "petal.sock").path
     typealias Handler = @MainActor ([String]) -> String
+    /// A function that answers later (the AI's tools waiting for the person to allow something): it calls `reply`
+    /// once, on the main thread.
+    typealias Later = @MainActor ([String], @escaping @MainActor (String) -> Void) -> Void
     private var handlers: [String: Handler] = [:]
+    private var later: [String: Later] = [:]
     private var fd: Int32 = -1
 
     func on(_ name: String, _ handler: @escaping Handler) { handlers[name] = handler }
+    func onLater(_ name: String, _ handler: @escaping Later) { later[name] = handler }
 
     /// Another Petal answers on the socket already: this one mustn't take it from it.
     nonisolated static func answering() -> Bool {
@@ -53,7 +58,8 @@ final class IPC {
             while true {
                 let client = accept(listener, nil, nil)
                 if client < 0 { break }
-                self?.serve(client)
+                // Each on its own thread: one waiting for an answer never holds up the rest.
+                Thread.detachNewThread { self?.serve(client) }
             }
         }
     }
@@ -80,16 +86,36 @@ final class IPC {
         } else {
             words = line.split(separator: " ").map(String.init)
         }
-        let reply = DispatchQueue.main.sync {
-            MainActor.assumeIsolated { () -> String in
-                guard let name = words.first, let handler = self.handlers[name] else {
-                    return "unknown function; try: " + self.handlers.keys.sorted().joined(separator: ", ")
+        let done = DispatchSemaphore(value: 0)
+        let answer = Answer()
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                let name = words.first ?? ""
+                let finish: @MainActor (String) -> Void = { text in
+                    guard !answer.given else { return }
+                    answer.given = true
+                    answer.text = text
+                    done.signal()
                 }
-                return handler(Array(words.dropFirst()))
+                if let handler = self.later[name] {
+                    handler(Array(words.dropFirst()), finish)
+                } else if let handler = self.handlers[name] {
+                    finish(handler(Array(words.dropFirst())))
+                } else {
+                    finish("unknown function; try: " + (Array(self.handlers.keys) + Array(self.later.keys)).sorted().joined(separator: ", "))
+                }
             }
         }
+        done.wait()
+        let reply = answer.text
         let out = Array((reply + "\n").utf8)
         _ = out.withUnsafeBytes { write(client, $0.baseAddress, out.count) }
         close(client)
     }
+}
+
+/// One reply, handed from the main thread to the socket's.
+private final class Answer: @unchecked Sendable {
+    var given = false
+    var text = ""
 }
