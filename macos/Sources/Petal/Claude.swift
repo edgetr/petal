@@ -261,15 +261,30 @@ final class InputPanel: NSPanel {
         onClose()
     }
 
-    /// Centered on the screen with the pointer, its bottom `above` points over the screen's bottom.
-    func show<Content: View>(_ content: Content, above: CGFloat) {
+    /// Centered on the screen with the pointer, just above the dock: it comes out of the dock rather than floating
+    /// over it.
+    func show<Content: View>(_ content: Content) {
         hosting.rootView = AnyView(content.environment(PetalApp.shared))
         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
+        // The content's own 10-point margin around the glass, then 12 points of space over the dock.
+        let above = Self.dockReach(on: screen) + 12 - 10
         setFrame(NSRect(x: screen.frame.midX - size.width / 2, y: screen.frame.minY + above, width: size.width, height: size.height).integral,
                  display: true)
         makeKeyAndOrderFront(nil)
+    }
+
+    /// How far the dock reaches up from the screen's bottom: Petal's (gap, its 2-point margin, the glass's 4-point
+    /// padding around a slot), or macOS's when that one is showing. 0 for a side dock.
+    static func dockReach(on screen: NSScreen) -> CGFloat {
+        let config = PetalApp.shared.config
+        if config.whichDock == "macos" { return max(0, screen.visibleFrame.minY - screen.frame.minY) }
+        guard config.position != "left", config.position != "right" else { return 0 }
+        let gap = config.number("dockMargin") >= 0 ? config.number("dockMargin") : 4
+        let icon = max(16, config.number("iconSize"))
+        let inset = config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5
+        return gap + 2 + 4 + icon + inset * 2 + 4
     }
 
     /// Grows upward as the conversation does, keeping its bottom edge.
@@ -308,7 +323,7 @@ final class ClaudePanel {
         }
         app.tooltips.hide()
         app.popups.closeAll()
-        panel?.show(ClaudePanelView(panel: self), above: 104)
+        panel?.show(ClaudePanelView(panel: self))
     }
 
     func openOptions() {
@@ -623,7 +638,7 @@ final class AppSearch {
         selection = 0
         if panel == nil { panel = InputPanel() }
         app.tooltips.hide()
-        panel?.show(AppSearchView(search: self), above: 110)
+        panel?.show(AppSearchView(search: self))
     }
 
     func close() { panel?.close() }

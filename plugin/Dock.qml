@@ -73,6 +73,16 @@ Item {
   readonly property string position: DockModel.normalizePosition(dockConfig.position)
   readonly property bool vertical: DockModel.isVertical(position)
   readonly property bool autohide: dockConfig.autohide === true
+  // How far the dock reaches up from the screen's bottom (DockWindow's gap + slot + padding), so the chat and the
+  // "+" search open just above it, out of the dock rather than floating over it. 0 for a side dock.
+  readonly property int dockReach: {
+    if (vertical || position === "top") return 0
+    var s = root.settings
+    var margin = s && s.dockMargin >= 0 ? s.dockMargin * Style.fontScale : Style.spacing.xs
+    var icon = Math.max(16, s && s.iconSize ? s.iconSize : 36) * Style.fontScale
+    var inset = s && s.iconPadding >= 0 ? s.iconPadding * Style.fontScale : Style.spacing.md
+    return Math.round(margin + icon + inset * 2 + Style.spacing.xs * 2)
+  }
 
   // ── Settings ──────────────────────────────────────────────────────────
   property alias settings: settingsAdapter

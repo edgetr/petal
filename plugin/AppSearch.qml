@@ -123,7 +123,7 @@ PanelWindow {
 
     width: Math.round(440 * Style.fontScale)
     x: Math.round((search.width - width) / 2)
-    y: search.height - height - Math.round(110 * Style.fontScale)
+    y: search.height - height - (search.dock ? search.dock.dockReach : 0) - Math.round(12 * Style.fontScale)
     height: column.implicitHeight + padding * 2
     radius: Math.round(22 * Style.fontScale)
     color: search.dock ? search.dock.popupFill : Qt.rgba(Commons.Color.popups.background.r, Commons.Color.popups.background.g, Commons.Color.popups.background.b, 0.74)

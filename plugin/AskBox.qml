@@ -165,7 +165,7 @@ PanelWindow {
     // options, or the conversation, up to half the screen, then it scrolls) and grows or shrinks upward.
     height: column.implicitHeight + pad * 2
     x: Math.round((box.width - width) / 2)
-    y: box.height - height - Math.round(104 * Style.fontScale)
+    y: box.height - height - (box.dock ? box.dock.dockReach : 0) - Math.round(12 * Style.fontScale)
     radius: Math.round(22 * Style.fontScale)
     color: box.dock ? box.dock.popupFill : Qt.rgba(Commons.Color.popups.background.r, Commons.Color.popups.background.g, Commons.Color.popups.background.b, 0.74)
     border.width: 1
@@ -329,6 +329,11 @@ PanelWindow {
             text: (box.settings ? box.modelName(box.provider === "codex" ? box.codexCurrent : box.settings[box.modelKey]) + " · " + box.settings[box.effortKey] : "") + (box.optionsOpen ? "  ⌃" : "  ⌄")
             active: box.optionsOpen
             onClicked: box.optionsOpen = !box.optionsOpen
+          }
+          QuietButton {
+            visible: box.describing
+            text: "Back"
+            onClicked: { box.describing = false; input.forceActiveFocus() }
           }
           QuietButton {
             visible: !!box.chat && box.chat.messages.count > 0
