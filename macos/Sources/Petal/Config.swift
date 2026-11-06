@@ -310,6 +310,23 @@ final class Config {
     /// Waits for every write still under way (on quit).
     func flush() { Self.writer.sync {} }
 
+    /// settings.json, modes.json or dock.json as Petal has it now (its own changes included, before they're written).
+    func root(of file: URL) -> [String: Any] {
+        file.path == settingsFile.path ? settings : file.path == dockFile.path ? dock : file.path == modesFile.path ? modesRoot : [:]
+    }
+
+    /// A change from Petal's tools (MCP.swift), in order with every other: tried on what Petal has first (so one
+    /// that refuses changes nothing), then made as Petal's own changes are, in memory and then on disk.
+    func change(_ file: URL, fallback: [String: Any], _ edit: @escaping (inout [String: Any]) throws -> Void) throws {
+        var probe = root(of: file)
+        if probe.isEmpty { probe = fallback }
+        try edit(&probe)
+        update(file) { root in
+            if root.isEmpty { root = fallback }
+            try? edit(&root)
+        }
+    }
+
     /// modes.json as read, for changes made in memory before it's written.
     @ObservationIgnored private var modesRoot: [String: Any] = [:]
 

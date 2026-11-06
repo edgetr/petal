@@ -560,20 +560,36 @@ final class DockController {
             return
         }
         if Perf.span("activate: parking", { Parking.activate(item.id) }) { return }   // each mode keeps its own windows
-        let windows = Perf.span("activate: windows (AX)") { Windows.windows(of: running.processIdentifier) }
-        guard !windows.isEmpty else {
-            if item.windows == 0 { launch(item.id) } else { Windows.bringForward(running) }
-            return
+        // Decided here from what the dock already knows; the app's windows are listed (Accessibility, which waits on
+        // a busy app) on the focus queue, and a newer click makes this one stand down.
+        let pid = running.processIdentifier, active = item.active, known = item.windows, id = item.id
+        let onScreen = (lastSnapshot ?? WindowList.current()).onScreenFrames(pid: pid)
+        let ticket = Windows.focusing.next()
+        Windows.focusQueue.async {
+            guard Windows.focusing.current(ticket) else { return }
+            let windows = Windows.windows(of: pid)
+            func rank(_ w: AppWindow) -> Int { w.minimized ? 1 : (onScreen.contains { $0.equalTo(w.frame, within: 4) } ? 0 : 2) }
+            let sorted = windows.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
+            var pick = sorted.first
+            if active, !sorted.isEmpty {
+                // The window in front now: the next one along comes forward (clicking again cycles through them).
+                let app = AXUIElementCreateApplication(pid)
+                AXUIElementSetMessagingTimeout(app, 0.3)
+                let focused: String = (Windows.value(app, kAXFocusedWindowAttribute) as AXUIElement?).flatMap { Windows.value($0, kAXTitleAttribute) } ?? ""
+                if let index = sorted.firstIndex(where: { $0.title == focused && !$0.minimized }) { pick = sorted[(index + 1) % sorted.count] }
+            }
+            let onIt = pick.map { rank($0) == 0 } ?? false
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard Windows.focusing.current(ticket) else { return }
+                    guard let pick else {
+                        if known == 0 { PetalApp.shared.docks.launch(id) } else { Windows.bringForward(running) }
+                        return
+                    }
+                    Windows.focus(pick, onScreen: onIt)
+                }
+            }
         }
-        let onScreen = (lastSnapshot ?? WindowList.current()).onScreenFrames(pid: running.processIdentifier)
-        func rank(_ w: AppWindow) -> Int { w.minimized ? 1 : (onScreen.contains { $0.equalTo(w.frame, within: 4) } ? 0 : 2) }
-        let sorted = windows.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
-        var pick = sorted[0]
-        if item.active {
-            let focused = Windows.frontTitle()
-            if let index = sorted.firstIndex(where: { $0.title == focused && !$0.minimized }) { pick = sorted[(index + 1) % sorted.count] }
-        }
-        Perf.span("activate: focus") { Windows.focus(pick, onScreen: rank(pick) == 0) }
     }
 
     func launch(_ id: String, files: [URL] = []) {

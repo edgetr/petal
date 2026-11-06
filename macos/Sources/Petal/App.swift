@@ -97,6 +97,7 @@ final class PetalApp {
     var overlayOpen: Bool { claude.isOpen || popups.card != nil }
 
     func start() {
+        MCP.inPetal = true
         Windows.limitWaiting()
         config.onChange = { [weak self] in
             guard let self else { return }
@@ -440,6 +441,8 @@ final class PetalApp {
         ipc.on("current") { [unowned self] _ in docks.focusedDock?.mode?.id ?? config.defaultMode }
         // Petal AI's tools (`Petal --mcp` asks here): ["assist", tool, json]; one that changes something waits for the
         // person to allow it.
+        // Petal's tools changing settings, modes or the dock (`Petal --mcp`, petal-mcp.py): done here, in order.
+        ipc.on("mcpCall") { args in MCP.answer(args.first ?? "", args.dropFirst().first ?? "{}") }
         ipc.onLater("assist") { [unowned self] args, reply in
             assist.handle(args.first ?? "", args.dropFirst().first ?? "{}", note: args.dropFirst(2).first, reply: reply)
         }

@@ -176,6 +176,8 @@ final class Routines {
         var total = 0
         var later = 0            // past the most one run handles
         var leftAlone: [String] = []
+        /// Sorted by what they are, with no AI to ask and no answer learned for names like theirs: left where they are.
+        var waitingForAI: [String] = []
         let at = Date()
     }
 
@@ -443,11 +445,13 @@ final class Routines {
             }
             if let file {
                 guard moves.isEmpty else { return step(index + 1) }   // already moved by an earlier action
-                place(routine, action, file) { move, folder, new in
+                place(routine, action, file) { move, folder, new, waits in
                     if let move {
                         moves.append(move)
                         if new { made.append(folder.path) }
                         said.append("moved “\(file.lastPathComponent)” to \(folder.lastPathComponent)" + (new ? " (a new folder)" : ""))
+                    } else if waits {
+                        said.append("left “\(file.lastPathComponent)” where it is, waiting for the AI")
                     }
                     step(index + 1)
                 }
@@ -464,6 +468,9 @@ final class Routines {
                             moves += done
                             made += folders
                             if !done.isEmpty { said.append(Self.tidied(done, in: plan.source)) }
+                            if !plan.waitingForAI.isEmpty {
+                                said.append("left \(plan.waitingForAI.count) file\(plan.waitingForAI.count == 1 ? "" : "s") waiting for the AI")
+                            }
                             step(index + 1)
                         }
                     }
@@ -473,7 +480,12 @@ final class Routines {
                     return plan.items.isEmpty ? step(index + 1) : use(plan, true)
                 }
                 plan(routine, action) { plan in
-                    guard let plan, !plan.items.isEmpty else { return step(index + 1) }
+                    guard let plan, !plan.items.isEmpty else {
+                        if let waiting = plan?.waitingForAI, !waiting.isEmpty {
+                            said.append("left \(waiting.count) file\(waiting.count == 1 ? "" : "s") waiting for the AI")
+                        }
+                        return step(index + 1)
+                    }
                     use(plan, false)
                 }
             }
@@ -521,6 +533,7 @@ final class Routines {
         case "open":
             var opened: [String] = []
             var urls: [URL] = []
+            var launched: [String] = []
             for item in action.apps {
                 if item.contains("://"), let url = URL(string: item) {
                     urls.append(url)
@@ -529,13 +542,21 @@ final class Routines {
                     urls.append(URL(fileURLWithPath: (item as NSString).expandingTildeInPath))
                     opened.append((item as NSString).lastPathComponent)
                 } else if !NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == item }) {
-                    app.docks.launch(item)   // Launch Services' own asynchronous open
+                    app.docks.launch(item)   // Launch Services' own asynchronous open (and the dock's launch pulse)
+                    launched.append(item)
                     opened.append(Apps.name(item))
                 }
             }
             let said = opened.isEmpty ? nil : "opened " + Insights.list(opened)
-            guard !urls.isEmpty else { return done(said) }
-            Assist.off({ for url in urls { NSWorkspace.shared.open(url) } }) { done(said) }
+            guard !urls.isEmpty || !launched.isEmpty else { return done(said) }
+            // The next step waits until the apps are running (30 s at most) and the addresses and files are opened.
+            Assist.off({
+                for url in urls { NSWorkspace.shared.open(url) }
+                let end = Date().addingTimeInterval(30)
+                while Date() < end, !launched.allSatisfy({ !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty }) {
+                    Thread.sleep(forTimeInterval: 0.25)
+                }
+            }) { done(said) }
         case "hide":
             let running = NSWorkspace.shared.runningApplications.filter { r in action.apps.contains { $0 == r.bundleIdentifier } && !r.isHidden }
             guard !running.isEmpty else { return done(nil) }
@@ -543,8 +564,10 @@ final class Routines {
             Assist.off({ running.forEach { $0.hide() } }) { done(said) }
         case "shortcut":
             guard !action.name.isEmpty else { return done(nil) }
-            Shortcuts.run(action.name)   // runs `shortcuts` off the main thread
-            done("ran the Shortcut “\(action.name)”")
+            // The next step waits for it to finish (5 minutes at most): an export it makes is there before filing.
+            Shortcuts.run(action.name, timeout: 300) { ok in
+                done(ok ? "ran the Shortcut “\(action.name)”" : "ran the Shortcut “\(action.name)”, which didn't finish cleanly")
+            }
         default:
             done(nil)
         }
@@ -561,28 +584,32 @@ final class Routines {
     }
 
     /// One file that just arrived: where it goes (the AI's answer for files named like it, if there is one), then
-    /// the move, off the main thread. `done(move, folder, made)`; no move when it stays.
-    private func place(_ routine: Routine, _ action: Action, _ file: URL, done: @escaping (Move?, URL, Bool) -> Void) {
+    /// the move, off the main thread. `done(move, folder, made, waitsForAI)`; no move when it stays.
+    private func place(_ routine: Routine, _ action: Action, _ file: URL, done: @escaping (Move?, URL, Bool, Bool) -> Void) {
         let base = Self.url(routine.source(action)) ?? file.deletingLastPathComponent()
         let finish = { (folder: URL?) in
-            guard let folder else { return done(nil, base, false) }
+            guard let folder else { return done(nil, base, false, false) }
             Self.io.async {
                 let result = Self.move(file, into: folder)
-                DispatchQueue.main.async { MainActor.assumeIsolated { done(result?.move, folder, result?.made ?? false) } }
+                DispatchQueue.main.async { MainActor.assumeIsolated { done(result?.move, folder, result?.made ?? false, false) } }
             }
         }
         if action.kind == "move" {
             return finish(Self.url(action.to, base: base))
         }
         let into = action.into.isEmpty ? base : (Self.url(action.into, base: base) ?? base)
-        guard action.by == "ai", let quick else { return finish(into.appending(path: Self.kind(of: file))) }
+        // Kind folders (Images, PDFs, …) only for a routine set to sort by kind: one in the person's own words keeps
+        // its own rules, with or without the AI.
+        guard action.by == "ai" else { return finish(into.appending(path: Self.kind(of: file))) }
         let key = Self.pattern(file.lastPathComponent)
+        // What the AI answered before for names like this one comes first; with no AI and no answer, it stays put.
         if let folder = learned[routine.id]?[key] { return finish(into.appending(path: folder)) }
+        guard let quick else { return done(nil, base, false, true) }
         let words = routine.words
         Self.io.async {
             // Moved already by a pickier routine: nothing to ask.
             guard FileManager.default.fileExists(atPath: file.path) else {
-                return DispatchQueue.main.async { MainActor.assumeIsolated { done(nil, base, false) } }
+                return DispatchQueue.main.async { MainActor.assumeIsolated { done(nil, base, false, false) } }
             }
             let folders = Self.survey(into)
             let prompt = Self.prompt(words: words, into: into, folders: folders, files: [(file.lastPathComponent, Self.facts(file, peek: true))])
@@ -599,7 +626,7 @@ final class Routines {
         }
     }
 
-    private func learn(_ routine: String, _ patterns: [String: String]) {
+    func learn(_ routine: String, _ patterns: [String: String]) {
         guard !patterns.isEmpty else { return }
         learned[routine, default: [:]].merge(patterns) { old, _ in old }
         saveLearned()
@@ -612,7 +639,10 @@ final class Routines {
         let trigger = routine.trigger
         let into = action.kind == "move" ? (Self.url(action.to, base: source) ?? source)
             : (action.into.isEmpty ? source : (Self.url(action.into, base: source) ?? source))
-        let byAI = action.kind == "sort" && action.by == "ai" && quick != nil
+        // Sorting in the person's own words (by: ai) never falls back to kind folders: with no AI, only the answers
+        // learned before are used, and the rest wait for the AI.
+        let inWords = action.kind == "sort" && action.by == "ai"
+        let byAI = inWords && quick != nil
         let known = learned[routine.id] ?? [:]
         Self.io.async {
             let all = Self.files(in: source).filter { Self.wants(trigger, $0) }
@@ -623,8 +653,17 @@ final class Routines {
             let exists = { (url: URL) in FileManager.default.fileExists(atPath: url.path) }
             if action.kind == "move" {
                 plan.items = files.map { Plan.Item(file: $0, folder: into, new: !exists(into)) }
-            } else if !byAI {
+            } else if !inWords {
                 plan.items = files.map { let f = into.appending(path: Self.kind(of: $0)); return Plan.Item(file: $0, folder: f, new: !exists(f)) }
+            } else if !byAI {
+                for file in files {
+                    if let name = known[Self.pattern(file.lastPathComponent)] {
+                        let f = into.appending(path: name)
+                        plan.items.append(Plan.Item(file: file, folder: f, new: !exists(f)))
+                    } else {
+                        plan.waitingForAI.append(file.lastPathComponent)
+                    }
+                }
             }
             guard byAI else { return DispatchQueue.main.async { done(plan) } }
             let folders = Self.survey(into)
@@ -903,7 +942,7 @@ final class Routines {
                 // Every action of the routine, in order, with this plan for its first file action.
                 self.execute(routine, file: nil, approved: plan) { moves in
                     send(["moved": moves.count, "into": Dictionary(counts.map { ($0.name, $0.count) }, uniquingKeysWith: +),
-                          "leftAlone": plan.leftAlone.count, "notYet": plan.later,
+                          "leftAlone": plan.leftAlone.count, "waitingForAI": plan.waitingForAI.count, "notYet": plan.later,
                           "undo": "petal_routine_undo puts them back (or Put back in Petal's settings, Routines)"])
                 }
             }
@@ -917,7 +956,7 @@ final class Routines {
             send(["files": plan.total, "wouldMove": plan.items.count,
                   "into": Self.counts(plan).map { $0.name + ($0.new ? " (new)" : "") + ": \($0.count)" },
                   "examples": plan.items.prefix(15).map { "\($0.file.lastPathComponent) → \($0.folder.lastPathComponent)" },
-                  "leftAlone": plan.leftAlone.prefix(15).map { $0 }, "notYet": plan.later,
+                  "leftAlone": plan.leftAlone.prefix(15).map { $0 }, "waitingForAI": plan.waitingForAI.prefix(15).map { $0 }, "notYet": plan.later,
                   "note": "Nothing moved yet. petal_routine_run without dryRun does it."])
         }
     }

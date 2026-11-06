@@ -140,6 +140,24 @@ enum RoutinesCheck {
         print(routines.log.map { "  \($0.undone ? "(put back) " : "")\($0.text)" }.joined(separator: "\n"))
         _ = tool("petal_routine_delete", ["id": id], routines)
         check(routines.list.count == 1, "deletes one")
+
+        // With no AI, a routine in the person's own words keeps its rules: what it learned before, and the rest
+        // waits where it is (never kind folders it wasn't asked for).
+        if !ai {
+            let words = root.appending(path: "Words")
+            try? fm.createDirectory(at: words, withIntermediateDirectories: true)
+            fm.createFile(atPath: words.appending(path: "invoice 77.pdf").path, contents: Data(repeating: 65, count: 100))
+            fm.createFile(atPath: words.appending(path: "random.png").path, contents: Data(repeating: 65, count: 100))
+            let made = tool("petal_routine_save", ["words": "File invoices under Receipts; leave the rest", "trigger": ["on": "file", "folder": words.path],
+                                                  "actions": [["do": "sort", "by": "ai"]]], routines)
+            let wid = (made["saved"] as? [String: Any])?["id"] as? String ?? ""
+            routines.learn(wid, [Routines.pattern("invoice 77.pdf"): "Receipts"])
+            let sorted = tool("petal_routine_run", ["id": wid], routines)
+            let inWords = { (path: String) in fm.fileExists(atPath: words.appending(path: path).path) }
+            check(inWords("Receipts/invoice 77.pdf") && inWords("random.png") && !inWords("Images") && sorted["waitingForAI"] as? Int == 1,
+                  "no AI: learned answers first, the rest waits for the AI: \(sorted)")
+            _ = tool("petal_routine_delete", ["id": wid], routines)
+        }
         Routines.flush()
         check(fm.fileExists(atPath: Routines.file.path) && Routines.file.path.hasPrefix(state.path), "kept in the test's own folder")
         print(failures == 0 ? "routines: all good" : "routines: \(failures) failed")

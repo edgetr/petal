@@ -102,7 +102,9 @@ final class ModeAutomation {
 
 /// The Shortcuts app's shortcuts, through its own command.
 enum Shortcuts {
-    static func run(_ name: String) {
+    /// Runs one, off the main thread. `done` (on the main thread) hears whether it finished within `timeout`
+    /// seconds; one still running then is stopped.
+    static func run(_ name: String, timeout: Double = 300, done: (@MainActor (Bool) -> Void)? = nil) {
         DispatchQueue.global(qos: .utility).async {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
@@ -110,8 +112,15 @@ enum Shortcuts {
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
             process.standardInput = FileHandle.nullDevice
-            try? process.run()
-            process.waitUntilExit()
+            let exited = DispatchSemaphore(value: 0)
+            process.terminationHandler = { _ in exited.signal() }
+            var finished = false
+            if (try? process.run()) != nil {
+                finished = exited.wait(timeout: .now() + timeout) == .success
+                if !finished { process.terminate() }
+            }
+            let ok = finished && process.terminationStatus == 0
+            if let done { DispatchQueue.main.async { MainActor.assumeIsolated { done(ok) } } }
         }
     }
 

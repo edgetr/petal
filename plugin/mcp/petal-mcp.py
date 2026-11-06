@@ -7,6 +7,8 @@ Claude panel starts it automatically; it can also be added to any Claude
 Code setup:  claude mcp add petal -- python3 /path/to/petal-mcp.py
 """
 
+import contextlib
+import fcntl
 import glob
 import json
 import os
@@ -772,6 +774,61 @@ def t_import_recipe(args):
             t_set_dock({"autohide": plan["dock"]["autohide"]})
     return {"modes": [{"id": m["id"], "name": m.get("name", m["id"]), "apps": m.get("apps", [])} for m in plan["modes"]],
             "missing": plan["missing"], "look": plan["look"]}
+
+
+_lock_depth = 0
+
+
+@contextlib.contextmanager
+def locked():
+    """Holds ~/.config/petal/.lock (shared with Petal for macOS), so two processes changing the files take turns:
+    each reads, changes and writes inside it. Nested holds (a tool calling another) don't lock again."""
+    global _lock_depth
+    if _lock_depth:
+        _lock_depth += 1
+        try:
+            yield
+        finally:
+            _lock_depth -= 1
+        return
+    os.makedirs(CONFIG, exist_ok=True)
+    with open(os.path.join(CONFIG, ".lock"), "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        _lock_depth = 1
+        try:
+            yield
+        finally:
+            _lock_depth = 0
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def writes(fn, name):
+    """A tool that changes settings, modes or the dock. On a Mac with Petal running, Petal does it itself, in order
+    with every other change (two sessions changing settings at once never undo each other); otherwise it's done
+    here, under the lock."""
+    def run(args):
+        if MAC and not _lock_depth and not args.get("preview"):
+            reply = petal("mcpCall", name, json.dumps(args), timeout=30)
+            if not reply.startswith("Petal isn't running") and not reply.startswith("unknown function"):
+                try:
+                    out = json.loads(reply)
+                except ValueError:
+                    raise ValueError(reply)
+                if isinstance(out, dict) and out.get("error"):
+                    raise ValueError(out["error"])
+                return out.get("result", {}) if isinstance(out, dict) else out
+        with locked():
+            return fn(args)
+    return run
+
+
+t_set_settings = writes(t_set_settings, "petal_set_settings")
+t_reset_settings = writes(t_reset_settings, "petal_reset_settings")
+t_set_dock = writes(t_set_dock, "petal_set_dock")
+t_save_mode = writes(t_save_mode, "petal_save_mode")
+t_delete_mode = writes(t_delete_mode, "petal_delete_mode")
+t_set_default_mode = writes(t_set_default_mode, "petal_set_default_mode")
+t_import_recipe = writes(t_import_recipe, "petal_import_recipe")
 
 
 def not_yet(_):

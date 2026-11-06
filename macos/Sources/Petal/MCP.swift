@@ -69,7 +69,17 @@ enum MCP {
         init(_ text: String) { errorDescription = text }
     }
 
+    /// Inside the running Petal (set at its start): settings, modes and dock changes go through its Config.
+    nonisolated(unsafe) static var inPetal = false
+
+    /// The tools that change settings.json, modes.json or dock.json.
+    static let writeTools: Set<String> = ["petal_set_settings", "petal_reset_settings", "petal_set_dock", "petal_save_mode",
+                                          "petal_delete_mode", "petal_set_default_mode", "petal_import_recipe"]
+
     static func call(_ name: String, _ args: [String: Any]) throws -> Any {
+        // While Petal runs, a change is made by Petal itself, in order with every other change (two notes changing
+        // settings at once never undo each other); only without it is the file changed here, under a lock.
+        if !inPetal, writeTools.contains(name), let done = try viaPetal(name, args) { return done }
         switch name {
         case "petal_get_state":
             let settings = read(settingsFile) ?? [:]
@@ -136,7 +146,12 @@ enum MCP {
             }
             if let use = args["use"] as? String {
                 guard ["petal", "macos"].contains(use) else { throw Failure("use must be petal or macos") }
-                done["use"] = petal("dock", use)
+                if inPetal, Thread.isMainThread {
+                    MainActor.assumeIsolated { PetalApp.shared.useDock(use) }
+                    done["use"] = "ok"
+                } else {
+                    done["use"] = petal("dock", use)
+                }
             }
             return done
         case "petal_save_mode":
@@ -228,24 +243,73 @@ enum MCP {
 
     // MARK: Files
 
+    /// The three files Petal keeps in memory: inside Petal, asked of it (its own changes may not be written yet).
+    private static func kept(_ url: URL) -> Bool { [settingsFile.path, modesFile.path, dockFile.path].contains(url.path) }
+
+    /// One of the write tools, done by the running Petal (["mcpCall", name, json]); nil when Petal isn't running
+    /// (or is one from before this), to be done here.
+    private static func viaPetal(_ name: String, _ args: [String: Any]) throws -> Any? {
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
+        let reply = petal(["mcpCall", name, json], timeout: 30)
+        if reply.hasPrefix("Petal isn't running") || reply.hasPrefix("unknown function") { return nil }
+        guard let object = try? JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any] else { throw Failure(reply) }
+        if let error = object["error"] as? String { throw Failure(error) }
+        return object["result"] ?? [:]
+    }
+
+    /// What the running Petal does for `viaPetal`: one line of JSON, the result or the error.
+    static func answer(_ name: String, _ json: String) -> String {
+        var reply: [String: Any]
+        do {
+            let args = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
+            reply = ["result": try call(name, args)]
+        } catch {
+            reply = ["error": error.localizedDescription]
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: reply, options: [.withoutEscapingSlashes]))
+            ?? Data("{\"error\": \"Couldn't answer\"}".utf8)
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Runs `body` holding ~/.config/petal/.lock (shared with petal-mcp.py), so two processes changing the files
+    /// while Petal isn't running take turns: each reads, changes and writes inside it.
+    static func locked<T>(_ body: () throws -> T) throws -> T {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let fd = open(folder.appending(path: ".lock").path, O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0 else { return try body() }
+        defer { flock(fd, LOCK_UN); close(fd) }
+        flock(fd, LOCK_EX)
+        return try body()
+    }
+
     static func read(_ url: URL) -> [String: Any]? {
+        if inPetal, Thread.isMainThread, kept(url) { return MainActor.assumeIsolated { PetalApp.shared.config.root(of: url) } }
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
     /// Changes a file in place. A file that's there but isn't valid JSON is left alone, with an error for Claude.
-    static func update(_ url: URL, fallback: [String: Any] = [:], _ change: (inout [String: Any]) throws -> Void) throws {
-        var object: [String: Any]
-        if FileManager.default.fileExists(atPath: url.path) {
-            guard let parsed = read(url) else { throw Failure("\(url.lastPathComponent) isn't valid JSON; fix it first") }
-            object = parsed
-        } else {
-            object = fallback
+    /// Inside Petal, settings, modes and dock changes go through its Config; elsewhere every change is made under
+    /// the lock, read to written, and written whole (renamed into place).
+    static func update(_ url: URL, fallback: [String: Any] = [:], _ change: @escaping (inout [String: Any]) throws -> Void) throws {
+        if inPetal, Thread.isMainThread, kept(url) {
+            return try MainActor.assumeIsolated { try PetalApp.shared.config.change(url, fallback: fallback, change) }
         }
-        try change(&object)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-        try (data + Data("\n".utf8)).write(to: url, options: .atomic)
+        try locked {
+            var object: [String: Any]
+            if FileManager.default.fileExists(atPath: url.path) {
+                guard let data = try? Data(contentsOf: url), let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw Failure("\(url.lastPathComponent) isn't valid JSON; fix it first")
+                }
+                object = parsed
+            } else {
+                object = fallback
+            }
+            try change(&object)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            try (data + Data("\n".utf8)).write(to: url, options: .atomic)
+        }
     }
 
     // MARK: The running Petal
