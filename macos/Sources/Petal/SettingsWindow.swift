@@ -433,6 +433,7 @@ struct ModesSettings: View {
     var body: some View {
         SettingToggle(key: "modes", title: "Focus modes", detail: "Each Desktop's own mode, with its own apps.")
             .padding(16).glassEffect(.regular, in: .rect(cornerRadius: 20))
+        WindowsCard()
 
         DescribeDayCard()
         SuggestionsCard()
