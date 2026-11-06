@@ -662,6 +662,10 @@ final class AppSearch {
         let q = query.trimmingCharacters(in: .whitespaces)
         var list: [Result] = []
         let typedPath = q.hasPrefix("/") || q.hasPrefix("~")
+        // A web address typed or pasted: a website shortcut.
+        if let address = Sites.address(q) {
+            list.append(Result(id: address, name: Sites.domain(address) ?? address, isFolder: false, path: ""))
+        }
         if !typedPath {
             list += Apps.search(q).prefix(60).map { Result(id: $0.id, name: $0.name, isFolder: false, path: "") }
         }
@@ -715,7 +719,7 @@ struct AppSearchView: View {
                 Spacer()
                 RoundButton(symbol: "xmark") { search.close() }
             }
-            TextField(search.mode.map { "Add an app or folder to \($0.name)…" } ?? "Add an app or folder…", text: $search.query)
+            TextField(search.mode.map { "Add an app, folder or website to \($0.name)…" } ?? "Add an app, folder or website…", text: $search.query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
                 .focused($focused)
@@ -765,8 +769,12 @@ struct SearchRow: View {
         let accent = Color(nsColor: PetalApp.shared.accent)
         Button(action: toggle) {
             HStack(spacing: 10) {
-                Image(nsImage: result.isFolder ? NSWorkspace.shared.icon(forFile: (result.path as NSString).expandingTildeInPath) : Apps.icon(result.id))
-                    .resizable().frame(width: 28, height: 28)
+                if Sites.isWeb(result.id) {
+                    SiteIcon(id: result.id, size: 28)
+                } else {
+                    Image(nsImage: result.isFolder ? NSWorkspace.shared.icon(forFile: (result.path as NSString).expandingTildeInPath) : Apps.icon(result.id))
+                        .resizable().frame(width: 28, height: 28)
+                }
                 Text(result.name).font(.system(size: 13)).lineLimit(1).truncationMode(.middle)
                 Spacer()
                 Text(result.isFolder ? (added ? "Stack ✓" : "+ Stack") : (added ? "In dock ✓" : "+ Add"))
