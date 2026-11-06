@@ -852,9 +852,9 @@ struct PermissionsSettings: View {
 
     var body: some View {
         let _ = tick
-        Permission(symbol: "accessibility", title: "Accessibility", detail: "Window lists, minimized windows, badges, and focus cards.",
+        Permission(symbol: "accessibility", title: "Accessibility", detail: "Window previews, minimized windows, badges, and focus cards.",
                    granted: Windows.trusted) { Windows.askForPermission() }
-        Permission(symbol: "rectangle.dashed.badge.record", title: "Screen Recording", detail: "Window previews. Petal never records; it takes a still of a window when you hover its app.",
+        Permission(symbol: "rectangle.dashed.badge.record", title: "Screen Recording", detail: "A picture of each window in previews; without it, they list windows by name. Petal never records: it takes a still while you hover an app.",
                    granted: Capture.allowed) { Capture.askForPermission() }
         Permission(symbol: "bell.badge", title: "Full Disk Access", detail: "Seeing notifications, to hold them in modes that hold them. Petal only reads Notification Center's list.",
                    granted: app.notes.canRead) { NotificationAccessRow.openSettings() }
