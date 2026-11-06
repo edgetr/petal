@@ -512,9 +512,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var signals: [DispatchSourceSignal] = []
     private var opened: [URL] = []
 
+    let services = TextServices()
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         let app = PetalApp()
         app.start()
+        // "Ask Petal AI" and "Add to Petal AI" on selected text, in every app's right-click menu (Services).
+        NSApp.servicesProvider = services
+        NSUpdateDynamicServices()
         for url in opened { app.recipes.show(url) }
         opened = []
         // Being killed (logout, `killall Petal`) gives macOS its Dock back too, not only quitting.

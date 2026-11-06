@@ -267,8 +267,9 @@ final class InputPanel: NSPanel {
 
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        // Its size is Petal's to set (fit), never the window following its content from the wrong corner.
-        hosting.sizingOptions = []
+        // Its size is Petal's to set (fit), never the window following its content from the wrong corner: only
+        // its own size for measuring, no minimum or maximum the window would follow.
+        hosting.sizingOptions = [.intrinsicContentSize]
         contentView = hosting
         isFloatingPanel = true
         level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) + 2)
@@ -349,6 +350,23 @@ final class ClaudePanel {
     var optionsOpen = false
     /// Files handed to the AI (dropped on its button or on the panel): sent with the next message.
     var attachments: [URL] = []
+    /// Passages quoted from any app (Ask Petal AI / Add to Petal AI): sent with the next message.
+    struct Quote: Identifiable, Equatable { let id = UUID(); let text: String; let source: String }
+    var quotes: [Quote] = []
+
+    func quote(_ text: String, from source: String) {
+        guard !quotes.contains(where: { $0.text == text }) else { return }
+        quotes.append(Quote(text: text, source: source))
+        if isOpen { fit() }
+    }
+
+    /// Added without opening the chat: the AI button says so for a moment.
+    func noteAdded() {
+        let app = PetalApp.shared
+        guard let dock = app.docks.focusedDock else { return }
+        app.tooltips.show(quotes.count == 1 ? "Added to Petal AI" : "\(quotes.count) passages for Petal AI", over: "claude", in: dock)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { app.tooltips.show(nil, over: "claude", in: dock) }
+    }
     private(set) var isOpen = false
     @ObservationIgnored private var panel: InputPanel?
 
@@ -400,6 +418,8 @@ struct ClaudePanelView: View {
     static let suggestions = ["Explain what I'm looking at", "Tidy up my Downloads", "Something in Petal isn't working right"]
     /// With files handed over: what people most often want done with them.
     static let fileSuggestions = ["Summarize it", "What are the key points?", "Make it shorter and clearer"]
+    /// With a passage quoted from another app.
+    static let quoteSuggestions = ["Explain this", "Rewrite it more clearly", "Find more on this"]
 
     var body: some View {
         @Bindable var panel = panel
@@ -418,7 +438,7 @@ struct ClaudePanelView: View {
             if let request = app.assist.pending {
                 AskRequestView(request: request).padding(12).background(.white.opacity(0.06), in: .rect(cornerRadius: 14))
             }
-            if !panel.attachments.isEmpty { attachmentsRow }
+            if !panel.attachments.isEmpty || !panel.quotes.isEmpty { attachmentsRow }
             input
         }
         // Exactly this wide whatever it shows: content a little too wide for it (Claude's rows and Codex's differ)
@@ -432,6 +452,7 @@ struct ClaudePanelView: View {
         .onChange(of: agent.running) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: panel.optionsOpen) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: panel.attachments.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
+        .onChange(of: panel.quotes.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: app.assist.pending?.id) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .dropDestination(for: URL.self) { urls, _ in
             for url in urls where url.isFileURL && !panel.attachments.contains(url) { panel.attachments.append(url) }
@@ -535,10 +556,11 @@ struct ClaudePanelView: View {
 
     private var empty: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(panel.attachments.isEmpty ? "Ask anything. \(provider?.name ?? "It") sees what you're looking at, and can work with your apps, windows, files and dock. Drop a file here to hand it over."
+            Text(!panel.quotes.isEmpty ? "What should \(provider?.name ?? "it") do with \(panel.quotes.count == 1 ? "this passage" : "these passages")?"
+                 : panel.attachments.isEmpty ? "Ask anything. \(provider?.name ?? "It") sees what you're looking at, and can work with your apps, windows, files and dock. Drop a file here to hand it over."
                  : "What should \(provider?.name ?? "it") do with \(panel.attachments.count == 1 ? "it" : "them")?")
                 .font(.system(size: 13)).foregroundStyle(.secondary).padding(.bottom, 6).fixedSize(horizontal: false, vertical: true)
-            ForEach(panel.attachments.isEmpty ? Self.suggestions : Self.fileSuggestions, id: \.self) { suggestion in
+            ForEach(!panel.quotes.isEmpty ? Self.quoteSuggestions : panel.attachments.isEmpty ? Self.suggestions : Self.fileSuggestions, id: \.self) { suggestion in
                 SuggestionRow(text: suggestion) { panel.draft = suggestion; submit() }
             }
         }
@@ -594,6 +616,21 @@ struct ClaudePanelView: View {
     private var attachmentsRow: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 6) {
+                ForEach(panel.quotes) { quote in
+                    HStack(spacing: 6) {
+                        Image(systemName: "text.quote").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text("“" + quote.text.replacingOccurrences(of: "\n", with: " ").prefix(48) + (quote.text.count > 48 ? "…”" : "”"))
+                            .font(.system(size: 12)).lineLimit(1)
+                        if !quote.source.isEmpty { Text(quote.source).font(.system(size: 11)).foregroundStyle(.secondary) }
+                        Button { panel.quotes.removeAll { $0 == quote } } label: {
+                            Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 10).frame(height: 28)
+                    .glassEffect(.clear, in: .capsule)
+                    .help(quote.text)
+                }
                 ForEach(panel.attachments, id: \.self) { url in
                     HStack(spacing: 6) {
                         Image(nsImage: NSWorkspace.shared.icon(forFile: url.path)).resizable().frame(width: 16, height: 16)
@@ -614,6 +651,14 @@ struct ClaudePanelView: View {
     private func submit() {
         guard !agent.running else { return }
         var text = panel.draft
+        if !panel.quotes.isEmpty {
+            if text.trimmingCharacters(in: .whitespaces).isEmpty { text = "What about this?" }
+            let quoted = panel.quotes.map { q in
+                (q.source.isEmpty ? "" : "From \(q.source):\n") + q.text.components(separatedBy: "\n").map { "> " + $0 }.joined(separator: "\n")
+            }
+            text = quoted.joined(separator: "\n\n") + "\n\n" + text
+            panel.quotes = []
+        }
         if !panel.attachments.isEmpty {
             if text.trimmingCharacters(in: .whitespaces).isEmpty { text = "What's in \(panel.attachments.count == 1 ? "this file" : "these files")?" }
             text += "\n\nFiles I'm handing you:\n" + panel.attachments.map(\.path).joined(separator: "\n")

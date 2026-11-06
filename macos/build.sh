@@ -70,6 +70,23 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSUIElement</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
   <key>NSHumanReadableCopyright</key><string>Edgetr. MIT License.</string>
+  <key>NSServices</key>
+  <array>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>Ask Petal AI</string></dict>
+      <key>NSMessage</key><string>askPetal</string>
+      <key>NSPortName</key><string>Petal</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSRequiredContext</key><dict/>
+    </dict>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>Add to Petal AI</string></dict>
+      <key>NSMessage</key><string>addToPetal</string>
+      <key>NSPortName</key><string>Petal</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSRequiredContext</key><dict/>
+    </dict>
+  </array>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>

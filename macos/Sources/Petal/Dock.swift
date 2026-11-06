@@ -1095,16 +1095,41 @@ struct ClaudeButton: View {
     let size: CGFloat
     @State private var hovering = false
     @State private var pressed = false
+    /// A file is over it: it leans in, wide awake, with rings rippling out to say "give it here".
+    @State private var fileOver = false
+    /// Counts drops: each one plays the "gulp" (a squash and the file's icon falling in).
+    @State private var swallowed = 0
+    @State private var dropped: NSImage?
 
     var body: some View {
         ZStack {
+            if fileOver { DropRipples(size: size, color: Color(nsColor: app.accent)) }
             ProviderMark(provider: app.chatProvider).foregroundStyle(.white.opacity(0.9))
-                .frame(width: size * 0.56, height: size * 0.56).scaleEffect(hovering ? 1.08 : 1)
+                .frame(width: size * 0.56, height: size * 0.56)
+                .scaleEffect(fileOver ? 1.22 : hovering ? 1.08 : 1)
+                .rotationEffect(.degrees(fileOver ? -10 : 0))
             if app.config.bool("claudeUsage") { UsageRing(usage: app.usage, size: size, line: 2.5, track: false) }
+            if let dropped {
+                Image(nsImage: dropped).resizable().frame(width: size * 0.5, height: size * 0.5)
+                    .keyframeAnimator(initialValue: DropFall(), trigger: swallowed) { content, value in
+                        content.offset(y: value.y).scaleEffect(value.scale).opacity(value.opacity)
+                    } keyframes: { _ in
+                        KeyframeTrack(\.y) { LinearKeyframe(-size * 0.9, duration: 0); CubicKeyframe(0, duration: 0.28) }
+                        KeyframeTrack(\.scale) { LinearKeyframe(1, duration: 0); CubicKeyframe(0.2, duration: 0.3) }
+                        KeyframeTrack(\.opacity) { LinearKeyframe(1, duration: 0.2); LinearKeyframe(0, duration: 0.1) }
+                    }
+            }
         }
         .frame(width: size, height: size)
+        .scaleEffect(fileOver ? 1.12 : 1)
+        .keyframeAnimator(initialValue: 1.0, trigger: swallowed) { content, scale in
+            content.scaleEffect(x: scale, y: 2 - scale)
+        } keyframes: { _ in
+            KeyframeTrack { CubicKeyframe(1, duration: 0.22); SpringKeyframe(0.86, duration: 0.1); SpringKeyframe(1.0, duration: 0.35, spring: .bouncy) }
+        }
         .clearGlass(in: .circle, pressed: pressed)
         .animation(.easeOut(duration: 0.12), value: hovering)
+        .animation(.spring(response: 0.32, dampingFraction: 0.6), value: fileOver)
         .slotFrame(dock, "claude")
         .slotMouse(SlotMouse(left: { app.claude.open(asking: nil) }, right: { Menus.settings(for: dock) },
                            hover: { on in
@@ -1112,9 +1137,41 @@ struct ClaudeButton: View {
                                app.tooltips.show(on ? app.usageTooltip : nil, over: "claude", in: dock)
                            },
                            // A file dropped on it goes to the AI: "summarize it", "what's in it?".
-                           files: { urls in app.claude.open(asking: nil, attaching: urls) },
-                           fileOver: { over in hovering = over },
+                           files: { urls in
+                               dropped = urls.first.map { NSWorkspace.shared.icon(forFile: $0.path) }
+                               swallowed += 1
+                               DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) { app.claude.open(asking: nil, attaching: urls) }
+                           },
+                           fileOver: { over in fileOver = over },
+                           dropOperation: .generic,
                            press: { pressed = $0 }))
+    }
+}
+
+/// Where a dropped file's icon is as it falls into the AI button.
+struct DropFall {
+    var y: CGFloat = 0
+    var scale: CGFloat = 1
+    var opacity: Double = 0
+}
+
+/// Rings rippling out from the AI button while a file is over it.
+struct DropRipples: View {
+    let size: CGFloat
+    let color: Color
+
+    var body: some View {
+        TimelineView(.animation) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            ZStack {
+                ForEach(0..<2) { i in
+                    let phase = (t / 1.1 + Double(i) / 2).truncatingRemainder(dividingBy: 1)
+                    Circle().strokeBorder(color.opacity(0.7 * (1 - phase)), lineWidth: 2)
+                        .frame(width: size * (0.9 + 0.7 * phase), height: size * (0.9 + 0.7 * phase))
+                }
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -1584,6 +1641,8 @@ struct SlotMouse: NSViewRepresentable {
     var drag: ((CGFloat, Bool) -> Void)? = nil
     var files: (([URL]) -> Void)? = nil
     var fileOver: (Bool) -> Void = { _ in }
+    /// What a drag over it shows: a copy ("+") into an app, or nothing extra where the slot has its own animation.
+    var dropOperation: NSDragOperation = .copy
     /// The button went down (true) or up, or a drag took over (false): for feedback the moment it's pressed. What a
     /// click does still happens on the way up, so a press can turn into a drag.
     var press: (Bool) -> Void = { _ in }
@@ -1679,7 +1738,7 @@ struct SlotMouse: NSViewRepresentable {
         override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
             handlers?.fileOver(true)
             PetalApp.shared.docks.revealAll()
-            return .copy
+            return handlers?.dropOperation ?? .copy
         }
 
         override func draggingExited(_ sender: NSDraggingInfo?) { handlers?.fileOver(false) }
