@@ -54,7 +54,8 @@ enum Bench {
 }
 
 /// `petal bench` (IPC "bench"): the same code a click runs, timed inside the running Petal: bringing the dock's apps
-/// forward, switching between the modes that don't wait, typing in the "+" search, and the dock's refresh. Each
+/// forward, switching between the modes that don't wait (with the apps drawn by SwiftUI and by layers), typing in
+/// the "+" search, and the dock's refresh. Each
 /// time includes drawing the result. It ends where it started (same mode, same app in front) and writes
 /// ~/Library/Logs/Petal/bench.json.
 @MainActor
@@ -117,20 +118,40 @@ enum LiveBench {
         }
         results["bring app forward"] = summary(activate)
 
-        // 2. Switching mode (modes without a wait), until the dock has drawn it.
-        var switching: [Double] = []
+        // 2. Switching mode (modes without a wait), until the dock has drawn it: with the apps drawn by SwiftUI,
+        // then by layers (DockStrip), each after a moment to settle.
         let modes = app.config.modes.filter { !$0.isDistracting }.map(\.id)
-        for _ in 0..<3 {
-            for id in modes {
-                let start = now()
-                Perf.span("switch: state") { app.requestMode(id, desktop: desktop) }
-                Perf.span("switch: layout + draw") { draw(panel) }
-                switching.append(ms(start))
-                try? await Task.sleep(for: .milliseconds(120))
+        let strip = DockStrip.shared.layers
+        for layers in [false, true] {
+            DockStrip.shared.layers = layers
+            app.docks.refresh(quick: true)
+            draw(panel)
+            try? await Task.sleep(for: .milliseconds(400))
+            let name = layers ? "layers" : "SwiftUI"
+            var switching: [Double] = []
+            for _ in 0..<3 {
+                for id in modes {
+                    let start = now()
+                    Perf.span("switch (\(name)): state") { app.requestMode(id, desktop: desktop) }
+                    Perf.span("switch (\(name)): layout + draw") { draw(panel) }
+                    switching.append(ms(start))
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
             }
+            if let startMode { app.setModeNow(startMode, desktop: desktop) }
+            results["switch mode (\(name))"] = summary(switching)
+            // An app coming forward, as the dock sees it (its icon turns active).
+            var quick: [Double] = []
+            for _ in 0..<10 {
+                let start = now()
+                app.docks.refresh(quick: true)
+                draw(panel)
+                quick.append(ms(start))
+            }
+            results["dock update when an app comes forward (\(name))"] = summary(quick)
         }
-        if let startMode { app.setModeNow(startMode, desktop: desktop) }
-        results["switch mode"] = summary(switching)
+        DockStrip.shared.layers = strip
+        app.docks.refresh(quick: true)
 
         // 3. The "+" search: opening it, then each keystroke until its results are drawn.
         var opening: [Double] = []
@@ -164,15 +185,6 @@ enum LiveBench {
         }
         results["dock refresh (main thread)"] = summary(refresh)
 
-        // 5. An app coming forward, as the dock sees it (its icon turns active).
-        var quick: [Double] = []
-        for _ in 0..<10 {
-            let start = now()
-            app.docks.refresh(quick: true)
-            draw(panel)
-            quick.append(ms(start))
-        }
-        results["dock update when an app comes forward"] = summary(quick)
 
         if let front { _ = front.activate() ; Windows.bringForward(front) }
         results["at"] = ISO8601DateFormatter().string(from: Date())
@@ -207,6 +219,19 @@ enum DockBench {
         let app = PetalApp()
         let modes = app.config.modes
         guard !modes.isEmpty else { print("no modes"); exit(0) }
+        // A few running apps that belong to no mode, as the dock usually has.
+        let loose = Apps.installed().map(\.id).filter { id in !modes.contains { $0.apps.contains(id) } }.prefix(2)
+        print("Petal dock bench: \(modes.count) modes, \(modes.map { $0.apps.count }) apps, \(loose.count) more running")
+        let was = DockStrip.shared.layers
+        for layers in [false, true] {
+            DockStrip.shared.layers = layers
+            measure(app: app, modes: modes, loose: Array(loose))
+        }
+        DockStrip.shared.layers = was
+        exit(0)
+    }
+
+    private static func measure(app: PetalApp, modes: [Mode], loose: [String]) {
         let dock = ScreenDock()
         dock.desktop = 1
         // As DockPanel: as wide as the screen, the dock centered in it.
@@ -219,15 +244,23 @@ enum DockBench {
         let hosting = DockHostingView(rootView: AnyView(DockView(dock: dock).environment(app)))
         window.contentView = DockHostingView.container(hosting)
         var sizes: Set<String> = []
-        // A few running apps that belong to no mode, as the dock usually has.
-        let loose = Apps.installed().map(\.id).filter { id in !modes.contains { $0.apps.contains(id) } }.prefix(2)
 
         func items(for mode: Mode, front: Int = 0) -> [DockItem] {
-            let pinned = mode.apps.filter(Apps.shows).enumerated().map { index, id in
+            var seen = Set<String>()
+            let pinned = mode.apps.filter { Apps.shows($0) && seen.insert($0).inserted }.enumerated().map { index, id in
                 DockItem(id: id, pinned: true, running: index % 2 == 0, windows: index % 2 == 0 ? (index % 4 == 0 ? 2 : 1) : 0,
                          here: index % 4 == 0, active: index == front)
             }
             return pinned + loose.map { DockItem(id: $0, pinned: false, running: true, windows: 1, here: true, active: false) }
+        }
+        /// As DockController.refresh does: the mode, its items, and (for the layer strip) every mode's row.
+        func show(_ mode: Mode, front: Int = 0) {
+            if dock.mode != mode { dock.mode = mode }
+            let now = items(for: mode, front: front)
+            if now != dock.items { dock.items = now }
+            if DockStrip.shared.layers {
+                dock.rows = Dictionary(uniqueKeysWithValues: modes.map { ($0.id, $0.id == mode.id ? now : items(for: $0, front: -1)) })
+            }
         }
         let longest = modes.map { $0.apps.filter(Apps.shows).count }.max() ?? 0
         dock.stageSlots = longest + loose.count + 1
@@ -236,6 +269,7 @@ enum DockBench {
             let size = hosting.measure()
             sizes.insert("\(Int(size.width))×\(Int(size.height))")
             if window.frame.height != size.height { window.setContentSize(CGSize(width: width, height: size.height)) }
+            window.contentView?.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
             CATransaction.flush()
         }
@@ -250,29 +284,54 @@ enum DockBench {
                 RunLoop.main.run(until: Date().addingTimeInterval(0.03))
             }
             samples.sort()
-            print(String(format: "%-40@ median %7.2f ms   worst %7.2f ms   (%d runs)", name as NSString,
+            print(String(format: "  %-38@ median %7.2f ms   worst %7.2f ms   (%d runs)", name as NSString,
                          samples[samples.count / 2], samples.last ?? 0, runs))
         }
 
-        print("Petal dock bench: \(modes.count) modes, \(modes.map { $0.apps.count }) apps")
-        dock.mode = modes[0]
-        dock.items = items(for: modes[0])
+        print("strip: \(DockStrip.label)")
+        show(modes[0])
         draw()
         // Warm every mode once (icons, colors), as a running dock has.
-        for mode in modes { dock.mode = mode; dock.items = items(for: mode); draw() }
+        for mode in modes { show(mode); draw() }
 
-        time("switch mode", runs: modes.count * 6) { run in
-            let mode = modes[run % modes.count]
-            dock.mode = mode
-            dock.items = items(for: mode)
+        var late = 0
+        time("switch mode", runs: modes.count * 6) { run in show(modes[run % modes.count]) }
+        // The layer strip must show the new row in the same pass that draws the switch.
+        if DockStrip.shared.layers {
+            for mode in modes {
+                show(mode)
+                draw()
+                if dock.strip?.shownMode != mode.id { late += 1 }
+            }
+            print("  rows not shown in the same pass: \(late) of \(modes.count)")
         }
-        time("an app comes forward", runs: 20) { run in
-            if let mode = dock.mode { dock.items = items(for: mode, front: run % 4) }
+        time("an app comes forward", runs: 20) { run in if let mode = dock.mode { show(mode, front: run % 4) } }
+        time("refresh with nothing new", runs: 20) { _ in if let mode = dock.mode { show(mode, front: 3) } }
+        // `--bench-dock <folder>`: the layer strip of each mode as a PNG (its layers as they rest, without the glass).
+        if DockStrip.shared.layers, let index = CommandLine.arguments.firstIndex(of: "--bench-dock"),
+           CommandLine.arguments.count > index + 1, let strip = dock.strip, let layer = strip.layer {
+            let folder = CommandLine.arguments[index + 1]
+            try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+            for (n, mode) in modes.enumerated() {
+                show(mode, front: 0)
+                draw()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+                let scale: CGFloat = 2
+                let size = strip.bounds.size
+                guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
+                                                 bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                                 colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+                      let context = NSGraphicsContext(bitmapImageRep: rep) else { continue }
+                context.cgContext.setFillColor(NSColor(white: 0.2, alpha: 1).cgColor)
+                context.cgContext.fill(CGRect(x: 0, y: 0, width: size.width * scale, height: size.height * scale))
+                context.cgContext.scaleBy(x: scale, y: scale)
+                layer.render(in: context.cgContext)
+                let path = (folder as NSString).appendingPathComponent("strip-\(n)-\(mode.id).png")
+                try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+                print("  " + path)
+            }
         }
-        time("refresh with nothing new", runs: 20) { _ in
-            if let mode = dock.mode { dock.items = items(for: mode, front: 3) }
-        }
-        print("dock sizes seen: \(sizes.sorted().joined(separator: ", ")); window \(Int(window.frame.width))×\(Int(window.frame.height))")
-        exit(0)
+        print("  dock sizes seen: \(sizes.sorted().joined(separator: ", ")); window \(Int(window.frame.width))×\(Int(window.frame.height))")
+        window.close()
     }
 }

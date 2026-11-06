@@ -27,6 +27,9 @@ final class ScreenDock {
     @ObservationIgnored var order: [String] = []
     @ObservationIgnored var frames: [String: CGRect] = [:]   // slot frames in the panel, top-left origin
     @ObservationIgnored weak var panel: DockPanel?
+    /// Every mode's apps as this screen would show them, for the layer strip's rows made ahead of time.
+    @ObservationIgnored var rows: [String: [DockItem]] = [:]
+    @ObservationIgnored weak var strip: AppStripView?
     let magnifier = Magnifier()
 
     init() { magnifier.dock = self }
@@ -179,6 +182,17 @@ final class DockController {
             for other in others where !dock.order.contains(other.id) { dock.order.append(other.id) }
             let ordered = pinned + dock.order.compactMap { key in others.first { $0.id == key } }
             Perf.span("refresh: set items") { if ordered != dock.items { dock.items = ordered } }
+            // The layer strip keeps every mode's row ready: each mode's apps, then the running apps in no mode.
+            if DockStrip.shared.layers {
+                let loose = ordered.filter { !$0.pinned }
+                var rows: [String: [DockItem]] = [:]
+                for other in modesOn ? config.modes : Array(config.modes.prefix(1)) where other.id != mode?.id {
+                    var seen = Set<String>()
+                    rows[other.id] = other.apps.filter { Apps.shows($0) && seen.insert($0).inserted }.map { item($0, pinned: true) } + loose
+                }
+                rows[mode?.id ?? ""] = ordered
+                dock.rows = rows
+            }
             if dock.minimized != minimizedAll { dock.minimized = minimizedAll }
 
             // The stage is as long as the most apps any mode would show here, so switching never moves the rest.
@@ -633,7 +647,8 @@ struct DockView: View {
         // Centered in a panel that never resizes, so the glass grows and shrinks around its centre in the same
         // animation as what changed inside it: the window never moves under it.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.easeOut(duration: 0.22), value: dock.items.map(\.id))
+        // (The layer strip animates its own apps, and its stage never changes size with them.)
+        .animation(.easeOut(duration: 0.22), value: DockStrip.shared.layers && !snapshotting ? [] : dock.items.map(\.id))
         .animation(.easeOut(duration: 0.22), value: dock.minimized.map(\.id))
         .animation(.easeOut(duration: 0.24), value: dock.mode?.id)
         .animation(.easeOut(duration: 0.24), value: app.pendingMode?.mode)
@@ -674,6 +689,16 @@ struct DockView: View {
     /// The mode's apps, the rest, and "+", centered on a stage as long as the fullest mode.
     @ViewBuilder private func stage(_ layout: AnyLayout) -> some View {
         let length = CGFloat(dock.stageSlots) * slot
+        if DockStrip.shared.layers && !snapshotting {
+            AppStrip(dock: dock, length: length, slot: slot)
+                .stripRoom(dock, icon: icon, slot: slot)
+                .frame(width: dock.vertical ? slot : length, height: dock.vertical ? length : slot)
+        } else {
+            swiftUIStage(layout, length: length)
+        }
+    }
+
+    @ViewBuilder private func swiftUIStage(_ layout: AnyLayout, length: CGFloat) -> some View {
         layout {
             ForEach(Array(dock.items.enumerated()), id: \.element.id) { index, item in
                 AppSlot(dock: dock, item: item, index: index, icon: icon, slot: slot)
