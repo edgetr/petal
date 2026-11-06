@@ -608,6 +608,7 @@ final class DockController {
 
     /// New window: the app comes forward and gets ⌘N, as its own File menu would.
     func newWindow(_ id: String) {
+        Windows.focusing.cancel()   // an earlier click's focus still on its way would come in front of the new window
         if Sites.isWeb(id) { Sites.open(id); return }
         guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: id).first else { launch(id); return }
         Windows.bringForward(running)

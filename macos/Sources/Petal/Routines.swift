@@ -193,6 +193,9 @@ final class Routines {
     @ObservationIgnored private var jobs: [(id: String, file: URL?)] = []
     @ObservationIgnored private var working = false
     @ObservationIgnored private var learned: [String: [String: String]] = [:]
+    /// Bumped when a routine's rule changes, and part of its quick-AI key, so an answer the quick AI gave for the
+    /// old rule (kept for the session) isn't reused for the new one.
+    @ObservationIgnored private var ruleVersion: [String: Int] = [:]
     @ObservationIgnored private var plans: [String: Plan] = [:]
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
@@ -413,6 +416,8 @@ final class Routines {
     private func next() {
         guard !working, !jobs.isEmpty else { return }
         let job = jobs.removeFirst()
+        // Routines turned off meanwhile ("Run my routines", or this one): what's still queued is dropped.
+        guard isOn else { jobs = []; return }
         guard let routine = list.first(where: { $0.id == job.id }), routine.on else { return next() }
         working = true
         execute(routine, file: job.file) { [weak self] _ in
@@ -606,6 +611,7 @@ final class Routines {
         if let folder = learned[routine.id]?[key] { return finish(into.appending(path: folder)) }
         guard let quick else { return done(nil, base, false, true) }
         let words = routine.words
+        let rule = ruleVersion[routine.id, default: 0]
         Self.io.async {
             // Moved already by a pickier routine: nothing to ask.
             guard FileManager.default.fileExists(atPath: file.path) else {
@@ -615,7 +621,7 @@ final class Routines {
             let prompt = Self.prompt(words: words, into: into, folders: folders, files: [(file.lastPathComponent, Self.facts(file, peek: true))])
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    quick(prompt, "r|\(routine.id)|\(key)") { answer in
+                    quick(prompt, "r|\(routine.id)|\(rule)|\(key)") { answer in
                         let picked = (answer?["folders"] as? [String: Any])?["1"] ?? answer?["folder"]
                         guard let name = Self.folderName(picked, among: folders.map(\.name)) else { return finish(nil) }
                         self.learn(routine.id, [key: name])
@@ -695,7 +701,7 @@ final class Routines {
             seen.append((item.folder.lastPathComponent, [item.file.lastPathComponent]))
         }
         let prompt = Self.prompt(words: routine.words, into: into, folders: seen, files: chunk.map { ($0.name, $0.facts) })
-        let key = "rb|\(routine.id)|" + chunk.map(\.name).joined(separator: "|")
+        let key = "rb|\(routine.id)|\(ruleVersion[routine.id, default: 0])|" + chunk.map(\.name).joined(separator: "|")
         quick(prompt, key) { answer in
             let picks = answer?["folders"] as? [String: Any] ?? [:]
             var patterns: [String: String] = [:]
@@ -801,9 +807,12 @@ final class Routines {
             // Its rule changed (its words, where it acts, where files go): what the AI answered for the old rule
             // doesn't hold any more, so names like those are asked about again.
             let old = list[index]
-            if old.words != routine.words || old.actions != routine.actions || old.trigger != routine.trigger, learned[routine.id] != nil {
-                learned[routine.id] = nil
-                saveLearned()
+            if old.words != routine.words || old.actions != routine.actions || old.trigger != routine.trigger {
+                ruleVersion[routine.id, default: 0] += 1
+                if learned[routine.id] != nil {
+                    learned[routine.id] = nil
+                    saveLearned()
+                }
             }
             var routine = routine
             routine.lastRun = list[index].lastRun
