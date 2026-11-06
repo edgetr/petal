@@ -629,7 +629,7 @@ struct PreviewTile: View {
         }
         .contentShape(.rect)
         .onHover { hovering = $0 }
-        .onTapGesture { Windows.focus(window); done() }
+        .onTapGesture { Windows.focus(window, onScreen: PetalApp.shared.docks.isOnScreen(window)); done() }
     }
 }
 
@@ -683,7 +683,7 @@ struct WindowRow: View {
         .background(hovering ? .white.opacity(0.08) : .clear, in: .rect(cornerRadius: 9))
         .contentShape(.rect)
         .onHover { hovering = $0 }
-        .onTapGesture { Windows.focus(window); done() }
+        .onTapGesture { Windows.focus(window, onScreen: PetalApp.shared.docks.isOnScreen(window)); done() }
     }
 }
 

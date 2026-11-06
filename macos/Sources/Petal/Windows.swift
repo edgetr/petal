@@ -74,17 +74,30 @@ enum Windows {
     /// Brings one window forward: unminimizes it, raises it, and makes its app the active one. The pointer stays.
     /// Brings one window to the front. A window on this Desktop comes forward through Accessibility, at once; one
     /// elsewhere (another Desktop, minimized) goes through Launch Services, which also switches Desktop.
+    ///
+    /// This window is raised last, after its app comes forward, and once more a moment later: bringing an app
+    /// forward through Launch Services asks it to reopen, and an app like Zoom answers by showing its main window
+    /// over the one asked for.
     static func focus(_ window: AppWindow, onScreen: Bool = false) {
         if window.minimized { AXUIElementSetAttributeValue(window.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
-        AXUIElementPerformAction(window.element, kAXRaiseAction as CFString)
-        AXUIElementSetAttributeValue(window.element, kAXMainAttribute as CFString, kCFBooleanTrue)
+        let raise = {
+            AXUIElementPerformAction(window.element, kAXRaiseAction as CFString)
+            AXUIElementSetAttributeValue(window.element, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementSetAttributeValue(window.element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        }
+        raise()
         guard let app = NSRunningApplication(processIdentifier: window.pid) else { return }
+        var forward = false
         if onScreen && !window.minimized && !app.isHidden {
             let element = AXUIElementCreateApplication(window.pid)
             AXUIElementSetMessagingTimeout(element, 0.3)
-            if AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success { return }
+            forward = AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
         }
-        bringForward(app)
+        if !forward { bringForward(app) }
+        raise()
+        for delay in forward ? [0.12] : [0.15, 0.4] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { raise() }
+        }
     }
 
     /// Moves and resizes a window (top-left origin).

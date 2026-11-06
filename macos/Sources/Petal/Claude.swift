@@ -384,8 +384,10 @@ struct ClaudePanelView: View {
             .frame(minHeight: 180, alignment: .top)
             input
         }
+        // Exactly this wide whatever it shows: content a little too wide for it (Claude's rows and Codex's differ)
+        // stays put on the left instead of spilling out on both sides, which made switching jump sideways.
+        .frame(width: 524, alignment: .leading)
         .padding(18)
-        .frame(width: 560)
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
         .padding(10)
         .onAppear { focused = true }
@@ -445,7 +447,7 @@ struct ClaudePanelView: View {
                     })) {
                         ForEach(app.providers) { Text($0.name).tag($0.rawValue) }
                     }
-                    .pickerStyle(.segmented).labelsHidden()
+                    .pickerStyle(.segmented).labelsHidden().fixedSize()
                 }
             }
             if app.models(for: provider).count > 1 {
@@ -454,14 +456,14 @@ struct ClaudePanelView: View {
                     Picker("", selection: Binding(get: { app.currentModel(for: provider) }, set: { app.config.set(provider.modelSetting, $0) })) {
                         ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
                     }
-                    .pickerStyle(.segmented).labelsHidden()
+                    .pickerStyle(.segmented).labelsHidden().fixedSize()
                 }
             }
             OptionRow(title: "Effort") {
                 Picker("", selection: Binding(get: { app.config.string(provider.effortSetting) }, set: { app.config.set(provider.effortSetting, $0) })) {
                     ForEach(app.efforts(for: provider), id: \.self) { Text($0).tag($0) }
                 }
-                .pickerStyle(.segmented).labelsHidden()
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
             }
             OptionRow(title: "Full access") {
                 let full = app.config.string("claudeAccess") == "full"
@@ -553,6 +555,7 @@ struct OptionRow<Content: View>: View {
             Text(title).font(.system(size: 12.5)).foregroundStyle(.secondary).frame(width: 84, alignment: .leading)
             content
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

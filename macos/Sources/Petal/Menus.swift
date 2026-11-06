@@ -45,7 +45,7 @@ enum Menus {
                 menu.addItem(header("Windows"))
                 for window in windows.prefix(10) {
                     let row = ClosureMenuItem(title: (window.title.isEmpty ? name : window.title) + (window.minimized ? " (minimized)" : "")) {
-                        Windows.focus(window)
+                        Windows.focus(window, onScreen: app.docks.isOnScreen(window))
                     }
                     menu.addItem(row)
                 }

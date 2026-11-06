@@ -249,6 +249,11 @@ final class DockController {
     /// and moving keep it current through Accessibility's events (without them, it's at most a second old).
     @ObservationIgnored private var lastSnapshot: WindowList?
 
+    /// The window is on the Desktop showing (as of the last look at the windows): it can come forward at once.
+    func isOnScreen(_ window: AppWindow) -> Bool {
+        !window.minimized && (lastSnapshot?.onScreenFrames(pid: window.pid) ?? []).contains { $0.equalTo(window.frame, within: 4) }
+    }
+
     /// `quick`: what changed is the mode or a setting, not the windows, so the last look at them does.
     func refresh(quick: Bool = false) {
         refresh(with: quick ? (lastSnapshot ?? WindowList.current()) : Perf.span("refresh: window list") { WindowList.current() })

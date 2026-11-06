@@ -86,8 +86,11 @@ final class PetalApp {
     /// A Claude panel, menu or search is open: an auto-hiding dock stays out.
     var overlayOpen: Bool { claude.isOpen || popups.card != nil }
 
+    @ObservationIgnored private var lastPosition = ""
+
     func start() {
         Windows.limitWaiting()
+        lastPosition = config.position
         config.onChange = { [weak self] in
             guard let self else { return }
             // The last look at the windows, at once; a fresh one off the main thread.
@@ -96,6 +99,11 @@ final class PetalApp {
             Perf.span("onChange: signals.watch") { self.signals.watch(Stacks.resolve(self.config.strings("stackFolders"))) }
             Perf.span("onChange: hotkeys") { self.hotkeys.refresh() }
             Perf.span("onChange: menuBar") { self.menuBar.refresh() }
+            // macOS's Dock keeps off the edge Petal's dock moved to.
+            if self.config.position != self.lastPosition {
+                self.lastPosition = self.config.position
+                if self.docks.shown { SystemDock.follow() }
+            }
         }
         registerIPC()
         ipc.start()
