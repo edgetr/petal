@@ -1375,7 +1375,12 @@ Item {
     appSearch.open = true
   }
 
-  function openAsk(prefill) {
+  // Where the AI button that opened the chat is (its x on the screen), so the panel grows out of it; -1 when it
+  // was opened some other way.
+  property real askFromX: -1
+
+  function openAsk(prefill, fromX) {
+    root.askFromX = fromX === undefined ? -1 : fromX
     petalPanel.open = false
     root.refreshUsage()
     askBox.describing = false

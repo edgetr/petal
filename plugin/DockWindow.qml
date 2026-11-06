@@ -881,7 +881,7 @@ PanelWindow {
         anchors.fill: parent
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
-        onClicked: window.dock.openAsk("")
+        onClicked: window.dock.openAsk("", window.vertical ? -1 : askSlot.mapToItem(null, askSlot.width / 2, 0).x)
         onContainsMouseChanged: {
           if (containsMouse) window.hoverSlot = askSlot
           else if (window.hoverSlot === askSlot) window.hoverSlot = null

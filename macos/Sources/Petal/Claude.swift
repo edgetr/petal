@@ -268,8 +268,8 @@ final class InputPanel: NSPanel {
         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
-        // The content's own 10-point margin around the glass, then 12 points of space over the dock.
-        let above = Self.dockReach(on: screen) + 12 - 10
+        // The content's own 10-point margin around the glass, then 6 points of space over the dock.
+        let above = Self.dockReach(on: screen) + 6 - 10
         setFrame(NSRect(x: screen.frame.midX - size.width / 2, y: screen.frame.minY + above, width: size.width, height: size.height).integral,
                  display: true)
         makeKeyAndOrderFront(nil)
@@ -347,19 +347,18 @@ struct ClaudePanelView: View {
 
     var body: some View {
         @Bindable var panel = panel
-        // The bottom (and the text box) never moves. The panel is as tall as what it shows (the suggestions, the
-        // options, or the conversation, up to half the screen, then it scrolls) and grows or shrinks upward. The
-        // options take the body's place; what's under them keeps its state but no room.
+        // The bottom (and the text box) never moves. The suggestions and the options share one minimum height, so
+        // switching between them moves nothing; a conversation grows the panel upward only once it needs more room,
+        // up to half the screen, then scrolls. The options open over what's below the header.
         VStack(alignment: .leading, spacing: 14) {
             header
             ZStack(alignment: .top) {
                 Group { if agent.messages.isEmpty { empty } else { conversation } }
                     .frame(maxWidth: .infinity, alignment: .top)
-                    .frame(height: panel.optionsOpen ? 0 : nil, alignment: .top)
-                    .clipped()
                     .opacity(panel.optionsOpen ? 0 : 1)
                 if panel.optionsOpen { options.transition(.opacity.combined(with: .offset(y: -6))) }
             }
+            .frame(minHeight: 180, alignment: .top)
             input
         }
         .padding(18)
