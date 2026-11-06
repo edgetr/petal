@@ -166,6 +166,7 @@ Item {
       property string dailySummary: ""
       property var aiAllowed: []
       property bool replyDrafts: true
+      property bool finderInDock: true
       property string chatWhileWorking: "steer"
       property bool selectionAsk: true
       property bool aiNotes: true

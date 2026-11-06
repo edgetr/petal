@@ -63,7 +63,7 @@ final class Config {
         "focusGuard": true, "blockDistractions": true, "peeks": true, "holdNotifications": true, "urgentNotifications": true,
         "modeWindows": false, "tiling": false, "tilingGaps": 8, "tilingFloat": [String](), "ai": true, "claudeUsage": true, "autoUpdate": true,
         "claudePath": "", "chatModel": "sonnet", "chatEffort": "medium", "claudeAccess": "auto",
-        "aiProviders": ["claude"], "otherAgents": true, "aiMemory": true, "aiLearns": true, "dailySummary": "", "aiAllowed": [Any](), "replyDrafts": true, "chatWhileWorking": "steer", "selectionAsk": true, "aiNotes": true, "routines": true,
+        "aiProviders": ["claude"], "otherAgents": true, "aiMemory": true, "aiLearns": true, "dailySummary": "", "aiAllowed": [Any](), "replyDrafts": true, "finderInDock": true, "chatWhileWorking": "steer", "selectionAsk": true, "aiNotes": true, "routines": true,
         "aiNeverLook": ["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"],
         "shortcuts": true, "schedule": [Any](), "activityLog": true, "suggestModes": true, "summary": true,
         "magnification": false, "magnificationAmount": 0.5, "menuBarIcon": true, "chatProvider": "claude", "codexModel": "", "codexEffort": "medium", "codexPath": "",
@@ -141,6 +141,7 @@ final class Config {
         map[String(number)] = id
         modesRoot["workspaces"] = map
         let file = modesFile
+        let files = self.files
         writing += 1
         Self.writer.async {
             // A file that's there but isn't valid JSON is left alone (see `update`).
@@ -151,15 +152,30 @@ final class Config {
                 root["workspaces"] = map
                 Self.writeObject(root, to: file)
             }
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    let config = PetalApp.shared.config
-                    config.writing -= 1
-                    config.accept(file)
-                }
-            }
+            let disk = Self.snapshot(files)
+            DispatchQueue.main.async { MainActor.assumeIsolated { PetalApp.shared.config.written(disk, valid: true, stale: false) } }
         }
     }
+
+    /// The three files as they are on disk now (on the writer's queue, after a write).
+    nonisolated private static func snapshot(_ files: [URL]) -> [NSDictionary] { files.map { readObject($0) as NSDictionary } }
+
+    /// One of Petal's writes is done. Once none is still on its way, memory must match all three files: one that
+    /// doesn't (someone else's change landed meanwhile, in that file or another) is loaded, and the files' stamps
+    /// are taken as they are now, so the watcher never mistakes an unseen change for one already read.
+    private func written(_ disk: [NSDictionary], valid: Bool, stale: Bool) {
+        writing -= 1
+        if !valid { NSSound.beep() }
+        guard writing == 0 else { return }   // the last write's check covers this one's
+        let mine = [modesRoot as NSDictionary, settings as NSDictionary, dock as NSDictionary]
+        if !valid || stale || !zip(disk, mine).allSatisfy({ $0.isEqual($1) }) {
+            reload()   // what's on disk stands
+            onChange?()
+        }
+        stamps = currentStamps()
+    }
+
+    private var files: [URL] { [modesFile, settingsFile, dockFile] }
 
     /// Writes from `setMode`, one after another, in order.
     nonisolated private static let writer = DispatchQueue(label: "petal.config.write", qos: .userInitiated)
@@ -273,6 +289,7 @@ final class Config {
         }
         // Someone else changed a file in the last second, before the watcher read it: read it once this is written.
         let stale = writing == 0 && currentStamps() != stamps
+        let files = self.files
         writing += 1
         Self.writer.async {
             // A file that's there but isn't valid JSON (half-written by an editor, say) is left alone, not replaced
@@ -284,22 +301,8 @@ final class Config {
                 Self.writeObject(disk, to: file)
             }
             // What's on disk now: someone else's change may have landed with ours.
-            let after = Self.readObject(file) as NSDictionary
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    let config = PetalApp.shared.config
-                    config.writing -= 1
-                    if !valid { NSSound.beep() }
-                    // Once nothing else of Petal's is on its way, memory must match the file; if it doesn't, the
-                    // file (with the other change) stands.
-                    let mine = (file == config.settingsFile ? config.settings : file == config.dockFile ? config.dock : config.modesRoot) as NSDictionary
-                    if !valid || stale || (config.writing == 0 && !after.isEqual(mine)) {
-                        config.reload()   // what's on disk stands
-                        config.onChange?()
-                    }
-                    config.accept(file)
-                }
-            }
+            let disk = Self.snapshot(files)
+            DispatchQueue.main.async { MainActor.assumeIsolated { PetalApp.shared.config.written(disk, valid: valid, stale: stale) } }
         }
         Perf.span("config: onChange") { onChange?() }
     }
@@ -346,14 +349,6 @@ final class Config {
                 self.onChange?()
             }
         }
-    }
-
-    /// Petal's own write of `file` is in: its new stamp is known. Only that file's: a change to another one,
-    /// by someone else, is still read by the watcher.
-    func accept(_ file: URL) {
-        guard let index = [modesFile, settingsFile, dockFile].firstIndex(of: file) else { return }
-        if stamps.count < 3 { stamps = currentStamps() }
-        stamps[index] = (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date
     }
 
     private func currentStamps() -> [Date?] {

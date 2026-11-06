@@ -47,6 +47,7 @@ final class Agent {
 
     /// Messages written while it works, sent once the run ends (queued), or at once by ending it (steering).
     private(set) var queued: [String] = []
+    @ObservationIgnored private var steering = 0
 
     func send(_ text: String) {
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -57,13 +58,16 @@ final class Agent {
             if app.config.string("chatWhileWorking") == "queue" {
                 queued.append(prompt)
             } else {
-                queued.insert(prompt, at: 0)
+                // After any steering already waiting, before what's queued: in the order written.
+                queued.insert(prompt, at: min(steering, queued.count))
+                steering += 1
                 messages.append(Message(kind: .step, text: "Steering"))
                 stop()
             }
             return
         }
         pendingAsk = []
+        steering = max(0, steering - 1)
         messages.append(Message(kind: .user, text: prompt))
         // Several notes may work at once, up to a few; the next waits its turn.
         if app.claude.working >= ClaudePanel.atOnce {
@@ -99,6 +103,8 @@ final class Agent {
     func deny() {
         pendingAsk = []
         messages.append(Message(kind: .step, text: "Not allowed"))
+        // What was written meanwhile goes now.
+        if !running, !queued.isEmpty { send(queued.removeFirst()) }
     }
 
     func stop() { process?.terminate() }

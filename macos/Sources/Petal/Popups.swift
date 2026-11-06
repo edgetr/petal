@@ -567,7 +567,8 @@ final class Previews {
     private func capture(_ list: [AppWindow]) {
         guard !list.isEmpty, Capture.allowed, !capturing else { return }
         capturing = true
-        let targets = list.map { (window: $0, number: Windows.id(of: $0.element)) }
+        // The window server's number is in each window's id ("pid-w<number>"): no Accessibility call here.
+        let targets = list.map { (window: $0, number: $0.id.split(separator: "w").last.flatMap { CGWindowID(String($0)) }) }
         Task {
             let pictures = await Capture.capture(targets)
             capturing = false
