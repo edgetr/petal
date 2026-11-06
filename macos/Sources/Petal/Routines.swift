@@ -431,12 +431,13 @@ final class Routines {
     /// `approved`: how many files the person already allowed for the routine's first file action (from the plan they
     /// saw). Each file action is planned when the run reaches it, after the actions before it are done (a Shortcut's
     /// export is there by then); it asks again only when there are more files than they allowed.
-    private func execute(_ routine: Routine, file: URL?, approved: Int? = nil, done: @escaping ([Move]) -> Void) {
+    /// `rule`: the rule version the run was decided under (a manual run's card may wait while the routine changes).
+    private func execute(_ routine: Routine, file: URL?, approved: Int? = nil, rule: Int? = nil, done: @escaping ([Move]) -> Void) {
         var said: [String] = []
         var moves: [Move] = []
         var made: [String] = []
         var approved = approved
-        let rule = ruleVersion[routine.id, default: 0]
+        let rule = rule ?? ruleVersion[routine.id, default: 0]
         /// Deleted or changed while it ran (a Shortcut exporting, a card waiting): the rest of it doesn't happen.
         func current() -> Bool { rule == ruleVersion[routine.id, default: 0] && list.contains { $0.id == routine.id } }
         func finish() {
@@ -824,6 +825,7 @@ final class Routines {
             let old = list[index]
             if old.words != routine.words || old.actions != routine.actions || old.trigger != routine.trigger {
                 ruleVersion[routine.id, default: 0] += 1
+                plans[routine.id] = nil   // a dry run's plan was for the old rule
                 if learned[routine.id] != nil {
                     learned[routine.id] = nil
                     saveLearned()
@@ -950,6 +952,8 @@ final class Routines {
         let id = args["id"] as? String ?? ""
         guard let routine = list.first(where: { $0.id == id }) else { return fail("No routine with id \(id); petal_routines lists them.") }
         let dry = args["dryRun"] as? Bool ?? false
+        let rule = ruleVersion[id, default: 0]   // the routine as it is now; a change while its card waits stops it
+        let changed = { send(["note": "The routine changed while it waited; nothing moved. Run it again."]) }
         guard let action = routine.actions.first(where: \.movesFiles) else {
             if dry { return send(["wouldDo": summary(routine)]) }
             run(routine, file: nil)
@@ -960,7 +964,7 @@ final class Routines {
             // Nothing to move there: the routine's other actions still run.
             guard n > 0 else {
                 self.plans[id] = nil
-                return self.execute(routine, file: nil, approved: 0) { moves in
+                return self.execute(routine, file: nil, approved: 0, rule: rule) { moves in
                     send(["moved": moves.count, "waitingForAI": plan.waitingForAI.count,
                           "note": "Nothing to move in its first folder; its other actions ran."])
                 }
@@ -970,9 +974,10 @@ final class Routines {
             let detail = counts.prefix(4).map { "\($0.name) \($0.count)" }.joined(separator: ", ") + (counts.count > 4 ? " and more" : "") + ". You can put them back."
             self.confirm(n >= 10, "Tidy \(n) files in \(where_)", detail) { allowed in
                 guard allowed else { return send(["declined": "The person didn't allow it."]) }
+                guard rule == self.ruleVersion[id, default: 0] else { return changed() }
                 self.plans[id] = nil
                 // Every action of the routine, in order; its first file action may move up to this many unasked.
-                self.execute(routine, file: nil, approved: n) { moves in
+                self.execute(routine, file: nil, approved: n, rule: rule) { moves in
                     let into = Dictionary(moves.map { (URL(fileURLWithPath: $0.to).deletingLastPathComponent().lastPathComponent, 1) }, uniquingKeysWith: +)
                     send(["moved": moves.count, "into": into,
                           "leftAlone": plan.leftAlone.count, "waitingForAI": plan.waitingForAI.count, "notYet": plan.later,
