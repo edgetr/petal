@@ -175,15 +175,23 @@ struct ProviderRow: View {
     var body: some View {
         let setup = app.aiSetup
         let state = setup.state(provider)
+        // On an API key, being signed in doesn't matter: the key does (Settings › AI has its field).
+        let keyed: Bool? = switch state {
+        case .signedOut, .ready: app.usesAPIKey(provider) ? app.apiKeyCheck.savedKey(provider) != nil : nil
+        default: nil
+        }
         HStack(spacing: 14) {
             ProviderMark(provider: provider).frame(width: 20, height: 20).frame(width: 40, height: 40).glassEffect(.regular, in: .circle)
             VStack(alignment: .leading, spacing: 2) {
                 Text(provider.name).font(.system(size: 14, weight: .semibold))
-                Text(on ? detail(state) : provider.plan).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(!on ? provider.plan : keyed.map { $0 ? "Uses your \(provider.keyMaker) API key." : "Add your \(provider.keyMaker) API key to use it." } ?? detail(state))
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
-            if on {
+            if on, let keyed {
+                Image(systemName: keyed ? "checkmark.circle.fill" : "key").foregroundStyle(keyed ? .green : .secondary)
+            } else if on {
                 switch state {
                 case .checking, .installing, .signingIn:
                     ProgressView().controlSize(.small)

@@ -67,6 +67,7 @@ final class Config {
         "aiNeverLook": ["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"],
         "shortcuts": true, "schedule": [Any](), "activityLog": true, "suggestModes": true, "summary": true,
         "magnification": false, "magnificationAmount": 0.5, "menuBarIcon": true, "chatProvider": "claude", "codexModel": "", "codexEffort": "medium", "codexPath": "",
+        "claudeAuth": "subscription", "codexAuth": "subscription",
     ]
 
     private(set) var modes: [Mode] = []

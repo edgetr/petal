@@ -85,7 +85,9 @@ and `… report`. Logs: `petal logs` (Omarchy's shell log; on macOS Petal's own 
 ## Things to know
 
 - Petal's AI is optional and uses the user's own Claude Code or Codex (`aiProviders`, `chatProvider`). Its usage
-  counts toward the user's own plan.
+  counts toward the user's own plan, or on macOS toward an API key (`claudeAuth` / `codexAuth`: `subscription` or
+  `api`). The key is pasted in Settings › AI and kept in the Keychain; only Petal's own runs use it. Never ask for a
+  key, put one in a file or the environment, or change `~/.claude`, `~/.codex` or their logins to switch.
 - On macOS, Petal hides macOS's Dock while it runs and gives it back on quit; `petal restore-dock` gives it back by
   hand. Permissions it may need: Accessibility (window lists, badges, focus cards, per-mode windows, tiling), Screen
   Recording (previews), Automation for each browser (reading and closing a tab), and Full Disk Access (reading

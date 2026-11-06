@@ -671,25 +671,33 @@ struct ClaudeSettings: View {
             ProviderList()
         }
         .onAppear { app.aiSetup.refreshAll() }
+        ForEach(app.providers) { APIKeyCard(provider: $0) }
         if let provider = app.chatProvider {
-            Card {
-                HStack(spacing: 18) {
-                    UsageRing(usage: app.usage, size: 64)
-                    VStack(alignment: .leading, spacing: 6) {
-                        if app.usage.limits.isEmpty {
-                            Text(app.usage.help.isEmpty ? "Checking your \(provider.name) usage…" : app.usage.help).foregroundStyle(.secondary)
-                        }
-                        ForEach(app.usage.limits, id: \.label) { limit in
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack {
-                                    Text(limit.label).font(.system(size: 12, weight: .medium))
-                                    Spacer()
-                                    Text("\(Int(limit.percent * 100))%").font(.system(size: 12).monospacedDigit())
-                                    if let reset = limit.resetsAt {
-                                        Text("resets \(reset, style: .relative)").font(.system(size: 11)).foregroundStyle(.secondary)
+            if let spent = app.usage.spentText {
+                Card(footer: provider == .claude ? "What Claude Code reports for Petal's own chats and quick calls on your key. Anthropic's console has the bill."
+                     : "Estimated from Codex's tokens at OpenAI's list prices, for Petal's own chats and quick calls on your key. OpenAI's usage page has the bill.") {
+                    Text(spent).font(.system(size: 20, weight: .semibold).monospacedDigit())
+                }
+            } else {
+                Card {
+                    HStack(spacing: 18) {
+                        UsageRing(usage: app.usage, size: 64)
+                        VStack(alignment: .leading, spacing: 6) {
+                            if app.usage.limits.isEmpty {
+                                Text(app.usage.help.isEmpty ? "Checking your \(provider.name) usage…" : app.usage.help).foregroundStyle(.secondary)
+                            }
+                            ForEach(app.usage.limits, id: \.label) { limit in
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack {
+                                        Text(limit.label).font(.system(size: 12, weight: .medium))
+                                        Spacer()
+                                        Text("\(Int(limit.percent * 100))%").font(.system(size: 12).monospacedDigit())
+                                        if let reset = limit.resetsAt {
+                                            Text("resets \(reset, style: .relative)").font(.system(size: 11)).foregroundStyle(.secondary)
+                                        }
                                     }
+                                    ProgressView(value: limit.percent).tint(UsageRing.color(limit.percent))
                                 }
-                                ProgressView(value: limit.percent).tint(UsageRing.color(limit.percent))
                             }
                         }
                     }

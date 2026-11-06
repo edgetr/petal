@@ -108,6 +108,8 @@ SETTINGS_SCHEMA = {
     "chatProvider": ("claude", "Which of aiProviders the chat panel, the usage ring and sorting use: claude or codex."),
     "codexModel": ("", "Codex chat model; empty = Codex's own default."),
     "codexEffort": ("medium", "Codex chat reasoning effort: low, medium, high or xhigh."),
+    "claudeAuth": ("subscription", "macOS: how Petal's own Claude runs (chat, sorting) pay: subscription (the user's Claude Code sign-in) or api (an Anthropic API key the user pastes in Settings > AI; it stays in the Keychain, and only Petal's runs use it). Never ask for or handle a key yourself."),
+    "codexAuth": ("subscription", "macOS: how Petal's own Codex runs pay: subscription (the user's ChatGPT sign-in) or api (an OpenAI API key the user pastes in Settings > AI; Keychain only, Petal's runs only). Never ask for or handle a key yourself."),
 }
 
 MODE_FIELDS = {

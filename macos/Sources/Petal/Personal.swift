@@ -85,6 +85,8 @@ enum Personal {
             }
             if let model = settings[provider.modelSetting] as? String, !model.isEmpty { environment["PETAL_AI_MODEL"] = model }
             if let effort = settings[provider.effortSetting] as? String, !effort.isEmpty { environment["PETAL_AI_EFFORT"] = effort }
+            // On an API key, the merge runs on it too.
+            environment = APIKeys.environment(environment, for: provider, api: settings[provider.authSetting] as? String == "api")
         }
         return environment
     }
