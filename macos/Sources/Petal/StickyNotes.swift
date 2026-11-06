@@ -163,6 +163,7 @@ extension ClaudePanel {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Shown only if the panel wasn't closed (or something else opened) meanwhile.
+                    guard ticket == self.pendingTicket else { return self.prune() }   // picked another, or closed
                     if there && self.notesOn { _ = self.attach(note, place) }
                     if ticket == self.pendingTicket { self.present(note) }
                     self.prune()
@@ -244,6 +245,12 @@ extension ClaudePanel {
         listenIfNeeded()
         guard !notesOn else { return }
         cancelPending()   // a note's window being brought forward (or a mode's countdown before it) opens nothing
+        // The chat showing becomes the loose chat, stuck to no window: from now on it looks at what's in front.
+        if current !== loose, current.place != nil, isOpen {
+            current.place = nil
+            current.windowGone = false
+            loose = current
+        }
         guard notes.contains(where: { $0.ready || $0.away }) else { return }
         for note in notes { note.ready = false; note.away = false }
         updateReady()
@@ -325,7 +332,7 @@ extension ClaudePanel {
     func cancelPending() {
         pendingOpen = nil
         pendingTicket += 1
-        Self.windowQueue.async { NoteFocus.request += 1 }
+        NoteFocus.cancel()
     }
 
     private func stepAway() {
@@ -441,19 +448,19 @@ extension ClaudePanel {
     /// app): unminimized, raised, its app in front; through Launch Services when it isn't on the screen (another
     /// Desktop, which macOS then switches to). The pointer stays where it is.
     nonisolated static func bringForward(pid: pid_t, window number: CGWindowID?, app url: URL?) {
+        // Numbered now: a newer request, or a cancel, stops this one at once, even while it waits on the app.
+        let request = NoteFocus.next()
         windowQueue.async {
-            // A newer request (or a cancelled one) stops this one's retries from bringing its app back.
-            NoteFocus.request += 1
-            let request = NoteFocus.request
+            guard NoteFocus.current(request) else { return }
             let element = Windows.windows(of: pid).first { $0.id == "\(pid)-w\(number ?? 0)" }?.element
             let raise = {
-                guard let element, request == NoteFocus.request else { return }
+                guard let element, NoteFocus.current(request) else { return }
                 AXUIElementPerformAction(element, kAXRaiseAction as CFString)
                 AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
                 AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
             }
             let launch = {
-                guard let url, request == NoteFocus.request else { return }
+                guard let url, NoteFocus.current(request) else { return }
                 let configuration = NSWorkspace.OpenConfiguration()
                 configuration.activates = true
                 configuration.addsToRecentItems = false
@@ -462,13 +469,13 @@ extension ClaudePanel {
             var minimized = false
             if let element {
                 minimized = Windows.value(element, kAXMinimizedAttribute) ?? false
-                if minimized { AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
+                if minimized, NoteFocus.current(request) { AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
             }
             let shown = (CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? [])
                 .contains { ($0[kCGWindowNumber as String] as? UInt32) == number }
             raise()
             var forward = false
-            if element != nil, shown, !minimized {
+            if element != nil, shown, !minimized, NoteFocus.current(request) {
                 let app = AXUIElementCreateApplication(pid)
                 AXUIElementSetMessagingTimeout(app, 0.3)
                 forward = AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
@@ -554,9 +561,28 @@ struct NotePlaceLine: View {
     }
 }
 
-/// Which request to bring a note's window forward is the newest; only `ClaudePanel.windowQueue` touches it.
+/// Which request to bring a note's window forward is the newest: a counter behind a lock, so cancelling reaches
+/// it at once from any thread (never waiting behind a slow Accessibility call on the window queue).
 enum NoteFocus {
-    nonisolated(unsafe) static var request = 0
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var newest = 0
+
+    /// A new request's number; every older one stops.
+    static func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        newest += 1
+        return newest
+    }
+
+    static func cancel() { _ = next() }
+
+    /// Still the newest: checked right before every activate and raise.
+    static func current(_ request: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return newest == request
+    }
 }
 
 /// An app's icon, never read from the disk on the main thread: the one Petal has already, else a plain one until

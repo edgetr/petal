@@ -113,7 +113,13 @@ final class Browsers {
         guard let id = app.bundleIdentifier, let kind = Self.kind(id) else { return done(nil) }
         switch kind {
         case .gecko:
-            done(window == nil ? Self.geckoAddress(pid: app.processIdentifier) : nil)
+            guard let window else { return done(Self.geckoAddress(pid: app.processIdentifier)) }
+            // A note's own window, found by id (or frame and title), read off the main thread.
+            let pid = app.processIdentifier
+            queue.async {
+                let url = Self.geckoAddress(pid: pid, window: window)
+                DispatchQueue.main.async { done(url) }
+            }
         case .chromium, .safari:
             let tab = kind == .safari ? "current tab" : "active tab"
             let source = window == nil ? "tell application id \"\(id)\" to return URL of \(tab) of front window"
@@ -207,15 +213,32 @@ final class Browsers {
 
     // MARK: Firefox and Zen
 
-    /// The address field's text in the front window, found through Accessibility (Firefox shows it without
-    /// "https://"; that's fine for the site).
-    static func geckoAddress(pid: pid_t) -> String? {
+    /// The address field's text in the front window (or `window`, one of its windows: by the window server's
+    /// number, else the one with that frame and title; none, or two alike, is no address), found through
+    /// Accessibility (Firefox shows it without "https://"; that's fine for the site).
+    nonisolated static func geckoAddress(pid: pid_t, window wanted: Window? = nil) -> String? {
         guard Windows.trusted else { return nil }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.3)
         // Gecko builds its accessibility tree once something asks for it.
         AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-        guard let window: AXUIElement = Windows.value(app, kAXFocusedWindowAttribute) else { return nil }
+        let found: AXUIElement?
+        if let wanted {
+            let all: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
+            if let number = wanted.number, let match = all.first(where: { Windows.id(of: $0) == number }) {
+                found = match
+            } else {
+                let alike = all.filter { w in
+                    guard let frame = Windows.frame(of: w), let title: String = Windows.value(w, kAXTitleAttribute) else { return false }
+                    return title == wanted.title && abs(frame.minX - wanted.frame.minX) <= 2 && abs(frame.minY - wanted.frame.minY) <= 2
+                        && abs(frame.width - wanted.frame.width) <= 2 && abs(frame.height - wanted.frame.height) <= 2
+                }
+                found = alike.count == 1 ? alike[0] : nil
+            }
+        } else {
+            found = Windows.value(app, kAXFocusedWindowAttribute)
+        }
+        guard let window = found else { return nil }
         var queue: [(AXUIElement, Int)] = [(window, 0)]
         var seen = 0
         let deadline = Date().addingTimeInterval(0.4)   // never long: the dock waits on this

@@ -184,8 +184,15 @@ final class Agent {
         messages = chat.lines.compactMap { line in kinds[line.kind].map { Message(kind: $0, text: line.text) } }
     }
 
+    /// The AI this chat's session belongs to, while it has one (and that AI is still chosen): a note carries on with
+    /// its own AI, whichever the panel last chose for another.
+    var ownProvider: Provider? {
+        guard sessionID != nil, let provider = sessionProvider, app.providers.contains(provider) else { return nil }
+        return provider
+    }
+
     private func run(_ prompt: String) {
-        guard let provider = app.chatProvider else {
+        guard let provider = ownProvider ?? app.chatProvider else {
             messages.append(Message(kind: .error, text: "Choose an AI in Petal's settings first."))
             return
         }
@@ -205,7 +212,7 @@ final class Agent {
                                  tools: Bundle.main.executablePath ?? "", session: sessionID, allowed: allowed)
         chat.api = app.usesAPIKey(provider)
         // A note's tools answer about its window: Petal --mcp passes this on with every call.
-        if place != nil { chat.note = noteID.uuidString }
+        if place != nil, config.bool("aiNotes") { chat.note = noteID.uuidString }
         authFailed = false
 
         let process = Process()
@@ -383,7 +390,7 @@ final class Agent {
         """
         let notes = (try? String(contentsOf: app.config.instructionsFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !notes.isEmpty { prompt += "\n\nThe user's own instructions:\n" + notes }
-        if let place {
+        if let place, app.config.bool("aiNotes") {
             let mode = app.config.modes.first { $0.id == place.mode }?.name
             let window = app.assist.neverLook(place.app) || place.title.isEmpty ? "\(place.appName)'s window" : "\(place.appName)'s window “\(place.title)”"
             prompt += "\n\nThis chat is a sticky note on one window: \(window)\(mode.map { ", in the \($0) mode" } ?? ""). When the user says this, here or what I'm looking at, they mean that window, even after they've gone to another app: petal_look looks at it (front: true looks at what's in front now instead). The user may read your reply later, from that window."
@@ -634,6 +641,8 @@ final class ClaudePanel {
             self.panel = panel
         }
         let again = isOpen && current === note
+        // A note shows (and carries on with) the AI its conversation is with.
+        if let own = note.agent.ownProvider, own != app.chatProvider { app.config.set("chatProvider", own.rawValue) }
         current = note
         for quote in incomingQuotes where !note.quotes.contains(where: { $0.text == quote.text }) { note.quotes.append(quote) }
         for file in incomingFiles where !note.attachments.contains(file) { note.attachments.append(file) }
