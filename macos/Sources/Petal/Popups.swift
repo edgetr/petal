@@ -331,7 +331,7 @@ final class Popups {
         GlassPanel.opaque(cardPanel)
         if let mode = card.pointsAt, let slot = panelRef.screenFrame(of: "mode:\(mode)") {
             cardPanel.show(pointingAt: slot, dock: panelRef) { CardView(card: card, tail: $0) }
-        } else if [.summary, .suggestion, .made].contains(card.kind) {
+        } else if [.summary, .suggestion, .made, .reply].contains(card.kind) {
             // Nothing on the dock to point at: top right, out of the dock's way, as macOS's own notices sit.
             cardPanel.showInCorner(CardView(card: card), on: panelRef.screenRef ?? NSScreen.main ?? NSScreen.screens[0])
         } else {
@@ -339,7 +339,7 @@ final class Popups {
             cardPanel.show(CardView(card: card), over: CGRect(x: pill.midX - 1, y: pill.minY, width: 2, height: pill.height), dock: panelRef)
         }
         // A card asking for a secret takes the keyboard for it.
-        cardPanel.takesKeys = card.kind == .ask && PetalApp.shared.assist.pending?.secret == true
+        cardPanel.takesKeys = card.kind == .reply || (card.kind == .ask && PetalApp.shared.assist.pending?.secret == true)
         if cardPanel.takesKeys { cardPanel.makeKey() }
         // A peek fades out by itself.
         if card.kind == .peek {
@@ -867,7 +867,7 @@ struct RightClick: NSViewRepresentable {
 /// A card over the dock: a focus card (block, move or peek), a held notification that can't wait, a suggested mode,
 /// a mode just made from one, or the weekly summary. Updates are in the menu bar, not here.
 struct FocusCard: Identifiable, Equatable {
-    enum Kind { case block, move, peek, note, suggestion, made, summary, ask }
+    enum Kind { case block, move, peek, note, suggestion, made, summary, ask, reply }
     let id = UUID()
     let kind: Kind
     var bundleID = ""
@@ -907,6 +907,7 @@ struct CardView: View {
             case .suggestion, .made: suggestionCard
             case .summary: SummaryCard(card: card)
             case .ask: AskCard()
+            case .reply: ReplyCard(card: card)
             }
         }
         .padding(card.kind == .peek ? 12 : 16)

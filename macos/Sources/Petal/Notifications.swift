@@ -178,6 +178,7 @@ final class Notes {
         guard !waiting.isEmpty else { return }
         all.removeAll { $0.mode == mode }
         banners.show(held: waiting, for: current)
+        app.drafts.prepare(waiting, for: current)
     }
 
     private func tick() {

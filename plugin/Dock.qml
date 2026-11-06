@@ -165,6 +165,7 @@ Item {
       property bool aiLearns: true
       property string dailySummary: ""
       property var aiAllowed: []
+      property bool replyDrafts: true
       property var aiNeverLook: ["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"]
       // Shortcuts, schedules, the private activity history behind suggestions
       // and the weekly summary; magnification and the menu bar icon are macOS's.

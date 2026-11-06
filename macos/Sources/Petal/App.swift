@@ -55,6 +55,8 @@ final class PetalApp {
     let notes = Notes()
     /// Petal AI's powers on the Mac: looking, acting (asked first), the Trash, memory, the day's summary.
     let assist = Assist()
+    /// Replies drafted for held messages, in the person's own style.
+    let drafts = Drafts()
     /// Reading and closing browser tabs (Browsers.swift).
     @ObservationIgnored let browsers = Browsers()
     /// Where each AI app is installed, when it is.
