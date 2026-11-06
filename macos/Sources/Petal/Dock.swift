@@ -1131,7 +1131,8 @@ struct ClaudeButton: View {
         .animation(.easeOut(duration: 0.12), value: hovering)
         .animation(.spring(response: 0.32, dampingFraction: 0.6), value: fileOver)
         .slotFrame(dock, "claude")
-        .slotMouse(SlotMouse(left: { app.claude.open(asking: nil) }, right: { Menus.settings(for: dock) },
+        // A second click closes what the first opened.
+        .slotMouse(SlotMouse(left: { if app.claude.isOpen { app.claude.close() } else { app.claude.open(asking: nil) } }, right: { Menus.settings(for: dock) },
                            hover: { on in
                                hovering = on
                                app.tooltips.show(on ? app.usageTooltip : nil, over: "claude", in: dock)
@@ -1455,7 +1456,7 @@ struct AddSlot: View {
             .animation(.easeOut(duration: 0.12), value: hovering)
             .lift(hovering, icon: icon)
             .slotFrame(dock, "add")
-            .slotMouse(SlotMouse(left: { app.popups.closeAll(); app.search.open(in: dock) }, right: { Menus.settings(for: dock) },
+            .slotMouse(SlotMouse(left: { if app.search.isOpen { app.search.close() } else { app.popups.closeAll(); app.search.open(in: dock) } }, right: { Menus.settings(for: dock) },
                                hover: { on in
                                    hovering = on
                                    app.tooltips.show(on ? (dock.mode.map { "Add apps to \($0.name)" } ?? "Add apps") : nil, over: "add", in: dock)

@@ -945,6 +945,9 @@ final class AppSearch {
 
     func close() { panel?.close() }
 
+    /// Showing now (a second click on "+" closes it).
+    var isOpen: Bool { panel?.isVisible == true }
+
     /// For `Bench`: the panel, to time how long it takes to draw.
     var window: NSWindow? { panel }
 
