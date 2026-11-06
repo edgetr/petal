@@ -89,10 +89,11 @@ final class ModeAutomation {
         let first = shownMode == nil
         shownMode = id
         pendingShortcut?.cancel()
-        guard !first, let id, let name = config.modes.first(where: { $0.id == id })?.shortcut, !name.isEmpty else { return }
+        guard !first, let id else { return }
         let work = DispatchWorkItem { [weak self] in
-            guard self?.shownMode == id else { return }
-            Shortcuts.run(name)
+            guard let self, self.shownMode == id else { return }
+            if let name = self.config.modes.first(where: { $0.id == id })?.shortcut, !name.isEmpty { Shortcuts.run(name) }
+            self.app.routines.modeEntered(id)
         }
         pendingShortcut = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)

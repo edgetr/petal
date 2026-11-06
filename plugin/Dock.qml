@@ -165,6 +165,7 @@ Item {
       property bool aiLearns: true
       property string dailySummary: ""
       property var aiAllowed: []
+      property bool routines: true
       // Shortcuts, schedules, the private activity history behind suggestions
       // and the weekly summary; magnification and the menu bar icon are macOS's.
       property bool shortcuts: true

@@ -122,6 +122,8 @@ final class Assist {
                                           html: args["html"] as? String, path: args["path"] as? String)
                 send(["opened": file.path])
             } catch { fail(error.localizedDescription) }
+        case "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
+            app.routines.handle(name, args, send, fail)
         case "petal_memories":
             let mode = args["mode"] as? String
             send(["memories": memories.filter { mode == nil || $0.mode == mode || $0.mode.isEmpty }.map(record)])
