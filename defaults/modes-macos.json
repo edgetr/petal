@@ -1,0 +1,70 @@
+{
+  "defaultMode": "building",
+  "workspaces": {},
+  "modes": [
+    {
+      "id": "building",
+      "name": "Building",
+      "icon": "hammer",
+      "color": "#b18cff",
+      "about": "coding, terminals, GitHub, programming docs, AI coding assistants",
+      "apps": [
+        "com.mitchellh.ghostty",
+        "com.apple.Terminal",
+        "com.microsoft.VSCode",
+        "com.todesktop.230313mzl4w4u92",
+        "dev.zed.Zed",
+        "com.apple.dt.Xcode",
+        "com.t3tools.t3code",
+        "net.imput.helium",
+        "com.apple.Safari",
+        "com.google.Chrome"
+      ],
+      "sites": ["github", "stack overflow", "docs", "localhost", "claude", "vercel", "linear"],
+      "focusDelay": 15,
+      "hold": false,
+      "allow": []
+    },
+    {
+      "id": "writing",
+      "name": "Writing",
+      "icon": "pencil",
+      "color": "#ff9f7a",
+      "about": "writing, notes, documents, studying, reading articles",
+      "apps": [
+        "md.obsidian",
+        "com.apple.Notes",
+        "com.apple.iWork.Pages",
+        "com.microsoft.Word",
+        "notion.id",
+        "net.imput.helium",
+        "com.apple.Safari"
+      ],
+      "sites": ["docs", "notion", "medium", "substack"],
+      "focusDelay": 30,
+      "hold": false,
+      "allow": []
+    },
+    {
+      "id": "social",
+      "name": "Social",
+      "icon": "bubble.left.and.bubble.right",
+      "color": "#ff5fae",
+      "about": "chatting with friends, social media, videos, entertainment",
+      "apps": [
+        "net.whatsapp.WhatsApp",
+        "com.hnc.Discord",
+        "com.apple.MobileSMS",
+        "ru.keepcoder.Telegram",
+        "com.spotify.client",
+        "com.apple.Music",
+        "net.imput.helium",
+        "com.apple.Safari"
+      ],
+      "sites": ["x.com", "youtube", "instagram", "reddit", "twitch"],
+      "focusDelay": 0,
+      "hold": false,
+      "allow": []
+    }
+  ]
+}

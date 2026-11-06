@@ -2,17 +2,21 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 
-// The Claude panel's chat: a real Claude Code session (the local CLI in
-// print mode, streaming JSON), working in your home folder. In auto mode,
-// Claude Code approves safe actions itself; anything it won't approve comes
-// back as an "Allow?" request, and allowing it re-runs the turn with exactly
-// that permitted (for the rest of the chat). Full access skips all checks.
+// The chat panel: a real Claude Code or Codex session (the user's own local
+// CLI, streaming JSON), working in your home folder. In auto mode, Claude
+// Code approves safe actions itself; anything it won't approve comes back as
+// an "Allow?" request, and allowing it re-runs the turn with exactly that
+// permitted (for the rest of the chat). Codex can't ask mid-turn: it works in
+// its sandbox. Full access skips all checks for either.
 Item {
   id: agent
 
   property var dock: null
-  property string claudePath: ""
+  readonly property string provider: dock ? dock.chatProvider : ""
+  readonly property string cliPath: dock ? dock.providerPath(provider) : ""
   readonly property bool running: proc.running
+  // The session belongs to the AI that started it; switching starts afresh.
+  property string sessionProvider: ""
 
   // Chat log: { kind: "user"|"claude"|"step"|"ask"|"error"|"done", text, detail }
   property alias messages: messages
@@ -37,7 +41,7 @@ Item {
     onFileChanged: reload()
   }
 
-  readonly property string systemPrompt: "You are Claude, running inside Petal, the user's dock on Omarchy "
+  readonly property string systemPrompt: "You are " + (dock ? dock.chatName : "Claude") + ", running inside Petal, the user's dock on Omarchy "
     + "(Arch Linux with Hyprland; Hyprland config lives in ~/.config/hypr/; validate config changes with "
     + "`hyprctl reload && hyprctl configerrors`; Omarchy has an `omarchy` CLI). Your replies show in a small panel "
     + "above the dock: be brief and friendly, short paragraphs, no big headings. You work in the user's home folder.\n\n"
@@ -45,10 +49,14 @@ Item {
     + "then petal_set_settings (appearance: dockColor, dockOpacity, iconSize, accentColor, font, …; feature switches: "
     + "bounce, badges, previews, …), petal_set_dock (position, auto-hide), petal_save_mode / petal_delete_mode "
     + "(focus modes and their apps; get desktop ids from petal_list_apps). Changes apply instantly. "
+    + "Modes by time are the `schedule` setting; a mode's `hyprland` field gives its workspaces their own border color, "
+    + "gaps and wallpaper. petal_suggestions and petal_summary read Petal's private activity history; "
+    + "petal_export_recipe and petal_import_recipe share a dock as a .petal file (say what an import adds before you run it). "
     + "If a request can't be done with settings, you may edit Petal's QML source (path in petal_get_state) and then "
     + "call petal_reload; mention that a Petal update could replace source edits. "
     + "You can also help with anything else on the computer: Omarchy, Hyprland, apps, files. "
-    + "If something needs the user's approval, say in one line what it would do; they can allow it from the panel."
+    + "If something needs the user's approval, say in one line what it would do; they can allow it from the panel. "
+    + "If something about Petal itself is broken, run `petal doctor` (and `petal doctor --fix`); the petal skill says more."
 
   function fullPrompt() {
     var mine = String(instructionsFile.text() || "").trim()
@@ -67,11 +75,13 @@ Item {
     if (proc.running) proc.signal(15)
   }
 
-  function send(text) {
+  // send(text[, shown]): `shown` is what the chat shows as yours, when the
+  // message itself is longer (Describe your day).
+  function send(text, shown) {
     var t = String(text || "").trim()
     if (!t || proc.running) return
     agent.pendingAsk = []
-    messages.append({ kind: "user", text: t, detail: "" })
+    messages.append({ kind: "user", text: String(shown || t).trim(), detail: "" })
     agent.run(t)
   }
 
@@ -91,9 +101,38 @@ Item {
     messages.append({ kind: "step", text: "Not allowed", detail: "" })
   }
 
+  function toml(text) {
+    return "\"" + String(text).replace(/\\/g, "\\\\").replace(/"/g, "\\\"").replace(/\n/g, "\\n") + "\""
+  }
+
   function run(prompt) {
     var s = agent.dock.settings
-    var args = [agent.claudePath, "-p",
+    if (!agent.provider || !agent.cliPath) {
+      messages.append({ kind: "error", text: agent.provider ? agent.dock.chatName + " isn't installed (see claudePath and codexPath in settings)." : "No AI is chosen in Petal's settings.", detail: "" })
+      return
+    }
+    if (agent.sessionProvider !== agent.provider) {
+      agent.sessionId = ""
+      agent.allowed = []
+      agent.sessionProvider = agent.provider
+    }
+    if (agent.provider === "codex") {
+      var cx = [agent.cliPath, "exec", "--json", "--skip-git-repo-check", "-C", Quickshell.env("HOME")]
+      cx = cx.concat(s.claudeAccess === "full" ? ["--dangerously-bypass-approvals-and-sandbox"] : ["--sandbox", "workspace-write"])
+      if (s.codexModel) cx.push("-m", s.codexModel)
+      cx.push("-c", "model_reasoning_effort=" + agent.toml(s.codexEffort || "medium"),
+        "-c", "developer_instructions=" + agent.toml(agent.fullPrompt()),
+        "-c", "mcp_servers.petal.command=\"python3\"",
+        "-c", "mcp_servers.petal.args=[" + agent.toml(agent.mcpServer) + "]",
+        // codex exec can't ask, so Petal's own tools are approved ahead.
+        "-c", "mcp_servers.petal.default_tools_approval_mode=\"approve\"")
+      if (agent.sessionId) cx.push("resume", agent.sessionId)
+      cx.push("-")
+      proc.command = ["bash", "-c", "p=\"$1\"; shift; printf '%s' \"$p\" | \"$@\"", "petal", prompt].concat(cx)
+      proc.running = true
+      return
+    }
+    var args = [agent.cliPath, "-p",
       "--model", s.chatModel || "sonnet",
       "--effort", s.chatEffort || "medium",
       "--output-format", "stream-json", "--verbose",
@@ -133,6 +172,10 @@ Item {
     case "mcp__petal__petal_list_apps": return "Looking up apps"
     case "mcp__petal__petal_switch_mode": return "Switching to  " + String(input.id || "")
     case "mcp__petal__petal_reload": return "Reloading Petal"
+    case "mcp__petal__petal_export_recipe": return "Saving your dock to share"
+    case "mcp__petal__petal_import_recipe": return "Adding a shared dock"
+    case "mcp__petal__petal_suggestions": return "Looking at how you use your modes"
+    case "mcp__petal__petal_summary": return "Adding up last week"
     default: return tool
     }
   }
@@ -149,9 +192,29 @@ Item {
     return [tool]
   }
 
+  // Codex's events: thread.started, item.started/completed, turn.completed/failed.
+  function handleCodex(m) {
+    var item = m.item || {}
+    if (m.type === "thread.started" && m.thread_id) agent.sessionId = m.thread_id
+    else if (m.type === "item.completed" && item.type === "agent_message" && String(item.text || "").trim())
+      messages.append({ kind: "claude", text: String(item.text).trim(), detail: "" })
+    else if (m.type === "item.started" && item.type === "command_execution")
+      messages.append({ kind: "step", text: "Running  " + String(item.command || "").split("\n")[0], detail: "" })
+    else if (m.type === "item.started" && item.type === "mcp_tool_call")
+      messages.append({ kind: "step", text: agent.describe("mcp__petal__" + item.tool, item.arguments), detail: "" })
+    else if (m.type === "item.started" && item.type === "file_change")
+      messages.append({ kind: "step", text: "Editing  " + agent.shortPath(((item.changes || [])[0] || {}).path), detail: "" })
+    else if (m.type === "item.started" && item.type === "web_search")
+      messages.append({ kind: "step", text: "Searching the web  " + String(item.query || ""), detail: "" })
+    else if (m.type === "turn.failed")
+      messages.append({ kind: "error", text: String((m.error || {}).message || "Something went wrong"), detail: "" })
+    if ((m.type === "turn.completed" || m.type === "turn.failed") && agent.dock) agent.dock.refreshUsage(agent.provider)
+  }
+
   function handle(line) {
     var m
     try { m = JSON.parse(line) } catch (e) { return }
+    if (agent.provider === "codex") { agent.handleCodex(m); return }
     if (m.session_id) agent.sessionId = m.session_id
     if (m.type === "assistant" && m.message && m.message.content) {
       m.message.content.forEach(function(c) {
@@ -174,7 +237,7 @@ Item {
       }
       if (m.is_error) messages.append({ kind: "error", text: String(m.result || "Something went wrong"), detail: "" })
       // Usage moved; show it.
-      if (agent.dock) agent.dock.refreshUsage()
+      if (agent.dock) agent.dock.refreshUsage(agent.provider)
     }
   }
 

@@ -10,8 +10,11 @@ Code setup:  claude mcp add petal -- python3 /path/to/petal-mcp.py
 import glob
 import json
 import os
+import plistlib
+import socket
 import subprocess
 import sys
+import time
 
 HOME = os.path.expanduser("~")
 CONFIG = os.path.join(HOME, ".config", "petal")
@@ -19,6 +22,16 @@ SETTINGS = os.path.join(CONFIG, "settings.json")
 MODES = os.path.join(CONFIG, "modes.json")
 INSTRUCTIONS = os.path.join(CONFIG, "instructions.md")
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# Petal for macOS ships this same server inside Petal.app, and keeps the dock's place in dock.json.
+MAC = sys.platform == "darwin"
+DOCK = os.path.join(CONFIG, "dock.json")
+SOCKET = os.environ.get("PETAL_SOCKET") or os.path.join(CONFIG, "petal.sock")
+# The person's own changes to Petal's code, kept through updates (bin/petal-personal, `petal personal`).
+PERSONAL = os.path.join(HOME, "Library/Application Support/Petal/source") if MAC else \
+    os.path.join(os.environ.get("PETAL_HOME") or os.path.join(HOME, ".local/share/petal"), "source")
+PERSONAL_HOW = ("To change Petal's code so it survives updates: `petal personal init` (once), edit the files in source, then "
+                "`petal personal save \"<what changed>\"`" + (", which builds it and restarts Petal into it." if MAC else
+                ", then `petal restart` to load it.") + " `petal personal help` lists the rest.")
 
 # Every setting Petal reads, with its default and what it does. Petal
 # reloads settings.json as soon as it changes.
@@ -69,20 +82,36 @@ SETTINGS_SCHEMA = {
     "chatModel": ("sonnet", "Claude panel model: haiku, sonnet, opus or fable."),
     "chatEffort": ("medium", "Claude panel effort: low, medium, high, xhigh or max."),
     "claudeAccess": ("auto", "Claude panel permissions: auto (safe actions run, risky ones ask) or full."),
+    "aiProviders": (["claude"], "The AI apps Petal uses, each the user's own install and account: claude, codex, both, or none ([] = no AI; the dock still works)."),
+    "otherAgents": (True, "Let the user's other AI sessions (T3 Code, Claude Code or Codex in a terminal) change Petal: its MCP server, skill and `petal` command are set up for them."),
+    "shortcuts": (True, "Petal's keyboard shortcuts: switch mode (1-9), open the AI panel, open the + search. Never takes one already in use."),
+    "schedule": ([], "Modes by time: [{mode, days: [1-7, 1 = Monday], from: \"HH:MM\", to: \"HH:MM\"}]. When a block starts, the focused workspace switches to that mode."),
+    "activityLog": (True, "Keep a private, local history of which app is in front (never titles), for suggestions and the weekly summary."),
+    "suggestModes": (True, "Suggest new modes, or apps to add to a mode, from the activity history."),
+    "summary": (True, "A weekly summary card: time in each mode, top apps, focus cards."),
+    "magnification": (False, "macOS: icons grow under the pointer."),
+    "magnificationAmount": (0.5, "macOS: how much icons grow, 0.1 to 1 (1 = twice the size)."),
+    "menuBarIcon": (True, "macOS: Petal's icon in the menu bar (mode, updates)."),
+    "chatProvider": ("claude", "Which of aiProviders the chat panel, the usage ring and sorting use: claude or codex."),
+    "codexModel": ("", "Codex chat model; empty = Codex's own default."),
+    "codexEffort": ("medium", "Codex chat reasoning effort: low, medium, high or xhigh."),
 }
 
 MODE_FIELDS = {
     "id": "unique id, lowercase",
     "name": "display name",
-    "icon": "one Nerd Font glyph or emoji",
+    "icon": "an SF Symbol name, like hammer" if MAC else "one Nerd Font glyph or emoji",
     "color": "#rrggbb",
     "about": "what the mode is for (used to sort activity into it)",
-    "apps": "desktop ids, in dock order",
+    "apps": ("bundle ids" if MAC else "desktop ids") + ", in dock order",
     "sites": "words or domains found in browser tab titles that belong to this mode",
-    "focusDelay": "seconds of countdown before leaving (if countdowns are on)",
-    "hold": "hold notifications from apps outside the mode",
-    "allow": "desktop ids whose notifications always come through",
+    "focusDelay": "seconds of countdown before leaving (if countdowns are on); 0 also turns focus cards off in this mode",
+    "hold": "Omarchy only: hold notifications from apps outside the mode" if MAC else "hold notifications from apps outside the mode",
+    "allow": "bundle ids focus cards always accept in this mode" if MAC else "desktop ids whose notifications always come through",
+    "shortcut": "macOS: the name of a Shortcut (Shortcuts app) to run when a Desktop enters this mode, e.g. one that turns on a Focus",
+    "hyprland": "Omarchy: this mode's look for its workspaces: {borderColor: \"#rrggbb\" or \"mode\", gapsIn, gapsOut, wallpaper}",
 }
+WORKSPACE = "Desktop" if MAC else "workspace"
 
 
 def read_json(path, fallback):
@@ -110,7 +139,50 @@ def run(*cmd):
         return str(e)
 
 
-def installed_apps(query=""):
+def petal(*args):
+    """Asks the running Petal for macOS, over its socket, as `omarchy-shell petal` does on Omarchy."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+            conn.settimeout(5)
+            conn.connect(SOCKET)
+            conn.sendall((json.dumps(list(args)) + "\n").encode())
+            reply = b""
+            while not reply.endswith(b"\n"):
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                reply += chunk
+            return reply.decode().strip()
+    except OSError as e:
+        return "Petal isn't running (%s)" % e
+
+
+def mac_apps(query=""):
+    roots = ["/Applications", "/Applications/Utilities", "/System/Applications", "/System/Applications/Utilities",
+             os.path.join(HOME, "Applications")]
+    apps, seen = [], set()
+    for root in roots:
+        for path in sorted(glob.glob(os.path.join(root, "*.app")) + glob.glob(os.path.join(root, "*", "*.app"))):
+            try:
+                with open(os.path.join(path, "Contents", "Info.plist"), "rb") as f:
+                    info = plistlib.load(f)
+            except Exception:   # a missing or malformed Info.plist: not an app to list
+                continue
+            app_id = info.get("CFBundleIdentifier")
+            if not app_id or app_id in seen:
+                continue
+            seen.add(app_id)
+            name = info.get("CFBundleDisplayName") or info.get("CFBundleName") or os.path.basename(path)[:-4]
+            if query and query.lower() not in (app_id + " " + name).lower():
+                continue
+            apps.append({"id": app_id, "name": name})
+    return sorted(apps, key=lambda a: a["name"].lower())
+
+
+def installed_apps(query="", categories=False):
+    """Installed apps as [{id, name}]; with categories, also each desktop entry's Categories (Omarchy)."""
+    if MAC:
+        return mac_apps(query)
     dirs = [os.path.join(HOME, ".local/share/applications")]
     dirs += [os.path.join(d, "applications") for d in os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")]
     apps, seen = [], set()
@@ -120,7 +192,7 @@ def installed_apps(query=""):
             if app_id in seen:
                 continue
             seen.add(app_id)
-            name, hidden = app_id, False
+            name, hidden, cats = app_id, False, []
             try:
                 with open(path, errors="ignore") as f:
                     in_entry = False
@@ -130,6 +202,8 @@ def installed_apps(query=""):
                             in_entry = line == "[Desktop Entry]"
                         elif in_entry and line.startswith("Name="):
                             name = line[5:]
+                        elif in_entry and line.startswith("Categories="):
+                            cats = [c for c in line[11:].split(";") if c]
                         elif in_entry and line in ("NoDisplay=true", "Hidden=true"):
                             hidden = True
             except OSError:
@@ -138,11 +212,15 @@ def installed_apps(query=""):
                 continue
             if query and query.lower() not in (app_id + " " + name).lower():
                 continue
-            apps.append({"id": app_id, "name": name})
+            apps.append({"id": app_id, "name": name, **({"categories": cats} if categories else {})})
     return apps
 
 
 def dock_config():
+    if MAC:
+        dock = read_json(DOCK, {})
+        return {"position": dock.get("position", "bottom"), "autohide": dock.get("autoHide", False),
+                "dock": dock.get("dock", "petal")}
     shell = read_json(os.path.join(HOME, ".config/omarchy/shell.json"), {})
     dock = shell.get("dock", {})
     return {"position": dock.get("position", "bottom"), "autohide": dock.get("autohide", False)}
@@ -158,9 +236,13 @@ def t_get_state(_):
         "settings_help": {k: v[1] for k, v in SETTINGS_SCHEMA.items()},
         "modes": read_json(MODES, {}),
         "mode_fields": MODE_FIELDS,
-        "current_mode": run("omarchy-shell", "petal", "current"),
+        "current_mode": petal("current") if MAC else run("omarchy-shell", "petal", "current"),
         "dock": dock_config(),
-        "files": {"settings": SETTINGS, "modes": MODES, "instructions": INSTRUCTIONS, "plugin_source": PLUGIN_DIR},
+        "files": {"settings": SETTINGS, "modes": MODES, "instructions": INSTRUCTIONS,
+                  "plugin_source": (os.path.join(PERSONAL, "macos") if os.path.exists(os.path.join(PERSONAL, "macos", "Package.swift"))
+                                    else os.environ.get("PETAL_SOURCE", "")) if MAC else PLUGIN_DIR,
+                  **({"app": os.environ.get("PETAL_APP", "")} if MAC else {})},
+        "personal": {"source": PERSONAL, "set_up": os.path.exists(os.path.join(PERSONAL, ".git", "petal-personal.json")), "how": PERSONAL_HOW},
     }
 
 
@@ -186,6 +268,8 @@ def t_reset_settings(args):
 
 
 def t_set_dock(args):
+    if MAC:
+        return mac_set_dock(args)
     done = {}
     if "position" in args:
         if args["position"] not in ("bottom", "top", "left", "right"):
@@ -193,6 +277,22 @@ def t_set_dock(args):
         done["position"] = run("omarchy-dock", "position", args["position"])
     if "autohide" in args:
         done["autohide"] = run("omarchy-dock", "autohide", "on" if args["autohide"] else "off")
+    return done
+
+
+def mac_set_dock(args):
+    dock, done = read_json(DOCK, {}), {}
+    if "position" in args:
+        if args["position"] not in ("bottom", "left", "right"):
+            raise ValueError("position must be bottom, left or right (the menu bar holds the top)")
+        dock["position"] = done["position"] = args["position"]
+    if "autohide" in args:
+        dock["autoHide"] = done["autohide"] = bool(args["autohide"])
+    write_json(DOCK, dock)
+    if "use" in args:
+        if args["use"] not in ("petal", "macos"):
+            raise ValueError("use must be petal or macos")
+        done["use"] = petal("dock", args["use"])
     return done
 
 
@@ -245,6 +345,8 @@ def t_set_default_mode(args):
 
 
 def t_switch_mode(args):
+    if MAC:
+        return {"result": petal("mode", args.get("id", ""))}
     return {"result": run("omarchy-shell", "petal", "mode", args.get("id", "")) or "ok"}
 
 
@@ -253,8 +355,391 @@ def t_list_apps(args):
 
 
 def t_reload(_):
-    subprocess.Popen(["omarchy", "restart", "shell"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    if MAC:
+        return {"ok": True, "note": petal("restart") + "; the Claude panel closes."}
+    # `petal restart` also checks the dock comes back when the user has changed Petal's code (petal personal).
+    cli = os.path.join(HOME, ".local/bin/petal")
+    command = [cli, "restart"] if os.access(cli, os.X_OK) else ["omarchy", "restart", "shell"]
+    subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     return {"ok": True, "note": "Omarchy's shell (and Petal) is restarting; the Claude panel closes."}
+
+
+# ── Activity, suggestions, summary (from Petal's private, local history) ──
+# Petal writes one line a minute while the person is at the computer:
+#   {"t": <unix seconds>, "app": "<desktop or bundle id>", "mode": "<mode id>", "ws": <workspace>}
+# and one per focus card answer: {"t", "card": "back" | "switch" | "close", "app", "mode"}.
+# Never titles, URLs or file names; 30 days kept; nothing leaves the machine.
+
+STATE = (os.path.join(HOME, "Library", "Application Support", "Petal") if MAC
+         else os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.join(HOME, ".local", "state"), "petal"))
+ACTIVITY = os.path.join(STATE, "activity.jsonl")
+SUGGESTIONS = os.path.join(CONFIG, "suggestions.json")
+KEEP_DAYS = 30
+DAY = 86400
+
+
+def read_activity(since=0):
+    out = []
+    try:
+        with open(ACTIVITY, errors="ignore") as f:
+            for line in f:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and isinstance(row.get("t"), (int, float)) and row["t"] >= since:
+                    out.append(row)
+    except OSError:
+        pass
+    return out
+
+
+def prune_activity():
+    """Keeps the last 30 days (Petal runs this when it starts)."""
+    if not os.path.exists(ACTIVITY):
+        return 0
+    cutoff = time.time() - KEEP_DAYS * DAY
+    keep = read_activity(cutoff)
+    tmp = ACTIVITY + ".tmp"
+    with open(tmp, "w") as f:
+        for row in keep:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    os.replace(tmp, ACTIVITY)
+    return len(keep)
+
+
+def day_of(t):
+    return time.strftime("%Y-%m-%d", time.localtime(t))
+
+
+def app_names():
+    return {a["id"]: a["name"] for a in installed_apps()}
+
+
+def name_list(names):
+    names = list(names)
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def dismissed():
+    return set(read_json(SUGGESTIONS, {}).get("dismissed", []))
+
+
+# A name for a set of apps, from what their desktop entries say they are (Omarchy).
+CATEGORY_MODES = [
+    ("Building", {"Development", "IDE", "TerminalEmulator"}),
+    ("Design", {"Graphics", "2DGraphics", "3DGraphics", "RasterGraphics", "VectorGraphics", "Photography"}),
+    ("Writing", {"Office", "WordProcessor", "TextEditor"}),
+    ("Social", {"Chat", "InstantMessaging", "Email", "Telephony"}),
+    ("Media", {"AudioVideo", "Audio", "Video", "Music", "Player"}),
+    ("Play", {"Game"}),
+    ("Study", {"Education", "Science"}),
+]
+
+
+def guess_name(app_ids, taken):
+    cats = {a["id"]: set(a.get("categories", [])) for a in installed_apps(categories=True)}
+    best, votes = "", 0
+    for name, wanted in CATEGORY_MODES:
+        n = sum(1 for a in app_ids if cats.get(a, set()) & wanted)
+        if n > votes:
+            best, votes = name, n
+    if votes * 2 < len(app_ids) or best.lower() in taken:
+        return ""
+    return best
+
+
+def t_suggestions(_):
+    settings = read_json(SETTINGS, {})
+    if not settings.get("activityLog", True) or not settings.get("suggestModes", True):
+        return {"suggestions": [], "note": "Suggestions are off (activityLog or suggestModes)."}
+    rows = [r for r in read_activity(time.time() - 14 * DAY) if r.get("app") and "card" not in r]
+    modes = read_json(MODES, {}).get("modes", [])
+    names = app_names()
+    skip = dismissed()
+    out = []
+
+    # 1. Apps used together: the same 30-minute windows, on 3 or more days, for 3 hours or more.
+    windows = {}
+    for r in rows:
+        w = windows.setdefault(int(r["t"] // 1800), {})
+        w[r["app"]] = w.get(r["app"], 0) + 1
+    # An app counts in a window it had at least two minutes of.
+    windows = {k: {a: m for a, m in w.items() if m >= 2} for k, w in windows.items()}
+
+    def together(apps):
+        days, minutes = set(), 0
+        for k, w in windows.items():
+            if all(a in w for a in apps):
+                days.add(day_of(k * 1800))
+                minutes += sum(w[a] for a in apps)
+        return days, minutes
+
+    def strong(apps):
+        days, minutes = together(apps)
+        return len(days) >= 3 and minutes >= 180
+
+    counts = {}
+    for w in windows.values():
+        for a in w:
+            counts[a] = counts.get(a, 0) + w[a]
+    pairs = []
+    ranked = sorted(counts, key=lambda a: -counts[a])[:30]
+    for i, a in enumerate(ranked):
+        for b in ranked[i + 1:]:
+            if strong([a, b]):
+                pairs.append((together([a, b])[1], a, b))
+    used = set()
+    held = [set(m.get("apps", [])) for m in modes]
+    for _, a, b in sorted(pairs, reverse=True):
+        if a in used or b in used:
+            continue
+        group = [a, b]
+        for c in ranked:
+            if len(group) >= 6:
+                break
+            if c not in group and c not in used and strong(group + [c]):
+                group.append(c)
+        group.sort()
+        if any(set(group) <= h for h in held):
+            continue
+        key = "+".join(group)
+        if key in skip:
+            continue
+        used.update(group)
+        days, minutes = together(group)
+        shown = [names.get(g, g) for g in group]
+        name = guess_name(group, {str(m.get("name", "")).lower() for m in modes})
+        out.append({"kind": "new", "key": key, "apps": group, "names": shown, "name": name,
+                    "days": len(days), "minutes": minutes,
+                    "text": "You often use %s together. %s" % (name_list(shown), "Make a %s mode?" % name if name else "Make a mode for them?")})
+
+    # 2. An app used in a mode's workspaces on 3 or more days that isn't in that mode.
+    by_mode = {}
+    for r in rows:
+        if r.get("mode"):
+            by_mode.setdefault((r["app"], r["mode"]), set()).add(day_of(r["t"]))
+    for (app, mode_id), days in sorted(by_mode.items(), key=lambda kv: -len(kv[1])):
+        mode = next((m for m in modes if m.get("id") == mode_id), None)
+        key = "add:%s:%s" % (app, mode_id)
+        if len(days) < 3 or not mode or app in used or app in mode.get("apps", []) or app in mode.get("allow", []) or key in skip:
+            continue
+        if app not in names:
+            continue   # not an app the dock can show (a helper or an uninstalled one)
+        out.append({"kind": "add", "key": key, "app": app, "name": names.get(app, app), "mode": mode_id,
+                    "modeName": mode.get("name", mode_id), "days": len(days),
+                    "text": "You use %s in %s most days. Keep it there?" % (names.get(app, app), mode.get("name", mode_id))})
+    return {"suggestions": out}
+
+
+def dismiss_suggestion(key):
+    data = read_json(SUGGESTIONS, {})
+    keys = [k for k in data.get("dismissed", []) if k != key] + [key]
+    data["dismissed"] = keys
+    write_json(SUGGESTIONS, data)
+    return {"ok": True, "dismissed": key}
+
+
+def duration(minutes):
+    if minutes < 60:
+        return "%d min" % minutes
+    hours = minutes / 60
+    return "%d h" % round(hours) if hours >= 10 else ("%.1f h" % hours).replace(".0 h", " h")
+
+
+def t_summary(_):
+    """The 7 days before today (on a Monday, last week): time in each mode, top apps, focus cards."""
+    today = time.localtime()
+    end = time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, 0, 0, -1))
+    start = end - 7 * DAY
+    rows = [r for r in read_activity(start) if r["t"] < end]
+    modes = {m.get("id"): m for m in read_json(MODES, {}).get("modes", [])}
+    names = app_names()
+    per_mode = {}
+    cards = {"shown": 0, "back": 0, "switch": 0, "close": 0}
+    for r in rows:
+        if "card" in r:
+            cards["shown"] += 1
+            if r["card"] in cards:
+                cards[r["card"]] += 1
+            continue
+        if not r.get("app"):
+            continue
+        m = per_mode.setdefault(r.get("mode") or "", {})
+        m[r["app"]] = m.get(r["app"], 0) + 1
+    out = []
+    for mode_id, apps in sorted(per_mode.items(), key=lambda kv: -sum(kv[1].values())):
+        total = sum(apps.values())
+        top = sorted(apps.items(), key=lambda kv: -kv[1])[:3]
+        mode = modes.get(mode_id, {})
+        out.append({"id": mode_id, "name": mode.get("name") or mode_id or "No mode", "color": mode.get("color", ""),
+                    "icon": mode.get("icon", ""), "minutes": total,
+                    "apps": [{"id": a, "name": names.get(a, a), "minutes": n} for a, n in top]})
+    lines = []
+    for m in out:
+        line = "%s in %s" % (duration(m["minutes"]), m["name"])
+        first = m["apps"][0] if m["apps"] else None
+        if first and first["minutes"] * 2 >= m["minutes"]:
+            line += ", most of it in %s" % first["name"]
+        elif len(m["apps"]) >= 2:
+            line += ", mostly %s and %s" % (m["apps"][0]["name"], m["apps"][1]["name"])
+        lines.append(line + ".")
+    if cards["shown"]:
+        lines.append("%d focus card%s; you went back %d time%s." % (cards["shown"], "" if cards["shown"] == 1 else "s",
+                     cards["back"], "" if cards["back"] == 1 else "s"))
+    if not out:
+        lines = ["Nothing recorded for these days yet." if read_json(SETTINGS, {}).get("activityLog", True)
+                 else "The activity history is off (activityLog), so there's nothing to sum up."]
+    return {"from": day_of(start), "to": day_of(end - 1), "minutes": sum(m["minutes"] for m in out),
+            "modes": out, "cards": cards, "lines": lines}
+
+
+# ── Recipes: a dock to share, as one .petal file ───────────────────────
+LOOK_KEYS = ["dockColor", "dockOpacity", "dockBorderColor", "dockBorderOpacity", "dockRadius", "dockSheen", "dockMargin",
+             "iconSize", "iconPadding", "idleOpacity", "separators", "hoverLiftAmount", "glowStrength", "accentColor",
+             "popupColor", "popupOpacity", "font", "tooltips", "hoverLift", "appGlow", "previews", "minimized", "badges",
+             "bounce", "progress", "quickActions", "recentFiles", "dropToOpen", "nowPlaying", "stacks", "trash",
+             "magnification", "magnificationAmount"]
+PLATFORM = "macos" if MAC else "omarchy"
+
+
+def shareable_mode(mode):
+    m = {k: v for k, v in mode.items() if k != "workspaces"}
+    if isinstance(m.get("hyprland"), dict):   # a wallpaper is a path on this computer
+        m["hyprland"] = {k: v for k, v in m["hyprland"].items() if k != "wallpaper"}
+        if not m["hyprland"]:
+            del m["hyprland"]
+    return m
+
+
+def t_export_recipe(args):
+    name = str(args.get("name") or "My Petal").strip()[:60] or "My Petal"
+    path = os.path.expanduser(str(args.get("path") or ""))
+    if not path:
+        safe = "".join(c if c.isalnum() or c in " -_" else "-" for c in name).strip() or "petal"
+        path = os.path.join(HOME, safe + ".petal")
+    if os.path.isdir(path):
+        path = os.path.join(path, name + ".petal")
+    if not path.endswith(".petal"):
+        path += ".petal"
+    modes = [shareable_mode(m) for m in read_json(MODES, {}).get("modes", [])]
+    names = app_names()
+    apps = {}
+    for m in modes:
+        for a in list(m.get("apps", [])) + list(m.get("allow", [])):
+            apps[a] = names.get(a, a)
+    settings = read_json(SETTINGS, {})
+    look = {k: settings.get(k, SETTINGS_SCHEMA[k][0]) for k in LOOK_KEYS if k in SETTINGS_SCHEMA}
+    dock = dock_config()
+    recipe = {"petal": 1, "name": name, "from": PLATFORM, "modes": modes, "apps": apps, "settings": look,
+              "dock": {"position": dock.get("position", "bottom"), "autoHide": bool(dock.get("autohide", False))}}
+    write_json(path, recipe)
+    return {"path": path, "modes": [m.get("name", m.get("id")) for m in modes]}
+
+
+def read_recipe(path):
+    path = os.path.expanduser(str(path or ""))
+    if not path:
+        raise ValueError("path is required")
+    recipe = read_json(path, None)
+    if not isinstance(recipe, dict) or recipe.get("petal") != 1 or not isinstance(recipe.get("modes"), list):
+        raise ValueError("%s isn't a Petal recipe" % path)
+    return recipe
+
+
+def plan_import(recipe, look):
+    """What importing would change: the modes as they'd be added, the apps that aren't here, the look."""
+    data = read_json(MODES, {"defaultMode": "", "workspaces": {}, "modes": []})
+    taken = {m.get("id") for m in data.get("modes", [])}
+    taken_names = {str(m.get("name", "")).lower() for m in data.get("modes", [])}
+    installed = installed_apps()
+    ids = {a["id"] for a in installed}
+    by_name = {}
+    for a in installed:
+        by_name.setdefault(a["name"].lower(), a["id"])
+    names = recipe.get("apps") if isinstance(recipe.get("apps"), dict) else {}
+    same = recipe.get("from") == PLATFORM
+    missing, modes = [], []
+
+    def resolve(app):
+        if same and app in ids:
+            return app
+        found = by_name.get(str(names.get(app, "")).lower()) or (by_name.get(app.lower()) if not same else None)
+        if found:
+            return found
+        label = names.get(app, app)
+        if label not in missing:
+            missing.append(label)
+        return None
+
+    for raw in recipe["modes"]:
+        if not isinstance(raw, dict) or not raw.get("id"):
+            continue
+        m = shareable_mode(raw)
+        base = "".join(c for c in str(m["id"]).lower() if c.isalnum() or c in "-_") or "mode"
+        mid, n = base, 2
+        while mid in taken:
+            mid, n = "%s-%d" % (base, n), n + 1
+        taken.add(mid)
+        m["id"] = mid
+        for field in ("apps", "allow"):
+            resolved = [resolve(a) for a in m.get(field, []) if isinstance(a, str)]
+            m[field] = list(dict.fromkeys(a for a in resolved if a))
+        # Icons are Nerd Font glyphs on Omarchy and SF Symbol names on macOS.
+        icon = str(m.get("icon") or "")
+        glyph = len(icon) <= 2 and not icon.isascii()
+        if MAC and glyph:
+            m["icon"] = "circle"
+        elif not MAC and not glyph:
+            m["icon"] = "●"
+        name, n = str(m.get("name") or mid.title()), 2
+        while name.lower() in taken_names:
+            name, n = "%s %d" % (str(m.get("name") or mid.title()), n), n + 1
+        taken_names.add(name.lower())
+        m["name"] = name
+        modes.append(m)
+    plan = {"modes": modes, "missing": missing, "look": False}
+    if look:
+        settings = read_json(SETTINGS, {})
+        changes = {}
+        for k, v in (recipe.get("settings") or {}).items():
+            if k in LOOK_KEYS and k in SETTINGS_SCHEMA and settings.get(k, SETTINGS_SCHEMA[k][0]) != v:
+                changes[k] = {"from": settings.get(k, SETTINGS_SCHEMA[k][0]), "to": v}
+        plan["look"] = True
+        plan["settings"] = changes
+        dock, now = recipe.get("dock") or {}, dock_config()
+        plan["dock"] = {k: v for k, v in (("position", dock.get("position")), ("autohide", dock.get("autoHide")))
+                        if v is not None and now.get(k) != v}
+    return plan
+
+
+def t_import_recipe(args):
+    recipe = read_recipe(args.get("path"))
+    plan = plan_import(recipe, bool(args.get("look")))
+    if args.get("preview"):   # used by `petal recipe import` and the Petal menu to show what will change first
+        return plan
+    data = read_json(MODES, {"defaultMode": "", "workspaces": {}, "modes": []})
+    data.setdefault("modes", []).extend(plan["modes"])
+    data.setdefault("workspaces", {})
+    if not data.get("defaultMode") and data["modes"]:
+        data["defaultMode"] = data["modes"][0]["id"]
+    write_json(MODES, data)
+    if plan.get("settings"):
+        settings = read_json(SETTINGS, {})
+        settings.update({k: v["to"] for k, v in plan["settings"].items()})
+        write_json(SETTINGS, settings)
+    if plan.get("dock"):
+        position = plan["dock"].get("position")
+        if position and (position in ("bottom", "left", "right") or (position == "top" and not MAC)):
+            t_set_dock({"position": position})
+        if "autohide" in plan["dock"]:
+            t_set_dock({"autohide": plan["dock"]["autohide"]})
+    return {"modes": [{"id": m["id"], "name": m.get("name", m["id"]), "apps": m.get("apps", [])} for m in plan["modes"]],
+            "missing": plan["missing"], "look": plan["look"]}
+
+
+def not_yet(_):
+    raise ValueError("This needs a newer Petal.")
 
 
 TOOLS = {
@@ -263,17 +748,36 @@ TOOLS = {
                            {"settings": {"type": "object", "description": "setting name -> new value"}}),
     "petal_reset_settings": (t_reset_settings, "Reset settings to their defaults (all, or just the given keys).",
                              {"keys": {"type": "array", "items": {"type": "string"}}}),
-    "petal_set_dock": (t_set_dock, "Move the dock (position: bottom, top, left, right) and/or turn auto-hide on or off.",
-                       {"position": {"type": "string", "enum": ["bottom", "top", "left", "right"]}, "autohide": {"type": "boolean"}}),
+    "petal_set_dock": (t_set_dock, "Move the dock (position: bottom, left, right) and/or turn auto-hide on or off; use: petal or macos picks Petal or macOS's own Dock (the other turns off)." if MAC
+                       else "Move the dock (position: bottom, top, left, right) and/or turn auto-hide on or off.",
+                       {"position": {"type": "string", "enum": ["bottom", "left", "right"] if MAC else ["bottom", "top", "left", "right"]},
+                        "autohide": {"type": "boolean"}, **({"use": {"type": "string", "enum": ["petal", "macos"]}} if MAC else {})}),
     "petal_save_mode": (t_save_mode, "Create a mode or update fields of an existing one (merges). Fields: " + "; ".join("%s: %s" % kv for kv in MODE_FIELDS.items()),
                         {"mode": {"type": "object", "description": "must include id"}}),
     "petal_delete_mode": (t_delete_mode, "Delete a mode.", {"id": {"type": "string"}}),
-    "petal_set_default_mode": (t_set_default_mode, "Set the mode new workspaces start in.", {"id": {"type": "string"}}),
-    "petal_switch_mode": (t_switch_mode, "Switch the focused workspace to a mode.", {"id": {"type": "string"}}),
-    "petal_list_apps": (t_list_apps, "Installed apps (desktop id and name), optionally filtered by a search word. Use the ids in a mode's apps.",
+    "petal_set_default_mode": (t_set_default_mode, "Set the mode new %ss start in." % WORKSPACE, {"id": {"type": "string"}}),
+    "petal_switch_mode": (t_switch_mode, "Switch the focused %s to a mode." % WORKSPACE, {"id": {"type": "string"}}),
+    "petal_list_apps": (t_list_apps, "Installed apps (%s and name), optionally filtered by a search word. Use the ids in a mode's apps." % ("bundle id" if MAC else "desktop id"),
                         {"query": {"type": "string"}}),
-    "petal_reload": (t_reload, "Restart Omarchy's shell to load edits to Petal's own source code (settings and modes don't need this).", {}),
+    "petal_export_recipe": (globals().get("t_export_recipe", not_yet), "Save the user's dock as a shareable recipe file (.petal): modes, apps, look and features, nothing personal. Returns its path.",
+                            {"path": {"type": "string", "description": "where to save it; default ~/<name>.petal"}, "name": {"type": "string"}}),
+    "petal_import_recipe": (globals().get("t_import_recipe", not_yet), "Add the modes from a recipe file (.petal) someone shared, and optionally its look. Apps are matched to what's installed; the rest are listed as missing.",
+                            {"path": {"type": "string"}, "look": {"type": "boolean", "description": "also use its look and features"}}),
+    "petal_suggestions": (globals().get("t_suggestions", not_yet), "Modes Petal would suggest from the user's activity (new modes, or apps to add to a mode).", {}),
+    "petal_summary": (globals().get("t_summary", not_yet), "Last week in the user's modes: time in each, top apps, focus cards.", {}),
+    "petal_reload": (t_reload, "Restart Petal to load a rebuilt Petal.app (settings and modes don't need this)." if MAC
+                     else "Restart Omarchy's shell to load edits to Petal's own source code (settings and modes don't need this).", {}),
 }
+
+
+def version():
+    if MAC:   # inside Petal.app: Contents/Resources/mcp/petal-mcp.py
+        try:
+            with open(os.path.join(PLUGIN_DIR, "..", "Info.plist"), "rb") as f:
+                return plistlib.load(f).get("CFBundleShortVersionString", "")
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            return ""
+    return read_json(os.path.join(PLUGIN_DIR, "manifest.json"), {}).get("version", "")
 
 
 def tool_list():
@@ -289,7 +793,7 @@ def handle(msg):
     if method == "initialize":
         return {"protocolVersion": (msg.get("params") or {}).get("protocolVersion", "2025-06-18"),
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "petal", "version": read_json(os.path.join(PLUGIN_DIR, "manifest.json"), {}).get("version", "")},
+                "serverInfo": {"name": "petal", "version": version()},
                 "instructions": "Tools to customize the Petal dock. Call petal_get_state first."}
     if method == "tools/list":
         return {"tools": tool_list()}
@@ -308,7 +812,110 @@ def handle(msg):
     return None
 
 
+def cli(argv):
+    """`petal recipe export|import`, `petal suggest`, `petal summary` (bin/petal), in plain words."""
+    command = argv[0] if argv else ""
+    rest = [a for a in argv[1:] if not a.startswith("--")]
+    flags = [a for a in argv[1:] if a.startswith("--")]
+    if command == "summary":
+        s = t_summary({})
+        print("%s to %s" % (s["from"], s["to"]))
+        for line in s["lines"]:
+            print("  " + line)
+    elif command == "suggest":
+        found = t_suggestions({})["suggestions"]
+        if not found:
+            print("No suggestions right now. Petal suggests modes once it has seen a few days of use.")
+        for i, g in enumerate(found, 1):
+            print("%d. %s" % (i, g["text"]))
+        if found:
+            print("\nAsk Claude to make one, or say \"petal suggest --dismiss <n>\" to stop suggesting it.")
+        for flag in flags:
+            if flag.startswith("--dismiss"):
+                n = int(rest[0]) if rest and rest[0].isdigit() else 0
+                if 1 <= n <= len(found):
+                    dismiss_suggestion(found[n - 1]["key"])
+                    print("Won't suggest %d again." % n)
+    elif command == "get":
+        state = t_get_state({})
+        if rest:
+            print(json.dumps(state["settings"].get(rest[0]), ensure_ascii=False))
+        else:
+            print(json.dumps(state, indent=2, ensure_ascii=False))
+    elif command == "set" and len(rest) >= 2:
+        raw = " ".join(argv[2:])
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            value = raw   # a bare word: a string setting
+        t_set_settings({"settings": {rest[0]: value}})
+        print("%s = %s" % (rest[0], json.dumps(value, ensure_ascii=False)))
+    elif command == "dismiss" and rest:
+        dismiss_suggestion(rest[0])
+    elif command == "prune":
+        prune_activity()
+    elif command == "recipe" and rest[:1] == ["export"]:
+        out = t_export_recipe({"path": rest[1] if len(rest) > 1 else ""})
+        print("Saved %s (%s)." % (out["path"].replace(HOME, "~"), ", ".join(out["modes"])))
+        print("Share the file; someone adds it with: petal recipe import <file>")
+    elif command == "recipe" and rest[:1] == ["import"] and len(rest) > 1:
+        look = "--look" in flags
+        plan = t_import_recipe({"path": rest[1], "look": look, "preview": True})
+        print("This adds %d mode%s:" % (len(plan["modes"]), "" if len(plan["modes"]) == 1 else "s"))
+        names = app_names()
+        for m in plan["modes"]:
+            print("  %s: %s" % (m["name"], ", ".join(names.get(a, a) for a in m.get("apps", [])) or "no apps yet"))
+        if plan["missing"]:
+            print("Not installed here (left out): " + ", ".join(plan["missing"]))
+        for k, v in (plan.get("settings") or {}).items():
+            print("  %s: %s -> %s" % (k, json.dumps(v["from"]), json.dumps(v["to"])))
+        for k, v in (plan.get("dock") or {}).items():
+            print("  dock %s -> %s" % (k, v))
+        if not look:
+            print("(Its look stays out; add --look to use it too.)")
+        if "--yes" not in flags:
+            if not sys.stdin.isatty():
+                print("Run again with --yes to add it.")
+                return
+            if input("Add it? [y/N] ").strip().lower() not in ("y", "yes"):
+                print("Nothing changed.")
+                return
+        out = t_import_recipe({"path": rest[1], "look": look})
+        print("Added %s." % ", ".join(m["name"] for m in out["modes"]))
+    else:
+        print("usage: petal get [key] | petal set <key> <json value> | petal recipe export [file] | "
+              "petal recipe import <file> [--look] [--yes] | petal suggest | petal summary")
+        sys.exit(2)
+
+
 def main():
+    # Petal for macOS answers Claude itself (no python3 needed on the Mac); its build takes the tools, settings and
+    # mode fields from here, so both platforms describe them the same way.
+    # `--tool <name> '<json args>'` runs one tool and prints its JSON (the dock and bin/petal use it, so there's one
+    # implementation); `--cli …` is bin/petal's plain-words side of the same.
+    if "--tool" in sys.argv[1:2]:
+        entry = TOOLS.get(sys.argv[2] if len(sys.argv) > 2 else "")
+        try:
+            if not entry:
+                raise ValueError("Unknown tool")
+            json.dump(entry[0](json.loads(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else {}), sys.stdout, ensure_ascii=False)
+        except Exception as e:  # one line of JSON either way, for whoever reads it
+            json.dump({"error": str(e)}, sys.stdout)
+            print()
+            sys.exit(1)
+        print()
+        return
+    if "--cli" in sys.argv[1:2]:
+        try:
+            cli(sys.argv[2:])
+        except (ValueError, OSError) as e:
+            print(e, file=sys.stderr)
+            sys.exit(1)
+        return
+    if "--describe" in sys.argv:
+        json.dump({"tools": tool_list(), "settings": {k: list(v) for k, v in SETTINGS_SCHEMA.items()},
+                   "mode_fields": MODE_FIELDS}, sys.stdout, indent=1, ensure_ascii=False)
+        return
     for line in sys.stdin:
         line = line.strip()
         if not line:

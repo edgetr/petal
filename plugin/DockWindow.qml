@@ -529,7 +529,7 @@ PanelWindow {
 
       // Modes
       ModeSwitcher { visible: window.opt("modes") && !!window.dock && window.dock.modes.length > 0 }
-      AskSlot { visible: window.opt("ai") || window.opt("claudeUsage") }
+      AskSlot { visible: !!window.dock && window.dock.providers.length > 0 && (window.opt("ai") || window.opt("claudeUsage")) }
       Separator { visible: window.opt("modes") }
 
       // Apps: a fixed-size stage as wide as the busiest mode needs, with the
@@ -824,8 +824,8 @@ PanelWindow {
     }
   }
 
-  // Claude: opens the Claude panel (usage, change modes, models). The ring
-  // shows how much of your tightest Claude Code limit is used.
+  // The AI button (Claude or Codex): opens the chat panel. The ring shows how
+  // much of that AI's tightest limit is used.
   component AskSlot: Item {
     id: askSlot
     readonly property int size: Math.round(window.iconSize * 0.95)
@@ -833,7 +833,7 @@ PanelWindow {
     readonly property color ringColor: used >= 0.9 ? "#ff4d6d" : used >= 0.7 ? "#ffb347" : window.accent
     property string tip: {
       // The ring shows what's used; the tooltip, what's left.
-      var t = "Claude"
+      var t = window.dock ? window.dock.chatName : "AI"
       var limits = window.dock && window.dock.usage && window.dock.usage.limits ? window.dock.usage.limits : []
       for (var i = 0; i < limits.length; i++)
         t += " · " + String(limits[i].title || limits[i].label).replace(" (7-day)", "") + " " + Math.round((1 - Number(limits[i].percent)) * 100) + "% left"
@@ -857,7 +857,7 @@ PanelWindow {
         width: Math.round(askSlot.size * 0.56)
         height: width
         sourceSize: Qt.size(width * 2, height * 2)
-        source: Qt.resolvedUrl("assets/claude.svg")
+        source: window.dock ? window.dock.providerMark(window.dock.chatProvider) : Qt.resolvedUrl("assets/claude.svg")
         scale: askMouse.pressed ? 0.88 : (askMouse.containsMouse ? 1.08 : 1)
         Behavior on scale { NumberAnimation { duration: 120 } }
       }
@@ -881,7 +881,7 @@ PanelWindow {
         anchors.fill: parent
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
-        onClicked: window.dock.openAsk("")
+        onClicked: window.dock.openAsk("", window.vertical ? -1 : askSlot.mapToItem(null, askSlot.width / 2, 0).x)
         onContainsMouseChanged: {
           if (containsMouse) window.hoverSlot = askSlot
           else if (window.hoverSlot === askSlot) window.hoverSlot = null
@@ -1451,6 +1451,9 @@ PanelWindow {
     readonly property var target: c && c.target && window.dock ? window.dock.modeById(c.target) : null
     readonly property var here: c && window.dock ? window.dock.modeById(c.mode || window.modeId) : null
     readonly property int wait: here && window.opt("countdown") ? Number(here.focusDelay || 0) : 0
+    // Petal's own quiet cards: a suggestion, the weekly summary, "done".
+    readonly property bool quiet: !!c && (c.kind === "suggest" || c.kind === "summary" || c.kind === "done")
+    readonly property string range: c && c.kind === "summary" && c.data ? window.dock.shortDay(c.data.from) + " – " + window.dock.shortDay(c.data.to) : ""
     readonly property color hue: target ? window.tint(target.color) : window.accent
 
     visible: !!c && window.isFocusedScreen && window.shown
@@ -1502,6 +1505,8 @@ PanelWindow {
           Text {
             width: parent.width
             textFormat: Text.StyledText
+            wrapMode: guardCard.quiet ? Text.Wrap : Text.NoWrap
+            maximumLineCount: guardCard.quiet ? 3 : 1
             elide: Text.ElideRight
             color: Commons.Color.popups.text
             font.family: window.uiFont
@@ -1511,7 +1516,11 @@ PanelWindow {
               if (!c) return ""
               var esc = function(s) { return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;") }
               var dim = "<font color='" + Commons.Color.muted + "'>"
+              if (c.kind === "suggest") return "<b>" + esc(c.s.text) + "</b>"
+              if (c.kind === "done") return "<b>" + esc(c.title) + "</b>"
+              if (c.kind === "summary") return "<b>Last week</b>" + dim + " · " + esc(guardCard.range) + "</font>"
               if (c.kind === "update") return "<b>Petal updated to " + esc(c.version) + "</b>"
+              if (c.kind === "kept") return "<b>Petal " + esc(c.version) + " couldn't take your changes</b>"
               if (c.kind === "held") return "<b>" + esc(c.n.summary) + "</b>" + dim + " · " + esc(c.n.app) + (c.allowedHere ? "" : " · held for " + esc(guardCard.target ? guardCard.target.name : "later")) + "</font>"
               if (c.kind === "guard") return "<b>" + esc(c.title) + "</b> belongs to " + esc(guardCard.target ? guardCard.target.name : "another mode") + "."
               if (c.kind === "fit") return "<b>" + esc(c.title) + "</b>" + dim + " · fits " + esc(guardCard.target ? guardCard.target.name : "") + "</font>"
@@ -1523,18 +1532,23 @@ PanelWindow {
             width: parent.width
             visible: text !== ""
             wrapMode: Text.Wrap
-            maximumLineCount: 3
+            maximumLineCount: guardCard.c && guardCard.c.kind === "summary" ? 6 : 3
             elide: Text.ElideRight
             textFormat: Text.PlainText
             color: Commons.Color.popups.text
             font.family: window.uiFont
             font.pixelSize: Style.font.body
+            lineHeight: guardCard.c && guardCard.c.kind === "summary" ? 1.15 : 1
             text: {
               var c = guardCard.c
               if (!c) return ""
               if (c.kind === "held") return String(c.n.body || "")
+              if (c.kind === "done") return String(c.body || "")
+              if (c.kind === "summary") return window.dock.listOf(c.data.lines).slice(0, 6).join("\n")
+              if (c.kind === "suggest" && c.busy) return "Making it…"
               if (c.kind === "guard") return "This workspace is in " + (guardCard.here ? guardCard.here.name : "another") + " mode. Go back to what you were doing, or switch the workspace to " + (guardCard.target ? guardCard.target.name : "that mode") + "."
               if (c.kind === "update") return "Restart the shell to finish (a second or two)."
+              if (c.kind === "kept") return "You still have your own Petal, with your changes. " + String(c.message || "").split("\n")[0]
               return ""
             }
           }
@@ -1557,8 +1571,41 @@ PanelWindow {
         spacing: Style.spacing.sm
 
         CardButton {
-          text: !guardCard.c ? "" : guardCard.c.kind === "update" ? "Later" : guardCard.c.kind === "held" ? (guardCard.c.allowedHere ? "OK" : "Later") : "Go back"
+          visible: !(guardCard.c && guardCard.c.kind === "suggest" && guardCard.c.busy)
+          text: {
+            var c = guardCard.c
+            if (!c) return ""
+            if (c.kind === "update" || c.kind === "kept") return "Later"
+            if (c.kind === "held") return c.allowedHere ? "OK" : "Later"
+            if (c.kind === "suggest") return "Not now"
+            if (c.kind === "done" || c.kind === "summary") return "OK"
+            return "Go back"
+          }
           onClicked: window.dock.cardStay()
+        }
+        CardButton {
+          visible: !!guardCard.c && (guardCard.c.kind === "suggest" || guardCard.c.kind === "summary")
+          primary: true
+          text: {
+            var c = guardCard.c
+            if (!c) return ""
+            if (c.kind === "summary") return "More"
+            if (c.kind !== "suggest") return ""
+            return c.busy ? "Making it…" : c.s && c.s.kind === "add" ? "Keep it" : "Make it"
+          }
+          onClicked: window.dock.cardGo()
+        }
+        CardButton {
+          // Asks the person's AI to explain it and offer to report it (petal report shows the report first).
+          visible: !!guardCard.c && guardCard.c.kind === "kept" && !!window.dock.chatProvider
+          primary: true
+          text: "Ask " + window.dock.chatName
+          onClicked: {
+            var v = guardCard.c.version
+            window.dock.card = null
+            window.dock.openAsk("")
+            window.dock.chat.send("Petal " + v + " couldn't take my own changes to Petal's code. Run `petal personal status`, tell me in plain words what happened, and offer to report it with `petal report` (show me the report first).")
+          }
         }
         CardButton {
           visible: !!guardCard.c && guardCard.c.kind === "update"
@@ -1985,7 +2032,8 @@ PanelWindow {
       }
       MenuSeparator {}
       MenuRow {
-        text: "Anything else? Ask Claude…"
+        visible: !!window.dock && window.dock.providers.length > 0
+        text: "Anything else? Ask " + (window.dock ? window.dock.chatName : "Claude") + "…"
         onTriggered: window.dock.openAsk("")
       }
       Text {
@@ -2134,12 +2182,17 @@ PanelWindow {
       MenuSeparator { visible: !!menu.m }
       MenuRow {
         visible: !!menu.m && window.dock.heldCount(menu.m.id) > 0
+        text: "Show " + (menu.m ? window.dock.heldCount(menu.m.id) : 0) + " held…"
+        onTriggered: window.dock.openPanel("held:" + menu.m.id)
+      }
+      MenuRow {
+        visible: !!menu.m && window.dock.heldCount(menu.m.id) > 0
         text: "Clear " + (menu.m ? window.dock.heldCount(menu.m.id) : 0) + " held"
         onTriggered: window.dock.clearHeld(menu.m.id)
       }
       MenuRow {
-        visible: !!menu.m
-        text: "Change with Claude…"
+        visible: !!menu.m && window.dock.providers.length > 0
+        text: "Change with " + window.dock.chatName + "…"
         onTriggered: window.dock.openAsk(menu.m ? "Change my " + menu.m.name + " mode: " : "")
       }
       MenuRow {
