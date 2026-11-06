@@ -69,7 +69,11 @@ final class Assist {
         pending = request
         answer = done
         // In the chat when it's open (the card shows there); over the dock otherwise (another AI session asking).
-        if !app.claude.isOpen { app.popups.show(FocusCard(kind: .ask, title: title, reason: detail)) }
+        if !app.claude.isOpen {
+            // Over the dock; with no Petal dock showing (macOS's in use), in the chat, which shows the question.
+            if app.docks.focusedDock?.panel != nil { app.popups.show(FocusCard(kind: .ask, title: title, reason: detail)) }
+            else { app.claude.open(asking: nil) }
+        }
         let work = DispatchWorkItem { [weak self] in self?.settle(false) }
         giveUp = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 120, execute: work)
@@ -335,7 +339,9 @@ final class Assist {
                     let window = found.first { $0.id == wanted } ?? found.first { !wanted.isEmpty && $0.title.localizedCaseInsensitiveContains(wanted) }
                         ?? (wanted.isEmpty ? found.first { !$0.minimized } : nil)
                     guard let window else { return fail("No such window; list them first.") }
-                    let label = window.title.isEmpty ? (NSRunningApplication(processIdentifier: window.pid)?.localizedName ?? "the window") : window.title
+                    let appName = NSRunningApplication(processIdentifier: window.pid)?.localizedName ?? "the window"
+                    // A private app's window is called by its app's name only, in replies and the history.
+                    let label = window.title.isEmpty || self.privatePIDs.contains(window.pid) ? appName : window.title
                     switch action {
                     case "focus": Windows.focus(window, onScreen: self.app.docks.isOnScreen(window)); send(["focused": label])
                     case "minimize": Windows.minimize(window); send(["minimized": label])
@@ -382,10 +388,24 @@ final class Assist {
     /// Files to the Trash (asked first), or the last ones back where they were (`undo`).
     private func trash(_ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         if args["undo"] as? Bool == true {
-            var back: [String] = []
-            for item in trashed where (try? FileManager.default.moveItem(at: item.to, to: item.from)) != nil { back.append(item.from.path) }
-            trashed = []
-            return send(["putBack": back])
+            let items = trashed
+            Self.queue.async {
+                var back: [String] = []
+                var stuck: [(from: URL, to: URL)] = []
+                for item in items {
+                    if (try? FileManager.default.moveItem(at: item.to, to: item.from)) != nil { back.append(item.from.path) }
+                    else if FileManager.default.fileExists(atPath: item.to.path) { stuck.append(item) }
+                }
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        self.trashed = stuck   // what couldn't come back yet stays, to try again
+                        var reply: [String: Any] = ["putBack": back]
+                        if !stuck.isEmpty { reply["stillInTrash"] = stuck.map(\.from.path); reply["why"] = "Something is in their old place now." }
+                        send(reply)
+                    }
+                }
+            }
+            return
         }
         let paths = (args["paths"] as? [String] ?? []).map { ($0 as NSString).expandingTildeInPath }
         let urls = paths.map(URL.init(fileURLWithPath:)).filter { FileManager.default.fileExists(atPath: $0.path) }

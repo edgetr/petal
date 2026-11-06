@@ -287,7 +287,8 @@ def t_reset_settings(args):
     keys = args.get("keys") or []
     settings = read_json(SETTINGS, {})
     for k in keys or list(SETTINGS_SCHEMA):
-        if k in SETTINGS_SCHEMA and k not in ("claudePath",):
+        # The private list is the person's to shorten: never reset by a tool.
+        if k in SETTINGS_SCHEMA and k not in ("claudePath", "aiNeverLook"):
             settings[k] = SETTINGS_SCHEMA[k][0]
     write_json(SETTINGS, settings)
     return {"ok": True, "reset": keys or "all"}

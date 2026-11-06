@@ -58,6 +58,9 @@ final class IPC {
             while true {
                 let client = accept(listener, nil, nil)
                 if client < 0 { break }
+                // A client that hung up before its answer (a tool waiting on the person) must never kill Petal.
+                var on: Int32 = 1
+                setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
                 // Each on its own thread: one waiting for an answer never holds up the rest.
                 Thread.detachNewThread { self?.serve(client) }
             }

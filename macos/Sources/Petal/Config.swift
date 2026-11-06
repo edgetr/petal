@@ -283,12 +283,17 @@ final class Config {
                 change(&disk)
                 Self.writeObject(disk, to: file)
             }
+            // What's on disk now: someone else's change may have landed with ours.
+            let after = Self.readObject(file) as NSDictionary
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     let config = PetalApp.shared.config
                     config.writing -= 1
                     if !valid { NSSound.beep() }
-                    if !valid || stale {
+                    // Once nothing else of Petal's is on its way, memory must match the file; if it doesn't, the
+                    // file (with the other change) stands.
+                    let mine = (file == config.settingsFile ? config.settings : file == config.dockFile ? config.dock : config.modesRoot) as NSDictionary
+                    if !valid || stale || (config.writing == 0 && !after.isEqual(mine)) {
                         config.reload()   // what's on disk stands
                         config.onChange?()
                     }

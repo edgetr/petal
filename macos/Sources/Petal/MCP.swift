@@ -108,6 +108,11 @@ enum MCP {
             }
             try update(settingsFile) { $0.merge(changes) { _, new in new } }
             return ["ok": true, "changed": changes]
+        case "petal_reset_settings" where (args["keys"] as? [String]).map({ $0.isEmpty || $0.contains("aiNeverLook") }) ?? true:
+            // Everything but the private list, which only the person shortens.
+            var keys = (args["keys"] as? [String]).flatMap { $0.isEmpty ? nil : $0 } ?? Array(schema.keys)
+            keys.removeAll { $0 == "aiNeverLook" }
+            return try call("petal_reset_settings", ["keys": keys.isEmpty ? ["__none__"] : keys])
         case "petal_reset_settings":
             let keys = args["keys"] as? [String] ?? []
             try update(settingsFile) { settings in

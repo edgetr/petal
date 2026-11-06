@@ -124,6 +124,8 @@ final class FocusGuard {
         // Nothing knows it: the AI, once ever per site or app.
         // Sorted before, but no mode fit (or its mode has since let it go): leave it be.
         if sorted[front.key] != nil { return ok(front.bundleID) }
+        // An app kept private is never described to the AI: left as it is.
+        if PetalApp.shared.assist.neverLook(front.bundleID) { return ok(front.bundleID) }
         guard !asked, brain.enabled, !asking.contains(front.key), (failed[front.key].map { Date().timeIntervalSince($0) > 600 } ?? true) else { return }
         asking.insert(front.key)
         let what = front.domain.map { "\(front.name) tab: \($0)" } ?? (front.isBrowser ? "\(front.name) tab" : front.name)

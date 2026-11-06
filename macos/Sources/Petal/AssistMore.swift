@@ -37,9 +37,13 @@ extension Assist {
         history = (try? JSONDecoder().decode([Done].self, from: data)) ?? []
     }
 
+    /// One at a time, in order (an older save never lands after a newer one), and flushed on quit.
+    nonisolated static let historyQueue = DispatchQueue(label: "petal.ai-history", qos: .utility)
+    nonisolated static func flushHistory() { historyQueue.sync {} }
+
     private func saveHistory() {
         let list = history
-        DispatchQueue.global(qos: .utility).async {
+        Self.historyQueue.async {
             try? FileManager.default.createDirectory(at: Self.historyFile.deletingLastPathComponent(), withIntermediateDirectories: true)
             if let data = try? JSONEncoder().encode(list) { try? data.write(to: Self.historyFile, options: .atomic) }
         }
@@ -50,18 +54,23 @@ extension Assist {
         guard let undo = done.undo else { return }
         switch undo {
         case .putBack(let pairs):
-            var stuck: [[String]] = []
-            for pair in pairs where pair.count == 2 {
+            // The files move off the main thread; what couldn't come back stays to try again.
+            Self.historyQueue.async {
+                var stuck: [[String]] = []
                 let fm = FileManager.default
-                guard fm.fileExists(atPath: pair[1]) else { continue }   // emptied from the Trash: nothing to bring
-                if fm.fileExists(atPath: pair[0]) || (try? fm.moveItem(atPath: pair[1], toPath: pair[0])) == nil { stuck.append(pair) }
+                for pair in pairs where pair.count == 2 {
+                    guard fm.fileExists(atPath: pair[1]) else { continue }   // emptied from the Trash: nothing to bring
+                    if fm.fileExists(atPath: pair[0]) || (try? fm.moveItem(atPath: pair[1], toPath: pair[0])) == nil { stuck.append(pair) }
+                }
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let index = self.history.firstIndex(where: { $0.id == done.id }) else { return }
+                        if stuck.isEmpty { self.history[index].undone = true } else { self.history[index].undo = .putBack(stuck) }
+                        self.saveHistory()
+                    }
+                }
             }
-            if !stuck.isEmpty, let index = history.firstIndex(where: { $0.id == done.id }) {
-                // Something is in the way: what couldn't come back stays to try again.
-                history[index].undo = .putBack(stuck)
-                saveHistory()
-                return
-            }
+            return
         case .forget(let id): forget(id: id, matching: nil)
         case .remember(let text, let mode): remember(text, mode: mode, learned: false)
         case .open(let path, let title):

@@ -17,6 +17,8 @@ final class Drafts {
 
     private(set) var drafts: [Draft] = []
     @ObservationIgnored private var asking = 0
+    /// Each entry into a mode is its own batch: answers from an earlier one are dropped.
+    @ObservationIgnored private var batch = 0
 
     var app: PetalApp { PetalApp.shared }
 
@@ -38,8 +40,10 @@ final class Drafts {
         guard !messages.isEmpty else { return }
         drafts = []
         asking = messages.count
+        batch += 1
+        let ticket = batch
         let style = Self.style()
-        let remembered = app.assist.memories.filter { $0.mode.isEmpty || $0.mode == mode.id }.map(\.text).prefix(12)
+        let remembered = !app.config.bool("aiMemory") ? [] : app.assist.memories.filter { $0.mode.isEmpty || $0.mode == mode.id }.map(\.text).prefix(12)
         for note in messages {
             let prompt = """
             Draft a reply for the user to a message they got, in their own way of writing. Don't send anything; it's a draft they'll edit.
@@ -50,7 +54,7 @@ final class Drafts {
             Reply with ONLY JSON: {"needsReply": true|false, "reply": "<the draft>"}
             """
             app.focus.brain.ask(prompt, key: "reply|\(note.id)") { [weak self] answer in
-                guard let self else { return }
+                guard let self, ticket == self.batch else { return }
                 self.asking -= 1
                 if answer?["needsReply"] as? Bool == true, let reply = (answer?["reply"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !reply.isEmpty {
                     self.drafts.append(Draft(note: note, original: reply, text: reply))

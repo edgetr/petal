@@ -487,8 +487,12 @@ final class Routines {
                          at: Date(), moves: moves, made: made), at: 0)
         if log.count > 300 { log.removeLast(log.count - 300) }
         saveLog()
-        // In the history now (written first, on the same queue): the journal can go.
-        Self.io.async { try? FileManager.default.removeItem(at: Self.journalFile) }
+        // In the history now (written first, on the same queue): the journal goes once the file on disk has it.
+        let recorded = log[0].id
+        Self.io.async {
+            let saved = (Config.parse(Self.logFile)?["entries"] as? [[String: Any]] ?? []).contains { $0["id"] as? String == recorded }
+            if saved { try? FileManager.default.removeItem(at: Self.journalFile) }
+        }
         setLastRun(routine.id, Date(), result: text)
     }
 
@@ -676,7 +680,7 @@ final class Routines {
         guard let index = id.flatMap({ id in log.firstIndex { $0.id == id } }) ?? (id == nil ? log.firstIndex(where: \.canUndo) : nil),
               log[index].canUndo else { return done([]) }
         let entry = log[index]
-        log[index].undone = true   // for now; anything that can't come back keeps it open, below
+        log[index].undone = true   // in memory for now; saved once the files are back (what can't come back keeps it open)
         // The watchers leave the files coming back alone, and the AI asks again about names like these.
         for move in entry.moves {
             let from = URL(fileURLWithPath: move.from)
@@ -687,7 +691,6 @@ final class Routines {
             learned[entry.routine] = patterns
             saveLearned()
         }
-        saveLog()
         Self.io.async {
             let fm = FileManager.default
             var back: [String] = []
@@ -711,8 +714,8 @@ final class Routines {
                     if !stuck.isEmpty, let index = self.log.firstIndex(where: { $0.id == entry.id }) {
                         self.log[index].undone = false
                         self.log[index].moves = stuck
-                        self.saveLog()
                     }
+                    self.saveLog()
                     done(back)
                 }
             }
@@ -868,7 +871,12 @@ final class Routines {
         }
         let go = { (plan: Plan) in
             let n = plan.items.count
-            guard n > 0 else { return send(["moved": 0, "note": "Nothing there to move."]) }
+            // Nothing to move there: the routine's other actions still run.
+            guard n > 0 else {
+                return self.execute(routine, file: nil, approved: plan) { moves in
+                    send(["moved": moves.count, "note": "Nothing to move in its first folder; its other actions ran."])
+                }
+            }
             let where_ = plan.source.lastPathComponent
             let counts = Self.counts(plan)
             let detail = counts.prefix(4).map { "\($0.name) \($0.count)" }.joined(separator: ", ") + (counts.count > 4 ? " and more" : "") + ". You can put them back."
