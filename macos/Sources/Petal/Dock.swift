@@ -17,7 +17,10 @@ struct DockItem: Identifiable, Equatable {
 final class ScreenDock {
     var desktop: Int?
     var mode: Mode?
-    var items: [DockItem] = []
+    var items: [DockItem] = [] { didSet { if items.count != appCount { appCount = items.count } } }
+    /// How many apps `items` holds, changing only when that does: "+" over the layer strip goes after them, and
+    /// watching this instead of `items` keeps an app coming forward from updating it.
+    private(set) var appCount = 0
     var minimized: [AppWindow] = []
     var stageSlots = 0
     /// The icons' size here: the setting's, or smaller when that many wouldn't fit along the screen's edge (as
@@ -994,6 +997,7 @@ struct DockView: View {
             AppStrip(dock: dock, length: length, slot: slot)
                 .stripRoom(dock, icon: icon, slot: slot)
                 .frame(width: dock.vertical ? slot : length, height: dock.vertical ? length : slot)
+                .overlay(alignment: dock.vertical ? .top : .leading) { StripAddSlot(dock: dock, icon: icon, slot: slot, length: length) }
         } else {
             swiftUIStage(layout, length: length)
         }
@@ -1046,6 +1050,18 @@ extension View {
             .animation(.easeOut(duration: on ? 0.06 : 0.14), value: on)
     }
 
+    /// A control's own surface on the dock's glass (the mode switcher, the AI button, "+"): clear Liquid Glass, so
+    /// the layers read as glass on glass, not shapes stacked on it. `on` false adds no glass at all (another mode's
+    /// button until the pointer is on it), not `.identity` glass, which still costs on every update. Pressed, it
+    /// shrinks as `pressed` does and what's on it darkens; the glass itself stays clear (darkened, it turns into a
+    /// dark disc).
+    func clearGlass<S: Shape>(_ on: Bool = true, in shape: S, pressed: Bool = false) -> some View {
+        brightness(pressed ? -0.22 : 0)
+            .modifier(ClearGlass(on: on, shape: shape))
+            .scaleEffect(pressed ? 0.92 : 1)
+            .animation(.easeOut(duration: pressed ? 0.06 : 0.14), value: pressed)
+    }
+
     /// The icon lifts and grows inward under the pointer.
     func lift(_ hovering: Bool, icon: CGFloat) -> some View {
         let config = PetalApp.shared.config
@@ -1056,6 +1072,16 @@ extension View {
         return scaleEffect(1 + amount, anchor: position == "left" ? .leading : position == "right" ? .trailing : .bottom)
             .offset(x: position == "left" ? shift : position == "right" ? -shift : 0, y: position == "bottom" ? -shift : 0)
             .animation(.easeOut(duration: 0.14), value: hovering)
+    }
+}
+
+/// See `clearGlass`.
+struct ClearGlass<S: Shape>: ViewModifier {
+    let on: Bool
+    let shape: S
+
+    func body(content: Content) -> some View {
+        if on { content.glassEffect(.clear.interactive(), in: shape) } else { content }
     }
 }
 
@@ -1072,13 +1098,12 @@ struct ClaudeButton: View {
 
     var body: some View {
         ZStack {
-            Circle().fill(.white.opacity(hovering ? 0.16 : 0.07)).overlay(Circle().strokeBorder(.white.opacity(0.14)))
             ProviderMark(provider: app.chatProvider).foregroundStyle(.white.opacity(0.9))
                 .frame(width: size * 0.56, height: size * 0.56).scaleEffect(hovering ? 1.08 : 1)
             if app.config.bool("claudeUsage") { UsageRing(usage: app.usage, size: size, line: 2.5, track: false) }
         }
         .frame(width: size, height: size)
-        .pressed(pressed)
+        .clearGlass(in: .circle, pressed: pressed)
         .animation(.easeOut(duration: 0.12), value: hovering)
         .slotFrame(dock, "claude")
         .slotMouse(SlotMouse(left: { app.claude.open(asking: nil) }, right: { Menus.settings(for: dock) },
@@ -1350,7 +1375,8 @@ enum AppColor {
     }
 }
 
-/// "+": add apps or folders to this Desktop's mode.
+/// "+": add apps or folders to this Desktop's mode. A plus in the mode's color on a clear glass tile. The layer strip
+/// leaves its slot empty and the dock puts this over it (see `DockView.stage`), so it's real glass either way.
 struct AddSlot: View {
     @Environment(PetalApp.self) private var app
     let dock: ScreenDock
@@ -1360,21 +1386,36 @@ struct AddSlot: View {
 
     var body: some View {
         let color = Color(nsColor: dock.mode?.color ?? PetalApp.shared.accent)
-        ZStack {
-            RoundedRectangle(cornerRadius: icon * 0.8 * 0.28)
-                .fill(.white.opacity(hovering ? 0.14 : 0.07))
-                .overlay(RoundedRectangle(cornerRadius: icon * 0.8 * 0.28).strokeBorder(.white.opacity(0.22)))
-                .frame(width: icon * 0.8, height: icon * 0.8)
-            Image(systemName: "plus").font(.system(size: icon * 0.36, weight: .bold)).foregroundStyle(color)
-        }
-        .pressed(pressed)
-        .lift(hovering, icon: icon)
-        .slotFrame(dock, "add")
-        .slotMouse(SlotMouse(left: { app.popups.closeAll(); app.search.open(in: dock) }, right: { Menus.settings(for: dock) },
-                           hover: { on in
-                               hovering = on
-                               app.tooltips.show(on ? (dock.mode.map { "Add apps to \($0.name)" } ?? "Add apps") : nil, over: "add", in: dock)
-                           }, press: { pressed = $0 }))
+        let side = icon * 0.8
+        Image(systemName: "plus").font(.system(size: icon * 0.36, weight: .bold)).foregroundStyle(color)
+            .scaleEffect(hovering ? 1.08 : 1)
+            .frame(width: side, height: side)
+            .clearGlass(in: .rect(cornerRadius: side * 0.28), pressed: pressed)
+            .animation(.easeOut(duration: 0.12), value: hovering)
+            .lift(hovering, icon: icon)
+            .slotFrame(dock, "add")
+            .slotMouse(SlotMouse(left: { app.popups.closeAll(); app.search.open(in: dock) }, right: { Menus.settings(for: dock) },
+                               hover: { on in
+                                   hovering = on
+                                   app.tooltips.show(on ? (dock.mode.map { "Add apps to \($0.name)" } ?? "Add apps") : nil, over: "add", in: dock)
+                               }, press: { pressed = $0 }))
+    }
+}
+
+/// "+" over the layer strip, which draws the apps and keeps the slot after them for it (a layer can't be glass): at
+/// the same place, start + count × slot along the stage, moving there with the strip's apps. Its own view, so the
+/// apps changing updates only this, never the rest of the dock.
+struct StripAddSlot: View {
+    let dock: ScreenDock
+    let icon: CGFloat
+    let slot: CGFloat
+    let length: CGFloat
+
+    var body: some View {
+        let count = CGFloat(dock.appCount)
+        AddSlot(dock: dock, icon: icon).frame(width: slot, height: slot).magnified(dock, "add")
+            .padding(dock.vertical ? .top : .leading, (length + (count - 1) * slot) / 2)
+            .animation(.easeOut(duration: 0.22), value: count)
     }
 }
 

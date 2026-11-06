@@ -14,11 +14,12 @@ final class DockStrip {
     static var label: String { shared.layers ? "layers" : "SwiftUI" }
 }
 
-/// The dock's apps and "+" as Core Animation layers in one view. Every mode's row is built once and kept, so
+/// The dock's apps as Core Animation layers in one view. Every mode's row is built once and kept, so
 /// switching mode only fades one ready row out and the next in; a row changes only when its mode's apps (or the
 /// running apps in no mode) change. Hover lift, the press, the bounce, the launch pulse, the glow and magnification
 /// are all layer properties and animations: the window server runs them, and SwiftUI never lays the dock out again
-/// for them. Popups find each app through `dock.frames`, as with the SwiftUI slots.
+/// for them. Popups find each app through `dock.frames`, as with the SwiftUI slots. Each row keeps the slot after its
+/// apps for "+", which the dock draws over it as SwiftUI's clear glass (`DockView.stage`): a layer can't be glass.
 struct AppStrip: NSViewRepresentable {
     let dock: ScreenDock
     let length: CGFloat
@@ -284,7 +285,7 @@ final class AppStripView: NSView {
 
     /// A tile's slot in the panel, top-left origin, as SwiftUI's `.global` frames are.
     func windowRect(of id: String) -> CGRect? {
-        guard let tile = current?.tiles[id] ?? (id == "add" ? current?.add : nil), let content = window?.contentView else { return nil }
+        guard let tile = current?.tiles[id], let content = window?.contentView else { return nil }
         let rect = convert(tile.base, to: nil)
         return CGRect(x: rect.minX, y: content.bounds.height - rect.maxY, width: rect.width, height: rect.height)
     }
@@ -294,7 +295,7 @@ final class AppStripView: NSView {
     func registerFrames() {
         guard let dock, let row = current, window != nil else { return }
         var now: Set<String> = []
-        for id in row.order + ["add"] {
+        for id in row.order {
             guard let rect = windowRect(of: id) else { continue }
             dock.frames[id] = rect
             if Magnifier.enabled { dock.magnifier.frames[id] = (rect, true) }
@@ -391,11 +392,6 @@ final class AppStripView: NSView {
     }
 
     private func hover(_ id: String, _ on: Bool, _ dock: ScreenDock) {
-        if id == "add" {
-            current?.add?.hoverAdd(on)
-            app.tooltips.show(on ? (dock.mode.map { "Add apps to \($0.name)" } ?? "Add apps") : nil, over: "add", in: dock)
-            return
-        }
         guard let item = current?.tiles[id]?.item else {
             if !on { app.tooltips.show(nil, over: id, in: dock); app.previews.hover(nil, in: dock, id: id) }
             return
@@ -425,7 +421,7 @@ final class AppStripView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let down, let id = downOn, id != "add", let dock else { return }
+        guard let down, let id = downOn, let dock else { return }
         let point = NSEvent.mouseLocation
         let delta = dock.vertical ? down.y - point.y : point.x - down.x
         if !dragging && (abs(point.x - down.x) > 4 || abs(point.y - down.y) > 4) {
@@ -460,10 +456,7 @@ final class AppStripView: NSView {
         }
         // Released somewhere else: no click.
         guard tile(at: convert(event.locationInWindow, from: nil))?.id == id else { return }
-        if id == "add" {
-            app.popups.closeAll()
-            app.search.open(in: dock)
-        } else if let item = current?.tiles[id]?.item {
+        if let item = current?.tiles[id]?.item {
             app.popups.closeAll()
             app.docks.activate(item)
         }
@@ -471,7 +464,7 @@ final class AppStripView: NSView {
 
     override func rightMouseDown(with event: NSEvent) {
         guard let dock, let tile = tile(at: convert(event.locationInWindow, from: nil)) else { return }
-        if tile.id == "add" { Menus.settings(for: dock) } else if let item = tile.item { Menus.app(item, in: dock) }
+        if let item = tile.item { Menus.app(item, in: dock) }
     }
 
     override func otherMouseDown(with event: NSEvent) {
@@ -484,7 +477,7 @@ final class AppStripView: NSView {
         let old = pressed
         pressed = id
         for key in [old, id].compactMap({ $0 }) {
-            guard let tile = current?.tiles[key] ?? (key == "add" ? current?.add : nil) else { continue }
+            guard let tile = current?.tiles[key] else { continue }
             tile.press(key == id)
         }
     }
@@ -534,10 +527,9 @@ final class Row {
     var mode: Mode?
     var tiles: [String: Tile] = [:]
     var order: [String] = []
-    var add: Tile?
 
     var key: String { mode?.id ?? "" }
-    var allTiles: [Tile] { order.compactMap { tiles[$0] } + (add.map { [$0] } ?? []) }
+    var allTiles: [Tile] { order.compactMap { tiles[$0] } }
 
     init(mode: Mode?) {
         self.mode = mode
@@ -560,7 +552,8 @@ final class Row {
             tiles[id] = nil
             tile.leave(animated: live)
         }
-        // Where each slot is: the apps and "+", centered on the stage.
+        // Where each slot is: the apps and "+" (the dock's SwiftUI glass, over the slot kept for it), centered on the
+        // stage.
         let count = CGFloat(items.count + 1)
         let vertical = look.position != "bottom"
         let lengthAlong = vertical ? stage.height : stage.width
@@ -592,10 +585,6 @@ final class Row {
             if isNew && live { tile.appear() }
         }
         order = ids
-        let plus = add ?? Tile(id: "add", in: container)
-        add = plus
-        plus.setAdd(color: mode?.color ?? PetalApp.shared.accent, look: look)
-        plus.place(base(items.count), shift: 0, look: look, animated: live, dragged: false)
     }
 }
 
@@ -622,9 +611,6 @@ final class Tile {
     let shadeMask = CALayer()
     let badge = CALayer()
     let dot = CALayer()
-    // "+"
-    private var plusBox: CALayer?
-    private var plusGlyph: CALayer?
 
     private var drawn: (image: String, size: CGFloat, scale: CGFloat)?
     private var sized: AppStripView.Look?
@@ -633,7 +619,6 @@ final class Tile {
     private var liftAmount: CGFloat = 0
     private var magnification: (scale: CGFloat, shift: CGFloat) = (1, 0)
     private var grown = false
-    private var addColor: NSColor?
     private var glowColor: NSColor?
     private var dotColor: NSColor?
 
@@ -822,52 +807,6 @@ final class Tile {
         }
     }
 
-    /// "+": a rounded box with a plus in the mode's color.
-    func setAdd(color: NSColor, look: AppStripView.Look) {
-        let size = look.icon
-        let slotSize = look.slot
-        if plusBox == nil {
-            let box = CALayer(), glyph = CALayer()
-            box.actions = nil
-            glyph.actions = nil
-            box.borderWidth = 1
-            box.borderColor = NSColor.white.withAlphaComponent(0.22).cgColor
-            box.backgroundColor = NSColor.white.withAlphaComponent(0.07).cgColor
-            glyph.contentsGravity = .center
-            holder.addSublayer(box)
-            holder.addSublayer(glyph)
-            plusBox = box
-            plusGlyph = glyph
-            icon.isHidden = true
-            shade.isHidden = true
-            glow.isHidden = true
-        }
-        guard let box = plusBox, let glyph = plusGlyph else { return }
-        let changed = drawn?.size != size || drawn?.scale != look.scale || addColor != color
-        still {
-            for layer in [slot, hop, lift, holder] {
-                layer.bounds = CGRect(x: 0, y: 0, width: slotSize, height: slotSize)
-                layer.position = CGPoint(x: slotSize / 2, y: slotSize / 2)
-            }
-            box.bounds = CGRect(x: 0, y: 0, width: size * 0.8, height: size * 0.8)
-            box.cornerRadius = size * 0.8 * 0.28
-            box.position = CGPoint(x: slotSize / 2, y: slotSize / 2)
-            glyph.frame = box.frame
-            for layer in [slot, hop, lift, holder, box, glyph] { layer.contentsScale = look.scale }
-            if changed {
-                let symbol = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)?
-                    .withSymbolConfiguration(.init(pointSize: size * 0.36, weight: .bold).applying(.init(paletteColors: [color])))
-                glyph.contents = symbol.flatMap { Tile.image($0, points: nil, scale: look.scale) }
-            }
-        }
-        drawn = ("add", size, look.scale)
-        addColor = color
-    }
-
-    func hoverAdd(_ on: Bool) {
-        plusBox?.backgroundColor = NSColor.white.withAlphaComponent(on ? 0.14 : 0.07).cgColor
-    }
-
     // MARK: Where it is
 
     func place(_ rect: CGRect, shift: CGFloat, look: AppStripView.Look, animated: Bool, dragged: Bool) {
@@ -961,7 +900,7 @@ final class Tile {
         let scale: CGFloat = on ? 0.92 : 1
         let duration = on ? 0.06 : 0.14
         setTransform(holder, CATransform3DMakeScale(scale, scale, 1), duration: duration)
-        if plusBox == nil { setOpacity(shade, on ? 0.22 : 0, duration: duration) } else { setOpacity(holder, on ? 0.8 : 1, duration: duration) }
+        setOpacity(shade, on ? 0.22 : 0, duration: duration)
     }
 
     /// The bounce: up half an icon, then a spring back.
@@ -999,23 +938,9 @@ final class Tile {
 
     private static var images: [String: CGImage] = [:]
 
-    /// An image as pixels for a layer, `points` across (its own size when nil).
-    static func image(_ image: NSImage, points: CGFloat?, scale: CGFloat) -> CGImage? {
-        let size = points.map { CGSize(width: $0, height: $0) } ?? image.size
-        var rect = CGRect(origin: .zero, size: CGSize(width: size.width * scale, height: size.height * scale))
-        if points == nil {
-            // A symbol: drawn into a bitmap of its own size at this scale.
-            let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(rect.width.rounded(.up)), pixelsHigh: Int(rect.height.rounded(.up)),
-                                       bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
-                                       bytesPerRow: 0, bitsPerPixel: 0)
-            guard let rep else { return nil }
-            rep.size = size
-            NSGraphicsContext.saveGraphicsState()
-            NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-            image.draw(in: CGRect(origin: .zero, size: size))
-            NSGraphicsContext.restoreGraphicsState()
-            return rep.cgImage
-        }
+    /// An image as pixels for a layer, `points` across.
+    static func image(_ image: NSImage, points: CGFloat, scale: CGFloat) -> CGImage? {
+        var rect = CGRect(origin: .zero, size: CGSize(width: points * scale, height: points * scale))
         return image.cgImage(forProposedRect: &rect, context: nil, hints: [.interpolation: NSImageInterpolation.high.rawValue])
     }
 
