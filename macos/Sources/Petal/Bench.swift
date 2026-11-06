@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 /// `Petal --bench`: times the work behind the dock's slow moments (listing apps, a search keystroke, the window
 /// list, reading windows through Accessibility, now playing) without showing or changing anything, so a change can
@@ -194,5 +195,84 @@ enum Perf {
         let result = work()
         spans[name, default: []].append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
         return result
+    }
+}
+
+/// `Petal --bench-dock`: lays out and draws the dock off screen (a window that's never shown) with the person's
+/// own modes, and times what the main thread does for a mode switch, an app coming forward and a refresh that
+/// changes nothing. Nothing is shown, and no setting or mode is changed.
+@MainActor
+enum DockBench {
+    static func run() -> Never {
+        let app = PetalApp()
+        let modes = app.config.modes
+        guard !modes.isEmpty else { print("no modes"); exit(0) }
+        let dock = ScreenDock()
+        dock.desktop = 1
+        // As DockPanel: as wide as the screen, the dock centered in it.
+        let width = NSScreen.main?.frame.width ?? 1512
+        let window = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: width, height: 120), styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        let hosting = DockHostingView(rootView: AnyView(DockView(dock: dock).environment(app)))
+        window.contentView = DockHostingView.container(hosting)
+        var sizes: Set<String> = []
+        // A few running apps that belong to no mode, as the dock usually has.
+        let loose = Apps.installed().map(\.id).filter { id in !modes.contains { $0.apps.contains(id) } }.prefix(2)
+
+        func items(for mode: Mode, front: Int = 0) -> [DockItem] {
+            let pinned = mode.apps.filter(Apps.shows).enumerated().map { index, id in
+                DockItem(id: id, pinned: true, running: index % 2 == 0, windows: index % 2 == 0 ? (index % 4 == 0 ? 2 : 1) : 0,
+                         here: index % 4 == 0, active: index == front)
+            }
+            return pinned + loose.map { DockItem(id: $0, pinned: false, running: true, windows: 1, here: true, active: false) }
+        }
+        let longest = modes.map { $0.apps.filter(Apps.shows).count }.max() ?? 0
+        dock.stageSlots = longest + loose.count + 1
+
+        func draw() {
+            let size = hosting.measure()
+            sizes.insert("\(Int(size.width))×\(Int(size.height))")
+            if window.frame.height != size.height { window.setContentSize(CGSize(width: width, height: size.height)) }
+            window.displayIfNeeded()
+            CATransaction.flush()
+        }
+        func time(_ name: String, runs: Int, _ change: (Int) -> Void) {
+            var samples: [Double] = []
+            for run in 0..<runs {
+                let start = DispatchTime.now().uptimeNanoseconds
+                change(run)
+                draw()
+                samples.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
+                // Let animations started by the change run their course, as they would between clicks.
+                RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+            }
+            samples.sort()
+            print(String(format: "%-40@ median %7.2f ms   worst %7.2f ms   (%d runs)", name as NSString,
+                         samples[samples.count / 2], samples.last ?? 0, runs))
+        }
+
+        print("Petal dock bench: \(modes.count) modes, \(modes.map { $0.apps.count }) apps")
+        dock.mode = modes[0]
+        dock.items = items(for: modes[0])
+        draw()
+        // Warm every mode once (icons, colors), as a running dock has.
+        for mode in modes { dock.mode = mode; dock.items = items(for: mode); draw() }
+
+        time("switch mode", runs: modes.count * 6) { run in
+            let mode = modes[run % modes.count]
+            dock.mode = mode
+            dock.items = items(for: mode)
+        }
+        time("an app comes forward", runs: 20) { run in
+            if let mode = dock.mode { dock.items = items(for: mode, front: run % 4) }
+        }
+        time("refresh with nothing new", runs: 20) { _ in
+            if let mode = dock.mode { dock.items = items(for: mode, front: 3) }
+        }
+        print("dock sizes seen: \(sizes.sorted().joined(separator: ", ")); window \(Int(window.frame.width))×\(Int(window.frame.height))")
+        exit(0)
     }
 }

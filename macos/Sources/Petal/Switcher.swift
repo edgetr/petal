@@ -19,8 +19,12 @@ struct ModeSwitcher: View {
                 ModeButton(dock: dock, mode: mode, size: size, pending: pending?.mode == mode.id ? pending : nil)
             }
             if let pending {
+                // It grows in from its left edge as the dock opens up, and goes at once when it closes, so the
+                // dock closing up never runs over it.
                 StayPill(pending: pending, size: size, vertical: dock.vertical)
-                    .transition(.scale(scale: 0.6, anchor: dock.vertical ? .top : .leading).combined(with: .opacity))
+                    .transition(.asymmetric(
+                        insertion: .scale(scale: 0.6, anchor: dock.vertical ? .top : .leading).combined(with: .opacity),
+                        removal: .opacity.animation(.easeOut(duration: 0.08))))
             }
         }
         .padding(3)
@@ -46,6 +50,9 @@ struct ModeButton: View {
         content(active: active, wide: wide)
             .frame(minWidth: size, minHeight: size, maxHeight: size)
             .fixedSize()
+            // Growing into a pill or shrinking back to a circle, what it shows stays inside its own outline, so
+            // it never runs over the buttons beside it.
+            .clipShape(.capsule)
             .contentShape(.capsule)
             .overlay(alignment: .topTrailing) {
                 if held > 0 && !active {

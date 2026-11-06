@@ -428,7 +428,7 @@ final class DockPanel: NSPanel {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         dock.panel = self
         hosting = DockHostingView(rootView: AnyView(DockView(dock: dock).environment(PetalApp.shared)))
-        contentView = hosting
+        contentView = DockHostingView.container(hosting)
         isFloatingPanel = true
         level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)))
         backgroundColor = .clear
@@ -453,12 +453,21 @@ final class DockPanel: NSPanel {
 
     var config: Config { PetalApp.shared.config }
 
+    /// The dock's content (the glass and the clear room around it), centered in the panel. The panel itself is as
+    /// long as the screen's edge, so it never resizes while the dock grows or shrinks: SwiftUI animates the glass
+    /// around its centre instead. Its clear parts let clicks through to the windows below.
+    var contentFrame: CGRect {
+        let size = measured ?? frame.size
+        return CGRect(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2, width: size.width, height: size.height)
+    }
+
     /// The glass itself, without the clear room around it for lifting and bouncing icons: tooltips, previews and
     /// stacks sit just above this, as they do over macOS's Dock.
     var glassFrame: CGRect {
         let room = DockView.outer(config)
-        return CGRect(x: frame.minX + room.leading, y: frame.minY + room.bottom,
-                      width: frame.width - room.leading - room.trailing, height: frame.height - room.top - room.bottom)
+        let content = contentFrame
+        return CGRect(x: content.minX + room.leading, y: content.minY + room.bottom,
+                      width: content.width - room.leading - room.trailing, height: content.height - room.top - room.bottom)
     }
 
     /// The gap between the dock and the screen's edge (Omarchy's `gap`).
@@ -472,22 +481,28 @@ final class DockPanel: NSPanel {
     func place(on screen: NSScreen) {
         screenRef = screen
         // Measured again only when the dock's content says its size may have changed: once a second, nothing has.
-        let size: CGSize
+        let content: CGSize
         if let measured, !hosting.sizeChanged {
-            size = measured
+            content = measured
         } else {
-            hosting.layoutSubtreeIfNeeded()
-            size = hosting.fittingSize
-            measured = size
-            hosting.sizeChanged = false
+            content = hosting.measure()
+            measured = content
         }
+        // Only the dock's thickness comes from its content; along the edge the panel is the screen's length.
         let area = screen.frame
         let visible = screen.visibleFrame
         var origin: CGPoint
+        let size: CGSize
         switch config.position {
-        case "left": origin = CGPoint(x: area.minX + gap, y: visible.midY - size.height / 2)
-        case "right": origin = CGPoint(x: area.maxX - size.width - gap, y: visible.midY - size.height / 2)
-        default: origin = CGPoint(x: area.midX - size.width / 2, y: area.minY + gap)
+        case "left":
+            size = CGSize(width: content.width, height: visible.height)
+            origin = CGPoint(x: area.minX + gap, y: visible.minY)
+        case "right":
+            size = CGSize(width: content.width, height: visible.height)
+            origin = CGPoint(x: area.maxX - content.width - gap, y: visible.minY)
+        default:
+            size = CGSize(width: area.width, height: content.height)
+            origin = CGPoint(x: area.minX, y: area.minY + gap)
         }
         // Tucked away, it slides a little toward the edge and fades out (sliding off the edge would put it on a
         // display arranged next to this one).
@@ -533,7 +548,7 @@ final class DockPanel: NSPanel {
     private func followMouse() {
         guard config.autoHide, let screen = screenRef else {
             if !dock.revealed { dock.revealed = true }
-            if frame.contains(NSEvent.mouseLocation) { dock.magnifier.wake() }
+            if contentFrame.contains(NSEvent.mouseLocation) { dock.magnifier.wake() }
             return
         }
         let mouse = NSEvent.mouseLocation
@@ -545,7 +560,7 @@ final class DockPanel: NSPanel {
         case "right": atEdge = mouse.x >= area.maxX - depth && mouse.y >= area.minY && mouse.y <= area.maxY
         default: atEdge = mouse.y <= area.minY + depth && mouse.x >= area.minX && mouse.x <= area.maxX
         }
-        let over = frame.insetBy(dx: -8, dy: -8).contains(mouse)
+        let over = contentFrame.insetBy(dx: -8, dy: -8).contains(mouse)
         if over && !tucked { dock.magnifier.wake() }
         if !dock.revealed && atEdge {
             dock.revealed = true
@@ -615,8 +630,14 @@ struct DockView: View {
         }
         .padding(outer)
         .fixedSize()
+        // Centered in a panel that never resizes, so the glass grows and shrinks around its centre in the same
+        // animation as what changed inside it: the window never moves under it.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.easeOut(duration: 0.22), value: dock.items.map(\.id))
         .animation(.easeOut(duration: 0.22), value: dock.minimized.map(\.id))
+        .animation(.easeOut(duration: 0.24), value: dock.mode?.id)
+        .animation(.easeOut(duration: 0.24), value: app.pendingMode?.mode)
+        .animation(.easeOut(duration: 0.22), value: app.signals.nowPlaying == nil)
     }
 
     /// Room around the glass: for its shadow, and inward for icons lifting and bouncing.
@@ -1286,8 +1307,33 @@ struct ModeIcon: View {
 final class DockHostingView: NSHostingView<AnyView> {
     var sizeChanged = true
 
+    required init(rootView: AnyView) {
+        super.init(rootView: rootView)
+        // Only its size for measuring: no minimum or maximum that would make the window follow the content.
+        sizingOptions = [.intrinsicContentSize]
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
     override func invalidateIntrinsicContentSize() {
         super.invalidateIntrinsicContentSize()
         sizeChanged = true
+    }
+
+    /// The content's own size (the glass and the room around it), laid out now.
+    func measure() -> CGSize {
+        layoutSubtreeIfNeeded()
+        sizeChanged = false
+        return intrinsicContentSize
+    }
+
+    /// A plain view holding the hosting view at its full size, so the window's size is the panel's alone.
+    static func container(_ hosting: DockHostingView) -> NSView {
+        let container = NSView()
+        hosting.translatesAutoresizingMaskIntoConstraints = true
+        hosting.autoresizingMask = [.width, .height]
+        container.addSubview(hosting)
+        return container
     }
 }
