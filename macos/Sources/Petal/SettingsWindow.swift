@@ -2,7 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// The settings window: everything Petal can change, on Liquid Glass over the person's own wallpaper, blurred.
+/// The settings window: everything Petal can change, on a window of Liquid Glass that shows what's behind it.
 /// On Omarchy the right-click menu stays tiny and the rest is asking Claude; the Mac adds this window, and its
 /// first field still asks the AI (when there is one).
 @MainActor
@@ -23,7 +23,7 @@ final class SettingsWindow {
             window.center()
             self.window = window
         }
-        window?.contentView = NSHostingView(rootView: SettingsView(selection: section).environment(PetalApp.shared))
+        window?.setGlassContent(SettingsView(selection: section).environment(PetalApp.shared))
         NSApp.activate()
         window?.makeKeyAndOrderFront(nil)
     }
@@ -93,7 +93,7 @@ struct SettingsView: View {
 
     var body: some View {
         ZStack {
-            Wallpaper()
+            Backdrop()
             HStack(spacing: 14) {
                 sidebar
                 Scroll {
@@ -206,34 +206,36 @@ struct SettingsView: View {
 
 // MARK: - Building blocks
 
-/// The person's own wallpaper, blurred, so the glass has something to be glass over.
-struct Wallpaper: View {
+/// What's behind a window's content. Petal's windows are Liquid Glass themselves (`NSWindow.setGlassContent`), so
+/// the windows and desktop behind them show through, blurred; this only adds a faint wash so text stays easy to read
+/// over a busy window. A snapshot can't see behind a window, so there it's a plain gradient.
+struct Backdrop: View {
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.snapshotting) private var snapshotting
 
     var body: some View {
-        GeometryReader { proxy in
-            ZStack {
-                if let image = Self.image {
-                    Image(nsImage: image).resizable().scaledToFill()
-                        .frame(width: proxy.size.width, height: proxy.size.height)
-                        .blur(radius: 48, opaque: true)
-                        .saturation(1.15)
-                } else {
-                    LinearGradient(colors: [Color(red: 0.85, green: 0.21, blue: 0.50), Color(red: 0.36, green: 0.27, blue: 0.62)],
-                                   startPoint: .topLeading, endPoint: .bottomTrailing)
-                }
-                (scheme == .dark ? Color.black.opacity(0.32) : Color.white.opacity(0.22))
+        ZStack {
+            if snapshotting {
+                LinearGradient(colors: [Color(red: 0.85, green: 0.21, blue: 0.50), Color(red: 0.36, green: 0.27, blue: 0.62)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
             }
-            .clipped()
+            scheme == .dark ? Color.black.opacity(0.16) : Color.white.opacity(0.18)
         }
         .ignoresSafeArea()
     }
+}
 
-    static var image: NSImage? {
-        guard let screen = NSScreen.main, let url = NSWorkspace.shared.desktopImageURL(for: screen) else { return nil }
-        var isFolder: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isFolder), !isFolder.boolValue else { return nil }
-        return NSImage(contentsOf: url)
+extension NSWindow {
+    /// The window itself becomes Liquid Glass (AppKit's own `NSGlassEffectView`): what's behind it shows through,
+    /// blurred, and the content sits in the glass.
+    func setGlassContent<Content: View>(_ view: Content) {
+        isOpaque = false
+        backgroundColor = .clear
+        let glass = (contentView as? NSGlassEffectView) ?? NSGlassEffectView()
+        glass.style = .regular
+        glass.cornerRadius = 16
+        glass.contentView = NSHostingView(rootView: view)
+        contentView = glass
     }
 }
 

@@ -24,7 +24,7 @@ final class RecipeWindow {
             return window
         }()
         self.window = window
-        window.contentView = NSHostingView(rootView: RecipeImportView(url: url) { [weak window] in window?.close() }.environment(PetalApp.shared))
+        window.setGlassContent(RecipeImportView(url: url) { [weak window] in window?.close() }.environment(PetalApp.shared))
         window.center()
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
@@ -58,7 +58,7 @@ struct RecipeImportView: View {
 
     var body: some View {
         ZStack {
-            Wallpaper()
+            Backdrop()
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 14) {
                     Image(nsImage: NSWorkspace.shared.icon(for: .petalRecipe)).resizable().frame(width: 52, height: 52)

@@ -15,7 +15,7 @@ final class Welcome {
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: WelcomeView { [weak self] in self?.window?.close() }.environment(PetalApp.shared))
+        window.setGlassContent(WelcomeView { [weak self] in self?.window?.close() }.environment(PetalApp.shared))
         window.center()
         self.window = window
         NSApp.activate()
@@ -36,7 +36,7 @@ struct WelcomeView: View {
     var body: some View {
         let accent = SettingsSection.dock.tint
         ZStack {
-            Wallpaper()
+            Backdrop()
             VStack(spacing: 14) {
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 84, height: 84)
                     .shadow(color: .black.opacity(0.35), radius: 20, y: 10)

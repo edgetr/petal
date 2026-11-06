@@ -201,7 +201,7 @@ final class ReleaseNotes {
         }()
         self.window = window
         window.title = "What’s New in Petal \(version)"
-        window.contentView = NSHostingView(rootView: ReleaseNotesView(version: version).environment(PetalApp.shared))
+        window.setGlassContent(ReleaseNotesView(version: version).environment(PetalApp.shared))
         window.center()
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
@@ -228,7 +228,7 @@ struct ReleaseNotesView: View {
 
     var body: some View {
         ZStack {
-            Wallpaper()
+            Backdrop()
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 14) {
                     Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 52, height: 52)
