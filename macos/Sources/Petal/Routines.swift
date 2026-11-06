@@ -436,12 +436,15 @@ final class Routines {
         var moves: [Move] = []
         var made: [String] = []
         var approved = approved
+        let rule = ruleVersion[routine.id, default: 0]
+        /// Deleted or changed while it ran (a Shortcut exporting, a card waiting): the rest of it doesn't happen.
+        func current() -> Bool { rule == ruleVersion[routine.id, default: 0] && list.contains { $0.id == routine.id } }
         func finish() {
             if !said.isEmpty { record(routine, said: said, moves: moves, made: made) }
             done(moves)
         }
         func step(_ index: Int) {
-            guard index < routine.actions.count else { return finish() }
+            guard index < routine.actions.count, current() else { return finish() }
             let action = routine.actions[index]
             guard action.movesFiles else {
                 // The next step waits for this one (opening, hiding: off the main thread) to finish.
@@ -471,6 +474,7 @@ final class Routines {
                             said.append("left \(plan.items.count) files in \(plan.source.lastPathComponent) (not allowed)")
                             return step(index + 1)
                         }
+                        guard current() else { return finish() }
                         self.apply(plan) { done, folders in
                             moves += done
                             made += folders
