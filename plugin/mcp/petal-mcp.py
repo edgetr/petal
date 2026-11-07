@@ -882,8 +882,26 @@ ASSIST_TOOLS = {
     "petal_show": (assist("petal_show"), "Open a page in its own window, kept so it can be opened again: a summary of their month, a report, a table, a chart. markdown, or html (a whole page; charts as inline SVG, no outside scripts or images), or path to an .html file you wrote. Each call makes a new page; to change one you made, pass update: the path it returned. Say in one line what's on it.",
                    {"title": {"type": "string"}, "markdown": {"type": "string"}, "html": {"type": "string"}, "path": {"type": "string"},
                     "update": {"type": "string", "description": "the path petal_show returned for a page you made, to change that page in place"}}),
-    "petal_vault": (assist("petal_vault"), "The user's vault of passwords and secrets, kept in their Keychain: you never see a secret. action list: their names. use (name): Petal types it into the field that has the cursor in the app in front, after asking the user. request (name, why): the user types a secret you need into Petal's card. Never ask for a secret in the chat.",
-                    {"action": {"type": "string", "enum": ["list", "use", "request"]}, "name": {"type": "string"}, "why": {"type": "string"}}),
+    "petal_vault": (assist("petal_vault"), "The user's vault (macOS), in their Keychain: logins, contact info (relationship: me, girlfriend, mom…), addresses (each may belong to a contact), payment info and API keys. "
+                    "You see usernames, contact info and addresses in full, and a card's name, last4 and expiry; never a password, card number, security code or key: Petal fills those into fields itself. "
+                    "action list (kind, site): what's saved. fill (fields {field: id from petal_ui}, item: an id from list; for a login, item may be left out and Petal finds the one saved for the page): "
+                    "fields are username, password, name, email, phone, street, street2, city, region, postalCode, country (a country menu too), number, expiry, month, year, securityCode, value (an API key); submit: true presses Return after the last. "
+                    "Petal decides from the page it reads itself: a login fills by itself only on its own site (or http://localhost) or app, an API key on its service's site, this Mac's pages or an app; elsewhere the user is asked. "
+                    "Payment info fills only on https pages after one Buy card per checkout: pass buying (what, in a few words) and price; after Buy, place the order on that shop without asking again; after Don't, stop. "
+                    "request (kind login, contact, address, card or apiKey; fields to fill, title, why): the user types what's missing into Petal's card (never into the chat); for a login, Submit fills the page and saves it. "
+                    "new_login (password_id, confirm_id, username_id, username; symbols false or allowed_symbols for sites that limit them): Petal makes a strong password, saves it for the page's site and fills it. "
+                    "If the user declines, don't find another way.",
+                    {"action": {"type": "string", "enum": ["list", "fill", "request", "new_login", "use"]},
+                     "item": {"type": "string", "description": "an item's id from list (or its title)"},
+                     "fields": {"type": "object", "additionalProperties": {"type": "string"}, "description": "fill or request: {field: id from petal_ui}, like {\"username\": \"e3\", \"password\": \"e4\"}"},
+                     "field": {"type": "string"}, "id": {"type": "string", "description": "one field's id from petal_ui (with field)"},
+                     "kind": {"type": "string", "enum": ["login", "contact", "address", "card", "apiKey"]}, "site": {"type": "string"},
+                     "buying": {"type": "string", "description": "fill with payment info: what you're buying, in a few words"}, "price": {"type": "string"},
+                     "submit": {"type": "boolean"}, "title": {"type": "string"}, "why": {"type": "string"}, "username": {"type": "string"},
+                     "password_id": {"type": "string"}, "confirm_id": {"type": "string"}, "username_id": {"type": "string"},
+                     "symbols": {"type": "boolean"}, "allowed_symbols": {"type": "string"}, "length": {"type": "integer"},
+                     "name": {"type": "string", "description": "use (older sessions): an item's title"},
+                     "task": {"type": "string", "description": "sessions outside Petal's own chat: the same few words for the task's acts"}}),
     "petal_memories": (assist("petal_memories"), "What Petal AI remembers about the user (everywhere, and per mode); mode limits it to one mode's and the everywhere ones.",
                        {"mode": {"type": "string"}}),
     "petal_ui": (assist("petal_ui"), "The controls of the window in front (in a sticky note's chat, the note's own window), to use with petal_act: buttons, links, text fields, checkboxes, menus, tabs, rows and the like, visible ones first, up to 150. "
@@ -895,7 +913,7 @@ ASSIST_TOOLS = {
                   "focus (id). scroll (id; direction up, down, left or right scrolls its area by most of a page; none brings the control into view). "
                   "menu (path, like \"File > Export…\"): chooses a menu bar item. key (key, like cmd-s, cmd-shift-z, return, escape, tab, down; id focuses that control first): a shortcut its menus have is chosen there, other keys go to the app, which comes forward to take them. "
                   "menu and key go to the window the last petal_ui looked at (app, if given, must be its app), brought to the front of its app first. The first use of an app in a reply asks the user (in an AI session outside Petal's own chat, the first in a task: name it in task; a new task, two quiet minutes or a Stop asks again). Each act checks the window hasn't moved or changed since petal_ui; when it has, call petal_ui again. "
-                  "What only a real click could do, it says so: ask the user to do it. Never for password fields (petal_vault types secrets) or private apps.",
+                  "What only a real click could do, it says so: ask the user to do it. Never for password fields (petal_vault fills saved passwords) or private apps.",
                   {"action": {"type": "string", "enum": ["press", "type", "focus", "scroll", "menu", "key"]}, "id": {"type": "string", "description": "a control's id from petal_ui, like e12"},
                    "text": {"type": "string"}, "replace": {"type": "boolean", "description": "type: replace what's in the field (default true)"}, "submit": {"type": "boolean", "description": "type: press Return after"},
                    "direction": {"type": "string", "enum": ["up", "down", "left", "right"]}, "path": {"type": "string", "description": "menu: like File > Export…"},

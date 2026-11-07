@@ -6,7 +6,11 @@ import SwiftUI
 @MainActor
 enum Snapshot {
     static func run(to folder: String) {
+        // Made-up items stand in for the vault: a snapshot never reads or writes the Keychain.
+        let vault = sampleVault()
+        VaultStore.standIn(vault)
         let app = PetalApp()
+        VaultModel.shared.preview(vault)
         let dock = ScreenDock()
         dock.desktop = 1
         dock.mode = app.config.mode(forDesktop: 1)
@@ -159,6 +163,24 @@ enum Snapshot {
                                           detail: "First, pressing Export. Until this reply is done it can press, type and choose menus in Safari with its own pointer; yours stays where it is. Esc stops it."))
         write(render(AnyView(CardView(card: FocusCard(kind: .ask))), app: app, size: nil), name: "card-ask-computer", folder: folder)
         app.assist.preview(nil)
+        // The vault's cards: a login it doesn't have yet, the one Buy card of a checkout, an address, and a login on a
+        // page that isn't its site.
+        let cards: [(String, Assist.Request)] = [
+            ("card-vault-login", Assist.Request(kind: "vault-new", title: "Add a login to your vault", detail: "", every: true,
+                                                form: VaultForm(kind: .login, place: "github.com", fills: true))),
+            ("card-vault-address", Assist.Request(kind: "vault-new", title: "Add an address", detail: "For your order from shop.example.", every: true,
+                                                  form: VaultForm(kind: .address))),
+            ("card-vault-buy", Assist.Request(kind: "vault-buy", title: "Buy on shop.example?",
+                                              detail: "Petal AI says: “Sony WH-1000XM5 headphones, $279”. Pays with Visa •••• 4242.", every: true, warn: true, allow: "Buy")),
+            ("card-vault-mismatch", Assist.Request(kind: "vault-fill", title: "Fill your github.com password on githuh-login.com?",
+                                                   detail: "This login is saved for github.com. This page is githuh-login.com: if it only looks like github.com, it may be trying to take your password.",
+                                                   every: true, warn: true, allow: "Fill anyway")),
+        ]
+        for (name, request) in cards {
+            app.assist.preview(request)
+            write(render(AnyView(CardView(card: FocusCard(kind: .ask))), app: app, size: nil), name: name, folder: folder)
+        }
+        app.assist.preview(nil)
         views.append(("computer-pill", AnyView(ActingPill(caption: "Pressing Export") {}), nil))
         views.append(("computer-pill-idle", AnyView(ActingPill(caption: nil) {}), nil))
         views.append(("computer-pill-long", AnyView(ActingPill(caption: "Typing in Search or enter website name, a long field name") {}), nil))
@@ -190,6 +212,36 @@ enum Snapshot {
         for (name, view, size) in views {
             write(render(view, app: app, size: size), name: name, folder: folder)
         }
+    }
+
+    /// The vault's made-up items for snapshots.
+    static func sampleVault() -> [VaultItem] {
+        var github = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"])
+        github[.username] = "ada@example.com"
+        github[.password] = "sample-password-1"
+        var bank = VaultItem(kind: .login, title: "Bank", sites: ["bank.com.tr"])
+        bank[.username] = "ada"
+        bank[.password] = "sample-password-2"
+        var me = VaultItem(kind: .contact, title: "Me")
+        me[.name] = "Ada Lovelace"
+        me[.relationship] = "me"
+        me[.email] = "ada@example.com"
+        var deniz = VaultItem(kind: .contact, title: "Deniz")
+        deniz[.name] = "Deniz Kaya"
+        deniz[.relationship] = "girlfriend"
+        deniz[.phone] = "+90 555 000 00 00"
+        var home = VaultItem(kind: .address, title: "Home")
+        home[.name] = "Deniz Kaya"
+        home[.street] = "Bağdat Cd. 12"
+        home[.city] = "İstanbul"
+        home[.country] = "Türkiye"
+        home[.contact] = deniz.id
+        var card = VaultItem(kind: .card, title: "Visa")
+        card[.number] = "4242 4242 4242 4242"
+        card[.expiry] = "04/27"
+        var key = VaultItem(kind: .apiKey, title: "OpenAI", sites: ["platform.openai.com"])
+        key[.value] = "sample-key-123456"
+        return [github, bank, me, deniz, home, card, key]
     }
 
     private static func render(_ view: AnyView, app: PetalApp, size: CGSize?) -> NSImage? {

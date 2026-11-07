@@ -30,7 +30,7 @@ final class SettingsWindow {
 }
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case dock, modes, claude, routines, focus, apps, look, permissions, about
+    case dock, modes, claude, vault, routines, focus, apps, look, permissions, about
     var id: String { rawValue }
 
     var title: String {
@@ -38,6 +38,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dock: "Dock"
         case .modes: "Modes"
         case .claude: "AI"
+        case .vault: "Vault"
         case .routines: "Routines"
         case .focus: "Focus"
         case .apps: "Apps & Extras"
@@ -52,6 +53,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dock: "dock.rectangle"
         case .modes: "circle.hexagongrid.fill"
         case .claude: "sparkles"
+        case .vault: "key.fill"
         case .routines: "wand.and.sparkles"
         case .focus: "scope"
         case .apps: "square.grid.2x2.fill"
@@ -66,6 +68,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dock: Color(red: 0.85, green: 0.21, blue: 0.50)
         case .modes: Color(red: 0.69, green: 0.55, blue: 1.0)
         case .claude: Color(red: 0.85, green: 0.47, blue: 0.34)
+        case .vault: Color(red: 0.32, green: 0.66, blue: 0.62)
         case .routines: Color(red: 0.95, green: 0.68, blue: 0.22)
         case .focus: Color(red: 0.30, green: 0.68, blue: 0.95)
         case .apps: Color(red: 0.35, green: 0.78, blue: 0.55)
@@ -80,6 +83,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dock: "Choose your dock, and where it sits."
         case .modes: "Each Desktop has its own mode, with its own apps."
         case .claude: "Claude, Codex, or no AI at all."
+        case .vault: "What Petal AI fills in for you, without seeing secrets."
         case .routines: "What Petal does by itself, in your words."
         case .focus: "Gentle cards when you drift from your mode."
         case .apps: "What the dock shows besides your apps."
@@ -199,6 +203,7 @@ struct SettingsView: View {
         case .dock: DockSettings()
         case .modes: ModesSettings()
         case .claude: ClaudeSettings()
+        case .vault: VaultSettings()
         case .routines: RoutinesSettings()
         case .focus: FocusSettings()
         case .apps: AppsSettings()
@@ -750,7 +755,6 @@ struct ClaudeSettings: View {
                 SettingToggle(key: "computerUse", title: "Let Petal AI use your apps", detail: "Never apps kept private, and never password fields.")
             }
             MemoryCard()
-            VaultCard()
             PrivacyCard()
             AIHistoryCard()
             if !app.config.strings("aiAllowed").isEmpty {
@@ -820,36 +824,6 @@ struct AIHistoryCard: View {
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-/// Secrets Petal AI can use without seeing them: their names, and adding or removing one.
-struct VaultCard: View {
-    @State private var names = Assist.vaultNames()
-    @State private var name = ""
-    @State private var secret = ""
-
-    var body: some View {
-        Card(title: "Vault", footer: "Passwords and keys Petal AI can type in for you, after asking each time. They stay in your Keychain; the AI never sees them.") {
-            ForEach(names, id: \.self) { item in
-                HStack {
-                    Image(systemName: "key.fill").font(.system(size: 11)).foregroundStyle(.secondary)
-                    Text(item).font(.system(size: 13))
-                    Spacer()
-                    RoundButton(symbol: "xmark") { Assist.vaultRemove(item); names = Assist.vaultNames() }
-                }
-            }
-            HStack(spacing: 8) {
-                TextField("Name, such as GitHub password", text: $name).textFieldStyle(.roundedBorder)
-                SecureField("Secret", text: $secret).textFieldStyle(.roundedBorder)
-                Button("Add") {
-                    Assist.vaultSave(name.trimmingCharacters(in: .whitespaces), secret)
-                    name = ""; secret = ""
-                    names = Assist.vaultNames()
-                }
-                .buttonStyle(.glass).disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || secret.isEmpty)
             }
         }
     }

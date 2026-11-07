@@ -2,7 +2,7 @@ import AppKit
 import Security
 
 /// What Petal AI did (shown in Settings › AI, each with its own undo where there is one), the apps it never looks
-/// into, and the vault: secrets it can use (typed into the field in front, after asking) but never sees.
+/// into, and keeping the vault's secrets out of everything it reads.
 extension Assist {
     // MARK: What it did
 
@@ -92,47 +92,11 @@ extension Assist {
         Set(NSWorkspace.shared.runningApplications.filter { neverLook($0.bundleIdentifier) }.map(\.processIdentifier))
     }
 
-    // MARK: The vault
-
-    nonisolated private static let vaultService = "tech.edgetr.petal.vault"
-
-    /// The secrets' names (never their values), from the Keychain.
-    nonisolated static func vaultNames() -> [String] {
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: vaultService,
-                                    kSecMatchLimit as String: kSecMatchLimitAll, kSecReturnAttributes as String: true]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let items = result as? [[String: Any]] else { return [] }
-        return items.compactMap { $0[kSecAttrAccount as String] as? String }.sorted()
-    }
-
-    static func vaultSave(_ name: String, _ secret: String) {
-        let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: vaultService,
-                                   kSecAttrAccount as String: name]
-        SecItemDelete(base as CFDictionary)
-        var item = base
-        item[kSecValueData as String] = Data(secret.utf8)
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
-        SecItemAdd(item as CFDictionary, nil)
-        VaultIndex.changed()
-    }
-
-    static func vaultRemove(_ name: String) {
-        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: vaultService,
-                       kSecAttrAccount as String: name] as CFDictionary)
-        VaultIndex.changed()
-    }
-
-    nonisolated fileprivate static func vaultSecret(_ name: String) -> String? {
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: vaultService,
-                                    kSecAttrAccount as String: name, kSecReturnData as String: true]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
+    // MARK: The vault (VaultStore.swift keeps it, VaultFill.swift uses it)
 
     /// Whether `text` is one of the vault's secrets, holds 8 characters or more of one, or holds a short one (a PIN)
     /// as a word of its own, anywhere in it; or is too long to look through (about 1 MB): petal_act never types one
-    /// (the vault types its own, after asking), and petal_ui never shows one. The first call after the vault changes
+    /// (the vault fills its own, VaultFill.swift), and petal_ui never shows one. The first call after the vault changes
     /// reads the Keychain: off the main thread.
     nonisolated static func isVaultSecret(_ text: String) -> Bool {
         vaultCheck(text) != .clean
@@ -151,53 +115,6 @@ extension Assist {
         let clean = index.redacted(text)
         return clean.count > limit ? String(clean.prefix(limit)) : clean
     }
-
-    /// The vault tool: list the names, use one (typed into the field in front, after asking every time, even with
-    /// Full access), or ask the person for one it doesn't have (typed into the card, never shown to the AI).
-    func vault(_ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
-        let name = (args["name"] as? String ?? "").trimmingCharacters(in: .whitespaces)
-        switch args["action"] as? String ?? "list" {
-        case "list":
-            send(["secrets": Self.vaultNames()])
-        case "use":
-            guard Self.vaultNames().contains(name) else { return fail("There's no “\(name)” in the vault. Ask for it with action: request.") }
-            guard let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
-                return fail("Nothing's in front to type into.")
-            }
-            let place = front.localizedName ?? "the app in front"
-            ask("vault:\(name)", "Type your “\(name)” into \(place)", detail: "Petal types it into the field that has the cursor; \(app.chatProvider?.name ?? "the AI") never sees it.",
-                always: true) { allowed in
-                guard allowed else { return send(["declined": "The person didn't allow it."]) }
-                guard let secret = Self.vaultSecret(name) else { return fail("Couldn't read it from the Keychain.") }
-                Self.type(secret, into: front.processIdentifier)
-                self.did("Typed your “\(name)” into \(place)")
-                send(["typed": name, "into": place])
-            }
-        case "request":
-            guard !name.isEmpty else { return fail("Give the secret a name, such as “GitHub password”.") }
-            let why = args["why"] as? String ?? ""
-            ask("vault-new", "\(app.chatProvider?.name ?? "Petal AI") needs your “\(name)”", detail: why.isEmpty ? "It goes in Petal's vault (your Keychain), and the AI never sees it." : why,
-                always: true, secret: true, typed: { secret in Self.vaultSave(name, secret) }) { allowed in
-                guard allowed else { return send(["declined": "The person didn't add it."]) }
-                self.did("Saved your “\(name)” in the vault")
-                send(["saved": name, "note": "It's in the vault; use it with action: use. You can't read it."])
-            }
-        default:
-            fail("action is list, use or request")
-        }
-    }
-
-    /// Types text into an app as keystrokes, to the field that has the cursor (needs Accessibility).
-    private static func type(_ text: String, into pid: pid_t) {
-        let source = CGEventSource(stateID: .combinedSessionState)
-        for chunk in UIMap.batches(text) {
-            for down in [true, false] {
-                let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)
-                chunk.withUnsafeBufferPointer { event?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: $0.baseAddress) }
-                event?.postToPid(pid)
-            }
-        }
-    }
 }
 
 /// The vault's secrets as hashes (UIMap.SecretIndex), read from the Keychain once and again only after the vault
@@ -213,6 +130,7 @@ enum VaultIndex {
         index = nil
         generation += 1
         lock.unlock()
+        DispatchQueue.main.async { MainActor.assumeIsolated { VaultModel.shared.changed() } }
     }
 
     static func current() -> UIMap.SecretIndex {
@@ -220,7 +138,7 @@ enum VaultIndex {
         if let index { lock.unlock(); return index }
         let started = generation
         lock.unlock()
-        let made = UIMap.SecretIndex(Assist.vaultNames().compactMap(Assist.vaultSecret))
+        let made = UIMap.SecretIndex(VaultStore.items().flatMap(Vault.secrets))
         lock.lock()
         if generation == started { index = made }   // a change meanwhile is read next time
         lock.unlock()

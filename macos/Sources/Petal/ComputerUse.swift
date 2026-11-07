@@ -13,7 +13,7 @@ import SwiftUI
 /// The first act on an app in a reply asks the person (Assist.ask, kind `computer:<bundle id>`): Allow covers that
 /// app for the rest of the reply, Always for good, unless the chat has Full access. An AI session outside Petal has
 /// no replies Petal can see: its Allow lasts one task (the same `task`, with no more than two minutes between acts).
-/// Never apps kept private (`aiNeverLook`), never password fields, never a vault secret: the vault types its own.
+/// Never apps kept private (`aiNeverLook`), never password fields, never a vault secret: the vault fills its own (VaultFill.swift).
 ///
 /// Each chat is its own caller (its note's id, or `mcp-<pid>` for the Petal tools of an AI session outside Petal):
 /// callers never share a window's ids or what the person allowed. An act only goes ahead on the window `petal_ui`
@@ -58,6 +58,8 @@ final class ComputerUse {
         var stopped = false
         var last = Date()
         let cancel = Acting.Cancel()
+        /// Shops the person said Buy to in this reply (their registrable names): payment info fills there now.
+        var checkouts: Set<String> = []
     }
 
     /// One action, waiting its turn: the cursor does one thing at a time.
@@ -91,7 +93,7 @@ final class ComputerUse {
     }
 
     /// By caller. Never shared between two chats.
-    private var maps: [String: Map] = [:]
+    private(set) var maps: [String: Map] = [:]
     private var sessions: [String: Session] = [:] { didSet { standGuard() } }
     private var closed: [String: Closed] = [:]
     private var line: [Job] = [] { didSet { standGuard() } }
@@ -124,7 +126,7 @@ final class ComputerUse {
     }
 
     /// Why Petal can't use apps now (turned off, or no Accessibility), or nil.
-    private func refusal() -> String? {
+    func refusal() -> String? {
         guard app.config.bool("computerUse") else { return "Using apps is off in Petal's settings (computerUse); only the person can turn it on." }
         guard Windows.trusted else { return "Petal needs Accessibility for this (Petal's settings, Permissions)." }
         return nil
@@ -132,7 +134,7 @@ final class ComputerUse {
 
     /// The same, for one app: asked again right before every action and before a petal_ui answer goes back, since the
     /// person may have changed their mind meanwhile.
-    private func refusal(for bundle: String, name: String) -> String? {
+    func refusal(for bundle: String, name: String) -> String? {
         if let refusal = refusal() { return refusal }
         if assist.neverLook(bundle) { return "The user keeps \(name) private: Petal doesn't look into it or use it." }
         return nil
@@ -249,7 +251,7 @@ final class ComputerUse {
         case "type":
             guard !options.text.isEmpty else { return fail("Give the text to type.") }
             if let entry, UIMap.isSecure(entry.node) {
-                return fail("That's a password field: Petal never types into those for you. Use petal_vault (action: use) to type a saved secret, or ask the person.")
+                return fail("That's a password field: petal_act never types there. petal_vault fills a saved password (action: fill), or asks the person for one (action: request).")
             }
         case "scroll":
             guard ["", "up", "down", "left", "right"].contains(options.direction) else { return fail("direction is up, down, left or right (or none, to bring the control into view).") }
@@ -269,6 +271,51 @@ final class ComputerUse {
         let job = Job(caller: caller, action: action, entry: entry, map: map, bundle: bundle, caption: caption, options: options,
                       cancel: Acting.Cancel(under: session.cancel), send: send, fail: fail)
         if session.apps.contains(bundle) { return enqueue(job) }
+        admit(job, session: session)
+    }
+
+    /// A field filled from the vault (VaultFill.swift): the same line, pointer, Stop and checks as petal_act, on a
+    /// control of the window petal_ui looked at. `allowed`: the person just said yes to this very fill on its card,
+    /// which lets it into the app for that fill alone; otherwise the app is asked about as petal_act asks.
+    func fill(_ plan: VaultFillPlan, entry: Entry, map: Map, caller: String, allowed: Bool,
+              send: @escaping (Any) -> Void, fail: @escaping (String) -> Void) {
+        let session = session(caller, task: UIMap.tidy(plan.task).lowercased())
+        sessions[caller]?.last = Date()
+        keepSweeping()
+        guard !session.stopped else { return fail(Self.stoppedText + " Don't carry on in this reply: say what's left and wait for them.") }
+        guard maps[caller]?.id == map.id else { return fail("The window was looked at again (or 5 minutes passed) since these ids. " + Acting.changed) }
+        guard let target = NSRunningApplication(processIdentifier: map.pid), !target.isTerminated else { return fail("\(map.appName) isn't open.") }
+        let bundle = target.bundleIdentifier ?? "\(target.processIdentifier)"
+        if let refusal = refusal(for: bundle, name: map.appName) { return fail(refusal) }
+        var options = Acting.Options()
+        options.fill = plan
+        options.submit = plan.submit
+        let job = Job(caller: caller, action: "fill", entry: entry, map: map, bundle: bundle, caption: "Filling your \(plan.field.words)",
+                      options: options, cancel: Acting.Cancel(under: session.cancel), send: send, fail: fail)
+        if allowed || session.apps.contains(bundle) { return enqueue(job) }
+        admit(job, session: session)
+    }
+
+    /// Whether the person said Buy to `shop` in this reply (or task), and the cancel of that reply, which the Buy
+    /// card's answer must still belong to.
+    func checkout(_ caller: String, shop: String, task: String) -> (allowed: Bool, cancel: Acting.Cancel) {
+        let current = session(caller, task: UIMap.tidy(task).lowercased())
+        return (!current.stopped && current.checkouts.contains(shop), current.cancel)
+    }
+
+    /// The person said Buy: payment info fills on `shop` for the rest of this reply, and Petal AI may use the app to
+    /// place the order without asking again. False when the reply ended while they were asked.
+    func allowCheckout(_ caller: String, shop: String, bundle: String, cancel: Acting.Cancel) -> Bool {
+        guard let current = sessions[caller], current.cancel === cancel, !current.stopped, !cancel.stopped else { return false }
+        sessions[caller]?.checkouts.insert(shop)
+        sessions[caller]?.apps.insert(bundle)
+        return true
+    }
+
+    /// The first act on an app in a reply asks the person; Allow lets the reply use it.
+    private func admit(_ job: Job, session: Session) {
+        let caller = job.caller, name = job.appName, bundle = job.bundle, caption = job.caption
+        let send = job.send, fail = job.fail
         let first = caption.prefix(1).lowercased() + caption.dropFirst()
         let lasting = session.turn == Self.outside ? "For this task" : "Until this reply is done"
         assist.ask("computer:\(bundle)", "Let Petal AI use \(name)?",
@@ -491,6 +538,12 @@ final class ComputerUse {
         // What its own typing, focusing or scrolling changed in the window isn't a change behind its back.
         if let fingerprint = outcome.fingerprint, maps[job.caller]?.id == job.map.id { maps[job.caller]?.fingerprint = fingerprint }
         assist.did(historyLine(job, outcome))
+        if let plan = job.options.fill {
+            var reply: [String: Any] = ["filled": plan.field.rawValue, "app": job.appName]
+            if let note = outcome.note { reply["note"] = note }
+            if plan.submit { reply["next"] = "The window may have changed: call petal_ui again before using more ids." }
+            return job.send(reply)
+        }
         var reply: [String: Any] = ["done": job.caption, "app": job.appName]
         if let value = outcome.value { reply["value"] = value }
         if let chose = outcome.chose { reply["chose"] = chose }
@@ -510,6 +563,10 @@ final class ComputerUse {
         case "focus": return "Went to \(thing) in \(job.appName)"
         case "scroll": return "Scrolled in \(job.appName)"
         case "menu": return "Chose \(outcome.chose ?? job.options.path.joined(separator: " › ")) in \(job.appName)"
+        case "fill":
+            let plan = job.options.fill
+            let place = plan?.place.web == true ? plan?.place.host ?? job.appName : job.appName
+            return "Filled your \(plan.map { $0.title.isEmpty ? "" : $0.title + " " } ?? "")\(plan?.field.words ?? "details") on \(place)"
         default:
             let key = job.options.key?.label ?? "a key"
             return "Pressed \(key)\(outcome.chose.map { " (\($0))" } ?? "") in \(job.appName)"
@@ -879,6 +936,8 @@ enum Acting {
         var direction = ""
         var path: [String] = []
         var key: UIMap.Key?
+        /// A field filled from the vault (VaultFill.swift).
+        var fill: VaultFillPlan?
     }
 
     struct Prepared {
@@ -915,7 +974,7 @@ enum Acting {
     }
 
     static let changed = "Call petal_ui again for fresh ids."
-    static let password = "That's a password field: Petal doesn't type there. petal_vault types a saved secret."
+    static let password = "That's a password field: petal_act doesn't type there. petal_vault fills a saved password (action: fill)."
 
     /// The window is still there, where the map said and showing what it showed (the same title, the same rows
     /// selected, the same control with the keyboard); so is the control. Then where the cursor goes, and for a
@@ -1027,7 +1086,7 @@ enum Acting {
     // MARK: The clipboard and the vault
 
     /// Never a vault secret onto the clipboard, where petal_look could read it, nor off it into a window, nor anything
-    /// pasted into a password field: the vault types its own, asking the person every time. The one check for every
+    /// pasted into a password field: the vault fills its own (VaultFill.swift). The one check for every
     /// way Petal copies or pastes (a key, a menu item, a button), right before it, in the window it acts on (`perform`).
     static func clipboardRefusal(_ map: ComputerUse.Map, _ element: AXUIElement?, clip: UIMap.Clip?) -> String? {
         switch clip {
@@ -1060,11 +1119,11 @@ enum Acting {
         for control in [element, focused].compactMap({ $0 }) {
             let node = Reader.node(control)
             if UIMap.isSecure(node) {
-                return pasting ? "A password field has the cursor: Petal doesn't paste there. petal_vault types a saved secret, asking the person every time."
-                    : "A password field has the cursor: Petal doesn't type there. petal_vault types a saved secret."
+                return pasting ? "A password field has the cursor: Petal doesn't paste there. petal_vault fills a saved one (action: fill)."
+                    : "A password field has the cursor: Petal doesn't type there. petal_vault fills a saved one (action: fill)."
             }
             if pasting, UIMap.looksSecret(node) {
-                return "The cursor is in a field for a password or token: Petal doesn't paste there. petal_vault types a saved secret, asking the person every time."
+                return "The cursor is in a field for a password or token: Petal doesn't paste there. petal_vault fills a saved one (action: fill)."
             }
         }
         return nil
@@ -1086,7 +1145,7 @@ enum Acting {
                 guard let text = found[name] as? String else { continue }
                 switch Assist.vaultCheck(text) {
                 case .secret:
-                    return "What's selected holds one of the vault's secrets: Petal doesn't copy it. petal_vault types a saved secret where it's needed, asking the person every time."
+                    return "What's selected holds one of the vault's secrets: Petal doesn't copy it. petal_vault fills a saved one where it's needed (action: fill)."
                 case .tooLong: return tooMuch("copy")
                 case .clean: break
                 }
@@ -1099,7 +1158,7 @@ enum Acting {
     /// private (what petal_look won't read): then why nothing is pasted. Off the main thread: the Keychain and an
     /// app's promised clipboard data may take a while.
     nonisolated static func pasteRefusal(_ pasteboard: NSPasteboard = .general) -> String? {
-        let refusal = "The clipboard holds a secret (one of the vault's, or a password manager's): Petal doesn't paste it. petal_vault types a saved secret, asking the person every time."
+        let refusal = "The clipboard holds a secret (one of the vault's, or a password manager's): Petal doesn't paste it. petal_vault fills a saved one (action: fill)."
         if Assist.isConcealed(pasteboard) { return refusal }
         for type in [NSPasteboard.PasteboardType.string, .html, .rtf, .URL] {
             guard let text = pasteboard.string(forType: type) else { continue }
@@ -1124,7 +1183,7 @@ enum Acting {
         let reading = Reader.read(pid: map.pid, window: map.windowID, budget: 1.5, deep: true)
         if reading.gone || reading.window == nil { return "That window is gone; nothing was copied. " + changed }
         if reading.holdsSecret {
-            return "This window shows a secret (one of the vault's, or a password, token or API key): Petal doesn't press its Copy buttons. petal_vault types a saved secret where it's needed, asking the person every time."
+            return "This window shows a secret (one of the vault's, or a password, token or API key): Petal doesn't press its Copy buttons. petal_vault fills a saved one where it's needed (action: fill)."
         }
         if reading.timedOut { return "Petal couldn't read all of this window in time to check it for secrets, so nothing was copied: ask the person to copy it." }
         return nil
@@ -1149,7 +1208,7 @@ enum Acting {
     /// alone for good. `then` gets why it was cleared, or nil, on the main thread.
     final class CopyWatch: @unchecked Sendable {
         nonisolated static let queue = DispatchQueue(label: "petal.computer.clipboard", qos: .userInitiated)
-        static let cleared = "That button copied a saved secret (or more text than Petal can check for one); Petal cleared the clipboard. petal_vault types a saved secret where it's needed, asking the person every time."
+        static let cleared = "That button copied a saved secret (or more text than Petal can check for one); Petal cleared the clipboard. petal_vault fills a saved one where it's needed (action: fill)."
 
         private let mark: CopyMark
         private let until: TimeInterval
@@ -1292,7 +1351,7 @@ enum Acting {
         case "type":
             guard let element, let node = entry?.node else { break }
             switch Assist.vaultCheck(options.text) {
-            case .secret: outcome.error = "That's one of the vault's secrets: petal_vault types it, after asking."
+            case .secret: outcome.error = "That's one of the vault's secrets: petal_vault fills it (action: fill)."
             case .tooLong: outcome.error = tooMuch("type")
             case .clean: break
             }
@@ -1343,6 +1402,12 @@ enum Acting {
             let now = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
             if !now.isEmpty, !options.submit {
                 outcome.value = UIMap.looksSecret(node) || Assist.isVaultSecret(now) ? UIMap.hidden : UIMap.truncate(UIMap.tidy(now), 200)
+            }
+        case "fill":
+            guard let element, let plan = options.fill else { break }
+            if let error = VaultFiller.fill(plan, into: element, map: map, cancel: cancel) {
+                if cancel.stopped { return outcome }
+                outcome.error = error
             }
         case "scroll":
             guard let element else { break }
@@ -1422,7 +1487,7 @@ enum Acting {
         }
         // Petal's own change (text, caret, focus, scroll) becomes what's expected next, so its next step isn't taken
         // for someone else's.
-        if outcome.error == nil, !cancel.stopped, ["type", "focus", "scroll", "key"].contains(action) {
+        if outcome.error == nil, !cancel.stopped, ["type", "focus", "scroll", "key", "fill"].contains(action) {
             let app = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(app, 0.5)
             outcome.fingerprint = Reader.fingerprint(app: app, window: map.window, lists: map.lists)

@@ -369,7 +369,7 @@ final class Popups {
         }
         // A card asking for a secret takes the keyboard for it.
         // One taking the place of a card that had the keyboard (a notice over a reply being written) gives it back.
-        if card.kind == .reply || (card.kind == .ask && PetalApp.shared.assist.pending?.secret == true) {
+        if card.kind == .reply || (card.kind == .ask && PetalApp.shared.assist.pending?.takesKeys == true) {
             cardPanel.takesKeys = true
             cardPanel.makeKey()
         } else {
@@ -1029,9 +1029,12 @@ struct AskCard: View {
 struct AskRequestView: View {
     @Environment(PetalApp.self) private var app
     let request: Assist.Request
-    @State private var secret = ""
 
     var body: some View {
+        if let form = request.form { VaultFormView(request: request, form: form) } else { question }
+    }
+
+    private var question: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 10) {
                 ProviderMark(provider: app.chatProvider).frame(width: 18, height: 18)
@@ -1043,18 +1046,16 @@ struct AskRequestView: View {
                 }
                 Spacer(minLength: 0)
             }
-            if request.secret {
-                SecureField("Type it here", text: $secret).textFieldStyle(.roundedBorder).onSubmit { app.assist.choose(.once, secret: secret, for: request.id) }
-            }
             HStack(spacing: 8) {
                 Spacer()
-                Button("Don't") { app.assist.choose(.no, for: request.id) }.buttonStyle(.glass)
-                if request.secret {
-                    Button("Save") { app.assist.choose(.once, secret: secret, for: request.id) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
-                        .disabled(secret.isEmpty)
+                if request.warn {
+                    // Something doesn't match, or it pays: Don't is the one to press without thinking.
+                    Button(request.allow) { app.assist.choose(.once, for: request.id) }.buttonStyle(.glass)
+                    Button("Don't") { app.assist.choose(.no, for: request.id) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
                 } else {
+                    Button("Don't") { app.assist.choose(.no, for: request.id) }.buttonStyle(.glass)
                     if !request.every { Button("Always") { app.assist.choose(.always, for: request.id) }.buttonStyle(.glass) }
-                    Button("Allow") { app.assist.choose(.once, for: request.id) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
+                    Button(request.allow) { app.assist.choose(.once, for: request.id) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
                 }
             }
         }
