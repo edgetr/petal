@@ -37,6 +37,8 @@ struct AgentAccessCheck {
         sameVariable()
         relaying()
         writing()
+        answers()
+        signals()
         if failures > 0 { print("\(failures) agent access check(s) failed"); exit(1) }
         print("agent access: all checks passed")
     }
@@ -814,5 +816,46 @@ struct AgentAccessCheck {
         run(closed, chunk: 1000, write: { _ in writes += 1; return false }, stopped: { false })
         expect(writes == 1, "no write after the agent's end closed", "\(writes)")
         expect(closed.read == 5000, "the rest is read and dropped", "\(closed.read)")
+    }
+
+    /// An answer petal run can't read is never shown: only one of three fixed sentences, whatever it holds.
+    static func answers() {
+        let key = "sk-ant-api03-0123456789abcdefXYZ"
+        let fixed = [AgentAccess.noAnswerText, AgentAccess.tooOldText, AgentAccess.unreadableText]
+        let cases: [(String, String)] = [
+            ("", AgentAccess.noAnswerText), (" \n", AgentAccess.noAnswerText),
+            ("unknown function agentKeys", AgentAccess.tooOldText),
+            ("{\"keys\":[{\"title\":\"K\",\"secret\":\"" + key, AgentAccess.unreadableText),   // cut short
+            (key, AgentAccess.unreadableText), ("Petal isn't running", AgentAccess.unreadableText),
+            ("unknown function " + key, AgentAccess.tooOldText),
+        ]
+        for (answer, expected) in cases {
+            let text = AgentAccess.unreadable(Array(answer.utf8))
+            expect(text == expected, "an unreadable answer gets its fixed sentence", "\(answer.prefix(20)) → \(text)")
+            expect(fixed.contains(text) && !text.contains(key) && !text.contains("sk-"), "nothing of the answer is shown", text)
+        }
+        // Any bytes at all, garbled or cut anywhere: always one of the three sentences.
+        var generator = SystemRandomNumberGenerator()
+        let whole = Array(("{\"keys\":[{\"secret\":\"" + key + "\"}]}").utf8)
+        for cut in 0...whole.count {
+            expect(fixed.contains(AgentAccess.unreadable(Array(whole[..<cut]))), "a cut answer gets a fixed sentence", "\(cut)")
+        }
+        for _ in 0..<200 {
+            let bytes = (0..<Int.random(in: 0...64, using: &generator)).map { _ in UInt8.random(in: 0...255, using: &generator) }
+            expect(fixed.contains(AgentAccess.unreadable(bytes)), "random bytes get a fixed sentence")
+        }
+    }
+
+    /// What petal run does with each signal while its command runs: the terminal's (sent to the whole group, so the
+    /// command has them already) are ignored, never passed on again; what's sent to petal run alone is passed on.
+    static func signals() {
+        expect(AgentAccess.onSignal(SIGINT) == .ignore, "Ctrl-C isn't passed on a second time")
+        expect(AgentAccess.onSignal(SIGQUIT) == .ignore, "Ctrl-\\ isn't passed on a second time")
+        expect(AgentAccess.onSignal(SIGTERM) == .forward, "SIGTERM to petal run alone is passed on")
+        expect(AgentAccess.onSignal(SIGHUP) == .forward, "SIGHUP is passed on")
+        expect(AgentAccess.onSignal(SIGTSTP) == .usual, "Ctrl-Z keeps its usual effect")
+        expect(AgentAccess.onSignal(SIGPIPE) == .usual && AgentAccess.onSignal(SIGKILL) == .usual, "others aren't taken over")
+        expect(Set(AgentAccess.handledSignals) == [SIGINT, SIGQUIT, SIGTERM, SIGHUP], "the signals taken over")
+        expect(AgentAccess.handledSignals.allSatisfy { AgentAccess.onSignal($0) != .usual }, "each taken over is ignored or passed on")
     }
 }

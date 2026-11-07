@@ -197,6 +197,9 @@ final class Routines {
     /// old rule (kept for the session) isn't reused for the new one.
     @ObservationIgnored private var ruleVersion: [String: Int] = [:]
     @ObservationIgnored private var plans: [String: Plan] = [:]
+    /// Each run under way, by routine: stopped when the routine changes, goes or is turned off, so its moves off the
+    /// main thread stop too.
+    @ObservationIgnored private var runs: [(id: String, stop: RoutineStop)] = []
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored private var stamp: Date?
@@ -477,18 +480,25 @@ final class Routines {
     /// saw). Each file action is planned when the run reaches it, after the actions before it are done (a Shortcut's
     /// export is there by then); it asks again only when there are more files than they allowed.
     /// `rule`: the rule version the run was decided under (a manual run's card may wait while the routine changes).
-    /// `caller`, `live`: the chat or AI session that ran it by hand, whose cards these are; once it hangs up the rest
-    /// doesn't happen.
+    /// `caller`, `live`, `stop`: the chat or AI session that ran it by hand, whose cards these are; once it hangs up
+    /// (`stop` is set then, off the main thread too) the rest doesn't happen, not even the rest of a tidy under way.
     private func execute(_ routine: Routine, file: URL?, approved: Int? = nil, rule: Int? = nil, caller: String? = nil,
-                         live: @escaping () -> Bool = { true }, done: @escaping ([Move]) -> Void) {
+                         live: @escaping () -> Bool = { true }, stop: RoutineStop = RoutineStop(), done: @escaping ([Move]) -> Void) {
         var said: [String] = []
         var moves: [Move] = []
         var made: [String] = []
         var approved = approved
         let rule = rule ?? ruleVersion[routine.id, default: 0]
-        /// Deleted or changed while it ran (a Shortcut exporting, a card waiting): the rest of it doesn't happen.
-        func current() -> Bool { live() && isOn && rule == ruleVersion[routine.id, default: 0] && list.contains { $0.id == routine.id } }
+        runs.append((routine.id, stop))
+        /// Deleted or changed while it ran (a Shortcut exporting, a card waiting), or its asker hung up: the rest of
+        /// it doesn't happen.
+        func current() -> Bool {
+            let still = !stop.isStopped && live() && isOn && rule == ruleVersion[routine.id, default: 0] && list.contains { $0.id == routine.id }
+            if !still { stop.stop() }
+            return still
+        }
         func finish() {
+            runs.removeAll { $0.stop === stop }
             if !said.isEmpty { record(routine, said: said, moves: moves, made: made) }
             done(moves)
         }
@@ -516,6 +526,8 @@ final class Routines {
                 }
             } else {
                 let use = { (plan: Plan, allowed: Bool) in
+                    // Its asker hung up, or the routine changed, while this folder was planned: no card goes up.
+                    guard current() else { return finish() }
                     // Many files ask first, however the routine was started (a time, an app, a mode, or by hand).
                     self.confirm(!allowed && plan.items.count >= 10, "Tidy \(plan.items.count) files in \(plan.source.lastPathComponent)",
                                  "\(routine.name). You can put them back.", owner: caller) { yes in
@@ -524,10 +536,11 @@ final class Routines {
                             return step(index + 1)
                         }
                         guard current() else { return finish() }
-                        self.apply(plan) { done, folders in
+                        self.apply(plan, stop: stop) { done, folders, cut in
                             moves += done
                             made += folders
                             if !done.isEmpty { said.append(Self.tidied(done, in: plan.source)) }
+                            if cut { said.append("stopped before the rest of \(plan.source.lastPathComponent)") }
                             if !plan.waitingForAI.isEmpty {
                                 said.append("left \(plan.waitingForAI.count) file\(plan.waitingForAI.count == 1 ? "" : "s") waiting for the AI")
                             }
@@ -785,17 +798,16 @@ final class Routines {
         }
     }
 
-    /// Does a plan's moves off the main thread. `done(moves, folders made)`.
-    private func apply(_ plan: Plan, done: @escaping ([Move], [String]) -> Void) {
+    /// Does a plan's moves off the main thread, asking `stop` before each (each move is in the journal as it's
+    /// made). `done(moves, folders made, stopped before the end)`.
+    private func apply(_ plan: Plan, stop: RoutineStop, done: @escaping ([Move], [String], Bool) -> Void) {
+        let items = plan.items
         Self.io.async {
-            var moves: [Move] = []
-            var made: [String] = []
-            for item in plan.items {
-                guard let result = Self.move(item.file, into: item.folder) else { continue }
-                moves.append(result.move)
-                if result.made { made.append(item.folder.path) }
+            let result = RoutineStop.each(items, stop: stop) { item -> (move: Move, made: String?)? in
+                Self.move(item.file, into: item.folder).map { ($0.move, $0.made ? item.folder.path : nil) }
             }
-            DispatchQueue.main.async { MainActor.assumeIsolated { done(moves, made) } }
+            let moves = result.done.map(\.move), made = result.done.compactMap(\.made)
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(moves, made, result.stopped) } }
         }
     }
 
@@ -870,6 +882,11 @@ final class Routines {
         ruleVersion[id, default: 0] += 1
         plans[id] = nil
         jobs.removeAll { $0.id == id }
+        stopRuns(id)
+    }
+
+    private func stopRuns(_ id: String) {
+        for run in runs where run.id == id { run.stop.stop() }
     }
 
     /// A routine's rule changed, or it's gone: whatever was decided under the old rule (an AI answer on its way, a
@@ -878,6 +895,7 @@ final class Routines {
         ruleVersion[id, default: 0] += 1
         plans[id] = nil
         if gone { jobs.removeAll { $0.id == id } }
+        stopRuns(id)
         if learned[id] != nil {
             learned[id] = nil
             saveLearned()
@@ -912,9 +930,10 @@ final class Routines {
 
     /// Petal AI's routine tools (`petal_routines`, `petal_routine_save`, `petal_routine_run`, `petal_routine_undo`,
     /// `petal_routine_delete`), from Assist.handle. `caller`: the chat or AI session asking, whose card a tidy's is;
-    /// `live`: false once it hung up, and then a run it started neither asks nor goes on.
+    /// `live`: false once it hung up, and then a run it started neither asks nor goes on; `stop` is set then too, so
+    /// moves under way off the main thread stop.
     func handle(_ name: String, _ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void,
-                caller: String? = nil, live: @escaping () -> Bool = { true }) {
+                caller: String? = nil, live: @escaping () -> Bool = { true }, stop: RoutineStop = RoutineStop()) {
         switch name {
         case "petal_routines":
             send(["on": isOn, "routines": list.map { r -> [String: Any] in
@@ -930,7 +949,7 @@ final class Routines {
             guard list.contains(where: { $0.id == id }) else { return fail("No routine with id \(id); petal_routines lists them.") }
             delete(id)
             send(["deleted": id])
-        case "petal_routine_run": runTool(args, caller: caller, live: live, send, fail)
+        case "petal_routine_run": runTool(args, caller: caller, live: live, stop: stop, send, fail)
         case "petal_routine_undo":
             undo(args["entry"] as? String, done: { (back: [String]) in
                 let reply: [String: Any] = back.isEmpty ? ["putBack": [String](), "note": "Nothing to put back."] : ["putBack": back]
@@ -1017,8 +1036,8 @@ final class Routines {
         }
     }
 
-    private func runTool(_ args: [String: Any], caller: String?, live: @escaping () -> Bool, _ send: @escaping (Any) -> Void,
-                         _ fail: @escaping (String) -> Void) {
+    private func runTool(_ args: [String: Any], caller: String?, live: @escaping () -> Bool, stop: RoutineStop,
+                         _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let id = args["id"] as? String ?? ""
         guard let routine = list.first(where: { $0.id == id }) else { return fail("No routine with id \(id); petal_routines lists them.") }
         let dry = args["dryRun"] as? Bool ?? false
@@ -1031,12 +1050,12 @@ final class Routines {
         }
         let go = { (plan: Plan) in
             // Its asker gone while the plan was made (the AI sorting): nothing is asked or moved for it.
-            guard live() else { return }
+            guard live(), !stop.isStopped else { return }
             let n = plan.items.count
             // Nothing to move there: the routine's other actions still run.
             guard n > 0 else {
                 self.plans[id] = nil
-                return self.execute(routine, file: nil, approved: 0, rule: rule, caller: caller, live: live) { moves in
+                return self.execute(routine, file: nil, approved: 0, rule: rule, caller: caller, live: live, stop: stop) { moves in
                     send(["moved": moves.count, "waitingForAI": plan.waitingForAI.count,
                           "note": "Nothing to move in its first folder; its other actions ran."])
                 }
@@ -1049,7 +1068,7 @@ final class Routines {
                 guard rule == self.ruleVersion[id, default: 0] else { return changed() }
                 self.plans[id] = nil
                 // Every action of the routine, in order; its first file action may move up to this many unasked.
-                self.execute(routine, file: nil, approved: n, rule: rule, caller: caller, live: live) { moves in
+                self.execute(routine, file: nil, approved: n, rule: rule, caller: caller, live: live, stop: stop) { moves in
                     let into = Dictionary(moves.map { (URL(fileURLWithPath: $0.to).deletingLastPathComponent().lastPathComponent, 1) }, uniquingKeysWith: +)
                     send(["moved": moves.count, "into": into,
                           "leftAlone": plan.leftAlone.count, "waitingForAI": plan.waitingForAI.count, "notYet": plan.later,

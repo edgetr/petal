@@ -378,6 +378,38 @@ enum AgentAccess {
         return true
     }
 
+    // MARK: petal run's answer and signals
+
+    static let tooOldText = "This Petal is too old for petal run: update it (petal update)."
+    static let noAnswerText = "Petal didn't answer."
+    static let unreadableText = "Petal's answer couldn't be read; nothing was run."
+
+    /// What `petal run` says when Petal's answer isn't the JSON it expects: one of three fixed sentences, never any of
+    /// the answer itself (cut short or garbled, it may still hold a key).
+    static func unreadable(_ answer: [UInt8]) -> String {
+        let blank: Set<UInt8> = [0x20, 0x09, 0x0A, 0x0D]
+        if answer.allSatisfy({ blank.contains($0) }) { return noAnswerText }
+        if answer.starts(with: Array("unknown function".utf8)) { return tooOldText }
+        return unreadableText
+    }
+
+    /// What `petal run` does with a signal while its command runs. The command is in the same process group, so
+    /// what the terminal sends the group (Ctrl-C, Ctrl-\) already reaches it: `petal run` only ignores those, and
+    /// ends when the command does, with its status. What's sent to `petal run` alone (an agent stopping it: SIGTERM,
+    /// or SIGHUP) is passed on. Anything else (Ctrl-Z) keeps its usual effect on both.
+    enum OnSignal: Equatable { case ignore, forward, usual }
+
+    static func onSignal(_ number: Int32) -> OnSignal {
+        switch number {
+        case SIGINT, SIGQUIT: return .ignore
+        case SIGTERM, SIGHUP: return .forward
+        default: return .usual
+        }
+    }
+
+    /// The signals `petal run` takes over while its command runs (and puts back to their defaults in the command).
+    static let handledSignals: [Int32] = [SIGINT, SIGQUIT, SIGTERM, SIGHUP]
+
     // MARK: Who's asking
 
     /// The kinds of caller. A grant names a verified agent (or `any`, for every verified agent).

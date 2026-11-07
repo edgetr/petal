@@ -24,10 +24,19 @@ enum AgentRun {
         guard let json = try? JSONSerialization.data(withJSONObject: ask) else { CLI.fail("Couldn't ask Petal.") }
         // Petal answers within 150 seconds, or keeps saying it's waiting while its card is up for the person. Leaving
         // (an agent stopping this, or giving up) answers its card Don't, so no key is given with nobody to take it.
-        let reply = MCP.petal(["agentKeys", String(decoding: json, as: UTF8.self)], timeout: 150)
-        guard let object = try? JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any] else {
-            CLI.fail(reply.hasPrefix("unknown function") ? "This Petal is too old for petal run: update it (petal update)." : reply.isEmpty ? "Petal didn't answer." : reply)
+        var answer: [UInt8]
+        switch MCP.petalAnswer(["agentKeys", String(decoding: json, as: UTF8.self)], timeout: 150) {
+        case .failed(let text): CLI.fail(text)   // this side's own words: nothing Petal sent
+        case .bytes(let bytes): answer = bytes
         }
+        // An answer cut short or garbled may still hold a key: it's never shown, only a fixed sentence, and the
+        // bytes are zeroed before anything else happens.
+        var data = Data(answer)
+        let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let unreadable = object == nil ? AgentAccess.unreadable(answer) : nil
+        data.resetBytes(in: 0..<data.count)
+        MCP.wipe(&answer)
+        guard let object else { CLI.fail(unreadable ?? AgentAccess.unreadableText) }
         if let error = object["error"] as? String { CLI.fail(error) }
         let keys = (object["keys"] as? [[String: Any]] ?? []).compactMap { entry -> (title: String, secret: String, variable: String?)? in
             guard let title = entry["title"] as? String, let secret = entry["secret"] as? String, !secret.isEmpty else { return nil }
@@ -56,19 +65,31 @@ enum AgentRun {
         for fd in [out.read, out.write, err.read, err.write] + (input.map { [$0.read, $0.write] } ?? []) {
             posix_spawn_file_actions_addclose(&actions, fd)
         }
-        // The signals this process passes on are back to their defaults in the command, and none is blocked.
-        let forwarded: [Int32] = [SIGINT, SIGTERM, SIGHUP, SIGQUIT]
+        // The signals this process takes over are back to their defaults in the command, and none is blocked.
+        let handled = AgentAccess.handledSignals
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
         var defaults = sigset_t()
         sigemptyset(&defaults)
-        for signal in forwarded + [SIGPIPE] { sigaddset(&defaults, signal) }
+        for signal in handled + [SIGPIPE] { sigaddset(&defaults, signal) }
         var none = sigset_t()
         sigemptyset(&none)
         posix_spawnattr_setsigdefault(&attributes, &defaults)
         posix_spawnattr_setsigmask(&attributes, &none)
         posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK))
+
+        // A SIGTERM or SIGHUP sent to this process alone (an agent stopping it) is passed on, even one that comes
+        // while the command is starting.
+        let forward = Forward()
+        var sources: [DispatchSourceSignal] = []
+        for number in handled where AgentAccess.onSignal(number) == .forward {
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
+            source.setEventHandler { forward.send(number) }
+            source.resume()
+            sources.append(source)
+        }
 
         let argv = command.map { strdup($0) } + [nil]
         let envp = environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
@@ -81,17 +102,12 @@ enum AgentRun {
             if let input { close(input.write) }
             CLI.fail("petal run couldn't start \(command[0]): \(String(cString: strerror(started))).")
         }
-        // Ctrl-C and the like reach the command (and only it decides when to stop); a signal sent to this process
-        // alone (an agent stopping it) is passed on.
-        var sources: [DispatchSourceSignal] = []
         let child = pid
-        for number in forwarded {
-            signal(number, SIG_IGN)
-            let source = DispatchSource.makeSignalSource(signal: number, queue: .global())
-            source.setEventHandler { kill(child, number) }
-            source.resume()
-            sources.append(source)
-        }
+        forward.started(child)
+        // Ctrl-C and Ctrl-\ reach the command from the terminal (it's in this process group), and only it decides
+        // when to stop: from now on this process ignores them and ends when it does, with its status. (Until now they
+        // end this process, and the command with it.)
+        for number in handled where AgentAccess.onSignal(number) == .ignore { signal(number, SIG_IGN) }
         let secrets = keys.map { (secret: $0.secret, label: $0.title) }
         let streams = DispatchGroup()
         let stop = Stop()
@@ -122,6 +138,25 @@ enum AgentRun {
         let signalled = status & 0x7f
         if signalled == 0 { return (status >> 8) & 0xff }
         return 128 + signalled
+    }
+
+    /// Passes a signal on to the command, holding one that came before it started until it has.
+    private final class Forward: @unchecked Sendable {
+        private let lock = NSLock()
+        private var child: pid_t = 0
+        private var waiting: [Int32] = []
+
+        func send(_ number: Int32) {
+            lock.withLock { if child > 0 { _ = kill(child, number) } else { waiting.append(number) } }
+        }
+
+        func started(_ pid: pid_t) {
+            lock.withLock {
+                child = pid
+                for number in waiting { _ = kill(pid, number) }
+                waiting = []
+            }
+        }
     }
 
     /// When the streams stop waiting for more: set once the command has ended.

@@ -213,7 +213,10 @@ final class Assist {
         case "petal_vault": vault(args, caller: note, who: who, send, fail)
         case "petal_ui", "petal_act": computer.handle(name, args, note: note, send: send, fail: fail)
         case "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
-            app.routines.handle(name, args, send, fail, caller: note, live: live)
+            // Its asker hanging up stops a tidy's moves under way off the main thread, not only what comes next.
+            let stop = RoutineStop()
+            request?.onHangUp { stop.stop() }
+            app.routines.handle(name, args, send, fail, caller: note, live: live, stop: stop)
         case "petal_memories":
             let mode = args["mode"] as? String
             send(["memories": memories.filter { mode == nil || $0.mode == mode || $0.mode.isEmpty }.map(record)])
