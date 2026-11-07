@@ -442,7 +442,16 @@ final class PetalApp {
         // Petal AI's tools (`Petal --mcp` asks here): ["assist", tool, json]; one that changes something waits for the
         // person to allow it.
         // Petal's tools changing settings, modes or the dock (`Petal --mcp`, petal-mcp.py): done here, in order.
-        ipc.on("mcpCall") { args in MCP.answer(args.first ?? "", args.dropFirst().first ?? "{}") }
+        ipc.onLater("mcpCall") { args, reply in
+            let name = args.first ?? "", json = args.dropFirst().first ?? "{}"
+            guard name == "petal_import_recipe" else { return reply(MCP.answer(name, json)) }
+            // Reading the recipe and finding its apps (a scan of the Applications folders, Launch Services) happen
+            // off the main thread; the modes it brings are made here, in order with every other change.
+            DispatchQueue.global(qos: .userInitiated).async {
+                let plan = Result { try MCP.importPlan(json) }
+                DispatchQueue.main.async { MainActor.assumeIsolated { reply(MCP.answer(name, json, plan: plan)) } }
+            }
+        }
         ipc.onLater("assist") { [unowned self] args, reply in
             assist.handle(args.first ?? "", args.dropFirst().first ?? "{}", note: args.dropFirst(2).first, reply: reply)
         }

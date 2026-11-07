@@ -204,8 +204,7 @@ enum MCP {
         case "petal_export_recipe":
             return ["path": try Recipe.export(path: args["path"] as? String, name: args["name"] as? String)]
         case "petal_import_recipe":
-            guard let path = args["path"] as? String, !path.isEmpty else { throw Failure("path is required") }
-            let plan = try Recipe.plan(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+            let plan = try importPlan(args)
             return try Recipe.apply(plan, look: args["look"] as? Bool ?? false)
         case "petal_suggestions":
             guard Insights.setting("activityLog") else { return ["suggestions": [], "note": "The activity history is off (activityLog)."] }
@@ -258,11 +257,16 @@ enum MCP {
     }
 
     /// What the running Petal does for `viaPetal`: one line of JSON, the result or the error.
-    static func answer(_ name: String, _ json: String) -> String {
+    /// `plan`: a recipe import's plan, made off the main thread (`importPlan`).
+    static func answer(_ name: String, _ json: String, plan: Result<Recipe.Plan, Error>? = nil) -> String {
         var reply: [String: Any]
         do {
             let args = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
-            reply = ["result": try call(name, args)]
+            if let plan {
+                reply = ["result": try Recipe.apply(plan.get(), look: args["look"] as? Bool ?? false)]
+            } else {
+                reply = ["result": try call(name, args)]
+            }
         } catch {
             reply = ["error": error.localizedDescription]
         }
@@ -353,6 +357,16 @@ enum MCP {
     static func apps(matching query: String) -> [[String: String]] {
         installed().filter { query.isEmpty || "\($0.id) \($0.name)".localizedCaseInsensitiveContains(query) }
             .map { ["id": $0.id, "name": $0.name] }
+    }
+
+    /// What importing the recipe in `args` would add (reads it and finds its apps: off the main thread in Petal).
+    static func importPlan(_ args: [String: Any]) throws -> Recipe.Plan {
+        guard let path = args["path"] as? String, !path.isEmpty else { throw Failure("path is required") }
+        return try Recipe.plan(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+    }
+
+    static func importPlan(_ json: String) throws -> Recipe.Plan {
+        try importPlan((try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:])
     }
 
     /// Every app in the usual places: bundle id, name, and where it is.
