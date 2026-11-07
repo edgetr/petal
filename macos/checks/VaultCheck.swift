@@ -66,6 +66,8 @@ struct VaultCheck {
         filledFields()
         protonSites()
         editorRevision()
+        scanSkipsGone()
+        piecesBeforeRedaction()
         if failures > 0 { print("vault: \(failures) failed"); exit(1) }
         print("vault: ok")
     }
@@ -1624,5 +1626,88 @@ struct VaultCheck {
         var spaced = item
         spaced[.number] = "4111 1111 1111 1111"
         expect(!Vault.editConflict(opened: Vault.openedRevision(spaced), stored: Vault.normalized(item)), "the same card written another way isn't a change")
+    }
+
+    /// A picture's check (Sensitive.scan): an element gone before it could be read gets no id, so the pieces after it
+    /// still point at their own elements, and what's covered is what shows the secret, not a neighbour.
+    static func scanSkipsGone() {
+        let index = UIMap.SecretIndex(["378282246310005", "4111 1111 1111 1111"])
+        func frame(_ x: CGFloat, y: CGFloat = 100) -> CGRect { CGRect(x: x, y: y, width: 60, height: 16) }
+        // Walks a window: each entry is an element read (its name, text and frame) under `parent` (a name), or nil
+        // for one gone before it could be read.
+        func walk(_ steps: [(name: String, text: String, frame: CGRect, parent: String)?]) -> (UIMap.ScanParts<String>, [String]?) {
+            var parts = UIMap.ScanParts<String>()
+            var ids: [String: Int] = [:]
+            var order: [String: Int] = [:]
+            ids["window"] = parts.read("window", frame: CGRect(x: 0, y: 0, width: 800, height: 600), parent: -1)
+            for step in steps {
+                guard let step else { continue }   // gone meanwhile: skipped, no id
+                let parent = ids[step.parent] ?? -1
+                let id = parts.read(step.name, frame: step.frame, parent: parent)
+                ids[step.name] = id
+                let place = order[step.parent, default: 0]
+                order[step.parent] = place + 1
+                if !step.text.isEmpty { parts.shows(step.text, id: id, order: place) }
+            }
+            return (parts, parts.joined(matches: index.matches).map { $0.map { parts.elements[$0] } })
+        }
+        // An Amex number as 8 and 7 digits, with elements gone before, between and after.
+        let (amexParts, amex) = walk([
+            nil,
+            ("label", "Card", frame(0, y: 60), "window"),
+            nil,
+            ("row", "", .zero, "window"),
+            ("first", "37828224", frame(40), "row"),
+            nil,
+            ("second", "6310005", frame(104), "row"),
+            nil,
+            ("order", "Order 1234", frame(0, y: 400), "window"),
+        ])
+        expect(Set(amex ?? []) == ["first", "second"], "Amex in 8 and 7 digits, elements gone around it: both pieces, nothing else (\(amex ?? []))")
+        expect(amexParts.elements.count == amexParts.frames.count && amexParts.elements.count == amexParts.parents.count,
+               "every element read has its frame and parent")
+        expect(amexParts.cover(amexParts.elements.firstIndex(of: "row") ?? -1)?.element == "window",
+               "a part with no bounds is covered by what holds it, not by a neighbour")
+        // A card number in fours, an element gone before each group.
+        let groups = ["4111", "1111", "1111", "1111"]
+        var steps: [(name: String, text: String, frame: CGRect, parent: String)?] = [("form", "", CGRect(x: 0, y: 90, width: 400, height: 40), "window")]
+        for (at, group) in groups.enumerated() {
+            steps.append(nil)
+            steps.append(("group\(at)", group, frame(40 + CGFloat(at) * 64), "form"))
+        }
+        steps.append(("total", "Total 12.00", frame(0, y: 300), "window"))
+        let (_, fours) = walk(steps)
+        expect(Set(fours ?? []) == Set((0..<4).map { "group\($0)" }), "a card in fours, elements gone between: every group (\(fours ?? []))")
+        expect(walk([("plain", "Hello", frame(0), "window"), nil, ("other", "1234", frame(70), "window")]).1 == [],
+               "ordinary text with an element gone: nothing")
+    }
+
+    /// petal_ui and the picture look for a secret shown in pieces in what the controls show as read, before any of it
+    /// is hidden: a piece holding part of the secret by itself (8 digits of an Amex) still finds the rest (7 digits).
+    static func piecesBeforeRedaction() {
+        let index = UIMap.SecretIndex(["378282246310005", "4111 1111 1111 1111"])
+        func fields(_ values: [String]) -> [UINode] {
+            values.enumerated().map { pair -> UINode in
+                var node = UINode(role: "AXStaticText")
+                node.value = pair.element
+                node.parent = 0
+                node.sibling = pair.offset
+                node.order = pair.offset + 1
+                node.frame = CGRect(x: CGFloat(pair.offset) * 70, y: 100, width: 64, height: 20)
+                return node
+            }
+        }
+        let amex = fields(["37828224", "6310005"])
+        expect(index.matches("37828224") && !index.matches("6310005"), "the 8 digits hold part of the card alone, the 7 don't")
+        let (hidden, whole) = UIMap.joinedHidden(amex, matches: index.matches)
+        expect(whole && hidden == [0, 1], "Amex as 8 and 7 digits, as read: both pieces (\(hidden.sorted()))")
+        let (shown, any) = UIMap.hideJoined(amex, matches: index.matches)
+        expect(any && shown.allSatisfy { $0.value == UIMap.hidden }, "neither is told")
+        // Redacted one by one first, the 7 digits would be left: the 8 are no longer a piece to join them with.
+        let redacted = amex.map { UIMap.redact($0, secret: index.matches) }
+        expect(redacted[0].value != amex[0].value && redacted[1].value == "6310005", "redaction alone hides only the 8")
+        let fours = fields(["4111", "1111", "1111", "1111", "Order 1234"])
+        let (four, fourWhole) = UIMap.joinedHidden(fours, matches: index.matches)
+        expect(fourWhole && four == [0, 1, 2, 3], "a card in fours, as read: the four groups, not the order (\(four.sorted()))")
     }
 }

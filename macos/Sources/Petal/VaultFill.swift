@@ -116,11 +116,23 @@ enum VaultFiller {
             return cancel.stopped ? ComputerUse.stoppedText : "The cursor left the field while Petal was filling it, so it stopped there. Call petal_ui to see the page."
         }
         // A card number or code a field cut short (a 16-character field given more) isn't a fill: counted here,
-        // never returned or logged. A secure field gives only its length.
+        // never returned or logged. A secure field gives only its length. A browser's Accessibility may still show the
+        // field as it was a moment ago (Chromium's lags behind its page), so it's read again for a little while
+        // (never typed again), still on the same page, before it counts as cut short.
         if plan.field == .number || plan.field == .securityCode {
-            let value: String? = plan.target.secure ? nil : Windows.value(element, kAXValueAttribute)
-            let count: Int? = Windows.value(element, kAXNumberOfCharactersAttribute)
-            if Vault.fits(text, value: value, count: count) == false {
+            var fits: Bool?
+            for attempt in 0..<10 {
+                if attempt > 0 {
+                    usleep(60_000)
+                    guard !cancel.stopped else { return cancel.buyEnded ? Acting.buyEndedText : ComputerUse.stoppedText }
+                    if let why = stillOnPage(plan, element: element, map: map, cancel: cancel, typed: true) { return why }
+                }
+                let value: String? = plan.target.secure ? nil : Windows.value(element, kAXValueAttribute)
+                let count: Int? = Windows.value(element, kAXNumberOfCharactersAttribute)
+                fits = Vault.fits(text, value: value, count: count)
+                if fits != false { break }
+            }
+            if fits == false {
                 return plan.field == .number ? "The card number didn't fit in that field: it holds fewer digits than the card has. Ask the person to check it."
                     : "The security code didn't fit in that field. Ask the person to check it."
             }

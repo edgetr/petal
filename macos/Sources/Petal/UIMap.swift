@@ -220,6 +220,43 @@ enum UIMap {
         return nil
     }
 
+    /// What a picture's check read of a window (Sensitive.scan): each element read, by an id that is its place among
+    /// those read (an element gone before it could be read gets none, so nothing after it shifts), its frame and its
+    /// parent's id, and the text each shows in the picture, to look for a secret shown in pieces.
+    struct ScanParts<Element> {
+        private(set) var elements: [Element] = []
+        private(set) var frames: [CGRect] = []
+        private(set) var parents: [Int] = []
+        private(set) var pieces: [TextPiece] = []
+        /// Each piece's element, by id.
+        private(set) var pieceAt: [Int] = []
+
+        /// An element read, with its frame and its parent's id (-1 for none): its id.
+        mutating func read(_ element: Element, frame: CGRect, parent: Int) -> Int {
+            elements.append(element)
+            frames.append(frame)
+            parents.append(parent)
+            return elements.count - 1
+        }
+
+        /// The element `id` shows `text`, its place among its parent's children `order`.
+        mutating func shows(_ text: String, id: Int, order: Int) {
+            pieces.append(TextPiece(text: text, parent: parents[id], order: order, frame: frames[id]))
+            pieceAt.append(id)
+        }
+
+        /// What covers element `id` in the picture (`UIMap.cover`), with its frame; nil when nothing around it has bounds.
+        func cover(_ id: Int) -> (element: Element, frame: CGRect)? {
+            UIMap.cover(frames: frames, parents: parents, at: id).map { (elements[$0], frames[$0]) }
+        }
+
+        /// The ids of the elements whose pieces show a secret only together (`joinedSecrets`), or nil when they
+        /// couldn't be checked whole.
+        func joined(matches: (String) -> Bool, going: () -> Bool = { true }) -> [Int]? {
+            UIMap.joinedSecrets(pieces, matches: matches, going: going).map { $0.sorted().map { pieceAt[$0] } }
+        }
+    }
+
     /// What to black out of a picture taken between two reads of a window (`before`, `after`: where each part that
     /// may show a secret was, by an id for the element, the same id in both for the same element), so wherever it
     /// was while the picture was taken, it's covered: the bounding box of where it was in each, which takes in the
@@ -849,7 +886,8 @@ enum UIMap {
         }
     }
 
-    /// `nodes` (every control read, by `order`, already redacted one by one) with a secret only several show
+    /// `nodes` (every control read, by `order`, as read: before anything of them is redacted, so a piece holding part
+    /// of a secret by itself still finds the rest beside it) with a secret only several show
     /// together (a card number as four fields of four digits) hidden in every piece of it, as `joinedSecrets` finds
     /// them: neighbours within a parent, or on one line. When the pieces can't be checked whole (too many, or `going`
     /// says time's up), only a piece that `matches` catches by itself is hidden: pieces that are a secret only

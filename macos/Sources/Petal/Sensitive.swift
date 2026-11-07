@@ -76,23 +76,18 @@ enum Sensitive {
         // Each element read: its parent (by when it was read) and its place among that parent's children.
         var stack: [(element: AXUIElement, depth: Int, parent: Int, order: Int)] = [(window, 0, -1, 0)]
         var visited = 0
-        // Text shown in the picture, to look for a secret split over several pieces (a card number in fours).
-        var pieces: [UIMap.TextPiece] = []
-        var pieceAt: [Int] = []
-        // Every element read, its frame and its parent (by when each was read): a part with no bounds of its own is
-        // covered by the nearest around it that has some (UIMap.cover).
-        var elements: [AXUIElement] = []
-        var frames: [CGRect] = []
-        var parents: [Int] = []
-        /// Covers the part read `at`: by its own frame, else its nearest ancestor's; false when none has one.
-        func cover(_ at: Int) -> Bool {
-            guard let index = UIMap.cover(frames: frames, parents: parents, at: at) else { return false }
-            scan.found.append((elements[index], frames[index].insetBy(dx: -4, dy: -4)))
+        // Every element read, by id (only one actually read gets one), its frame and its parent, and the text each
+        // shows in the picture: a part with no bounds of its own is covered by the nearest around it that has some
+        // (UIMap.cover), and a secret split over several pieces (a card number in fours) is looked for in them.
+        var parts = UIMap.ScanParts<AXUIElement>()
+        /// Covers the part read as `id`: by its own frame, else its nearest ancestor's; false when none has one.
+        func cover(_ id: Int) -> Bool {
+            guard let (element, frame) = parts.cover(id) else { return false }
+            scan.found.append((element, frame.insetBy(dx: -4, dy: -4)))
             return true
         }
         while let (element, depth, parent, order) = stack.popLast() {
             guard visited < 40_000, Date() < deadline else { scan.complete = false; return scan }
-            let me = visited
             visited += 1
             var raw: CFArray?
             let error = AXUIElementCopyMultipleAttributeValues(element, names, AXCopyMultipleAttributeOptions(rawValue: 0), &raw)
@@ -116,24 +111,20 @@ enum Sensitive {
             node.placeholder = values[kAXPlaceholderValueAttribute] as? String ?? ""
             node.identifier = values[kAXIdentifierAttribute] as? String ?? ""
             let frame = Reader.frame(values[kAXPositionAttribute], values[kAXSizeAttribute])
-            elements.append(element)
-            frames.append(frame)
-            parents.append(parent)
+            let me = parts.read(element, frame: frame, parent: parent)
             let placed = frame.width > 0 && frame.height > 0
+            // A password field's value is never read; anything else's is searched whole.
+            let secure = UIMap.isSecure(node)
+            let value = secure ? "" : Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
             // Named for a secret only counts for a field one types into: a window or page called "API keys" isn't
             // blacked out whole (its text is still searched below).
-            var secret = UIMap.isSecure(node) || UIMap.looksSecretField(node) || mine.contains { CFEqual($0, element) }
-            if !secret {
-                // A password field's value is never read; anything else's is searched whole.
-                let value = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
-                secret = [node.title, node.label, node.help, node.placeholder, value].contains { !$0.isEmpty && vault.matches($0) }
-                let shown = [value, node.title, node.label].first { !$0.isEmpty } ?? ""
-                // One with no bounds may be in the picture: it counts, covered by what's around it if need be.
-                if !secret, !shown.isEmpty, !placed || frame.intersects(around) {
-                    pieces.append(UIMap.TextPiece(text: shown, parent: parent, order: order, frame: frame))
-                    pieceAt.append(me)
-                }
-            }
+            let secret = secure || UIMap.looksSecretField(node) || mine.contains { CFEqual($0, element) }
+                || [node.title, node.label, node.help, node.placeholder, value].contains { !$0.isEmpty && vault.matches($0) }
+            // Every text shown counts as a piece, one holding part of a secret by itself too: the rest of that secret
+            // in the pieces beside it is found only with it (an Amex number as 37828224 and 6310005). One with no
+            // bounds may be in the picture: it counts, covered by what's around it if need be.
+            let shown = [value, node.title, node.label].first { !$0.isEmpty } ?? ""
+            if !secure, !shown.isEmpty, !placed || frame.intersects(around) { parts.shows(shown, id: me, order: order) }
             // A part that may show a secret with no bounds of its own (an attribute that failed, or a zero size):
             // what holds it is covered, else the window isn't read whole.
             if secret, !cover(me) { scan.complete = false; return scan }
@@ -149,11 +140,11 @@ enum Sensitive {
             for (index, child) in children.enumerated().reversed() { stack.append((child, depth + 1, me, index)) }
         }
         // A secret only the pieces show together: every piece of it is covered.
-        guard let joined = UIMap.joinedSecrets(pieces, matches: vault.matches, going: { Date() < deadline }) else {
+        guard let joined = parts.joined(matches: vault.matches, going: { Date() < deadline }) else {
             scan.complete = false
             return scan
         }
-        for index in joined where !cover(pieceAt[index]) { scan.complete = false; return scan }
+        for id in joined where !cover(id) { scan.complete = false; return scan }
         return scan
     }
 

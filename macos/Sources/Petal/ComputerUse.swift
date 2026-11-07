@@ -982,6 +982,10 @@ enum Reader {
         // Every element read (by order), and which of them are told: a secret shown only by several together (a card
         // number in four fields) is hidden in each before anything goes out.
         var walked: [UINode] = []
+        // Each as read, before anything of it is hidden or cut short: the pieces of a secret shown in several are
+        // looked for in these, so a piece that holds part of it by itself (an Amex number as 37828224 and 6310005)
+        // still finds the rest beside it.
+        var whole: [UINode] = []
         var told: [Int] = []
         while let (element, depth, clip, web, parent, sibling) = stack.popLast() {
             if visited >= 5000 || Date() > deadline { reading.timedOut = true; break }
@@ -1031,6 +1035,7 @@ enum Reader {
             // A field Petal filled with a secret stays hidden whatever it shows now (part of a card number left
             // after an edit is still part of it).
             let filled = Sensitive.isFilled(element, pid: pid)
+            whole.append(node)
             let holds = UIMap.holdsSecret(node, filled: filled, secret: secret)
             node = UIMap.redact(node, filled: filled, secret: secret)
             if holds {
@@ -1068,10 +1073,10 @@ enum Reader {
         }
         // Bounded as the picture's check is; out of time, only a text that holds a secret by itself is hidden.
         let joinBy = Date().addingTimeInterval(0.5)
-        (reading.joined, reading.joinedWhole) = UIMap.joinedHidden(walked, matches: vault.matches, going: { Date() < joinBy })
+        (reading.joined, reading.joinedWhole) = UIMap.joinedHidden(whole, matches: vault.matches, going: { Date() < joinBy })
         if !reading.joined.isEmpty { reading.holdsSecret = true }
         for index in reading.joined.sorted() {
-            if let path = UIMap.pieceText(walked[index]) { reading.joinedTexts.append(walked[index][keyPath: path]) }
+            if let path = UIMap.pieceText(whole[index]) { reading.joinedTexts.append(whole[index][keyPath: path]) }
             var at = walked[index].parent
             while at >= 0, at < walked.count, reading.aroundJoined.insert(at).inserted { at = walked[at].parent }
         }
