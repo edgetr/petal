@@ -76,6 +76,8 @@ struct VaultCheck {
         selectMenus()
         identityNotes()
         protonZip()
+        tightPieces()
+        splitPanes()
         if failures > 0 { print("vault: \(failures) failed"); exit(1) }
         print("vault: ok")
     }
@@ -1952,5 +1954,71 @@ struct VaultCheck {
         expect(Vault.protonZipMember(["Proton Pass/data.pgp", "Proton Pass/files/a.json"]) == nil, "encrypted or attachments only: nothing")
         expect(Vault.protonZipMember(["a.json", "b.json"]) == nil && Vault.protonZipMember([]) == nil, "no data.json: nothing")
         expect(Vault.protonZipMember(["other/data.json"]) == nil, "a data.json elsewhere isn't the vault")
+    }
+
+    /// A key shown in short spans side by side, or a PIN one digit a box, is found run together: every piece of it is
+    /// hidden, the ones holding only its last few characters too; ordinary text beside it isn't.
+    static func tightPieces() {
+        var pin = VaultItem(kind: .login, title: "Door")
+        pin[.password] = "739251"
+        let index = UIMap.SecretIndex((sample() + [pin]).flatMap(Vault.secrets))
+        func piece(_ text: String, _ order: Int, x: CGFloat) -> UIMap.TextPiece {
+            UIMap.TextPiece(text: text, parent: 5, order: order, frame: CGRect(x: x, y: 100, width: 30, height: 16))
+        }
+        // sk-abcdefghijklmnop in spans of four or so, between ordinary words.
+        let key = ["Key:", "sk-a", "bcde", "fghi", "jklm", "nop", "Copied"].enumerated().map { piece($1, $0, x: CGFloat($0) * 32) }
+        expect(key.allSatisfy { !index.matches($0.text) }, "no span alone is a secret")
+        let keyFound = UIMap.joinedSecrets(key, matches: index.matches, spans: index.spans) ?? []
+        expect(keyFound == Set(1...5), "a key in short spans: every span of it, nothing else (\(keyFound.sorted()))")
+        let keyNoSpans = UIMap.joinedSecrets(key, matches: index.matches) ?? []
+        expect(Set(2...4).isSubset(of: keyNoSpans) && !keyNoSpans.contains(0), "without spans the run's middle is still found (\(keyNoSpans.sorted()))")
+        // A long part in one span, its last characters in the next: the next is taken along.
+        let tail = [piece("sk-abcdefghij", 0, x: 0), piece("klmnop", 1, x: 120), piece("Copied", 2, x: 180)]
+        let tailFound = UIMap.joinedSecrets(tail, matches: index.matches, spans: index.spans) ?? []
+        expect(tailFound == [0, 1], "the key's end in the next span goes with it (\(tailFound.sorted()))")
+        // A PIN one digit a box.
+        let digits = ["PIN", "7", "3", "9", "2", "5", "1", "Done"].enumerated().map { piece($1, $0, x: CGFloat($0) * 32) }
+        let pinFound = UIMap.joinedSecrets(digits, matches: index.matches, spans: index.spans) ?? []
+        expect(pinFound == Set(1...6), "a PIN digit by digit: every digit, nothing else (\(pinFound.sorted()))")
+        // Through the whole read: each control is hidden.
+        var nodes = [UINode(role: "AXWebArea")]
+        for (at, text) in ["7", "3", "9", "2", "5", "1"].enumerated() {
+            var node = UINode(role: "AXStaticText")
+            node.value = text
+            node.parent = 0
+            node.sibling = at
+            node.frame = CGRect(x: CGFloat(at) * 32, y: 100, width: 30, height: 16)
+            nodes.append(node)
+        }
+        let (shown, hid) = UIMap.hideJoined(nodes, matches: index.matches, spans: index.spans)
+        expect(hid && shown.dropFirst().allSatisfy { $0.value == UIMap.hidden }, "a PIN's digit boxes are all hidden")
+        // Ordinary text, digits beside each other included, is left alone either way.
+        let plain = ["Order", "12", "34", "shipped", "to", "Ada"].enumerated().map { piece($1, $0, x: CGFloat($0) * 32) }
+        expect(UIMap.joinedSecrets(plain, matches: index.matches, spans: index.spans) == [], "ordinary text run together isn't a secret")
+        let near = ["7", "3", "9", "2", "5"].enumerated().map { piece($1, $0, x: CGFloat($0) * 32) }
+        expect(UIMap.joinedSecrets(near, matches: index.matches, spans: index.spans) == [], "five of a PIN's six digits aren't it")
+        // Card groups still join with spaces, as before.
+        let card = ["4111", "1111", "1111", "1111"].enumerated().map { piece($1, $0, x: CGFloat($0) * 32) }
+        expect(UIMap.joinedSecrets(card, matches: index.matches, spans: index.spans) == Set(0...3), "a card in four groups")
+    }
+
+    /// A browser split into panes (Phi) shows two pages side by side: a Buy said on the field's page, in the second
+    /// pane, lasts while that page is one the window shows, and ends when it isn't.
+    static func splitPanes() {
+        let left = NSObject(), right = NSObject(), next = NSObject()
+        func web(_ url: String, page: AnyObject) -> Vault.Place {
+            Vault.Place(web: true, frameURL: url, topURL: url, tab: Vault.Tab(id: nil, page: page), bundle: "com.phibrowser.Mac", appName: "Phi", signed: true)
+        }
+        let news = web("https://news.example/", page: left)
+        let pay = web("https://checkout.shop.example/pay", page: right)
+        guard let buy = Vault.Checkout(place: pay, window: 7, card: "visa", turn: "3|") else { return expect(false, "a Buy in the second pane") }
+        expect(Vault.Checkout.seen([buy], pages: [news, pay], window: 7).count == 1, "the second pane's page, met after the first: kept")
+        expect(Vault.Checkout.seen([buy], pages: [pay, news], window: 7).count == 1, "in either order")
+        expect(buy.covers(pay, window: 7, card: "visa", turn: "3|"), "and the fill there is covered")
+        expect(Vault.Checkout.seen([buy], pages: [news], window: 7).isEmpty, "the first pane alone: over")
+        expect(Vault.Checkout.seen([buy], pages: [news, web("https://checkout.shop.example/pay", page: next)], window: 7).isEmpty,
+               "the second pane on a new page element: over")
+        expect(Vault.Checkout.seen([buy], pages: [], window: 7).isEmpty, "no page found: over")
+        expect(Vault.Checkout.seen([buy], pages: [news], window: 8).count == 1, "another window: untouched")
     }
 }

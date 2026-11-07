@@ -52,7 +52,13 @@ enum VaultFiller {
         if plan.target.popup {
             let year = plan.field == .year ? saved.map { $0[.expiry] } : nil
             let month = plan.field == .month
-            return choose(text, in: element, pid: pid, cancel: cancel, pick: { titles in
+            // Right before each press (an option, opening the menu, its item): not stopped, steered or past the Buy,
+            // and still the page Petal decided on. Reading a long menu's options takes a while.
+            let still = { () -> String? in
+                if cancel.stopped { return cancel.buyEnded ? Acting.buyEndedText : ComputerUse.stoppedText }
+                return stillOnPage(plan, element: element, map: map, cancel: cancel, typed: false)
+            }
+            return choose(text, in: element, pid: pid, cancel: cancel, still: still, pick: { titles in
                 if month { return Vault.pickMonth(text, from: titles) }
                 return year.flatMap { Vault.pickYear($0, from: titles) } ?? Vault.pick(text, from: titles)
             })
@@ -157,9 +163,10 @@ enum VaultFiller {
     /// Picks the item that is `wanted` from a pop-up menu (a web page's select; Vault.pick: "Türkiye" finds "Turkey";
     /// a year as "2027" or "27", whichever the menu has): straight from its options when it shows them closed, else
     /// by opening it and pressing the item in the menu that opens (under it, or the app's own: Chromium's), or
-    /// closes it again with nothing picked when none is.
+    /// closes it again with nothing picked when none is. `still` is asked right before every press, and its answer
+    /// (stopped, or the page moved on) ends it with nothing more pressed.
     static func choose(_ wanted: String, in popup: AXUIElement, pid: pid_t, cancel: Acting.Cancel,
-                       pick: ([String]) -> Int?) -> String? {
+                       still: () -> String?, pick: ([String]) -> Int?) -> String? {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.5)
         func role(_ element: AXUIElement) -> String { Windows.value(element, kAXRoleAttribute) ?? "" }
@@ -181,11 +188,14 @@ enum VaultFiller {
                                     labels: texts(kAXDescriptionAttribute), pick: pick)
         }
         func close() { if let escape = UIMap.parseKey("escape") { Acting.post(escape, to: pid, cancel: Acting.Cancel()) } }
-        guard !cancel.stopped else { return ComputerUse.stoppedText }
+        if let why = still() { return why }
         // Shown without opening it: pressed there.
         let shown = Vault.selectOptions(popup, opened: false, appMenus: [], role: role, children: children).items
-        if let at = index(shown), AXUIElementPerformAction(shown[at], kAXPressAction as CFString) == .success { return nil }
-        guard !cancel.stopped else { return ComputerUse.stoppedText }
+        if let at = index(shown) {
+            if let why = still() { return why }
+            if AXUIElementPerformAction(shown[at], kAXPressAction as CFString) == .success { return nil }
+        }
+        if let why = still() { return why }
         AXUIElementPerformAction(popup, kAXPressAction as CFString)
         var list: [AXUIElement] = []
         for attempt in 0..<6 {
@@ -198,7 +208,7 @@ enum VaultFiller {
             close()
             return list.isEmpty ? "That menu didn't open through Accessibility; ask the person to pick it." : "Petal didn't find a matching item in that menu; ask the person to pick it."
         }
-        guard !cancel.stopped else { close(); return ComputerUse.stoppedText }
+        if let why = still() { close(); return why }
         guard AXUIElementPerformAction(list[at], kAXPressAction as CFString) == .success else {
             close()
             return "Couldn't pick it from that menu; ask the person to pick it."
@@ -265,35 +275,42 @@ enum VaultReader {
         return place
     }
 
-    /// The page a browser window shows (its tab's outermost web area that isn't an app's own page: inside T3 Code's
-    /// t3code://app/ page, the site's page it shows), as a place: what a Buy is checked against before each act in
-    /// that window, the same page `place(of:)` gives a field in it. Not a web page (another app, or none found in
-    /// time): `web` false.
-    static func page(in window: AXUIElement, pid: pid_t, bundle: String, appName: String) -> Vault.Place {
-        var place = Vault.Place(bundle: bundle, appName: appName)
-        guard isBrowser(pid: pid, bundle: bundle) else { return place }
+    /// The pages a browser window shows (each tab page's outermost web area that isn't an app's own page: inside T3
+    /// Code's t3code://app/ page, the site's page it shows), as places: what a Buy is checked against before each act
+    /// in that window, the same page `place(of:)` gives a field in it. A browser split into panes (Phi) shows several
+    /// side by side; a Buy lasts while its own page is one of them. Not a web page (another app, or none found in
+    /// time): none.
+    static func pages(in window: AXUIElement, pid: pid_t, bundle: String, appName: String) -> [Vault.Place] {
+        guard isBrowser(pid: pid, bundle: bundle) else { return [] }
+        var out: [Vault.Place] = []
         var queue: [(AXUIElement, Int)] = [(window, 0)]
         var seen = 0
         let deadline = Date().addingTimeInterval(1)
-        while !queue.isEmpty, seen < 3000, Date() < deadline {
+        while !queue.isEmpty, seen < 3000, out.count < Self.panes, Date() < deadline {
             let (element, depth) = queue.removeFirst()
             seen += 1
             if (Windows.value(element, kAXRoleAttribute) as String?) == "AXWebArea" {
                 let address = url(element)
                 if Vault.isTabPage(address) {
+                    var place = Vault.Place(bundle: bundle, appName: appName)
                     place.web = true
                     place.frameURL = address
                     place.topURL = address
                     place.tab.page = element
-                    return place
+                    out.append(place)
+                    // Its frames are part of it, never pages of their own.
+                    continue
                 }
             }
             guard depth < 30 else { continue }
             let children: [AXUIElement] = Windows.value(element, kAXChildrenAttribute) ?? []
             queue += children.map { ($0, depth + 1) }
         }
-        return place
+        return out
     }
+
+    /// At most this many pages side by side in one window.
+    static let panes = 8
 
     static func url(_ area: AXUIElement) -> String? {
         if let url: URL = Windows.value(area, "AXURL") { return url.absoluteString }
@@ -453,47 +470,53 @@ extension Assist {
         app.browsers.tab(of: running, window: window) { url, id in MainActor.assumeIsolated { done(url, id) } }
     }
 
-    /// What `map`'s window shows now (its tab's page, with the browser's own answer for the tab), read off the main
-    /// thread: a Buy in that window is checked against it before every act there (ComputerUse).
-    func vaultTab(_ map: ComputerUse.Map, done: @escaping @MainActor (Vault.Place) -> Void) {
+    /// What `map`'s window shows now (its tab's pages, with the browser's own answer for the tab), read off the main
+    /// thread: a Buy in that window is checked against them before every act there (ComputerUse).
+    func vaultTab(_ map: ComputerUse.Map, done: @escaping @MainActor ([Vault.Place]) -> Void) {
         vaultTab(window: map.window, pid: map.pid, bundle: map.bundle, appName: map.appName, windowID: map.windowID, frame: map.windowFrame, done: done)
     }
 
     /// What `window` shows now, as above, for a read that has no map (petal_look).
     func vaultTab(window: AXUIElement, pid: pid_t, bundle: String, appName: String, windowID: CGWindowID?, frame: CGRect,
-                  done: @escaping @MainActor (Vault.Place) -> Void) {
+                  done: @escaping @MainActor ([Vault.Place]) -> Void) {
         // Read only on the read queue, as Map's window is.
         nonisolated(unsafe) let window = window
         ComputerUse.readQueue.async {
-            let place = VaultReader.page(in: window, pid: pid, bundle: bundle, appName: appName)
+            let pages = VaultReader.pages(in: window, pid: pid, bundle: bundle, appName: appName)
             let title: String = Windows.value(window, kAXTitleAttribute) ?? ""
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard place.web else { return done(place) }
+                    guard !pages.isEmpty else { return done([]) }
                     self.withTab(pid: pid, windowID: windowID, frame: frame, title: title) { url, id in
-                        var place = place
-                        place.tabURL = url
-                        place.tab.id = id
-                        done(place)
+                        done(pages.map { page in
+                            var page = page
+                            page.tabURL = url
+                            page.tab.id = id
+                            return page
+                        })
                     }
                 }
             }
         }
     }
 
-    /// The page a read of `map`'s window just met (`page`, its outermost web area, and its address), with the
-    /// browser's own answer for the tab: what petal_ui saw, checked against a Buy in that window. No page: not one.
-    func vaultShown(_ map: ComputerUse.Map, page: AXUIElement?, url: String?, title: String, done: @escaping @MainActor (Vault.Place) -> Void) {
-        var place = Vault.Place(bundle: map.bundle, appName: map.appName)
-        guard let page else { return done(place) }
-        place.web = true
-        place.frameURL = url
-        place.topURL = url
-        place.tab.page = page
+    /// The pages a read of `map`'s window just met (`pages`, each tab page's outermost web area, and its address),
+    /// with the browser's own answer for the tab: what petal_ui saw, checked against a Buy in that window. None: no
+    /// page.
+    func vaultShown(_ map: ComputerUse.Map, pages: [(page: AXUIElement, url: String?)], title: String,
+                    done: @escaping @MainActor ([Vault.Place]) -> Void) {
+        guard !pages.isEmpty else { return done([]) }
         withTab(map, title: title) { url, id in
-            place.tabURL = url
-            place.tab.id = id
-            done(place)
+            done(pages.map { shown in
+                var place = Vault.Place(bundle: map.bundle, appName: map.appName)
+                place.web = true
+                place.frameURL = shown.url
+                place.topURL = shown.url
+                place.tab.page = shown.page
+                place.tabURL = url
+                place.tab.id = id
+                return place
+            })
         }
     }
 

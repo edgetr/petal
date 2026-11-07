@@ -1122,15 +1122,23 @@ enum Vault {
             !token.revoked && turn == self.turn && card == self.card && revision == self.revision && window == self.window && same(place)
         }
 
-        /// Its window, seen showing anything but the tab and page Buy was said on: the checkout is over.
-        func left(_ place: Place, window: UInt32?) -> Bool {
-            window == self.window && !same(place)
+        /// Its window, seen showing anything but the tab and page Buy was said on: the checkout is over. `pages`:
+        /// every tab page the window shows (a browser split into panes shows several, side by side); the Buy's page
+        /// (the one around the field it was said on) must be one of them, wherever it is.
+        func left(_ pages: [Place], window: UInt32?) -> Bool {
+            window == self.window && !pages.contains(where: same)
         }
 
-        /// What's left of `checkouts` once `window` was seen showing `place` (by any read or act, or after its title
+        func left(_ place: Place, window: UInt32?) -> Bool { left([place], window: window) }
+
+        /// What's left of `checkouts` once `window` was seen showing `pages` (by any read or act, or after its title
         /// changed): a Buy whose window shows another tab or page is over, and coming back doesn't bring it back.
+        static func seen(_ checkouts: [Checkout], pages: [Place], window: UInt32?) -> [Checkout] {
+            checkouts.filter { !$0.left(pages, window: window) }
+        }
+
         static func seen(_ checkouts: [Checkout], place: Place, window: UInt32?) -> [Checkout] {
-            checkouts.filter { !$0.left(place, window: window) }
+            seen(checkouts, pages: [place], window: window)
         }
 
         /// What's left of `checkouts` once a new Buy card is about to show for `window` (another card on the same

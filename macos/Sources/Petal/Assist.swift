@@ -337,8 +337,8 @@ final class Assist {
                             // the AI hears (or sees) what's in it: the same check petal_ui, fills and acts make.
                             guard let looked, let number, self.computer.hasBuy(in: number) else { return told() }
                             self.vaultTab(window: looked, pid: pid, bundle: front.bundleIdentifier ?? "", appName: front.localizedName ?? "",
-                                          windowID: number, frame: frame) { place in
-                                self.computer.seen(place, window: number)
+                                          windowID: number, frame: frame) { pages in
+                                self.computer.seen(pages, window: number)
                                 // Made private while the tab was read: none of it goes.
                                 if self.neverLook(front.bundleIdentifier) { return refuse(privately) }
                                 told()

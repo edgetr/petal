@@ -247,8 +247,8 @@ final class ComputerUse {
                     // A Buy said in this window (by any chat) ends if what was just read is another tab or page,
                     // before the AI hears what it read.
                     guard let id = reading.windowID, self.hasBuy(in: id) else { return send(result) }
-                    self.assist.vaultShown(made, page: reading.page, url: reading.pageURL, title: reading.title) { place in
-                        self.seen(place, window: id)
+                    self.assist.vaultShown(made, pages: reading.pages, title: reading.title) { pages in
+                        self.seen(pages, window: id)
                         // Stuck somewhere else, turned off or made private meanwhile: these ids are no use.
                         if let refusal = self.refusal(for: bundle, name: name) { return fail(refusal) }
                         if self.places[caller, default: 0] != stuck { return fail(Self.moved) }
@@ -333,9 +333,9 @@ final class ComputerUse {
         // A Buy said in this window lasts only while it shows the tab and page it was said on: looked at before
         // every act there (an act may be what leaves it, or the person may have).
         guard let window = map.windowID, hasBuy(in: window) else { return proceed(job) }
-        assist.vaultTab(map) { [weak self] place in
+        assist.vaultTab(map) { [weak self] pages in
             guard let self else { return }
-            self.seen(place, window: window)
+            self.seen(pages, window: window)
             self.proceed(job)
         }
     }
@@ -400,7 +400,7 @@ final class ComputerUse {
     /// this card), or nil. A window seen showing another page or tab ends that Buy.
     func checkout(_ caller: String, token: Acting.Cancel, place: Vault.Place, window: CGWindowID?, card: String, revision: Int?) -> Vault.BuyToken? {
         guard live(caller, token), let current = sessions[caller] else { return nil }
-        if let window { seen(place, window: window) }
+        if let window { seen([place], window: window) }
         let turn = Self.turnName(current)
         return sessions[caller]?.checkouts.first { $0.covers(place, window: window, card: card, revision: revision, turn: turn) }?.token
     }
@@ -440,12 +440,12 @@ final class ComputerUse {
         sessions.values.contains { $0.checkouts.contains { $0.window == window } }
     }
 
-    /// `window` was seen showing `place` (by a read or an act of any chat, or after its title changed): every Buy in
-    /// it that was said on another tab or page is over, for good.
-    func seen(_ place: Vault.Place, window: CGWindowID) {
+    /// `window` was seen showing `pages` (by a read or an act of any chat, or after its title changed): every Buy in
+    /// it whose own tab and page isn't one of them is over, for good.
+    func seen(_ pages: [Vault.Place], window: CGWindowID) {
         for caller in Array(sessions.keys) {
             guard let list = sessions[caller]?.checkouts, list.contains(where: { $0.window == window }) else { continue }
-            let left = Vault.Checkout.seen(list, place: place, window: window)
+            let left = Vault.Checkout.seen(list, pages: pages, window: window)
             if left.count != list.count { sessions[caller]?.checkouts = left }
         }
     }
@@ -493,7 +493,7 @@ final class ComputerUse {
             for caller in Array(sessions.keys) { sessions[caller]?.checkouts.removeAll { $0.window == id } }
             buyCards[id] = nil   // a card still open for it counts for nothing
         case .titleChanged:
-            assist.vaultTab(map) { [weak self] place in self?.seen(place, window: id) }
+            assist.vaultTab(map) { [weak self] pages in self?.seen(pages, window: id) }
         default:
             break
         }
@@ -509,9 +509,9 @@ final class ComputerUse {
         let maps = buyWindows.filter { $0.value.pid == pid }
         var left = maps.count
         for (id, map) in maps {
-            assist.vaultTab(map) { [weak self] place in
+            assist.vaultTab(map) { [weak self] pages in
                 guard let self else { return }
-                self.seen(place, window: id)
+                self.seen(pages, window: id)
                 left -= 1
                 guard left == 0 else { return }
                 let again = self.buyTabReads.removeValue(forKey: pid) == true
@@ -928,10 +928,9 @@ enum Reader {
         var holdsSecret = false
         /// The vault couldn't be read: nothing was read, since nothing could be checked for its secrets.
         var vaultUnreadable = false
-        /// The first web page met (the tab's page in a browser) and its address: a Buy in this window ends when it's
-        /// another one.
-        var page: AXUIElement?
-        var pageURL: String?
+        /// The web pages met (each tab page in a browser, several side by side in one split into panes) and their
+        /// addresses: a Buy in this window ends when its own page isn't one of them.
+        var pages: [(page: AXUIElement, url: String?)] = []
         /// The orders at which the controls asked about (`focus`) were met, and those hidden as pieces of a secret
         /// several show together (`UIMap.joinedHidden`).
         var focusOrders: Set<Int> = []
@@ -1016,12 +1015,9 @@ enum Reader {
             node.sibling = sibling
             if focus.contains(where: { CFEqual($0, element) }) { reading.focusOrders.insert(order) }
             // The tab's page: never an app's own (T3 Code's t3code://app/ page holds its sites' pages).
-            if role == "AXWebArea", reading.page == nil {
+            if role == "AXWebArea", reading.pages.count < VaultReader.panes {
                 let address = VaultReader.url(element)
-                if Vault.isTabPage(address) {
-                    reading.page = element
-                    reading.pageURL = address
-                }
+                if Vault.isTabPage(address) { reading.pages.append((element, address)) }
             }
             // A password field's value is never read. A static text's is, for secrets shown in pieces (a web page's
             // spans show their text only there); it's never told.

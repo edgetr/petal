@@ -837,8 +837,9 @@ enum UIMap {
     static let joinLength = 160
     static let joinPieces = 12_000
 
-    /// Which pieces show a secret only together (a card number as four "4111"s): runs of up to `joinRun` neighbours,
-    /// joined with spaces, that `matches` catches when no shorter run inside them does (a single piece is checked on
+    /// Which pieces show a secret only together (a card number as four "4111"s, an API key in short spans, a PIN one
+    /// digit a box): runs of up to `joinRun` neighbours, joined with spaces or run together, that `matches` catches
+    /// when no shorter run inside them does (a single piece is checked on
     /// its own already). Neighbours are a parent's children in order, and pieces on one line with little room
     /// between them. nil when there are too many pieces, or `going` says time's up first. `spans` (where the secrets are
     /// in a text, `SecretIndex.spans`): a piece holding a secret by itself (a card number in one span) takes its
@@ -883,8 +884,31 @@ enum UIMap {
         }
         closeLine()
 
-        func joined(_ group: [Int], _ from: Int, _ to: Int) -> String {
-            group[from...to].map { pieces[$0].text }.joined(separator: " ")
+        // A run's text both ways: with a space between pieces (a card number's groups, words), and run together (an
+        // API key in short spans, a PIN one digit a box), with where each piece is in it.
+        func joined(_ group: [Int], _ from: Int, _ to: Int, tight: Bool) -> (text: String, at: [Range<Int>]) {
+            var text = ""
+            var at: [Range<Int>] = []
+            var count = 0
+            for index in group[from...to] {
+                if !tight, !text.isEmpty { text += " "; count += 1 }
+                let piece = pieces[index].text
+                text += piece
+                at.append(count..<count + piece.count)
+                count += piece.count
+            }
+            return (text, at)
+        }
+        // How the run from `from` to `to` holds a secret: spaced (false), run together (true), or not at all (nil).
+        // `past`: only a secret reaching past that many characters (the first piece, caught alone already) counts.
+        func caught(_ group: [Int], _ from: Int, _ to: Int, past: Int? = nil) -> Bool? {
+            for tight in [false, true] {
+                let text = joined(group, from, to, tight: tight).text
+                guard matches(text) else { continue }
+                if let past, let spans, !spans(text).contains(where: { $0.upperBound > past }) { continue }
+                return tight
+            }
+            return nil
         }
         var found = Set<Int>()
         for group in groups {
@@ -897,19 +921,27 @@ enum UIMap {
                 while end < group.count, end - start < joinRun {
                     length += 1 + pieces[group[end]].text.count
                     if length > joinLength { break }
-                    let text = joined(group, start, end)
-                    if matches(text) {
-                        // Caught already by the first piece alone: only a secret reaching past it joins the rest.
-                        if alone, let spans, !spans(text).contains(where: { $0.upperBound > first.count }) {
-                            end += 1
-                            continue
+                    // Caught already by the first piece alone: only a secret reaching past it joins the rest.
+                    guard let tight = caught(group, start, end, past: alone ? first.count : nil) else { end += 1; continue }
+                    // Only the shortest run: one starting further in that's caught too (or a piece caught on its own,
+                    // already covered) is marked from there.
+                    if caught(group, start + 1, end) == nil {
+                        for at in start...end { found.insert(group[at]) }
+                        // A long secret may run on past the shortest run that shows it (its last few characters in
+                        // the next piece): every piece the secret reaches is marked.
+                        if let spans {
+                            var next = end + 1
+                            while next < group.count, next - start < joinRun {
+                                length += 1 + pieces[group[next]].text.count
+                                if length > joinLength { break }
+                                let run = joined(group, start, next, tight: tight)
+                                guard spans(run.text).contains(where: { $0.overlaps(run.at[next - start]) }) else { break }
+                                found.insert(group[next])
+                                next += 1
+                            }
                         }
-                        // Only the shortest run: one starting further in that's caught too (or a piece caught on
-                        // its own, already covered) is marked from there.
-                        if !matches(joined(group, start + 1, end)) { for at in start...end { found.insert(group[at]) } }
-                        break
                     }
-                    end += 1
+                    break
                 }
             }
         }
