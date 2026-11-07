@@ -14,6 +14,12 @@ struct VaultCheck {
     }
 
     static func main() {
+        unlisted()
+        guard VaultSite.load(URL(fileURLWithPath: "Resources/public_suffix_list.dat")) else {
+            print("FAIL: the Public Suffix List (macos/Resources/public_suffix_list.dat) didn't load")
+            exit(1)
+        }
+        suffixList()
         sites()
         exports()
         imports()
@@ -23,8 +29,39 @@ struct VaultCheck {
         decisions()
         picking()
         redaction()
+        records()
+        places()
+        checkouts()
         if failures > 0 { print("vault: \(failures) failed"); exit(1) }
         print("vault: ok")
+    }
+
+    /// Before the list is read: a login fills only on its saved host and what's under it.
+    static func unlisted() {
+        let m = VaultSite.matches
+        expect(m("github.com", "github.com") && m("accounts.github.com", "github.com"), "no list: the host and under it")
+        expect(!m("github.com", "accounts.github.com"), "no list: not up to a registrable name it can't work out")
+        expect(!m("evil.uk.com", "bank.uk.com") && !m("evil.duckdns.org", "home.duckdns.org"), "no list: no sibling")
+        expect(VaultSite.registrable("www.example.co.uk") == "www.example.co.uk", "no list: the host itself")
+    }
+
+    /// The Public Suffix List's own rules, ICANN and private, wildcards and exceptions.
+    static func suffixList() {
+        let r = VaultSite.registrable
+        expect(r("bank.uk.com") == "bank.uk.com" && r("www.bank.uk.com") == "bank.uk.com", "uk.com is a private suffix")
+        expect(r("home.duckdns.org") == "home.duckdns.org", "duckdns.org is a private suffix")
+        expect(r("me.github.io") == "me.github.io" && r("x.me.github.io") == "me.github.io", "github.io")
+        expect(r("www.example.co.uk") == "example.co.uk", "co.uk")
+        expect(r("foo.bar.ck") == "foo.bar.ck", "*.ck: every second-level name is a suffix")
+        expect(r("www.ck") == "www.ck" && r("a.www.ck") == "www.ck", "!www.ck: the exception is registrable")
+        let m = VaultSite.matches
+        expect(!m("evil.uk.com", "bank.uk.com") && m("www.bank.uk.com", "bank.uk.com"), "a sibling on uk.com never fills")
+        expect(!m("evil.duckdns.org", "home.duckdns.org"), "a sibling on duckdns.org never fills")
+        expect(!m("evil.github.io", "me.github.io"), "a sibling on github.io never fills")
+        expect(!m("other.co.uk", "example.co.uk") && m("login.example.co.uk", "example.co.uk"), "co.uk")
+        expect(!m("x.bar.ck", "y.bar.ck") && !m("evil.ck", "www.ck"), "wildcard and exception rules")
+        expect(!m("anything.uk.com", "uk.com") && m("uk.com", "uk.com"), "a suffix saved as a site matches only itself")
+        expect(!m("evil.example", "x.example") && m("a.x.example", "x.example"), "a name the list doesn't cover: the host and under it")
     }
 
     static func sites() {
@@ -70,7 +107,7 @@ struct VaultCheck {
         login[.username] = "ada"
         login[.password] = "p,w\"q\nx"
         login[.notes] = "two\nlines"
-        var app = VaultItem(kind: .login, title: "Slack", apps: ["com.tinyspeck.slackmacgap"])
+        var app = VaultItem(kind: .login, title: "Slack", apps: ["com.tinyspeck.slackmacgap"], appSigners: ["com.tinyspeck.slackmacgap": "BQR82RBBHL"])
         app[.password] = "slack-pass-1234"
         var deniz = VaultItem(kind: .contact, title: "Deniz")
         deniz[.name] = "Deniz Kaya"
@@ -289,7 +326,7 @@ struct VaultCheck {
         expect(Vault.decide(loop, .password, target: secure, place: web("http://127.0.0.1:8080/")) == .fill, "on http://127.0.0.1")
         expect(Vault.decide(loop, .password, target: secure, place: web("http://[::1]:8080/")) == .fill, "on http://[::1]")
         expect(isAsk(Vault.decide(test, .password, target: secure, place: web("http://evil.example/"))), "a localhost login elsewhere asks")
-        let native = Vault.Place(web: false, bundle: "com.tinyspeck.slackmacgap", appName: "Slack", signed: true)
+        let native = Vault.Place(web: false, bundle: "com.tinyspeck.slackmacgap", appName: "Slack", signed: true, team: "BQR82RBBHL")
         expect(Vault.decide(app, .password, target: secure, place: native) == .fill, "its own app fills")
         var unsigned = native
         unsigned.signed = false
@@ -297,6 +334,13 @@ struct VaultCheck {
         var other = native
         other.bundle = "com.example.fake"
         expect(isAsk(Vault.decide(app, .password, target: secure, place: other)), "another app asks")
+        var lookalike = native
+        lookalike.team = "EVILTEAM12"
+        expect(isAsk(Vault.decide(app, .password, target: secure, place: lookalike)), "the same bundle id signed by someone else asks")
+        var unbound = app
+        unbound.appSigners = [:]
+        expect(isAsk(Vault.decide(unbound, .password, target: secure, place: native)), "an app login with no saved signer asks")
+        expect(Vault.moved(from: native, to: lookalike) != nil, "another signer since the decision")
         expect(isAsk(Vault.decide(login, .password, target: secure, place: native)), "a web login in an app asks")
         let nowhere = VaultItem(kind: .login, title: "X", fields: ["password": "pw-12345678"])
         expect(isAsk(Vault.decide(nowhere, .password, target: secure, place: web("https://x.com/"))), "a login saved for no site asks")
@@ -306,6 +350,8 @@ struct VaultCheck {
         expect(Vault.decide(key, .value, target: secure, place: web("https://openai.com/")) == .fill, "a key on its service's registrable name")
         expect(Vault.decide(key, .value, target: text, place: web("http://localhost:8000/setup")) == .fill, "a key on this Mac's page")
         expect(Vault.decide(key, .value, target: text, place: web("http://127.0.0.1/", tab: "http://127.0.0.1/")) == .fill, "a key on 127.0.0.1")
+        expect(isAsk(Vault.decide(key, .value, target: text, place: web("file://localhost/Users/x/page.html"))), "file://localhost isn't this Mac's web page")
+        expect(isAsk(Vault.decide(key, .value, target: text, place: web("ftp://localhost/"))), "only http and https on this Mac")
         expect(Vault.decide(key, .value, target: text, place: native) == .fill, "a key into an app")
         let stolen = Vault.decide(key, .value, target: text, place: web("https://0penai-billing.com/"))
         if case .ask(let title, let detail) = stolen {
@@ -319,12 +365,13 @@ struct VaultCheck {
 
         // Payment info: nothing before Buy; once Buy, every field; only https.
         let shop = web("https://checkout.shop.example/pay")
-        expect(Vault.decide(card, .number, target: text, place: shop) == .buy(shop: "shop.example"), "a card number waits for Buy")
-        expect(Vault.decide(card, .name, target: text, place: shop) == .buy(shop: "shop.example"), "even the name on the card waits for Buy")
+        expect(Vault.decide(card, .number, target: text, place: shop) == .buy(shop: "checkout.shop.example"), "a card number waits for Buy, on the exact host")
+        expect(Vault.decide(card, .name, target: text, place: shop) == .buy(shop: "checkout.shop.example"), "even the name on the card waits for Buy")
         expect(Vault.decide(card, .securityCode, target: secure, place: shop, checkout: true) == .fill, "after Buy the security code fills")
         expect(Vault.decide(card, .month, target: popup, place: shop, checkout: true) == .fill, "after Buy a month from a menu")
         let stripe = web("https://js.stripe.com/v3/elements", top: "https://shop.example/checkout")
         expect(Vault.decide(card, .number, target: text, place: stripe) == .buy(shop: "shop.example"), "a payment frame: the shop is the tab's page")
+        expect(Vault.mixed(.card, [stripe, web("https://shop.example/checkout")]) == nil, "a payment frame and its shop's page are one place")
         expect(isRefuse(Vault.decide(card, .number, target: text, place: web("http://shop.example/"), checkout: true)), "never on http")
         expect(isRefuse(Vault.decide(card, .number, target: text, place: web("http://localhost/"), checkout: true)), "never on http, even this Mac")
         expect(isRefuse(Vault.decide(card, .number, target: text, place: native, checkout: true)), "never into an app")
@@ -375,5 +422,133 @@ struct VaultCheck {
         expect(index.matches("pw: slack-pass-1234"), "a password")
         expect(!index.matches("ada@example.com") && !index.matches("Bağdat Cd. 12"), "a username or address isn't a secret")
         expect(!index.matches("Visa ending 1111"), "the last four aren't a secret")
+        // A 3-digit security code: wherever it isn't part of a longer number.
+        expect(index.matches("CVV: 737") && index.matches("cvc737") && index.matches("737") && index.matches("(737)"), "a security code by itself")
+        expect(!index.matches("17370") && !index.matches("7371") && !index.matches("Order 1737"), "not inside a longer number")
+        expect(index.redacted("CVV: 737, order 17370") == "CVV: \(UIMap.hidden), order 17370", "only the code itself is hidden")
+        expect(UIMap.SecretIndex(["ab1"]).matches("x ab1 y") == false, "3 characters that aren't digits aren't looked for inside text")
+        // Payment fields are named so in petal_ui and pictures.
+        var field = UINode(role: "AXTextField")
+        field.label = "Security code"
+        expect(UIMap.looksSecret(field), "a security code field")
+        field.label = ""
+        field.identifier = "cc-number"
+        expect(UIMap.looksSecret(field), "a card number field by its autofill id")
+        field.identifier = "quantity"
+        expect(!UIMap.looksSecret(field), "a quantity field isn't")
+        // What Petal typed is listed with every form of it (a card number's fours).
+        let typed = UIMap.SecretIndex(Vault.secrets(.number, "5555444433331111") + Vault.secrets(.password, "typed-only-pw"))
+        expect(typed.matches("5555 4444 3333 1111") && typed.matches("pw typed-only-pw"), "a typed secret is hidden too")
+        expect(Vault.secrets(.email, "a@b.c").isEmpty, "contact info isn't a secret")
+    }
+
+    /// Keychain records: Petal's own items, and secrets from before kinds, whatever their names.
+    static func records() {
+        let item = sample()[0]
+        let data = (try? JSONEncoder().encode(item)) ?? Data()
+        expect(Vault.stored(account: "item:" + item.id, data: data, marked: true) == .item(item), "a marked item")
+        expect(Vault.stored(account: "item:" + item.id, data: data, marked: false) == .item(item), "an item from before the mark, by its id")
+        expect(Vault.stored(account: "item:work", data: Data("sk-legacy-123".utf8), marked: false) == .legacy(name: "item:work", secret: "sk-legacy-123"),
+               "an old secret named item:… stays a secret")
+        expect(Vault.stored(account: "item:x", data: Data("{\"id\":\"x\"}".utf8), marked: false) == .legacy(name: "item:x", secret: "{\"id\":\"x\"}"),
+               "JSON that isn't an item is an old secret")
+        expect(Vault.stored(account: "item:other", data: data, marked: false) == .legacy(name: "item:other", secret: String(decoding: data, as: UTF8.self)),
+               "an item under another id isn't trusted as one")
+        expect(Vault.stored(account: "OpenAI", data: Data("sk-1".utf8), marked: false) == .legacy(name: "OpenAI", secret: "sk-1"), "a plain old name")
+        expect(Vault.stored(account: "x", data: Data([0xff, 0xfe, 0x00]), marked: false) == .unreadable, "bytes that aren't text")
+        expect(Vault.migrate([("item:work", "sk-legacy-123")]).first?.title == "item:work", "it becomes an API key under its name")
+
+        // Logins for apps: a login is the same only for the same site or app and username.
+        var slack = VaultItem(kind: .login, title: "Slack", apps: ["com.tinyspeck.slackmacgap"])
+        slack[.username] = "ada"
+        slack[.password] = "one"
+        var zoom = VaultItem(kind: .login, title: "Zoom", apps: ["us.zoom.xos"])
+        zoom[.username] = "ada"
+        zoom[.password] = "two"
+        expect(!Vault.same(slack, zoom), "two apps' logins with the same username are two logins")
+        let both = Vault.merge(existing: [], incoming: [slack, zoom])
+        expect(both.added == 2, "export and import keep both app logins")
+        var again = zoom
+        again.id = Vault.newID()
+        expect(Vault.same(zoom, again), "the same app and username is the same login")
+        var nowhere1 = VaultItem(kind: .login, title: "A"), nowhere2 = VaultItem(kind: .login, title: "B")
+        nowhere1[.password] = "p1"
+        nowhere2[.password] = "p2"
+        expect(!Vault.same(nowhere1, nowhere2), "logins saved for nowhere are never merged")
+        expect(Vault.merge(existing: [nowhere1], incoming: [nowhere2]).added == 1, "so neither password is lost")
+        let round = Vault.importData(Vault.exportJSON([slack, zoom, nowhere1, nowhere2]))?.items ?? []
+        expect(Vault.merge(existing: [], incoming: round.map { var i = $0; i.id = Vault.newID(); return i }).added == 4, "every one survives a round trip into a fresh vault")
+    }
+
+    /// One fill, one place; new_login and requests check every field.
+    static func places() {
+        func web(_ frame: String?, top: String? = nil) -> Vault.Place {
+            Vault.Place(web: true, frameURL: frame, topURL: top ?? frame, bundle: "com.apple.Safari", appName: "Safari", signed: true)
+        }
+        let secure = Vault.Target(secure: true, text: true), text = Vault.Target(secure: false, text: true)
+        let page = web("https://github.com/signup")
+        let frame = web("https://evil.example/frame", top: "https://github.com/signup")
+        expect(Vault.mixed(.login, [page, page]) == nil, "fields on one page")
+        expect(Vault.mixed(.login, [page, frame]) != nil, "a login's fields in two sites' frames are refused")
+        expect(Vault.mixed(.login, [page, web("http://github.com/signup")]) != nil, "https and http are two places")
+        expect(Vault.mixed(.contact, [page, frame]) == nil, "contact info fills freely")
+        let native = Vault.Place(web: false, bundle: "com.example.app", appName: "App", signed: true, team: "TEAM123456")
+        expect(Vault.mixed(.apiKey, [page, native]) != nil, "a page and an app are two places")
+
+        // new_login: every field must fill by itself.
+        var login = VaultItem(kind: .login, title: "GitHub")
+        Vault.bind(&login, to: page)
+        login[.username] = "ada"
+        login[.password] = "x"
+        expect(login.sites == ["github.com"], "saved for the page read")
+        expect(Vault.unasked(login, [.password, .password, .username], targets: [secure, secure, text], places: [page, page, page]) == nil, "one secure page")
+        expect(Vault.unasked(login, [.password, .password], targets: [secure, secure], places: [page, frame])?.index == 0, "a confirm field in another site's frame")
+        let http = web("http://github.com/signup")
+        var plain = VaultItem(kind: .login, title: "GitHub")
+        Vault.bind(&plain, to: http)
+        plain[.password] = "x"
+        expect(Vault.unasked(plain, [.password], targets: [secure], places: [http]) != nil, "no password made on http")
+        var appLogin = VaultItem(kind: .login, title: "App")
+        Vault.bind(&appLogin, to: native)
+        appLogin[.password] = "x"
+        expect(appLogin.appSigners == ["com.example.app": "TEAM123456"], "an app login keeps who signed it")
+        expect(Vault.unasked(appLogin, [.password], targets: [secure], places: [native]) == nil, "a verified app")
+        var unverified = native
+        unverified.team = nil
+        var none = VaultItem(kind: .login, title: "App")
+        Vault.bind(&none, to: unverified)
+        expect(none.apps.isEmpty, "an app Petal can't verify isn't saved as the login's")
+
+        // request: a refusal before the card; what doesn't match, on the card.
+        expect(Vault.request(.login, [.username, .password], targets: [text, secure], places: [page, page], saved: 1) == Vault.Requested(), "a login form on its page")
+        let overHTTP = Vault.request(.login, [.username, .password], targets: [text, secure], places: [http, http], saved: 1)
+        expect(overHTTP.refusal == nil && overHTTP.warning?.contains("secure") == true, "http: the card says it isn't secure")
+        expect(Vault.request(.login, [.username, .password], targets: [text, secure], places: [page, frame], saved: 1).refusal != nil, "two sites: refused")
+        expect(Vault.request(.login, [.password], targets: [text], places: [page], saved: 0).refusal != nil, "a password into a text field: refused")
+        expect(Vault.request(.apiKey, [.value], targets: [text], places: [web("http://evil.example/")], saved: 0).warning != nil, "a key over http elsewhere: warned")
+        expect(Vault.request(.contact, [.email], targets: [text], places: [http], saved: 0) == Vault.Requested(), "contact info: nothing to warn about")
+        expect(Vault.question(login, [.username, .password], place: frame) == "Fill your github.com username and password on evil.example?", "one question names every field")
+    }
+
+    /// A Buy covers its exact host, window, tab, card and reply only.
+    static func checkouts() {
+        func web(_ frame: String, tab: String? = nil) -> Vault.Place {
+            Vault.Place(web: true, frameURL: frame, topURL: frame, tabURL: tab, bundle: "com.apple.Safari", appName: "Safari", signed: true)
+        }
+        let pay = web("https://checkout.shop.example/pay", tab: "https://checkout.shop.example/pay")
+        let bought = Vault.Checkout(host: "checkout.shop.example", window: 7, tab: "checkout.shop.example", card: "visa", turn: "3|")
+        expect(bought.covers(pay, window: 7, card: "visa", turn: "3|"), "the same checkout")
+        expect(bought.covers(web("https://checkout.shop.example/confirm", tab: "https://checkout.shop.example/confirm"), window: 7, card: "visa", turn: "3|"),
+               "another page of the same host")
+        expect(!bought.covers(web("https://other.shop.example/pay", tab: "https://other.shop.example/pay"), window: 7, card: "visa", turn: "3|"), "a subdomain asks again")
+        expect(!bought.covers(web("https://evil.example/pay", tab: "https://evil.example/pay"), window: 7, card: "visa", turn: "3|"), "another shop")
+        expect(!bought.covers(pay, window: 8, card: "visa", turn: "3|"), "another window")
+        expect(!bought.covers(pay, window: nil, card: "visa", turn: "3|"), "a window Petal can't name")
+        expect(!bought.covers(pay, window: 7, card: "amex", turn: "3|"), "another card")
+        expect(!bought.covers(pay, window: 7, card: "visa", turn: "4|"), "the next reply")
+        expect(!bought.covers(web("https://checkout.shop.example/pay", tab: "https://evil.example/"), window: 7, card: "visa", turn: "3|"), "the tab says another host")
+        expect(!bought.covers(web("https://checkout.shop.example/pay"), window: 7, card: "visa", turn: "3|"), "the tab can't be read now, though it could then")
+        expect(bought.left(web("https://evil.example/"), window: 7) && !bought.left(pay, window: 7) && !bought.left(web("https://evil.example/"), window: 8),
+               "leaving the host in that window ends it")
     }
 }

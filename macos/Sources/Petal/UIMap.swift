@@ -164,19 +164,26 @@ enum UIMap {
     /// Words in a field's name or identifier that say it holds a secret, even when it isn't a password field.
     static let secretWords = ["password", "passwd", "passcode", "passphrase", "token", "secret", "api key", "apikey", "api_key",
                               "api-key", "access key", "private key"]
+    /// A payment form's card number and security code fields, by their names and autofill identifiers.
+    static let paymentWords = ["card number", "cardnumber", "card-number", "card_number", "cc-number", "ccnumber", "cc-csc",
+                               "security code", "securitycode", "security-code", "card verification", "cvv", "cvc", "csc"]
 
-    /// A field whose name or identifier says it holds a password, token, secret or API key.
+    /// A field whose name or identifier says it holds a password, token, secret, API key, card number or security code.
     static func looksSecret(_ node: UINode) -> Bool {
         let words = [node.title, node.label, node.placeholder, node.help, node.identifier].joined(separator: " ").lowercased()
-        return secretWords.contains { words.contains($0) }
+        return secretWords.contains { words.contains($0) } || paymentWords.contains { words.contains($0) }
     }
 
     /// The vault's secrets as hashes (Swift's, seeded afresh in each process): a whole secret, every run of `piece`
     /// characters of a longer one, and a short one (`short` to `piece` - 1 characters, a PIN) as a word of its own
-    /// inside text, so text holding a secret, or part of a long one, is caught without keeping the secrets.
+    /// inside text, so text holding a secret, or part of a long one, is caught without keeping the secrets. A card's
+    /// 3-digit security code is caught wherever it isn't part of a longer number ("CVV: 737", "cvc737", not 737 in
+    /// 17370).
     struct SecretIndex {
         static let piece = 8
         static let short = 4
+        /// A security code: the shortest secret looked for inside text, digits only.
+        static let code = 3
         /// Text longer than this (in UTF-8 bytes, about 1 MB) isn't searched: it counts as holding a secret, and
         /// Petal doesn't move or show it.
         static let limit = 1_000_000
@@ -188,12 +195,18 @@ enum UIMap {
         private var pieces = Set<UInt64>()
         /// Short secrets by their length, as `window` hashes them.
         private var shorts: [Int: Set<UInt64>] = [:]
+        /// 3-digit secrets (security codes), as `window` hashes them.
+        private var numbers: [Int: Set<UInt64>] = [:]
 
         init(_ secrets: [String]) {
             for secret in secrets where !secret.isEmpty {
                 wholes.insert(secret.hashValue)
-                let codes = Self.codes(Array(secret))
-                if codes.count >= Self.short, codes.count < Self.piece {
+                let characters = Array(secret)
+                let codes = Self.codes(characters)
+                let digits = characters.allSatisfy { $0.isASCII && $0.isNumber }
+                if digits, codes.count == Self.code {
+                    numbers[codes.count, default: []].insert(Self.window(codes[...]))
+                } else if codes.count >= Self.short, codes.count < Self.piece {
                     shorts[codes.count, default: []].insert(Self.window(codes[...]))
                 }
                 guard codes.count >= Self.piece else { continue }
@@ -242,6 +255,12 @@ enum UIMap {
                     return going
                 }
             }
+            for (length, hashes) in numbers where going {
+                Self.roll(codes, length) { start, hash in
+                    if hashes.contains(hash), Self.numberEdge(characters, start), Self.numberEdge(characters, start + length) { going = found(start, length) }
+                    return going
+                }
+            }
             guard going, !pieces.isEmpty else { return }
             Self.roll(codes, Self.piece) { start, hash in
                 if pieces.contains(hash) { going = found(start, Self.piece) }
@@ -268,6 +287,12 @@ enum UIMap {
         static func edge(_ characters: [Character], _ at: Int) -> Bool {
             guard at > 0, at < characters.count else { return true }
             return !(characters[at - 1].isLetter || characters[at - 1].isNumber) || !(characters[at].isLetter || characters[at].isNumber)
+        }
+
+        /// Between `at - 1` and `at` is the end of a number: not two digits side by side.
+        static func numberEdge(_ characters: [Character], _ at: Int) -> Bool {
+            guard at > 0, at < characters.count else { return true }
+            return !characters[at - 1].isNumber || !characters[at].isNumber
         }
 
         /// `text` with every part that `matches` would catch replaced by "(hidden)": a whole secret, every run of

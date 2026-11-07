@@ -58,8 +58,9 @@ final class ComputerUse {
         var stopped = false
         var last = Date()
         let cancel = Acting.Cancel()
-        /// Shops the person said Buy to in this reply (their registrable names): payment info fills there now.
-        var checkouts: Set<String> = []
+        /// The Buy cards the person answered Buy in this reply: each lets payment info fill on its exact host, in its
+        /// window, with its card (Vault.Checkout).
+        var checkouts: [Vault.Checkout] = []
     }
 
     /// One action, waiting its turn: the cursor does one thing at a time.
@@ -274,15 +275,33 @@ final class ComputerUse {
         admit(job, session: session)
     }
 
-    /// A field filled from the vault (VaultFill.swift): the same line, pointer, Stop and checks as petal_act, on a
-    /// control of the window petal_ui looked at. `allowed`: the person just said yes to this very fill on its card,
-    /// which lets it into the app for that fill alone; otherwise the app is asked about as petal_act asks.
-    func fill(_ plan: VaultFillPlan, entry: Entry, map: Map, caller: String, allowed: Bool,
-              send: @escaping (Any) -> Void, fail: @escaping (String) -> Void) {
-        let session = session(caller, task: UIMap.tidy(plan.task).lowercased())
+    /// The reply a vault call belongs to, taken as the call comes in (nil when that reply can't act): every later
+    /// step of the call checks it's still that reply (`live`), so a card answered or a save finished after the person
+    /// stopped or steered it never acts in the next reply.
+    func token(_ caller: String, task: String) -> Acting.Cancel? {
+        let current = session(caller, task: UIMap.tidy(task).lowercased())
         sessions[caller]?.last = Date()
         keepSweeping()
-        guard !session.stopped else { return fail(Self.stoppedText + " Don't carry on in this reply: say what's left and wait for them.") }
+        return current.stopped || current.cancel.stopped ? nil : current.cancel
+    }
+
+    /// The reply `token` came from is still the caller's, and wasn't stopped.
+    func live(_ caller: String, _ token: Acting.Cancel) -> Bool {
+        guard let current = sessions[caller] else { return false }
+        return current.cancel === token && !current.stopped && !token.stopped
+    }
+
+    /// A field filled from the vault (VaultFill.swift): the same line, pointer, Stop and checks as petal_act, on a
+    /// control of the window petal_ui looked at, in the reply `token` came from. `allowed`: the person just said yes
+    /// to this very fill on its card, which lets it into the app for that fill alone; otherwise the app is asked
+    /// about as petal_act asks.
+    func fill(_ plan: VaultFillPlan, entry: Entry, map: Map, caller: String, token: Acting.Cancel, allowed: Bool,
+              send: @escaping (Any) -> Void, fail: @escaping (String) -> Void) {
+        sessions[caller]?.last = Date()
+        keepSweeping()
+        guard live(caller, token), let session = sessions[caller] else {
+            return fail(Self.stoppedText + " Don't carry on in this reply: say what's left and wait for them.")
+        }
         guard maps[caller]?.id == map.id else { return fail("The window was looked at again (or 5 minutes passed) since these ids. " + Acting.changed) }
         guard let target = NSRunningApplication(processIdentifier: map.pid), !target.isTerminated else { return fail("\(map.appName) isn't open.") }
         let bundle = target.bundleIdentifier ?? "\(target.processIdentifier)"
@@ -291,26 +310,33 @@ final class ComputerUse {
         options.fill = plan
         options.submit = plan.submit
         let job = Job(caller: caller, action: "fill", entry: entry, map: map, bundle: bundle, caption: "Filling your \(plan.field.words)",
-                      options: options, cancel: Acting.Cancel(under: session.cancel), send: send, fail: fail)
+                      options: options, cancel: Acting.Cancel(under: token), send: send, fail: fail)
         if allowed || session.apps.contains(bundle) { return enqueue(job) }
         admit(job, session: session)
     }
 
-    /// Whether the person said Buy to `shop` in this reply (or task), and the cancel of that reply, which the Buy
-    /// card's answer must still belong to.
-    func checkout(_ caller: String, shop: String, task: String) -> (allowed: Bool, cancel: Acting.Cancel) {
-        let current = session(caller, task: UIMap.tidy(task).lowercased())
-        return (!current.stopped && current.checkouts.contains(shop), current.cancel)
+    /// Whether a Buy the person said in this reply covers payment info at `place` (its exact host, this window and
+    /// tab, this card). A window whose page left the host it was bought on ends that Buy.
+    func checkout(_ caller: String, token: Acting.Cancel, place: Vault.Place, window: CGWindowID?, card: String) -> Bool {
+        guard live(caller, token), let current = sessions[caller] else { return false }
+        sessions[caller]?.checkouts.removeAll { $0.left(place, window: window) }
+        let turn = Self.turnName(current)
+        return sessions[caller]?.checkouts.contains { $0.covers(place, window: window, card: card, turn: turn) } ?? false
     }
 
-    /// The person said Buy: payment info fills on `shop` for the rest of this reply, and Petal AI may use the app to
-    /// place the order without asking again. False when the reply ended while they were asked.
-    func allowCheckout(_ caller: String, shop: String, bundle: String, cancel: Acting.Cancel) -> Bool {
-        guard let current = sessions[caller], current.cancel === cancel, !current.stopped, !cancel.stopped else { return false }
-        sessions[caller]?.checkouts.insert(shop)
-        sessions[caller]?.apps.insert(bundle)
+    /// The person said Buy on `place`'s host: payment info from `card` fills there, in that window, for the rest of
+    /// this reply. It doesn't let Petal AI use the browser otherwise: pressing the order button asks as any act does
+    /// (unless the reply may use the browser already). False when the reply ended while they were asked.
+    func allowCheckout(_ caller: String, token: Acting.Cancel, place: Vault.Place, window: CGWindowID?, card: String) -> Bool {
+        guard live(caller, token), let current = sessions[caller], let host = place.shop, let window else { return false }
+        let bought = Vault.Checkout(host: host, window: window, tab: place.tabURL.flatMap(VaultSite.host), card: card, turn: Self.turnName(current))
+        sessions[caller]?.checkouts.removeAll { $0.window == window }
+        sessions[caller]?.checkouts.append(bought)
         return true
     }
+
+    /// A reply's name for its Buys: its turn (and an outside session's task).
+    private static func turnName(_ session: Session) -> String { "\(session.turn)|\(session.task)" }
 
     /// The first act on an app in a reply asks the person; Allow lets the reply use it.
     private func admit(_ job: Job, session: Session) {

@@ -123,16 +123,20 @@ struct VaultItem: Codable, Equatable, Identifiable {
     var sites: [String] = []
     /// Apps a login belongs to, by bundle id.
     var apps: [String] = []
+    /// Who signed each of those apps when the login was tied to it (its Team ID, or "apple" for Apple's own): the
+    /// login fills by itself only into a copy signed the same way. An app with none saved asks first.
+    var appSigners: [String: String] = [:]
     var fields: [String: String] = [:]
     var updated: Date = Date()
 
-    init(id: String = Vault.newID(), kind: VaultKind, title: String, sites: [String] = [], apps: [String] = [], fields: [String: String] = [:],
-         updated: Date = Date()) {
+    init(id: String = Vault.newID(), kind: VaultKind, title: String, sites: [String] = [], apps: [String] = [],
+         appSigners: [String: String] = [:], fields: [String: String] = [:], updated: Date = Date()) {
         self.id = id
         self.kind = kind
         self.title = title
         self.sites = sites
         self.apps = apps
+        self.appSigners = appSigners
         self.fields = fields
         self.updated = updated
     }
@@ -145,6 +149,7 @@ struct VaultItem: Codable, Equatable, Identifiable {
         title = (try? c.decode(String.self, forKey: .title)) ?? ""
         sites = (try? c.decode([String].self, forKey: .sites)) ?? []
         apps = (try? c.decode([String].self, forKey: .apps)) ?? []
+        appSigners = (try? c.decode([String: String].self, forKey: .appSigners)) ?? [:]
         fields = (try? c.decode([String: String].self, forKey: .fields)) ?? [:]
         updated = (try? c.decode(Date.self, forKey: .updated)) ?? Date(timeIntervalSince1970: 0)
     }
@@ -354,6 +359,8 @@ enum Vault {
         var appName = ""
         /// The app's code signature is valid, from Apple's certificates, and names this bundle id.
         var signed = false
+        /// Who signed it, checked against its running code: its Team ID, or "apple" for Apple's own.
+        var team: String?
 
         /// The host shown to the person: the page's (or frame's).
         var host: String? { frameURL.flatMap(VaultSite.host) }
@@ -366,7 +373,7 @@ enum Vault {
         case fill
         /// A card asks the person first, Don't the default: the place doesn't match.
         case ask(title: String, detail: String)
-        /// Payment info before this checkout was allowed: one "Buy?" card for the shop (its registrable name).
+        /// Payment info before this checkout was allowed: one "Buy?" card for the shop (the page's exact host).
         case buy(shop: String)
         case refuse(String)
     }
@@ -378,7 +385,7 @@ enum Vault {
     /// - an API key fills by itself on its service's site (the same rule), on this Mac's own pages, or into an app;
     ///   any other site asks the same way;
     /// - payment info only on secure web pages (https), and only once this checkout's one "Buy?" card was answered
-    ///   Buy (`checkout`): before that, nothing of the card goes into the page;
+    ///   Buy (`checkout`, which Checkout.covers decides): before that, nothing of the card goes into the page;
     /// - contact info and addresses fill freely: they aren't secrets;
     /// - a password only into a password field; a card number, security code or key into a password field or a
     ///   text field; a country or region also by picking from a pop-up menu; the rest into text fields.
@@ -400,11 +407,10 @@ enum Vault {
         switch item.kind {
         case .login:
             guard let why = mismatch(item, place) else { return .fill }
-            let saved = item.sites.first ?? item.title
-            return .ask(title: "Fill your \(saved) \(field.words) \(place.web ? "on" : "in") \(place.where_)?", detail: why)
+            return .ask(title: question(item, [field], place: place), detail: why)
         case .apiKey:
             guard let why = keyMismatch(item, place) else { return .fill }
-            return .ask(title: "Fill your “\(item.title)” on \(place.where_)?", detail: why)
+            return .ask(title: question(item, [field], place: place), detail: why)
         case .card:
             guard place.web, let frame = place.frameURL, VaultSite.scheme(frame) == "https",
                   VaultSite.scheme(place.topURL ?? frame) == "https", let shop = place.shop else {
@@ -413,7 +419,7 @@ enum Vault {
             if let tab = place.tabURL.flatMap(VaultSite.host), tab != shop {
                 return .refuse("Petal couldn't confirm the page (the tab says \(tab), the page says \(shop)), so it fills no payment info here.")
             }
-            return checkout ? .fill : .buy(shop: VaultSite.registrable(shop))
+            return checkout ? .fill : .buy(shop: shop)
         case .contact, .address:
             return .fill
         }
@@ -454,7 +460,11 @@ enum Vault {
         guard item.apps.contains(place.bundle) else {
             return "This login is saved for \((item.sites + item.apps).joined(separator: ", ")), not \(place.appName)."
         }
-        guard place.signed else { return "Petal couldn't verify \(place.appName) is the real app (its signature didn't check out)." }
+        guard place.signed, let team = place.team else { return "Petal couldn't verify \(place.appName) is the real app (its signature didn't check out)." }
+        guard let saved = item.appSigners[place.bundle] else {
+            return "Petal doesn't know who made the \(place.appName) this login was saved for, so it can't tell this copy is the same app."
+        }
+        guard saved == team else { return "This \(place.appName) is signed by someone other than the one the login was saved in: it may be an app made to look like it." }
         return nil
     }
 
@@ -462,7 +472,10 @@ enum Vault {
     /// onto its service's site.
     static func keyMismatch(_ item: VaultItem, _ place: Place) -> String? {
         guard place.web else { return nil }
-        let local = { (url: String?) in url.flatMap(VaultSite.host).map(VaultSite.isLocal) ?? false }
+        // Only a web page on this Mac (http or https), never a file:// or other address naming localhost.
+        let local = { (url: String?) in
+            url.map { ["http", "https"].contains(VaultSite.scheme($0) ?? "") && (VaultSite.host($0).map(VaultSite.isLocal) ?? false) } ?? false
+        }
         if local(place.frameURL), local(place.topURL ?? place.frameURL), place.tabURL.map({ local($0) }) ?? true { return nil }
         if let problem = pageProblem(place) { return problem }
         let host = place.host ?? ""
@@ -559,12 +572,154 @@ enum Vault {
     /// again right before filling, so a page that moved on meanwhile never gets it.
     static func moved(from then: Place, to now: Place) -> String? {
         if then.web != now.web || then.bundle != now.bundle { return "That field isn't in the same app or page anymore; nothing was filled. Call petal_ui again." }
-        guard then.web else { return nil }
+        guard then.web else {
+            return then.team == now.team ? nil : "Petal couldn't verify \(now.appName) is the same app anymore; nothing was filled."
+        }
         func origin(_ url: String?) -> String { url.map { "\(VaultSite.scheme($0) ?? "")://\(VaultSite.host($0) ?? "")" } ?? "" }
         if origin(then.frameURL) != origin(now.frameURL) || origin(then.topURL) != origin(now.topURL) {
             return "The page changed (it's \(now.host ?? "another page") now); nothing was filled. Call petal_ui again."
         }
         return nil
+    }
+
+    /// The one question for filling `fields` of `item` where it doesn't match: "Fill your github.com username and
+    /// password on githuh.com?".
+    static func question(_ item: VaultItem, _ fields: [VaultField], place: Place) -> String {
+        if item.kind == .apiKey { return "Fill your “\(item.title)” on \(place.where_)?" }
+        var words: [String] = []
+        for field in fields where !words.contains(field.words) { words.append(field.words) }
+        let list = words.count <= 1 ? words.joined() : words.dropLast().joined(separator: ", ") + " and " + words[words.count - 1]
+        return "Fill your \(item.sites.first ?? item.title) \(list) \(place.web ? "on" : "in") \(place.where_)?"
+    }
+
+    /// Where a field's value goes, to tell one fill's fields apart: a page's origin (for payment info, the shop's:
+    /// a card form's fields often sit in a payment company's frames), or an app.
+    static func destination(_ kind: VaultKind, _ place: Place) -> String {
+        guard place.web else { return "app:" + place.bundle }
+        let url = kind == .card ? place.topURL ?? place.frameURL : place.frameURL
+        return url.map { "\(VaultSite.scheme($0) ?? "")://\(VaultSite.host($0) ?? "")" } ?? "unreadable"
+    }
+
+    /// Why one fill's fields can't go together, or nil: a login's, key's or card's fields in more than one page or
+    /// app (a login form with its password in another site's frame). One card answers for one place only.
+    static func mixed(_ kind: VaultKind, _ places: [Place]) -> String? {
+        guard [.login, .apiKey, .card].contains(kind) else { return nil }
+        var seen: [String] = [], names: [String] = []
+        for place in places where !seen.contains(destination(kind, place)) {
+            seen.append(destination(kind, place))
+            let name = kind == .card ? place.shop ?? place.where_ : place.where_
+            if !names.contains(name) { names.append(name) }
+        }
+        guard seen.count > 1 else { return nil }
+        let said = names.count > 1 ? " (\(names.joined(separator: ", ")))" : ""
+        return "Those fields are in different pages or apps\(said): Petal fills one place at a time, so nothing was filled. Fill each place's fields on their own."
+    }
+
+    /// The first field of a fill Petal won't do by itself (`index`, and why), or nil: what new_login checks before it
+    /// makes, saves and fills a password. Asking isn't enough there: every field must fill by itself.
+    static func unasked(_ item: VaultItem, _ fields: [VaultField], targets: [Target], places: [Place]) -> (index: Int, why: String)? {
+        if let mixed = mixed(item.kind, places) { return (0, mixed) }
+        for index in fields.indices {
+            switch decide(item, fields[index], target: targets[index], place: places[index]) {
+            case .fill: continue
+            case .refuse(let why), .ask(_, let why): return (index, why)
+            case .buy: return (index, "Payment info waits for the Buy card.")
+            }
+        }
+        return nil
+    }
+
+    /// What a login typed into Petal's card is saved for: the page Petal read, or the app once Petal confirmed who
+    /// signed it.
+    static func bind(_ item: inout VaultItem, to place: Place) {
+        if place.web {
+            if let host = place.host { item.sites = [host] }
+        } else if place.signed, let team = place.team {
+            item.apps = [place.bundle]
+            item.appSigners = [place.bundle: team]
+        }
+    }
+
+    /// Before a request card that fills fields: a field Petal won't fill whatever's typed (`refusal`, its index), or
+    /// what doesn't match where the fields are (`warning`, said on the card). `saved`: the field whose place the
+    /// answer is saved for (a login's password field's).
+    struct Requested: Equatable {
+        var refusal: String?
+        var index = 0
+        var warning: String?
+    }
+
+    static func request(_ kind: VaultKind, _ fields: [VaultField], targets: [Target], places: [Place], saved: Int) -> Requested {
+        guard !fields.isEmpty else { return Requested() }
+        if let mixed = mixed(kind, places) { return Requested(refusal: mixed) }
+        var probe = VaultItem(kind: kind, title: "x")
+        bind(&probe, to: places[saved])
+        for field in kind.fields { probe[field] = "x" }
+        probe[.expiry] = "01/30"
+        var warnings: [String] = []
+        for index in fields.indices {
+            switch decide(probe, fields[index], target: targets[index], place: places[index]) {
+            case .fill: continue
+            case .refuse(let why): return Requested(refusal: why, index: index)
+            case .buy: return Requested(refusal: "Payment info waits for the Buy card: Petal doesn't fill it from a request.", index: index)
+            case .ask(_, let why): if !warnings.contains(why) { warnings.append(why) }
+            }
+        }
+        return Requested(warning: warnings.isEmpty ? nil : warnings.joined(separator: " "))
+    }
+
+    /// The person said Buy on one "Buy on <host>?" card: payment info fills there with that card, in that window,
+    /// for the rest of that reply, while its tab stays on that host. Another host (a subdomain or another shop),
+    /// window, card or reply asks again; a page that leaves the host ends it.
+    struct Checkout: Equatable {
+        /// The shop's exact host (the tab's whole page).
+        var host: String
+        var window: UInt32
+        /// The browser's own answer for the window's tab when Buy was said, if it gave one.
+        var tab: String?
+        var card: String
+        var turn: String
+
+        func covers(_ place: Place, window: UInt32?, card: String, turn: String) -> Bool {
+            guard turn == self.turn, card == self.card, window == self.window, place.shop == host else { return false }
+            if tab != nil { return place.tabURL.flatMap(VaultSite.host) == tab }
+            return true
+        }
+
+        /// The same window, now on another host: the checkout is over.
+        func left(_ place: Place, window: UInt32?) -> Bool {
+            window == self.window && place.web && place.shop != host
+        }
+    }
+
+    /// Every way a value typed into a field may show up in text (a card number in its forms), for the redaction.
+    static func secrets(_ field: VaultField, _ value: String) -> [String] {
+        guard field.isSecret else { return [] }
+        var item = VaultItem(kind: field == .password ? .login : field == .value ? .apiKey : .card, title: "")
+        item.fields[field.rawValue] = value
+        return secrets(item)
+    }
+
+    /// One vault record in the Keychain, as read: an item (its account `item:<id>`, its data the item as JSON, marked
+    /// as Petal's own format or proven by its id), else a secret from before kinds kept under a name (which may
+    /// itself start with "item:"). Never lost: what doesn't read as an item is an old secret.
+    enum Stored: Equatable {
+        case item(VaultItem)
+        case legacy(name: String, secret: String)
+        case unreadable
+    }
+
+    /// The Keychain attribute (kSecAttrGeneric) Petal marks its items' format with.
+    static let format = "petal.vault.item.1"
+
+    static func stored(account: String, data: Data, marked: Bool) -> Stored {
+        if account.hasPrefix("item:"), let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           object["kind"] is String, let item = try? JSONDecoder().decode(VaultItem.self, from: data),
+           marked || account == "item:" + item.id {
+            return .item(item)
+        }
+        guard let secret = String(data: data, encoding: .utf8) else { return .unreadable }
+        return .legacy(name: account, secret: secret)
     }
 
     // MARK: Import and export
@@ -790,7 +945,7 @@ enum Vault {
         return importCSV(text)
     }
 
-    /// The same thing saved twice: the same id (Petal's own export), else a login for the same site and username,
+    /// The same thing saved twice: the same id (Petal's own export), else a login for the same site or app and username,
     /// a card with the same number, contact info with the same email (or name), an address with the same first line
     /// and postal code, an API key with the same title.
     static func same(_ a: VaultItem, _ b: VaultItem) -> Bool {
@@ -798,9 +953,11 @@ enum Vault {
         guard a.kind == b.kind else { return false }
         switch a.kind {
         case .login:
+            // The same username for the same site or app; logins saved for nowhere are never the same as each other.
             guard a.username.lowercased() == b.username.lowercased() else { return false }
-            let left = Set(a.sites.map(VaultSite.plain)), right = Set(b.sites.map(VaultSite.plain))
-            return left == right || !left.isDisjoint(with: right)
+            let left = Set(a.sites.map { "site:" + VaultSite.plain($0) } + a.apps.map { "app:" + $0.lowercased() })
+            let right = Set(b.sites.map { "site:" + VaultSite.plain($0) } + b.apps.map { "app:" + $0.lowercased() })
+            return !left.isEmpty && !left.isDisjoint(with: right)
         case .card:
             let digits = a[.number].filter(\.isNumber)
             return !digits.isEmpty && digits == b[.number].filter(\.isNumber)
@@ -870,36 +1027,87 @@ enum Vault {
 
 /// Which site a web address is, and whether something saved for one site belongs on a page.
 enum VaultSite {
-    /// Suffixes under which anyone can have a name of their own (so "a.co.uk" and "b.co.uk" are strangers), beyond
-    /// the rule below; and hosting sites where every customer is a subdomain (anyone can have evil.github.io).
-    static let suffixes: Set<String> = [
-        "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk", "sch.uk", "nhs.uk", "police.uk",
-        "com.tr", "net.tr", "org.tr", "edu.tr", "gov.tr", "k12.tr", "bel.tr", "av.tr", "gen.tr", "biz.tr", "info.tr", "web.tr",
-        "tv.tr", "pol.tr", "tsk.tr", "name.tr", "bbs.tr", "dr.tr", "kep.tr",
-        "com.au", "net.au", "org.au", "edu.au", "gov.au", "asn.au", "id.au",
-        "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp", "ad.jp", "ed.jp", "gr.jp", "lg.jp",
-        "co.nz", "org.nz", "net.nz", "ac.nz", "govt.nz", "geek.nz", "school.nz",
-        "co.za", "org.za", "gov.za", "ac.za", "web.za", "net.za",
-        "com.br", "net.br", "org.br", "gov.br", "edu.br", "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn",
-        "com.hk", "org.hk", "edu.hk", "gov.hk", "net.hk", "com.sg", "edu.sg", "gov.sg", "org.sg", "net.sg",
-        "co.in", "net.in", "org.in", "gen.in", "firm.in", "ind.in", "ac.in", "edu.in", "gov.in",
-        "co.kr", "or.kr", "ac.kr", "go.kr", "ne.kr", "com.mx", "org.mx", "gob.mx", "edu.mx", "net.mx",
-        "co.il", "org.il", "ac.il", "gov.il", "com.tw", "org.tw", "edu.tw", "gov.tw", "co.id", "ac.id", "go.id", "or.id",
-        "co.th", "ac.th", "go.th", "in.th", "com.pl", "net.pl", "org.pl", "co.at", "or.at", "com.es", "com.pt", "com.gr",
-        // Hosting: every customer has a subdomain.
-        "github.io", "gitlab.io", "bitbucket.io", "herokuapp.com", "vercel.app", "now.sh", "netlify.app", "netlify.com",
-        "pages.dev", "workers.dev", "web.app", "firebaseapp.com", "appspot.com", "blogspot.com", "azurewebsites.net",
-        "cloudfront.net", "amazonaws.com", "s3.amazonaws.com", "ngrok.io", "ngrok-free.app", "ngrok.app", "glitch.me",
-        "repl.co", "replit.app", "onrender.com", "fly.dev", "surge.sh", "wixsite.com", "myshopify.com", "notion.site",
-        "carrd.co", "web.core.windows.net", "azurestaticapps.net", "deno.dev", "railway.app", "up.railway.app",
-        "framer.app", "webflow.io", "squarespace.com", "wordpress.com", "tumblr.com", "translate.goog", "googleusercontent.com",
-        "sharepoint.com", "my.salesforce.com", "force.com", "zendesk.com", "atlassian.net", "readthedocs.io", "gitbook.io",
-        "substack.com", "medium.com", "itch.io", "neocities.org", "codeberg.page", "pythonanywhere.com", "streamlit.app",
-        "hf.space", "csb.app", "stackblitz.io", "lovable.app",
-    ]
-    /// Under a country's own two letters, these second words are shared suffixes too ("com.tr", "co.uk", "ac.jp").
-    static let shared: Set<String> = ["com", "co", "net", "org", "edu", "gov", "ac", "or", "ne", "go", "gob", "mil", "nom", "ltd",
-                                      "plc", "sch", "k12", "gen", "biz", "info", "nic", "res", "gv", "mi", "ed"]
+    /// The Public Suffix List (publicsuffix.org, its ICANN and private sections; `macos/Resources`, copied into the
+    /// app by build.sh): the names under which anyone can register one of their own ("co.uk", "uk.com", "github.io",
+    /// every "*.ck" but "www.ck"), so "a.co.uk" and "b.co.uk", or "me.github.io" and "evil.github.io", are strangers.
+    struct Suffixes {
+        private var rules = Set<String>()
+        /// "ck" for "*.ck".
+        private var wildcards = Set<String>()
+        /// "www.ck" for "!www.ck".
+        private var exceptions = Set<String>()
+        /// The top-level names the list has rules for: any other is a name it doesn't cover.
+        private var tops = Set<String>()
+
+        init(_ text: String) {
+            for line in text.split(whereSeparator: \.isNewline) {
+                // A rule is a line's first word; comments start with //.
+                guard let word = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).first, !word.hasPrefix("//") else { continue }
+                let rule = word.lowercased()
+                if rule.hasPrefix("!") { exceptions.insert(String(rule.dropFirst())) }
+                else if rule.hasPrefix("*.") { wildcards.insert(String(rule.dropFirst(2))) }
+                else { rules.insert(rule) }
+                if let top = rule.split(separator: ".").last { tops.insert(String(top)) }
+            }
+        }
+
+        var isEmpty: Bool { rules.isEmpty && wildcards.isEmpty }
+
+        /// The public suffix of `host` by the list's own algorithm (an exception wins, else the longest rule, else
+        /// the top-level name); nil when the list has no rule for its top-level name.
+        func suffix(of host: String) -> String? {
+            let labels = host.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+            guard let top = labels.last, tops.contains(top), !labels.contains(where: \.isEmpty) else { return nil }
+            for start in labels.indices where exceptions.contains(labels[start...].joined(separator: ".")) {
+                return labels[(start + 1)...].joined(separator: ".")
+            }
+            for start in labels.indices {
+                let candidate = labels[start...].joined(separator: ".")
+                if rules.contains(candidate) { return candidate }
+                if start + 1 < labels.count, wildcards.contains(labels[(start + 1)...].joined(separator: ".")) { return candidate }
+            }
+            return top
+        }
+
+        /// The name someone registered: one label more than the suffix; nil for a public suffix itself or a name
+        /// the list doesn't cover.
+        func registrable(_ host: String) -> String? {
+            guard let suffix = suffix(of: host), host != suffix, host.hasSuffix("." + suffix) else { return nil }
+            let rest = host.dropLast(suffix.count + 1)
+            guard let label = rest.split(separator: ".").last else { return nil }
+            return "\(label).\(suffix)"
+        }
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var list: Suffixes?
+    nonisolated(unsafe) private static var loading = false
+
+    /// The list, once read; the first ask starts reading it (off the main thread) from the app's copy. Until then,
+    /// nil: a login fills by itself only on its saved host and what's under it.
+    static func suffixes() -> Suffixes? {
+        lock.lock()
+        defer { lock.unlock() }
+        if list == nil, !loading, let url = Bundle.main.url(forResource: "public_suffix_list", withExtension: "dat") {
+            loading = true
+            DispatchQueue.global(qos: .utility).async { load(url) }
+        }
+        return list
+    }
+
+    /// Reads the list from `url` (on the caller's thread; never the main one). False when it isn't there.
+    @discardableResult
+    static func load(_ url: URL) -> Bool {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return false }
+        let read = Suffixes(text)
+        lock.lock()
+        if !read.isEmpty { list = read }
+        lock.unlock()
+        return !read.isEmpty
+    }
+
+    /// Starts reading the list now, so it's there by the time a field is filled.
+    static func preload() { _ = suffixes() }
 
     /// The host of an address, or of a bare host ("github.com"), lower case, without a port, brackets or a trailing dot.
     static func host(_ text: String) -> String? {
@@ -936,38 +1144,25 @@ enum VaultSite {
         host.contains(":") || host.split(separator: ".").allSatisfy { !$0.isEmpty && $0.allSatisfy(\.isNumber) }
     }
 
-    /// Under which anyone can register a name: "co.uk", "github.io".
-    static func isSuffix(_ host: String) -> Bool {
-        if suffixes.contains(host) { return true }
-        let labels = host.split(separator: ".").map(String.init)
-        return labels.count == 2 && labels[1].count == 2 && shared.contains(labels[0])
-    }
-
     /// The name someone registered: "github.com" for "gist.github.com", "example.co.uk" for "www.example.co.uk",
-    /// "me.github.io" for "me.github.io". Conservative: when unsure, the longer name (fewer pages match).
+    /// "me.github.io" for "me.github.io". Conservative: until the list is read, or for a name it doesn't cover, the
+    /// host itself (fewer pages match).
     static func registrable(_ text: String) -> String {
         guard let host = host(text) else { return text.lowercased() }
         if isAddress(host) || isLocal(host) { return host }
-        let labels = host.split(separator: ".").map(String.init)
-        guard labels.count > 2 else { return host }
-        // The longest known suffix, then one label more.
-        for take in stride(from: min(4, labels.count - 1), through: 2, by: -1) {
-            let suffix = labels.suffix(take).joined(separator: ".")
-            if suffixes.contains(suffix) { return labels.suffix(take + 1).joined(separator: ".") }
-        }
-        let last = labels[labels.count - 1], second = labels[labels.count - 2]
-        if last.count == 2, shared.contains(second) { return labels.suffix(3).joined(separator: ".") }
-        return labels.suffix(2).joined(separator: ".")
+        return suffixes()?.registrable(host) ?? host
     }
 
     /// A page on `host` belongs to something saved for `saved`: the same host, or under the saved site's registrable
-    /// name ("accounts.github.com" for "github.com"). An IP address, this Mac, or a shared suffix saved as a site
-    /// ("github.io") only matches itself.
+    /// name ("accounts.github.com" for "github.com"). An IP address, this Mac, or a public suffix saved as a site
+    /// ("github.io") only matches itself. Until the list is read, or for a name it doesn't cover: the saved host and
+    /// what's under it only.
     static func matches(host: String, saved: String) -> Bool {
         guard let page = self.host(host), let site = self.host(saved) else { return false }
         if page == site { return true }
-        if isAddress(page) || isAddress(site) || isSuffix(site) || isLocal(site) || isLocal(page) { return false }
-        let root = registrable(site)
+        if isAddress(page) || isAddress(site) || isLocal(site) || isLocal(page) { return false }
+        guard let list = suffixes(), list.suffix(of: site) != nil, list.suffix(of: page) != nil else { return page.hasSuffix("." + site) }
+        guard let root = list.registrable(site) else { return false }
         return page == root || page.hasSuffix("." + root)
     }
 }

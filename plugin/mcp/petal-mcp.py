@@ -865,7 +865,7 @@ def assist(name):
 
 # Petal AI on the Mac: seeing what's in front and acting on the Mac through Petal's permissions. (Omarchy: later.)
 ASSIST_TOOLS = {
-    "petal_look": (assist("petal_look"), "What the user is looking at now: the app and window in front, the browser tab's address and title, selected text, the current mode and which apps are open. In a sticky note's chat it looks at the note's own window, even after the user has moved on (front: true looks at what's in front now instead). screenshot: \"window\" (the front window, or app's) or \"screen\" saves a PNG and returns its path to read. clipboard: true adds the clipboard's text. Use it when the user says this, here, what I'm looking at.",
+    "petal_look": (assist("petal_look"), "What the user is looking at now: the app and window in front, the browser tab's address and title, selected text, the current mode and which apps are open. In a sticky note's chat it looks at the note's own window, even after the user has moved on (front: true looks at what's in front now instead). screenshot: \"window\" (the front window, or app's) or \"screen\" saves a PNG and returns its path to read; fields that may hold a password, card number, security code or key are blacked out, and a window Petal can't check isn't shown. clipboard: true adds the clipboard's text. Use it when the user says this, here, what I'm looking at.",
                    {"screenshot": {"type": "string", "enum": ["", "window", "screen"]}, "app": {"type": "string", "description": "look at this app instead of the one in front"},
                     "clipboard": {"type": "boolean"}, "front": {"type": "boolean", "description": "in a sticky note: what's in front now, not the note's window"}}),
     "petal_apps": (assist("petal_apps"), "Open, quit, hide or bring forward an app (by name or bundle id); open with `open` set opens that address or file (in `app` if given). Quitting asks the user first.",
@@ -886,8 +886,8 @@ ASSIST_TOOLS = {
                     "You see usernames, contact info and addresses in full, and a card's name, last4 and expiry; never a password, card number, security code or key: Petal fills those into fields itself. "
                     "action list (kind, site): what's saved. fill (fields {field: id from petal_ui}, item: an id from list; for a login, item may be left out and Petal finds the one saved for the page): "
                     "fields are username, password, name, email, phone, street, street2, city, region, postalCode, country (a country menu too), number, expiry, month, year, securityCode, value (an API key); submit: true presses Return after the last. "
-                    "Petal decides from the page it reads itself: a login fills by itself only on its own site (or http://localhost) or app, an API key on its service's site, this Mac's pages or an app; elsewhere the user is asked. "
-                    "Payment info fills only on https pages after one Buy card per checkout: pass buying (what, in a few words) and price; after Buy, place the order on that shop without asking again; after Don't, stop. "
+                    "Petal decides from the page it reads itself: a login fills by itself only on its own site (or http://localhost) or app, an API key on its service's site, this Mac's pages or an app; elsewhere the user is asked, once for all the fields. Fill one page or app at a time. "
+                    "Payment info fills only on https pages after one Buy card per checkout: pass buying (what, in a few words) and price; Buy covers that card on that exact page's host, in that window, for the rest of the reply; then place the order there (using the browser may ask once, as any app does); after Don't, stop. "
                     "request (kind login, contact, address, card or apiKey; fields to fill, title, why): the user types what's missing into Petal's card (never into the chat); for a login, Submit fills the page and saves it. "
                     "new_login (password_id, confirm_id, username_id, username; symbols false or allowed_symbols for sites that limit them): Petal makes a strong password, saves it for the page's site and fills it. "
                     "If the user declines, don't find another way.",
@@ -900,7 +900,7 @@ ASSIST_TOOLS = {
                      "submit": {"type": "boolean"}, "title": {"type": "string"}, "why": {"type": "string"}, "username": {"type": "string"},
                      "password_id": {"type": "string"}, "confirm_id": {"type": "string"}, "username_id": {"type": "string"},
                      "symbols": {"type": "boolean"}, "allowed_symbols": {"type": "string"}, "length": {"type": "integer"},
-                     "name": {"type": "string", "description": "use (older sessions): an item's title"},
+                     "name": {"type": "string", "description": "use (older sessions): an item's title; it fills like fill, into id or the field petal_ui saw with the cursor"},
                      "task": {"type": "string", "description": "sessions outside Petal's own chat: the same few words for the task's acts"}}),
     "petal_memories": (assist("petal_memories"), "What Petal AI remembers about the user (everywhere, and per mode); mode limits it to one mode's and the everywhere ones.",
                        {"mode": {"type": "string"}}),

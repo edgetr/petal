@@ -118,11 +118,15 @@ extension Assist {
 }
 
 /// The vault's secrets as hashes (UIMap.SecretIndex), read from the Keychain once and again only after the vault
-/// changes, so checking every control petal_ui reads never touches the Keychain. Never on the main thread.
+/// changes, so checking every control petal_ui reads never touches the Keychain. With them, every secret Petal typed
+/// into a field this run (`typed`), saved or not: a login asked for without saving it, or one the Keychain refused,
+/// is hidden from the AI just the same. Never on the main thread.
 enum VaultIndex {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var index: UIMap.SecretIndex?
     nonisolated(unsafe) private static var generation = 0
+    /// Secrets Petal typed, kept (in memory only) until Petal quits.
+    nonisolated(unsafe) private static var typed: [String] = []
 
     /// A secret was saved or removed: the next check reads the vault again.
     static func changed() {
@@ -133,12 +137,30 @@ enum VaultIndex {
         DispatchQueue.main.async { MainActor.assumeIsolated { VaultModel.shared.changed() } }
     }
 
+    /// Secrets Petal is about to type (every form of each: Vault.secrets): hidden from the AI from now on.
+    static func remember(_ secrets: [String]) {
+        let fresh = secrets.filter { !$0.isEmpty }
+        guard !fresh.isEmpty else { return }
+        lock.lock()
+        var added = false
+        for secret in fresh where !typed.contains(secret) {
+            typed.append(secret)
+            added = true
+        }
+        if added {
+            index = nil
+            generation += 1
+        }
+        lock.unlock()
+    }
+
     static func current() -> UIMap.SecretIndex {
         lock.lock()
         if let index { lock.unlock(); return index }
         let started = generation
+        let extra = typed
         lock.unlock()
-        let made = UIMap.SecretIndex(VaultStore.items().flatMap(Vault.secrets))
+        let made = UIMap.SecretIndex(VaultStore.items().flatMap(Vault.secrets) + extra)
         lock.lock()
         if generation == started { index = made }   // a change meanwhile is read next time
         lock.unlock()

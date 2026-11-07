@@ -462,9 +462,11 @@ struct VaultEditor: View {
             HStack(spacing: 6) {
                 ForEach(item.apps, id: \.self) { id in
                     HStack(spacing: 4) {
-                        Image(nsImage: Apps.icon(id)).resizable().frame(width: 16, height: 16)
-                        Text(Apps.name(id)).font(.system(size: 12))
-                        Button { item.apps.removeAll { $0 == id } } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
+                        LinkedApp(id: id)
+                        Button {
+                            item.apps.removeAll { $0 == id }
+                            item.appSigners[id] = nil
+                        } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
                             .buttonStyle(.plain)
                     }
                     .padding(.horizontal, 8).padding(.vertical, 3)
@@ -472,8 +474,14 @@ struct VaultEditor: View {
                 }
                 Menu("Add an app") {
                     ForEach(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !item.apps.contains($0.bundleIdentifier ?? "") }
-                        .compactMap { app in app.bundleIdentifier.map { ($0, app.localizedName ?? $0) } }.sorted { $0.1 < $1.1 }, id: \.0) { id, name in
-                        Button(name) { item.apps.append(id) }
+                        .compactMap { app in app.bundleIdentifier.map { ($0, app.localizedName ?? $0, app.processIdentifier) } }.sorted { $0.1 < $1.1 }, id: \.0) { id, name, pid in
+                        Button(name) {
+                            item.apps.append(id)
+                            // Who signed the app running now: the login fills by itself only into a copy signed the same.
+                            VaultReader.loadSigner(pid: pid, bundle: id) { team in
+                                if let team, item.apps.contains(id) { item.appSigners[id] = team }
+                            }
+                        }
                     }
                 }
                 .fixedSize()
@@ -571,6 +579,28 @@ extension VaultModel {
                     done(ok)
                 }
             }
+        }
+    }
+}
+
+/// An app tied to a login: its icon and name as Petal has them, read off the main thread the first time.
+private struct LinkedApp: View {
+    let id: String
+    @State private var name: String?
+    @State private var icon: NSImage?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if let icon = icon ?? Apps.cachedIcon(id) {
+                Image(nsImage: icon).resizable().frame(width: 16, height: 16)
+            } else {
+                Image(systemName: "app").frame(width: 16, height: 16)
+            }
+            Text(name ?? Apps.cachedName(id) ?? id).font(.system(size: 12))
+        }
+        .task(id: id) {
+            Apps.loadName(id) { name = $0 }
+            Apps.loadIcon(id) { icon = $0 }
         }
     }
 }

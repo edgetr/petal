@@ -40,6 +40,12 @@ enum VaultFiller {
         guard let text = plan.given ?? VaultStore.item(plan.itemID).flatMap({ Vault.text($0, plan.field, fourDigitYear: plan.fourDigitYear) }),
               !text.isEmpty else { return "That isn't in the vault anymore." }
         guard !cancel.stopped else { return ComputerUse.stoppedText }
+        // Hidden from the AI before a key goes, saved in the vault or not: in petal_ui, petal_look, the clipboard and
+        // pictures (Sensitive), for as long as Petal runs.
+        if plan.field.isSecret {
+            VaultIndex.remember(Vault.secrets(plan.field, text))
+            Sensitive.filled(element, pid: pid)
+        }
         if let error = Acting.bringWindow(map, cancel: cancel) { return error }
         if plan.target.popup { return choose(text, in: element, pid: pid, cancel: cancel) }
         if !Acting.isFront(pid) {
@@ -121,8 +127,20 @@ enum VaultFiller {
 
 /// Which page or app a field is in, read by Petal through Accessibility (never from the AI), off the main thread.
 enum VaultReader {
+    /// The browsers whose pages Petal believes about their address (AXURL), with who signs each (its Team ID, or
+    /// "apple"): any other app's web view is part of that app, filled as the app.
+    static let browsers: [String: String] = [
+        "com.apple.Safari": "apple", "com.apple.SafariTechnologyPreview": "apple",
+        "com.google.Chrome": "EQHXZ8M8AV", "com.google.Chrome.beta": "EQHXZ8M8AV", "com.google.Chrome.dev": "EQHXZ8M8AV",
+        "com.google.Chrome.canary": "EQHXZ8M8AV", "org.mozilla.firefox": "43AQ936H96", "org.mozilla.firefoxdeveloperedition": "43AQ936H96",
+        "org.mozilla.nightly": "43AQ936H96", "com.microsoft.edgemac": "UBF8T346G9", "com.brave.Browser": "KL8N8XSYF4",
+        "com.brave.Browser.beta": "KL8N8XSYF4", "company.thebrowser.Browser": "S6N382Y83G", "com.vivaldi.Vivaldi": "4XF3XNRN6Y",
+        "com.operasoftware.Opera": "A2P9LX4JPN", "net.imput.helium": "S4Q33XPHB4", "com.t3tools.t3code": "ARK85ZXQ4Z",
+    ]
+
     /// The addresses of the web areas around `element`: the nearest (a login or payment frame's own) and the
-    /// outermost (the tab's page). Not in a web page: the app, and whether its signature checks out.
+    /// outermost (the tab's page), in a browser Petal knows whose signature checks out. Anywhere else (an app, or
+    /// another app's web view): the app, and who signed it.
     static func place(of element: AXUIElement, pid: pid_t, bundle: String, appName: String) -> Vault.Place {
         var place = Vault.Place(bundle: bundle, appName: appName)
         var areas: [String?] = []
@@ -130,16 +148,18 @@ enum VaultReader {
         for _ in 0..<120 {
             guard let at = current else { break }
             let role: String = Windows.value(at, kAXRoleAttribute) ?? ""
-            if role == "AXWebArea" {
-                place.web = true
-                areas.append(url(at))
-            }
+            if role == "AXWebArea" { areas.append(url(at)) }
             if role == "AXWindow" || role == "AXApplication" { break }
             current = Windows.value(at, kAXParentAttribute)
         }
-        place.frameURL = areas.first ?? nil
-        place.topURL = areas.last ?? nil
-        if !place.web { place.signed = signed(pid: pid, bundle: bundle) }
+        if !areas.isEmpty, isBrowser(pid: pid, bundle: bundle) {
+            place.web = true
+            place.frameURL = areas.first ?? nil
+            place.topURL = areas.last ?? nil
+        } else {
+            place.team = signer(pid: pid, bundle: bundle)
+            place.signed = place.team != nil || signed(pid: pid, bundle: bundle)
+        }
         return place
     }
 
@@ -149,15 +169,58 @@ enum VaultReader {
         return nil
     }
 
-    /// The running app is signed by Apple's certificates (an App Store or Developer ID app, or Apple's own) for this
-    /// very bundle id, and its signature checks out now: an app made to look like another can't pass.
-    static func signed(pid: pid_t, bundle: String) -> Bool {
-        guard !bundle.isEmpty, !bundle.contains("\"") else { return false }
+    private static func guest(_ pid: pid_t) -> SecCode? {
         var code: SecCode?
-        guard SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributePid: pid] as CFDictionary, [], &code) == errSecSuccess, let code else { return false }
+        guard SecCodeCopyGuestWithAttributes(nil, [kSecGuestAttributePid: pid] as CFDictionary, [], &code) == errSecSuccess else { return nil }
+        return code
+    }
+
+    private static func satisfies(_ code: SecCode, _ text: String) -> Bool {
         var requirement: SecRequirement?
-        guard SecRequirementCreateWithString("anchor apple generic and identifier \"\(bundle)\"" as CFString, [], &requirement) == errSecSuccess else { return false }
+        guard SecRequirementCreateWithString(text as CFString, [], &requirement) == errSecSuccess, let requirement else { return false }
         return SecCodeCheckValidity(code, [], requirement) == errSecSuccess
+    }
+
+    private static func requirement(bundle: String, team: String) -> String? {
+        guard !bundle.isEmpty, !bundle.contains("\""), !team.isEmpty, team.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else { return nil }
+        return team == "apple" ? "anchor apple and identifier \"\(bundle)\""
+            : "anchor apple generic and identifier \"\(bundle)\" and certificate leaf[subject.OU] = \"\(team)\""
+    }
+
+    /// The running app is a browser Petal knows, signed now by that browser's maker.
+    static func isBrowser(pid: pid_t, bundle: String) -> Bool {
+        guard let team = browsers[bundle], let text = requirement(bundle: bundle, team: team), let code = guest(pid) else { return false }
+        return satisfies(code, text)
+    }
+
+    /// The running app is signed by Apple's certificates (an App Store or Developer ID app, or Apple's own) for this
+    /// very bundle id, and its signature checks out now.
+    static func signed(pid: pid_t, bundle: String) -> Bool {
+        guard !bundle.isEmpty, !bundle.contains("\""), let code = guest(pid) else { return false }
+        return satisfies(code, "anchor apple generic and identifier \"\(bundle)\"")
+    }
+
+    /// Who signed the running app for this bundle id, checked now: "apple" for Apple's own, else its Team ID; nil
+    /// when it isn't signed so (an app made to look like another, signed by someone else, has another Team ID).
+    static func signer(pid: pid_t, bundle: String) -> String? {
+        guard !bundle.isEmpty, !bundle.contains("\""), let code = guest(pid) else { return nil }
+        if satisfies(code, "anchor apple and identifier \"\(bundle)\"") { return "apple" }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let team = (info as? [String: Any])?[kSecCodeInfoTeamIdentifier as String] as? String,
+              let text = requirement(bundle: bundle, team: team), satisfies(code, text) else { return nil }
+        return team
+    }
+
+    /// Who signed a running app, read off the main thread and handed back on it (for the settings window, when an
+    /// app is added to a login).
+    static func loadSigner(pid: pid_t, bundle: String, _ done: @escaping @MainActor (String?) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let team = signer(pid: pid, bundle: bundle)
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(team) } }
+        }
     }
 
     /// Whether the control takes text, is a password field, or is a pop-up menu.
@@ -173,19 +236,21 @@ extension Assist {
     /// petal_vault. `list` what the AI may see; `fill` fields from the vault (a login or API key by itself where it
     /// belongs, else after asking; payment info after one Buy card per checkout; contact info and addresses freely);
     /// `request` what's missing through Petal's card; `new_login` a strong password made, saved and filled. The AI
-    /// never sees a password, card number, security code or key.
+    /// never sees a password, card number, security code or key. Every step after the first checks the call's reply
+    /// is still going (ComputerUse.token).
     func vault(_ args: [String: Any], caller: String?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         switch (args["action"] as? String ?? "list").lowercased() {
         case "list": vaultList(args, send)
         case "fill": vaultFill(args, caller: caller, send, fail)
         case "request": vaultRequest(args, caller: caller, send, fail)
         case "new_login", "generate": vaultNewLogin(args, caller: caller, send, fail)
-        case "use": vaultUse(args, send, fail)
+        case "use": vaultUse(args, caller: caller, send, fail)
         default: fail("action is list, fill, request or new_login.")
         }
     }
 
     private static let hidden = "Petal fills these itself; you never see a password, card number, security code or key."
+    private static let over = ComputerUse.stoppedText + " Don't carry on in this reply: say what's left and wait for them."
 
     private func vaultList(_ args: [String: Any], _ send: @escaping (Any) -> Void) {
         let kind = (args["kind"] as? String).flatMap { $0.isEmpty ? nil : Vault.kindNamed($0) }
@@ -267,7 +332,9 @@ extension Assist {
         let map = window.map, entries = window.entries
         let ref = args["item"] as? String ?? args["name"] as? String ?? ""
         let task = args["task"] as? String ?? ""
+        guard let token = computer.token(caller, task: task) else { return fail(Self.over) }
         vaultPlaces(map, entries) { places, targets, items in
+            guard self.computer.live(caller, token) else { return fail(Self.over) }
             // The item: named, else the login saved for this page (or app), else the only card saved.
             let first = Vault.field(wanted[0].word)!
             let item: VaultItem
@@ -289,20 +356,27 @@ extension Assist {
             } else {
                 return fail("Name the item (its id from action list).")
             }
+            // One fill, one place: a card's question is about one page or app only.
+            if let mixed = Vault.mixed(item.kind, places) { return fail(mixed) }
             var plans: [VaultFillPlan] = []
-            var asks: [(String, String)] = []
-            var shops: Set<String> = []
+            var asked: [VaultField] = []
+            var reasons: [String] = []
+            var askPlace: Vault.Place?
+            var buyPlace: Vault.Place?
             for (offset, pair) in wanted.enumerated() {
                 let field = Vault.field(pair.word, kind: item.kind)!
                 var plan = VaultFillPlan(itemID: item.id, title: item.title, field: field, place: places[offset], target: targets[offset])
                 plan.task = task
                 plan.fourDigitYear = args["fourDigitYear"] as? Bool ?? false
-                let shop = places[offset].shop.map(VaultSite.registrable) ?? ""
-                let allowed = item.kind == .card && self.computer.checkout(caller, shop: shop, task: task).allowed
-                switch Vault.decide(item, field, target: targets[offset], place: places[offset], checkout: allowed) {
+                let bought = item.kind == .card
+                    && self.computer.checkout(caller, token: token, place: places[offset], window: map.windowID, card: item.id)
+                switch Vault.decide(item, field, target: targets[offset], place: places[offset], checkout: bought) {
                 case .refuse(let why): return fail("\(pair.id): \(why) Nothing was filled.")
-                case .ask(let title, let detail): asks.append((title, detail))
-                case .buy(let shop): shops.insert(shop)
+                case .ask(_, let why):
+                    asked.append(field)
+                    if !reasons.contains(why) { reasons.append(why) }
+                    askPlace = askPlace ?? places[offset]
+                case .buy: buyPlace = buyPlace ?? places[offset]
                 case .fill: break
                 }
                 plans.append(plan)
@@ -310,14 +384,17 @@ extension Assist {
             // Return goes once, after the last field.
             if args["submit"] as? Bool == true, !plans.isEmpty { plans[plans.count - 1].submit = true }
             let go: (Bool) -> Void = { allowed in
-                self.vaultFillAll(plans, entries: entries, map: map, caller: caller, allowed: allowed, send: send)
+                guard self.computer.live(caller, token) else { return fail(Self.over) }
+                self.vaultFillAll(plans, entries: entries, map: map, caller: caller, token: token, allowed: allowed, send: send)
             }
-            if !shops.isEmpty {
-                guard shops.count == 1, let shop = shops.first else { return fail("Those fields are on different shops' pages; fill one checkout at a time.") }
-                return self.vaultBuy(item, shop: shop, args: args, map: map, caller: caller, task: task, send: send, fail: fail) { go(true) }
+            if let buyPlace {
+                return self.vaultBuy(item, place: buyPlace, args: args, map: map, caller: caller, token: token, send: send, fail: fail) { go(true) }
             }
-            guard let (title, detail) = asks.first else { return go(false) }
-            self.ask("vault-fill", title, detail: detail, always: true, warn: true, allow: "Fill anyway", owner: caller) { allowed in
+            // One card for every field that doesn't match, naming them all. Payment info a Buy covers fills on that
+            // Buy, without asking to use the browser.
+            guard let askPlace else { return go(item.kind == .card) }
+            self.ask("vault-fill", Vault.question(item, asked, place: askPlace), detail: reasons.joined(separator: " "), always: true, warn: true,
+                     allow: "Fill anyway", owner: caller) { allowed in
                 guard allowed else { return send(["declined": "The person didn't let Petal fill it. Don't find another way."]) }
                 go(true)
             }
@@ -325,8 +402,8 @@ extension Assist {
     }
 
     /// Fills the fields one after another; the AI hears which were filled, and the first error if any.
-    private func vaultFillAll(_ plans: [VaultFillPlan], entries: [ComputerUse.Entry], map: ComputerUse.Map, caller: String, allowed: Bool,
-                              send: @escaping (Any) -> Void) {
+    private func vaultFillAll(_ plans: [VaultFillPlan], entries: [ComputerUse.Entry], map: ComputerUse.Map, caller: String,
+                              token: Acting.Cancel, allowed: Bool, send: @escaping (Any) -> Void) {
         var steps = Array(plans.indices)
         var filled: [String] = []
         func next() {
@@ -336,7 +413,7 @@ extension Assist {
                 return send(reply)
             }
             let index = steps.removeFirst()
-            computer.fill(plans[index], entry: entries[index], map: map, caller: caller, allowed: allowed, send: { reply in
+            computer.fill(plans[index], entry: entries[index], map: map, caller: caller, token: token, allowed: allowed, send: { reply in
                 if let declined = (reply as? [String: Any])?["declined"] { return send(["filled": filled, "declined": declined]) }
                 filled.append(plans[index].field.rawValue)
                 next()
@@ -347,19 +424,21 @@ extension Assist {
         next()
     }
 
-    /// The one card before payment info goes into a shop's page in a reply: "Buy on shop.example?", what Petal AI says
-    /// it's buying (its words, marked as such) and the card. Buy lets payment info fill there, and the order be
-    /// placed, for the rest of the reply; Don't (the default) fills nothing.
-    private func vaultBuy(_ item: VaultItem, shop: String, args: [String: Any], map: ComputerUse.Map, caller: String, task: String,
+    /// The one card before payment info goes into a shop's page: "Buy on checkout.shop.example?", what Petal AI says
+    /// it's buying (its words, marked as such) and the card. Buy lets that card's payment info fill on that exact
+    /// host, in that window and tab, for the rest of the reply; Don't (the default) fills nothing.
+    private func vaultBuy(_ item: VaultItem, place: Vault.Place, args: [String: Any], map: ComputerUse.Map, caller: String, token: Acting.Cancel,
                           send: @escaping (Any) -> Void, fail: @escaping (String) -> Void, bought: @escaping () -> Void) {
+        guard let shop = place.shop, map.windowID != nil else {
+            return fail("Petal couldn't tell which page or window this is, so it fills no payment info here.")
+        }
         let what = UIMap.truncate(UIMap.tidy(args["buying"] as? String ?? ""), 160)
         let price = UIMap.truncate(UIMap.tidy(args["price"] as? String ?? ""), 40)
         let said = [what, price].filter { !$0.isEmpty }.joined(separator: ", ")
         let detail = (said.isEmpty ? "Petal AI didn't say what it's buying." : "Petal AI says: “\(said)”.") + " Pays with \(Vault.cardName(item))."
-        let cancel = computer.checkout(caller, shop: shop, task: task).cancel
         ask("vault-buy", "Buy on \(shop)?", detail: detail, always: true, warn: true, allow: "Buy", owner: caller) { allowed in
             guard allowed else { return send(["declined": "The person said Don't: nothing was filled. Don't buy it, and don't find another way."]) }
-            guard self.computer.allowCheckout(caller, shop: shop, bundle: map.bundle, cancel: cancel) else { return fail(ComputerUse.stoppedText) }
+            guard self.computer.allowCheckout(caller, token: token, place: place, window: map.windowID, card: item.id) else { return fail(Self.over) }
             self.did("You said Buy on \(shop) (\(Vault.cardName(item)))")
             bought()
         }
@@ -369,7 +448,9 @@ extension Assist {
 
     /// Asks the person for what's missing, on Petal's card (a login, contact info, an address, payment info or an
     /// API key): typed there, never into the chat. With fields' ids, Submit fills them on the page Petal read (never
-    /// payment info: that waits for Buy); for a login, "Save to your vault" (on by default) keeps it for that site.
+    /// payment info: that waits for Buy), and the card says plainly when that page or app isn't where a login or key
+    /// belongs (not secure, another site in a frame, an app Petal can't verify); for a login, "Save to your vault"
+    /// (on by default) keeps it for that site.
     private func vaultRequest(_ args: [String: Any], caller: String?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let legacyName = (args["name"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         let kind = (args["kind"] as? String).flatMap { $0.isEmpty ? nil : Vault.kindNamed($0) } ?? (legacyName.isEmpty ? .login : .apiKey)
@@ -389,43 +470,53 @@ extension Assist {
             guard let found = vaultWindow(caller, ids: ids) else { return fail(needsLook(caller, ids: ids)) }
             window = found
         }
+        // The reply this belongs to: nothing is saved or filled for a reply that's over.
+        var token: Acting.Cancel?
+        if let caller {
+            guard let current = computer.token(caller, task: args["task"] as? String ?? "") else { return fail(Self.over) }
+            token = current
+        }
+        let live = { token.map { self.computer.live(caller ?? "", $0) } ?? true }
         let why = (args["why"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let title = (args["title"] as? String ?? legacyName).trimmingCharacters(in: .whitespaces)
-        let show: @MainActor ([Vault.Place], [Vault.Target]) -> Void = { places, targets in
+        let saved = mapped.firstIndex { $0.0.isSecret } ?? 0
+        let show: @MainActor ([Vault.Place], [Vault.Target], String?) -> Void = { places, targets, warning in
             // The site shown and saved is the one Petal read: the password field's page (or the first field's).
-            let read = places.isEmpty ? nil : places[mapped.firstIndex { $0.0.isSecret } ?? 0]
+            let read = places.isEmpty ? nil : places[saved]
             var form = VaultForm(kind: kind, place: read.map(VaultForm.placeName) ?? "", fills: !ids.isEmpty)
             form.title = title
             form.username = args["username"] as? String ?? ""
             if kind == .apiKey, let read, read.web { form.site = read.host ?? "" }
-            self.ask("vault-new", form.heading, detail: why, always: true, form: form, owner: caller, typed: { answer in
+            // What doesn't match comes first, in Petal's words; then what Petal AI said, marked as its own.
+            let said = why.isEmpty ? "" : "Petal AI says: “\(UIMap.truncate(UIMap.tidy(why), 300))”"
+            let detail = [warning ?? "", said].filter { !$0.isEmpty }.joined(separator: "\n\n")
+            self.ask("vault-new", form.heading, detail: detail, always: true, form: form, warn: warning != nil, owner: caller, typed: { answer in
+                guard live() else { return send(["declined": Self.over]) }
                 self.vaultAnswered(answer, kind: kind, place: read, mapped: mapped, places: places, targets: targets,
-                                   window: window, caller: caller, send: send)
+                                   window: window, caller: caller, token: token, send: send)
             }) { allowed in
                 if !allowed { send(["declined": "The person closed it. Don't ask for it in the chat."]) }
             }
         }
-        guard let window else { return show([], []) }
+        guard let window else { return show([], [], nil) }
         vaultPlaces(window.map, window.entries) { places, targets, _ in
-            // Never a card whose Submit couldn't fill: a password only into a password field, and so on.
-            var probe = VaultItem(kind: kind, title: "x", sites: places.compactMap(\.host), apps: places.map(\.bundle))
-            for field in kind.fields { probe[field] = "x" }
-            probe[.expiry] = "01/30"
-            for (offset, pair) in mapped.enumerated() {
-                if case .refuse(let why) = Vault.decide(probe, pair.0, target: targets[offset], place: places[offset]) { return fail("\(pair.1): \(why)") }
-            }
-            show(places, targets)
+            guard live() else { return fail(Self.over) }
+            // Never a card whose Submit couldn't fill: a password only into a password field, one page or app at a
+            // time, and so on. What only doesn't match is said on the card.
+            let check = Vault.request(kind, mapped.map(\.0), targets: targets, places: places, saved: saved)
+            if let refusal = check.refusal { return fail("\(mapped[check.index].1): \(refusal)") }
+            show(places, targets, check.warning)
         }
     }
 
     private func vaultAnswered(_ answer: VaultForm.Answer, kind: VaultKind, place: Vault.Place?, mapped: [(VaultField, String)],
                                places: [Vault.Place], targets: [Vault.Target], window: (map: ComputerUse.Map, entries: [ComputerUse.Entry])?,
-                               caller: String?, send: @escaping (Any) -> Void) {
+                               caller: String?, token: Acting.Cancel?, send: @escaping (Any) -> Void) {
         var item = VaultItem(kind: kind, title: answer.title)
         for (field, value) in answer.values { item[field] = value }
-        if kind == .login, let place {
-            if place.web, let host = place.host { item.sites = [host] } else if !place.web, place.signed { item.apps = [place.bundle] }
-        }
+        // Hidden from the AI from now on, whether it's saved or not.
+        VaultIndex.remember(Vault.secrets(item))
+        if kind == .login, let place { Vault.bind(&item, to: place) }
         if kind == .apiKey, let site = VaultSite.host(answer.site) { item.sites = [site] }
         if item.title.isEmpty {
             switch kind {
@@ -436,28 +527,31 @@ extension Assist {
             case .apiKey: item.title = item.sites.first ?? "API key"
             }
         }
+        let live = { token.map { self.computer.live(caller ?? "", $0) } ?? true }
         var reply: [String: Any] = ["note": Self.hidden]
         let fillAll = {
-            guard let window, let caller, !mapped.isEmpty else { return send(reply) }
+            guard let window, let caller, let token, !mapped.isEmpty else { return send(reply) }
+            guard live() else { reply["error"] = Self.over; return send(reply) }
             // Each field on the page Petal read for it when the card showed, checked again right before.
             let plans = mapped.indices.compactMap { index -> VaultFillPlan? in
                 guard let value = answer.values[mapped[index].0], !value.isEmpty else { return nil }
                 return VaultFillPlan(title: item.title, field: mapped[index].0, given: value, place: places[index], target: targets[index])
             }
             let used = mapped.indices.filter { answer.values[mapped[$0].0].map { !$0.isEmpty } ?? false }
-            self.vaultFillAll(plans, entries: used.map { window.entries[$0] }, map: window.map, caller: caller, allowed: true) { result in
+            self.vaultFillAll(plans, entries: used.map { window.entries[$0] }, map: window.map, caller: caller, token: token, allowed: true) { result in
                 if let filled = result as? [String: Any] { reply.merge(filled) { _, new in new } }
                 send(reply)
             }
         }
         guard answer.save else { return fillAll() }
+        guard live() else { return send(["declined": Self.over]) }
         let saving = item
         VaultStore.queue.async {
             let ok = VaultStore.save([saving])
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     if ok {
-                        self.did("Saved \(saving.kind == .login ? "a login for \(saving.sites.first ?? saving.title)" : "“\(saving.title)”") in the vault")
+                        self.did("Saved \(saving.kind == .login ? "a login for \(saving.sites.first ?? saving.apps.first ?? saving.title)" : "“\(saving.title)”") in the vault")
                         reply["saved"] = Vault.shown(saving)
                     } else {
                         reply["saved"] = false
@@ -472,7 +566,8 @@ extension Assist {
     // MARK: new_login
 
     /// A new account: Petal makes a strong password, saves it as a login for the page it read, and fills the
-    /// password field (and the one confirming it, and the username).
+    /// password field (and the one confirming it, and the username): only where every one of those fields would
+    /// fill by itself (one secure page of that site, or an app Petal verified).
     private func vaultNewLogin(_ args: [String: Any], caller: String?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         if let refusal = computer.refusal() { return fail(refusal) }
         let passwordID = args["password_id"] as? String ?? args["id"] as? String ?? ""
@@ -486,37 +581,53 @@ extension Assist {
         let length = (args["length"] as? NSNumber)?.intValue ?? 20
         let symbols = args["symbols"] as? Bool ?? true
         let allowed = (args["allowed_symbols"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let task = args["task"] as? String ?? ""
         if !usernameID.isEmpty, username.isEmpty { return fail("Give username too: the email or username for the new account.") }
+        guard let token = computer.token(caller, task: task) else { return fail(Self.over) }
         vaultPlaces(map, entries) { places, targets, _ in
+            guard self.computer.live(caller, token) else { return fail(Self.over) }
             let place = places[0]
             var item = VaultItem(kind: .login, title: (args["title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                                  ?? (place.web ? place.host.map(VaultSite.registrable) ?? "Login" : place.appName))
-            if place.web, let host = place.host { item.sites = [host] } else if !place.web { item.apps = [place.bundle] }
+            Vault.bind(&item, to: place)
+            guard !item.sites.isEmpty || !item.apps.isEmpty else {
+                return fail("Petal didn't make a password here: it couldn't \(place.web ? "read which page this is" : "verify who made \(place.appName)").")
+            }
             item[.username] = username
             item[.password] = "x"
-            // Only where it would fill by itself: a secure page (or a verified app).
-            if let why = Vault.mismatch(item, place) { return fail("Petal didn't make a password here: \(why)") }
             let roles: [VaultField] = [.password] + (confirmID.isEmpty ? [] : [.password]) + (usernameID.isEmpty ? [] : [.username])
-            for (offset, field) in roles.enumerated() {
-                if case .refuse(let why) = Vault.decide(item, field, target: targets[offset], place: places[offset]) { return fail("\(ids[offset]): \(why)") }
+            // Every field, as it would fill by itself; a field that would only ask (another site's frame, http, an
+            // app Petal can't verify) means no password is made at all.
+            if let (index, why) = Vault.unasked(item, roles, targets: Array(targets.prefix(roles.count)), places: Array(places.prefix(roles.count))) {
+                return fail("\(ids[index]): Petal didn't make a password here: \(why)")
             }
             VaultStore.queue.async {
                 item[.password] = Vault.password(length: length, symbols: symbols, allowed: allowed, random: VaultStore.random)
-                let ok = VaultStore.save([item])
+                VaultIndex.remember(Vault.secrets(item))
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
-                        guard ok else { return fail("The Keychain didn't take the new password, so nothing was filled.") }
-                        self.did("Made a strong password for \(place.where_) and saved it in the vault")
-                        let plans = roles.indices.map { index -> VaultFillPlan in
-                            var plan = VaultFillPlan(itemID: item.id, title: item.title, field: roles[index], place: places[index], target: targets[index])
-                            plan.task = args["task"] as? String ?? ""
-                            return plan
-                        }
-                        self.vaultFillAll(plans, entries: Array(entries.prefix(roles.count)), map: map, caller: caller, allowed: false) { result in
-                            var reply = (result as? [String: Any]) ?? [:]
-                            reply["saved"] = Vault.shown(item)
-                            reply["note"] = "Petal made a strong password and saved it as \(item.title); you never see it."
-                            send(reply)
+                        // The reply ended while the password was made: nothing is saved or filled.
+                        guard self.computer.live(caller, token) else { return fail(Self.over) }
+                        let saving = item
+                        VaultStore.queue.async {
+                            let ok = VaultStore.save([saving])
+                            DispatchQueue.main.async {
+                                MainActor.assumeIsolated {
+                                    guard ok else { return fail("The Keychain didn't take the new password, so nothing was filled.") }
+                                    self.did("Made a strong password for \(place.where_) and saved it in the vault")
+                                    let plans = roles.indices.map { index -> VaultFillPlan in
+                                        var plan = VaultFillPlan(itemID: saving.id, title: saving.title, field: roles[index], place: places[index], target: targets[index])
+                                        plan.task = task
+                                        return plan
+                                    }
+                                    self.vaultFillAll(plans, entries: Array(entries.prefix(roles.count)), map: map, caller: caller, token: token, allowed: false) { result in
+                                        var reply = (result as? [String: Any]) ?? [:]
+                                        reply["saved"] = Vault.shown(saving)
+                                        reply["note"] = "Petal made a strong password and saved it as \(saving.title); you never see it."
+                                        send(reply)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -526,44 +637,39 @@ extension Assist {
 
     // MARK: use (older callers)
 
-    /// Types a saved key or password into the field that has the cursor in the app in front, after asking every
-    /// time: for sessions that name a secret, as before kinds. `fill` is the way now.
-    private func vaultUse(_ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    /// An older way to fill: a saved key or password by its name, into a field. It goes through `fill` with every
+    /// one of fill's checks (the field's id from petal_ui, its page or app, its kind, Stop): `id`, else the one field
+    /// petal_ui saw with the cursor.
+    private func vaultUse(_ args: [String: Any], caller: String?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let name = (args["name"] as? String ?? args["item"] as? String ?? "").trimmingCharacters(in: .whitespaces)
-        guard let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
-            return fail("Nothing's in front to type into.")
+        guard !name.isEmpty else { return fail("Give the item's id or name (action list shows them), and fill with action fill.") }
+        var id = (args["id"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+        if id.isEmpty {
+            guard let caller, let map = computer.maps[caller], Date().timeIntervalSince(map.made) <= UIMap.lifetime else {
+                return fail("Call petal_ui first, then action fill with item and fields {password: id} (or {value: id} for a key).")
+            }
+            let focused = map.entries.filter { $0.value.node.focused }.map(\.key)
+            guard focused.count == 1 else {
+                return fail("Petal didn't see which field has the cursor. Use action fill with item and fields {password: id} (or {value: id} for a key) from petal_ui.")
+            }
+            id = focused[0]
         }
-        if neverLook(front.bundleIdentifier) { return fail("The user keeps \(front.localizedName ?? "that app") private.") }
+        let picked = id
+        guard let caller, let token = computer.token(caller, task: args["task"] as? String ?? "") else {
+            return fail(caller == nil ? ComputerUse.oldTools : Self.over)
+        }
         VaultStore.load { items in
+            guard self.computer.live(caller, token) else { return fail(Self.over) }
             guard let item = Vault.find(items, name), [.apiKey, .login].contains(item.kind) else {
                 return fail("There's no “\(name)” in the vault. action list shows what's there; fill is the way to fill a field.")
             }
-            let place = front.localizedName ?? "the app in front"
-            let field: VaultField = item.kind == .login ? .password : .value
-            self.ask("vault:\(item.id)", "Type your “\(item.title)” into \(place)", detail: "Petal types it into the field that has the cursor; \(self.app.chatProvider?.name ?? "the AI") never sees it.",
-                     always: true) { allowed in
-                guard allowed else { return send(["declined": "The person didn't allow it."]) }
-                let pid = front.processIdentifier
-                VaultStore.queue.async {
-                    guard let secret = VaultStore.item(item.id).map({ $0[field] }), !secret.isEmpty else {
-                        return DispatchQueue.main.async { fail("Couldn't read it from the Keychain.") }
-                    }
-                    let source = CGEventSource(stateID: .combinedSessionState)
-                    for chunk in UIMap.batches(secret) {
-                        for down in [true, false] {
-                            let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)
-                            chunk.withUnsafeBufferPointer { event?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: $0.baseAddress) }
-                            event?.postToPid(pid)
-                        }
-                    }
-                    DispatchQueue.main.async {
-                        MainActor.assumeIsolated {
-                            self.did("Typed your “\(item.title)” into \(place)")
-                            send(["typed": item.title, "into": place])
-                        }
-                    }
-                }
-            }
+            var forwarded = args
+            forwarded["item"] = item.id
+            forwarded["name"] = nil
+            forwarded["field"] = nil
+            forwarded["id"] = nil
+            forwarded["fields"] = [item.kind == .login ? "password" : "value": picked]
+            self.vaultFill(forwarded, caller: caller, send, fail)
         }
     }
 }

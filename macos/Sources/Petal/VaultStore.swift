@@ -3,26 +3,41 @@ import Observation
 import Security
 
 /// The vault's items in the Keychain (service `tech.edgetr.petal.vault`), never in a plain file: one generic password
-/// per item, its account `item:<id>`, its data the item as JSON. Read once and kept until it changes. Every read and
-/// write waits on the Keychain, so all of it runs on `queue`, never on the main thread.
+/// per item, its account `item:<id>`, its data the item as JSON, marked as Petal's format (kSecAttrGeneric,
+/// Vault.format). Read once and kept until it changes. Every read and write of the Keychain runs on `queue`, one at a
+/// time and in order, never on the main thread; a read that a save overtook is never kept (`generation`).
 ///
 /// Before kinds, the vault kept a secret under a name (account "OpenAI key", data the secret): the first load
-/// moves each into an API key (Vault.migrate), deleting the old item only once the new one is saved.
+/// moves each into an API key (Vault.migrate), deleting the old item only once the new one is saved. A record that
+/// doesn't read as an item (an old name that happens to start with "item:") is such a secret, never dropped.
 enum VaultStore {
     static let service = "tech.edgetr.petal.vault"
     static let prefix = "item:"
+    private static let onQueue = DispatchSpecificKey<Bool>()
     /// One at a time, in order.
-    static let queue = DispatchQueue(label: "petal.vault", qos: .userInitiated)
+    static let queue: DispatchQueue = {
+        let queue = DispatchQueue(label: "petal.vault", qos: .userInitiated)
+        queue.setSpecific(key: onQueue, value: true)
+        return queue
+    }()
 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var cache: [VaultItem]?
+    /// Goes up with every save and removal: a read that started before one is stale.
+    nonisolated(unsafe) private static var generation = 0
     /// Set for `Petal --snapshot`: these stand in for the Keychain, which is then never touched.
     nonisolated(unsafe) private static var stand: [VaultItem]?
+
+    /// Runs `work` on `queue` (at once when already on it), waiting for it.
+    private static func serially<T>(_ work: () -> T) -> T {
+        DispatchQueue.getSpecific(key: onQueue) == true ? work() : queue.sync(execute: work)
+    }
 
     static func standIn(_ items: [VaultItem]) {
         lock.lock()
         stand = items
         cache = nil
+        generation += 1
         lock.unlock()
         VaultIndex.changed()
     }
@@ -35,24 +50,40 @@ enum VaultStore {
         if let stand { lock.unlock(); return stand.sorted { $0.updated > $1.updated } }
         if let cache { lock.unlock(); return cache }
         lock.unlock()
+        return serially {
+            lock.lock()
+            if let cache { lock.unlock(); return cache }
+            let started = generation
+            lock.unlock()
+            let sorted = readAll().sorted { $0.updated > $1.updated }
+            lock.lock()
+            if generation == started { cache = sorted }   // a save meanwhile: read again next time
+            lock.unlock()
+            return sorted
+        }
+    }
+
+    /// Reads every record (on `queue`). An old secret becomes an API key, the old record deleted only once the
+    /// new one is in; if the Keychain refuses the new one, the old stays and the secret is still listed (and hidden
+    /// from the AI) under the new item for now.
+    private static func readAll() -> [VaultItem] {
         var found: [VaultItem] = []
-        for account in accounts() {
+        var unreadable = 0
+        for (account, marked) in accounts() {
             guard let data = read(account) else { continue }
-            if account.hasPrefix(prefix) {
-                if let item = try? JSONDecoder().decode(VaultItem.self, from: data) { found.append(item) }
-            } else if let secret = String(data: data, encoding: .utf8), let item = Vault.migrate([(account, secret)]).first {
-                // An older item becomes an API key; the old one goes only once its new one is in.
-                if write(item) {
-                    delete(account)
-                    found.append(item)
-                }
+            switch Vault.stored(account: account, data: data, marked: marked) {
+            case .item(let item):
+                found.append(item)
+            case .legacy(let name, let secret):
+                guard let item = Vault.migrate([(name, secret)]).first else { continue }
+                if write(item) { delete(account) }
+                found.append(item)
+            case .unreadable:
+                unreadable += 1
             }
         }
-        let sorted = found.sorted { $0.updated > $1.updated }
-        lock.lock()
-        cache = sorted
-        lock.unlock()
-        return sorted
+        if unreadable > 0 { NSLog("Petal vault: \(unreadable) Keychain item(s) aren't text or an item; left as they are.") }
+        return found
     }
 
     static func item(_ id: String) -> VaultItem? { items().first { $0.id == id } }
@@ -70,33 +101,42 @@ enum VaultStore {
     /// Saves (adds, or replaces the item with its id); false when the Keychain refused it.
     @discardableResult
     static func save(_ items: [VaultItem]) -> Bool {
-        var ok = true
-        lock.lock()
-        if stand != nil {
-            for item in items {
-                if let index = stand!.firstIndex(where: { $0.id == item.id }) { stand![index] = item } else { stand!.append(item) }
+        let ok: Bool = serially {
+            lock.lock()
+            if stand != nil {
+                for item in items {
+                    if let index = stand!.firstIndex(where: { $0.id == item.id }) { stand![index] = item } else { stand!.append(item) }
+                }
+                generation += 1
+                lock.unlock()
+                return true
             }
             lock.unlock()
-        } else {
-            lock.unlock()
+            var ok = true
             for item in items where !write(item) { ok = false }
             lock.lock()
+            generation += 1
             cache = nil
             lock.unlock()
+            return ok
         }
         VaultIndex.changed()
         return ok
     }
 
     static func remove(_ id: String) {
-        lock.lock()
-        if stand != nil {
-            stand!.removeAll { $0.id == id }
-            lock.unlock()
-        } else {
+        serially {
+            lock.lock()
+            if stand != nil {
+                stand!.removeAll { $0.id == id }
+                generation += 1
+                lock.unlock()
+                return
+            }
             lock.unlock()
             delete(prefix + id)
             lock.lock()
+            generation += 1
             cache = nil
             lock.unlock()
         }
@@ -105,12 +145,17 @@ enum VaultStore {
 
     // MARK: The Keychain
 
-    private static func accounts() -> [String] {
+    /// Every record's account, and whether it's marked as Petal's item format.
+    private static func accounts() -> [(account: String, marked: Bool)] {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                     kSecMatchLimit as String: kSecMatchLimitAll, kSecReturnAttributes as String: true]
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let found = result as? [[String: Any]] else { return [] }
-        return found.compactMap { $0[kSecAttrAccount as String] as? String }
+        return found.compactMap { attributes in
+            guard let account = attributes[kSecAttrAccount as String] as? String else { return nil }
+            let generic = (attributes[kSecAttrGeneric as String] as? Data).map { String(decoding: $0, as: UTF8.self) }
+            return (account, generic == Vault.format)
+        }
     }
 
     private static func read(_ account: String) -> Data? {
@@ -126,13 +171,15 @@ enum VaultStore {
         let match: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                     kSecAttrAccount as String: prefix + item.id]
         let label = "Petal vault: \(item.title)"
-        let change: [String: Any] = [kSecValueData as String: data, kSecAttrLabel as String: label]
+        let marker = Data(Vault.format.utf8)
+        let change: [String: Any] = [kSecValueData as String: data, kSecAttrLabel as String: label, kSecAttrGeneric as String: marker]
         switch SecItemUpdate(match as CFDictionary, change as CFDictionary) {
         case errSecSuccess: return true
         case errSecItemNotFound:
             var add = match
             add[kSecValueData as String] = data
             add[kSecAttrLabel as String] = label
+            add[kSecAttrGeneric as String] = marker
             add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
             return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
         default: return false

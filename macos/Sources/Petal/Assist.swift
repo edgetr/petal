@@ -287,12 +287,14 @@ final class Assist {
                     let finish = {
                         guard !shot.isEmpty else { return send(result) }
                         Task {
-                            if let path = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", hiding: hidden) {
+                            let picture = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", hiding: hidden)
+                            if let path = picture.path {
                                 self.did(shot == "screen" ? "Looked at your screen" : "Looked at \(front.localizedName ?? "a window")")
                                 result["screenshot"] = path
-                                result["screenshotNote"] = "A PNG of the \(shot == "screen" ? "screen" : "window"); read it to see it."
+                                result["screenshotNote"] = "A PNG of the \(shot == "screen" ? "screen" : "window"); read it to see it. Black boxes are fields that may hold a password, card number, security code or key: Petal hides them."
+                                    + (picture.note.map { " " + $0 } ?? "")
                             } else {
-                                result["screenshotNote"] = Capture.allowed ? "Couldn't take the picture." : "Petal needs Screen Recording for pictures (Petal's settings, Permissions)."
+                                result["screenshotNote"] = picture.note ?? (Capture.allowed ? "Couldn't take the picture." : "Petal needs Screen Recording for pictures (Petal's settings, Permissions).")
                             }
                             send(result)
                         }
@@ -354,36 +356,85 @@ final class Assist {
             ?? apps.first { $0.localizedName?.localizedCaseInsensitiveContains(name) == true }
     }
 
-    /// A picture of one window (its number), or of the main screen, saved in Petal's caches; its path.
-    /// `window` nil is the whole screen; a window that can't be found is no picture, never the screen instead.
-    nonisolated private static func screenshot(_ window: CGWindowID?, screen: Bool = false, hiding: Set<pid_t> = []) async -> String? {
-        guard screen || window != nil else { return nil }
+    /// A picture of one window (its number), or of the main screen, saved in Petal's caches: its path, and what was
+    /// left out. `window` nil is the whole screen; a window that can't be found is no picture, never the screen
+    /// instead. What may show a secret is blacked out first (Sensitive), in memory: no picture is written before.
+    /// A window Petal can't read whole through Accessibility is no picture (or, on the screen, isn't in it).
+    nonisolated private static func screenshot(_ window: CGWindowID?, screen: Bool = false, hiding: Set<pid_t> = []) async -> (path: String?, note: String?) {
+        guard screen || window != nil else { return (nil, nil) }
         guard CGPreflightScreenCaptureAccess(),
               // One window may be behind others or on another Desktop (a note's): every window is listed then.
-              let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: window == nil) else { return nil }
+              let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: window == nil) else { return (nil, nil) }
         let filter: SCContentFilter
-        let size: CGSize
+        let area: CGRect
+        var note: String?
+        // Each window in the picture, with its Accessibility window, read again once the picture is taken.
+        var watched: [(window: SCWindow, element: AXUIElement, pid: pid_t, visible: CGRect)] = []
+        var rects: [CGRect] = []
         if !screen {
-            guard let window, let match = content.windows.first(where: { $0.windowID == window }) else { return nil }
+            guard let window, let match = content.windows.first(where: { $0.windowID == window }), let pid = match.owningApplication?.processID else { return (nil, nil) }
+            guard let element = Sensitive.window(pid: pid, id: window) else {
+                return (nil, "Petal couldn't read that window through Accessibility, so it can't hide what may be secret in it: no picture.")
+            }
+            let before = Sensitive.scan(window: element, pid: pid, visible: match.frame, deadline: Date().addingTimeInterval(3))
+            guard before.complete else {
+                return (nil, "Petal couldn't check all of that window for passwords and card numbers in time (it's very big, or the app didn't answer): no picture.")
+            }
+            rects = before.rects
+            watched = [(match, element, pid, match.frame)]
             filter = SCContentFilter(desktopIndependentWindow: match)
-            size = match.frame.size
+            area = match.frame
         } else if let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first {
             // The screen without the apps kept private, and without Petal's own windows: its previews, banners,
             // cards and stacks can show what's in those apps (and the chat itself needn't be in the picture).
             // Notification banners too: they belong to Notification Center, not their app, and can show a private
-            // app's messages.
+            // app's messages. Only the windows checked are in the picture: one that opens meanwhile isn't.
             let me = ProcessInfo.processInfo.processIdentifier
-            filter = SCContentFilter(display: display, excludingApplications: content.applications.filter {
-                hiding.contains($0.processID) || $0.processID == me || $0.bundleIdentifier == "com.apple.notificationcenterui"
-            }, exceptingWindows: [])
-            size = CGSize(width: display.width, height: display.height)
-        } else { return nil }
+            area = CGDisplayBounds(display.displayID)
+            let deadline = Date().addingTimeInterval(6)
+            var included: [SCWindow] = []
+            var left: [String] = []
+            for candidate in content.windows where candidate.isOnScreen && candidate.frame.intersects(area) {
+                guard let owner = candidate.owningApplication, !hiding.contains(owner.processID), owner.processID != me,
+                      owner.bundleIdentifier != "com.apple.notificationcenterui" else { continue }
+                if let element = Sensitive.window(pid: owner.processID, id: candidate.windowID) {
+                    let found = Sensitive.scan(window: element, pid: owner.processID, visible: candidate.frame.intersection(area),
+                                               deadline: min(deadline, Date().addingTimeInterval(2)))
+                    if found.complete {
+                        rects += found.rects
+                        included.append(candidate)
+                        watched.append((candidate, element, owner.processID, candidate.frame.intersection(area)))
+                        continue
+                    }
+                } else if candidate.windowLayer != 0 {
+                    // The menu bar, menus and other overlays, which have no window of their own in Accessibility.
+                    included.append(candidate)
+                    continue
+                }
+                let name = owner.applicationName.isEmpty ? "a window" : owner.applicationName
+                if !left.contains(name) { left.append(name) }
+            }
+            if !left.isEmpty {
+                note = "Left out (Petal couldn't check them for passwords and card numbers): \(left.joined(separator: ", "))."
+            }
+            filter = SCContentFilter(display: display, including: included)
+        } else { return (nil, nil) }
         let configuration = SCStreamConfiguration()
-        let scale = min(2, 2000 / max(1, max(size.width, size.height)))   // sharp enough to read, small enough to send
-        configuration.width = Int(size.width * scale)
-        configuration.height = Int(size.height * scale)
+        let scale = min(2, 2000 / max(1, max(area.width, area.height)))   // sharp enough to read, small enough to send
+        configuration.width = Int(area.width * scale)
+        configuration.height = Int(area.height * scale)
         configuration.showsCursor = false
-        guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) else { return nil }
+        configuration.ignoreShadowsSingleWindow = true
+        guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) else { return (nil, note) }
+        // Read again now: a field revealed or moved while the picture was taken is covered where it is now too. A
+        // window that can't be read whole again is covered completely.
+        for item in watched {
+            let after = Sensitive.scan(window: item.element, pid: item.pid, visible: item.visible, deadline: Date().addingTimeInterval(2))
+            if after.complete { rects += after.rects } else if screen { rects.append(item.window.frame) } else {
+                return (nil, "Petal couldn't check all of that window for passwords and card numbers in time: no picture.")
+            }
+        }
+        guard let clean = Sensitive.blackOut(image, rects, origin: area.origin, scale: CGFloat(image.width) / max(1, area.width)) else { return (nil, note) }
         let folder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "Petal/look")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         // Only the newest few are kept.
@@ -391,9 +442,9 @@ final class Assist {
         for file in old.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }).dropFirst(10) { try? FileManager.default.removeItem(at: file) }
         // Its own name (two notes looking in the same second never share a picture), in time order for the above.
         let url = folder.appending(path: "look-\(Int(Date().timeIntervalSince1970 * 1000))-\(UUID().uuidString.prefix(8)).png")
-        let rep = NSBitmapImageRep(cgImage: image)
-        guard let data = rep.representation(using: .png, properties: [:]), (try? data.write(to: url, options: .atomic)) != nil else { return nil }
-        return url.path
+        let rep = NSBitmapImageRep(cgImage: clean)
+        guard let data = rep.representation(using: .png, properties: [:]), (try? data.write(to: url, options: .atomic)) != nil else { return (nil, note) }
+        return (url.path, note)
     }
 
     // MARK: Apps
