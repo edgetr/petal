@@ -284,6 +284,9 @@ def t_set_settings(args):
         raise ValueError("Only the person can allow more, with Always on Petal's card or in its settings.")
     if changes.get("claudeAccess") == "full" and settings.get("claudeAccess") != "full":
         raise ValueError("Only the person can turn on Full access, in the chat's options or Petal's settings.")
+    # Using the person's apps: the AI may turn it off, never back on.
+    if "computerUse" in changes and changes["computerUse"] is not False and not computer_use_on(settings):
+        raise ValueError("Only the person can turn on using apps (computerUse), in Petal's settings.")
     for key in ("aiNeverLook", "aiAllowed"):
         if key in changes and not (isinstance(changes[key], list) and all(isinstance(v, str) for v in changes[key])):
             raise ValueError("%s is a list." % key)
@@ -294,12 +297,18 @@ def t_set_settings(args):
     return {"ok": True, "changed": changes}
 
 
+def computer_use_on(settings):
+    """Using apps is on in these settings (missing: its default, on)."""
+    return settings.get("computerUse", SETTINGS_SCHEMA["computerUse"][0]) is True
+
+
 def t_reset_settings(args):
     keys = args.get("keys") or []
     settings = read_json(SETTINGS, {})
+    # Never the private list, which only the person shortens, nor using apps once it's off, which only they turn on.
+    kept = {"claudePath", "aiNeverLook"} | (set() if computer_use_on(settings) else {"computerUse"})
     for k in keys or list(SETTINGS_SCHEMA):
-        # The private list is the person's to shorten: never reset by a tool.
-        if k in SETTINGS_SCHEMA and k not in ("claudePath", "aiNeverLook"):
+        if k in SETTINGS_SCHEMA and k not in kept:
             settings[k] = SETTINGS_SCHEMA[k][0]
     write_json(SETTINGS, settings)
     return {"ok": True, "reset": keys or "all"}
@@ -839,10 +848,11 @@ def not_yet(_):
 def assist(name):
     """Petal AI's tools on macOS: the running Petal does them, with its own permissions (and asks first)."""
     def run(args):
-        # A sticky note's chat (Petal sets PETAL_NOTE for its own) is answered about the note's window.
-        note = os.environ.get("PETAL_NOTE", "")
+        # Which chat asks: a Petal chat's note (Petal sets PETAL_NOTE for its own), answered about the note's window;
+        # any other AI session is this process, so two sessions never share what they looked at or were allowed.
+        caller = os.environ.get("PETAL_NOTE") or "mcp-py-%d" % os.getpid()
         # A card asking the person first waits up to 120 s: this waits longer, so their answer always arrives.
-        reply = petal("assist", name, json.dumps(args), *([note] if note else []), timeout=150)
+        reply = petal("assist", name, json.dumps(args), caller, timeout=150)
         try:
             out = json.loads(reply)
         except ValueError:
@@ -884,7 +894,7 @@ ASSIST_TOOLS = {
                   "action press (id): presses a button, link, checkbox, tab or row. type (id, text): puts text in a field (replace: false inserts at the cursor instead; submit: true presses Return after). "
                   "focus (id). scroll (id; direction up, down, left or right scrolls its area by most of a page; none brings the control into view). "
                   "menu (path, like \"File > Export…\"): chooses a menu bar item. key (key, like cmd-s, cmd-shift-z, return, escape, tab, down; id focuses that control first): a shortcut its menus have is chosen there, other keys go to the app, which comes forward to take them. "
-                  "menu and key use the last petal_ui's app, or app. The first use of an app in a reply asks the user. Each act checks the window hasn't moved or changed since petal_ui; when it has, call petal_ui again. "
+                  "menu and key go to the window the last petal_ui looked at (app, if given, must be its app), brought to the front of its app first. The first use of an app in a reply asks the user. Each act checks the window hasn't moved or changed since petal_ui; when it has, call petal_ui again. "
                   "What only a real click could do, it says so: ask the user to do it. Never for password fields (petal_vault types secrets) or private apps.",
                   {"action": {"type": "string", "enum": ["press", "type", "focus", "scroll", "menu", "key"]}, "id": {"type": "string", "description": "a control's id from petal_ui, like e12"},
                    "text": {"type": "string"}, "replace": {"type": "boolean", "description": "type: replace what's in the field (default true)"}, "submit": {"type": "boolean", "description": "type: press Return after"},

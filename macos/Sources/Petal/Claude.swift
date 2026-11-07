@@ -148,7 +148,11 @@ final class Agent {
         if !running, !queued.isEmpty { send(queued.removeFirst()) }
     }
 
-    func stop() { process?.terminate() }
+    /// Stops the run (Stop, steering, a new chat): what it was doing in the person's apps stops with it.
+    func stop() {
+        process?.terminate()
+        app.assist.computer.end(noteID.uuidString)
+    }
 
     /// The person stopped Petal AI using their apps (Stop, or Escape): said in the chat, as the AI is told.
     func personStopped() {
@@ -183,6 +187,7 @@ final class Agent {
         switching = true
         defer { switching = false }
         endRun()
+        app.assist.computer.end(noteID.uuidString, forget: true)
         askedWith = nil
         keptPlace = nil
         onDisk = false
@@ -237,6 +242,7 @@ final class Agent {
         switching = true
         defer { switching = false }
         endRun()
+        app.assist.computer.end(noteID.uuidString, forget: true)
         askedWith = nil
         keptPlace = chat.place
         onDisk = true
@@ -288,6 +294,8 @@ final class Agent {
         authFailed = false
 
         turn += 1
+        // A new turn: nothing the last one started in the person's apps carries on, and it asks again.
+        app.assist.computer.end(noteID.uuidString)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = provider.chatArguments(chat)
@@ -331,6 +339,8 @@ final class Agent {
                 MainActor.assumeIsolated {
                     guard self.runID == id else { return }
                     self.running = false
+                    // The turn is over: its tools can't answer anymore, so nothing it asked of Petal goes ahead.
+                    self.app.assist.computer.end(self.noteID.uuidString)
                     // What was written while it worked goes now (steering: straight after it stopped).
                     let more = !self.queued.isEmpty && self.pendingAsk.isEmpty
                     if more {

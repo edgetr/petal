@@ -23,6 +23,7 @@ final class Assist {
         let detail: String    // a line more, or ""
         var secret = false    // asks the person for a secret (the vault), typed into the card
         var every = false     // asked every time: no Always
+        var owner: String?    // the chat asking (ComputerUse): its Stop, or its next turn, answers Don't
     }
 
     struct Memory: Identifiable, Equatable {
@@ -62,13 +63,13 @@ final class Assist {
 
     /// Allowed already (Full access, or Always for this kind), or asked with a card; `done` hears the answer.
     /// `always`: asked even with Full access (the vault). `secret`: the card takes a secret, handed to `typed`.
-    func ask(_ kind: String, _ title: String, detail: String = "", always: Bool = false, secret: Bool = false,
+    func ask(_ kind: String, _ title: String, detail: String = "", always: Bool = false, secret: Bool = false, owner: String? = nil,
              typed: ((String) -> Void)? = nil, done: @escaping (Bool) -> Void) {
         // `always` (the vault) asks every time: neither Full access nor an earlier Always skips it.
         if !secret, !always, config.string("claudeAccess") == "full" || config.strings("aiAllowed").contains(kind) { return done(true) }
         settle(false)   // one question at a time: a newer one replaces an older one, which is declined
         secretTyped = typed
-        let request = Request(kind: kind, title: title, detail: detail, secret: secret, every: always)
+        let request = Request(kind: kind, title: title, detail: detail, secret: secret, every: always, owner: owner)
         pending = request
         answer = done
         // In the chat when it's open (the card shows there); over the dock otherwise (another AI session asking).
@@ -112,6 +113,11 @@ final class Assist {
         pending = nil
         if asked, app.popups.card?.kind == .ask { app.popups.dismissCard() }
         done?(allowed)
+    }
+
+    /// The chat `owner` stopped, or moved on to another turn: its question waiting is answered Don't.
+    func decline(owner: String) {
+        if pending?.owner == owner { settle(false) }
     }
 
     /// The card went away without an answer (×, Escape, another card): that's Don't.

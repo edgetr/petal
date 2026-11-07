@@ -9,6 +9,7 @@ struct UINode: Equatable {
     var label = ""           // AXDescription
     var help = ""
     var placeholder = ""
+    var identifier = ""      // AXIdentifier: the app's own name for it, never shown
     var value = ""           // never read for a password field
     var frame = CGRect.zero  // top-left origin, as Accessibility counts
     var enabled = true
@@ -155,6 +156,88 @@ enum UIMap {
     static func moved(_ a: CGRect, _ b: CGRect, tolerance: CGFloat = 4) -> Bool {
         abs(a.minX - b.minX) > tolerance || abs(a.minY - b.minY) > tolerance
             || abs(a.width - b.width) > tolerance || abs(a.height - b.height) > tolerance
+    }
+
+    // MARK: Privacy
+
+    static let hidden = "(hidden)"
+    /// Words in a field's name or identifier that say it holds a secret, even when it isn't a password field.
+    static let secretWords = ["password", "passwd", "passcode", "passphrase", "token", "secret", "api key", "apikey", "api_key",
+                              "api-key", "access key", "private key"]
+
+    /// A field whose name or identifier says it holds a password, token, secret or API key.
+    static func looksSecret(_ node: UINode) -> Bool {
+        let words = [node.title, node.label, node.placeholder, node.help, node.identifier].joined(separator: " ").lowercased()
+        return secretWords.contains { words.contains($0) }
+    }
+
+    /// The vault's secrets as hashes (Swift's, seeded afresh in each process): a whole secret, and every run of
+    /// `piece` characters of a longer one, so text holding part of a secret is caught without keeping the secrets.
+    struct SecretIndex {
+        static let piece = 8
+        private var wholes = Set<Int>()
+        private var pieces = Set<Int>()
+
+        init(_ secrets: [String]) {
+            for secret in secrets where !secret.isEmpty {
+                wholes.insert(secret.hashValue)
+                let characters = Array(secret)
+                guard characters.count >= Self.piece else { continue }
+                for start in 0...(characters.count - Self.piece) { pieces.insert(String(characters[start..<start + Self.piece]).hashValue) }
+            }
+        }
+
+        var isEmpty: Bool { wholes.isEmpty }
+
+        /// `text` is a secret, or holds `piece` characters or more of one.
+        func matches(_ text: String) -> Bool {
+            guard !wholes.isEmpty, !text.isEmpty else { return false }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if wholes.contains(text.hashValue) || wholes.contains(trimmed.hashValue) { return true }
+            let characters = Array(text)
+            guard !pieces.isEmpty, characters.count >= Self.piece else { return false }
+            for start in 0...(characters.count - Self.piece) where pieces.contains(String(characters[start..<start + Self.piece]).hashValue) {
+                return true
+            }
+            return false
+        }
+    }
+
+    /// What the AI may be told of a control: a password field's value never, a field that looks like it holds a
+    /// secret as "(hidden)", and any text holding a vault secret as "(hidden)".
+    static func redact(_ node: UINode, secret: (String) -> Bool) -> UINode {
+        var out = node
+        if isSecure(node) { out.value = "" }
+        else if looksSecret(node), !node.value.isEmpty { out.value = hidden }
+        for path in [\UINode.title, \.label, \.help, \.placeholder, \.value] where out[keyPath: path] != hidden && secret(out[keyPath: path]) {
+            out[keyPath: path] = hidden
+        }
+        return out
+    }
+
+    // MARK: Has the window changed?
+
+    /// What a window shows that an act depends on: its title, what has the keyboard (and what's in it), and which
+    /// rows are selected. If any of these changed since `petal_ui`, the same button may act on something else (another
+    /// email selected while the person was asked), so the act is refused.
+    struct Fingerprint: Equatable {
+        var title = ""
+        var focus = ""
+        var selection = ""
+    }
+
+    static func fingerprint(title: String, focusRole: String, focusSubrole: String, focusValue: String, selected: [String]) -> Fingerprint {
+        let secure = focusSubrole == "AXSecureTextField"
+        let focus = focusRole.isEmpty ? "" : "\(focusRole)/\(focusSubrole)=" + (secure ? "" : truncate(tidy(focusValue), 200))
+        return Fingerprint(title: tidy(title), focus: focus, selection: selected.map { truncate(tidy($0), 120) }.joined(separator: "\n"))
+    }
+
+    /// Why an act can't go ahead on a window whose fingerprint is now `now`, or nil.
+    static func changed(_ then: Fingerprint, _ now: Fingerprint) -> String? {
+        if then.title != now.title { return "The window changed (its title is different now); look again with petal_ui." }
+        if then.selection != now.selection { return "The window changed (something else is selected now); look again with petal_ui." }
+        if then.focus != now.focus { return "The window changed (another control has the keyboard now); look again with petal_ui." }
+        return nil
     }
 
     // MARK: Menus

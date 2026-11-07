@@ -108,6 +108,7 @@ final class PetalApp {
             Perf.span("onChange: hotkeys") { self.hotkeys.refresh() }
             Perf.span("onChange: menuBar") { self.menuBar.refresh() }
             self.claude.notesSettingChanged()   // sticky notes turned off: no listening, nudges or taking app clicks
+            self.assist.computer.settingsChanged()   // using apps turned off, or an app made private: what's under way stops
 
         }
         registerIPC()

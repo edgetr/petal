@@ -113,14 +113,16 @@ extension Assist {
         item[kSecValueData as String] = Data(secret.utf8)
         item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
         SecItemAdd(item as CFDictionary, nil)
+        VaultIndex.changed()
     }
 
     static func vaultRemove(_ name: String) {
         SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: vaultService,
                        kSecAttrAccount as String: name] as CFDictionary)
+        VaultIndex.changed()
     }
 
-    nonisolated private static func vaultSecret(_ name: String) -> String? {
+    nonisolated fileprivate static func vaultSecret(_ name: String) -> String? {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: vaultService,
                                     kSecAttrAccount as String: name, kSecReturnData as String: true]
         var result: CFTypeRef?
@@ -128,10 +130,11 @@ extension Assist {
         return String(data: data, encoding: .utf8)
     }
 
-    /// Whether `text` is one of the vault's secrets: petal_act never types one (the vault types its own, after
-    /// asking). Reads the Keychain: off the main thread.
+    /// Whether `text` is one of the vault's secrets or holds 8 characters or more of one: petal_act never types one
+    /// (the vault types its own, after asking), and petal_ui never shows one. The first call after the vault changes
+    /// reads the Keychain: off the main thread.
     nonisolated static func isVaultSecret(_ text: String) -> Bool {
-        !text.isEmpty && vaultNames().contains { vaultSecret($0) == text }
+        !text.isEmpty && VaultIndex.current().matches(text)
     }
 
     /// The vault tool: list the names, use one (typed into the field in front, after asking every time, even with
@@ -182,5 +185,33 @@ extension Assist {
                 event?.postToPid(pid)
             }
         }
+    }
+}
+
+/// The vault's secrets as hashes (UIMap.SecretIndex), read from the Keychain once and again only after the vault
+/// changes, so checking every control petal_ui reads never touches the Keychain. Never on the main thread.
+enum VaultIndex {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var index: UIMap.SecretIndex?
+    nonisolated(unsafe) private static var generation = 0
+
+    /// A secret was saved or removed: the next check reads the vault again.
+    static func changed() {
+        lock.lock()
+        index = nil
+        generation += 1
+        lock.unlock()
+    }
+
+    static func current() -> UIMap.SecretIndex {
+        lock.lock()
+        if let index { lock.unlock(); return index }
+        let started = generation
+        lock.unlock()
+        let made = UIMap.SecretIndex(Assist.vaultNames().compactMap(Assist.vaultSecret))
+        lock.lock()
+        if generation == started { index = made }   // a change meanwhile is read next time
+        lock.unlock()
+        return made
     }
 }

@@ -112,6 +112,10 @@ enum MCP {
             if changes["claudeAccess"] as? String == "full", current["claudeAccess"] as? String != "full" {
                 throw Failure("Only the person can turn on Full access, in the chat's options or Petal's settings.")
             }
+            // Using the person's apps: the AI may turn it off, never back on.
+            if let use = changes["computerUse"], (use as? Bool) != false, !computerUseOn(current) {
+                throw Failure("Only the person can turn on using apps (computerUse), in Petal's settings.")
+            }
             if changes.keys.contains("aiNeverLook"), !(changes["aiNeverLook"] is [String]) {
                 throw Failure("aiNeverLook is a list of app ids.")
             }
@@ -122,19 +126,17 @@ enum MCP {
             }
             try update(settingsFile) { $0.merge(changes) { _, new in new } }
             return ["ok": true, "changed": changes]
-        case "petal_reset_settings" where (args["keys"] as? [String]).map({ $0.isEmpty || $0.contains("aiNeverLook") }) ?? true:
-            // Everything but the private list, which only the person shortens.
-            var keys = (args["keys"] as? [String]).flatMap { $0.isEmpty ? nil : $0 } ?? Array(schema.keys)
-            keys.removeAll { $0 == "aiNeverLook" }
-            return try call("petal_reset_settings", ["keys": keys.isEmpty ? ["__none__"] : keys])
         case "petal_reset_settings":
-            let keys = args["keys"] as? [String] ?? []
+            let asked = args["keys"] as? [String] ?? []
+            // Never the private list, which only the person shortens, nor using apps once it's off, which only they
+            // turn back on.
             try update(settingsFile) { settings in
-                for key in keys.isEmpty ? Array(schema.keys) : keys where key != "claudePath" {
+                let off = !computerUseOn(settings)
+                for key in asked.isEmpty ? Array(schema.keys) : asked where key != "claudePath" && key != "aiNeverLook" && !(off && key == "computerUse") {
                     if let entry = schema[key] { settings[key] = entry.first }
                 }
             }
-            return ["ok": true, "reset": keys.isEmpty ? "all" as Any : keys as Any]
+            return ["ok": true, "reset": asked.isEmpty ? "all" as Any : asked as Any]
         case "petal_set_dock":
             var done: [String: Any] = [:]
             if let position = args["position"] as? String, !["bottom", "left", "right"].contains(position) {
@@ -224,10 +226,13 @@ enum MCP {
              "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
             // Petal itself does these, with its own permissions (and asks the person first where it should).
             let json = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
-            // A sticky note's chat (PETAL_NOTE, set by Petal for its own chats) is answered about the note's window.
+            // Which chat asks: a Petal chat's note (PETAL_NOTE, set by Petal for its own chats), answered about the
+            // note's window; any other AI session is this process, so two sessions never share what they looked at
+            // or were allowed.
             let note = ProcessInfo.processInfo.environment["PETAL_NOTE"] ?? ""
+            let caller = note.isEmpty ? "mcp-\(getpid())" : note
             // A card asking the person first waits up to 120 s: this waits longer, so their answer always arrives.
-            let reply = petal(["assist", name, json] + (note.isEmpty ? [] : [note]), timeout: 150)
+            let reply = petal(["assist", name, json, caller], timeout: 150)
             guard let data = reply.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) else {
                 throw Failure(reply.isEmpty ? "Petal isn't running" : reply)
             }
@@ -238,6 +243,11 @@ enum MCP {
         default:
             throw Failure("Unknown tool")
         }
+    }
+
+    /// Using apps is on in these settings (missing: its default, on).
+    private static func computerUseOn(_ settings: [String: Any]) -> Bool {
+        settings["computerUse"] as? Bool ?? (schema["computerUse"]?.first as? Bool ?? true)
     }
 
     // MARK: Files

@@ -92,6 +92,49 @@ struct UIMapCheck {
         expect(UIMap.caption("press", name: "Export", kind: "button") == "Pressing Export", "caption")
         expect(UIMap.caption("type", name: "", kind: "search field") == "Typing in the search field", "caption without a name")
 
+        // Vault secrets: whole, or 8 characters or more of one, never shown; short pieces and other text are.
+        let vault = UIMap.SecretIndex(["sk-live-4f9a2b7c1d", "1234"])
+        expect(vault.matches("sk-live-4f9a2b7c1d"), "a whole secret")
+        expect(vault.matches("Bearer sk-live-4f9a2b7c1d please"), "a secret inside text")
+        expect(vault.matches("token 4f9a2b7c"), "8 characters of a secret")
+        expect(!vault.matches("4f9a2b7"), "7 characters aren't enough")
+        expect(vault.matches("1234") && vault.matches(" 1234\n"), "a short secret, whole")
+        expect(!vault.matches("Room 1234"), "a short secret isn't looked for inside text")
+        expect(!vault.matches("Inbox"), "other text")
+        expect(!UIMap.SecretIndex([]).matches("anything"), "an empty vault matches nothing")
+
+        let filled = node("AXTextField", "Notes", order: 0, value: "use sk-live-4f9a2b7c1d here")
+        let shown = UIMap.redact(filled) { vault.matches($0) }
+        expect(shown.value == UIMap.hidden && UIMap.value(shown) == UIMap.hidden, "a vault secret in a field is hidden", shown.value)
+        expect(shown.title == "Notes", "its name stays")
+        var titled = node("AXButton", "Copy sk-live-4f9a2b7c1d", order: 0)
+        titled = UIMap.redact(titled) { vault.matches($0) }
+        expect(titled.title == UIMap.hidden, "a vault secret in a name is hidden")
+        var token = node("AXTextField", "API token", order: 0, value: "ghp_abc")
+        token = UIMap.redact(token) { _ in false }
+        expect(token.value == UIMap.hidden, "a token field's value is hidden")
+        var keyed = UINode(role: "AXTextField", identifier: "passwordInput", value: "hunter2")
+        keyed = UIMap.redact(keyed) { _ in false }
+        expect(keyed.value == UIMap.hidden, "a field whose identifier says password is hidden")
+        let plain = UIMap.redact(node("AXTextField", "Subject", order: 0, value: "Lunch")) { vault.matches($0) }
+        expect(plain.value == "Lunch", "an ordinary value stays")
+        expect(UIMap.select([shown], window: window, find: "sk-live").shown.isEmpty, "find never matches a hidden value")
+
+        // Has the window changed since petal_ui?
+        let then = UIMap.fingerprint(title: "Inbox", focusRole: "AXTable", focusSubrole: "", focusValue: "", selected: ["#3 Lunch on Friday"])
+        expect(UIMap.changed(then, then) == nil, "the same window")
+        let other = UIMap.fingerprint(title: "Inbox", focusRole: "AXTable", focusSubrole: "", focusValue: "", selected: ["#4 Invoice"])
+        expect(UIMap.changed(then, other)?.contains("selected") == true, "another email selected", "\(String(describing: UIMap.changed(then, other)))")
+        let renamed = UIMap.fingerprint(title: "Sent", focusRole: "AXTable", focusSubrole: "", focusValue: "", selected: ["#3 Lunch on Friday"])
+        expect(UIMap.changed(then, renamed)?.contains("title") == true, "another title")
+        let typing = UIMap.fingerprint(title: "Inbox", focusRole: "AXTextField", focusSubrole: "", focusValue: "a", selected: ["#3 Lunch on Friday"])
+        expect(UIMap.changed(then, typing)?.contains("keyboard") == true, "another control has the keyboard")
+        let spaced = UIMap.fingerprint(title: "  Inbox ", focusRole: "AXTable", focusSubrole: "", focusValue: "", selected: ["#3  Lunch on\nFriday"])
+        expect(UIMap.changed(then, spaced) == nil, "whitespace isn't a change")
+        let secret1 = UIMap.fingerprint(title: "Log in", focusRole: "AXTextField", focusSubrole: "AXSecureTextField", focusValue: "a", selected: [])
+        let secret2 = UIMap.fingerprint(title: "Log in", focusRole: "AXTextField", focusSubrole: "AXSecureTextField", focusValue: "ab", selected: [])
+        expect(secret1 == secret2 && !secret1.focus.contains("a="), "a password field's value isn't kept")
+
         print("UIMap: \(passed) passed, \(failures) failed")
         if failures > 0 { exit(1) }
     }
