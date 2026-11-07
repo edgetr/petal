@@ -94,6 +94,22 @@ final class GlassPanel: NSPanel {
         orderFrontRegardless()
     }
 
+    /// By a point on the screen (Petal AI's own pointer): below and to the right of it, kept on the screen.
+    func show<Content: View>(_ content: Content, near point: CGPoint, on screen: NSScreen) {
+        hosting.rootView = AnyView(content.environment(PetalApp.shared))
+        hosting.layoutSubtreeIfNeeded()
+        let size = hosting.fittingSize
+        let area = screen.visibleFrame.insetBy(dx: 4, dy: 4)
+        var origin = CGPoint(x: point.x + 12, y: point.y - 24 - size.height)
+        if origin.y < area.minY { origin.y = point.y + 8 }
+        origin.x = min(max(origin.x, area.minX), area.maxX - size.width)
+        origin.y = min(max(origin.y, area.minY), area.maxY - size.height)
+        setFrame(NSRect(origin: origin, size: size).integral, display: true)
+        ignoresMouseEvents = !interactive
+        if alphaValue != 1 { Self.opaque(self) }
+        orderFrontRegardless()
+    }
+
     /// Fully visible again, also stopping a fade that's under way (setting alphaValue alone wouldn't).
     static func opaque(_ panel: NSWindow) {
         NSAnimationContext.runAnimationGroup { context in

@@ -154,6 +154,15 @@ enum Snapshot {
         views.append(("describe-day", AnyView(DescribeDaySheet()), nil))
         views.append(("settings-windows", AnyView(VStack { WindowsCard(showTiling: true) }.padding(20)), CGSize(width: 640, height: 420)))
         views.append(("settings-api-keys", AnyView(VStack(spacing: 14) { ForEach(Provider.allCases) { APIKeyCard(provider: $0) } }.padding(20)), CGSize(width: 640, height: 420)))
+        // Petal AI using an app: its first question, the chip with Stop by its pointer, and the pointer itself.
+        app.assist.preview(Assist.Request(kind: "computer:com.apple.Safari", title: "Let Petal AI use Safari?",
+                                          detail: "First, pressing Export. Until this reply is done it can press, type and choose menus in Safari with its own pointer; yours stays where it is. Esc stops it."))
+        write(render(AnyView(CardView(card: FocusCard(kind: .ask))), app: app, size: nil), name: "card-ask-computer", folder: folder)
+        app.assist.preview(nil)
+        views.append(("computer-pill", AnyView(ActingPill(caption: "Pressing Export") {}), nil))
+        views.append(("computer-pill-idle", AnyView(ActingPill(caption: nil) {}), nil))
+        views.append(("computer-pill-long", AnyView(ActingPill(caption: "Typing in Search or enter website name, a long field name") {}), nil))
+        if let pointer = FakeCursor.picture() { views.append(("computer-cursor", AnyView(Image(nsImage: pointer)), nil)) }
         for dot in [false, true] {
             let mark = MenuBar.mark(dot: dot)
             views.append(("menubar\(dot ? "-dot" : "")", AnyView(HStack(spacing: 16) {

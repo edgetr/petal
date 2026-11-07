@@ -102,7 +102,8 @@ SETTINGS_SCHEMA = {
     "chatWhileWorking": ("steer", "Writing in the AI chat while it works: steer (it stops where it is and carries on from the new message) or queue (sent once it's done)."),
     "finderInDock": (True, "macOS: Finder as its own button next to the AI button, the same in every mode (never among the apps, so it never appears at the end and moves the rest)."),
     "replyDrafts": (True, "Entering a mode with held messages that need an answer, Petal AI drafts replies in the user's own style (learned from the replies they edit), shown on a card; it never sends anything."),
-    "aiAllowed": ([], "What Petal AI may do without asking first (the user chose Always on its card): quit, close, trash, tidy."),
+    "aiAllowed": ([], "What Petal AI may do without asking first (the user chose Always on its card): quit, close, trash, tidy, computer:<bundle id> (using that app)."),
+    "computerUse": (True, "macOS: Petal AI can use the user's apps for them (petal_ui, petal_act): it presses buttons, types and chooses menu items through Accessibility, with a pink pointer of its own; the user's pointer never moves. It asks before it uses each app (once per reply), and Stop or Escape ends it. Never apps in aiNeverLook, never password fields. Off: both tools refuse."),
     "routines": (True, "macOS: run the user's routines (routines.json): what Petal does by itself when a file lands in a folder, an app opens, a mode starts or at a time. Made with petal_routine_save."),
     "shortcuts": (True, "Petal's keyboard shortcuts: switch mode (1-9), open the AI panel, open the + search. Never takes one already in use."),
     "schedule": ([], "Modes by time: [{mode, days: [1-7, 1 = Monday], from: \"HH:MM\", to: \"HH:MM\"}]. When a block starts, the focused workspace switches to that mode."),
@@ -283,6 +284,9 @@ def t_set_settings(args):
         raise ValueError("Only the person can allow more, with Always on Petal's card or in its settings.")
     if changes.get("claudeAccess") == "full" and settings.get("claudeAccess") != "full":
         raise ValueError("Only the person can turn on Full access, in the chat's options or Petal's settings.")
+    # Using the person's apps: the AI may turn it off, never back on.
+    if "computerUse" in changes and changes["computerUse"] is not False and not computer_use_on(settings):
+        raise ValueError("Only the person can turn on using apps (computerUse), in Petal's settings.")
     for key in ("aiNeverLook", "aiAllowed"):
         if key in changes and not (isinstance(changes[key], list) and all(isinstance(v, str) for v in changes[key])):
             raise ValueError("%s is a list." % key)
@@ -293,12 +297,18 @@ def t_set_settings(args):
     return {"ok": True, "changed": changes}
 
 
+def computer_use_on(settings):
+    """Using apps is on in these settings (missing: its default, on)."""
+    return settings.get("computerUse", SETTINGS_SCHEMA["computerUse"][0]) is True
+
+
 def t_reset_settings(args):
     keys = args.get("keys") or []
     settings = read_json(SETTINGS, {})
+    # Never the private list, which only the person shortens, nor using apps once it's off, which only they turn on.
+    kept = {"claudePath", "aiNeverLook"} | (set() if computer_use_on(settings) else {"computerUse"})
     for k in keys or list(SETTINGS_SCHEMA):
-        # The private list is the person's to shorten: never reset by a tool.
-        if k in SETTINGS_SCHEMA and k not in ("claudePath", "aiNeverLook"):
+        if k in SETTINGS_SCHEMA and k not in kept:
             settings[k] = SETTINGS_SCHEMA[k][0]
     write_json(SETTINGS, settings)
     return {"ok": True, "reset": keys or "all"}
@@ -838,10 +848,11 @@ def not_yet(_):
 def assist(name):
     """Petal AI's tools on macOS: the running Petal does them, with its own permissions (and asks first)."""
     def run(args):
-        # A sticky note's chat (Petal sets PETAL_NOTE for its own) is answered about the note's window.
-        note = os.environ.get("PETAL_NOTE", "")
+        # Which chat asks: a Petal chat's note (Petal sets PETAL_NOTE for its own), answered about the note's window;
+        # any other AI session is this process, so two sessions never share what they looked at or were allowed.
+        caller = os.environ.get("PETAL_NOTE") or "mcp-py-%d" % os.getpid()
         # A card asking the person first waits up to 120 s: this waits longer, so their answer always arrives.
-        reply = petal("assist", name, json.dumps(args), *([note] if note else []), timeout=150)
+        reply = petal("assist", name, json.dumps(args), caller, timeout=150)
         try:
             out = json.loads(reply)
         except ValueError:
@@ -875,6 +886,21 @@ ASSIST_TOOLS = {
                     {"action": {"type": "string", "enum": ["list", "use", "request"]}, "name": {"type": "string"}, "why": {"type": "string"}}),
     "petal_memories": (assist("petal_memories"), "What Petal AI remembers about the user (everywhere, and per mode); mode limits it to one mode's and the everywhere ones.",
                        {"mode": {"type": "string"}}),
+    "petal_ui": (assist("petal_ui"), "The controls of the window in front (in a sticky note's chat, the note's own window), to use with petal_act: buttons, links, text fields, checkboxes, menus, tabs, rows and the like, visible ones first, up to 150. "
+                 "Each has an id (e12), role, name, value (never a password field's) and frame [x, y, w, h] in screen points. The ids last until the next petal_ui or 5 minutes: call it again whenever the window changes. "
+                 "app: another app's front window; front: true in a sticky note uses what's in front now; find: only controls whose name has this word (for a big window). Apps the user keeps private give only their name.",
+                 {"app": {"type": "string"}, "front": {"type": "boolean"}, "find": {"type": "string", "description": "a word in the control's name or value"}}),
+    "petal_act": (assist("petal_act"), "Use a control from the last petal_ui, through Accessibility, with Petal's own pink pointer (the user's pointer never moves). "
+                  "action press (id): presses a button, link, checkbox, tab or row. type (id, text): puts text in a field (replace: false inserts at the cursor instead; submit: true presses Return after). "
+                  "focus (id). scroll (id; direction up, down, left or right scrolls its area by most of a page; none brings the control into view). "
+                  "menu (path, like \"File > Export…\"): chooses a menu bar item. key (key, like cmd-s, cmd-shift-z, return, escape, tab, down; id focuses that control first): a shortcut its menus have is chosen there, other keys go to the app, which comes forward to take them. "
+                  "menu and key go to the window the last petal_ui looked at (app, if given, must be its app), brought to the front of its app first. The first use of an app in a reply asks the user (in an AI session outside Petal's own chat, the first in a task: name it in task; a new task, two quiet minutes or a Stop asks again). Each act checks the window hasn't moved or changed since petal_ui; when it has, call petal_ui again. "
+                  "What only a real click could do, it says so: ask the user to do it. Never for password fields (petal_vault types secrets) or private apps.",
+                  {"action": {"type": "string", "enum": ["press", "type", "focus", "scroll", "menu", "key"]}, "id": {"type": "string", "description": "a control's id from petal_ui, like e12"},
+                   "text": {"type": "string"}, "replace": {"type": "boolean", "description": "type: replace what's in the field (default true)"}, "submit": {"type": "boolean", "description": "type: press Return after"},
+                   "direction": {"type": "string", "enum": ["up", "down", "left", "right"]}, "path": {"type": "string", "description": "menu: like File > Export…"},
+                   "key": {"type": "string", "description": "key: like cmd-s"}, "app": {"type": "string", "description": "menu or key: this app instead of the last petal_ui's"},
+                   "task": {"type": "string", "description": "a few words for the task this act is part of (sessions outside Petal's own chat): keep it the same across the task's acts"}}),
     "petal_routines": (assist("petal_routines"), "The user's routines (what Petal does by itself: id, their words, trigger, actions, on, last run) and the latest of what they did (history; canPutBack).", {}),
     "petal_routine_save": (assist("petal_routine_save"),
                            "Make a routine from what the user asked, or change one (id). words: their own words. You fill trigger and actions from them, once; Petal runs it without AI except for sorting files by what they are. "

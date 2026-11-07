@@ -93,6 +93,29 @@ enum Apps {
     /// The icon if it's been read already (never touches the disk).
     static func cachedIcon(_ id: String) -> NSImage? { icons[id] }
 
+    /// An app's name when Petal has it already (never asks Launch Services).
+    static func cachedName(_ id: String) -> String? { Sites.isWeb(id) ? name(id) : names[id] }
+
+    /// Reads an app's name off the main thread, kept for next time (its bundle id for an app that's gone).
+    static func loadName(_ id: String, _ done: @escaping @MainActor (String) -> Void) {
+        if let known = cachedName(id) { return done(known) }
+        DispatchQueue.global(qos: .utility).async {
+            let found = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id).map { url -> String in
+                let bundle = Bundle(url: url)
+                return bundle?.localizedInfoDictionary?["CFBundleDisplayName"] as? String
+                    ?? bundle?.infoDictionary?["CFBundleDisplayName"] as? String
+                    ?? bundle?.infoDictionary?["CFBundleName"] as? String
+                    ?? url.deletingPathExtension().lastPathComponent
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if let found, names[id] == nil { names[id] = found }
+                    done(names[id] ?? id)
+                }
+            }
+        }
+    }
+
     /// Reads an app's icon off the main thread, kept for next time (a plain one for an app that's gone).
     static func loadIcon(_ id: String, _ done: @escaping @MainActor (NSImage) -> Void) {
         if let icon = icons[id] { return done(icon) }

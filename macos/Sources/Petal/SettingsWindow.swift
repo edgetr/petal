@@ -746,6 +746,9 @@ struct ClaudeSettings: View {
                 SettingToggle(key: "ai", title: "Sort new apps and sites", detail: "\(provider.name) decides which mode something new belongs to.")
                 DailySummaryRow()
             }
+            Card(title: "Using your apps", footer: "Petal AI presses buttons, types and chooses menu items with a pink pointer of its own; yours stays where it is. It asks before it uses each app, and Stop or Esc ends it.") {
+                SettingToggle(key: "computerUse", title: "Let Petal AI use your apps", detail: "Never apps kept private, and never password fields.")
+            }
             MemoryCard()
             VaultCard()
             PrivacyCard()
@@ -754,7 +757,7 @@ struct ClaudeSettings: View {
                 Card(title: "Allowed without asking", footer: "You chose Always for these. Take one away and Petal AI asks again.") {
                     ForEach(app.config.strings("aiAllowed"), id: \.self) { kind in
                         HStack {
-                            Text(AllowedKinds.name(kind)).font(.system(size: 13))
+                            AllowedKindName(kind: kind)
                             Spacer()
                             RoundButton(symbol: "xmark") { app.config.set("aiAllowed", app.config.strings("aiAllowed").filter { $0 != kind }) }
                         }
@@ -911,6 +914,7 @@ struct DailySummaryRow: View {
 }
 
 /// What the kinds of thing Petal AI asks about are called.
+@MainActor
 enum AllowedKinds {
     static func name(_ kind: String) -> String {
         switch kind {
@@ -918,8 +922,23 @@ enum AllowedKinds {
         case "close": "Closing windows"
         case "trash": "Moving files to the Trash"
         case "tidy": "Tidying many files at once"
-        default: kind
+        default: kind.hasPrefix("computer:") ? "Using \(Apps.cachedName(String(kind.dropFirst(9))) ?? String(kind.dropFirst(9)))" : kind
         }
+    }
+}
+
+/// A kind's name in the Allowed list: an app's name is read off the main thread (its bundle id until then).
+struct AllowedKindName: View {
+    let kind: String
+    @State private var appName: String?
+
+    var body: some View {
+        Text(appName.map { "Using \($0)" } ?? AllowedKinds.name(kind)).font(.system(size: 13))
+            .task(id: kind) {
+                guard kind.hasPrefix("computer:") else { return }
+                let id = String(kind.dropFirst(9))
+                if Apps.cachedName(id) == nil { Apps.loadName(id) { appName = $0 } }
+            }
     }
 }
 

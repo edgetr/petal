@@ -28,6 +28,14 @@ Use, in this order:
    `petal_routine_save` (their words, plus the trigger and actions you fill in), `petal_routines`,
    `petal_routine_run` (`dryRun: true` shows what it would do with the files there now), `petal_routine_undo` (puts
    moved files back), `petal_routine_delete`. Routines only move files, never delete them.
+   Using the user's apps (`computerUse`): `petal_ui` lists the front window's controls with ids (e12), and
+   `petal_act` presses, types, focuses or scrolls one by id, chooses a menu item by path ("File > Export…") or
+   presses a key (cmd-s), through Accessibility with Petal's own pink pointer; the user's pointer never moves. The
+   first use of an app in a reply asks the user; from a session outside Petal's own chat, the first in a task (pass
+   the same `task` words with each act; a new task, two quiet minutes or a Stop asks again). Menus and keys go only to the window `petal_ui` looked at, and an
+   act on a window that changed since (another row selected, another title) is refused: call `petal_ui` again.
+   Never private apps or password fields (`petal_vault` types secrets); what only a real click could do, ask the
+   user to do. Only the user turns `computerUse` on.
    In Petal's own panel each chat is a sticky note (`aiNotes`): stuck to the window it was opened on, so
    `petal_look` looks at that window even after the user moves on (`front: true` for what's in front now).
    Changes apply instantly. `petal_export_recipe` / `petal_import_recipe` share a dock as a `.petal` file (modes,

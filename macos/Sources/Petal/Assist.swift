@@ -3,7 +3,8 @@ import Observation
 import ScreenCaptureKit
 
 /// Petal AI's own powers on the Mac. Claude Code and Codex reach them through Petal's tools (`petal_look`,
-/// `petal_apps`, `petal_windows`, `petal_trash`, `petal_remember`, `petal_forget`, `petal_memories`), which the
+/// `petal_apps`, `petal_windows`, `petal_trash`, `petal_remember`, `petal_forget`, `petal_memories`, and `petal_ui` and
+/// `petal_act` for using apps, ComputerUse.swift), which the
 /// running Petal answers over its socket: Petal holds the Mac's permissions (Accessibility, Screen Recording, each
 /// browser's Automation), so the AI never needs them itself.
 ///
@@ -22,6 +23,7 @@ final class Assist {
         let detail: String    // a line more, or ""
         var secret = false    // asks the person for a secret (the vault), typed into the card
         var every = false     // asked every time: no Always
+        var owner: String?    // the chat asking (ComputerUse): its Stop, or its next turn, answers Don't
     }
 
     struct Memory: Identifiable, Equatable {
@@ -40,6 +42,8 @@ final class Assist {
     @ObservationIgnored private var giveUp: DispatchWorkItem?
     @ObservationIgnored private var trashed: [(from: URL, to: URL)] = []
     @ObservationIgnored private var timer: Timer?
+    /// Using the person's apps with a pointer of its own (ComputerUse.swift).
+    @ObservationIgnored let computer = ComputerUse()
     nonisolated private static let queue = DispatchQueue(label: "petal.assist", qos: .userInitiated, attributes: .concurrent)
 
     var app: PetalApp { PetalApp.shared }
@@ -59,20 +63,22 @@ final class Assist {
 
     /// Allowed already (Full access, or Always for this kind), or asked with a card; `done` hears the answer.
     /// `always`: asked even with Full access (the vault). `secret`: the card takes a secret, handed to `typed`.
-    func ask(_ kind: String, _ title: String, detail: String = "", always: Bool = false, secret: Bool = false,
+    func ask(_ kind: String, _ title: String, detail: String = "", always: Bool = false, secret: Bool = false, owner: String? = nil,
              typed: ((String) -> Void)? = nil, done: @escaping (Bool) -> Void) {
         // `always` (the vault) asks every time: neither Full access nor an earlier Always skips it.
         if !secret, !always, config.string("claudeAccess") == "full" || config.strings("aiAllowed").contains(kind) { return done(true) }
         settle(false)   // one question at a time: a newer one replaces an older one, which is declined
         secretTyped = typed
-        let request = Request(kind: kind, title: title, detail: detail, secret: secret, every: always)
+        let request = Request(kind: kind, title: title, detail: detail, secret: secret, every: always, owner: owner)
         pending = request
         answer = done
-        // In the chat when it's open (the card shows there); over the dock otherwise (another AI session asking).
-        if !app.claude.isOpen {
-            // Over the dock; with no Petal dock showing (macOS's in use), in the chat, which shows the question.
+        // In the chat when it's open and the question is its own (the card shows there); over the dock otherwise
+        // (another chat or AI session asking).
+        if !app.claude.isOpen || !showsInChat(request) {
+            // Over the dock; with no Petal dock showing (macOS's in use), in the chat asking, which shows the question.
             if app.docks.focusedDock?.panel != nil { app.popups.show(FocusCard(kind: .ask, title: title, reason: detail)) }
-            else { app.claude.open(asking: nil) }
+            else if let owner, let note = app.claude.note(withID: owner) { app.claude.present(note) }
+            else if !app.claude.isOpen { app.claude.open(asking: nil) }
         }
         let work = DispatchWorkItem { [weak self] in self?.settle(false) }
         giveUp = work
@@ -80,6 +86,9 @@ final class Assist {
     }
 
     @ObservationIgnored private var secretTyped: ((String) -> Void)?
+
+    /// Shows a made-up question, for `Petal --snapshot`.
+    func preview(_ request: Request?) { pending = request }
 
     /// The answer to the question `id` (a newer question replaced an older one, which was answered Don't then: an
     /// answer meant for the older one, or a secret typed for it, never goes to the newer).
@@ -106,6 +115,20 @@ final class Assist {
         pending = nil
         if asked, app.popups.card?.kind == .ask { app.popups.dismissCard() }
         done?(allowed)
+    }
+
+    /// The chat panel shows `request` only when it's that chat's own (or nobody's in particular): another chat's
+    /// question never shows in the one open, where it could be answered for the wrong chat. An AI session outside
+    /// Petal asks over the dock, or in the chat when there's no Petal dock.
+    func showsInChat(_ request: Request) -> Bool {
+        guard let owner = request.owner, owner != app.claude.current.id.uuidString else { return true }
+        if app.claude.note(withID: owner) != nil { return false }
+        return app.docks.focusedDock?.panel == nil
+    }
+
+    /// The chat `owner` stopped, or moved on to another turn: its question waiting is answered Don't.
+    func decline(owner: String) {
+        if pending?.owner == owner { settle(false) }
     }
 
     /// The card went away without an answer (×, Escape, another card): that's Don't.
@@ -151,6 +174,7 @@ final class Assist {
                 send(["opened": file.path])
             } catch { fail(error.localizedDescription) }
         case "petal_vault": vault(args, send, fail)
+        case "petal_ui", "petal_act": computer.handle(name, args, note: note, send: send, fail: fail)
         case "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
             app.routines.handle(name, args, send, fail)
         case "petal_memories":
@@ -185,17 +209,30 @@ final class Assist {
         }
         result["onScreen"] = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !$0.isHidden }
             .compactMap(\.localizedName)).sorted()
-        // The clipboard only once the privacy checks below have passed, and never something private.
+        // The clipboard only once the privacy checks below have passed, and never something private. Read here,
+        // and told only with the vault's secrets taken out (off the main thread: that may read the Keychain).
         let wantsClipboard = args["clipboard"] as? Bool == true
+        var clipboard: String?
         let addClipboard = {
             guard wantsClipboard else { return }
             if Self.clipboardIsPrivate || self.neverLook(NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
                 result["clipboard"] = "The clipboard holds something private (a password manager's, or one kept private): Petal doesn't read it."
             } else {
-                result["clipboard"] = NSPasteboard.general.string(forType: .string).map { String($0.prefix(4000)) } ?? ""
+                // Read whole: the vault's secrets are taken out of all of it before it's cut short.
+                clipboard = NSPasteboard.general.string(forType: .string) ?? ""
             }
         }
-        guard let front else { addClipboard(); return send(result) }
+        guard let front else {
+            addClipboard()
+            guard let raw = clipboard else { return send(result) }
+            return Self.queue.async {
+                let clean = Self.shownText(raw, limit: 4000) ?? Self.tooMuchClipboard
+                DispatchQueue.main.async {
+                    result["clipboard"] = clean
+                    send(result)
+                }
+            }
+        }
         result["app"] = ["name": front.localizedName ?? "", "id": front.bundleIdentifier ?? ""]
         // An app the person keeps private (passwords, a bank): only its name, nothing of what's in it (its window,
         // selection, tab, picture, nor the clipboard).
@@ -224,14 +261,19 @@ final class Assist {
                 window = match
             }
             let number = window.flatMap { Windows.id(of: $0) }
-            let title: String = window.flatMap { Windows.value($0, kAXTitleAttribute) } ?? ""
+            let realTitle: String = window.flatMap { Windows.value($0, kAXTitleAttribute) } ?? ""
             let frame = window.flatMap { Windows.frame(of: $0) } ?? .zero
             let focused: AXUIElement? = number == focusedID ? Windows.value(element, kAXFocusedUIElementAttribute) : nil
             let selected: String = focused.flatMap { Windows.value($0, kAXSelectedTextAttribute) } ?? ""
+            // Nothing of the vault's secrets goes to the AI: not in the title, the selection, nor the clipboard.
+            let title = Self.withoutSecrets(realTitle)
+            let shownSelection = selected.isEmpty ? "" : Self.shownText(selected, limit: 8000) ?? Self.tooMuchSelected
+            let shownClipboard = clipboard.map { Self.shownText($0, limit: 4000) ?? Self.tooMuchClipboard }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     result["window"] = title
-                    if !selected.isEmpty { result["selectedText"] = String(selected.prefix(8000)) }
+                    if !shownSelection.isEmpty { result["selectedText"] = shownSelection }
+                    if let shownClipboard { result["clipboard"] = shownClipboard }
                     let hidden = self.privatePIDs
                     let finish = {
                         guard !shot.isEmpty else { return send(result) }
@@ -249,17 +291,27 @@ final class Assist {
                     guard Browsers.kind(front.bundleIdentifier ?? "") != nil else { return finish() }
                     // A note's tab is always its own window's (by id, or frame and title), never whichever window is
                     // in front by the time the browser answers.
-                    let other = place == nil ? nil : Browsers.Window(number: number, title: title, frame: frame)
+                    let other = place == nil ? nil : Browsers.Window(number: number, title: realTitle, frame: frame)
                     self.app.browsers.frontURL(of: front, window: other) { url in
-                        MainActor.assumeIsolated {
-                            if let url { result["tab"] = ["url": url, "title": title] }
-                            finish()
+                        guard let url else { return finish() }
+                        // An address can carry a key too (?token=…).
+                        Self.queue.async {
+                            let shown = Self.withoutSecrets(url)
+                            DispatchQueue.main.async {
+                                MainActor.assumeIsolated {
+                                    result["tab"] = ["url": shown, "title": title]
+                                    finish()
+                                }
+                            }
                         }
                     }
                 }
             }
         }
     }
+
+    nonisolated static let tooMuchClipboard = "The clipboard holds too much to check for saved secrets: Petal doesn't read it."
+    nonisolated static let tooMuchSelected = "What's selected is too much to check for saved secrets: Petal doesn't read it."
 
     /// What password managers mark what they copy with (nspasteboard.org's markers, and 1Password's own): the
     /// clipboard then holds a secret, never read.
@@ -272,15 +324,21 @@ final class Assist {
 
     static var clipboardIsPrivate: Bool { isConcealed(NSPasteboard.general) }
 
+    /// `text` with the vault's secrets in it (whole, 8 characters or more of one, or a short one as a word) as
+    /// "(hidden)", the same matching petal_ui uses. May read the Keychain: never on the main thread.
+    nonisolated static func withoutSecrets(_ text: String) -> String {
+        text.isEmpty ? text : VaultIndex.current().redacted(text)
+    }
+
     /// The app in front (never Petal itself), or the running app called `name`.
-    private func frontApp(named name: String?) -> NSRunningApplication? {
+    func frontApp(named name: String?) -> NSRunningApplication? {
         if let name, !name.isEmpty { return running(name) }
         let me = ProcessInfo.processInfo.processIdentifier
         if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != me { return front }
         return nil
     }
 
-    private func running(_ name: String) -> NSRunningApplication? {
+    func running(_ name: String) -> NSRunningApplication? {
         let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
         return apps.first { $0.bundleIdentifier?.caseInsensitiveCompare(name) == .orderedSame }
             ?? apps.first { $0.localizedName?.caseInsensitiveCompare(name) == .orderedSame }

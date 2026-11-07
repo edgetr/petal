@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Checks the window maths (tiling and parking) and when the dock looks at the windows, without running Petal or
-# moving any window:
+# Checks the window maths (tiling and parking), when the dock looks at the windows, and which controls Petal AI is
+# told about (UIMap), without running Petal or moving any window:
 #   macos/checks/run.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -10,3 +10,5 @@ swiftc -parse-as-library -O -o "$out/check" Sources/Petal/WindowLayout.swift che
 "$out/check"
 swiftc -parse-as-library -O -o "$out/look" Sources/Petal/LookSchedule.swift checks/LookScheduleCheck.swift
 "$out/look"
+swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIMapCheck.swift
+"$out/uimap"
