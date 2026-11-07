@@ -18,24 +18,35 @@ final class IPC {
     typealias From = @MainActor ([String], AgentAccess.Caller, Pending, @escaping @MainActor (String) -> Void) -> Void
 
     /// An identified request still waiting for its answer, as its handler sees it. `hungUp`: its client went (closed,
-    /// or was killed) before the answer; what `onHangUp` holds runs then, once, on the main thread, so nothing it
-    /// asked for goes on with nobody to hear the answer. `waiting`, set by the handler: the person has a card up for
-    /// this request now. While they do, the client is sent a space every 10 seconds ahead of the answer's line, so a
-    /// request that asks more than once (an agent's card, then the app's) never runs out of time while they read.
+    /// or was killed) before the answer. The socket's thread sets it the moment it sees the client go, so it's true at
+    /// once on every thread, even for a handler queued on the main thread before the client went and not yet run: that
+    /// one never starts, and every check a running one makes (`Assist.handle`'s `live`) sees it before its next step.
+    /// What `onHangUp` holds runs after, once, on the main thread, so nothing it asked for goes on with nobody to hear
+    /// the answer. `waiting`, set by the handler: the person has a card up for this request now. While they do, the
+    /// client is sent a space every 10 seconds ahead of the answer's line, so a request that asks more than once (an
+    /// agent's card, then the app's) never runs out of time while they read.
     @MainActor final class Pending {
-        private(set) var hungUp = false
+        nonisolated private let gone = Flag()
+        nonisolated var hungUp: Bool { gone.isSet }
         var waiting: (() -> Bool)?
         private var cleanup: [() -> Void] = []
+        private var cleanedUp = false
 
         nonisolated init() {}
 
+        /// The socket's thread saw the client go: from now on the request is hung up, before anything on the main
+        /// thread hears of it.
+        nonisolated func cancel() { gone.set() }
+
         func onHangUp(_ body: @escaping () -> Void) {
-            if hungUp { body() } else { cleanup.append(body) }
+            if cleanedUp { body() } else { cleanup.append(body) }
         }
 
+        /// What the request left waiting is undone, on the main thread, once.
         func hangUp() {
-            guard !hungUp else { return }
-            hungUp = true
+            gone.set()
+            guard !cleanedUp else { return }
+            cleanedUp = true
             let all = cleanup
             cleanup = []
             all.forEach { $0() }
@@ -130,6 +141,9 @@ final class IPC {
         // Who's asking, read here (off the main thread) from the socket itself.
         let caller = Self.identified.contains(words.first ?? "") ? AgentCallers.identify(client: client) : nil
         let pending = Pending()
+        // Its client watched from here on: one already gone is hung up before its handler is even queued.
+        let peer = caller == nil ? nil : Peer(client)
+        if peer?.gone() == true { pending.cancel() }
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
                 let name = words.first ?? ""
@@ -140,6 +154,8 @@ final class IPC {
                     done.signal()
                 }
                 if let handler = self.from[name], let caller {
+                    // Its client went while it waited its turn here: nothing is done for nobody.
+                    guard !pending.hungUp else { return }
                     handler(Array(words.dropFirst()), caller, pending, finish)
                 } else if let handler = self.later[name] {
                     handler(Array(words.dropFirst()), finish)
@@ -152,7 +168,7 @@ final class IPC {
         }
         if caller == nil {
             done.wait()
-        } else if !Self.wait(done, client: client, pending: pending) {
+        } else if let peer, !Self.wait(done, client: client, peer: peer, pending: pending) {
             close(client)
             return
         }
@@ -165,25 +181,19 @@ final class IPC {
 
 extension IPC {
     /// Waits for an identified request's answer, watching its client: once it has gone (its end closed, not only its
-    /// writing half, as `nc` does once it has sent its line), the request hears it (`hangUp`) and false says nobody
-    /// is left to answer. While the person has a card up for it, the client hears a space every 10 seconds.
-    nonisolated fileprivate static func wait(_ done: DispatchSemaphore, client: Int32, pending: Pending) -> Bool {
-        // A closed peer ends this socket's sending side too: the write filter says so (EV_EOF), a half-close doesn't.
-        let queue = kqueue()
-        defer { if queue >= 0 { close(queue) } }
-        var watch = kevent(ident: UInt(client), filter: Int16(EVFILT_WRITE), flags: UInt16(EV_ADD), fflags: 0, data: 0, udata: nil)
-        let watching = queue >= 0 && kevent(queue, &watch, 1, nil, 0, nil) == 0
+    /// writing half, as `nc` does once it has sent its line), the request is hung up there and then (`cancel`), what
+    /// it left waiting is undone on the main thread (`hangUp`), and false says nobody is left to answer. While the
+    /// person has a card up for it, the client hears a space every 10 seconds.
+    nonisolated fileprivate static func wait(_ done: DispatchSemaphore, client: Int32, peer: Peer, pending: Pending) -> Bool {
         let beat = Beat()
         var asked = DispatchTime.now()
-        while done.wait(timeout: .now() + 0.25) == .timedOut {
-            if watching {
-                var event = kevent()
-                var now = timespec(tv_sec: 0, tv_nsec: 0)
-                if kevent(queue, nil, 0, &event, 1, &now) > 0, event.flags & UInt16(EV_EOF) != 0 {
-                    DispatchQueue.main.async { MainActor.assumeIsolated { pending.hangUp() } }
-                    return false
-                }
+        while true {
+            if peer.gone() {
+                pending.cancel()
+                DispatchQueue.main.async { MainActor.assumeIsolated { pending.hangUp() } }
+                return false
             }
+            if done.wait(timeout: .now() + 0.25) == .success { return true }
             if beat.take() {
                 var space: UInt8 = 0x20
                 _ = write(client, &space, 1)
@@ -193,8 +203,37 @@ extension IPC {
                 DispatchQueue.main.async { MainActor.assumeIsolated { if pending.waiting?() == true { beat.set() } } }
             }
         }
-        return true
     }
+}
+
+/// Whether a request's client has gone, asked from the socket's thread. A closed peer ends this socket's sending side
+/// too: the write filter says so (EV_EOF); a half-close doesn't.
+private final class Peer {
+    private let queue: Int32
+    private let watching: Bool
+
+    init(_ client: Int32) {
+        queue = kqueue()
+        var watch = kevent(ident: UInt(client), filter: Int16(EVFILT_WRITE), flags: UInt16(EV_ADD), fflags: 0, data: 0, udata: nil)
+        watching = queue >= 0 && kevent(queue, &watch, 1, nil, 0, nil) == 0
+    }
+
+    deinit { if queue >= 0 { close(queue) } }
+
+    func gone() -> Bool {
+        guard watching else { return false }
+        var event = kevent()
+        var now = timespec(tv_sec: 0, tv_nsec: 0)
+        return kevent(queue, nil, 0, &event, 1, &now) > 0 && event.flags & UInt16(EV_EOF) != 0
+    }
+}
+
+/// Set once, read from any thread.
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var on = false
+    func set() { lock.withLock { on = true } }
+    var isSet: Bool { lock.withLock { on } }
 }
 
 /// The main thread saying a request's client should hear it's still waiting on the person.

@@ -190,7 +190,7 @@ final class Assist {
         case "petal_look": look(args, place: app.claude.notesOn ? note.flatMap { app.claude.note(withID: $0) }?.place : nil, note: note, send)
         case "petal_apps": apps(args, caller: note, live: live, send, fail)
         case "petal_windows": windows(args, caller: note, live: live, send, fail)
-        case "petal_trash": trash(args, caller: note, send, fail)
+        case "petal_trash": trash(args, caller: note, live: live, send, fail)
         case "petal_remember":
             guard config.bool("aiMemory") else { return fail("Memory is off in Petal's settings (aiMemory).") }
             let text = (args["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -780,7 +780,7 @@ final class Assist {
     // MARK: The Trash
 
     /// Files to the Trash (asked first), or the last ones back where they were (`undo`).
-    private func trash(_ args: [String: Any], caller: String?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func trash(_ args: [String: Any], caller: String?, live: @escaping () -> Bool, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         if args["undo"] as? Bool == true {
             let items = trashed
             Self.queue.async {
@@ -807,7 +807,7 @@ final class Assist {
         let names = urls.prefix(3).map(\.lastPathComponent).joined(separator: ", ") + (urls.count > 3 ? " and \(urls.count - 3) more" : "")
         ask("trash", urls.count == 1 ? "Move “\(urls[0].lastPathComponent)” to the Trash" : "Move \(urls.count) items to the Trash",
             detail: urls.count == 1 ? "You can put it back." : names, owner: caller) { allowed in
-            guard allowed else { return send(["declined": "The person didn't allow it."]) }
+            guard allowed, live() else { return send(["declined": "The person didn't allow it."]) }
             NSWorkspace.shared.recycle(urls) { moved, error in
                 MainActor.assumeIsolated {
                     self.trashed = moved.map { (from: $0.key, to: $0.value) }

@@ -4,8 +4,9 @@
 # preview says (Background), the vault's pure side (sites, 2FA codes, exports, when it fills by itself), and agents
 # using the vault (AgentAccess: petal run's variables and redaction, who's asking, projects and grants; worktrees on
 # throwaway folders in the temporary folder; writing through a full pipe; an unreadable answer and which signals it
-# passes on), a routine's tidy stopping once its asker hangs up (RoutineStop), and that every card Petal AI's tools put up
-# names its owner, without running Petal, moving any window or touching the Keychain:
+# passes on), a routine's tidy stopping once its asker hangs up (RoutineStop), a request whose client hung up before its
+# turn never being done (IPC, on a throwaway socket), and that every card Petal AI's tools put up names its owner,
+# without running Petal, moving any window or touching the Keychain:
 #   macos/checks/run.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -27,6 +28,10 @@ swiftc -parse-as-library -O -o "$out/agents" Sources/Petal/AgentAccess.swift Sou
 "$out/agents"
 swiftc -parse-as-library -O -o "$out/routinestop" Sources/Petal/RoutineStop.swift checks/RoutineStopCheck.swift
 "$out/routinestop"
+# IPC.swift on a throwaway socket in the temporary folder (never Petal's): a request whose client hangs up first is
+# never done.
+swiftc -parse-as-library -O -o "$out/ipc" Sources/Petal/IPC.swift Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/IPCCheck.swift
+"$out/ipc"
 # Every card Petal AI's tools put up says whose it is (Assist.ask's `owner`), so a chat's Stop or an agent hanging up
 # answers it Don't: the parameter has no default, and every call to it (a string first: the card's kind) names it.
 perl -0777 -ne '
