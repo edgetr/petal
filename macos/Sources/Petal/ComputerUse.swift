@@ -95,7 +95,7 @@ final class ComputerUse {
 
     /// By caller. Never shared between two chats.
     private(set) var maps: [String: Map] = [:]
-    private var sessions: [String: Session] = [:] { didSet { standGuard() } }
+    private var sessions: [String: Session] = [:] { didSet { standGuard(); unwatchBuys() } }
     private var closed: [String: Closed] = [:]
     private var line: [Job] = [] { didSet { standGuard() } }
     private var busy = false { didSet { standGuard() } }
@@ -190,9 +190,16 @@ final class ComputerUse {
                         if !UIMap.isVisible(node, window: reading.windowFrame) { item["offscreen"] = true }
                         list.append(item)
                     }
-                    self.maps[caller] = Map(pid: pid, bundle: bundle, appName: name, window: window, windowID: reading.windowID,
-                                            windowFrame: reading.windowFrame, lists: reading.lists, fingerprint: reading.fingerprint,
-                                            entries: entries, count: entries.count, made: Date())
+                    let made = Map(pid: pid, bundle: bundle, appName: name, window: window, windowID: reading.windowID,
+                                   windowFrame: reading.windowFrame, lists: reading.lists, fingerprint: reading.fingerprint,
+                                   entries: entries, count: entries.count, made: Date())
+                    self.maps[caller] = made
+                    // A Buy said in this window (by any chat) ends if what was just read is another tab or page.
+                    if let id = reading.windowID, self.hasBuy(in: id) {
+                        self.assist.vaultShown(made, page: reading.page, url: reading.pageURL, title: reading.title) { place in
+                            self.seen(place, window: id)
+                        }
+                    }
                     self.keepSweeping()
                     var result: [String: Any] = ["app": name, "window": reading.title, "elements": list,
                                                  "note": "Act with petal_act by id. These ids last until the next petal_ui, or 5 minutes; call petal_ui again once the window changes."]
@@ -277,10 +284,10 @@ final class ComputerUse {
                       cancel: Acting.Cancel(under: session.cancel), send: send, fail: fail)
         // A Buy said in this window lasts only while it shows the tab and page it was said on: looked at before
         // every act there (an act may be what leaves it, or the person may have).
-        guard let window = map.windowID, session.checkouts.contains(where: { $0.window == window }) else { return proceed(job) }
+        guard let window = map.windowID, hasBuy(in: window) else { return proceed(job) }
         assist.vaultTab(map) { [weak self] place in
             guard let self else { return }
-            self.sessions[caller]?.checkouts.removeAll { $0.left(place, window: window) }
+            self.seen(place, window: window)
             self.proceed(job)
         }
     }
@@ -336,7 +343,7 @@ final class ComputerUse {
     /// window and tab, this card). A window seen showing another page or tab ends that Buy.
     func checkout(_ caller: String, token: Acting.Cancel, place: Vault.Place, window: CGWindowID?, card: String) -> Bool {
         guard live(caller, token), let current = sessions[caller] else { return false }
-        sessions[caller]?.checkouts.removeAll { $0.left(place, window: window) }
+        if let window { seen(place, window: window) }
         let turn = Self.turnName(current)
         return sessions[caller]?.checkouts.contains { $0.covers(place, window: window, card: card, turn: turn) } ?? false
     }
@@ -344,12 +351,64 @@ final class ComputerUse {
     /// The person said Buy on `place`'s host: payment info from `card` fills there, in that window, for the rest of
     /// this reply. It doesn't let Petal AI use the browser otherwise: pressing the order button asks as any act does
     /// (unless the reply may use the browser already). False when the reply ended while they were asked.
-    func allowCheckout(_ caller: String, token: Acting.Cancel, place: Vault.Place, window: CGWindowID?, card: String) -> Bool {
-        guard live(caller, token), let current = sessions[caller], let window,
+    func allowCheckout(_ caller: String, token: Acting.Cancel, place: Vault.Place, map: Map, card: String) -> Bool {
+        guard live(caller, token), let current = sessions[caller], let window = map.windowID,
               let bought = Vault.Checkout(place: place, window: window, card: card, turn: Self.turnName(current)) else { return false }
         sessions[caller]?.checkouts.removeAll { $0.window == window }
         sessions[caller]?.checkouts.append(bought)
+        watchBuy(map)
         return true
+    }
+
+    /// Some chat's Buy is in this window.
+    func hasBuy(in window: CGWindowID) -> Bool {
+        sessions.values.contains { $0.checkouts.contains { $0.window == window } }
+    }
+
+    /// `window` was seen showing `place` (by a read or an act of any chat, or after its title changed): every Buy in
+    /// it that was said on another tab or page is over, for good.
+    func seen(_ place: Vault.Place, window: CGWindowID) {
+        for caller in Array(sessions.keys) {
+            guard let list = sessions[caller]?.checkouts, list.contains(where: { $0.window == window }) else { continue }
+            let left = Vault.Checkout.seen(list, place: place, window: window)
+            if left.count != list.count { sessions[caller]?.checkouts = left }
+        }
+    }
+
+    // MARK: Watching a Buy's window
+
+    /// Each window with a Buy in it, as looked at when Buy was said: its title is watched (a tab switch or a new page
+    /// changes it), and what it shows is read again then.
+    private var buyWindows: [CGWindowID: Map] = [:]
+
+    private func watchBuy(_ map: Map) {
+        guard let id = map.windowID, buyWindows[id] == nil else { return }
+        if buyWindows.isEmpty { WindowEvents.shared.listen("buy") { [weak self] event in self?.buyEvent(event) } }
+        buyWindows[id] = map
+        AXWatcher.shared.watchTitle(map.window, pid: map.pid)
+    }
+
+    /// Stops watching windows no Buy is in anymore (sessions changed).
+    private func unwatchBuys() {
+        guard !buyWindows.isEmpty else { return }
+        let windows = Set(sessions.values.flatMap { $0.checkouts.map(\.window) })
+        for (id, map) in buyWindows where !windows.contains(id) {
+            AXWatcher.shared.unwatchTitle(map.window, pid: map.pid)
+            buyWindows[id] = nil
+        }
+        if buyWindows.isEmpty { WindowEvents.shared.stopListening("buy") }
+    }
+
+    private func buyEvent(_ event: WindowEvents.Event) {
+        guard let id = event.window, let map = buyWindows[id] else { return }
+        switch event.kind {
+        case .closed:
+            for caller in Array(sessions.keys) { sessions[caller]?.checkouts.removeAll { $0.window == id } }
+        case .titled:
+            assist.vaultTab(map) { [weak self] place in self?.seen(place, window: id) }
+        default:
+            break
+        }
     }
 
     /// A reply's name for its Buys: its turn (and an outside session's task).
@@ -725,6 +784,10 @@ enum Reader {
         var holdsSecret = false
         /// The vault couldn't be read: nothing was read, since nothing could be checked for its secrets.
         var vaultUnreadable = false
+        /// The first web page met (the tab's page in a browser) and its address: a Buy in this window ends when it's
+        /// another one.
+        var page: AXUIElement?
+        var pageURL: String?
     }
 
     static let attributes = [kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute,
@@ -780,6 +843,10 @@ enum Reader {
             node.web = web
             node.clip = clip
             node.order = order
+            if role == "AXWebArea", reading.page == nil {
+                reading.page = element
+                reading.pageURL = VaultReader.url(element)
+            }
             // A password field's value is never read.
             if UIMap.valueRoles.contains(role), !UIMap.isSecure(node) {
                 node.value = text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)

@@ -361,15 +361,42 @@ final class Assist {
     /// left out. `window` nil is the whole screen; a window that can't be found is no picture, never the screen
     /// instead. What may show a secret is blacked out first (Sensitive), in memory: no picture is written before.
     /// A window Petal can't read whole through Accessibility is no picture (or, on the screen, isn't in it).
+    /// The window server keeps where each window is; what Accessibility finds is placed by where it is now, so a window
+    /// that moved or changed size between the list and the picture would have its blackouts in the wrong place: then
+    /// it's taken again once, and after that there's no picture.
     nonisolated private static func screenshot(_ window: CGWindowID?, screen: Bool = false, hiding: Set<pid_t> = []) async -> (path: String?, note: String?) {
-        guard screen || window != nil else { return (nil, nil) }
+        for _ in 0..<2 {
+            let taken = await capture(window, screen: screen, hiding: hiding)
+            if !taken.moved { return (taken.path, taken.note) }
+        }
+        return (nil, "A window moved or changed size while Petal took the picture, so it couldn't be sure what it hid: no picture. Try again once it's still.")
+    }
+
+    /// Where the window server has a window now (top-left origin, as Accessibility and ScreenCaptureKit count), or
+    /// nil when it's gone.
+    nonisolated private static func frame(of window: CGWindowID) -> CGRect? {
+        guard let list = CGWindowListCopyWindowInfo(.optionIncludingWindow, window) as? [[String: Any]],
+              let info = list.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == window }),
+              let bounds = info[kCGWindowBounds as String] as? NSDictionary else { return nil }
+        return CGRect(dictionaryRepresentation: bounds as CFDictionary)
+    }
+
+    /// The window is still where (and the size) it was when the picture's place for it was worked out.
+    nonisolated private static func still(_ window: SCWindow) -> Bool {
+        guard let now = frame(of: window.windowID) else { return false }
+        let then = window.frame
+        return abs(now.minX - then.minX) <= 1 && abs(now.minY - then.minY) <= 1 && abs(now.width - then.width) <= 1 && abs(now.height - then.height) <= 1
+    }
+
+    nonisolated private static func capture(_ window: CGWindowID?, screen: Bool, hiding: Set<pid_t>) async -> (path: String?, note: String?, moved: Bool) {
+        guard screen || window != nil else { return (nil, nil, false) }
         // Nothing can be checked for the vault's secrets while it can't be read: no picture at all.
         if VaultIndex.current().unreadable {
-            return (nil, VaultStore.unreadableText + " Petal can't hide its secrets in a picture, so it takes none: try again in a moment.")
+            return (nil, VaultStore.unreadableText + " Petal can't hide its secrets in a picture, so it takes none: try again in a moment.", false)
         }
         guard CGPreflightScreenCaptureAccess(),
               // One window may be behind others or on another Desktop (a note's): every window is listed then.
-              let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: window == nil) else { return (nil, nil) }
+              let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: window == nil) else { return (nil, nil, false) }
         let filter: SCContentFilter
         let area: CGRect
         var note: String?
@@ -377,14 +404,16 @@ final class Assist {
         var watched: [(window: SCWindow, element: AXUIElement, pid: pid_t, visible: CGRect)] = []
         var rects: [CGRect] = []
         if !screen {
-            guard let window, let match = content.windows.first(where: { $0.windowID == window }), let pid = match.owningApplication?.processID else { return (nil, nil) }
+            guard let window, let match = content.windows.first(where: { $0.windowID == window }), let pid = match.owningApplication?.processID else { return (nil, nil, false) }
             guard let element = Sensitive.window(pid: pid, id: window) else {
-                return (nil, "Petal couldn't read that window through Accessibility, so it can't hide what may be secret in it: no picture.")
+                return (nil, "Petal couldn't read that window through Accessibility, so it can't hide what may be secret in it: no picture.", false)
             }
             let before = Sensitive.scan(window: element, pid: pid, visible: match.frame, deadline: Date().addingTimeInterval(3))
             guard before.complete else {
-                return (nil, "Petal couldn't check all of that window for passwords and card numbers in time (it's very big, or the app didn't answer): no picture.")
+                return (nil, "Petal couldn't check all of that window for passwords and card numbers in time (it's very big, or the app didn't answer): no picture.", false)
             }
+            // Moved while it was read: its blackouts may be in the wrong place.
+            guard still(match) else { return (nil, nil, true) }
             rects = before.rects
             watched = [(match, element, pid, match.frame)]
             filter = SCContentFilter(desktopIndependentWindow: match)
@@ -428,23 +457,26 @@ final class Assist {
             if overlays > 0 { notes.append("Menus, the menu bar and other overlays aren't in the picture: Petal can't check them for secrets.") }
             if !notes.isEmpty { note = notes.joined(separator: " ") }
             filter = SCContentFilter(display: display, including: included)
-        } else { return (nil, nil) }
+        } else { return (nil, nil, false) }
         let configuration = SCStreamConfiguration()
         let scale = min(2, 2000 / max(1, max(area.width, area.height)))   // sharp enough to read, small enough to send
         configuration.width = Int(area.width * scale)
         configuration.height = Int(area.height * scale)
         configuration.showsCursor = false
         configuration.ignoreShadowsSingleWindow = true
-        guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) else { return (nil, note) }
+        guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) else { return (nil, note, false) }
         // Read again now: a field revealed or moved while the picture was taken is covered where it is now too. A
         // window that can't be read whole again is covered completely.
         for item in watched {
             let after = Sensitive.scan(window: item.element, pid: item.pid, visible: item.visible, deadline: Date().addingTimeInterval(2))
             if after.complete { rects += after.rects } else if screen { rects.append(item.window.frame) } else {
-                return (nil, "Petal couldn't check all of that window for passwords and card numbers in time: no picture.")
+                return (nil, "Petal couldn't check all of that window for passwords and card numbers in time: no picture.", false)
             }
+            // The picture placed it where it was listed; what was found is where it is now. Moved meanwhile: taken
+            // again (nothing is written).
+            guard still(item.window) else { return (nil, nil, true) }
         }
-        guard let clean = Sensitive.blackOut(image, rects, origin: area.origin, scale: CGFloat(image.width) / max(1, area.width)) else { return (nil, note) }
+        guard let clean = Sensitive.blackOut(image, rects, origin: area.origin, scale: CGFloat(image.width) / max(1, area.width)) else { return (nil, note, false) }
         let folder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "Petal/look")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         // Only the newest few are kept.
@@ -453,8 +485,8 @@ final class Assist {
         // Its own name (two notes looking in the same second never share a picture), in time order for the above.
         let url = folder.appending(path: "look-\(Int(Date().timeIntervalSince1970 * 1000))-\(UUID().uuidString.prefix(8)).png")
         let rep = NSBitmapImageRep(cgImage: clean)
-        guard let data = rep.representation(using: .png, properties: [:]), (try? data.write(to: url, options: .atomic)) != nil else { return (nil, note) }
-        return (url.path, note)
+        guard let data = rep.representation(using: .png, properties: [:]), (try? data.write(to: url, options: .atomic)) != nil else { return (nil, note, false) }
+        return (url.path, note, false)
     }
 
     // MARK: Apps

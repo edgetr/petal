@@ -655,6 +655,90 @@ enum UIMap {
         text.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init)
     }
 
+    // MARK: Text shown in pieces
+
+    /// A bit of text a window shows (a static text's value, a label), with what holds it (`parent`, any number that
+    /// stands for it), its place among that parent's children, and where it is on the screen.
+    struct TextPiece {
+        var text: String
+        var parent: Int
+        var order: Int
+        var frame: CGRect
+    }
+
+    /// At most this many neighbours are joined, up to this many characters, out of at most this many pieces (more
+    /// than that and the window isn't checked whole).
+    static let joinRun = 8
+    static let joinLength = 160
+    static let joinPieces = 12_000
+
+    /// Which pieces show a secret only together (a card number as four "4111"s): runs of up to `joinRun` neighbours,
+    /// joined with spaces, that `matches` catches when no shorter run inside them does (a single piece is checked on
+    /// its own already). Neighbours are a parent's children in order, and pieces on one line with little room
+    /// between them. nil when there are too many pieces, or `going` says time's up first.
+    static func joinedSecrets(_ pieces: [TextPiece], matches: (String) -> Bool, going: () -> Bool = { true }) -> Set<Int>? {
+        let usable = pieces.indices.filter { !pieces[$0].text.isEmpty && pieces[$0].text.count <= joinLength }
+        guard usable.count <= joinPieces else { return nil }
+        guard usable.count >= 2 else { return [] }
+        var groups: [[Int]] = []
+        // A parent's children, in order.
+        var byParent: [Int: [Int]] = [:]
+        for index in usable { byParent[pieces[index].parent, default: []].append(index) }
+        for (_, list) in byParent where list.count > 1 { groups.append(list.sorted { pieces[$0].order < pieces[$1].order }) }
+        // One line: the middles level within half the shorter's height, left to right, close together.
+        let placed = usable.filter { pieces[$0].frame.width > 0 && pieces[$0].frame.height > 0 }.sorted { pieces[$0].frame.midY < pieces[$1].frame.midY }
+        var line: [Int] = []
+        func closeLine() {
+            let row = line.sorted { pieces[$0].frame.minX < pieces[$1].frame.minX }
+            var run: [Int] = []
+            for index in row {
+                if let last = run.last {
+                    let a = pieces[last].frame, b = pieces[index].frame
+                    let gap = b.minX - a.maxX
+                    if gap > max(a.height, b.height) * 1.5 || gap < -a.width / 2 {
+                        if run.count > 1 { groups.append(run) }
+                        run = []
+                    }
+                }
+                run.append(index)
+            }
+            if run.count > 1 { groups.append(run) }
+            line = []
+        }
+        for index in placed {
+            if let first = line.first {
+                let a = pieces[first].frame, b = pieces[index].frame
+                if abs(b.midY - a.midY) > min(a.height, b.height) / 2 { closeLine() }
+            }
+            line.append(index)
+        }
+        closeLine()
+
+        func joined(_ group: [Int], _ from: Int, _ to: Int) -> String {
+            group[from...to].map { pieces[$0].text }.joined(separator: " ")
+        }
+        var found = Set<Int>()
+        for group in groups {
+            guard going() else { return nil }
+            for start in group.indices {
+                var length = pieces[group[start]].text.count
+                var end = start + 1
+                while end < group.count, end - start < joinRun {
+                    length += 1 + pieces[group[end]].text.count
+                    if length > joinLength { break }
+                    if matches(joined(group, start, end)) {
+                        // Only the shortest run: one starting further in that's caught too (or a piece caught on
+                        // its own, already covered) is marked from there.
+                        if !matches(joined(group, start + 1, end)) { for at in start...end { found.insert(group[at]) } }
+                        break
+                    }
+                    end += 1
+                }
+            }
+        }
+        return found
+    }
+
     /// The same element (CFEqual: for Accessibility, the same control of the same app), or neither.
     static func same(_ a: AnyObject?, _ b: AnyObject?) -> Bool {
         switch (a, b) {

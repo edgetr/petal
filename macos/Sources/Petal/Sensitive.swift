@@ -48,10 +48,14 @@ enum Sensitive {
         // A vault that can't be read can't be searched for: no window is checked whole.
         guard !vault.unreadable else { scan.complete = false; return scan }
         let mine = filled(of: pid)
-        var stack: [(element: AXUIElement, depth: Int)] = [(window, 0)]
+        // Each element read: its parent (by when it was read) and its place among that parent's children.
+        var stack: [(element: AXUIElement, depth: Int, parent: Int, order: Int)] = [(window, 0, -1, 0)]
         var visited = 0
-        while let (element, depth) = stack.popLast() {
+        // Text shown in the picture, to look for a secret split over several pieces (a card number in fours).
+        var pieces: [UIMap.TextPiece] = []
+        while let (element, depth, parent, order) = stack.popLast() {
             guard visited < 40_000, Date() < deadline else { scan.complete = false; return scan }
+            let me = visited
             visited += 1
             var raw: CFArray?
             let error = AXUIElementCopyMultipleAttributeValues(element, names, AXCopyMultipleAttributeOptions(rawValue: 0), &raw)
@@ -80,6 +84,10 @@ enum Sensitive {
                 // A password field's value is never read; anything else's is searched whole.
                 let value = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
                 secret = [node.title, node.label, node.help, node.placeholder, value].contains { !$0.isEmpty && vault.matches($0) }
+                let shown = [value, node.title, node.label].first { !$0.isEmpty } ?? ""
+                if !secret, !shown.isEmpty, frame.width > 0, frame.height > 0, frame.intersects(around) {
+                    pieces.append(UIMap.TextPiece(text: shown, parent: parent, order: order, frame: frame))
+                }
             }
             if secret, frame.width > 0, frame.height > 0 { scan.rects.append(frame.insetBy(dx: -4, dy: -4)) }
             // Far down a page or scrolled away: not in the picture.
@@ -91,8 +99,14 @@ enum Sensitive {
             guard UIMap.covered(read, depth: depth, maxDepth: Self.maxDepth) else { scan.complete = false; return scan }
             // A page that shows nothing of itself to Accessibility can't be checked.
             if role == "AXWebArea", children.isEmpty, frame.width > 40, frame.height > 40 { scan.complete = false; return scan }
-            for child in children.reversed() { stack.append((child, depth + 1)) }
+            for (index, child) in children.enumerated().reversed() { stack.append((child, depth + 1, me, index)) }
         }
+        // A secret only the pieces show together: every piece of it is covered.
+        guard let joined = UIMap.joinedSecrets(pieces, matches: vault.matches, going: { Date() < deadline }) else {
+            scan.complete = false
+            return scan
+        }
+        for index in joined { scan.rects.append(pieces[index].frame.insetBy(dx: -4, dy: -4)) }
         return scan
     }
 

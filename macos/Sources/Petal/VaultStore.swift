@@ -276,6 +276,11 @@ final class VaultModel {
         var added = 0
         var same = 0
         var updated: [String] = []
+        /// Saved items the file would give another password, code or key, kept as they are (Vault.Merge), as the
+        /// file has them: saved instead only if the person says so.
+        var conflicts: [VaultItem] = []
+        var usedImported = false
+        var older = 0
         var skipped = 0
         var file: URL
         var failed: String?
@@ -296,6 +301,8 @@ final class VaultModel {
                     result.added = merge.added
                     result.same = merge.same
                     result.updated = merge.updated
+                    result.conflicts = merge.conflicts
+                    result.older = merge.older
                     result.skipped = parsed.skipped
                     } else {
                         result.failed = "The Keychain didn't take them. Nothing was added."
@@ -307,6 +314,15 @@ final class VaultModel {
                 result.failed = data == nil ? "Petal couldn't read that file." : "That isn't an export Petal knows (Apple Passwords, Chrome, Proton Pass or Petal)."
             }
             DispatchQueue.main.async { MainActor.assumeIsolated { self.load(); done(result) } }
+        }
+    }
+
+    /// The person chose the import's passwords, codes and keys over the ones saved (Vault.Merge's conflicts).
+    func useImported(_ items: [VaultItem], done: @escaping (Bool) -> Void) {
+        let stamped = items.map { item -> VaultItem in var item = item; item.updated = Date(); return item }
+        VaultStore.queue.async {
+            let ok = VaultStore.save(stamped)
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.load(); done(ok) } }
         }
     }
 

@@ -39,6 +39,12 @@ struct VaultCheck {
         settling()
         coverage()
         addresses()
+        rechecked()
+        untrusted()
+        joinedPieces()
+        importConflicts()
+        buyRevoked()
+        years()
         if failures > 0 { print("vault: \(failures) failed"); exit(1) }
         print("vault: ok")
     }
@@ -217,8 +223,9 @@ struct VaultCheck {
         expect(contact?[.name] == "Deniz Kaya" && contact?[.email] == "deniz@example.com", "Proton identity as contact info")
         expect(address?[.contact] == contact?.id && address?[.city] == "İstanbul" && address?[.name] == "Deniz Kaya", "its address, linked to it")
 
-        // Merging: a login with a newer password is updated (kept the import's); the same one changes nothing; an
-        // imported address whose contact is already saved is linked to the saved one.
+        // Merging: a login with another password from another app's export is a conflict (kept as saved, the import's
+        // offered); the same one changes nothing; an imported address whose contact is already saved is linked to the
+        // saved one.
         var saved = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"])
         saved[.username] = "ADA"
         saved[.password] = "old"
@@ -226,8 +233,9 @@ struct VaultCheck {
         same[.username] = "ada@example.com"
         same[.password] = "p,w\"q"
         let merged = Vault.merge(existing: [saved, same], incoming: parsed.items)
-        expect(merged.added == 0 && merged.same == 1 && merged.updated == ["GitHub"], "merge: one newer password, one the same")
-        expect(merged.save.count == 1 && merged.save[0].id == saved.id && merged.save[0][.password] == "pa55-word", "the saved login keeps its id")
+        expect(merged.added == 0 && merged.same == 1 && merged.updated.isEmpty && merged.save.isEmpty, "merge: one different password kept, one the same")
+        expect(merged.conflicts.count == 1 && merged.conflicts[0].id == saved.id && merged.conflicts[0][.password] == "pa55-word"
+               && merged.conflicts[0].username == "ADA", "the conflict offers the import's password on the saved login's id")
         let twice = Vault.merge(existing: [], incoming: parsed.items + parsed.items)
         expect(twice.added == 2 && twice.same == 2, "the same row twice in a file is one login")
         var deniz = VaultItem(kind: .contact, title: "Deniz")
@@ -689,5 +697,199 @@ struct VaultCheck {
         expect(again.added == 0 && again.same == 2, "importing it again adds nothing")
         let elsewhere = Vault.merge(existing: [one], incoming: [address("Apartment 1", id: "cccc")], petal: true)
         expect(elsewhere.added == 0 && elsewhere.same == 1, "Petal's export from another Mac still finds the address saved here")
+    }
+
+    /// After a request card: the completed item is decided again where its fields are, before anything is typed.
+    static func rechecked() {
+        let secure = Vault.Target(secure: true, text: true), text = Vault.Target(secure: false, text: true)
+        let page = Vault.Place(web: true, frameURL: "https://integration.example/settings", topURL: "https://integration.example/settings",
+                               bundle: "com.apple.Safari", appName: "Safari", signed: true)
+        // The request card itself saw nothing wrong: the key's service would have been this page.
+        let asked = Vault.request(.apiKey, [.value], targets: [text], places: [page], saved: 0)
+        expect(asked.refusal == nil && asked.warning == nil, "a key requested on a page: no warning before it's typed")
+        // The person typed another service for it.
+        var key = VaultItem(kind: .apiKey, title: "OpenAI", sites: ["platform.openai.com"])
+        key[.value] = "sk-typed-into-the-card"
+        if case .ask(let title, let detail) = Vault.recheck(key, [.value], targets: [text], places: [page], warned: asked.warning) {
+            expect(title.contains("integration.example") && detail.contains("platform.openai.com") && detail.contains("integration.example"),
+                   "another service than the page asks, naming both: \(detail)")
+        } else { expect(false, "a key typed for another service asks before it fills") }
+        key.sites = ["integration.example"]
+        expect(Vault.recheck(key, [.value], targets: [text], places: [page], warned: nil) == .fill, "the page's own service fills")
+        // A login bound to the page it was asked on fills; one on http was warned about already, so it isn't asked again.
+        var login = VaultItem(kind: .login, title: "x")
+        login[.username] = "ada"; login[.password] = "pw-typed"
+        Vault.bind(&login, to: page)
+        expect(Vault.recheck(login, [.username, .password], targets: [text, secure], places: [page, page], warned: nil) == .fill, "a login bound to its page")
+        var plain = page
+        plain.frameURL = "http://integration.example/login"; plain.topURL = plain.frameURL
+        let warned = Vault.request(.login, [.password], targets: [secure], places: [plain], saved: 0)
+        expect(warned.warning != nil, "http is warned on the request card")
+        var onHTTP = VaultItem(kind: .login, title: "x"); onHTTP[.password] = "pw"
+        Vault.bind(&onHTTP, to: plain)
+        expect(Vault.recheck(onHTTP, [.password], targets: [secure], places: [plain], warned: warned.warning) == .fill, "what the card said isn't asked twice")
+        if case .ask = Vault.recheck(onHTTP, [.password], targets: [secure], places: [plain], warned: nil) {} else { expect(false, "unwarned http asks") }
+        if case .refuse = Vault.recheck(login, [.password], targets: [text], places: [page], warned: nil) {} else { expect(false, "a password into a text field is refused") }
+    }
+
+    /// A browser Petal doesn't trust, another app's web view, or a browser's own controls: never filled by itself,
+    /// never saved for the app.
+    static func untrusted() {
+        expect(Vault.surface(webArea: true, trusted: true, browser: true) == .web, "a trusted browser's page")
+        expect(Vault.surface(webArea: true, trusted: false, browser: true) == .unverified, "a known browser that isn't trusted (Zen)")
+        expect(Vault.surface(webArea: true, trusted: false, browser: false) == .unverified, "any app's web page")
+        expect(Vault.surface(webArea: false, trusted: false, browser: true) == .unverified, "a browser's own controls")
+        expect(Vault.surface(webArea: false, trusted: false, browser: false) == .app, "an app's own field")
+        let items = sample()
+        let login = items[0], key = items[6], home = items[4], card = items[5]
+        let secure = Vault.Target(secure: true, text: true), text = Vault.Target(secure: false, text: true)
+        let zen = Vault.Place(bundle: "app.zen-browser.zen", appName: "Zen", signed: true, team: "ZENTEAM", unverified: true,
+                              claimedURL: "https://github.com/login")
+        if case .ask(_, let detail) = Vault.decide(login, .password, target: secure, place: zen) {
+            expect(detail.contains("github.com") && detail.contains("Zen"), "the card names the unverified address: \(detail)")
+        } else { expect(false, "a login on an untrusted browser's page asks, even for its own site") }
+        if case .ask = Vault.decide(key, .value, target: text, place: zen) {} else { expect(false, "a key on an untrusted browser's page asks") }
+        if case .refuse = Vault.decide(card, .number, target: text, place: zen) {} else { expect(false, "no payment info there") }
+        expect(Vault.decide(home, .street, target: text, place: zen) == .fill, "an address isn't a secret: it fills")
+        // A login saved for the browser as an app (before) still asks; a new one is saved for nothing.
+        var bound = login
+        bound.sites = []; bound.apps = ["app.zen-browser.zen"]; bound.appSigners = ["app.zen-browser.zen": "ZENTEAM"]
+        if case .ask = Vault.decide(bound, .password, target: secure, place: zen) {} else { expect(false, "a login bound to a browser asks") }
+        var fresh = VaultItem(kind: .login, title: "x")
+        Vault.bind(&fresh, to: zen)
+        expect(fresh.apps.isEmpty && fresh.sites.isEmpty && fresh.appSigners.isEmpty, "never bound to a browser's bundle")
+        fresh[.password] = "x"
+        if let (_, why) = Vault.unasked(fresh, [.password], targets: [secure], places: [zen]) {
+            expect(why.contains("Zen"), "no password is made there")
+        } else { expect(false, "new_login refuses an untrusted browser") }
+        // A page it can't verify that navigated after the card: nothing is filled.
+        var moved = zen
+        moved.claimedURL = "https://evil.example/"
+        expect(Vault.moved(from: zen, to: zen) == nil && Vault.moved(from: zen, to: moved) != nil, "an unverified page that moved on")
+        var app = zen
+        app.unverified = false
+        expect(Vault.moved(from: zen, to: app) != nil, "an unverified page is never the same place as the app")
+        expect(Vault.mixed(.login, [zen, moved]) != nil, "two unverified addresses are two places")
+    }
+
+    /// A secret a window shows in pieces (a card number as four texts) is found and every piece covered.
+    static func joinedPieces() {
+        let index = UIMap.SecretIndex(sample().flatMap(Vault.secrets))
+        func piece(_ text: String, _ parent: Int, _ order: Int, x: CGFloat, y: CGFloat = 100) -> UIMap.TextPiece {
+            UIMap.TextPiece(text: text, parent: parent, order: order, frame: CGRect(x: x, y: y, width: 36, height: 16))
+        }
+        let groups = ["4111", "1111", "1111", "1111"]
+        expect(groups.allSatisfy { !index.matches($0) }, "no group alone is a secret")
+        let siblings = [piece("Card", 1, 0, x: 0, y: 60)] + groups.enumerated().map { piece($1, 2, $0, x: 40 + CGFloat($0) * 40) }
+            + [piece("Expires 04/27", 2, 4, x: 220)]
+        let found = UIMap.joinedSecrets(siblings, matches: index.matches) ?? []
+        expect(found == Set(1...4), "four sibling groups are covered, nothing else (\(found.sorted()))")
+        // Each group in its own parent, side by side on one line.
+        let spans = groups.enumerated().map { piece($1, 10 + $0, 0, x: CGFloat($0) * 42) }
+        expect(UIMap.joinedSecrets(spans, matches: index.matches) == Set(0...3), "groups on one line, each in its own parent")
+        // Far apart on a line, in different parents: not one number.
+        let apart = groups.enumerated().map { piece($1, 10 + $0, 0, x: CGFloat($0) * 400) }
+        expect(UIMap.joinedSecrets(apart, matches: index.matches) == [], "far apart in different parents isn't joined")
+        // Text that isn't a secret is left alone, and time running out means not checked whole.
+        let plain = ["Order", "1234", "shipped"].enumerated().map { piece($1, 3, $0, x: CGFloat($0) * 40) }
+        expect(UIMap.joinedSecrets(plain, matches: index.matches) == [], "ordinary words")
+        expect(UIMap.joinedSecrets(siblings, matches: index.matches, going: { false }) == nil, "out of time: not whole")
+        // An API key split in two.
+        let key = [piece("sk-abcdefgh", 4, 0, x: 0), piece("ijklmnop", 4, 1, x: 80)]
+        expect(UIMap.joinedSecrets(key, matches: index.matches) != nil, "a key in two pieces is looked at")
+        let many = (0..<(UIMap.joinPieces + 1)).map { piece("w", $0, 0, x: CGFloat($0)) }
+        expect(UIMap.joinedSecrets(many, matches: { _ in false }) == nil, "too many pieces: not checked whole")
+    }
+
+    /// Imports never quietly replace a secret with an older or unknown one.
+    static func importConflicts() {
+        let then = Date(timeIntervalSince1970: 1_700_000_000), now = Date(timeIntervalSince1970: 1_800_000_000)
+        var saved = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"], updated: now)
+        saved[.username] = "ada"; saved[.password] = "newer-password"
+        // Petal's own older export: kept, not stamped as new.
+        var old = saved
+        old[.password] = "older-password"; old.updated = then
+        let older = Vault.merge(existing: [saved], incoming: [old], petal: true, at: now.addingTimeInterval(60))
+        expect(older.save.isEmpty && older.older == 1 && older.conflicts.isEmpty, "an older Petal export keeps yours")
+        // Petal's own newer export: taken, with its own date.
+        var newer = saved
+        newer[.password] = "newest-password"; newer.updated = now.addingTimeInterval(10)
+        let taken = Vault.merge(existing: [saved], incoming: [newer], petal: true, at: now.addingTimeInterval(60))
+        expect(taken.save.count == 1 && taken.save[0][.password] == "newest-password" && taken.save[0].updated == newer.updated
+               && taken.updated == ["GitHub"], "a newer Petal export replaces it, keeping its date")
+        // The same date, another password: a conflict.
+        var tie = saved
+        tie[.password] = "tie-password"
+        let tied = Vault.merge(existing: [saved], incoming: [tie], petal: true)
+        expect(tied.save.isEmpty && tied.conflicts.count == 1, "the same date: a conflict")
+        // Another app's export: no reliable date, so a different secret is a conflict; the last row for it wins.
+        var csv1 = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"]); csv1[.username] = "ada"; csv1[.password] = "csv-one"
+        var csv2 = csv1; csv2.id = Vault.newID(); csv2[.password] = "csv-two"
+        let other = Vault.merge(existing: [saved], incoming: [csv1, csv2])
+        expect(other.save.isEmpty && other.conflicts.count == 1 && other.conflicts[0].id == saved.id && other.conflicts[0][.password] == "csv-two",
+               "another app's export: kept yours, the file's last offered")
+        // A card's other security code and an API key's other value are conflicts too; details without a secret merge.
+        var card = VaultItem(kind: .card, title: "Visa"); card[.number] = "4111111111111111"; card[.securityCode] = "737"
+        var card2 = card; card2.id = Vault.newID(); card2[.securityCode] = "999"
+        expect(Vault.merge(existing: [card], incoming: [card2]).conflicts.count == 1, "another security code")
+        var key = VaultItem(kind: .apiKey, title: "OpenAI"); key[.value] = "sk-one-1234567"
+        var key2 = key; key2.id = Vault.newID(); key2[.value] = "sk-two-1234567"
+        expect(Vault.merge(existing: [key], incoming: [key2]).conflicts.count == 1, "another key")
+        var card3 = card; card3.id = Vault.newID(); card3[.name] = "Ada Lovelace"
+        let details = Vault.merge(existing: [card], incoming: [card3])
+        expect(details.conflicts.isEmpty && details.save.count == 1 && details.save[0][.name] == "Ada Lovelace" && details.save[0][.securityCode] == "737",
+               "details without another secret merge")
+        var card4 = VaultItem(kind: .card, title: "Visa"); card4[.number] = "4111111111111111"
+        var noCode = card4; noCode.id = Vault.newID(); noCode[.securityCode] = "123"
+        expect(Vault.merge(existing: [card4], incoming: [noCode]).conflicts.isEmpty, "a secret saved for the first time isn't a conflict")
+    }
+
+    /// Buy on tab A, tab B seen in that window (a petal_ui read, an act, a title change), back on A: the Buy is over.
+    static func buyRevoked() {
+        let tabA = NSObject(), tabB = NSObject()
+        func web(_ url: String, page: AnyObject, id: String?) -> Vault.Place {
+            Vault.Place(web: true, frameURL: url, topURL: url, tabURL: url, tab: Vault.Tab(id: id, page: page), bundle: "com.google.Chrome", appName: "Chrome", signed: true)
+        }
+        let a = web("https://checkout.shop.example/pay", page: tabA, id: "11")
+        let b = web("https://news.example/", page: tabB, id: "12")
+        guard let buy = Vault.Checkout(place: a, window: 7, card: "visa", turn: "3|") else { return expect(false, "a Buy") }
+        var list = [buy]
+        list = Vault.Checkout.seen(list, place: a, window: 7)
+        expect(list.count == 1, "the same tab seen keeps it")
+        list = Vault.Checkout.seen(list, place: b, window: 8)
+        expect(list.count == 1, "another window seen doesn't touch it")
+        list = Vault.Checkout.seen(list, place: b, window: 7)
+        expect(list.isEmpty, "tab B seen in its window ends it")
+        list = Vault.Checkout.seen(list, place: a, window: 7)
+        expect(list.isEmpty && !list.contains { $0.covers(a, window: 7, card: "visa", turn: "3|") }, "back on tab A doesn't bring it back")
+        // What petal_ui read (its page element, the browser's id answered later): tab B's page even if the id is A's.
+        let readB = web("https://checkout.shop.example/pay", page: tabB, id: "11")
+        expect(Vault.Checkout.seen([buy], place: readB, window: 7).isEmpty, "another page element ends it whatever id came back")
+        var none = Vault.Place(bundle: "com.google.Chrome", appName: "Chrome")
+        none.web = false
+        expect(Vault.Checkout.seen([buy], place: none, window: 7).isEmpty, "a read that found no page ends it")
+    }
+
+    /// A card's year as the field wants it: a menu's own items, or what a text field says of itself.
+    static func years() {
+        let menu4 = ["Year", "2025", "2026", "2027", "2028"], menu2 = ["YY", "25", "26", "27", "28"]
+        expect(Vault.pickYear("04/27", from: menu4) == 3, "a 4-digit menu gets 2027")
+        expect(Vault.pickYear("04/27", from: menu2) == 3, "a 2-digit menu gets 27")
+        expect(Vault.pickYear("04/2027", from: menu4) == 3 && Vault.pickYear("2027-04", from: menu2) == 3, "however it's saved")
+        expect(Vault.pickYear("04/31", from: menu4) == nil, "a year the menu doesn't have picks nothing")
+        let f = Vault.fourDigitYear
+        expect(f(.year, nil, ["YYYY"], nil) == true && f(.year, nil, ["YY"], nil) == false, "the placeholder says")
+        expect(f(.expiry, nil, ["MM/YYYY"], nil) == true && f(.expiry, nil, ["MM / YY"], nil) == false && f(.expiry, nil, ["MMYY"], nil) == false, "an expiry's placeholder")
+        expect(f(.expiry, nil, ["MM/AAAA"], nil) == true && f(.expiry, nil, ["MM/AA"], nil) == false, "in Spanish or French")
+        expect(f(.year, nil, ["e.g. 2027"], nil) == true, "a sample year")
+        expect(f(.year, nil, ["Expiry year"], 4) == true && f(.year, nil, ["Expiry year"], 2) == false, "its room")
+        expect(f(.expiry, nil, [""], 7) == true && f(.expiry, nil, [""], 5) == false, "an expiry's room")
+        expect(f(.year, nil, ["Expiry year"], nil) == nil, "nothing says: the default")
+        expect(f(.year, "YYYY", ["YY"], 2) == true && f(.year, "YY", ["YYYY"], nil) == false, "what the AI said wins")
+        expect(f(.year, nil, ["Yearly payment"], nil) == nil, "a word ending in yy isn't a format")
+        let card = sample()[5]
+        expect(Vault.text(card, .year) == "27" && Vault.text(card, .year, fourDigitYear: true) == "2027", "the year typed")
+        expect(Vault.text(card, .expiry) == "04/27" && Vault.text(card, .expiry, fourDigitYear: true) == "04/2027"
+               && Vault.text(card, .expiry, fourDigitYear: false) == "04/27", "the expiry typed")
     }
 }

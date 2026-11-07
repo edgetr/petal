@@ -14,15 +14,15 @@ import Observation
 final class Browsers {
     enum Kind { case chromium, safari, gecko }
 
-    static let chromium: [String: String] = [
+    nonisolated static let chromium: [String: String] = [
         "net.imput.helium": "Helium", "com.google.Chrome": "Chrome", "com.google.Chrome.beta": "Chrome Beta",
         "com.google.Chrome.dev": "Chrome Dev", "com.google.Chrome.canary": "Chrome Canary", "company.thebrowser.Browser": "Arc",
         "com.brave.Browser": "Brave", "com.brave.Browser.beta": "Brave Beta", "com.microsoft.edgemac": "Edge",
         "com.vivaldi.Vivaldi": "Vivaldi", "com.operasoftware.Opera": "Opera", "org.chromium.Chromium": "Chromium",
         "at.studio.AsideBrowser": "Aside",
     ]
-    static let safari: Set<String> = ["com.apple.Safari", "com.apple.SafariTechnologyPreview"]
-    static let gecko: Set<String> = ["org.mozilla.firefox", "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly", "app.zen-browser.zen"]
+    nonisolated static let safari: Set<String> = ["com.apple.Safari", "com.apple.SafariTechnologyPreview"]
+    nonisolated static let gecko: Set<String> = ["org.mozilla.firefox", "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly", "app.zen-browser.zen"]
 
     static func kind(_ bundleID: String) -> Kind? {
         if chromium[bundleID] != nil { return .chromium }

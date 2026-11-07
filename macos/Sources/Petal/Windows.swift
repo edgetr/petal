@@ -411,9 +411,10 @@ final class WindowEvents {
     static let shared = WindowEvents()
 
     /// `missionControl`: Mission Control (or App Exposé) opened; `missionControlEnded`: it closed. macOS's Dock says
-    /// so through Accessibility.
+    /// so through Accessibility. `titled`: the title of a window someone asked to watch (`AXWatcher.watchTitle`)
+    /// changed.
     enum Kind { case created, closed, focused, minimized, unminimized, moved, resized, activated, launched, quit, hidden, shown, space, screens,
-                     missionControl, missionControlEnded }
+                     missionControl, missionControlEnded, titled }
     struct Event {
         let kind: Kind
         let pid: pid_t
@@ -595,6 +596,21 @@ final class AXWatcher: @unchecked Sendable {
         }
     }
 
+    /// Also tells when `window`'s title changes (a browser's tab or page: a Buy's window), until `unwatchTitle`.
+    func watchTitle(_ window: AXUIElement, pid: pid_t) {
+        perform { [self] in
+            guard let observer = observers[pid] else { return }
+            AXObserverAddNotification(observer, window, kAXTitleChangedNotification as CFString, nil)
+        }
+    }
+
+    func unwatchTitle(_ window: AXUIElement, pid: pid_t) {
+        perform { [self] in
+            guard let observer = observers[pid] else { return }
+            AXObserverRemoveNotification(observer, window, kAXTitleChangedNotification as CFString)
+        }
+    }
+
     /// Watches every window not watched yet, of every app: after a Desktop change, which brings windows into view.
     func watchAll() {
         perform { [self] in for pid in Array(observers.keys) { watchAll(pid) } }
@@ -684,6 +700,7 @@ final class AXWatcher: @unchecked Sendable {
         case kAXWindowDeminiaturizedNotification: send(.unminimized, window: windowIDs[element], element: element)
         case kAXMovedNotification: send(.moved, window: windowIDs[element], element: element)
         case kAXResizedNotification: send(.resized, window: windowIDs[element], element: element)
+        case kAXTitleChangedNotification: send(.titled, window: windowIDs[element] ?? Windows.id(of: element), element: element)
         case kAXApplicationHiddenNotification: send(.hidden)
         case kAXApplicationShownNotification: send(.shown)
         case _ where Self.missionControlOpened.contains(name): send(.missionControl)

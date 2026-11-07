@@ -290,6 +290,19 @@ struct VaultSettings: View {
                 Text(failed).font(.system(size: 12)).foregroundStyle(.secondary)
             } else {
                 Text(Self.summary(result)).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                if !result.conflicts.isEmpty {
+                    HStack(spacing: 8) {
+                        Text(result.usedImported ? "Petal now uses the file's." : Self.conflictText(result.conflicts))
+                            .font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        if !result.usedImported {
+                            Button("Use the imported ones") {
+                                model.useImported(result.conflicts) { ok in if ok { imported?.usedImported = true } }
+                            }
+                            .buttonStyle(.glass).controlSize(.small)
+                        }
+                    }
+                }
             }
             if result.trashed {
                 Label("The export is in the Trash.", systemImage: "trash").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -313,8 +326,18 @@ struct VaultSettings: View {
             let names = result.updated.prefix(5).joined(separator: ", ") + (result.updated.count > 5 ? ", …" : "")
             parts.append("\(result.updated.count) had something newer, which Petal kept: \(names).")
         }
+        if result.older > 0 { parts.append("\(result.older) \(result.older == 1 ? "was" : "were") older in the file than here: Petal kept yours.") }
         if result.skipped > 0 { parts.append("\(result.skipped) had nothing to keep (notes and the like).") }
         return parts.joined(separator: " ")
+    }
+
+    /// "2 logins differ, kept yours: GitHub, Figma."
+    static func conflictText(_ items: [VaultItem]) -> String {
+        let kinds = Set(items.map(\.kind))
+        let noun = kinds == [.login] ? (items.count == 1 ? "login differs" : "logins differ")
+            : items.count == 1 ? "item differs" : "items differ"
+        let names = items.prefix(5).map(\.title).joined(separator: ", ") + (items.count > 5 ? ", …" : "")
+        return "\(items.count) \(noun) from what's saved, so Petal kept yours: \(names)."
     }
 
     private func chooseImport() {

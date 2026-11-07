@@ -373,12 +373,35 @@ enum Vault {
         var signed = false
         /// Who signed it, checked against its running code: its Team ID, or "apple" for Apple's own.
         var team: String?
+        /// In a browser Petal doesn't trust (one whose maker it doesn't know, or whose signature didn't check out) or
+        /// another app's web view, or in a browser's own controls: which page it is can't be believed. Nothing fills
+        /// there by itself, and nothing is saved for the app.
+        var unverified = false
+        /// The address that page gives for itself, unverified: said on the card, never trusted.
+        var claimedURL: String?
 
         /// The host shown to the person: the page's (or frame's).
         var host: String? { frameURL.flatMap(VaultSite.host) }
         /// Where a purchase is made: the tab's whole page (a card form often sits in a payment company's frame).
         var shop: String? { (topURL ?? frameURL).flatMap(VaultSite.host) }
         var where_: String { web ? host ?? appName : appName }
+    }
+
+    /// What a field is in, from what Petal read around it: a page of a browser it trusts (`web`), a page it can't
+    /// verify or a browser's own controls (`unverified`), or an app.
+    enum Surface: Equatable { case web, unverified, app }
+
+    /// `webArea`: a web page holds the field; `trusted`: the app is a browser on Petal's list, signed now by its
+    /// maker; `browser`: the app is any browser Petal knows of (trusted or not).
+    static func surface(webArea: Bool, trusted: Bool, browser: Bool) -> Surface {
+        if webArea && trusted { return .web }
+        return webArea || browser ? .unverified : .app
+    }
+
+    /// Why a page Petal can't verify gets nothing by itself, naming the address it gives as unverified.
+    static func unverifiedWhy(_ place: Place) -> String {
+        let said = place.claimedURL.flatMap(VaultSite.host).map { " The page says it's \($0), but Petal can't check that." } ?? ""
+        return "\(place.appName) isn't a browser Petal can verify pages in, so it can't tell which site this is.\(said) Fill only if you're sure of the address."
     }
 
     enum Decision: Equatable {
@@ -461,6 +484,7 @@ enum Vault {
 
     /// Why a login's place isn't one it's saved for, in plain words, or nil when it is.
     static func mismatch(_ item: VaultItem, _ place: Place) -> String? {
+        if place.unverified { return unverifiedWhy(place) }
         if item.sites.isEmpty && item.apps.isEmpty { return "This login isn't saved for any site yet, so Petal can't tell it's the right place." }
         if place.web {
             if let problem = pageProblem(place) { return problem }
@@ -483,7 +507,7 @@ enum Vault {
     /// Why an API key doesn't belong where the field is, or nil: it goes into any app, onto this Mac's own pages, and
     /// onto its service's site.
     static func keyMismatch(_ item: VaultItem, _ place: Place) -> String? {
-        guard place.web else { return nil }
+        guard place.web else { return place.unverified ? unverifiedWhy(place) : nil }
         // Only a web page on this Mac (http or https), never a file:// or other address naming localhost.
         let local = { (url: String?) in
             url.map { ["http", "https"].contains(VaultSite.scheme($0) ?? "") && (VaultSite.host($0).map(VaultSite.isLocal) ?? false) } ?? false
@@ -508,13 +532,48 @@ enum Vault {
         return (String(format: "%02d", month), String(year4.suffix(2)), year4)
     }
 
-    /// What's typed for a field: a card's month or year from its expiry, else what's saved.
-    static func text(_ item: VaultItem, _ field: VaultField, fourDigitYear: Bool = false) -> String? {
+    /// What's typed for a field: a card's month or year from its expiry, else what's saved. `fourDigitYear`: the
+    /// year as the field wants it ("2027" or "27"; nil when it doesn't say: two digits for a year field, the expiry
+    /// as saved).
+    static func text(_ item: VaultItem, _ field: VaultField, fourDigitYear: Bool? = nil) -> String? {
         switch field {
         case .month: return expiryParts(item[.expiry])?.month
-        case .year: return expiryParts(item[.expiry]).map { fourDigitYear ? $0.year4 : $0.year2 }
+        case .year: return expiryParts(item[.expiry]).map { fourDigitYear == true ? $0.year4 : $0.year2 }
+        case .expiry:
+            if let four = fourDigitYear, let parts = expiryParts(item[.expiry]) { return "\(parts.month)/\(four ? parts.year4 : parts.year2)" }
+            fallthrough
         default: let value = item[field]; return value.isEmpty ? nil : value
         }
+    }
+
+    /// Whether a year (or an expiry's year) goes in as four digits: as the AI said (`format` "YYYY" or "YY"), else as
+    /// the field says of itself (a placeholder or label like "MM/YYYY", "YY", "AAAA" or "2027"), else by its room (4
+    /// or 2 characters for a year, 7 or 5 for an expiry). nil when nothing says.
+    static func fourDigitYear(_ field: VaultField, format: String?, hints: [String], maxLength: Int?) -> Bool? {
+        func style(_ text: String) -> Bool? {
+            for token in text.lowercased().split(whereSeparator: { !$0.isLetter }) {
+                if ["yyyy", "aaaa", "jjjj"].contains(where: { token.hasSuffix($0) }) { return true }
+                if ["yy", "aa", "jj"].contains(where: { token.hasSuffix($0) }) && (token.count == 2 || token.hasPrefix("mm")) { return false }
+            }
+            return nil
+        }
+        if let format, let said = style(format) { return said }
+        for hint in hints {
+            if let said = style(hint) { return said }
+            // A sample year ("2027", "MM/2027").
+            if hint.range(of: #"(^|[^0-9])20[0-9]{2}([^0-9]|$)"#, options: .regularExpression) != nil { return true }
+        }
+        switch (field, maxLength) {
+        case (.year, 4?), (.expiry, 7?): return true
+        case (.year, 2?), (.expiry, 5?): return false
+        default: return nil
+        }
+    }
+
+    /// Which of a year menu's items is the card's year, whether the menu says "2027" or "27".
+    static func pickYear(_ expiry: String, from options: [String]) -> Int? {
+        guard let parts = expiryParts(expiry) else { return nil }
+        return pick(parts.year4, from: options) ?? pick(parts.year2, from: options)
     }
 
     /// Countries' other names, for picking from a menu: what's saved on one side, what a menu may say on the other.
@@ -584,11 +643,17 @@ enum Vault {
     /// nil: read again right before filling, so a page that moved on meanwhile never gets it. `samePage`: the tab's
     /// page must also still be at the same path (payment info: the checkout page Buy was said on).
     static func moved(from then: Place, to now: Place, samePage: Bool = false) -> String? {
-        if then.web != now.web || then.bundle != now.bundle { return "That field isn't in the same app or page anymore; nothing was filled. Call petal_ui again." }
-        guard then.web else {
-            return then.team == now.team ? nil : "Petal couldn't verify \(now.appName) is the same app anymore; nothing was filled."
+        if then.web != now.web || then.bundle != now.bundle || then.unverified != now.unverified {
+            return "That field isn't in the same app or page anymore; nothing was filled. Call petal_ui again."
         }
         func origin(_ url: String?) -> String { url.map { "\(VaultSite.scheme($0) ?? "")://\(VaultSite.host($0) ?? "")" } ?? "" }
+        guard then.web else {
+            // A page Petal can't verify: at least the address it gave when the person said yes.
+            if then.unverified, origin(then.claimedURL) != origin(now.claimedURL) {
+                return "The page changed (it says \(now.claimedURL.flatMap(VaultSite.host) ?? "another page") now); nothing was filled. Call petal_ui again."
+            }
+            return then.team == now.team ? nil : "Petal couldn't verify \(now.appName) is the same app anymore; nothing was filled."
+        }
         if origin(then.frameURL) != origin(now.frameURL) || origin(then.topURL) != origin(now.topURL)
             || (then.tab.page != nil && !UIMap.same(then.tab.page, now.tab.page))
             || (samePage && path(then.topURL ?? then.frameURL) != path(now.topURL ?? now.frameURL)) {
@@ -615,6 +680,10 @@ enum Vault {
     /// Where a field's value goes, to tell one fill's fields apart: a page's origin (for payment info, the shop's:
     /// a card form's fields often sit in a payment company's frames), or an app.
     static func destination(_ kind: VaultKind, _ place: Place) -> String {
+        if place.unverified {
+            let claimed = place.claimedURL.map { "\(VaultSite.scheme($0) ?? "")://\(VaultSite.host($0) ?? "")" } ?? ""
+            return "unverified:\(place.bundle):\(claimed)"
+        }
         guard place.web else { return "app:" + place.bundle }
         let url = kind == .card ? place.topURL ?? place.frameURL : place.frameURL
         return url.map { "\(VaultSite.scheme($0) ?? "")://\(VaultSite.host($0) ?? "")" } ?? "unreadable"
@@ -650,11 +719,11 @@ enum Vault {
     }
 
     /// What a login typed into Petal's card is saved for: the page Petal read, or the app once Petal confirmed who
-    /// signed it.
+    /// signed it. Never a browser (or a page it can't verify): a login there is for no app at all.
     static func bind(_ item: inout VaultItem, to place: Place) {
         if place.web {
             if let host = place.host { item.sites = [host] }
-        } else if place.signed, let team = place.team {
+        } else if !place.unverified, place.signed, let team = place.team {
             item.apps = [place.bundle]
             item.appSigners = [place.bundle: team]
         }
@@ -686,6 +755,36 @@ enum Vault {
             }
         }
         return Requested(warning: warnings.isEmpty ? nil : warnings.joined(separator: " "))
+    }
+
+    /// After a request card was answered: what the completed item (the site or service the person typed, the login
+    /// bound to the page) does where its fields are, decided as any fill is, before a key goes. What the request card
+    /// already warned about (`warned`) isn't asked again; anything else that doesn't match is one card, Don't the
+    /// default.
+    enum Recheck: Equatable {
+        case fill
+        case ask(title: String, detail: String)
+        case refuse(index: Int, why: String)
+    }
+
+    static func recheck(_ item: VaultItem, _ fields: [VaultField], targets: [Target], places: [Place], warned: String?) -> Recheck {
+        if let mixed = mixed(item.kind, places) { return .refuse(index: 0, why: mixed) }
+        var asked: [VaultField] = [], reasons: [String] = []
+        var at: Place?
+        for index in fields.indices {
+            switch decide(item, fields[index], target: targets[index], place: places[index]) {
+            case .fill: continue
+            case .refuse(let why): return .refuse(index: index, why: why)
+            case .buy: return .refuse(index: index, why: "Payment info waits for the Buy card: Petal doesn't fill it from a request.")
+            case .ask(_, let why):
+                if let warned, warned.contains(why) { continue }
+                asked.append(fields[index])
+                if !reasons.contains(why) { reasons.append(why) }
+                at = at ?? places[index]
+            }
+        }
+        guard let at else { return .fill }
+        return .ask(title: question(item, asked, place: at), detail: reasons.joined(separator: " "))
     }
 
     /// The person said Buy on one "Buy on <host>?" card: payment info fills there with that card, in that window
@@ -735,6 +834,12 @@ enum Vault {
         /// Its window, seen showing anything but the tab and page Buy was said on: the checkout is over.
         func left(_ place: Place, window: UInt32?) -> Bool {
             window == self.window && !same(place)
+        }
+
+        /// What's left of `checkouts` once `window` was seen showing `place` (by any read or act, or after its title
+        /// changed): a Buy whose window shows another tab or page is over, and coming back doesn't bring it back.
+        static func seen(_ checkouts: [Checkout], place: Place, window: UInt32?) -> [Checkout] {
+            checkouts.filter { !$0.left(place, window: window) }
         }
     }
 
@@ -1033,17 +1138,25 @@ enum Vault {
         /// New items, and saved ones the import changed, to save.
         var save: [VaultItem] = []
         var added = 0
-        /// Already there, and changed: a login's password differed (the import's, newer, is kept), or another kind's
-        /// details. Their titles, to say so.
+        /// Already there, and changed: Petal's own export newer than what's saved, or details that hold no secret.
+        /// Their titles, to say so.
         var updated: [String] = []
         var same = 0
+        /// Saved items the import would give another password, security code or key with nothing reliable to say
+        /// which is newer (another app's export, or Petal's with the same date): kept as they are. Each as the import
+        /// would make it (the saved item's id, the import's secret), to save instead if the person says so.
+        var conflicts: [VaultItem] = []
+        /// In Petal's own export but older than what's saved: kept as they are.
+        var older = 0
     }
 
     /// An import against what's saved. Something already there changes nothing unless it differs: a login only when
-    /// its password does (then the import's, newer, is kept); anything else takes the import's fields. A later entry
-    /// of the same file wins over an earlier one. Petal's own export (`petal`) keeps its ids and dates, and its items
-    /// with different ids stay apart however alike; an imported address whose contact turned out to be one already
-    /// saved is linked to that one.
+    /// its password does; anything else takes the import's fields. A secret (a password, security code or key) is
+    /// replaced only when Petal's own export (`petal`, which keeps ids and dates) says it's newer: from any other
+    /// export, a different secret is a conflict, kept as it is and said. Petal's export older than what's saved
+    /// changes nothing. A later entry of the same file wins over an earlier one. Petal's export's items with
+    /// different ids stay apart however alike; an imported address whose contact turned out to be one already saved
+    /// is linked to that one.
     static func merge(existing: [VaultItem], incoming: [VaultItem], petal: Bool = false, at date: Date = Date()) -> Merge {
         var result = Merge()
         var current = existing
@@ -1060,24 +1173,44 @@ enum Vault {
                 return same(saved, item)
             }
             if let index {
-                var saved = current[index]
+                let saved = current[index]
                 if saved.kind == .contact { renamed[item.id] = saved.id }
+                var next = saved
                 if saved.kind == .login {
                     guard saved[.password] != item[.password], !item[.password].isEmpty else { result.same += 1; continue }
-                    saved[.password] = item[.password]
-                    if saved[.notes].isEmpty { saved[.notes] = item[.notes] }
+                    next[.password] = item[.password]
+                    if next[.notes].isEmpty { next[.notes] = item[.notes] }
                 } else {
                     let fields = saved.fields.merging(item.fields) { _, new in new }
                     let sites = saved.sites + item.sites.filter { !saved.sites.contains($0) }
                     guard fields != saved.fields || sites != saved.sites || saved.title != item.title else { result.same += 1; continue }
-                    saved.fields = fields
-                    saved.sites = sites
-                    saved.title = item.title.isEmpty ? saved.title : item.title
+                    next.fields = fields
+                    next.sites = sites
+                    next.title = item.title.isEmpty ? saved.title : item.title
                 }
-                saved.updated = date
-                current[index] = saved
-                if !result.updated.contains(saved.title) { result.updated.append(saved.title) }
-                if let at = touched[saved.id] { result.save[at] = saved } else { touched[saved.id] = result.save.count; result.save.append(saved) }
+                let replaces = replacesSecret(saved, with: next)
+                if petal {
+                    // Petal's own dates say which is newer.
+                    if item.updated < saved.updated || (item.updated == saved.updated && !replaces) { result.older += 1; continue }
+                    if item.updated == saved.updated {
+                        result.conflicts.removeAll { $0.id == next.id }
+                        result.conflicts.append(next)
+                        continue
+                    }
+                    next.updated = item.updated
+                } else if replaces {
+                    result.conflicts.removeAll { $0.id == next.id }
+                    next.updated = date
+                    result.conflicts.append(next)
+                    continue
+                } else {
+                    next.updated = date
+                }
+                current[index] = next
+                // A later entry that's taken wins over an earlier conflict about the same item.
+                result.conflicts.removeAll { $0.id == next.id }
+                if !result.updated.contains(next.title) { result.updated.append(next.title) }
+                if let at = touched[next.id] { result.save[at] = next } else { touched[next.id] = result.save.count; result.save.append(next) }
             } else {
                 if item.updated == Date(timeIntervalSince1970: 0) { item.updated = date }
                 current.append(item)
@@ -1087,6 +1220,11 @@ enum Vault {
             }
         }
         return result
+    }
+
+    /// `next` has a secret `saved` holds, different (not one `saved` didn't have yet).
+    static func replacesSecret(_ saved: VaultItem, with next: VaultItem) -> Bool {
+        VaultField.allCases.contains { $0.isSecret && $0 != .notes && !saved[$0].isEmpty && saved[$0] != next[$0] }
     }
 }
 

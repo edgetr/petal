@@ -16,7 +16,8 @@ struct VaultFillPlan {
     var target: Vault.Target
     var submit = false
     var task = ""
-    var fourDigitYear = false
+    /// How the AI said a year goes in ("YYYY" or "YY"); else the field's own placeholder, label or room decides.
+    var yearFormat: String?
 }
 
 // MARK: - Filling
@@ -45,7 +46,16 @@ enum VaultFiller {
         } else {
             saved = nil
         }
-        guard let text = plan.given ?? saved.flatMap({ Vault.text($0, plan.field, fourDigitYear: plan.fourDigitYear) }),
+        // A year as the field wants it: a menu's own items say ("2027" or "27"); a text field's placeholder, label or
+        // room (or what the AI said).
+        var four: Bool?
+        if [.year, .expiry].contains(plan.field), !plan.target.popup {
+            let node = Reader.node(element)
+            let room: Int? = Windows.value(element, "AXMaxLength") ?? Windows.value(element, "AXMaxNumberOfCharacters")
+            four = Vault.fourDigitYear(plan.field, format: plan.yearFormat, hints: [node.placeholder, node.label, node.title, node.help],
+                                       maxLength: room)
+        }
+        guard let text = plan.given ?? saved.flatMap({ Vault.text($0, plan.field, fourDigitYear: four) }),
               !text.isEmpty else { return "That isn't in the vault anymore." }
         guard !cancel.stopped else { return ComputerUse.stoppedText }
         // Hidden from the AI before a key goes, saved in the vault or not: in petal_ui, petal_look, the clipboard and
@@ -55,7 +65,12 @@ enum VaultFiller {
             Sensitive.filled(element, pid: pid)
         }
         if let error = Acting.bringWindow(map, cancel: cancel) { return error }
-        if plan.target.popup { return choose(text, in: element, pid: pid, cancel: cancel) }
+        if plan.target.popup {
+            let year = plan.field == .year ? saved.map { $0[.expiry] } : nil
+            return choose(text, in: element, pid: pid, cancel: cancel, pick: { titles in
+                year.flatMap { Vault.pickYear($0, from: titles) } ?? Vault.pick(text, from: titles)
+            })
+        }
         if !Acting.isFront(pid) {
             guard Acting.bringForward(pid, cancel: cancel) else { return ComputerUse.stoppedText }
         }
@@ -98,8 +113,9 @@ enum VaultFiller {
     }
 
     /// Opens a pop-up menu (a web page's select), picks the item that is `wanted` (Vault.pick: "Türkiye" finds
-    /// "Turkey"), or closes it again with nothing picked when none is.
-    static func choose(_ wanted: String, in popup: AXUIElement, pid: pid_t, cancel: Acting.Cancel) -> String? {
+    /// "Turkey"; a year as "2027" or "27", whichever the menu has), or closes it again with nothing picked when none is.
+    static func choose(_ wanted: String, in popup: AXUIElement, pid: pid_t, cancel: Acting.Cancel,
+                       pick: ([String]) -> Int?) -> String? {
         func items() -> [AXUIElement] {
             let children: [AXUIElement] = Windows.value(popup, kAXChildrenAttribute) ?? []
             let menu = children.first { (Windows.value($0, kAXRoleAttribute) as String?) == "AXMenu" }
@@ -115,7 +131,7 @@ enum VaultFiller {
             for _ in 0..<5 where list.isEmpty { usleep(80_000); list = items() }
         }
         let titles = list.map { (Windows.value($0, kAXTitleAttribute) as String?) ?? "" }
-        guard let index = Vault.pick(wanted, from: titles) else {
+        guard let index = pick(titles) else {
             if opened, let escape = UIMap.parseKey("escape") { Acting.post(escape, to: pid, cancel: cancel) }
             return list.isEmpty ? "That menu didn't open through Accessibility; ask the person to pick it." : "Petal didn't find a matching item in that menu; ask the person to pick it."
         }
@@ -147,9 +163,19 @@ enum VaultReader {
         "at.studio.AsideBrowser": "8CPD4K4TBB", "com.phibrowser.Mac": "87DQ3HMK5G",
     ]
 
+    /// Every browser Petal knows of, trusted or not (Browsers.swift's, the ones above, and a few more people use):
+    /// a field in one, outside a page Petal can verify, is never filled by itself or saved for the browser as an app.
+    static let known: Set<String> = Set(browsers.keys).union(Browsers.chromium.keys).union(Browsers.safari).union(Browsers.gecko).union([
+        "app.zen-browser.zen", "com.kagi.kagimacOS", "com.duckduckgo.macos.browser", "com.operasoftware.OperaGX",
+        "com.sigmaos.sigmaos.macos", "net.waterfox.waterfox", "io.gitlab.librewolf-community", "one.ablaze.floorp",
+        "org.chromium.Thorium", "com.ungoogled.chromium", "ru.yandex.desktop.yandex-browser", "com.naver.Whale",
+        "org.torproject.torbrowser", "com.mullvad.mullvadbrowser", "com.openai.atlas", "ai.perplexity.comet",
+    ])
+
     /// The addresses of the web areas around `element`: the nearest (a login or payment frame's own) and the
-    /// outermost (the tab's page), in a browser Petal knows whose signature checks out. Anywhere else (an app, or
-    /// another app's web view): the app, and who signed it.
+    /// outermost (the tab's page), in a browser Petal trusts whose signature checks out. A page anywhere else (a
+    /// browser Petal doesn't trust, another app's web view), or a browser's own controls: unverified, with the address
+    /// the page gives for itself. Otherwise the app, and who signed it.
     static func place(of element: AXUIElement, pid: pid_t, bundle: String, appName: String) -> Vault.Place {
         var place = Vault.Place(bundle: bundle, appName: appName)
         var areas: [(element: AXUIElement, url: String?)] = []
@@ -161,12 +187,16 @@ enum VaultReader {
             if role == "AXWindow" || role == "AXApplication" { break }
             current = Windows.value(at, kAXParentAttribute)
         }
-        if let top = areas.last, isBrowser(pid: pid, bundle: bundle) {
+        let surface = Vault.surface(webArea: !areas.isEmpty, trusted: !areas.isEmpty && isBrowser(pid: pid, bundle: bundle),
+                                    browser: known.contains(bundle))
+        if surface == .web, let top = areas.last {
             place.web = true
             place.frameURL = areas.first?.url
             place.topURL = top.url
             place.tab.page = top.element
         } else {
+            place.unverified = surface == .unverified
+            place.claimedURL = areas.first?.url
             place.team = signer(pid: pid, bundle: bundle)
             place.signed = place.team != nil || signed(pid: pid, bundle: bundle)
         }
@@ -365,6 +395,22 @@ extension Assist {
         }
     }
 
+    /// The page a read of `map`'s window just met (`page`, its outermost web area, and its address), with the
+    /// browser's own answer for the tab: what petal_ui saw, checked against a Buy in that window. No page: not one.
+    func vaultShown(_ map: ComputerUse.Map, page: AXUIElement?, url: String?, title: String, done: @escaping @MainActor (Vault.Place) -> Void) {
+        var place = Vault.Place(bundle: map.bundle, appName: map.appName)
+        guard let page else { return done(place) }
+        place.web = true
+        place.frameURL = url
+        place.topURL = url
+        place.tab.page = page
+        withTab(map, title: title) { url, id in
+            place.tabURL = url
+            place.tab.id = id
+            done(place)
+        }
+    }
+
     /// The fields asked for: `fields` {field: id}, or one `field` with `id`.
     private func wantedFields(_ args: [String: Any]) -> [(word: String, id: String)]? {
         var out: [(String, String)] = []
@@ -407,7 +453,10 @@ extension Assist {
                 item = found
             } else if [.username, .password].contains(first) {
                 let place = places[wanted.firstIndex { Vault.field($0.word) == .password } ?? 0]
-                let logins = Vault.logins(items, host: place.web ? place.host : nil, bundle: place.web ? nil : place.bundle)
+                // A page Petal can't verify: the login for the address it gives, which then asks (never one saved
+                // for the browser as an app).
+                let host = place.web ? place.host : place.unverified ? place.claimedURL.flatMap(VaultSite.host) : nil
+                let logins = Vault.logins(items, host: host, bundle: place.web || place.unverified ? nil : place.bundle)
                 guard !logins.isEmpty else {
                     return fail("There's no login saved for \(place.where_). Ask the person with action request (kind login, fields {username: id, password: id}): they type it into Petal's card, and Petal fills it.")
                 }
@@ -431,7 +480,8 @@ extension Assist {
                 let field = Vault.field(pair.word, kind: item.kind)!
                 var plan = VaultFillPlan(itemID: item.id, title: item.title, field: field, place: places[offset], target: targets[offset])
                 plan.task = task
-                plan.fourDigitYear = args["fourDigitYear"] as? Bool ?? false
+                plan.yearFormat = (args["yearFormat"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                    ?? ((args["fourDigitYear"] as? Bool).map { $0 ? "YYYY" : "YY" })
                 let bought = item.kind == .card
                     && self.computer.checkout(caller, token: token, place: places[offset], window: map.windowID, card: item.id)
                 switch Vault.decide(item, field, target: targets[offset], place: places[offset], checkout: bought) {
@@ -502,7 +552,7 @@ extension Assist {
         let detail = (said.isEmpty ? "Petal AI didn't say what it's buying." : "Petal AI says: “\(said)”.") + " Pays with \(Vault.cardName(item))."
         ask("vault-buy", "Buy on \(shop)?", detail: detail, always: true, warn: true, allow: "Buy", owner: caller) { allowed in
             guard allowed else { return send(["declined": "The person said Don't: nothing was filled. Don't buy it, and don't find another way."]) }
-            guard self.computer.allowCheckout(caller, token: token, place: place, window: map.windowID, card: item.id) else { return fail(Self.over) }
+            guard self.computer.allowCheckout(caller, token: token, place: place, map: map, card: item.id) else { return fail(Self.over) }
             self.did("You said Buy on \(shop) (\(Vault.cardName(item)))")
             bought()
         }
@@ -556,7 +606,7 @@ extension Assist {
             let detail = [warning ?? "", said].filter { !$0.isEmpty }.joined(separator: "\n\n")
             self.ask("vault-new", form.heading, detail: detail, always: true, form: form, warn: warning != nil, owner: caller, typed: { answer in
                 guard live() else { return send(["declined": Self.over]) }
-                self.vaultAnswered(answer, kind: kind, place: read, mapped: mapped, places: places, targets: targets,
+                self.vaultAnswered(answer, kind: kind, place: read, mapped: mapped, places: places, targets: targets, warned: warning,
                                    window: window, caller: caller, token: token, send: send)
             }) { allowed in
                 if !allowed { send(["declined": "The person closed it. Don't ask for it in the chat."]) }
@@ -574,7 +624,8 @@ extension Assist {
     }
 
     private func vaultAnswered(_ answer: VaultForm.Answer, kind: VaultKind, place: Vault.Place?, mapped: [(VaultField, String)],
-                               places: [Vault.Place], targets: [Vault.Target], window: (map: ComputerUse.Map, entries: [ComputerUse.Entry])?,
+                               places: [Vault.Place], targets: [Vault.Target], warned: String?,
+                               window: (map: ComputerUse.Map, entries: [ComputerUse.Entry])?,
                                caller: String?, token: Acting.Cancel?, send: @escaping (Any) -> Void) {
         var item = VaultItem(kind: kind, title: answer.title)
         for (field, value) in answer.values { item[field] = value }
@@ -597,14 +648,32 @@ extension Assist {
             guard let window, let caller, let token, !mapped.isEmpty else { return send(reply) }
             guard live() else { reply["error"] = Self.over; return send(reply) }
             // Each field on the page Petal read for it when the card showed, checked again right before.
-            let plans = mapped.indices.compactMap { index -> VaultFillPlan? in
-                guard let value = answer.values[mapped[index].0], !value.isEmpty else { return nil }
-                return VaultFillPlan(title: item.title, field: mapped[index].0, given: value, place: places[index], target: targets[index])
-            }
             let used = mapped.indices.filter { answer.values[mapped[$0].0].map { !$0.isEmpty } ?? false }
-            self.vaultFillAll(plans, entries: used.map { window.entries[$0] }, map: window.map, caller: caller, token: token, allowed: true) { result in
-                if let filled = result as? [String: Any] { reply.merge(filled) { _, new in new } }
+            let plans = used.map { index in
+                VaultFillPlan(title: item.title, field: mapped[index].0, given: answer.values[mapped[index].0], place: places[index], target: targets[index])
+            }
+            let go = {
+                self.vaultFillAll(plans, entries: used.map { window.entries[$0] }, map: window.map, caller: caller, token: token, allowed: true) { result in
+                    if let filled = result as? [String: Any] { reply.merge(filled) { _, new in new } }
+                    send(reply)
+                }
+            }
+            // Decided again with what was typed (the service a key is for, the login bound to the page), as any fill
+            // is: a place it doesn't match gets its card before a key goes, unless the request card said so already.
+            switch Vault.recheck(item, used.map { mapped[$0].0 }, targets: used.map { targets[$0] }, places: used.map { places[$0] }, warned: warned) {
+            case .fill: go()
+            case .refuse(let index, let why):
+                reply["error"] = "\(mapped[used[index]].1): \(why) Nothing was filled."
                 send(reply)
+            case .ask(let title, let detail):
+                self.ask("vault-fill", title, detail: detail, always: true, warn: true, allow: "Fill anyway", owner: caller) { allowed in
+                    guard allowed else {
+                        reply["declined"] = "The person didn't let Petal fill it there. Don't find another way."
+                        return send(reply)
+                    }
+                    guard live() else { reply["error"] = Self.over; return send(reply) }
+                    go()
+                }
             }
         }
         guard answer.save else { return fillAll() }
@@ -655,7 +724,8 @@ extension Assist {
                                  ?? (place.web ? place.host.map(VaultSite.registrable) ?? "Login" : place.appName))
             Vault.bind(&item, to: place)
             guard !item.sites.isEmpty || !item.apps.isEmpty else {
-                return fail("Petal didn't make a password here: it couldn't \(place.web ? "read which page this is" : "verify who made \(place.appName)").")
+                let why = place.web ? "it couldn't read which page this is." : place.unverified ? Vault.unverifiedWhy(place) : "it couldn't verify who made \(place.appName)."
+                return fail("Petal didn't make a password here: \(why)")
             }
             item[.username] = username
             item[.password] = "x"

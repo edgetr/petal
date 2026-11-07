@@ -897,6 +897,7 @@ ASSIST_TOOLS = {
                      "field": {"type": "string"}, "id": {"type": "string", "description": "one field's id from petal_ui (with field)"},
                      "kind": {"type": "string", "enum": ["login", "contact", "address", "card", "apiKey"]}, "site": {"type": "string"},
                      "buying": {"type": "string", "description": "fill with payment info: what you're buying, in a few words"}, "price": {"type": "string"},
+                     "yearFormat": {"type": "string", "enum": ["YYYY", "YY"], "description": "fill a card's year or expiry: how the field wants the year, when its placeholder or label doesn't say (Petal reads those itself, and a year menu's own items)"},
                      "submit": {"type": "boolean"}, "title": {"type": "string"}, "why": {"type": "string"}, "username": {"type": "string"},
                      "password_id": {"type": "string"}, "confirm_id": {"type": "string"}, "username_id": {"type": "string"},
                      "symbols": {"type": "boolean"}, "allowed_symbols": {"type": "string"}, "length": {"type": "integer"},
