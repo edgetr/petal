@@ -95,7 +95,14 @@ final class ComputerUse {
 
     /// By caller. Never shared between two chats.
     private(set) var maps: [String: Map] = [:]
-    private var sessions: [String: Session] = [:] { didSet { standGuard(); unwatchBuys() } }
+    private var sessions: [String: Session] = [:] {
+        didSet {
+            // A Buy gone from every reply (its window moved on or closed, replaced, its reply over) is revoked at once.
+            Vault.Checkout.revoke(oldValue.values.flatMap(\.checkouts), keeping: sessions.values.flatMap(\.checkouts))
+            standGuard()
+            unwatchBuys()
+        }
+    }
     private var closed: [String: Closed] = [:]
     private var line: [Job] = [] { didSet { standGuard() } }
     private var busy = false { didSet { standGuard() } }
@@ -333,19 +340,27 @@ final class ComputerUse {
         var options = Acting.Options()
         options.fill = plan
         options.submit = plan.submit
+        // Payment info fills only under the Buy that covers this page now, and stops the moment that Buy ends.
+        var buy: Vault.BuyToken?
+        if plan.payment {
+            guard let covering = checkout(caller, token: token, place: plan.place, window: map.windowID, card: plan.itemID) else {
+                return fail(Acting.buyEndedText)
+            }
+            buy = covering
+        }
         let job = Job(caller: caller, action: "fill", entry: entry, map: map, bundle: bundle, caption: "Filling your \(plan.field.words)",
-                      options: options, cancel: Acting.Cancel(under: token), send: send, fail: fail)
+                      options: options, cancel: Acting.Cancel(under: token, buy: buy), send: send, fail: fail)
         if allowed || session.apps.contains(bundle) { return enqueue(job) }
         admit(job, session: session)
     }
 
-    /// Whether a Buy the person said in this reply covers payment info at `place` (its exact host and page, this
-    /// window and tab, this card). A window seen showing another page or tab ends that Buy.
-    func checkout(_ caller: String, token: Acting.Cancel, place: Vault.Place, window: CGWindowID?, card: String) -> Bool {
-        guard live(caller, token), let current = sessions[caller] else { return false }
+    /// The Buy said in this reply that covers payment info at `place` (its exact host and page, this window and tab,
+    /// this card), or nil. A window seen showing another page or tab ends that Buy.
+    func checkout(_ caller: String, token: Acting.Cancel, place: Vault.Place, window: CGWindowID?, card: String) -> Vault.BuyToken? {
+        guard live(caller, token), let current = sessions[caller] else { return nil }
         if let window { seen(place, window: window) }
         let turn = Self.turnName(current)
-        return sessions[caller]?.checkouts.contains { $0.covers(place, window: window, card: card, turn: turn) } ?? false
+        return sessions[caller]?.checkouts.first { $0.covers(place, window: window, card: card, turn: turn) }?.token
     }
 
     /// The person said Buy on `place`'s host: payment info from `card` fills there, in that window, for the rest of
@@ -566,7 +581,7 @@ final class ComputerUse {
 
     /// What a stopped job tells the chat: turned off or made private, said so; else the person stopped it.
     private func whyStopped(_ job: Job) -> String {
-        refusal(for: job.bundle, name: job.appName) ?? Self.stoppedText
+        refusal(for: job.bundle, name: job.appName) ?? (job.cancel.buyEnded ? Acting.buyEndedText : Self.stoppedText)
     }
 
     /// Checks the window and control are as the map said, glides the cursor there, then checks it all again and does
@@ -821,10 +836,15 @@ enum Reader {
         reading.windowFrame = Windows.frame(of: window) ?? .zero
 
         let deadline = Date().addingTimeInterval(budget)
-        var stack: [(element: AXUIElement, depth: Int, clip: CGRect?, web: Bool)] = [(window, 0, nil, false)]
+        // Each element: its parent (by order) and its place among that parent's children, for secrets in pieces.
+        var stack: [(element: AXUIElement, depth: Int, clip: CGRect?, web: Bool, parent: Int, sibling: Int)] = [(window, 0, nil, false, -1, 0)]
         var order = 0
         var visited = 0
-        while let (element, depth, clip, web) = stack.popLast() {
+        // Every element read (by order), and which of them are told: a secret shown only by several together (a card
+        // number in four fields) is hidden in each before anything goes out.
+        var walked: [UINode] = []
+        var told: [Int] = []
+        while let (element, depth, clip, web, parent, sibling) = stack.popLast() {
             if visited >= 5000 || Date() > deadline { reading.timedOut = true; break }
             visited += 1
             let values = Self.values(element, attributes)
@@ -843,6 +863,8 @@ enum Reader {
             node.web = web
             node.clip = clip
             node.order = order
+            node.parent = parent
+            node.sibling = sibling
             if role == "AXWebArea", reading.page == nil {
                 reading.page = element
                 reading.pageURL = VaultReader.url(element)
@@ -867,8 +889,9 @@ enum Reader {
             if UIMap.pressableRoles.contains(role), depth > 0, !UIMap.name(node).isEmpty {
                 node.pressable = actions(element).contains(kAXPressAction as String)
             }
+            walked.append(node)
             if UIMap.isActionable(node) {
-                reading.nodes.append(node)
+                told.append(order)
                 reading.elements[order] = element
                 reading.meanings[order] = meaning
             }
@@ -884,8 +907,16 @@ enum Reader {
             } else {
                 children = Windows.value(element, kAXChildrenAttribute) ?? []
             }
-            for child in children.prefix(500).reversed() { stack.append((child, depth + 1, inner, web || role == "AXWebArea")) }
+            let me = order - 1
+            for (index, child) in children.prefix(500).enumerated().reversed() {
+                stack.append((child, depth + 1, inner, web || role == "AXWebArea", me, index))
+            }
         }
+        // Bounded as the picture's check is; out of time, every short text with a digit is hidden instead.
+        let joinBy = Date().addingTimeInterval(0.5)
+        let joined = UIMap.hideJoined(walked, matches: vault.matches, going: { Date() < joinBy })
+        if joined.hid { reading.holdsSecret = true }
+        reading.nodes = told.map { joined.nodes[$0] }
         reading.fingerprint = fingerprint(app: app, window: window, lists: reading.lists)
         return reading
     }
@@ -1082,15 +1113,24 @@ enum Acting {
         private let lock = NSLock()
         private var flag = false
         private let parent: Cancel?
-        init(under parent: Cancel? = nil) { self.parent = parent }
+        /// A payment fill's Buy: revoking it stops the fill as a Stop would.
+        private let buy: Vault.BuyToken?
+        init(under parent: Cancel? = nil, buy: Vault.BuyToken? = nil) {
+            self.parent = parent
+            self.buy = buy
+        }
         var stopped: Bool {
             lock.lock()
             let own = flag
             lock.unlock()
-            return own || (parent?.stopped ?? false)
+            return own || buyEnded || (parent?.stopped ?? false)
         }
+        /// The Buy this fill was made under is over.
+        var buyEnded: Bool { (buy?.revoked ?? false) || (parent?.buyEnded ?? false) }
         func stop() { lock.lock(); flag = true; lock.unlock() }
     }
+
+    static let buyEndedText = "The Buy is over (the tab moved on, the window closed, or the reply ended): no more payment info was filled. Don't try another way; if the person still wants it, fill again on the checkout page and Petal asks them again."
 
     static let changed = "Call petal_ui again for fresh ids."
     static let password = "That's a password field: petal_act doesn't type there. petal_vault fills a saved password (action: fill)."

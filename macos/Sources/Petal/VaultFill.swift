@@ -16,6 +16,8 @@ struct VaultFillPlan {
     var target: Vault.Target
     var submit = false
     var task = ""
+    /// Payment info: fills only under a Buy that still covers its page (ComputerUse.fill), and stops when it ends.
+    var payment = false
     /// How the AI said a year goes in ("YYYY" or "YY"); else the field's own placeholder, label or room decides.
     var yearFormat: String?
 }
@@ -57,7 +59,7 @@ enum VaultFiller {
         }
         guard let text = plan.given ?? saved.flatMap({ Vault.text($0, plan.field, fourDigitYear: four) }),
               !text.isEmpty else { return "That isn't in the vault anymore." }
-        guard !cancel.stopped else { return ComputerUse.stoppedText }
+        guard !cancel.stopped else { return cancel.buyEnded ? Acting.buyEndedText : ComputerUse.stoppedText }
         // Hidden from the AI before a key goes, saved in the vault or not: in petal_ui, petal_look, the clipboard and
         // pictures (Sensitive), for as long as Petal runs.
         if plan.field.isSecret {
@@ -482,8 +484,9 @@ extension Assist {
                 plan.task = task
                 plan.yearFormat = (args["yearFormat"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                     ?? ((args["fourDigitYear"] as? Bool).map { $0 ? "YYYY" : "YY" })
+                plan.payment = item.kind == .card
                 let bought = item.kind == .card
-                    && self.computer.checkout(caller, token: token, place: places[offset], window: map.windowID, card: item.id)
+                    && self.computer.checkout(caller, token: token, place: places[offset], window: map.windowID, card: item.id) != nil
                 switch Vault.decide(item, field, target: targets[offset], place: places[offset], checkout: bought) {
                 case .refuse(let why): return fail("\(pair.id): \(why) Nothing was filled.")
                 case .ask(_, let why):

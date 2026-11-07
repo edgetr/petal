@@ -44,6 +44,9 @@ struct VaultCheck {
         joinedPieces()
         importConflicts()
         buyRevoked()
+        buyTokens()
+        joinedControls()
+        oneToOne()
         years()
         if failures > 0 { print("vault: \(failures) failed"); exit(1) }
         print("vault: ok")
@@ -868,6 +871,117 @@ struct VaultCheck {
         var none = Vault.Place(bundle: "com.google.Chrome", appName: "Chrome")
         none.web = false
         expect(Vault.Checkout.seen([buy], place: none, window: 7).isEmpty, "a read that found no page ends it")
+    }
+
+    /// A Buy's token: covering only until revoked; a Buy gone from the list, however it went, is revoked, and one kept
+    /// isn't. A payment fill made under it stops as soon as it is.
+    static func buyTokens() {
+        let tab = NSObject()
+        let pay = Vault.Place(web: true, frameURL: "https://checkout.shop.example/pay", topURL: "https://checkout.shop.example/pay",
+                              tabURL: "https://checkout.shop.example/pay", tab: Vault.Tab(id: "11", page: tab),
+                              bundle: "com.google.Chrome", appName: "Chrome", signed: true)
+        let away = Vault.Place(web: true, frameURL: "https://news.example/", topURL: "https://news.example/", tabURL: "https://news.example/",
+                               tab: Vault.Tab(id: "12", page: NSObject()), bundle: "com.google.Chrome", appName: "Chrome", signed: true)
+        guard let a = Vault.Checkout(place: pay, window: 7, card: "visa", turn: "3|"),
+              let b = Vault.Checkout(place: pay, window: 9, card: "visa", turn: "3|") else { return expect(false, "two Buys") }
+        expect(!a.token.revoked && a.covers(pay, window: 7, card: "visa", turn: "3|"), "a new Buy covers its page")
+        expect(a.token != b.token, "each Buy has its own token")
+        // Its window seen on another page: gone from the list, so revoked; the other window's Buy is kept, and valid.
+        let left = Vault.Checkout.seen([a, b], place: away, window: 7)
+        Vault.Checkout.revoke([a, b], keeping: left)
+        expect(a.token.revoked && !a.covers(pay, window: 7, card: "visa", turn: "3|"), "the Buy that left is revoked and covers nothing")
+        expect(!b.token.revoked && b.covers(pay, window: 9, card: "visa", turn: "3|"), "the other Buy stays")
+        // Revoked for good: the same Buy put back (coming back to the tab) still covers nothing.
+        Vault.Checkout.revoke([], keeping: [a])
+        expect(a.token.revoked, "a revoked token never comes back")
+        // A reply's Buys all dropped at once (the reply ended): every one revoked.
+        Vault.Checkout.revoke([b], keeping: [])
+        expect(b.token.revoked, "a reply's end revokes its Buys")
+        // A copy of a Buy (a session's list copied) shares its token.
+        guard let c = Vault.Checkout(place: pay, window: 7, card: "visa", turn: "4|") else { return expect(false, "a third Buy") }
+        let copy = c
+        Vault.Checkout.revoke([c], keeping: [copy])
+        expect(!c.token.revoked, "the same Buy kept (as a copy) isn't revoked")
+    }
+
+    /// petal_ui: a card number shown four digits a control (four fields in a row, or four buttons on a line) is hidden
+    /// in every one of them; what isn't a secret, and a single group, stays.
+    static func joinedControls() {
+        let index = UIMap.SecretIndex(sample().flatMap(Vault.secrets))
+        func field(_ value: String, parent: Int, sibling: Int, x: CGFloat, order: Int) -> UINode {
+            var node = UINode(role: "AXTextField")
+            node.value = value
+            node.parent = parent
+            node.sibling = sibling
+            node.order = order
+            node.frame = CGRect(x: x, y: 200, width: 50, height: 20)
+            return node
+        }
+        var form = UINode(role: "AXGroup")
+        form.frame = CGRect(x: 0, y: 190, width: 400, height: 40)
+        var label = UINode(role: "AXStaticText")
+        label.title = "Card"
+        label.parent = 0
+        label.order = 1
+        label.frame = CGRect(x: 0, y: 160, width: 40, height: 16)
+        let groups = ["4111", "1111", "1111", "1111"]
+        let nodes = [form, label] + groups.enumerated().map { field($1, parent: 0, sibling: $0 + 1, x: 60 + CGFloat($0) * 60, order: $0 + 2) }
+        let (hid, any) = UIMap.hideJoined(nodes, matches: index.matches)
+        expect(any && hid[2...5].allSatisfy { $0.value == UIMap.hidden }, "each of four fields holding a card number's groups is hidden")
+        expect(hid[1].title == "Card" && hid[0] == nodes[0], "the label and the form are left alone")
+        // Each group a button in its own parent, side by side on a line.
+        let buttons = groups.enumerated().map { pair -> UINode in
+            var node = UINode(role: "AXButton")
+            node.title = pair.element
+            node.parent = 10 + pair.offset
+            node.order = pair.offset
+            node.frame = CGRect(x: CGFloat(pair.offset) * 44, y: 300, width: 40, height: 20)
+            return node
+        }
+        let (shown, hidButtons) = UIMap.hideJoined(buttons, matches: index.matches)
+        expect(hidButtons && shown.allSatisfy { $0.title == UIMap.hidden }, "four buttons on one line showing it are each hidden")
+        // Not a secret: an order number and a phone number in pieces stay.
+        let plain = ["Order", "1234", "5678"].enumerated().map { field($1, parent: 0, sibling: $0, x: CGFloat($0) * 60, order: $0) }
+        let (same, none) = UIMap.hideJoined(plain, matches: index.matches)
+        expect(!none && same == plain, "ordinary pieces stay")
+        // Out of time: every short piece with a digit hidden, words kept.
+        let (late, lateAny) = UIMap.hideJoined(plain, matches: index.matches, going: { false })
+        expect(lateAny && late[0].value == "Order" && late[1].value == UIMap.hidden && late[2].value == UIMap.hidden,
+               "not checked whole: pieces with digits hidden")
+        // A password field's value is never a piece (and never read).
+        var secure = field("4111", parent: 0, sibling: 0, x: 0, order: 0)
+        secure.subrole = "AXSecureTextField"
+        let mixed = [secure, field("1111", parent: 0, sibling: 1, x: 60, order: 1)]
+        expect(!UIMap.hideJoined(mixed, matches: index.matches).hid, "a password field isn't a piece")
+    }
+
+    /// Petal's own export with two items alike (the same site and username) and ids the vault doesn't have: one may
+    /// update the saved item that matches, the other is added; neither is lost.
+    static func oneToOne() {
+        let then = Date(timeIntervalSince1970: 1_700_000_000), now = Date(timeIntervalSince1970: 1_800_000_000)
+        var saved = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"], updated: then)
+        saved[.username] = "ada"; saved[.password] = "saved-password"
+        var first = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"], updated: now)
+        first[.username] = "ada"; first[.password] = "first-password"
+        var second = VaultItem(kind: .login, title: "GitHub work", sites: ["github.com"], updated: now)
+        second[.username] = "ada"; second[.password] = "second-password"
+        expect(first.id != second.id && first.id != saved.id, "three ids")
+        let merged = Vault.merge(existing: [saved], incoming: [first, second], petal: true, at: now)
+        let passwords = Set(merged.save.map { $0[.password] })
+        expect(merged.added == 1 && merged.save.count == 2 && passwords == ["first-password", "second-password"],
+               "one updates the saved item, the other is added (\(merged.save.map(\.title)))")
+        expect(merged.save.first { $0.id == saved.id }?[.password] == "first-password", "the first to match takes the saved item")
+        expect(merged.save.contains { $0.id == second.id }, "the second keeps its own id")
+        // The same Petal id twice in a file still lands on one item (a later entry wins).
+        var again = first
+        again[.password] = "first-again"; again.updated = now.addingTimeInterval(5)
+        let twice = Vault.merge(existing: [saved], incoming: [first, again], petal: true, at: now)
+        expect(twice.added == 0 && twice.save.count == 1 && twice.save[0][.password] == "first-again", "one Petal id twice is one item")
+        // Another app's export has no ids to keep apart: its rows for one login still meet on it.
+        var csv1 = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"]); csv1[.username] = "ada"; csv1[.password] = "saved-password"
+        var csv2 = csv1; csv2.id = Vault.newID()
+        let csv = Vault.merge(existing: [saved], incoming: [csv1, csv2])
+        expect(csv.added == 0 && csv.same == 2, "another app's rows still match the saved login")
     }
 
     /// A card's year as the field wants it: a menu's own items, or what a text field says of itself.

@@ -792,6 +792,9 @@ enum Vault {
     /// window, card or reply asks again; the window showing anything else (another page or tab, even of the same
     /// shop) ends it, and coming back doesn't bring it back.
     struct Checkout: Equatable {
+        /// This Buy's own: revoked the moment the Buy is over (its window moved on or closed, another Buy replaced it,
+        /// its reply ended), which stops every payment fill made under it, queued or under way.
+        let token = BuyToken()
         /// The shop's exact host (the tab's whole page).
         var host: String
         /// The shop page's path when Buy was said.
@@ -828,7 +831,7 @@ enum Vault {
         }
 
         func covers(_ place: Place, window: UInt32?, card: String, turn: String) -> Bool {
-            turn == self.turn && card == self.card && window == self.window && same(place)
+            !token.revoked && turn == self.turn && card == self.card && window == self.window && same(place)
         }
 
         /// Its window, seen showing anything but the tab and page Buy was said on: the checkout is over.
@@ -841,6 +844,21 @@ enum Vault {
         static func seen(_ checkouts: [Checkout], place: Place, window: UInt32?) -> [Checkout] {
             checkouts.filter { !$0.left(place, window: window) }
         }
+
+        /// Revokes every Buy in `before` that isn't in `after` (however it went), so nothing filled under it goes on.
+        static func revoke(_ before: [Checkout], keeping after: [Checkout]) {
+            let kept = Set(after.map { ObjectIdentifier($0.token) })
+            for gone in before where !kept.contains(ObjectIdentifier(gone.token)) { gone.token.revoke() }
+        }
+    }
+
+    /// A Buy's token: valid until revoked, for good. Read on the act queue, revoked on the main thread.
+    final class BuyToken: Equatable, @unchecked Sendable {
+        private let lock = NSLock()
+        private var flag = false
+        var revoked: Bool { lock.lock(); defer { lock.unlock() }; return flag }
+        func revoke() { lock.lock(); flag = true; lock.unlock() }
+        static func == (a: BuyToken, b: BuyToken) -> Bool { a === b }
     }
 
     /// Every way a value typed into a field may show up in text (a card number in its forms), for the redaction.
@@ -1163,6 +1181,9 @@ enum Vault {
         let fromFile = Set(incoming.map(\.id))
         var touched: [String: Int] = [:]   // item id → index in result.save
         var renamed: [String: String] = [:]   // an imported contact's id → the saved one's
+        // A saved item matched by what it holds (not its id) → the Petal id in the file that matched it: one each, so two
+        // of the file's items alike (the same site and username) never fold into one.
+        var claimed: [String: String] = [:]
         // Contacts first, so addresses can follow their contact.
         let ordered = incoming.filter { $0.kind != .address } + incoming.filter { $0.kind == .address }
         for var item in ordered {
@@ -1170,10 +1191,12 @@ enum Vault {
             let index = current.firstIndex { saved in
                 if saved.id == item.id { return true }
                 if petal, fromFile.contains(saved.id) { return false }
+                if petal, let by = claimed[saved.id], by != item.id { return false }
                 return same(saved, item)
             }
             if let index {
                 let saved = current[index]
+                if petal, saved.id != item.id { claimed[saved.id] = item.id }
                 if saved.kind == .contact { renamed[item.id] = saved.id }
                 var next = saved
                 if saved.kind == .login {

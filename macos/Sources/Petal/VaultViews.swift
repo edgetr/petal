@@ -424,6 +424,8 @@ struct VaultEditor: View {
     @State private var showing: Set<VaultField> = []
     @State private var sites = ""
     @State private var problem: String?
+    /// A save on its way to the Keychain: the editor stays open, with what was typed, until it's there.
+    @State private var saving = false
 
     init(item: VaultItem, isNew: Bool, close: @escaping () -> Void) {
         _item = State(initialValue: item)
@@ -459,11 +461,12 @@ struct VaultEditor: View {
             if let problem { Text(problem).font(.system(size: 12)).foregroundStyle(.secondary) }
             HStack(spacing: 8) {
                 if !isNew {
-                    Button("Delete", role: .destructive) { model.remove(item.id); close() }.buttonStyle(.glass)
+                    Button("Delete", role: .destructive) { model.remove(item.id); close() }.buttonStyle(.glass).disabled(saving)
                 }
                 Spacer()
-                Button("Cancel") { close() }.buttonStyle(.glass)
-                Button("Save") { save() }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
+                Button("Cancel") { close() }.buttonStyle(.glass).disabled(saving)
+                Button(saving ? "Saving…" : "Save") { save() }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
+                    .disabled(saving)
             }
         }
     }
@@ -580,15 +583,21 @@ struct VaultEditor: View {
             item.title = item.kind == .contact ? (item[.name].isEmpty ? "Contact info" : item[.name]) : item.kind == .address ? "Home"
                 : item.kind == .card ? (Vault.brand(item[.number].filter(\.isNumber)) ?? "Card") : item.sites.first ?? item.kind.name
         }
-        // One contact is the person themselves.
-        if item.isMe {
-            for var other in model.items where other.isMe && other.id != item.id {
-                other[.relationship] = ""
-                model.save(other)
+        problem = nil
+        saving = true
+        model.save(item) { ok in
+            saving = false
+            // The Keychain refused it: nothing typed is lost, and Save tries again.
+            guard ok else { problem = "Petal couldn't save this to your Keychain. Your changes are still here: try Save again."; return }
+            // One contact is the person themselves (only once this one is saved as them).
+            if item.isMe {
+                for var other in model.items where other.isMe && other.id != item.id {
+                    other[.relationship] = ""
+                    model.save(other)
+                }
             }
+            close()
         }
-        model.save(item)
-        close()
     }
 }
 

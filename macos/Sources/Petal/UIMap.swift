@@ -17,6 +17,8 @@ struct UINode: Equatable {
     var pressable = false    // a group, image or text that says it can be pressed
     var web = false          // inside a web page
     var order = 0            // reading order (depth first)
+    var parent = -1          // the order of what holds it (-1: the window)
+    var sibling = 0          // its place among that parent's children
     var clip: CGRect?        // what's showing of the scroll areas it's in; nil when it's in none
 }
 
@@ -737,6 +739,39 @@ enum UIMap {
             }
         }
         return found
+    }
+
+    /// The text of a control's that counts as its piece: its value when it's told (never a password field's), else
+    /// its title, else its description.
+    static func pieceText(_ node: UINode) -> WritableKeyPath<UINode, String>? {
+        if valueRoles.contains(node.role), !isSecure(node), !node.value.isEmpty { return \.value }
+        if !node.title.isEmpty { return \.title }
+        if !node.label.isEmpty { return \.label }
+        return nil
+    }
+
+    /// `nodes` (every control read, by `order`, already redacted one by one) with a secret only several show
+    /// together (a card number as four fields of four digits) hidden in every piece of it, as `joinedSecrets` finds
+    /// them: neighbours within a parent, or on one line. When the pieces can't be checked whole (too many, or `going`
+    /// says time's up), every short piece with a digit in it is hidden instead. `hid`: something was.
+    static func hideJoined(_ nodes: [UINode], matches: (String) -> Bool, going: () -> Bool = { true }) -> (nodes: [UINode], hid: Bool) {
+        var out = nodes
+        var pieces: [TextPiece] = []
+        var owners: [(node: Int, path: WritableKeyPath<UINode, String>)] = []
+        for (index, node) in nodes.enumerated() {
+            guard !isSecure(node), ![node.title, node.label, node.help, node.placeholder, node.value].contains(hidden),
+                  let path = pieceText(node) else { continue }
+            pieces.append(TextPiece(text: node[keyPath: path], parent: node.parent, order: node.sibling, frame: node.frame))
+            owners.append((index, path))
+        }
+        let found: Set<Int>
+        if let joined = joinedSecrets(pieces, matches: matches, going: going) {
+            found = joined
+        } else {
+            found = Set(pieces.indices.filter { pieces[$0].text.count <= joinLength && pieces[$0].text.contains(where: \.isNumber) })
+        }
+        for piece in found { out[owners[piece].node][keyPath: owners[piece].path] = hidden }
+        return (out, !found.isEmpty)
     }
 
     /// The same element (CFEqual: for Accessibility, the same control of the same app), or neither.
