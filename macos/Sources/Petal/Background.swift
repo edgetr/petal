@@ -148,6 +148,25 @@ enum Background {
         return .go
     }
 
+    /// A gate's check in its order: a Stop already heard ends it with nothing read; else the reads (`read`: a note's
+    /// situation through Accessibility, which can take a while; nil for anyone else), and only then the Stop sampled
+    /// again, last, right before the verdict: a Stop, steering, a new turn or the app made private (all of which stop
+    /// `cancel`) during those reads is heard.
+    static func check(stopped: () -> Bool, read: () -> Situation?) -> Verdict {
+        if stopped() { return .no }
+        let note = read()
+        let stoppedNow = stopped()
+        return verdict(stopped: stoppedNow, note: note)
+    }
+
+    /// The same for a change made in the background: the situation read, then the Stop last. Nil: stopped.
+    static func check(stopped: () -> Bool, read: () -> Situation, plannedFront: Bool, changed: Bool) -> Behind? {
+        if stopped() { return nil }
+        let now = read()
+        if stopped() { return nil }
+        return behind(now, plannedFront: plannedFront, changed: changed)
+    }
+
     /// Every change on a note's path (a value set, focus, select-all, each batch of keys, Return, a press, a scroll, a
     /// menu item) goes through `mutate`: its guard runs, then the change at once, with nothing read in between. The
     /// reads a change needs (where the keyboard is, the page, the window) come before `mutate`, never inside it
@@ -394,6 +413,38 @@ enum Background {
 
     /// Something came forward in another app than the note's and the person's (a link opened in a browser, a file in
     /// its app), with no input from the person since the baseline: the AI is told, whether or not it was put back.
+    /// Read right before each change that puts something back (activating the person's app, raising their window,
+    /// making it main).
+    struct PutBack: Equatable {
+        /// Stopped (Stop, steering, a new turn, the app made private).
+        var stopped: Bool
+        /// When the person last pressed a key, clicked or scrolled (uptime).
+        var lastInput: TimeInterval
+        /// The app in front now.
+        var frontNow: pid_t?
+        /// The window in front in that app is still one Petal expects there: the note's, which jumped forward, or,
+        /// once Petal raised theirs, theirs. Always true when putting back an app.
+        var windowExpected: Bool
+    }
+
+    /// Each change of putting back goes only while nothing has moved since it was decided: no input from the person
+    /// since the baseline, the app that jumped forward (`jumped`) still the one in front (not something the person
+    /// chose), its window still the expected one, and not stopped. Any of those failing ends the putting back.
+    static func putBack(_ seen: PutBack, baseline: Baseline, jumped: pid_t) -> Bool {
+        !seen.stopped && seen.lastInput < baseline.at && seen.frontNow == jumped && seen.windowExpected
+    }
+
+    /// The restoration gate in its order: a Stop already heard reads nothing; else what's in front (`read`, through
+    /// Accessibility), then the person's last input, then the Stop sampled last, right before the verdict.
+    static func putBackGoes(baseline: Baseline, jumped: pid_t, stopped: () -> Bool,
+                            read: () -> (front: pid_t?, windowExpected: Bool), lastInput: () -> TimeInterval) -> Bool {
+        if stopped() { return false }
+        let seen = read()
+        let input = lastInput()
+        return putBack(PutBack(stopped: stopped(), lastInput: input, frontNow: seen.front, windowExpected: seen.windowExpected),
+                       baseline: baseline, jumped: jumped)
+    }
+
     static func opened(_ baseline: Baseline, note: pid_t, frontNow: pid_t?, lastInput: TimeInterval) -> Bool {
         guard let now = frontNow, lastInput < baseline.at else { return false }
         return now != note && now != baseline.front

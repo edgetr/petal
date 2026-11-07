@@ -2331,11 +2331,11 @@ enum Acting {
     }
 
     /// The gate every act's changes go through: a Stop, and for a note acting in its window in front (`note`), the
-    /// person typing there again or gone elsewhere, read just now (Background.verdict).
+    /// person typing there again or gone elsewhere, read just now; the Stop sampled last, after those reads
+    /// (Background.check).
     static func changeGate(_ map: ComputerUse.Map, cancel: Cancel, note: Bool) -> Background.Gate {
         Background.Gate {
-            guard !cancel.stopped else { return .no }
-            return Background.verdict(stopped: cancel.stopped, note: note ? situation(map) : nil)
+            Background.check(stopped: { cancel.stopped }, read: { note ? situation(map) : nil })
         }
     }
 

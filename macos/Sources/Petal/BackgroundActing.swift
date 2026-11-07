@@ -68,12 +68,11 @@ extension Acting {
         /// shared helpers (focus, insert, typing, scrolling) do their reads first and take the gate for their changes.
         var changed = false
         func clear() -> Background.Verdict {
-            guard !cancel.stopped else { return .no }
-            let now = situation(map)
-            // A Stop, steering, a new turn or the app made private (which stops `cancel`) may have come during that
-            // read: heard here, right before the change.
-            guard !cancel.stopped else { return .no }
-            switch Background.behind(now, plannedFront: front, changed: changed) {
+            // The situation read first; a Stop, steering, a new turn or the app made private (which stops `cancel`)
+            // during that read is heard after it, right before the change (Background.check).
+            guard let behind = Background.check(stopped: { cancel.stopped }, read: { situation(map) },
+                                                plannedFront: front, changed: changed) else { return .no }
+            switch behind {
             case .go:
                 changed = true
                 return .go
@@ -273,29 +272,62 @@ extension Acting {
             }
         }
         if now == getpid() { now = nil }   // Petal's own windows are never put away here
-        // Every read first, then the person's last input, then what's put back at once: nothing read in between.
+        // Every read and lookup first, to decide; then each change that puts something back goes through its own
+        // gate (stillJumped), read again right before it, with nothing read in between.
         let noteWindowFront = front && !windowMain && now == pid && windowInFront(map)
         let lastInput = ProcessInfo.processInfo.systemUptime - idle()
         let opened = Background.opened(baseline, note: pid, frontNow: now, lastInput: lastInput)
         let other = now.flatMap { NSRunningApplication(processIdentifier: $0)?.localizedName } ?? "another app"
+        /// What's said when nothing is put back (or the putting back stopped before it changed anything).
+        func leftAsItIs() {
+            if opened { say("That opened something in \(other), which is in front now.") }
+            else if now == pid, baseline.front != pid { say("\(map.appName) came to the front after that.") }
+            else if noteWindowFront { say("That brought this window forward in \(map.appName).") }
+        }
+        /// The restoration gate, right before each change that puts something back, with every lookup done before it:
+        /// the app that jumped forward still in front with the expected window (`window`, read through Accessibility),
+        /// then the person's last input, then a Stop sampled last (Background.putBackGoes). The person picking another
+        /// app or window, a key or click of theirs, or a Stop meanwhile ends the putting back there.
+        func stillJumped(window: () -> Bool = { true }) -> Bool {
+            guard let jumped = now else { return false }
+            return Background.putBackGoes(baseline: baseline, jumped: jumped, stopped: { cancel.stopped },
+                                          read: {
+                                              let front = frontApp()
+                                              return (front, front == jumped && window())
+                                          },
+                                          lastInput: { ProcessInfo.processInfo.systemUptime - idle() })
+        }
         switch Background.restore(baseline, note: pid, frontNow: now, lastInput: lastInput) {
         case .app(let person):
-            if let theirApp = NSRunningApplication(processIdentifier: person) {
+            if let theirApp = NSRunningApplication(processIdentifier: person), stillJumped() {
                 theirApp.activate()
                 say(opened
                     ? "That opened something in \(other), which came to the front; Petal put back the app the person was using. What it opened is in \(other), which this note can't see."
                     : "\(map.appName) came to the front by itself after that; Petal put back the app the person was using.")
+            } else {
+                leftAsItIs()
             }
         case .window:
             if noteWindowFront, let theirs {
-                AXUIElementPerformAction(theirs, kAXRaiseAction as CFString)
-                AXUIElementSetAttributeValue(theirs, kAXMainAttribute as CFString, kCFBooleanTrue)
-                say("That brought this window forward in \(map.appName); Petal put the person's window back in front.")
+                // Once theirs is raised, it may already be the focused window: either is still what Petal expects.
+                func theirsFront() -> Bool {
+                    guard let focused: AXUIElement = Windows.value(app, kAXFocusedWindowAttribute) else { return false }
+                    return CFEqual(focused, theirs)
+                }
+                if stillJumped(window: { windowInFront(map) }) {
+                    AXUIElementPerformAction(theirs, kAXRaiseAction as CFString)
+                    if stillJumped(window: { windowInFront(map) || theirsFront() }) {
+                        AXUIElementSetAttributeValue(theirs, kAXMainAttribute as CFString, kCFBooleanTrue)
+                    }
+                    say("That brought this window forward in \(map.appName); Petal put the person's window back in front.")
+                } else {
+                    leftAsItIs()
+                }
+            } else {
+                leftAsItIs()
             }
         case .none:
-            if opened { say("That opened something in \(other), which is in front now.") }
-            else if now == pid, baseline.front != pid { say("\(map.appName) came to the front after that.") }
-            else if noteWindowFront { say("That brought this window forward in \(map.appName).") }
+            leftAsItIs()
         }
         // Its own change (text, caret, focus, scroll) becomes what's expected next, as in the foreground.
         if outcome.error == nil, outcome.needs == nil, !outcome.again, !cancel.stopped, ["type", "focus", "scroll", "key"].contains(action) {

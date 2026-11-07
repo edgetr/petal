@@ -155,6 +155,40 @@ struct BackgroundCheck {
         expect(!Background.opened(base, note: 200, frontNow: 100, lastInput: 40), "the person's own app still in front")
         expect(!Background.opened(base, note: 200, frontNow: nil, lastInput: 40), "unknown isn't opened")
 
+        // Each change that puts something back has its own gate, read again right before it.
+        func seen(stopped: Bool = false, input: TimeInterval = 40, front: pid_t? = 200, window: Bool = true) -> Background.PutBack {
+            Background.PutBack(stopped: stopped, lastInput: input, frontNow: front, windowExpected: window)
+        }
+        expect(Background.putBack(seen(), baseline: base, jumped: 200), "nothing moved since: put back")
+        expect(!Background.putBack(seen(input: 55), baseline: base, jumped: 200), "a key or click of the person's since: left alone")
+        expect(!Background.putBack(seen(front: 100), baseline: base, jumped: 200),
+               "the person switched back themselves meanwhile: nothing activated over their choice")
+        expect(!Background.putBack(seen(front: 300), baseline: base, jumped: 200), "another app in front now: left alone")
+        expect(!Background.putBack(seen(front: nil), baseline: base, jumped: 200), "the app in front unknown: left alone")
+        expect(!Background.putBack(seen(window: false), baseline: base, jumped: 200),
+               "another window of that app picked meanwhile: the old one isn't promoted again")
+        expect(!Background.putBack(seen(stopped: true), baseline: base, jumped: 200), "a Stop ends the putting back")
+        // Its order: what's in front read, then the person's last input, then the Stop last; a Stop or a click during
+        // the reads is heard.
+        var putTrace: [String] = []
+        var putStop = false
+        let goes = Background.putBackGoes(baseline: base, jumped: 200,
+                                          stopped: { putTrace.append("stop?"); return putStop },
+                                          read: { putTrace.append("front"); putStop = true; return (200, true) },
+                                          lastInput: { putTrace.append("input"); return 40 })
+        expect(!goes, "stopped while reading what's in front: nothing put back")
+        expect(putTrace == ["stop?", "front", "input", "stop?"], "the Stop sampled after every read", "\(putTrace)")
+        var clicked: TimeInterval = 40
+        expect(!Background.putBackGoes(baseline: base, jumped: 200, stopped: { false },
+                                       read: { clicked = 60; return (200, true) }, lastInput: { clicked }),
+               "the person clicked while it read: their input is read after, and counts")
+        var readFront = false
+        expect(!Background.putBackGoes(baseline: base, jumped: 200, stopped: { true },
+                                       read: { readFront = true; return (200, true) }, lastInput: { 40 }) && !readFront,
+               "already stopped: nothing read")
+        expect(Background.putBackGoes(baseline: base, jumped: 200, stopped: { false }, read: { (200, true) }, lastInput: { 40 }),
+               "nothing moved: it goes")
+
         // MARK: Presses that open another app
 
         expect(!Background.pressOpens(role: "AXLink", url: "https://example.com/a", browser: true), "a web link in a browser opens there")
@@ -205,6 +239,33 @@ struct BackgroundCheck {
         expect(Background.verdict(stopped: false, note: situation(front: true, focused: true, idle: 0.3)) == .interrupted(.typing),
                "a note, the person typing there again")
         expect(Background.verdict(stopped: false, note: situation(front: false)) == .interrupted(.left), "a note, the person gone elsewhere")
+
+        // The gate's order: the situation read first (Accessibility, which can block), the Stop sampled last. A Stop
+        // (or the app made private) that comes during the read refuses, never a stale go.
+        var cancelled = false
+        var gateTrace: [String] = []
+        let flipped = Background.check(stopped: { gateTrace.append("stop?"); return cancelled },
+                                       read: { gateTrace.append("read"); cancelled = true; return situation(front: true, focused: true, idle: 30) })
+        expect(flipped == .no, "stopped during the read: refused", "\(flipped)")
+        expect(gateTrace == ["stop?", "read", "stop?"], "the Stop sampled again after the read", "\(gateTrace)")
+        cancelled = false
+        let plain = Background.check(stopped: { cancelled }, read: { cancelled = true; return nil })
+        expect(plain == .no, "Petal AI's plain chat: stopped while its gate ran: refused")
+        var read = false
+        expect(Background.check(stopped: { true }, read: { read = true; return nil }) == .no && !read, "already stopped: nothing read")
+        expect(Background.check(stopped: { false }, read: { situation(front: true, focused: true, idle: 30) }) == .go,
+               "nothing stopped, the person idle there: go")
+        expect(Background.check(stopped: { false }, read: { situation(front: true, focused: true, idle: 0.2) }) == .interrupted(.typing),
+               "the person typing there: interrupted")
+        // The background way's gate: the same order.
+        cancelled = false
+        let behindFlipped = Background.check(stopped: { cancelled }, read: { cancelled = true; return situation() },
+                                             plannedFront: false, changed: false)
+        expect(behindFlipped == nil, "a background change stopped during its read: refused")
+        expect(Background.check(stopped: { false }, read: { situation() }, plannedFront: false, changed: false) == .go,
+               "a background change, nothing stopped: go")
+        expect(Background.check(stopped: { false }, read: { situation(front: true, focused: true) }, plannedFront: false, changed: true) == .stop,
+               "the person back after a change: stop")
 
         // Every change comes right after its guard: a trace of the reads, the guard and the changes, with stubs. The
         // guard is the person (scripted: they come back at the third guard).
