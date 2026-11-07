@@ -126,6 +126,15 @@ struct NotePlace: Codable, Equatable, Sendable {
         return number == nil && none
     }
 
+    /// What the note's AI reads and uses (petal_look, petal_ui): its own window; for an app's note, and a tab's that
+    /// knows its tab (checked before and after reading), its app's focused window; for a note asked where its app
+    /// showed no window (Finder's desktop), nothing: never a window that app shows later.
+    var target: NoteTarget {
+        if kind == .app { return .focused }
+        if let window { return .window(window) }
+        return kind == .tab && tab != nil ? .focused : .nothing
+    }
+
     /// Without anything a private app's window or tab said: its title, and its tab's address and title (the tab's
     /// place stays, so the note still knows its tab while the browser runs).
     var scrubbed: NotePlace {
@@ -136,6 +145,9 @@ struct NotePlace: Codable, Equatable, Sendable {
         return place
     }
 }
+
+/// The window a note's AI reads and uses: its app's focused one, one window by its number, or none at all.
+enum NoteTarget: Equatable, Sendable { case focused, window(UInt32), nothing }
 
 /// A note here (`live`) or a chat kept from before Petal (or the browser) last started, as it may fit what's in
 /// front: where it's stuck and its chat.
@@ -223,6 +235,23 @@ enum NoteRules {
             guard let tab = place.tab else { return place.on(pid: front.pid, window: front.window, none: front.none) }
             guard let now = front.tab, place.app == front.app else { return false }
             return sameTab(tab, pid: place.pid, now, pid: front.pid)
+        }
+    }
+
+    /// Whether counting the browser's tabs on the address of the tab showing (`front`, read without a count) could
+    /// make it the note's tab: a note that knows its tab only by its address (its chat kept from before Petal
+    /// restarted), the browser's only tab on it when last seen, and a tab showing that Petal can tell apart.
+    static func worthCounting(_ note: NoteTab, pid notePID: Int32, _ front: NoteTab, pid frontPID: Int32) -> Bool {
+        front.shared == nil && front.known && note.shared == 1 && sameURL(note.url, front.url) && !(notePID == frontPID && note.known)
+    }
+
+    /// Of the notes stuck to `places` (nil: stuck to none), the ones that let go of their place (their indices): a
+    /// place holds one note, the first to have it, so which note comes back there is never a guess.
+    static func letGo(_ places: [NotePlace?]) -> [Int] {
+        var taken = Set<String>()
+        return places.indices.filter { index in
+            guard let place = places[index] else { return false }
+            return !taken.insert(key(place)).inserted
         }
     }
 

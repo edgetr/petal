@@ -170,7 +170,13 @@ final class ComputerUse {
             return send(["app": name, "private": "The user keeps this app private: Petal doesn't look into it or use it."])
         }
         let pid = target.processIdentifier
-        let wanted = place?.lookWindow
+        // A note asked where its app showed no window has none to read: never a window its app shows later.
+        let wanted: CGWindowID?
+        switch place?.target ?? .focused {
+        case .nothing: return fail(ClaudePanel.noWindow(name))
+        case .window(let number): wanted = number
+        case .focused: wanted = nil
+        }
         let find = args["find"] as? String ?? ""
         // A note stuck to one tab reads its window only while that tab is the one showing, checked before and after.
         let tabPlace = place.flatMap { $0.kind == .tab && $0.tab != nil ? $0 : nil }

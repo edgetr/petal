@@ -150,7 +150,7 @@ final class Assist {
         let fail = { (text: String) in send(["error": text]) }
         switch name {
         // The note's window as it is now (a note stuck to none, or notes off: what's in front).
-        case "petal_look": look(args, place: app.claude.notesOn ? note.flatMap { app.claude.note(withID: $0) }?.place : nil, send)
+        case "petal_look": look(args, place: app.claude.notesOn ? note.flatMap { app.claude.note(withID: $0) }?.place : nil, note: note, send)
         case "petal_apps": apps(args, send, fail)
         case "petal_windows": windows(args, send, fail)
         case "petal_trash": trash(args, send, fail)
@@ -191,12 +191,12 @@ final class Assist {
     /// with `screenshot` ("window" or "screen") a picture saved where the AI can read it, and the clipboard if asked.
     /// A sticky note (`place`) looks at its own window instead, wherever the person is now, unless it asks for an app
     /// or for what's in front (`front`).
-    private func look(_ args: [String: Any], place: NotePlace? = nil, _ send: @escaping (Any) -> Void) {
+    private func look(_ args: [String: Any], place: NotePlace? = nil, note: String? = nil, _ send: @escaping (Any) -> Void) {
         let named = args["app"] as? String ?? ""
         let place = named.isEmpty && args["front"] as? Bool != true ? place : nil
         let stuck = place?.running
         let front = place == nil ? frontApp(named: named) : stuck
-        let wanted = place?.lookWindow
+        let wanted: CGWindowID? = if case .window(let number)? = place?.target { number } else { nil }
         var result: [String: Any] = [:]
         if let place, let mode = config.modes.first(where: { $0.id == place.mode }) { result["mode"] = ["id": mode.id, "name": mode.name] }
         else if let mode = app.docks.focusedDock?.mode { result["mode"] = ["id": mode.id, "name": mode.name] }
@@ -206,6 +206,8 @@ final class Assist {
                 return send(["note": place.kind == .app ? "This note is stuck to \(place.appName), which isn't open. front: true looks at what's in front now."
                                                       : "This note's window is closed: \(place.appName) has quit. front: true looks at what's in front now."])
             }
+            // Asked where its app showed no window: none to look at, never a window that app shows later.
+            if place.target == .nothing { return send(["note": ClaudePanel.noWindow(place.appName)]) }
             result["note"] = place.kind == .app
                 ? "This note is stuck to all of \(place.appName): this is its window in front; the user may be looking at something else now (front: true shows that)."
                 : "This is the window the note is stuck to; the user may be looking at something else now (front: true shows that)."
@@ -302,6 +304,9 @@ final class Assist {
                                                         "private": "The user keeps this app private: Petal doesn't look at what's in it."]
                         let tell = {
                             if self.neverLook(front.bundleIdentifier) { return refuse(privately) }
+                            // Its tab, seen showing: the note follows it (a chat kept from before Petal restarted
+                            // takes the tab's button from now on).
+                            if let tabPlace, let before, let note { self.app.claude.tabSeen(note: note, was: tabPlace, tab: before.tab, window: before.window) }
                             if picture != nil { self.did(shot == "screen" ? "Looked at your screen" : "Looked at \(front.localizedName ?? "a window")") }
                             send(result)
                         }

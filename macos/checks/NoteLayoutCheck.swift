@@ -16,6 +16,8 @@ struct NoteLayoutCheck {
         NotePlace(pid: pid, app: app, appName: "Safari", window: window, title: "", mode: "", desktop: 1, scope: scope, tab: tab)
     }
 
+    static let s1Tab = NoteTab(element: 1, index: 2, count: 4, shared: 1, url: "https://apple.com/mac", title: "Mac")
+
     static func main() {
         // MARK: Scopes
 
@@ -60,6 +62,25 @@ struct NoteLayoutCheck {
         expect(NoteRules.fits(place(.app, app: finder, window: 5), opening), "an app's note fits its app, whatever window")
         expect(FrontPlace(pid: 1, app: "", window: 3, tab: nil, none: true).unread == false && opening.unread && !desktop.unread,
                "unread only when no window and not said so")
+
+        // What a note's AI reads and uses: never a window its app shows after the note was asked with none.
+        expect(onDesktop.target == .nothing, "a window's note asked with no window targets nothing")
+        expect(onWindow.target == .window(5), "a window's note targets its window")
+        expect(place(.app, app: finder, window: nil).target == .focused && place(.app, app: finder, window: 5).target == .focused,
+               "only an app's note follows its app's focused window")
+        expect(place(.tab, window: nil, tab: NoteTab(id: "1", url: "a", title: "")).target == .focused,
+               "a tab's note whose window isn't known: whichever window shows its tab (checked before and after)")
+        expect(place(.tab, window: nil).target == .nothing, "a tab's note that knows no tab and no window: nothing")
+
+        // An open note steps away the moment another app comes forward, before its window is read.
+        let otherApp = FrontPlace(pid: 20, app: "com.apple.Notes", window: nil, tab: nil)
+        expect(!NoteRules.sameWindow(onWindow, otherApp, orUnknown: true) && !NoteRules.sameWindow(onDesktop, otherApp, orUnknown: true),
+               "another app in front, window not read yet: a window's note isn't there")
+        expect(NoteRules.sameWindow(onWindow, opening, orUnknown: true), "its own app, window not read yet: it waits for the read")
+        expect(!NoteRules.sameWindow(place(.tab, tab: s1Tab), FrontPlace(pid: 20, app: "com.apple.Safari", window: nil, tab: nil), orUnknown: true),
+               "another Safari process: not a tab note's")
+        expect(NoteRules.sameWindow(place(.app, app: "com.apple.Notes", window: 3), otherApp, orUnknown: true),
+               "an app's note stays with its app, whatever process")
 
         // MARK: Chromium tabs (ids)
 
@@ -199,6 +220,27 @@ struct NoteLayoutCheck {
         expect(!NoteRules.fits(keptFromBefore, safariFront(NoteTab(element: 5, index: 2, count: 4, shared: 2, url: s1.url, title: ""))),
                "but not one of two, even in its place")
 
+        // Petal restarted, the browser didn't, the chat picked from the list: its tab is read with no count, so it
+        // isn't its tab until the browser's tabs on its address are counted; then, the only one, it takes its button.
+        let readNow = NoteTab(element: 31, index: 3, count: 4, url: s1.url, title: "")
+        expect(!NoteRules.fits(keptFromBefore, safariFront(readNow)), "a tab read without a count isn't found by its address")
+        expect(NoteRules.worthCounting(back, pid: 10, readNow, pid: 10), "so it's worth counting")
+        var countedNow = readNow
+        countedNow.shared = 1
+        expect(NoteRules.fits(keptFromBefore, safariFront(countedNow)), "the browser's only tab on its address: its tab")
+        let adoptedNow = NoteRules.follow(back, to: countedNow, keepWords: true)
+        expect(adoptedNow.element == 31 && NoteRules.fits(place(.tab, tab: adoptedNow), safariFront(readNow)),
+               "it takes the tab's button, and is known by it from then on, counted or not")
+        countedNow.shared = 2
+        expect(!NoteRules.fits(keptFromBefore, safariFront(countedNow)), "two tabs on its address: neither, and nothing adopted")
+        expect(!NoteRules.worthCounting(s1, pid: 10, readNow, pid: 10), "a note that knows its tab's button never counts")
+        expect(!NoteRules.worthCounting(back, pid: 10, NoteTab(index: 3, count: 4, url: s1.url, title: ""), pid: 10),
+               "nor for a tab Petal can't tell apart")
+        expect(!NoteRules.worthCounting(back, pid: 10, NoteTab(element: 31, url: "https://apple.com/iphone", title: ""), pid: 10),
+               "nor for another address")
+        expect(!NoteRules.worthCounting(hadTwin.tab!, pid: 10, NoteTab(id: "5", url: a.url, title: ""), pid: 77),
+               "nor for a tab that had a twin when last seen")
+
         // MARK: Telling notes apart (one tab, one note)
 
         // Two notes kept from before on the same address; the browser has it once: neither by the address alone.
@@ -268,6 +310,21 @@ struct NoteLayoutCheck {
                "a tab's kept chat beats a window's note here, even the one showing")
         expect(pick([N(scope: .tab, showing: false, name: "live tab"), N(scope: .tab, showing: false, name: "kept tab")]) == "live tab",
                "between equals, the note here beats a kept chat")
+
+        // MARK: One place, one note
+
+        // Two tab notes of one window, both made "This window": the one made so last takes the window, the other lets go.
+        let tabA = place(.tab, tab: NoteTab(element: 1, index: 1, count: 2, url: "https://a.com", title: ""))
+        let tabB = place(.tab, tab: NoteTab(element: 2, index: 2, count: 2, url: "https://b.com", title: ""))
+        var widenedA = tabA, widenedB = tabB
+        widenedA.scope = .window
+        widenedB.scope = .window
+        expect(NoteRules.letGo([tabA, tabB]).isEmpty, "two tabs of one window are two places")
+        expect(NoteRules.letGo([widenedB, widenedA]) == [1], "made the same window: the one taking it keeps it, the other lets go")
+        expect(NoteRules.letGo([widenedB, nil, tabA, place(.window, window: 6)]).isEmpty, "a tab of that window, another window, or none: no clash")
+        expect(NoteRules.letGo([place(.app, window: 5), place(.app, pid: 99, window: 8)]) == [1], "two notes made all of one app: one keeps it")
+        // Kept chats, newest first, after a restart: the newest keeps the place.
+        expect(NoteRules.letGo([widenedA, widenedB, widenedA, tabB]) == [1, 2], "read newest first, each place keeps its newest chat")
 
         // MARK: Keys
 

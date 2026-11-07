@@ -323,6 +323,24 @@ final class Browsers {
         return matches.count == 1 ? matches[0].tab : nil
     }
 
+    /// How many tabs of the whole browser (every window) have the address `url`, counted as `NoteRules.sameURL`
+    /// matches; nil when the browser can't be asked or couldn't list them (Firefox and Zen: never). Off the main thread.
+    nonisolated static func tabsSharing(_ url: String, bundleID: String) -> Int? {
+        guard let kind = kind(bundleID), kind != .gecko, access(bundleID) == .allowed, let listing = run("""
+            set k to ""
+            tell application id "\(bundleID)"
+            repeat with x in windows
+            repeat with v in (get URL of tabs of x)
+            set s to contents of v
+            if s is not missing value then set k to k & s & (character id 30)
+            end repeat
+            end repeat
+            end tell
+            return k
+            """) else { return nil }
+        return shared(url, among: listing)
+    }
+
     /// How many tabs of the browser have the address `url`, from `sharedScript`'s list: nil when it couldn't list them.
     nonisolated private static func shared(_ url: String, among listing: String) -> Int? {
         NoteRules.shared(url, among: listing.components(separatedBy: "\u{1E}"))
