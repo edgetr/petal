@@ -26,9 +26,10 @@ enum Snapshot {
             .init(kind: .claude, text: "Done — icons are now **44 pt**, up from 36. Say *smaller* if it's too much."),
             .init(kind: .ask, text: "defaults write com.apple.finder AppleShowAllFiles -bool true"),
         ])
-        // A sticky note: the window it's stuck to shows under the header.
+        // A sticky note: the tab it's stuck to shows under the header, with the chip that changes it.
         agent.place = NotePlace(pid: 0, app: "com.apple.Safari", appName: "Safari", window: 1, title: "Liquid Glass – Apple Developer",
-                                mode: dock.mode?.id ?? "", desktop: 1)
+                                mode: dock.mode?.id ?? "", desktop: 1, scope: .tab,
+                                tab: NoteTab(index: 2, count: 5, url: "https://developer.apple.com/design/", title: "Liquid Glass – Apple Developer"))
 
         let installed = Apps.installed().map(\.id)
         let pick = { (wanted: [String]) in wanted.filter(installed.contains) + installed.filter { !wanted.contains($0) } }

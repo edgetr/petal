@@ -43,8 +43,11 @@ Use, in this order:
    and always asks before it fills (field `value`); the user sorts it in Settings › Vault. Payment info waits for one "Buy?" card per checkout (pass what you're buying
    and the price). Missing details: `action: request` (the user types them into Petal's card); a new account:
    `action: new_login`. Never ask for a password, card or key in the chat.
-   In Petal's own panel each chat is a sticky note (`aiNotes`): stuck to the window it was opened on, so
-   `petal_look` looks at that window even after the user moves on (`front: true` for what's in front now).
+   In Petal's own panel each chat is a sticky note (`aiNotes`): stuck to the browser tab, window, or all of the
+   app it was opened on (a chip on the note changes which), so `petal_look` looks there even after the user moves
+   on (`front: true` for what's in front now; a tab's note says its tab under `noteTab`, and reads, acts and fills
+   only while that tab is the one its window shows: otherwise ask the user to switch back to it). The user can drag a
+   note anywhere on its window; it comes back there whenever that tab, window or app is in front again.
    Changes apply instantly. `petal_export_recipe` / `petal_import_recipe` share a dock as a `.petal` file (modes,
    apps by name, look; nothing personal) or add one someone shared (`look: true` also takes its look; say what it
    adds before importing); `petal_suggestions` and `petal_summary` read the

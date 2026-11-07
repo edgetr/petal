@@ -16,6 +16,13 @@ final class Generation: @unchecked Sendable {
 
     func cancel() { _ = next() }
 
+    /// The newest request, without making a new one: checked later with `current`.
+    var now: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return newest
+    }
+
     func current(_ request: Int) -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -411,10 +418,12 @@ final class WindowEvents {
     static let shared = WindowEvents()
 
     /// `missionControl`: Mission Control (or App Exposé) opened; `missionControlEnded`: it closed. macOS's Dock says
-    /// so through Accessibility. `titled`: the title of a window someone asked to watch (`AXWatcher.watchTitle`)
-    /// changed.
+    /// so through Accessibility. `titleChanged`: a window's title changed (a browser showing another tab);
+    /// `tabSwitched`: in a browser, the keyboard moved to another element or a tab strip's selection changed (another
+    /// tab selected, even one titled as the last). Both only while someone asked for them (`titles`): they're often.
+    /// A window someone asked about by itself (`AXWatcher.watchTitle`: a Buy's) always gets its `titleChanged`.
     enum Kind { case created, closed, focused, minimized, unminimized, moved, resized, activated, launched, quit, hidden, shown, space, screens,
-                     missionControl, missionControlEnded, titled }
+                     missionControl, missionControlEnded, titleChanged, tabSwitched }
     struct Event {
         let kind: Kind
         let pid: pid_t
@@ -434,7 +443,19 @@ final class WindowEvents {
 
     func stopListening(_ key: String) {
         listeners[key] = nil
+        titleListeners.remove(key)
+        AXWatcher.shared.titles(!titleListeners.isEmpty)
         checkPermission()
+    }
+
+    private var titleListeners: Set<String> = []
+
+    /// Whether `key` wants to hear windows' titles changing and browsers' tabs being selected (sticky notes on
+    /// browser tabs). Off, they're dropped on the observers' own thread.
+    func titles(_ key: String, _ on: Bool) {
+        guard on != titleListeners.contains(key) else { return }
+        if on { titleListeners.insert(key) } else { titleListeners.remove(key) }
+        AXWatcher.shared.titles(!titleListeners.isEmpty)
     }
 
     /// Starts the observers once Accessibility is allowed and someone listens, and stops them when it's taken away or
@@ -513,14 +534,22 @@ final class AXWatcher: @unchecked Sendable {
     private var windowIDs: [AXUIElement: CGWindowID] = [:]
     private var running = false
     private var generation = 0   // retries from before a stop are dropped
+    /// Someone wants windows' title changes and browsers' tab switches (WindowEvents.titles).
+    private var wantsTitles = false
+    /// Windows whose title changes are always passed on (`watchTitle`), whether or not anyone wants every window's.
+    private var titleWatched: Set<AXUIElement> = []
 
     /// On the app itself: windows opening, focus, hiding, and (as well as on each window, for one not watched yet)
     /// minimizing, so a minimized window reaches the dock even if its own observer was never added.
     private static let appNotifications = [kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification,
                                            kAXApplicationHiddenNotification, kAXApplicationShownNotification,
                                            kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
+    /// On a browser itself, for its tabs: selecting another tab moves the keyboard to that tab's page, and in
+    /// Safari, Firefox and Zen changes the tab strip's selection. Dropped here unless someone wants them.
+    private static let browserNotifications = [kAXFocusedUIElementChangedNotification, kAXSelectedChildrenChangedNotification]
     private static let windowNotifications = [kAXUIElementDestroyedNotification, kAXMovedNotification, kAXResizedNotification,
-                                              kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
+                                              kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification,
+                                              kAXTitleChangedNotification]
     /// On macOS's Dock, which draws Mission Control: it opening (all windows, or one app's), and closing. Showing the
     /// desktop counts as closing, since the Dock doesn't come out for it. (yabai watches the same four.)
     private static let dockID = "com.apple.dock"
@@ -565,12 +594,17 @@ final class AXWatcher: @unchecked Sendable {
             }
             observers = [:]
             windowIDs = [:]
+            titleWatched = []
             dockPID = 0
         }
     }
 
     func observe(_ app: NSRunningApplication) {
         perform { [self] in observe(app, attempt: 0, generation: generation) }
+    }
+
+    func titles(_ on: Bool) {
+        perform { [self] in wantsTitles = on }
     }
 
     /// Watches macOS's Dock again if it isn't watched: Petal restarts it when it hides it, and macOS may not say
@@ -593,21 +627,33 @@ final class AXWatcher: @unchecked Sendable {
                 var owner: pid_t = 0
                 return AXUIElementGetPid(element, &owner) == .success && owner != pid
             }
+            titleWatched = titleWatched.filter { element in
+                var owner: pid_t = 0
+                return AXUIElementGetPid(element, &owner) == .success && owner != pid
+            }
         }
     }
 
-    /// Also tells when `window`'s title changes (a browser's tab or page: a Buy's window), until `unwatchTitle`.
+    /// Also tells when `window`'s title changes (a browser's tab or page: a Buy's window), until `unwatchTitle`,
+    /// even while nobody wants every window's (`titles`). A window already watched has its title observed with the
+    /// rest (one observer for every listener); one that isn't gets it added here, and taken off by `unwatchTitle`.
     func watchTitle(_ window: AXUIElement, pid: pid_t) {
         perform { [self] in
             guard let observer = observers[pid] else { return }
-            AXObserverAddNotification(observer, window, kAXTitleChangedNotification as CFString, nil)
+            titleWatched.insert(window)
+            if windowIDs[window] == nil {
+                AXObserverAddNotification(observer, window, kAXTitleChangedNotification as CFString, nil)
+            }
         }
     }
 
     func unwatchTitle(_ window: AXUIElement, pid: pid_t) {
         perform { [self] in
-            guard let observer = observers[pid] else { return }
-            AXObserverRemoveNotification(observer, window, kAXTitleChangedNotification as CFString)
+            guard titleWatched.remove(window) != nil else { return }
+            // A watched window's title stays observed: it's shared with whoever wants every window's.
+            if windowIDs[window] == nil, let observer = observers[pid] {
+                AXObserverRemoveNotification(observer, window, kAXTitleChangedNotification as CFString)
+            }
         }
     }
 
@@ -640,7 +686,9 @@ final class AXWatcher: @unchecked Sendable {
         let element = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(element, 0.3)
         var added = 0
-        let names = isDock ? Self.missionControlOpened + Self.missionControlClosed : Self.appNotifications
+        let browser = Browsers.kind(app.bundleIdentifier ?? "") != nil
+        let names = isDock ? Self.missionControlOpened + Self.missionControlClosed
+            : Self.appNotifications + (browser ? Self.browserNotifications : [])
         for name in names where AXObserverAddNotification(observer, element, name as CFString, nil) == .success { added += 1 }
         guard added > 0 else {
             // An app that has only just launched may not answer yet: try again a few times.
@@ -691,6 +739,7 @@ final class AXWatcher: @unchecked Sendable {
             send(.created, window: windowIDs[element], element: element)
         case kAXUIElementDestroyedNotification:
             // A closed window can't be asked its id any more: it's the one remembered for this element.
+            titleWatched.remove(element)
             guard let id = windowIDs.removeValue(forKey: element) else { return }
             send(.closed, window: id)
         case kAXFocusedWindowChangedNotification:
@@ -700,7 +749,15 @@ final class AXWatcher: @unchecked Sendable {
         case kAXWindowDeminiaturizedNotification: send(.unminimized, window: windowIDs[element], element: element)
         case kAXMovedNotification: send(.moved, window: windowIDs[element], element: element)
         case kAXResizedNotification: send(.resized, window: windowIDs[element], element: element)
-        case kAXTitleChangedNotification: send(.titled, window: windowIDs[element] ?? Windows.id(of: element), element: element)
+        case kAXTitleChangedNotification:
+            let watched = titleWatched.contains(element)
+            guard wantsTitles || watched else { return }
+            send(.titleChanged, window: windowIDs[element] ?? (watched ? Windows.id(of: element) : nil), element: element)
+        case kAXFocusedUIElementChangedNotification, kAXSelectedChildrenChangedNotification:
+            // Only browsers are asked for these. The window isn't looked up (it waits on the app): the listener
+            // checks it's the one in front.
+            guard wantsTitles else { return }
+            send(.tabSwitched)
         case kAXApplicationHiddenNotification: send(.hidden)
         case kAXApplicationShownNotification: send(.shown)
         case _ where Self.missionControlOpened.contains(name): send(.missionControl)

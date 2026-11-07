@@ -392,10 +392,14 @@ extension Assist {
 
     /// Where the controls are and what kind each is (and the browser's own answer for the tab: its address and its
     /// id for it), read off the main thread, handed back on it with the vault's items (nil when the vault can't be
-    /// read).
-    private func vaultPlaces(_ map: ComputerUse.Map, _ entries: [ComputerUse.Entry],
+    /// read). A tab note's map is read only while the note's tab is the one its window shows (else `fail`): never
+    /// another tab's site on a card or in a fill.
+    private func vaultPlaces(_ map: ComputerUse.Map, _ entries: [ComputerUse.Entry], fail: @escaping (String) -> Void,
                              done: @escaping @MainActor (_ places: [Vault.Place], _ targets: [Vault.Target], _ items: [VaultItem]?) -> Void) {
         ComputerUse.readQueue.async {
+            if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
+                return DispatchQueue.main.async { fail(ClaudePanel.tabNotShowing) }
+            }
             let places = entries.map { VaultReader.place(of: $0.element, pid: map.pid, bundle: map.bundle, appName: map.appName) }
             let targets = entries.map { VaultReader.target($0.element) }
             let title: String = Windows.value(map.window, kAXTitleAttribute) ?? ""
@@ -498,7 +502,7 @@ extension Assist {
         let ref = args["item"] as? String ?? args["name"] as? String ?? ""
         let task = args["task"] as? String ?? ""
         guard let token = computer.token(caller, task: task) else { return fail(Self.over) }
-        vaultPlaces(map, entries) { places, targets, items in
+        vaultPlaces(map, entries, fail: fail) { places, targets, items in
             guard self.computer.live(caller, token) else { return fail(Self.over) }
             guard let items else { return fail(VaultStore.unreadableText + " Nothing was filled; try again in a moment.") }
             // The item: named, else the login saved for this page (or app), else the only card saved.
@@ -676,7 +680,7 @@ extension Assist {
             }
         }
         guard let window else { return show([], [], nil) }
-        vaultPlaces(window.map, window.entries) { places, targets, _ in
+        vaultPlaces(window.map, window.entries, fail: fail) { places, targets, _ in
             guard live() else { return fail(Self.over) }
             // Never a card whose Submit couldn't fill: a password only into a password field, one page or app at a
             // time, and so on. What only doesn't match is said on the card.
@@ -790,7 +794,7 @@ extension Assist {
         let task = args["task"] as? String ?? ""
         if !usernameID.isEmpty, username.isEmpty { return fail("Give username too: the email or username for the new account.") }
         guard let token = computer.token(caller, task: task) else { return fail(Self.over) }
-        vaultPlaces(map, entries) { places, targets, _ in
+        vaultPlaces(map, entries, fail: fail) { places, targets, _ in
             guard self.computer.live(caller, token) else { return fail(Self.over) }
             let place = places[0]
             var item = VaultItem(kind: .login, title: (args["title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
