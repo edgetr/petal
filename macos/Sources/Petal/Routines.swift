@@ -749,7 +749,8 @@ final class Routines {
 
     private func ask(_ chunks: [[(url: URL, name: String, facts: String)]], routine: Routine, rule: Int, into: URL,
                      folders: [(name: String, samples: [String])], plan: Plan, done: @escaping (Plan?) -> Void) {
-        guard rule == ruleVersion[routine.id, default: 0] else { return done(nil) }   // the rule changed meanwhile
+        // The rule changed meanwhile, or routines were turned off: no more is asked.
+        guard isOn, rule == ruleVersion[routine.id, default: 0] else { return done(nil) }
         guard let chunk = chunks.first, let quick else { return done(plan) }
         var plan = plan
         // Folders this plan makes count as there for the next chunk, so similar files share them.
@@ -762,7 +763,7 @@ final class Routines {
         quick(prompt, key) { answer in
             // The rule changed while the AI answered: this plan is for the old rule, so nothing in it is learned or
             // moved.
-            guard rule == self.ruleVersion[routine.id, default: 0] else { return done(nil) }
+            guard self.isOn, rule == self.ruleVersion[routine.id, default: 0] else { return done(nil) }
             let picks = answer?["folders"] as? [String: Any] ?? [:]
             var patterns: [String: String] = [:]
             for (index, file) in chunk.enumerated() {
