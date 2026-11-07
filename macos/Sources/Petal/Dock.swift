@@ -89,6 +89,9 @@ final class DockController {
             refreshInBackground()   // the minimized windows
         } else {
             WindowEvents.shared.stopListening("dock")
+            trailing?.cancel()   // a timed look waiting: none while hidden
+            trailing = nil
+            armedFor = nil
             setMissionControl(false)
             for panel in panels.values { panel.close() }
             panels = [:]
@@ -190,7 +193,10 @@ final class DockController {
                 guard let self else { return }
                 self.trailing = nil
                 self.armedFor = nil
-                if self.shown, self.schedule.fire(at: Self.now) { self.startLook() }
+                // Hidden (macOS's Dock chosen): no looks, and no timer again for a look that can't happen. Showing
+                // again looks at once.
+                guard self.shown else { return }
+                if self.schedule.fire(at: Self.now) { self.startLook() }
                 self.armTrailing()
             }
         }

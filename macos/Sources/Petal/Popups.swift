@@ -112,12 +112,16 @@ final class GlassPanel: NSPanel {
         alphaValue = 0
         ignoresMouseEvents = true
         hosting.rootView = AnyView(EmptyView())
-        if isKeyWindow {
-            takesKeys = false
-            resignKey()
-            if let front = NSWorkspace.shared.frontmostApplication, front != NSRunningApplication.current {
-                front.activate(from: NSRunningApplication.current, options: [])
-            }
+        releaseKeys()
+    }
+
+    /// Gives typing back to the app in front, if this has it.
+    func releaseKeys() {
+        takesKeys = false
+        guard isKeyWindow else { return }
+        resignKey()
+        if let front = NSWorkspace.shared.frontmostApplication, front != NSRunningApplication.current {
+            front.activate(from: NSRunningApplication.current, options: [])
         }
     }
 
@@ -348,8 +352,13 @@ final class Popups {
             cardPanel.show(CardView(card: card), over: CGRect(x: pill.midX - 1, y: pill.minY, width: 2, height: pill.height), dock: panelRef)
         }
         // A card asking for a secret takes the keyboard for it.
-        cardPanel.takesKeys = card.kind == .reply || (card.kind == .ask && PetalApp.shared.assist.pending?.secret == true)
-        if cardPanel.takesKeys { cardPanel.makeKey() }
+        // One taking the place of a card that had the keyboard (a notice over a reply being written) gives it back.
+        if card.kind == .reply || (card.kind == .ask && PetalApp.shared.assist.pending?.secret == true) {
+            cardPanel.takesKeys = true
+            cardPanel.makeKey()
+        } else {
+            cardPanel.releaseKeys()
+        }
         // A peek fades out by itself.
         if card.kind == .peek {
             let work = DispatchWorkItem { [weak self] in
