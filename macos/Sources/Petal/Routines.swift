@@ -221,7 +221,8 @@ final class Routines {
     /// that didn't save) stays for the next launch to recover. On `io`.
     nonisolated static func pruneJournal() {
         guard var list = Config.parse(journalFile)?["moves"] as? [[String: String]] else { return }
-        let saved = Set((Config.parse(logFile)?["entries"] as? [[String: Any]] ?? []).flatMap { entry in
+        // Moves in an entry that was put back don't count: the same move made again since is a new one.
+        let saved = Set((Config.parse(logFile)?["entries"] as? [[String: Any]] ?? []).filter { $0["undone"] as? Bool != true }.flatMap { entry in
             (entry["moves"] as? [[String: String]] ?? []).map { ($0["from"] ?? "") + "→" + ($0["to"] ?? "") }
         })
         list.removeAll { saved.contains(($0["from"] ?? "") + "→" + ($0["to"] ?? "")) }
@@ -251,8 +252,10 @@ final class Routines {
         Self.io.async {
             var routines = mine
             var outside = false
-            if let now = Self.modified(url), now != known,
-               let disk = (Config.parse(url)?["routines"] as? [[String: Any]])?.compactMap(Routine.init) {
+            if let now = Self.modified(url), now != known {
+                // Edited by hand but not readable (a typo): left as it is, for the person to fix; memory keeps the
+                // change until then.
+                guard let disk = (Config.parse(url)?["routines"] as? [[String: Any]])?.compactMap(Routine.init) else { return }
                 routines = disk
                 change(&routines)
                 outside = true
@@ -276,6 +279,8 @@ final class Routines {
             let new = routines.first { $0.id == old.id }
             if new == nil || new!.words != old.words || new!.actions != old.actions || new!.trigger != old.trigger {
                 ruleChanged(old.id, gone: new == nil)
+            } else if old.on, new?.on == false {
+                stopped(old.id)
             }
         }
         list = routines
@@ -307,12 +312,14 @@ final class Routines {
 
     func start(_ ready: (() -> Void)? = nil) {
         Self.io.async {
-            let routines = (Config.parse(Self.file)?["routines"] as? [[String: Any]] ?? []).compactMap(Routine.init)
+            let parsed = Config.parse(Self.file)?["routines"] as? [[String: Any]]
+            let routines = (parsed ?? []).compactMap(Routine.init)
             let log = (Config.parse(Self.logFile)?["entries"] as? [[String: Any]] ?? []).compactMap(Entry.init)
             let learned = (Config.parse(Self.learnedFile) ?? [:]).compactMapValues { $0 as? [String: String] }
-            let stamp = Self.modified(Self.file)
+            // Not readable (a typo): no stamp is taken, so nothing writes over it until it's fixed and read.
+            let stamp = parsed == nil && FileManager.default.fileExists(atPath: Self.file.path) ? nil : Self.modified(Self.file)
             // Moves from a batch Petal quit in the middle of, not in the history yet: kept so they can be put back.
-            let known = Set(log.flatMap { $0.moves.map { $0.from + "→" + $0.to } })
+            let known = Set(log.filter { !$0.undone }.flatMap { $0.moves.map { $0.from + "→" + $0.to } })   // put back: not these
             let unrecorded = ((Config.parse(Self.journalFile)?["moves"] as? [[String: String]]) ?? [])
                 .compactMap { m in m["from"].flatMap { from in m["to"].map { Move(from: from, to: $0) } } }
                 .filter { !known.contains($0.from + "→" + $0.to) }
@@ -388,7 +395,15 @@ final class Routines {
         Self.io.async {
             let now = Self.modified(Self.file)
             guard now != known else { return }
-            let routines = (Config.parse(Self.file)?["routines"] as? [[String: Any]] ?? []).compactMap(Routine.init)
+            // Not readable (a typo mid-edit): the routines Petal has stay until it is; a file that's gone is none.
+            let routines: [Routine]
+            if let list = Config.parse(Self.file)?["routines"] as? [[String: Any]] {
+                routines = list.compactMap(Routine.init)
+            } else if FileManager.default.fileExists(atPath: Self.file.path) {
+                return
+            } else {
+                routines = []
+            }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.stamp = now
@@ -832,12 +847,7 @@ final class Routines {
 
     func setOn(_ id: String, _ on: Bool) {
         guard list.contains(where: { $0.id == id }) else { return }
-        // Turned off: an AI answer or a card still on its way doesn't move anything, and its queued files are dropped.
-        if !on {
-            ruleVersion[id, default: 0] += 1
-            plans[id] = nil
-            jobs.removeAll { $0.id == id }
-        }
+        if !on { stopped(id) }
         saveRoutines { list in
             if let index = list.firstIndex(where: { $0.id == id }) { list[index].on = on }
         }
@@ -848,6 +858,14 @@ final class Routines {
         ruleChanged(id, gone: true)
         saveRoutines { $0.removeAll { $0.id == id } }
         watch()
+    }
+
+    /// Turned off (the settings switch, the chat, the file): an AI answer or a card still on its way doesn't move
+    /// anything, and its queued files are dropped.
+    private func stopped(_ id: String) {
+        ruleVersion[id, default: 0] += 1
+        plans[id] = nil
+        jobs.removeAll { $0.id == id }
     }
 
     /// A routine's rule changed, or it's gone: whatever was decided under the old rule (an AI answer on its way, a
@@ -870,6 +888,8 @@ final class Routines {
             let old = list[index]
             if old.words != routine.words || old.actions != routine.actions || old.trigger != routine.trigger {
                 ruleChanged(routine.id, gone: false)
+            } else if old.on, !routine.on {
+                stopped(routine.id)
             }
         }
         plans[routine.id] = nil
