@@ -98,8 +98,15 @@ enum Sensitive {
                 continue
             }
             var values: [String: Any] = [:]
+            // What each attribute that couldn't be read said (an AXError's raw value): none there, or a failure.
+            var errors: [String: Int32] = [:]
             for (name, value) in zip(attributes, list) {
-                if CFGetTypeID(value) == AXValueGetTypeID(), AXValueGetType(value as! AXValue) == .axError { continue }
+                if CFGetTypeID(value) == AXValueGetTypeID(), AXValueGetType(value as! AXValue) == .axError {
+                    var error = AXError.failure
+                    AXValueGetValue(value as! AXValue, .axError, &error)
+                    errors[name] = error.rawValue
+                    continue
+                }
                 values[name] = value
             }
             let role = values[kAXRoleAttribute] as? String ?? ""
@@ -115,18 +122,26 @@ enum Sensitive {
             let placed = frame.width > 0 && frame.height > 0
             // A password field's value is never read; anything else's is searched whole.
             let secure = UIMap.isSecure(node)
-            let value = secure ? "" : Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
+            var value = ""
+            if !secure {
+                var raw: CFTypeRef?
+                let error = AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &raw)
+                if error == .success { value = Reader.text(raw, whole: true) } else { errors[kAXValueAttribute] = error.rawValue }
+            }
+            // A text that couldn't be read may hold a secret no one looked for: what shows it is covered.
+            let texts = [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute, kAXPlaceholderValueAttribute, kAXValueAttribute]
+            let unread = UIMap.textUnread(role: role, roleError: errors[kAXRoleAttribute] ?? 0, errors: texts.compactMap { errors[$0] })
             // Named for a secret only counts for a field one types into: a window or page called "API keys" isn't
             // blacked out whole (its text is still searched below).
-            let secret = secure || UIMap.looksSecretField(node) || mine.contains { CFEqual($0, element) }
+            let secret = secure || unread || UIMap.looksSecretField(node) || mine.contains { CFEqual($0, element) }
                 || [node.title, node.label, node.help, node.placeholder, value].contains { !$0.isEmpty && vault.matches($0) }
             // Every text shown counts as a piece, one holding part of a secret by itself too: the rest of that secret
             // in the pieces beside it is found only with it (an Amex number as 37828224 and 6310005). One with no
             // bounds may be in the picture: it counts, covered by what's around it if need be.
             let shown = [value, node.title, node.label].first { !$0.isEmpty } ?? ""
             if !secure, !shown.isEmpty, !placed || frame.intersects(around) { parts.shows(shown, id: me, order: order) }
-            // A part that may show a secret with no bounds of its own (an attribute that failed, or a zero size):
-            // what holds it is covered, else the window isn't read whole.
+            // A part that may show a secret (or text that couldn't be read) with no bounds of its own (an attribute
+            // that failed, or a zero size): what holds it is covered, else the window isn't read whole.
             if secret, !cover(me) { scan.complete = false; return scan }
             // Far down a page or scrolled away: not in the picture.
             if depth > 0, placed, !frame.intersects(around) { continue }

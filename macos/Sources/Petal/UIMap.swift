@@ -529,12 +529,14 @@ enum UIMap {
     }
 
     /// What the AI may be told of a control: a password field's value never, a field that looks like it holds a
-    /// secret or that Petal filled with one (`filled`, however its text was cut or edited since) as "(hidden)", and
-    /// any text holding a vault secret as "(hidden)".
+    /// secret as "(hidden)", one Petal filled with one (`filled`, however its text was cut or edited since) with every
+    /// text of its hidden, its name too, and any text holding a vault secret as "(hidden)".
     static func redact(_ node: UINode, filled: Bool = false, secret: (String) -> Bool) -> UINode {
         var out = node
+        // A filled field's name may echo what's in it too (a page that repeats the card number in its label).
+        if filled { hideAll(&out) }
         if isSecure(node) { out.value = "" }
-        else if filled || looksSecret(node), !node.value.isEmpty { out.value = hidden }
+        else if looksSecret(node), !node.value.isEmpty { out.value = hidden }
         for path in [\UINode.title, \.label, \.help, \.placeholder, \.value] where out[keyPath: path] != hidden && secret(out[keyPath: path]) {
             out[keyPath: path] = hidden
         }
@@ -1170,6 +1172,22 @@ extension UIMap {
         case -25202: return .gone
         default: return .unreadable
         }
+    }
+
+    /// Roles that show text of their own in a picture (what they say, or what's typed in them).
+    static let textRoles: Set<String> = ["AXStaticText", "AXTextField", "AXTextArea", "AXComboBox", "AXSearchField",
+                                         "AXHeading", "AXLink", "AXCell"]
+
+    /// Reading an attribute failed (an AXError's raw value), rather than saying there's nothing there: anything but
+    /// 0 success, -25212 no value, -25205 attribute unsupported and -25208 not implemented.
+    static func readFailed(_ error: Int32) -> Bool { ![0, -25212, -25205, -25208].contains(error) }
+
+    /// Whether an element may show text a picture's check couldn't read: one that shows text (`textRoles`, or one
+    /// whose role couldn't be read, `roleError`) with any of its texts (title, description, help, placeholder, value:
+    /// `errors`) failing to read. Then it's covered as if it held a secret, or, with nothing around it that has
+    /// bounds, the window isn't read whole.
+    static func textUnread(role: String, roleError: Int32 = 0, errors: [Int32]) -> Bool {
+        (textRoles.contains(role) || readFailed(roleError)) && errors.contains(where: readFailed)
     }
 
     /// Whether a scan that must see a whole window (what a picture would show) saw all that's under an element: not

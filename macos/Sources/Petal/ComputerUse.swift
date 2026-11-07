@@ -1354,8 +1354,10 @@ enum Acting {
                 prepared.error = "That control moved: the window changed since petal_ui. " + changed
                 return prepared
             }
-            // Where it was is not enough: the same button may mean the opposite now (Mute became Unmute).
-            if let why = UIMap.changed(entry.meaning, meaning, secret: { VaultIndex.current().matches($0) }) {
+            // Where it was is not enough: the same button may mean the opposite now (Mute became Unmute). A field
+            // Petal filled never has its new name told (it may echo what's in it).
+            let filled = Sensitive.isFilled(entry.element, pid: map.pid)
+            if let why = UIMap.changed(entry.meaning, meaning, secret: { filled || VaultIndex.current().matches($0) }) {
                 prepared.error = why
                 return prepared
             }

@@ -824,6 +824,31 @@ struct VaultCheck {
         expect(UIMap.covered(.children(4), depth: 3, maxDepth: 80) && !UIMap.covered(.children(4), depth: 80, maxDepth: 80),
                "children past the deepest level: not whole")
         expect(UIMap.covered(.none, depth: 80, maxDepth: 80) && UIMap.covered(.gone, depth: 3, maxDepth: 80), "a leaf, or gone: whole")
+
+        // A text that couldn't be read (not "none there") on something that shows text: covered, else not whole.
+        for none: Int32 in [0, -25212, -25205, -25208] {
+            expect(!UIMap.readFailed(none) && !UIMap.textUnread(role: "AXTextField", errors: [none, none]), "\(none): no text, as before")
+        }
+        for failing: Int32 in [-25204, -25200, -25202, -25211] {
+            expect(UIMap.readFailed(failing), "\(failing): a failed read")
+            for role in ["AXStaticText", "AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"] {
+                expect(UIMap.textUnread(role: role, errors: [0, failing]), "\(role) whose text failed to read (\(failing)) may show a secret")
+            }
+            expect(!UIMap.textUnread(role: "AXGroup", errors: [failing]) && !UIMap.textUnread(role: "AXScrollArea", errors: [failing]),
+                   "a group's failed title isn't text it shows (what's under it is read)")
+            expect(UIMap.textUnread(role: "", roleError: failing, errors: [failing]), "a role that couldn't be read counts as showing text")
+            expect(!UIMap.textUnread(role: "", roleError: -25205, errors: [-25205]), "no role and no text: nothing unread")
+        }
+        // Covered by its own frame, else the nearest ancestor with one; with none, the window isn't read whole.
+        var parts = UIMap.ScanParts<String>()
+        let window = parts.read("window", frame: CGRect(x: 0, y: 0, width: 800, height: 600), parent: -1)
+        let group = parts.read("group", frame: .zero, parent: window)
+        let field = parts.read("field", frame: CGRect(x: 20, y: 40, width: 200, height: 20), parent: group)
+        let label = parts.read("label", frame: .zero, parent: group)
+        expect(parts.cover(field)?.element == "field" && parts.cover(label)?.element == "window", "an unread field: its frame, or what holds it")
+        var bare = UIMap.ScanParts<String>()
+        let top = bare.read("window", frame: .zero, parent: -1)
+        expect(bare.cover(bare.read("text", frame: .zero, parent: top)) == nil, "an unread text with nothing framed around it: not read whole")
     }
 
     /// Two flats in one building are two addresses; the same address saved twice is one.
@@ -1566,6 +1591,23 @@ struct VaultCheck {
                "the same text in a field Petal didn't fill is told as usual")
         field.value = ""
         expect(UIMap.redact(field, filled: true, secret: index.matches).value == "", "an empty filled field shows nothing to hide")
+        // Its name may echo what's in it: every text of a filled field is hidden, not only its value.
+        var echoing = UINode(role: "AXTextField")
+        echoing.title = "Card ending 1111"
+        echoing.label = "4111 11"
+        echoing.help = "Shown as 4111"
+        echoing.placeholder = "1111"
+        echoing.value = "4111 11"
+        let told = UIMap.redact(echoing, filled: true, secret: index.matches)
+        expect([told.title, told.label, told.help, told.placeholder, told.value].allSatisfy { $0 == UIMap.hidden } && UIMap.name(told) == UIMap.hidden,
+               "a filled field's title, description, help, placeholder and value are all hidden (\(told))")
+        var secure = echoing
+        secure.subrole = "AXSecureTextField"
+        let secureTold = UIMap.redact(secure, filled: true, secret: index.matches)
+        expect(secureTold.value == "" && secureTold.title == UIMap.hidden && secureTold.label == UIMap.hidden,
+               "a filled password field: no value at all, and its name hidden")
+        let unfilled = UIMap.redact(echoing, secret: index.matches)
+        expect(unfilled.title == "Card ending 1111" && unfilled.label == "4111 11", "a field Petal didn't fill keeps its name")
     }
 
     /// Proton Pass's logins: every site with its rule (autofillUrls) and the older list (urls), in its JSON and its

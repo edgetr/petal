@@ -864,8 +864,11 @@ extension Assist {
                                     }
                                     guard ok else { return fail("The Keychain didn't take the new password, so nothing was filled.") }
                                     self.did("Made a strong password for \(place.where_) and saved it in the vault")
+                                    // The login as saved: edited while the fill waits to be allowed (another site), it fills nothing.
+                                    let revision = Vault.revision(Vault.normalized(saving))
                                     let plans = roles.indices.map { index -> VaultFillPlan in
                                         var plan = VaultFillPlan(itemID: saving.id, title: saving.title, field: roles[index], place: places[index], target: targets[index])
+                                        plan.revision = revision
                                         plan.task = task
                                         return plan
                                     }
