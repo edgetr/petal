@@ -94,10 +94,10 @@ extension Assist {
 
     // MARK: The vault
 
-    private static let vaultService = "tech.edgetr.petal.vault"
+    nonisolated private static let vaultService = "tech.edgetr.petal.vault"
 
     /// The secrets' names (never their values), from the Keychain.
-    static func vaultNames() -> [String] {
+    nonisolated static func vaultNames() -> [String] {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: vaultService,
                                     kSecMatchLimit as String: kSecMatchLimitAll, kSecReturnAttributes as String: true]
         var result: CFTypeRef?
@@ -120,12 +120,18 @@ extension Assist {
                        kSecAttrAccount as String: name] as CFDictionary)
     }
 
-    private static func vaultSecret(_ name: String) -> String? {
+    nonisolated private static func vaultSecret(_ name: String) -> String? {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: vaultService,
                                     kSecAttrAccount as String: name, kSecReturnData as String: true]
         var result: CFTypeRef?
         guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+
+    /// Whether `text` is one of the vault's secrets: petal_act never types one (the vault types its own, after
+    /// asking). Reads the Keychain: off the main thread.
+    nonisolated static func isVaultSecret(_ text: String) -> Bool {
+        !text.isEmpty && vaultNames().contains { vaultSecret($0) == text }
     }
 
     /// The vault tool: list the names, use one (typed into the field in front, after asking every time, even with

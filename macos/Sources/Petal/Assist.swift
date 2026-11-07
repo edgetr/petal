@@ -3,7 +3,8 @@ import Observation
 import ScreenCaptureKit
 
 /// Petal AI's own powers on the Mac. Claude Code and Codex reach them through Petal's tools (`petal_look`,
-/// `petal_apps`, `petal_windows`, `petal_trash`, `petal_remember`, `petal_forget`, `petal_memories`), which the
+/// `petal_apps`, `petal_windows`, `petal_trash`, `petal_remember`, `petal_forget`, `petal_memories`, and `petal_ui` and
+/// `petal_act` for using apps, ComputerUse.swift), which the
 /// running Petal answers over its socket: Petal holds the Mac's permissions (Accessibility, Screen Recording, each
 /// browser's Automation), so the AI never needs them itself.
 ///
@@ -40,6 +41,8 @@ final class Assist {
     @ObservationIgnored private var giveUp: DispatchWorkItem?
     @ObservationIgnored private var trashed: [(from: URL, to: URL)] = []
     @ObservationIgnored private var timer: Timer?
+    /// Using the person's apps with a pointer of its own (ComputerUse.swift).
+    @ObservationIgnored let computer = ComputerUse()
     nonisolated private static let queue = DispatchQueue(label: "petal.assist", qos: .userInitiated, attributes: .concurrent)
 
     var app: PetalApp { PetalApp.shared }
@@ -80,6 +83,9 @@ final class Assist {
     }
 
     @ObservationIgnored private var secretTyped: ((String) -> Void)?
+
+    /// Shows a made-up question, for `Petal --snapshot`.
+    func preview(_ request: Request?) { pending = request }
 
     /// The answer to the question `id` (a newer question replaced an older one, which was answered Don't then: an
     /// answer meant for the older one, or a secret typed for it, never goes to the newer).
@@ -151,6 +157,7 @@ final class Assist {
                 send(["opened": file.path])
             } catch { fail(error.localizedDescription) }
         case "petal_vault": vault(args, send, fail)
+        case "petal_ui", "petal_act": computer.handle(name, args, note: note, send: send, fail: fail)
         case "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
             app.routines.handle(name, args, send, fail)
         case "petal_memories":
@@ -273,14 +280,14 @@ final class Assist {
     static var clipboardIsPrivate: Bool { isConcealed(NSPasteboard.general) }
 
     /// The app in front (never Petal itself), or the running app called `name`.
-    private func frontApp(named name: String?) -> NSRunningApplication? {
+    func frontApp(named name: String?) -> NSRunningApplication? {
         if let name, !name.isEmpty { return running(name) }
         let me = ProcessInfo.processInfo.processIdentifier
         if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != me { return front }
         return nil
     }
 
-    private func running(_ name: String) -> NSRunningApplication? {
+    func running(_ name: String) -> NSRunningApplication? {
         let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
         return apps.first { $0.bundleIdentifier?.caseInsensitiveCompare(name) == .orderedSame }
             ?? apps.first { $0.localizedName?.caseInsensitiveCompare(name) == .orderedSame }

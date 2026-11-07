@@ -746,6 +746,9 @@ struct ClaudeSettings: View {
                 SettingToggle(key: "ai", title: "Sort new apps and sites", detail: "\(provider.name) decides which mode something new belongs to.")
                 DailySummaryRow()
             }
+            Card(title: "Using your apps", footer: "Petal AI presses buttons, types and chooses menu items with a pink pointer of its own; yours stays where it is. It asks before it uses each app, and Stop or Esc ends it.") {
+                SettingToggle(key: "computerUse", title: "Let Petal AI use your apps", detail: "Never apps kept private, and never password fields.")
+            }
             MemoryCard()
             VaultCard()
             PrivacyCard()
@@ -911,6 +914,7 @@ struct DailySummaryRow: View {
 }
 
 /// What the kinds of thing Petal AI asks about are called.
+@MainActor
 enum AllowedKinds {
     static func name(_ kind: String) -> String {
         switch kind {
@@ -918,7 +922,7 @@ enum AllowedKinds {
         case "close": "Closing windows"
         case "trash": "Moving files to the Trash"
         case "tidy": "Tidying many files at once"
-        default: kind
+        default: kind.hasPrefix("computer:") ? "Using \(Apps.name(String(kind.dropFirst(9))))" : kind
         }
     }
 }

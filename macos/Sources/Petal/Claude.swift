@@ -47,6 +47,8 @@ final class Agent {
     @ObservationIgnored private var errorText = ""
     @ObservationIgnored private var authFailed = false   // this run's key or sign-in was refused, already said
     @ObservationIgnored private var runID = UUID()   // a stopped run's late lines don't belong to the next chat
+    /// Counts the runs (each reply is one): what Petal AI may use in an app lasts one reply (ComputerUse.swift).
+    @ObservationIgnored private(set) var turn = 0
 
     var app: PetalApp { PetalApp.shared }
 
@@ -147,6 +149,11 @@ final class Agent {
     }
 
     func stop() { process?.terminate() }
+
+    /// The person stopped Petal AI using their apps (Stop, or Escape): said in the chat, as the AI is told.
+    func personStopped() {
+        messages.append(Message(kind: .step, text: "You stopped it"))
+    }
 
     /// Shows a made-up conversation, for `Petal --snapshot`.
     func preview(_ sample: [Message]) {
@@ -280,6 +287,7 @@ final class Agent {
         chat.note = noteID.uuidString
         authFailed = false
 
+        turn += 1
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = provider.chatArguments(chat)
@@ -419,6 +427,16 @@ final class Agent {
         case "mcp__petal__petal_look": return (input["screenshot"] as? String ?? "").isEmpty ? "Looking at what's in front" : "Looking at your screen"
         case "mcp__petal__petal_apps": return ((input["action"] as? String ?? "open").capitalized) + "  " + (input["app"] as? String ?? input["open"] as? String ?? "")
         case "mcp__petal__petal_windows": return (input["action"] as? String ?? "list") == "list" ? "Looking at your windows" : "Arranging windows"
+        case "mcp__petal__petal_ui": return "Looking at " + ((input["app"] as? String).flatMap { $0.isEmpty ? nil : $0 + "'s" } ?? "the window's") + " controls"
+        case "mcp__petal__petal_act":
+            switch input["action"] as? String ?? "" {
+            case "type": return "Typing"
+            case "focus": return "Going to a field"
+            case "scroll": return "Scrolling"
+            case "menu": return "Choosing  " + (input["path"] as? String ?? "")
+            case "key": return "Pressing  " + (input["key"] as? String ?? "")
+            default: return "Pressing a button"
+            }
         case "mcp__petal__petal_trash": return input["undo"] as? Bool == true ? "Putting files back" : "Moving to the Trash"
         case "mcp__petal__petal_remember": return "Remembering  " + (input["text"] as? String ?? "")
         case "mcp__petal__petal_forget": return "Forgetting"
@@ -446,6 +464,8 @@ final class Agent {
         Routines: when the user wants something to happen by itself from now on ("keep my Downloads tidy", "when a PDF lands in Downloads, file it under Receipts", "when I open Figma, switch to Design", "every evening tidy my Desktop"), make a routine with petal_routine_save: their own words, plus the trigger and actions you work out from them (Petal runs it with no AI except sorting files by what they are). It acts on new files only; when it says files are there already, show them what it would do with petal_routine_run (dryRun: true) in a line or two, and do it with petal_routine_run if they want. Routines only move files into folders, never delete; petal_routine_undo puts the last ones back, and Settings, Routines lists them all.
 
         Memory: below is what you remember about this user. When you learn something lasting that will help later (a preference, a habit, how they like things done, what a mode is for), save it yourself with petal_remember (learned: true; with the mode's id when it's about one mode) and say so in a word or two. When they say remember or forget something, do it with petal_remember or petal_forget. Forget what turns out wrong or out of date. Never keep passwords, secrets, or anything private they wouldn't want kept.
+
+        Using the user's apps for them (when computerUse is on): petal_ui lists the controls of the window in front (in a sticky note, its own window), each with an id like e12, its kind, name, value and place. petal_act then presses, types into, focuses or scrolls one by its id, chooses a menu item by its path (\"File > Export…\") or presses a key (cmd-s). Petal moves a pink pointer of its own, never the user's, and asks the user before it uses each app. Call petal_ui first, and again after anything that changes the window: ids from before may be gone, and an act that fails because the window changed means call petal_ui again. Prefer petal_apps and petal_windows to open, quit, bring forward or arrange, and a menu item or key over hunting for a button. When something can only be done with a real click (a canvas, a game, a control Accessibility can't reach), say so and ask the user to do it. Never type a password: petal_vault does. If the user stops it, stop and say what's left.
 
         Passwords and other secrets live in Petal's vault (petal_vault): list their names, use one (Petal types it into the field that has the cursor, after asking the user; you never see it), or request one you need (the user types it into Petal's card, never into the chat). Never ask the user to paste a password or key into the chat. Some apps the user keeps private: petal_look shows only their name.
 
