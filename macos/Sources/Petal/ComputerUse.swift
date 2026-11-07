@@ -47,6 +47,11 @@ final class ComputerUse {
         let entries: [String: Entry]
         let count: Int
         let made: Date
+        /// A note stuck to one tab: where, with the tab as seen showing when it was read. Every act checks that tab
+        /// is still the one its window shows, never acting on another.
+        var tabPlace: NotePlace? = nil
+        /// Its chat's `places` count when it was read: a note stuck somewhere else since can't use it.
+        var place = 0
     }
 
     /// One chat's reply (its turn; one task of an AI session outside Petal): the apps it may use, whether the person
@@ -92,6 +97,10 @@ final class ComputerUse {
 
     /// By caller. Never shared between two chats.
     private var maps: [String: Map] = [:]
+    /// By caller: how many times its note was stuck to something else (`placeChanged`). A map, or a petal_ui under
+    /// way, from before the last is no use.
+    private var places: [String: Int] = [:]
+    nonisolated static let moved = "This note was stuck somewhere else (its tab, its window or all of its app) since that petal_ui. Call petal_ui again for fresh ids."
     private var sessions: [String: Session] = [:] { didSet { standGuard() } }
     private var closed: [String: Closed] = [:]
     private var line: [Job] = [] { didSet { standGuard() } }
@@ -146,8 +155,11 @@ final class ComputerUse {
         let place = named.isEmpty && args["front"] as? Bool != true && app.claude.notesOn ? app.claude.note(withID: caller)?.place : nil
         let target: NSRunningApplication?
         if let place {
-            target = NSRunningApplication(processIdentifier: place.pid).flatMap { $0.bundleIdentifier == place.app && !$0.isTerminated ? $0 : nil }
-            guard target != nil else { return fail("This note's window is closed: \(place.appName) has quit. front: true uses what's in front now.") }
+            target = place.running
+            guard target != nil else {
+                return fail(place.kind == .app ? "This note is stuck to \(place.appName), which isn't open. front: true uses what's in front now."
+                                               : "This note's window is closed: \(place.appName) has quit. front: true uses what's in front now.")
+            }
         } else {
             target = assist.frontApp(named: named)
         }
@@ -158,16 +170,41 @@ final class ComputerUse {
             return send(["app": name, "private": "The user keeps this app private: Petal doesn't look into it or use it."])
         }
         let pid = target.processIdentifier
-        let wanted = place?.window
+        // A note asked where its app showed no window has none to read: never a window its app shows later.
+        let wanted: CGWindowID?
+        switch place?.target ?? .focused {
+        case .nothing: return fail(ClaudePanel.noWindow(name))
+        case .window(let number): wanted = number
+        case .focused: wanted = nil
+        }
         let find = args["find"] as? String ?? ""
+        // A note stuck to one tab reads its window only while that tab is the one showing, checked before and after.
+        let tabPlace = place.flatMap { $0.kind == .tab && $0.tab != nil ? $0 : nil }
+        let stuck = places[caller, default: 0]
         Self.readQueue.async {
+            if let tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
+                return DispatchQueue.main.async { fail(ClaudePanel.tabNotShowing) }
+            }
             let reading = Reader.read(pid: pid, window: wanted, budget: 1.5)
+            let seen = tabPlace.flatMap { ClaudePanel.tabShowing($0) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Turned off, or the app made private, while it read: nothing it read goes back.
                     if let refusal = self.refusal(for: bundle, name: name) { return fail(refusal) }
+                    // The note was stuck somewhere else while it read: what it read was for the old place.
+                    if self.places[caller, default: 0] != stuck { return fail(Self.moved) }
                     if reading.gone { return fail("This note's window is closed (it was in \(name)). front: true uses what's in front now.") }
                     guard let window = reading.window else { return fail("\(name) has no window open.") }
+                    // Another tab came forward while it read (or Petal can't tell any more): nothing it read goes back.
+                    var stuckTab: NotePlace?
+                    if let tabPlace {
+                        guard let seen, seen.window == reading.windowID else { return fail(ClaudePanel.tabNotShowing) }
+                        self.app.claude.tabSeen(note: caller, was: tabPlace, tab: seen.tab, window: seen.window)
+                        var now = tabPlace
+                        if let tab = now.tab { now.tab = NoteRules.follow(tab, to: seen.tab, keepWords: true) }
+                        now.window = seen.window
+                        stuckTab = now
+                    }
                     let picked = UIMap.select(reading.nodes, window: reading.windowFrame, find: find)
                     var entries: [String: Entry] = [:]
                     var list: [[String: Any]] = []
@@ -185,7 +222,7 @@ final class ComputerUse {
                     }
                     self.maps[caller] = Map(pid: pid, bundle: bundle, appName: name, window: window, windowID: reading.windowID,
                                             windowFrame: reading.windowFrame, lists: reading.lists, fingerprint: reading.fingerprint,
-                                            entries: entries, count: entries.count, made: Date())
+                                            entries: entries, count: entries.count, made: Date(), tabPlace: stuckTab, place: stuck)
                     self.keepSweeping()
                     var result: [String: Any] = ["app": name, "window": reading.title, "elements": list,
                                                  "note": "Act with petal_act by id. These ids last until the next petal_ui, or 5 minutes; call petal_ui again once the window changes."]
@@ -214,6 +251,7 @@ final class ComputerUse {
         let id = (args["id"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         if let map = maps[caller], Date().timeIntervalSince(map.made) > UIMap.lifetime { maps[caller] = nil }
         // Every action, menus and keys too, goes to the window the last petal_ui looked at: never another one.
+        if let map = maps[caller], map.place != places[caller, default: 0] { maps[caller] = nil; return fail(Self.moved) }
         guard let map = maps[caller] else {
             return fail(byElement.contains(action) || !id.isEmpty
                 ? "Call petal_ui first: ids come from it, and last until the next petal_ui or 5 minutes."
@@ -274,6 +312,8 @@ final class ComputerUse {
         assist.ask("computer:\(bundle)", "Let Petal AI use \(name)?",
                    detail: "First, \(first). \(lasting) it can press, type and choose menus in \(name) with its own pointer; yours stays where it is. Esc stops it.",
                    owner: caller) { allowed in
+            // The note was stuck somewhere else while the person was asked (its card was taken away): look again.
+            if job.map.place != self.places[caller, default: 0] { return fail(Self.moved) }
             // Its turn ended, the person stopped it, or turned it off, while they were asked.
             if job.cancel.stopped { return fail(self.whyStopped(job)) }
             guard allowed else {
@@ -404,15 +444,18 @@ final class ComputerUse {
     private func stale(_ job: Job) -> String? {
         if job.cancel.stopped || sessions[job.caller]?.stopped == true { return whyStopped(job) }
         if let refusal = refusal(for: job.bundle, name: job.appName) { return refusal }
+        if job.map.place != places[job.caller, default: 0] { return Self.moved }
         guard let map = maps[job.caller], map.id == job.map.id, Date().timeIntervalSince(map.made) <= UIMap.lifetime else {
             return "The window was looked at again (or 5 minutes passed) since these ids. " + Acting.changed
         }
         return nil
     }
 
-    /// What a stopped job tells the chat: turned off or made private, said so; else the person stopped it.
+    /// What a stopped job tells the chat: turned off or made private, or its note stuck somewhere else, said so; else
+    /// the person stopped it.
     private func whyStopped(_ job: Job) -> String {
-        refusal(for: job.bundle, name: job.appName) ?? Self.stoppedText
+        if let refusal = refusal(for: job.bundle, name: job.appName) { return refusal }
+        return job.map.place != places[job.caller, default: 0] ? Self.moved : Self.stoppedText
     }
 
     /// Checks the window and control are as the map said, glides the cursor there, then checks it all again and does
@@ -432,6 +475,12 @@ final class ComputerUse {
             ?? CGPoint(x: map.windowFrame.midX, y: map.windowFrame.minY + 14)
         cursor.preparing(job.caption, near: Self.screenPoint(near))
         Self.actQueue.async {
+            // A tab note's tab must still be the one its window shows.
+            if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
+                return DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self.cursor.rest(); job.fail(ClaudePanel.tabNotShowing); self.finished() }
+                }
+            }
             let prepared = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -443,17 +492,21 @@ final class ComputerUse {
                         Self.actQueue.async {
                             var outcome = Acting.Outcome()
                             if !cancel.stopped {
-                                // Right before the change: the window, what's selected in it, what has the keyboard
-                                // and the control, again.
-                                let checked = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options, known: prepared)
-                                if let error = checked.error {
-                                    outcome.error = error
-                                } else if !cancel.stopped {
-                                    if ["press", "menu"].contains(job.action) || (job.action == "key" && checked.menuItem != nil) {
-                                        DispatchQueue.main.async { MainActor.assumeIsolated { self.cursor.press() } }
+                                // Right before the change: a tab note's tab still showing, then the window (its title
+                                // is the tab's), what's selected in it, what has the keyboard and the control, again.
+                                if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
+                                    outcome.error = ClaudePanel.tabNotShowing
+                                } else {
+                                    let checked = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options, known: prepared)
+                                    if let error = checked.error {
+                                        outcome.error = error
+                                    } else if !cancel.stopped {
+                                        if ["press", "menu"].contains(job.action) || (job.action == "key" && checked.menuItem != nil) {
+                                            DispatchQueue.main.async { MainActor.assumeIsolated { self.cursor.press() } }
+                                        }
+                                        outcome = Acting.perform(job.action, entry: job.entry, map: map, prepared: checked,
+                                                                 options: job.options, cancel: cancel)
                                     }
-                                    outcome = Acting.perform(job.action, entry: job.entry, map: map, prepared: checked,
-                                                             options: job.options, cancel: cancel)
                                 }
                             }
                             DispatchQueue.main.async {
@@ -548,6 +601,25 @@ final class ComputerUse {
         sessions[caller] = nil
         if forget { maps[caller] = nil }
         if !closed.isEmpty { keepSweeping() }
+    }
+
+    /// A note was stuck to something else (its tab, its window or all of its app; Agent.place): its ids, a petal_ui
+    /// under way, its actions waiting or under way and its question waiting (its card goes) were for the old place,
+    /// so they go, and its AI is told at once to look again. What the person allowed this reply stays.
+    func placeChanged(_ caller: String) {
+        places[caller, default: 0] += 1
+        maps[caller] = nil
+        if let acting, acting.caller == caller {
+            acting.cancel.stop()
+            cursor.hide()
+        }
+        let waiting = line.filter { $0.caller == caller }
+        line.removeAll { $0.caller == caller }
+        for job in waiting {
+            job.cancel.stop()
+            job.fail(Self.moved)
+        }
+        assist.decline(owner: caller)
     }
 
     private func cancelWork(of caller: String) {

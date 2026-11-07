@@ -30,7 +30,15 @@ final class Agent {
     /// The sticky note this chat is (StickyNotes.swift): its tools are told, so they look at its window.
     let noteID = UUID()
     /// The window the note is stuck to; nil for a chat stuck to none.
-    var place: NotePlace? { didSet { if place != oldValue { keep() } } }
+    var place: NotePlace? {
+        didSet {
+            guard place != oldValue else { return }
+            // Stuck to something else (its tab, its window, all of its app): what its AI read for the old one is no
+            // use, and nothing it asked for there goes ahead.
+            if place?.kind != oldValue?.kind { app.assist.computer.placeChanged(noteID.uuidString) }
+            keep()
+        }
+    }
     /// The AI the chat's first message was asked with, before it has a session (a note waiting for a slot keeps it).
     @ObservationIgnored private var askedWith: Provider?
     /// The window a kept chat was stuck to, kept in its saves until the note sticks to a window again (or learns
@@ -229,7 +237,7 @@ final class Agent {
         chatProvider = provider
         let title = first.components(separatedBy: "\n").first { !$0.hasPrefix(">") && !$0.hasPrefix("From ") && !$0.isEmpty } ?? first
         return SavedChat(id: chatID, title: String(title.prefix(80)), provider: provider?.rawValue ?? "", session: sessionID,
-                         updated: Date(), lines: lines, place: place ?? keptPlace, pending: pending.isEmpty ? nil : pending)
+                         updated: Date(), lines: lines, place: (place ?? keptPlace)?.sanitized, pending: pending.isEmpty ? nil : pending)
     }
 
     private static func name(_ kind: Kind) -> String {
@@ -244,7 +252,7 @@ final class Agent {
         endRun()
         app.assist.computer.end(noteID.uuidString, forget: true)
         askedWith = nil
-        keptPlace = chat.place
+        keptPlace = chat.place?.sanitized
         onDisk = true
         pendingAsk = []
         allowed = []
@@ -488,8 +496,19 @@ final class Agent {
         if !notes.isEmpty { prompt += "\n\nThe user's own instructions:\n" + notes }
         if let place, app.config.bool("aiNotes") {
             let mode = app.config.modes.first { $0.id == place.mode }?.name
-            let window = app.assist.neverLook(place.app) || place.title.isEmpty ? "\(place.appName)'s window" : "\(place.appName)'s window “\(place.title)”"
-            prompt += "\n\nThis chat is a sticky note on one window: \(window)\(mode.map { ", in the \($0) mode" } ?? ""). When the user says this, here or what I'm looking at, they mean that window, even after they've gone to another app: petal_look looks at it (front: true looks at what's in front now instead). The user may read your reply later, from that window."
+            let quiet = app.assist.neverLook(place.app)
+            let window = quiet || place.title.isEmpty ? "\(place.appName)'s window" : "\(place.appName)'s window “\(place.title)”"
+            let inMode = mode.map { ", in the \($0) mode" } ?? ""
+            switch place.kind {
+            case .app:
+                prompt += "\n\nThis chat is a sticky note on all of \(place.appName): it shows on whichever of its windows is in front\(inMode). When the user says this, here or what I'm looking at, they mean \(place.appName)'s window in front, even after they've gone to another app: petal_look looks at it (front: true looks at what's in front now instead). The user may read your reply later, from \(place.appName)."
+            case .tab:
+                let title = quiet ? "" : (place.tab?.title.isEmpty == false ? place.tab?.title ?? "" : place.title)
+                let tab = title.isEmpty ? "one tab in \(place.appName)" : "one tab in \(place.appName), “\(title)”"
+                prompt += "\n\nThis chat is a sticky note on \(tab)\(inMode). When the user says this, here or what I'm looking at, they mean that tab, even after they've gone elsewhere: petal_look looks at its window and says which tab the note is on (front: true looks at what's in front now instead). The user may read your reply later, from that tab."
+            case .window:
+                prompt += "\n\nThis chat is a sticky note on one window: \(window)\(inMode). When the user says this, here or what I'm looking at, they mean that window, even after they've gone to another app: petal_look looks at it (front: true looks at what's in front now instead). The user may read your reply later, from that window."
+            }
         }
         let remembered = app.assist.memoryBrief(mode: place?.mode)
         if !remembered.isEmpty { prompt += "\n\nWhat you remember about this user ([id] for petal_forget):\n" + remembered }
@@ -532,6 +551,18 @@ final class LineBuffer: @unchecked Sendable {
 final class InputPanel: NSPanel {
     private let hosting = NSHostingView(rootView: AnyView(EmptyView()))
     var onClose: () -> Void = {}
+    /// Where a note the person moved sits, for the panel's size (StickyNotes.swift); nil: over the dock.
+    var placement: ((CGSize) -> CGRect?)?
+    /// A note stuck where the person left it stays when they click elsewhere in its place: only ×, Escape, the AI
+    /// button or going to another place puts it away.
+    var stays: () -> Bool = { false }
+    /// Dragged by its glass: where the pointer and the panel were when it began.
+    private var dragStart: (mouse: CGPoint, origin: CGPoint)?
+    /// Let go after a drag: where it is now.
+    var onMoved: (CGRect) -> Void = { _ in }
+    /// Where it was let go, while no window holds it there (a chat stuck to none, or its window still being read):
+    /// it grows from there instead of going back over the dock, until it's opened again.
+    private var dropped: CGRect?
 
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -552,8 +583,27 @@ final class InputPanel: NSPanel {
 
     override func resignKey() {
         super.resignKey()
-        close()
+        if !stays() { close() }
     }
+
+    // MARK: Dragging
+
+    /// The pointer moved with the button down on the panel's glass (not its text or controls): the panel follows it.
+    func drag() {
+        let mouse = NSEvent.mouseLocation
+        if dragStart == nil { dragStart = (mouse, frame.origin) }
+        guard let start = dragStart else { return }
+        setFrameOrigin(NSPoint(x: start.origin.x + mouse.x - start.mouse.x, y: start.origin.y + mouse.y - start.mouse.y))
+    }
+
+    func dragEnded() {
+        guard dragStart != nil else { return }
+        dragStart = nil
+        dropped = frame
+        onMoved(frame)
+    }
+
+    var dragging: Bool { dragStart != nil }
 
     override func close() {
         super.close()
@@ -582,6 +632,14 @@ final class InputPanel: NSPanel {
             ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
+        dropped = nil
+        // A note the person moved: where they left it on its window.
+        if let stuck = placement?(size) {
+            setFrame(stuck, display: true)
+            if key { makeKeyAndOrderFront(nil) } else { orderFrontRegardless() }
+            popIn(from: CGPoint(x: size.width / 2, y: size.height / 2))
+            return
+        }
         // The content's own 10-point margin around the glass, then 6 points of space over the dock.
         let above = Self.dockReach(on: screen) + 6 - 10
         let bottomDock = PetalApp.shared.config.position == "bottom"
@@ -628,10 +686,22 @@ final class InputPanel: NSPanel {
         return gap + 2 + 4 + icon + inset * 2 + 4
     }
 
-    /// Grows upward as the conversation does, keeping its bottom edge.
+    /// Grows upward as the conversation does, keeping its bottom edge (a moved note: the corner it's stuck by).
     func fit() {
+        guard !dragging else { return }
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
+        if let stuck = placement?(size) {
+            if stuck != frame { setFrame(stuck, display: true, animate: false) }
+            return
+        }
+        if let dropped {
+            let visible = (screen ?? NSScreen.main ?? NSScreen.screens[0]).visibleFrame
+            let target = NSRect(x: dropped.minX, y: max(visible.minY, min(dropped.minY, visible.maxY - size.height)),
+                                width: size.width, height: size.height).integral
+            if target != frame { setFrame(target, display: true, animate: false) }
+            return
+        }
         let screen = self.screen ?? NSScreen.main ?? NSScreen.screens[0]
         let bottom = screen.frame.minY + Self.dockReach(on: screen) + 6 - 10
         let target = NSRect(x: frame.midX - size.width / 2, y: bottom, width: size.width, height: size.height).integral
@@ -664,7 +734,20 @@ final class ClaudePanel {
     var readyApps: Set<String> = []
     var readyModes: [String: Int] = [:]
     @ObservationIgnored var closeReason: CloseReason?
-    @ObservationIgnored var lastFront: (pid: pid_t, window: CGWindowID?)?
+    /// What was in front when Petal last looked (its tab too, in a browser), and where its window was.
+    @ObservationIgnored var lastFront: FrontPlace?
+    @ObservationIgnored var lastFrontFrame: CGRect?
+    /// The tab in front can be told apart (a Safari window's tab strip showed up, say): the chip offers "This tab".
+    var frontTabKnown = false
+    /// A look at the front window waiting to happen (its title changed: maybe another tab) or under way.
+    @ObservationIgnored var lookAgain: DispatchWorkItem?
+    /// The open note's window moved or resized: its frame is being read, and read once more if it moves again meanwhile.
+    @ObservationIgnored var following = false
+    @ObservationIgnored var followAgain = false
+    /// Counts the looks at what's in front: only the newest one's answer counts.
+    @ObservationIgnored var looks = 0
+    /// The looks again at an app whose focused window couldn't be read, while it stays unknown.
+    @ObservationIgnored var unknownLooks: (pid: pid_t, count: Int) = (0, 0)
     @ObservationIgnored var pendingOpen: StickyNote?
     @ObservationIgnored var pendingTicket = 0
     /// Counts chats picked from the list: one picked after another (before its window was checked) wins.
@@ -672,6 +755,10 @@ final class ClaudePanel {
     /// The app a note's window is being brought forward in: another app coming forward stops its retries.
     @ObservationIgnored var bringing: pid_t?
     @ObservationIgnored var savedPlaces: [String: SavedChat] = [:]
+    /// Counts the person's choices of what the note sticks to: a tab read for an older one never sticks it.
+    @ObservationIgnored var stickTicket = 0
+    /// The apps kept private (`aiNeverLook`) as notes last heard: a change drops tab reads under way.
+    @ObservationIgnored var privateApps: [String] = []
     @ObservationIgnored var listening = false
     /// The one chat stuck to no window (no app in front, or sticky notes off).
     @ObservationIgnored var loose: StickyNote
@@ -738,6 +825,11 @@ final class ClaudePanel {
                 // A question still waiting goes to the dock, where it can be answered.
                 if PetalApp.shared.assist.pending != nil { PetalApp.shared.popups.show(FocusCard(kind: .ask)) }
             }
+            // A note the person moved sits where they left it on its window, follows it, and stays put when
+            // they click elsewhere in it (StickyNotes.swift).
+            panel.placement = { [weak self] size in self?.stuckFrame(size) }
+            panel.stays = { [weak self] in self?.stuckHere ?? false }
+            panel.onMoved = { [weak self] frame in self?.noteMoved(to: frame) }
             self.panel = panel
         }
         let again = isOpen && current === note
@@ -796,6 +888,20 @@ final class ClaudePanel {
     }
 
     func fit() { panel?.fit() }
+
+    /// Dragged by its glass (not its text or controls): it goes where the pointer does, and sticks there.
+    func dragNote() { panel?.drag() }
+    func dragNoteEnded() { panel?.dragEnded() }
+}
+
+/// The panel's glass, under its text and controls: dragging it moves the note.
+private struct NoteDragArea: View {
+    let panel: ClaudePanel
+
+    var body: some View {
+        Color.clear.contentShape(.rect)
+            .gesture(DragGesture(minimumDistance: 3).onChanged { _ in panel.dragNote() }.onEnded { _ in panel.dragNoteEnded() })
+    }
 }
 
 struct ClaudePanelView: View {
@@ -819,7 +925,7 @@ struct ClaudePanelView: View {
         VStack(alignment: .leading, spacing: 14) {
             header
             // The window this note is stuck to.
-            if let place = agent.place { NotePlaceLine(place: place, gone: panel.current.windowGone).padding(.top, -6) }
+            if let place = agent.place { NotePlaceLine(panel: panel, place: place, gone: panel.current.windowGone).padding(.top, -6) }
             ZStack(alignment: .top) {
                 // A chat with only messages still to send (kept from before Petal quit) shows them, with Send now.
         Group { if agent.messages.isEmpty && agent.queued.isEmpty { empty } else { conversation } }
@@ -839,6 +945,8 @@ struct ClaudePanelView: View {
         // stays put on the left instead of spilling out on both sides, which made switching jump sideways.
         .frame(width: 524, alignment: .leading)
         .padding(18)
+        // Its glass, between the text and controls, moves it: let go, it sticks there on its window.
+        .background { NoteDragArea(panel: panel) }
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
         .padding(10)
         .onAppear { focused = true }

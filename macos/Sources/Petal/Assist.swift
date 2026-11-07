@@ -150,7 +150,7 @@ final class Assist {
         let fail = { (text: String) in send(["error": text]) }
         switch name {
         // The note's window as it is now (a note stuck to none, or notes off: what's in front).
-        case "petal_look": look(args, place: app.claude.notesOn ? note.flatMap { app.claude.note(withID: $0) }?.place : nil, send)
+        case "petal_look": look(args, place: app.claude.notesOn ? note.flatMap { app.claude.note(withID: $0) }?.place : nil, note: note, send)
         case "petal_apps": apps(args, send, fail)
         case "petal_windows": windows(args, send, fail)
         case "petal_trash": trash(args, send, fail)
@@ -191,21 +191,26 @@ final class Assist {
     /// with `screenshot` ("window" or "screen") a picture saved where the AI can read it, and the clipboard if asked.
     /// A sticky note (`place`) looks at its own window instead, wherever the person is now, unless it asks for an app
     /// or for what's in front (`front`).
-    private func look(_ args: [String: Any], place: NotePlace? = nil, _ send: @escaping (Any) -> Void) {
+    private func look(_ args: [String: Any], place: NotePlace? = nil, note: String? = nil, _ send: @escaping (Any) -> Void) {
         let named = args["app"] as? String ?? ""
         let place = named.isEmpty && args["front"] as? Bool != true ? place : nil
-        let stuck = place.flatMap { p in NSRunningApplication(processIdentifier: p.pid).flatMap { $0.bundleIdentifier == p.app && !$0.isTerminated ? $0 : nil } }
+        let stuck = place?.running
         let front = place == nil ? frontApp(named: named) : stuck
-        let wanted = place?.window
+        let wanted: CGWindowID? = if case .window(let number)? = place?.target { number } else { nil }
         var result: [String: Any] = [:]
         if let place, let mode = config.modes.first(where: { $0.id == place.mode }) { result["mode"] = ["id": mode.id, "name": mode.name] }
         else if let mode = app.docks.focusedDock?.mode { result["mode"] = ["id": mode.id, "name": mode.name] }
         if let place {
             // A note's window that's gone is said so, and nothing else is looked at in its place.
             guard stuck != nil else {
-                return send(["note": "This note's window is closed: \(place.appName) has quit. front: true looks at what's in front now."])
+                return send(["note": place.kind == .app ? "This note is stuck to \(place.appName), which isn't open. front: true looks at what's in front now."
+                                                      : "This note's window is closed: \(place.appName) has quit. front: true looks at what's in front now."])
             }
-            result["note"] = "This is the window the note is stuck to; the user may be looking at something else now (front: true shows that)."
+            // Asked where its app showed no window: none to look at, never a window that app shows later.
+            if place.target == .nothing { return send(["note": ClaudePanel.noWindow(place.appName)]) }
+            result["note"] = place.kind == .app
+                ? "This note is stuck to all of \(place.appName): this is its window in front; the user may be looking at something else now (front: true shows that)."
+                : "This is the window the note is stuck to; the user may be looking at something else now (front: true shows that)."
         }
         result["onScreen"] = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !$0.isHidden }
             .compactMap(\.localizedName)).sorted()
@@ -244,7 +249,14 @@ final class Assist {
         addClipboard()
         let pid = front.processIdentifier
         let shot = args["screenshot"] as? String ?? ((args["screenshot"] as? Bool) == true ? "window" : "")
+        // A note stuck to one tab looks only while that tab is the one its window shows: never at another tab.
+        // Checked before reading and again once everything is read, right before it's told (`deliver`).
+        let tabPlace = place.flatMap { $0.kind == .tab && $0.tab != nil ? $0 : nil }
         Self.queue.async {
+            let before = tabPlace.flatMap { ClaudePanel.tabShowing($0) }
+            if tabPlace != nil, before == nil {
+                return DispatchQueue.main.async { send(["note": ClaudePanel.tabNotShowing]) }
+            }
             let element = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(element, 0.3)
             var window: AXUIElement? = Windows.value(element, kAXFocusedWindowAttribute)
@@ -275,31 +287,75 @@ final class Assist {
                     if !shownSelection.isEmpty { result["selectedText"] = shownSelection }
                     if let shownClipboard { result["clipboard"] = shownClipboard }
                     let hidden = self.privatePIDs
+                    // What was read goes to the AI only if it's still what it was read from: the app not made private
+                    // meanwhile, and a tab note's tab still the one showing in the same window. Else none of it goes
+                    // (the picture is deleted): another tab's text, address or picture is never told as the note's.
+                    let deliver = { (picture: String?) in
+                        // The picture is deleted off the main thread (the disk may wait), before the refusal is told.
+                        let refuse = { (answer: [String: Any]) in
+                            guard let picture else { return send(answer) }
+                            nonisolated(unsafe) let answer = answer
+                            Self.queue.async {
+                                try? FileManager.default.removeItem(atPath: picture)
+                                DispatchQueue.main.async { MainActor.assumeIsolated { send(answer) } }
+                            }
+                        }
+                        let privately: [String: Any] = ["app": ["name": front.localizedName ?? "", "id": front.bundleIdentifier ?? ""],
+                                                        "private": "The user keeps this app private: Petal doesn't look at what's in it."]
+                        let tell = {
+                            if self.neverLook(front.bundleIdentifier) { return refuse(privately) }
+                            // Its tab, seen showing: the note follows it (a chat kept from before Petal restarted
+                            // takes the tab's button from now on).
+                            if let tabPlace, let before, let note { self.app.claude.tabSeen(note: note, was: tabPlace, tab: before.tab, window: before.window) }
+                            if picture != nil { self.did(shot == "screen" ? "Looked at your screen" : "Looked at \(front.localizedName ?? "a window")") }
+                            send(result)
+                        }
+                        guard let tabPlace, let before else { return tell() }
+                        Self.queue.async {
+                            let after = ClaudePanel.tabShowing(tabPlace)
+                            // The same tab of the same window it read: its id or button, place and address unchanged.
+                            let same = after.map { now in
+                                now.window == before.window && before.window == number && now.tab.id == before.tab.id
+                                    && now.tab.element == before.tab.element && now.tab.index == before.tab.index
+                                    && now.tab.count == before.tab.count && now.tab.url == before.tab.url
+                            } ?? false
+                            DispatchQueue.main.async {
+                                MainActor.assumeIsolated { same ? tell() : refuse(["note": ClaudePanel.tabNotShowing]) }
+                            }
+                        }
+                    }
                     let finish = {
-                        guard !shot.isEmpty else { return send(result) }
+                        guard !shot.isEmpty else { return deliver(nil) }
                         Task {
-                            if let path = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", hiding: hidden) {
-                                self.did(shot == "screen" ? "Looked at your screen" : "Looked at \(front.localizedName ?? "a window")")
+                            let path = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", hiding: hidden)
+                            if let path {
                                 result["screenshot"] = path
                                 result["screenshotNote"] = "A PNG of the \(shot == "screen" ? "screen" : "window"); read it to see it."
                             } else {
                                 result["screenshotNote"] = Capture.allowed ? "Couldn't take the picture." : "Petal needs Screen Recording for pictures (Petal's settings, Permissions)."
                             }
-                            send(result)
+                            deliver(path)
                         }
                     }
                     guard Browsers.kind(front.bundleIdentifier ?? "") != nil else { return finish() }
                     // A note's tab is always its own window's (by id, or frame and title), never whichever window is
                     // in front by the time the browser answers.
                     let other = place == nil ? nil : Browsers.Window(number: number, title: realTitle, frame: frame)
+                    // A note stuck to one tab: which, as it was last seen (the window may show another now).
+                    let noteTab = place?.kind == .tab ? place?.tab : nil
                     self.app.browsers.frontURL(of: front, window: other) { url in
-                        guard let url else { return finish() }
+                        guard url != nil || noteTab != nil else { return finish() }
                         // An address can carry a key too (?token=…).
                         Self.queue.async {
-                            let shown = Self.withoutSecrets(url)
+                            let shown = url.map(Self.withoutSecrets)
+                            let stuckTab = noteTab.map { ["url": Self.withoutSecrets($0.url), "title": Self.withoutSecrets($0.title)] }
                             DispatchQueue.main.async {
                                 MainActor.assumeIsolated {
-                                    result["tab"] = ["url": shown, "title": title]
+                                    if let shown { result["tab"] = ["url": shown, "title": title] }
+                                    if let stuckTab {
+                                        result["noteTab"] = stuckTab
+                                        result["note"] = "This note is stuck to one tab of this window (noteTab); tab is the one the window shows now. The user may be looking at something else (front: true shows that)."
+                                    }
                                     finish()
                                 }
                             }
