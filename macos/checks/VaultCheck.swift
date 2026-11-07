@@ -56,6 +56,9 @@ struct VaultCheck {
         nameHeuristics()
         securityCodes()
         years()
+        wideCardGaps()
+        importDetails()
+        cardDigits()
         if failures > 0 { print("vault: \(failures) failed"); exit(1) }
         print("vault: ok")
     }
@@ -165,7 +168,8 @@ struct VaultCheck {
         let back = Vault.importData(data)
         expect(back?.items == items, "Petal's export round trip is lossless")
         let merged = Vault.merge(existing: [], incoming: back?.items ?? [])
-        expect(merged.save.sorted { $0.id < $1.id } == items.sorted { $0.id < $1.id } && merged.added == items.count, "importing it into an empty vault keeps every item as it was")
+        // (A card number is kept as its digits.)
+        expect(merged.save.sorted { $0.id < $1.id } == items.map(Vault.normalized).sorted { $0.id < $1.id } && merged.added == items.count, "importing it into an empty vault keeps every item as it was")
         let again = Vault.merge(existing: items, incoming: items)
         expect(again.save.isEmpty && again.same == items.count, "importing it again changes nothing")
         // Logins as CSV, in Chrome's format: back with the same title, site, username, password and notes.
@@ -630,14 +634,98 @@ struct VaultCheck {
         }
         expect(index.matches("ends …1111 1111 1111"), "twelve of its digits are enough")
         let other = UIMap.SecretIndex(Vault.secrets(.number, "5555444433331111"))
-        expect(other.matches("5555\u{00A0}·\u{00A0}4444") && !other.matches("5555 card 4444") && !other.matches("5555 \u{00A0} - 4444"),
-               "half a card number across a few separators is caught; across a word, or more than 3 characters, it isn't")
+        expect(other.matches("5555\u{00A0}·\u{00A0}4444") && !other.matches("5555 card 4444") && !other.matches("5555 (·) 4444"),
+               "half a card number across a few characters is caught; across a word, or more than 3 that aren't separators, it isn't")
         expect(!index.matches("Call 4111 2222 3333") && !index.matches("4111.11"), "other numbers aren't")
         expect(!index.matches("Visa •••• 1111"), "the last four still aren't a secret")
         expect(index.redacted("Order 1234 5678, card 4111 1111 1111 1111.") == "Order 1234 5678, card \(UIMap.hidden).", "only the card number goes")
         // A full-width security code is the same code.
         expect(index.matches("CVV ７３７") && !index.matches("１７３７０"), "a security code in full-width digits")
         expect(UIMap.SecretIndex.digit("٤") == 4 && UIMap.SecretIndex.digit("x") == nil && UIMap.SecretIndex.digit("²") == nil, "digits in any script, not superscripts")
+    }
+
+    /// A card number spread out by separators of any kind and length (up to 16 between two digits) is still caught,
+    /// and hidden whole; a letter, or 17 separators, breaks it.
+    static func wideCardGaps() {
+        let index = UIMap.SecretIndex(Vault.secrets(.number, "4532015112830366"))
+        for (text, what) in [("4532    0151    1283    0366", "four spaces"), ("4532\t\t0151\t\t1283\t\t0366", "tabs"),
+                             ("4532\n    0151\n    1283\n    0366", "line breaks and indents"), ("4532 . 0151 / 1283 - 0366", "spaced punctuation"),
+                             ("4532 \u{200B}\u{00A0} \u{2014} 0151\u{3000}\u{3000}\u{3000}\u{3000}1283\r\n\r\n0366", "mixed invisible and wide spaces"),
+                             ("4532" + String(repeating: " ", count: 16) + "0151 1283 0366", "16 spaces")] {
+            expect(index.matches(text), "a card number with \(what) is caught")
+            let shown = index.redacted("Card: \(text) ok")
+            expect(shown == "Card: \(UIMap.hidden) ok", "a card number with \(what) is hidden whole: \(shown.debugDescription)")
+        }
+        let half = UIMap.SecretIndex(Vault.secrets(.number, "5555444433331111"))
+        expect(half.matches("5555 \u{00A0} - 4444") && half.matches("5555        4444"), "half of one across separators")
+        expect(!half.matches("5555" + String(repeating: " ", count: 17) + "4444"), "17 separators break it")
+        expect(!half.matches("5555    x    4444") && !half.matches("5555 :: ** 4444"), "a letter, or more than 3 that aren't separators, break it")
+        expect(UIMap.SecretIndex.separator("\u{200D}") && UIMap.SecretIndex.separator("\u{2013}") && !UIMap.SecretIndex.separator("a")
+               && !UIMap.SecretIndex.separator("*"), "what counts as a separator")
+    }
+
+    /// A login from another app's file with the same secrets but another title or notes is never "already here"
+    /// with its details dropped: notes join a login that has none; otherwise the import's are offered.
+    static func importDetails() {
+        var saved = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"])
+        saved[.username] = "ada"
+        saved[.password] = "pw"
+        saved[.notes] = "mine"
+        var renamed = saved
+        renamed.id = Vault.newID()
+        renamed.title = "github.com"
+        renamed[.notes] = "recovery codes in the drawer"
+        let merged = Vault.merge(existing: [saved], incoming: [renamed])
+        expect(merged.same == 0 && merged.save.isEmpty && merged.conflicts.count == 1, "other details: kept yours, offered the import's")
+        expect(merged.conflicts.first.map { $0.id == saved.id && $0.title == "github.com" && $0[.notes] == "recovery codes in the drawer" && $0[.password] == "pw" } == true,
+               "the offer is the import's title and notes on the saved login")
+        var bare = saved
+        bare[.notes] = ""
+        var noted = saved
+        noted.id = Vault.newID()
+        noted[.notes] = "n"
+        let joined = Vault.merge(existing: [bare], incoming: [noted])
+        expect(joined.save.count == 1 && joined.save[0][.notes] == "n" && joined.conflicts.isEmpty && joined.same == 0, "notes join a login that had none")
+        var titled = saved
+        titled.id = Vault.newID()
+        titled.title = "Work GitHub"
+        titled[.notes] = ""
+        let named = Vault.merge(existing: [saved], incoming: [titled])
+        expect(named.conflicts.first?.title == "Work GitHub" && named.conflicts.first?[.notes] == "mine" && named.same == 0, "only the title differs: offered")
+        var twin = saved
+        twin.id = Vault.newID()
+        expect(Vault.merge(existing: [saved], incoming: [twin]).same == 1, "every field the same: already here")
+        var other = renamed
+        other[.password] = "new"
+        let both = Vault.merge(existing: [saved], incoming: [other])
+        expect(both.conflicts.count == 1 && both.conflicts[0][.password] == "new" && both.conflicts[0].title == "github.com", "another password: the import's details with it")
+    }
+
+    /// A card number and security code are typed as ASCII digits whatever they were saved as, kept so, and a field
+    /// that took fewer digits than were typed isn't a fill.
+    static func cardDigits() {
+        var card = VaultItem(kind: .card, title: "Visa")
+        card[.number] = "4532 0151 1283 0366"
+        card[.securityCode] = "７３７"
+        expect(Vault.text(card, .number) == "4532015112830366" && Vault.text(card, .securityCode) == "737", "typed as digits only")
+        expect(Vault.typed(.number, "4532-0151\u{00A0}1283 0366") == "4532015112830366" && Vault.typed(.password, "a b") == "a b", "only card fields lose separators")
+        let kept = Vault.normalized(card)
+        expect(kept[.number] == "4532015112830366" && kept[.securityCode] == "737", "kept as digits")
+        var odd = card
+        odd[.number] = "ask the bank"
+        expect(Vault.normalized(odd)[.number] == "ask the bank", "text that isn't a number stays")
+        var login = VaultItem(kind: .login, title: "x")
+        login[.password] = "1 2 3"
+        expect(Vault.normalized(login)[.password] == "1 2 3", "only cards")
+        let digits = "4532015112830366"
+        expect(Vault.fits(digits, value: "4532 0151 1283 0366", count: 19) == true, "a field that groups them holds them all")
+        expect(Vault.fits(digits, value: "453201511283", count: 12) == false, "a field that cut it short")
+        expect(Vault.fits(digits, value: nil, count: 16) == true && Vault.fits(digits, value: nil, count: 15) == false, "a secure field by its length")
+        expect(Vault.fits(digits, value: nil, count: nil) == nil, "a field that says nothing: can't tell")
+        // An import with the number grouped is the card already saved.
+        var grouped = card
+        grouped.id = Vault.newID()
+        expect(Vault.merge(existing: [kept], incoming: [grouped]).same == 1, "a grouped number is the same card")
     }
 
     /// A vault that can't be read hides everything rather than nothing.

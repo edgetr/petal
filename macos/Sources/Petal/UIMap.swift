@@ -223,8 +223,23 @@ enum UIMap {
         enum Check: Equatable { case clean, secret, tooLong, unreadable }
         /// A card number's length in digits.
         static let cardDigits = 12...19
-        /// At most this many characters between two digits of a card number ("4242 - 4242").
+        /// At most this many characters between two digits of a card number when any of them is something other
+        /// than a separator ("4242 · 4242", "4242)(4242").
         static let cardGap = 3
+        /// At most this many separators between two digits of a card number ("4242    4242", a line break and an
+        /// indent): spaces of any kind, line breaks, dots, slashes, dashes and invisible characters.
+        static let cardSeparators = 16
+
+        /// What may stand between a card number's digits however many there are (up to `cardSeparators`).
+        static func separator(_ character: Character) -> Bool {
+            if character.isWhitespace || character.isNewline || "./\\".contains(character) { return true }
+            return character.unicodeScalars.allSatisfy { scalar in
+                switch scalar.properties.generalCategory {
+                case .format, .dashPunctuation, .spaceSeparator, .lineSeparator, .paragraphSeparator, .control: return true
+                default: return false
+                }
+            }
+        }
 
         private var wholes = Set<Int>()
         /// Every `piece` characters of a longer secret, as `window` hashes them.
@@ -338,11 +353,13 @@ enum UIMap {
                 }
             }
             guard going, !cards.isEmpty else { return }
-            // A card number's digits with whatever is between them (spaces of any kind, dots, slashes, dashes): runs of
-            // digits are joined across at most `cardGap` other characters, never across a letter.
+            // A card number's digits with whatever is between them: runs of digits are joined across up to
+            // `cardSeparators` separators (spaces of any kind, line breaks, dots, slashes, dashes, invisible
+            // characters), or `cardGap` characters when one of them is something else, never across a letter.
             var digits: [UInt64] = []
             var at: [Int] = []
             var gap = 0
+            var plain = true
             func flush() {
                 Self.roll(digits, Self.piece) { start, hash in
                     if cards.contains(hash) { going = found(at[start], at[start + Self.piece - 1] - at[start] + 1) }
@@ -356,11 +373,14 @@ enum UIMap {
                     digits.append(Self.digitCodes[digit])
                     at.append(index)
                     gap = 0
+                    plain = true
                 } else if !digits.isEmpty {
                     gap += 1
-                    if character.isLetter || gap > Self.cardGap {
+                    plain = plain && Self.separator(character)
+                    if character.isLetter || gap > (plain ? Self.cardSeparators : Self.cardGap) {
                         flush()
                         gap = 0
+                        plain = true
                         guard going else { return }
                     }
                 }

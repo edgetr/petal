@@ -586,8 +586,38 @@ enum Vault {
         case .expiry:
             if let four = fourDigitYear, let parts = expiryParts(item[.expiry]) { return "\(parts.month)/\(four ? parts.year4 : parts.year2)" }
             fallthrough
-        default: let value = item[field]; return value.isEmpty ? nil : value
+        default: let value = typed(field, item[field]); return value.isEmpty ? nil : value
         }
+    }
+
+    /// What goes into a field for `value`: a card number or security code as ASCII digits only (whatever script or
+    /// grouping it was saved in: "4111 1111 1111 1111" would not fit a 16-character field); anything else as it is.
+    static func typed(_ field: VaultField, _ value: String) -> String {
+        guard field == .number || field == .securityCode else { return value }
+        return String(value.compactMap { UIMap.SecretIndex.digit($0).map { Character(String($0)) } })
+    }
+
+    /// The item as it's kept: a card number or security code that is only digits and separators ("4111 1111 …",
+    /// "４１１１-…") as ASCII digits. One with letters in it stays as typed.
+    static func normalized(_ item: VaultItem) -> VaultItem {
+        guard item.kind == .card else { return item }
+        var item = item
+        for field in [VaultField.number, .securityCode] {
+            let value = item[field]
+            guard value.contains(where: { UIMap.SecretIndex.digit($0) != nil }),
+                  value.allSatisfy({ UIMap.SecretIndex.digit($0) != nil || !($0.isLetter || $0.isNumber) }) else { continue }
+            item[field] = typed(field, value)
+        }
+        return item
+    }
+
+    /// After typing `typed` (a card number or security code's digits), whether the field holds all of it: its text
+    /// (`value`, read only to count its digits; nil for a secure field) has as many digits, else it holds as many
+    /// characters (`count`). nil when the field says neither, so Petal can't tell.
+    static func fits(_ typed: String, value: String?, count: Int?) -> Bool? {
+        if let value { return value.filter { UIMap.SecretIndex.digit($0) != nil }.count >= typed.count }
+        if let count { return count >= typed.count }
+        return nil
     }
 
     /// Whether a year (or an expiry's year) goes in as four digits: as the AI said (`format` "YYYY" or "YY"), else as
@@ -1226,7 +1256,8 @@ enum Vault {
     /// (Petal's own export, which keeps ids and dates): a newer entry is the whole item again (every field, its
     /// title, sites and apps), restored as it was backed up. Matched by what it holds (the same site and username,
     /// card number, …): a login takes only the import's password (and its notes where none are saved, or Petal's newer
-    /// ones); anything else takes the import's fields. Either way a secret (a password, security code or key) is
+    /// ones; another app's other title or notes are offered as a conflict, never dropped); anything else takes the
+    /// import's fields. Either way a secret (a password, security code or key) is
     /// replaced only when Petal's own export says it's newer: from any other export, a different secret is a
     /// conflict, kept as it is and said. Petal's export older than what's saved changes nothing. An entry repeated
     /// with the same id (Petal's export) lands on one item, the later winning.
@@ -1238,7 +1269,9 @@ enum Vault {
     /// record and details; an imported address whose contact turned out to be one already saved is linked to that one.
     static func merge(existing: [VaultItem], incoming: [VaultItem], petal: Bool = false, at date: Date = Date()) -> Merge {
         var result = Merge()
-        var current = existing
+        // Card numbers and codes compared as they're kept (digits only), however each side wrote them.
+        var current = existing.map(normalized)
+        let incoming = incoming.map(normalized)
         let fromFile = Set(incoming.map(\.id))
         var touched: [String: Int] = [:]   // item id → index in result.save
         var renamed: [String: String] = [:]   // an imported contact's id → the saved one's
@@ -1278,6 +1311,9 @@ enum Vault {
                 if saved.id != item.id { claimed[saved.id] = item.id }
                 if saved.kind == .contact { renamed[item.id] = saved.id }
                 var next = saved
+                // Another app's login whose title or notes differ from what's kept: the import's as well, offered as
+                // a conflict, so its details are never dropped without a word.
+                var detailed: VaultItem?
                 if byID {
                     // Petal's own backup of this very item: all of it, as backed up.
                     next = item
@@ -1285,12 +1321,13 @@ enum Vault {
                     if !item[.password].isEmpty { next[.password] = item[.password] }
                     let newer = petal && item.updated > saved.updated
                     if next[.notes].isEmpty || (newer && !item[.notes].isEmpty) { next[.notes] = item[.notes] }
+                    if !petal { detailed = withDetails(next, from: item) }
                 } else {
                     next.fields = saved.fields.merging(item.fields) { _, new in new }
                     next.sites = saved.sites + item.sites.filter { !saved.sites.contains($0) }
                     next.title = item.title.isEmpty ? saved.title : item.title
                 }
-                guard !identical(next, saved) else { result.same += 1; continue }
+                guard !identical(next, saved) || detailed != nil else { result.same += 1; continue }
                 let replaces = replacesSecret(saved, with: next)
                 if petal {
                     // Petal's own dates say which is newer.
@@ -1303,18 +1340,26 @@ enum Vault {
                     next.updated = item.updated
                 } else if replaces {
                     // Only this entry has this saved item, so the conflict is its own (a repeat of it replaces it).
-                    result.conflicts.removeAll { $0.id == next.id }
-                    next.updated = date
-                    result.conflicts.append(next)
+                    var offered = detailed ?? next
+                    result.conflicts.removeAll { $0.id == offered.id }
+                    offered.updated = date
+                    result.conflicts.append(offered)
                     continue
                 } else {
                     next.updated = date
                 }
-                current[index] = next
                 // A later entry with the same id that's taken wins over its earlier conflict.
                 result.conflicts.removeAll { $0.id == next.id }
-                if !result.updated.contains(next.title) { result.updated.append(next.title) }
-                if let at = touched[next.id] { result.save[at] = next } else { touched[next.id] = result.save.count; result.save.append(next) }
+                if !identical(next, saved) {
+                    current[index] = next
+                    if !result.updated.contains(next.title) { result.updated.append(next.title) }
+                    if let at = touched[next.id] { result.save[at] = next } else { touched[next.id] = result.save.count; result.save.append(next) }
+                }
+                if var detailed {
+                    // The secrets agree; the title or notes don't: yours stay, the import's are offered.
+                    detailed.updated = date
+                    result.conflicts.append(detailed)
+                }
             } else {
                 if item.updated == Date(timeIntervalSince1970: 0) { item.updated = date }
                 current.append(item)
@@ -1324,6 +1369,14 @@ enum Vault {
             }
         }
         return result
+    }
+
+    /// `merged` with `item`'s title and notes where `item` has them, or nil when that changes nothing.
+    static func withDetails(_ merged: VaultItem, from item: VaultItem) -> VaultItem? {
+        var detailed = merged
+        if !item.title.isEmpty { detailed.title = item.title }
+        if !item[.notes].isEmpty { detailed[.notes] = item[.notes] }
+        return identical(detailed, merged) ? nil : detailed
     }
 
     /// The very same item, its id and date aside: its kind, title, every field (secrets, notes and the rest), sites,

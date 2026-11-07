@@ -114,6 +114,7 @@ enum VaultStore {
     /// Saves (adds, or replaces the item with its id); false when the Keychain refused it.
     @discardableResult
     static func save(_ items: [VaultItem]) -> Bool {
+        let items = items.map(Vault.normalized)
         let ok: Bool = serially {
             lock.lock()
             if stand != nil {

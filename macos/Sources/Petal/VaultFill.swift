@@ -57,7 +57,7 @@ enum VaultFiller {
             four = Vault.fourDigitYear(plan.field, format: plan.yearFormat, hints: [node.placeholder, node.label, node.title, node.help],
                                        maxLength: room)
         }
-        guard let text = plan.given ?? saved.flatMap({ Vault.text($0, plan.field, fourDigitYear: four) }),
+        guard let text = plan.given.map({ Vault.typed(plan.field, $0) }) ?? saved.flatMap({ Vault.text($0, plan.field, fourDigitYear: four) }),
               !text.isEmpty else { return "That isn't in the vault anymore." }
         guard !cancel.stopped else { return cancel.buyEnded ? Acting.buyEndedText : ComputerUse.stoppedText }
         // Hidden from the AI before a key goes, saved in the vault or not: in petal_ui, petal_look, the clipboard and
@@ -92,6 +92,16 @@ enum VaultFiller {
         }
         guard Acting.type(text, to: pid, cancel: cancel, still: { keysGo(to: element, pid: pid) }) else {
             return cancel.stopped ? ComputerUse.stoppedText : "The cursor left the field while Petal was filling it, so it stopped there. Call petal_ui to see the page."
+        }
+        // A card number or code a field cut short (a 16-character field given more) isn't a fill: counted here,
+        // never returned or logged. A secure field gives only its length.
+        if plan.field == .number || plan.field == .securityCode {
+            let value: String? = plan.target.secure ? nil : Windows.value(element, kAXValueAttribute)
+            let count: Int? = Windows.value(element, kAXNumberOfCharactersAttribute)
+            if Vault.fits(text, value: value, count: count) == false {
+                return plan.field == .number ? "The card number didn't fit in that field: it holds fewer digits than the card has. Ask the person to check it."
+                    : "The security code didn't fit in that field. Ask the person to check it."
+            }
         }
         if plan.submit, let enter = UIMap.parseKey("return") {
             guard keysGo(to: element, pid: pid) else { return "The cursor left the field before Return: it was filled, not sent." }
@@ -705,9 +715,18 @@ extension Assist {
         guard live() else { return send(["declined": Self.over]) }
         let saving = item
         VaultStore.queue.async {
+            // Stopped, or the reply ended, while the save waited its turn: nothing is saved.
+            guard !(token?.stopped ?? false) else {
+                return DispatchQueue.main.async { MainActor.assumeIsolated { send(["declined": Self.over]) } }
+            }
             let ok = VaultStore.save([saving])
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    guard live() else {
+                        if ok { reply["saved"] = Vault.shown(saving) }
+                        reply["declined"] = Self.over
+                        return send(reply)
+                    }
                     if ok {
                         self.did("Saved \(saving.kind == .login ? "a login for \(saving.sites.first ?? saving.apps.first ?? saving.title)" : "“\(saving.title)”") in the vault")
                         reply["saved"] = Vault.shown(saving)
@@ -769,9 +788,16 @@ extension Assist {
                         guard self.computer.live(caller, token) else { return fail(Self.over) }
                         let saving = item
                         VaultStore.queue.async {
+                            // Stopped, or the reply ended, while the save waited its turn: nothing is saved.
+                            guard !token.stopped else {
+                                return DispatchQueue.main.async { MainActor.assumeIsolated { fail(Self.over) } }
+                            }
                             let ok = VaultStore.save([saving])
                             DispatchQueue.main.async {
                                 MainActor.assumeIsolated {
+                                    guard self.computer.live(caller, token) else {
+                                        return fail(ok ? "Petal saved the new password as \(saving.title) but filled nothing: " + Self.over : Self.over)
+                                    }
                                     guard ok else { return fail("The Keychain didn't take the new password, so nothing was filled.") }
                                     self.did("Made a strong password for \(place.where_) and saved it in the vault")
                                     let plans = roles.indices.map { index -> VaultFillPlan in
