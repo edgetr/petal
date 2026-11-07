@@ -499,10 +499,27 @@ enum UIMap {
     }
 
     /// Any word anywhere in a control's names is a copy or cut word ("Click to copy API key", "Kopyalamak için
-    /// tıkla"): it gets a Copy button's checks (the window read for secrets first, the clipboard put back after),
+    /// tıkla"): it gets a Copy button's checks (the window read for secrets first, the clipboard watched after),
     /// even when `clip(control:)` can't tell.
     static func mightCopy(_ node: UINode) -> Bool {
         mentions(node, foldedCopy, foldedCopyStarts)
+    }
+
+    /// After a copy-like press, the clipboard is watched for a moment, from its change count `start` just before:
+    /// `wait` while it hasn't moved, `look` once it moved by exactly one (the press's own copy), and `leave` for good
+    /// once it moved further (someone else copied too) or the person typed or clicked: then it's theirs.
+    enum CopyWatch: Equatable { case wait, look, leave }
+
+    static func copyWatch(start: Int, now: Int, input: Bool) -> CopyWatch {
+        if input { return .leave }
+        if now == start { return .wait }
+        return now == start &+ 1 ? .look : .leave
+    }
+
+    /// The clipboard is cleared only when what the press copied (`seen`, one step after `start`) holds a secret, it is
+    /// still exactly that copy right before clearing (`now`), and the person gave no input meanwhile.
+    static func clearsCopy(start: Int, seen: Int, now: Int, input: Bool, secret: Bool) -> Bool {
+        secret && !input && seen == start &+ 1 && now == seen
     }
 
     /// One of `words` is a word of its title, description, help or the app's own name for it ("copyApiKey"), or one of

@@ -97,6 +97,8 @@ final class ComputerUse {
     private var line: [Job] = [] { didSet { standGuard() } }
     private var busy = false { didSet { standGuard() } }
     private var acting: Job?
+    /// Chats whose copy-like press is still being watched (CopyWatch): their next action waits, nobody else's.
+    private var watching: Set<String> = []
     /// Whose actions the cursor showing is for: Stop stops that reply, even between its actions.
     private var lastCaller: String?
     /// Lets maps and turns nobody uses go (an AI session that quit never says so), while there are any.
@@ -342,7 +344,7 @@ final class ComputerUse {
     private func sweep() {
         let now = Date()
         maps = maps.filter { now.timeIntervalSince($0.value.made) <= UIMap.lifetime }
-        let working = Set(line.map(\.caller)).union(acting.map { [$0.caller] } ?? []).union(assist.pending?.owner.map { [$0] } ?? [])
+        let working = Set(line.map(\.caller)).union(acting.map { [$0.caller] } ?? []).union(watching).union(assist.pending?.owner.map { [$0] } ?? [])
         for (caller, session) in sessions where !working.contains(caller) {
             let quiet = now.timeIntervalSince(session.last)
             if let agent = app.claude.note(withID: caller)?.agent {
@@ -384,8 +386,8 @@ final class ComputerUse {
     }
 
     private func next() {
-        guard !busy, !line.isEmpty else { return }
-        let job = line.removeFirst()
+        guard !busy, let index = line.firstIndex(where: { !watching.contains($0.caller) }) else { return }
+        let job = line.remove(at: index)
         if job.cancel.stopped { job.fail(whyStopped(job)); return next() }
         busy = true
         run(job)
@@ -464,9 +466,26 @@ final class ComputerUse {
         }
     }
 
+    /// A copy-like press is watched (`Acting.CopyWatch`) before its reply goes back, even if stopped meanwhile: the
+    /// line moves on at once, and only that chat's next action waits for it.
     private func done(_ job: Job, _ outcome: Acting.Outcome) {
         cursor.rest()
         defer { finished() }
+        guard let mark = outcome.copied else { return answer(job, outcome) }
+        watching.insert(job.caller)
+        Acting.CopyWatch.start(mark) { [weak self] cleared in
+            guard let self else { return }
+            self.watching.remove(job.caller)
+            self.answer(job, outcome, cleared: cleared)
+            self.next()
+        }
+    }
+
+    private func answer(_ job: Job, _ outcome: Acting.Outcome, cleared: String? = nil) {
+        if let cleared {
+            assist.did(historyLine(job, outcome))
+            return job.fail(cleared)
+        }
         if job.cancel.stopped { return job.fail(whyStopped(job)) }
         if let error = outcome.error { return job.fail(error) }
         // What its own typing, focusing or scrolling changed in the window isn't a change behind its back.
@@ -869,6 +888,8 @@ enum Acting {
         var note: String?
         /// The window as its own typing, focusing or scrolling left it.
         var fingerprint: UIMap.Fingerprint?
+        /// A copy-like press: the clipboard is watched from here before the reply goes back.
+        var copied: CopyMark?
     }
 
     /// Stop, seen at once from any thread. A job's is under its turn's: stopping the turn stops every job in it.
@@ -1102,39 +1123,94 @@ enum Acting {
         return nil
     }
 
-    /// What the clipboard held, every item and every kind of data, to put back.
-    struct Clipboard {
+    /// A copy-like press's backstop, should a secret reach the clipboard anyway: the clipboard's change count just
+    /// before the press (never what it held), and when the press was (system uptime).
+    struct CopyMark {
         let count: Int
-        let items: [[NSPasteboard.PasteboardType: Data]]
+        let at: TimeInterval
 
-        static func save(_ pasteboard: NSPasteboard = .general) -> Clipboard {
-            let items = (pasteboard.pasteboardItems ?? []).map { item in
-                Dictionary(item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }, uniquingKeysWith: { a, _ in a })
-            }
-            return Clipboard(count: pasteboard.changeCount, items: items)
-        }
-
-        func restore(_ pasteboard: NSPasteboard = .general) {
-            pasteboard.clearContents()
-            let rebuilt = items.map { kinds -> NSPasteboardItem in
-                let item = NSPasteboardItem()
-                for (type, data) in kinds { item.setData(data, forType: type) }
-                return item
-            }
-            if !rebuilt.isEmpty { pasteboard.writeObjects(rebuilt) }
+        static func now(_ pasteboard: NSPasteboard = .general) -> CopyMark {
+            CopyMark(count: pasteboard.changeCount, at: ProcessInfo.processInfo.systemUptime)
         }
     }
 
-    /// After any press: if the clipboard changed (within `wait`) and now holds a vault secret, something a password
-    /// manager marks private, or too much to check, what it held before goes back at once; then why. Unchanged, it
-    /// only compares the change count. Off the main thread.
-    static func copiedSecret(since saved: Clipboard, wait: TimeInterval = 0.6, _ pasteboard: NSPasteboard = .general) -> String? {
-        let until = Date().addingTimeInterval(wait)
-        while pasteboard.changeCount == saved.count, Date() < until { usleep(30_000) }
-        guard pasteboard.changeCount != saved.count else { return nil }
-        guard pasteRefusal(pasteboard) != nil else { return nil }
-        saved.restore(pasteboard)
-        return "That button put a secret on the clipboard (one of the vault's, a password manager's, or too much to check): Petal refused it and put back what the clipboard held before. petal_vault types a saved secret where it's needed, asking the person every time."
+    /// Watches the clipboard for `wait` after a copy-like press, every 50 ms on a queue of its own, so neither the act
+    /// queue nor another chat's actions wait behind it. Only the press's own copy (one step on) is read, and only its
+    /// plain text and the password managers' markers: a vault secret or something marked private is cleared, while
+    /// it's still that copy. Nothing is ever put back. Another copy, or the person's own key or click (a global
+    /// monitor installed just for the watch, and the keyboard's and mouse's own times since the press), and it's left
+    /// alone for good. `then` gets why it was cleared, or nil, on the main thread.
+    final class CopyWatch: @unchecked Sendable {
+        nonisolated static let queue = DispatchQueue(label: "petal.computer.clipboard", qos: .userInitiated)
+        static let cleared = "That button copied a saved secret; Petal cleared the clipboard. petal_vault types a saved secret where it's needed, asking the person every time."
+
+        private let mark: CopyMark
+        private let until: TimeInterval
+        private let pasteboard: NSPasteboard
+        private let then: @MainActor (String?) -> Void
+        private let lock = NSLock()
+        private var heard = false
+        private var monitor: Any?
+
+        private init(_ mark: CopyMark, wait: TimeInterval, pasteboard: NSPasteboard, then: @escaping @MainActor (String?) -> Void) {
+            self.mark = mark
+            self.until = mark.at + wait
+            self.pasteboard = pasteboard
+            self.then = then
+        }
+
+        @MainActor static func start(_ mark: CopyMark, wait: TimeInterval = 0.6, pasteboard: NSPasteboard = .general,
+                                     then: @escaping @MainActor (String?) -> Void) {
+            let watch = CopyWatch(mark, wait: wait, pasteboard: pasteboard, then: then)
+            watch.monitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { _ in
+                watch.lock.withLock { watch.heard = true }
+            }
+            queue.async { watch.tick() }
+        }
+
+        /// The person typed or clicked since the press: what the monitor heard, and the hardware's own times, which
+        /// also cover the moment before the monitor was installed (never Petal's posted keys).
+        private func input() -> Bool {
+            if lock.withLock({ heard }) { return true }
+            let since = ProcessInfo.processInfo.systemUptime - mark.at
+            return [CGEventType.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown].contains {
+                CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) < since
+            }
+        }
+
+        private func tick() {
+            let now = pasteboard.changeCount
+            let late = ProcessInfo.processInfo.systemUptime >= until
+            switch UIMap.copyWatch(start: mark.count, now: now, input: input()) {
+            case .leave: return finish(nil)
+            case .wait: return late ? finish(nil) : again()
+            case .look:
+                let types = pasteboard.types ?? []
+                // Counted but not written yet: the copy's contents are still coming.
+                if types.isEmpty { return late ? finish(nil) : again() }
+                let secret = Assist.isConcealed(pasteboard)
+                    || pasteboard.string(forType: .string).map { Assist.vaultCheck($0) == .secret } == true
+                if UIMap.clearsCopy(start: mark.count, seen: now, now: pasteboard.changeCount, input: input(), secret: secret) {
+                    pasteboard.clearContents()
+                    return finish(Self.cleared)
+                }
+                finish(nil)
+            }
+        }
+
+        private func again() {
+            Self.queue.asyncAfter(deadline: .now() + 0.05) { self.tick() }
+        }
+
+        private func finish(_ why: String?) {
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if let monitor = self.monitor { NSEvent.removeMonitor(monitor) }
+                    self.monitor = nil
+                    self.then(why)
+                }
+            }
+        }
     }
 
     static func perform(_ action: String, entry: ComputerUse.Entry?, map: ComputerUse.Map, prepared: Prepared, options: Options,
@@ -1171,26 +1247,27 @@ enum Acting {
             }
             // A Copy or Cut button (or one whose names mention copying: "Click to copy API key") copies what it's for,
             // not what has the keyboard: never in a window showing a secret.
-            if clip == .copy || UIMap.mightCopy(fresh) || entry.map({ UIMap.mightCopy($0.node) }) == true,
-               let why = copyButtonRefusal(map) {
+            let copies = clip == .copy || UIMap.mightCopy(fresh) || entry.map({ UIMap.mightCopy($0.node) }) == true
+            if copies, let why = copyButtonRefusal(map) {
                 outcome.error = why
                 break
             }
-            // Any press may copy (a key's icon button that says nothing): should a secret reach the clipboard, what
-            // was there goes back at once.
-            let saved = Clipboard.save()
+            // And should a secret reach the clipboard anyway, it's cleared (CopyWatch, after the reply's press): only
+            // the change count now, never what the clipboard holds.
             let actions = Reader.actions(element)
             if let done = ["AXPress", "AXPick", "AXConfirm", "AXOpen"].first(where: actions.contains) {
                 guard !cancel.stopped else { return outcome }
+                let mark = copies ? CopyMark.now() : nil
                 if AXUIElementPerformAction(element, done as CFString) == .success {
-                    if let why = copiedSecret(since: saved) { outcome.error = why }
+                    outcome.copied = mark
                     break
                 }
             }
             if ["AXRow", "AXCell", "AXTab", "AXRadioButton"].contains(entry?.node.role ?? "") {
                 guard !cancel.stopped else { return outcome }
+                let mark = copies ? CopyMark.now() : nil
                 if AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) == .success {
-                    if let why = copiedSecret(since: saved) { outcome.error = why }
+                    outcome.copied = mark
                     break
                 }
             }

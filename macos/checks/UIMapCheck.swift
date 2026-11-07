@@ -255,6 +255,20 @@ struct UIMapCheck {
         expect(!UIMap.mightCopy(UINode(role: "AXButton", title: "Show API key")), "might copy: an ordinary button")
         expect(!UIMap.mightPaste(UINode(role: "AXButton", title: "Click to copy")), "a copy button doesn't paste")
 
+        // After a copy-like press: only the press's own copy is looked at, and cleared only while it's still that copy.
+        expect(UIMap.copyWatch(start: 7, now: 7, input: false) == .wait, "copy watch: unchanged waits")
+        expect(UIMap.copyWatch(start: 7, now: 8, input: false) == .look, "copy watch: one step looks")
+        expect(UIMap.copyWatch(start: 7, now: 9, input: false) == .leave, "copy watch: two steps leave it")
+        expect(UIMap.copyWatch(start: 7, now: 6, input: false) == .leave, "copy watch: backwards leaves it")
+        expect(UIMap.copyWatch(start: 7, now: 7, input: true) == .leave && UIMap.copyWatch(start: 7, now: 8, input: true) == .leave,
+               "copy watch: the person's input leaves it")
+        expect(UIMap.copyWatch(start: Int.max, now: Int.min, input: false) == .look, "copy watch: the count wrapping")
+        expect(UIMap.clearsCopy(start: 7, seen: 8, now: 8, input: false, secret: true), "clears: the press's secret")
+        expect(!UIMap.clearsCopy(start: 7, seen: 8, now: 8, input: false, secret: false), "clears: not without a secret")
+        expect(!UIMap.clearsCopy(start: 7, seen: 8, now: 9, input: false, secret: true), "clears: not once copied over")
+        expect(!UIMap.clearsCopy(start: 7, seen: 9, now: 9, input: false, secret: true), "clears: not two steps on")
+        expect(!UIMap.clearsCopy(start: 7, seen: 8, now: 8, input: true, secret: true), "clears: not after the person's input")
+
         // A control whose meaning changed (Mute became Unmute while the person was asked) is never pressed.
         let mute = UIMap.meaning(role: "AXButton", subrole: "", title: "Mute", label: "")
         expect(UIMap.changed(mute, UIMap.meaning(role: "AXButton", subrole: "", title: "  Mute ", label: "")) == nil, "meaning: the same, spaces aside")
