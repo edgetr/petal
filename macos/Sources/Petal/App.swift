@@ -463,7 +463,7 @@ final class PetalApp {
             request.waiting = { [unowned self] in assist.pending?.owner == caller }
             request.onHangUp { [unowned self] in assist.hungUp(caller) }
             // Who it is goes with the request itself, never looked up again later.
-            assist.handle(args.first ?? "", args.dropFirst().first ?? "{}", note: caller, who: who, reply: reply)
+            assist.handle(args.first ?? "", args.dropFirst().first ?? "{}", note: caller, who: who, request: request, reply: reply)
         }
         // `petal run` asking for API keys (AgentCallers.swift).
         ipc.onFrom("agentKeys") { [unowned self] args, who, request, reply in

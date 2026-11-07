@@ -158,16 +158,21 @@ enum AgentRun {
     /// <sys/filio.h>'s FIONREAD, _IOR('f', 127, int), which Swift doesn't import: how many bytes a pipe holds.
     private static let fionread: UInt = 0x4000_0000 | (UInt(MemoryLayout<Int32>.size) << 16) | (UInt(UInt8(ascii: "f")) << 8) | 127
 
-    /// Writes all of `bytes`, waiting as long as the reader takes; false once its end is closed (or another error).
+    /// Writes all of `bytes`, waiting as long as the reader takes (an end that doesn't block says EAGAIN when the
+    /// pipe is full: it waits until it takes more); false once its end is closed (or another error).
     private static func writeAll(_ fd: Int32, _ bytes: [UInt8]) -> Bool {
-        var offset = 0
-        while offset < bytes.count {
-            let written = bytes[offset...].withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
-            if written < 0, errno == EINTR { continue }
-            if written <= 0 { return false }
-            offset += written
-        }
-        return true
+        AgentAccess.writeAll(bytes, write: { part in
+            let written = part.withUnsafeBytes { Darwin.write(fd, $0.baseAddress, $0.count) }
+            return (written, written < 0 ? errno : 0)
+        }, writable: {
+            while true {
+                var ready = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                let polled = poll(&ready, 1, -1)
+                if polled < 0 { if errno == EINTR || errno == EAGAIN { continue }; return false }
+                // A closed reader shows as POLLHUP or POLLERR: the next write says EPIPE.
+                return ready.revents & Int16(POLLNVAL) == 0
+            }
+        })
     }
 
     /// The command is a program that can run: a path to one, or a name found in PATH.

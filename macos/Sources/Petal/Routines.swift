@@ -477,14 +477,17 @@ final class Routines {
     /// saw). Each file action is planned when the run reaches it, after the actions before it are done (a Shortcut's
     /// export is there by then); it asks again only when there are more files than they allowed.
     /// `rule`: the rule version the run was decided under (a manual run's card may wait while the routine changes).
-    private func execute(_ routine: Routine, file: URL?, approved: Int? = nil, rule: Int? = nil, done: @escaping ([Move]) -> Void) {
+    /// `caller`, `live`: the chat or AI session that ran it by hand, whose cards these are; once it hangs up the rest
+    /// doesn't happen.
+    private func execute(_ routine: Routine, file: URL?, approved: Int? = nil, rule: Int? = nil, caller: String? = nil,
+                         live: @escaping () -> Bool = { true }, done: @escaping ([Move]) -> Void) {
         var said: [String] = []
         var moves: [Move] = []
         var made: [String] = []
         var approved = approved
         let rule = rule ?? ruleVersion[routine.id, default: 0]
         /// Deleted or changed while it ran (a Shortcut exporting, a card waiting): the rest of it doesn't happen.
-        func current() -> Bool { isOn && rule == ruleVersion[routine.id, default: 0] && list.contains { $0.id == routine.id } }
+        func current() -> Bool { live() && isOn && rule == ruleVersion[routine.id, default: 0] && list.contains { $0.id == routine.id } }
         func finish() {
             if !said.isEmpty { record(routine, said: said, moves: moves, made: made) }
             done(moves)
@@ -515,7 +518,7 @@ final class Routines {
                 let use = { (plan: Plan, allowed: Bool) in
                     // Many files ask first, however the routine was started (a time, an app, a mode, or by hand).
                     self.confirm(!allowed && plan.items.count >= 10, "Tidy \(plan.items.count) files in \(plan.source.lastPathComponent)",
-                                 "\(routine.name). You can put them back.") { yes in
+                                 "\(routine.name). You can put them back.", owner: caller) { yes in
                         guard yes else {
                             said.append("left \(plan.items.count) files in \(plan.source.lastPathComponent) (not allowed)")
                             return step(index + 1)
@@ -908,8 +911,10 @@ final class Routines {
     }
 
     /// Petal AI's routine tools (`petal_routines`, `petal_routine_save`, `petal_routine_run`, `petal_routine_undo`,
-    /// `petal_routine_delete`), from Assist.handle.
-    func handle(_ name: String, _ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    /// `petal_routine_delete`), from Assist.handle. `caller`: the chat or AI session asking, whose card a tidy's is;
+    /// `live`: false once it hung up, and then a run it started neither asks nor goes on.
+    func handle(_ name: String, _ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void,
+                caller: String? = nil, live: @escaping () -> Bool = { true }) {
         switch name {
         case "petal_routines":
             send(["on": isOn, "routines": list.map { r -> [String: Any] in
@@ -925,7 +930,7 @@ final class Routines {
             guard list.contains(where: { $0.id == id }) else { return fail("No routine with id \(id); petal_routines lists them.") }
             delete(id)
             send(["deleted": id])
-        case "petal_routine_run": runTool(args, send, fail)
+        case "petal_routine_run": runTool(args, caller: caller, live: live, send, fail)
         case "petal_routine_undo":
             undo(args["entry"] as? String, done: { (back: [String]) in
                 let reply: [String: Any] = back.isEmpty ? ["putBack": [String](), "note": "Nothing to put back."] : ["putBack": back]
@@ -1012,7 +1017,8 @@ final class Routines {
         }
     }
 
-    private func runTool(_ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func runTool(_ args: [String: Any], caller: String?, live: @escaping () -> Bool, _ send: @escaping (Any) -> Void,
+                         _ fail: @escaping (String) -> Void) {
         let id = args["id"] as? String ?? ""
         guard let routine = list.first(where: { $0.id == id }) else { return fail("No routine with id \(id); petal_routines lists them.") }
         let dry = args["dryRun"] as? Bool ?? false
@@ -1024,11 +1030,13 @@ final class Routines {
             return send(["ran": summary(routine)])
         }
         let go = { (plan: Plan) in
+            // Its asker gone while the plan was made (the AI sorting): nothing is asked or moved for it.
+            guard live() else { return }
             let n = plan.items.count
             // Nothing to move there: the routine's other actions still run.
             guard n > 0 else {
                 self.plans[id] = nil
-                return self.execute(routine, file: nil, approved: 0, rule: rule) { moves in
+                return self.execute(routine, file: nil, approved: 0, rule: rule, caller: caller, live: live) { moves in
                     send(["moved": moves.count, "waitingForAI": plan.waitingForAI.count,
                           "note": "Nothing to move in its first folder; its other actions ran."])
                 }
@@ -1036,12 +1044,12 @@ final class Routines {
             let where_ = plan.source.lastPathComponent
             let counts = Self.counts(plan)
             let detail = counts.prefix(4).map { "\($0.name) \($0.count)" }.joined(separator: ", ") + (counts.count > 4 ? " and more" : "") + ". You can put them back."
-            self.confirm(n >= 10, "Tidy \(n) files in \(where_)", detail) { allowed in
-                guard allowed else { return send(["declined": "The person didn't allow it."]) }
+            self.confirm(n >= 10, "Tidy \(n) files in \(where_)", detail, owner: caller) { allowed in
+                guard allowed, live() else { return send(["declined": "The person didn't allow it."]) }
                 guard rule == self.ruleVersion[id, default: 0] else { return changed() }
                 self.plans[id] = nil
                 // Every action of the routine, in order; its first file action may move up to this many unasked.
-                self.execute(routine, file: nil, approved: n, rule: rule) { moves in
+                self.execute(routine, file: nil, approved: n, rule: rule, caller: caller, live: live) { moves in
                     let into = Dictionary(moves.map { (URL(fileURLWithPath: $0.to).deletingLastPathComponent().lastPathComponent, 1) }, uniquingKeysWith: +)
                     send(["moved": moves.count, "into": into,
                           "leftAlone": plan.leftAlone.count, "waitingForAI": plan.waitingForAI.count, "notYet": plan.later,
@@ -1063,10 +1071,11 @@ final class Routines {
         }
     }
 
-    /// Asked first with Petal AI's card when it's many files; the check never asks.
-    private func confirm(_ many: Bool, _ title: String, _ detail: String, done: @escaping (Bool) -> Void) {
+    /// Asked first with Petal AI's card when it's many files; the check never asks. `owner`: the chat or AI session
+    /// that ran it (nil for a routine's own trigger).
+    private func confirm(_ many: Bool, _ title: String, _ detail: String, owner: String?, done: @escaping (Bool) -> Void) {
         guard many, !standalone else { return done(true) }
-        PetalApp.shared.assist.ask("tidy", title, detail: detail, done: done)
+        PetalApp.shared.assist.ask("tidy", title, detail: detail, owner: owner, done: done)
     }
 
     nonisolated static func counts(_ plan: Plan) -> [(name: String, count: Int, new: Bool)] {

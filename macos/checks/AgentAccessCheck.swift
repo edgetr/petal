@@ -36,6 +36,7 @@ struct AgentAccessCheck {
         words()
         sameVariable()
         relaying()
+        writing()
         if failures > 0 { print("\(failures) agent access check(s) failed"); exit(1) }
         print("agent access: all checks passed")
     }
@@ -701,6 +702,39 @@ struct AgentAccessCheck {
 
     /// `petal run`'s streams (AgentAccess.relay): the moment after the command ends stops the reading, never the
     /// writing. A pipe of bytes, an agent that may pause, and a clock that passes the deadline while a write waits.
+    /// Writing to the agent's end: a full pipe that doesn't block (EAGAIN) is waited on, never the end.
+    static func writing() {
+        expect(AgentAccess.wrote(10, errno: 0) == .wrote(10), "some written")
+        expect(AgentAccess.wrote(-1, errno: EINTR) == .again, "a signal: write again")
+        expect(AgentAccess.wrote(-1, errno: EAGAIN) == .wait, "a full non-blocking pipe: wait for room")
+        expect(AgentAccess.wrote(-1, errno: EWOULDBLOCK) == .wait, "EWOULDBLOCK too")
+        expect(AgentAccess.wrote(-1, errno: EPIPE) == .gone, "the reader closed its end")
+        expect(AgentAccess.wrote(-1, errno: EBADF) == .gone, "another error")
+        expect(AgentAccess.wrote(0, errno: 0) == .gone, "nothing written: never a loop")
+
+        // A pipe that takes 3 bytes at a time and is full every other write: everything arrives, after waits.
+        let bytes = Array("hello, agent".utf8)
+        var got: [UInt8] = [], full = false, waits = 0, interrupted = false
+        let done = AgentAccess.writeAll(bytes, write: { part in
+            if !interrupted { interrupted = true; return (-1, EINTR) }
+            full.toggle()
+            if full { return (-1, EAGAIN) }
+            let n = min(3, part.count)
+            got += part.prefix(n)
+            return (n, 0)
+        }, writable: { waits += 1; return true })
+        expect(done && got == bytes, "every byte through a full pipe", String(decoding: got, as: UTF8.self))
+        expect(waits > 0, "waited for room rather than giving up")
+
+        // The reader leaves while the pipe is full: the rest is dropped, and the writing says so.
+        var tries = 0
+        let left = AgentAccess.writeAll(bytes, write: { _ in tries += 1; return tries == 1 ? (-1, EAGAIN) : (-1, EPIPE) },
+                                        writable: { true })
+        expect(!left && tries == 2, "EPIPE after a wait ends it")
+        expect(!AgentAccess.writeAll(bytes, write: { _ in (-1, EAGAIN) }, writable: { false }), "a pipe that can't be waited on ends it")
+        expect(AgentAccess.writeAll([], write: { _ in (-1, EPIPE) }, writable: { true }), "nothing to write: done")
+    }
+
     static func relaying() {
         final class Pipe {
             var bytes: [UInt8] = []

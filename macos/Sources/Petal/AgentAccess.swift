@@ -346,6 +346,38 @@ enum AgentAccess {
         }
     }
 
+    /// What one `write` to the agent's end means for the rest: some went (`wrote`), a signal came first (`again`),
+    /// the pipe is full for now because that end doesn't block (EAGAIN: `wait` until it takes more), or the reader
+    /// is gone (EPIPE, or any other error: `gone`). A write of nothing that isn't an error is gone too: it would
+    /// otherwise loop for ever.
+    enum Wrote: Equatable { case wrote(Int), again, wait, gone }
+
+    static func wrote(_ result: Int, errno code: Int32) -> Wrote {
+        if result > 0 { return .wrote(result) }
+        if result == 0 { return .gone }
+        switch code {
+        case EINTR: return .again
+        case EAGAIN, EWOULDBLOCK: return .wait
+        default: return .gone
+        }
+    }
+
+    /// Writes all of `bytes` through `write` (a result and its errno), waiting through a full pipe (`writable`: true
+    /// once it takes more, false when it can't be waited on), however long the reader takes; false once it's gone.
+    static func writeAll(_ bytes: [UInt8], write: (ArraySlice<UInt8>) -> (Int, Int32), writable: () -> Bool) -> Bool {
+        var offset = 0
+        while offset < bytes.count {
+            let (result, code) = write(bytes[offset...])
+            switch wrote(result, errno: code) {
+            case .wrote(let count): offset += count
+            case .again: continue
+            case .wait: if !writable() { return false }
+            case .gone: return false
+            }
+        }
+        return true
+    }
+
     // MARK: Who's asking
 
     /// The kinds of caller. A grant names a verified agent (or `any`, for every verified agent).

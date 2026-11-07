@@ -76,8 +76,10 @@ final class Assist {
     /// `always`: asked even with Full access (the vault). `form`: the card takes what the person types for the vault,
     /// handed to `typed` before `done`. `warn`: Don't is the default (what's asked doesn't match).
     /// `keep`: the label of an Always kept as `kept` says (an agent's grant), shown even when Don't is the default.
+    /// `owner`: the chat or AI session asking (Assist.handle's caller), always said: its Stop, next turn or hanging up
+    /// answers its card Don't. Only what no chat asked for (a routine's own run) passes nil.
     func ask(_ kind: String, _ title: String, detail: String = "", always: Bool = false, form: VaultForm? = nil, warn: Bool = false,
-             allow: String = "Allow", owner: String? = nil, keep: String? = nil, mark: AgentAccess.Agent? = nil, kept: (() -> Void)? = nil,
+             allow: String = "Allow", owner: String?, keep: String? = nil, mark: AgentAccess.Agent? = nil, kept: (() -> Void)? = nil,
              typed: ((VaultForm.Answer) -> Void)? = nil, done: @escaping (Bool) -> Void) {
         // `always` (the vault) asks every time: neither Full access nor an earlier Always skips it.
         if form == nil, !always, !warn, config.string("claudeAccess") == "full" || config.strings("aiAllowed").contains(kind) { return done(true) }
@@ -169,8 +171,13 @@ final class Assist {
 
     /// One of Petal AI's tools, from `Petal --mcp` (["assist", name, json]); the reply is one line of JSON.
     /// `note`: the sticky note whose chat asks (PETAL_NOTE), so looking looks at its window. `who`: who's asking, as
-    /// Petal read it off the socket when the request came in (AgentCallers).
-    func handle(_ name: String, _ json: String, note: String? = nil, who: AgentAccess.Caller? = nil, reply: @escaping @MainActor (String) -> Void) {
+    /// Petal read it off the socket when the request came in (AgentCallers). `request`: the socket's request; once its
+    /// client hangs up, its cards are answered Don't (hungUp) and what it started off the main thread neither asks nor
+    /// acts.
+    func handle(_ name: String, _ json: String, note: String? = nil, who: AgentAccess.Caller? = nil, request: IPC.Pending? = nil,
+                reply: @escaping @MainActor (String) -> Void) {
+        let live = { request?.hungUp != true }
+        guard live() else { return }   // its client went before Petal got to it: nothing to answer
         let args = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
         let send: (Any) -> Void = { result in
             let object: Any = JSONSerialization.isValidJSONObject(result) ? result : ["result": "\(result)"]
@@ -181,9 +188,9 @@ final class Assist {
         switch name {
         // The note's window as it is now (a note stuck to none, or notes off: what's in front).
         case "petal_look": look(args, place: app.claude.notesOn ? note.flatMap { app.claude.note(withID: $0) }?.place : nil, note: note, send)
-        case "petal_apps": apps(args, send, fail)
-        case "petal_windows": windows(args, send, fail)
-        case "petal_trash": trash(args, send, fail)
+        case "petal_apps": apps(args, caller: note, live: live, send, fail)
+        case "petal_windows": windows(args, caller: note, live: live, send, fail)
+        case "petal_trash": trash(args, caller: note, send, fail)
         case "petal_remember":
             guard config.bool("aiMemory") else { return fail("Memory is off in Petal's settings (aiMemory).") }
             let text = (args["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -206,7 +213,7 @@ final class Assist {
         case "petal_vault": vault(args, caller: note, who: who, send, fail)
         case "petal_ui", "petal_act": computer.handle(name, args, note: note, send: send, fail: fail)
         case "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
-            app.routines.handle(name, args, send, fail)
+            app.routines.handle(name, args, send, fail, caller: note, live: live)
         case "petal_memories":
             let mode = args["mode"] as? String
             send(["memories": memories.filter { mode == nil || $0.mode == mode || $0.mode.isEmpty }.map(record)])
@@ -605,7 +612,8 @@ final class Assist {
 
     // MARK: Apps
 
-    private func apps(_ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func apps(_ args: [String: Any], caller: String?, live: @escaping () -> Bool, _ send: @escaping (Any) -> Void,
+                      _ fail: @escaping (String) -> Void) {
         let action = args["action"] as? String ?? ""
         let name = args["app"] as? String ?? ""
         let target = args["open"] as? String ?? ""
@@ -632,7 +640,7 @@ final class Assist {
                 let id = Self.bundleID(name)
                 found = (id, NSWorkspace.shared.urlForApplication(withBundleIdentifier: id))
             }) { [weak self] in
-                guard let self else { return }
+                guard let self, live() else { return }
                 guard found.url != nil else { return fail("No app called \(name) is installed.") }
                 self.app.docks.launch(found.id)
                 send(["opened": Apps.name(found.id)])
@@ -653,8 +661,8 @@ final class Assist {
                     NSWorkspace.shared.openApplication(at: url, configuration: configuration)
                 }) { if url == nil { running.activate() }; send(["focused": label]) }
             default:
-                ask("quit", "Quit \(label)", detail: "It asks to save anything unsaved.") { allowed in
-                    guard allowed else { return send(["declined": "The person didn't allow quitting \(label)."]) }
+                ask("quit", "Quit \(label)", detail: "It asks to save anything unsaved.", owner: caller) { allowed in
+                    guard allowed, live() else { return send(["declined": "The person didn't allow quitting \(label)."]) }
                     Self.off({ running.terminate() }) {
                         self.did("Quit \(label)")
                         send(["quit": label])
@@ -683,7 +691,8 @@ final class Assist {
 
     // MARK: Windows
 
-    private func windows(_ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func windows(_ args: [String: Any], caller: String?, live: @escaping () -> Bool, _ send: @escaping (Any) -> Void,
+                         _ fail: @escaping (String) -> Void) {
         let action = args["action"] as? String ?? "list"
         let appName = args["app"] as? String ?? ""
         let wanted = args["window"] as? String ?? ""
@@ -699,6 +708,8 @@ final class Assist {
             for pid in pids { found += Windows.windows(of: pid) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    // Its asker gone while the windows were read: nothing is asked or done for it.
+                    guard live() else { return }
                     if action == "list" {
                         let hidden = self.privatePIDs
                         return send(["windows": found.map { w in
@@ -721,8 +732,8 @@ final class Assist {
                             send(["minimized": label])
                         }
                     case "close":
-                        self.ask("close", "Close “\(label)”", detail: "Its app asks to save anything unsaved.") { allowed in
-                            guard allowed else { return send(["declined": "The person didn't allow closing it."]) }
+                        self.ask("close", "Close “\(label)”", detail: "Its app asks to save anything unsaved.", owner: caller) { allowed in
+                            guard allowed, live() else { return send(["declined": "The person didn't allow closing it."]) }
                             let element = window.element
                             Self.off({
                                 guard let button: AXUIElement = Windows.value(element, kAXCloseButtonAttribute) else { return }
@@ -766,7 +777,7 @@ final class Assist {
     // MARK: The Trash
 
     /// Files to the Trash (asked first), or the last ones back where they were (`undo`).
-    private func trash(_ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func trash(_ args: [String: Any], caller: String?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         if args["undo"] as? Bool == true {
             let items = trashed
             Self.queue.async {
@@ -792,7 +803,7 @@ final class Assist {
         guard !urls.isEmpty else { return fail("None of those files are there.") }
         let names = urls.prefix(3).map(\.lastPathComponent).joined(separator: ", ") + (urls.count > 3 ? " and \(urls.count - 3) more" : "")
         ask("trash", urls.count == 1 ? "Move “\(urls[0].lastPathComponent)” to the Trash" : "Move \(urls.count) items to the Trash",
-            detail: urls.count == 1 ? "You can put it back." : names) { allowed in
+            detail: urls.count == 1 ? "You can put it back." : names, owner: caller) { allowed in
             guard allowed else { return send(["declined": "The person didn't allow it."]) }
             NSWorkspace.shared.recycle(urls) { moved, error in
                 MainActor.assumeIsolated {

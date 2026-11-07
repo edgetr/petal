@@ -3,7 +3,8 @@
 # told about (UIMap), where AI sticky notes show and sit (NoteLayout), how a note works in the background and what its
 # preview says (Background), the vault's pure side (sites, 2FA codes, exports, when it fills by itself), and agents
 # using the vault (AgentAccess: petal run's variables and redaction, who's asking, projects and grants; worktrees on
-# throwaway folders in the temporary folder), without running Petal, moving any window or touching the Keychain:
+# throwaway folders in the temporary folder; writing through a full pipe), and that every card Petal AI's tools put up
+# names its owner, without running Petal, moving any window or touching the Keychain:
 #   macos/checks/run.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -23,3 +24,29 @@ swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Pe
 "$out/vault"
 swiftc -parse-as-library -O -o "$out/agents" Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/AgentAccessCheck.swift
 "$out/agents"
+# Every card Petal AI's tools put up says whose it is (Assist.ask's `owner`), so a chat's Stop or an agent hanging up
+# answers it Don't: the parameter has no default, and every call to it (a string first: the card's kind) names it.
+perl -0777 -ne '
+    if ($ARGV =~ /\/Assist\.swift$/ && !/func ask\(_ kind: String[^{]*?\bowner: String\?,/s) { print "Assist.ask: owner must be said\n"; $bad++ }
+    while (/\bask\("/g) {
+        my $start = pos($_) - 1;
+        # The call: up to its closing parenthesis, past strings and their \(...) interpolations.
+        my ($i, @stack) = ($start + 1, ("("));
+        while ($i < length($_) && @stack) {
+            my $c = substr($_, $i, 1);
+            if ($stack[-1] eq "\"") {
+                if ($c eq "\\" && substr($_, $i + 1, 1) eq "(") { push @stack, "("; $i++ }
+                elsif ($c eq "\\") { $i++ }
+                elsif ($c eq "\"") { pop @stack }
+            } elsif ($c eq "\"") { push @stack, "\"" }
+            elsif ($c eq "(") { push @stack, "(" }
+            elsif ($c eq ")") { pop @stack }
+            $i++;
+        }
+        my $call = substr($_, $start, $i - $start);
+        my $line = (substr($_, 0, $start) =~ tr/\n//) + 1;
+        if ($call !~ /\bowner:/) { print "$ARGV:$line: ask(...) without owner:\n"; $bad++ }
+        $calls++;
+    }
+    END { if ($bad) { print "$bad card(s) without an owner\n"; exit 1 } print "asks: all $calls name their owner\n" }
+' Sources/Petal/*.swift
