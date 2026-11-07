@@ -239,7 +239,6 @@ extension ClaudePanel {
     func stick(to scope: NoteScope) {
         let note = current
         guard var place = note.place, place.kind != scope else { return }
-        let front = lastFront.flatMap { NoteRules.sameWindow(place, $0) ? $0 : nil }
         stickTicket += 1
         let mine = stickTicket
         switch scope {
@@ -263,11 +262,21 @@ extension ClaudePanel {
             }
             return
         case .window:
-            // An app's note sticks to the window it's on now, only once Petal knows which that is.
-            if let front, front.window != nil {
-                place.pid = front.pid
-                place.window = front.window
-            } else if place.kind == .app {
+            // An app's note sticks to the window in front now, read again (the one Petal saw last may be another
+            // window by now), and only then stuck to; a choice made meanwhile wins.
+            if place.kind == .app {
+                guard let running = place.running else { return }
+                Self.readFront(of: running) { read in
+                    let pid = running.processIdentifier
+                    guard mine == self.stickTicket, self.current === note, var now = note.place, now.kind == .app,
+                          let window = read.window else { return }
+                    if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid { self.saw(running, read) }
+                    now.pid = pid
+                    now.window = window
+                    now.scope = .window
+                    note.place = now
+                    self.claimPlace(note)
+                }
                 return
             }
             guard place.window != nil else { return }
@@ -403,9 +412,15 @@ extension ClaudePanel {
         let note = StickyNote()
         note.agent.restore(chat)
         notes.append(note)
-        guard let place = chat.place?.sanitized,
-              !notes.contains(where: { $0.attached && $0.place.map(NoteRules.key) == NoteRules.key(place) })
-        else { present(note); return prune() }
+        guard let place = chat.place?.sanitized else { present(note); return prune() }
+        if notes.contains(where: { $0 !== note && $0.attached && $0.place.map { NoteRules.samePlace($0, place) } == true }) {
+            // Another note holds its place now (the list may still show the chat as it was before): it opens as a
+            // plain chat and lets go of the place, or its next save would claim it back.
+            note.agent.keptPlace = nil
+            if let now = note.agent.saved { Chats.save(now) }
+            present(note)
+            return prune()
+        }
         // An app's note sticks to its app again, open or not: it shows on whichever of its windows is in front.
         if place.kind == .app, !place.app.isEmpty {
             _ = attach(note, place)
