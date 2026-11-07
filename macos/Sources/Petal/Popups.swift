@@ -426,14 +426,18 @@ final class Previews {
     @ObservationIgnored private var listed: [String: [AppWindow]] = [:]
     /// While a menu from the dock is open, nothing opens behind it.
     @ObservationIgnored private var held = false
-    /// Pictures of the windows the notes work in, by note.
-    private(set) var noteThumbs: [UUID: NSImage] = [:]
+    /// Pictures of the windows the notes work in, by note, each with the note as it was when it was taken: shown only
+    /// while the note still has that very window (`noteThumb`).
+    private(set) var noteThumbs: [UUID: NotePicture.Kept<NSImage>] = [:]
     @ObservationIgnored private var capturingNotes = false
     @ObservationIgnored private var noteCount = 0
     /// Made-up notes, for `Petal --snapshot`.
     @ObservationIgnored private var sampleNotes: [NotePreviewItem]?
     /// The notes the AI button's preview shows.
     var noteItems: [NotePreviewItem] { sampleNotes ?? PetalApp.shared.claude.previewItems }
+
+    /// A note's picture, only if it's of the window the note has now: never its old window's after it moved.
+    func noteThumb(_ item: NotePreviewItem) -> NSImage? { NotePicture.current(noteThumbs[item.id], now: item.seen) }
     /// Accessibility answers each app in its own time (up to 0.3 s for a busy one), so windows are listed here, each
     /// app on its own: a slow one never holds up the next.
     nonisolated private static let queue = DispatchQueue(label: "petal.previews", qos: .userInitiated, attributes: .concurrent)
@@ -587,9 +591,9 @@ final class Previews {
                 noteCount = items.count
                 PetalApp.shared.popups.refit()
             }
-            // No picture kept of a window that's gone, or of an app now kept private.
-            let pictured = Set(items.filter(\.pictured).map(\.id))
-            noteThumbs = noteThumbs.filter { pictured.contains($0.key) }
+            // No picture kept of a window that's gone, of an app now kept private, or of a window the note left.
+            let now = Dictionary(items.map { ($0.id, $0.seen) }, uniquingKeysWith: { first, _ in first })
+            noteThumbs = noteThumbs.filter { id, kept in now[id].map { NotePicture.current(kept, now: $0) != nil } ?? false }
             return captureNotes()
         }
         if id == Self.media {
@@ -670,16 +674,24 @@ final class Previews {
             // note still has that very window, and its app wasn't made private meanwhile.
             let now = Dictionary(noteItems.map { ($0.id, $0.seen) }, uniquingKeysWith: { first, _ in first })
             for (id, picture) in pictures {
-                if let seen = taken[id], NotePicture.accepts(picture.shot, taken: seen, now: now[id]) { noteThumbs[id] = picture.image }
-                else { noteThumbs[id] = nil }
+                if let seen = taken[id], NotePicture.accepts(picture.shot, taken: seen, now: now[id]) {
+                    noteThumbs[id] = NotePicture.Kept(seen: seen, image: picture.image)
+                } else {
+                    noteThumbs[id] = nil
+                }
             }
+            // A note with no new picture keeps its old one only while that's still of the window it has now.
+            noteThumbs = noteThumbs.filter { id, kept in now[id].map { NotePicture.current(kept, now: $0) != nil } ?? false }
         }
     }
 
     /// What `Petal --snapshot` draws the AI button's preview with.
     func preview(notes: [NotePreviewItem]?, thumbnails: [UUID: NSImage] = [:]) {
         sampleNotes = notes
-        noteThumbs = thumbnails
+        let seen = Dictionary((notes ?? []).map { ($0.id, $0.seen) }, uniquingKeysWith: { first, _ in first })
+        noteThumbs = Dictionary(uniqueKeysWithValues: thumbnails.compactMap { id, image in
+            seen[id].map { (id, NotePicture.Kept(seen: $0, image: image)) }
+        })
     }
 
     /// Each window's id in the window server ties it to ScreenCaptureKit's window exactly; the frame is the fallback.

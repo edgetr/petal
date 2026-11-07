@@ -136,7 +136,7 @@ struct NotesPreview: View {
         let items = app.previews.noteItems
         let row = HStack(alignment: .top, spacing: Self.gap) {
             ForEach(items) { item in
-                NoteTile(item: item, image: app.previews.noteThumbs[item.id], done: done)
+                NoteTile(item: item, image: app.previews.noteThumb(item), done: done)
             }
         }
         if NoteStatus.previewScrolls(items.count) {

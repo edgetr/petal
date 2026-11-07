@@ -131,16 +131,92 @@ struct BackgroundCheck {
         // MARK: Putting back what jumped forward
 
         let base = Background.Baseline(front: 100, at: 50)
-        expect(Background.restore(base, note: 200, noteFrontNow: true, lastInput: 40) == .app(100),
+        expect(Background.restore(base, note: 200, frontNow: 200, lastInput: 40) == .app(100),
                "the note's app jumped forward with no input since: the person's app goes back")
-        expect(Background.restore(base, note: 200, noteFrontNow: true, lastInput: 55) == .none,
+        expect(Background.restore(base, note: 200, frontNow: 200, lastInput: 55) == .none,
                "the person pressed a key or clicked after the baseline: theirs to decide")
-        expect(Background.restore(base, note: 200, noteFrontNow: true, lastInput: 50) == .none, "input at the baseline itself counts")
-        expect(Background.restore(base, note: 200, noteFrontNow: false, lastInput: 40) == .none, "nothing jumped forward")
-        expect(Background.restore(Background.Baseline(front: 200, at: 50), note: 200, noteFrontNow: true, lastInput: 40) == .window,
+        expect(Background.restore(base, note: 200, frontNow: 200, lastInput: 50) == .none, "input at the baseline itself counts")
+        expect(Background.restore(base, note: 200, frontNow: 100, lastInput: 40) == .none, "nothing jumped forward")
+        expect(Background.restore(base, note: 200, frontNow: nil, lastInput: 40) == .none, "the app in front unknown: nothing done")
+        expect(Background.restore(Background.Baseline(front: 200, at: 50), note: 200, frontNow: 200, lastInput: 40) == .window,
                "the person was using the note's app: only their window goes back")
-        expect(Background.restore(Background.Baseline(front: nil, at: 50), note: 200, noteFrontNow: true, lastInput: 40) == .none,
+        expect(Background.restore(Background.Baseline(front: nil, at: 50), note: 200, frontNow: 200, lastInput: 40) == .none,
                "no app known in front then: nothing to put back")
+        // A press that opened another app (a link in Safari, a file in Preview) is put back too, and the AI told.
+        expect(Background.restore(base, note: 200, frontNow: 300, lastInput: 40) == .app(100),
+               "a press opened Safari over the person's app: their app goes back")
+        expect(Background.opened(base, note: 200, frontNow: 300, lastInput: 40), "and the AI hears something opened elsewhere")
+        expect(Background.restore(Background.Baseline(front: 200, at: 50), note: 200, frontNow: 300, lastInput: 40) == .app(200),
+               "the person in the note's app, another app came forward: the note's app goes back")
+        expect(Background.restore(base, note: 200, frontNow: 300, lastInput: 60) == .none
+               && !Background.opened(base, note: 200, frontNow: 300, lastInput: 60),
+               "the person switched apps themselves: nothing put back, nothing said opened")
+        expect(!Background.opened(base, note: 200, frontNow: 200, lastInput: 40), "the note's own app isn't another app")
+        expect(!Background.opened(base, note: 200, frontNow: 100, lastInput: 40), "the person's own app still in front")
+        expect(!Background.opened(base, note: 200, frontNow: nil, lastInput: 40), "unknown isn't opened")
+
+        // MARK: Presses that open another app
+
+        expect(!Background.pressOpens(role: "AXLink", url: "https://example.com/a", browser: true), "a web link in a browser opens there")
+        expect(!Background.pressOpens(role: "AXLink", url: "HTTP://example.com", browser: true), "any case of http")
+        expect(Background.pressOpens(role: "AXLink", url: "https://example.com", browser: false),
+               "a web link in Slack opens the default browser: refused")
+        expect(Background.pressOpens(role: "AXLink", url: "mailto:a@b.c", browser: true), "mailto: opens Mail")
+        expect(Background.pressOpens(role: "AXLink", url: "zoommtg://join?x=1", browser: true), "an app's own scheme")
+        expect(Background.pressOpens(role: "AXLink", url: nil, browser: true), "a link with no address: can't tell, refused")
+        expect(Background.pressOpens(role: "AXLink", url: "  ", browser: true), "nor a blank one")
+        expect(Background.pressOpens(role: "AXRow", url: "file:///Users/me/a.pdf", browser: false), "a file in Finder opens in its app")
+        expect(Background.pressOpens(role: "AXImage", url: "file:///Applications/Notes.app", browser: false), "an app in Finder")
+        expect(!Background.pressOpens(role: "AXButton", url: nil, browser: false), "an ordinary button isn't refused")
+        expect(!Background.pressOpens(role: "AXRow", url: nil, browser: false), "nor a row with no address")
+        expect(!Background.pressOpens(role: "AXButton", url: "https://example.com", browser: true), "a web button in a browser")
+        expect(Background.pressAction(["AXShowMenu", "AXPress"]) == "AXPress", "pressed with AXPress")
+        expect(Background.pressAction(["AXPick", "AXOpen"]) == "AXPick", "AXPick before AXOpen")
+        expect(Background.pressAction(["AXOpen"]) == nil, "never AXOpen in the background")
+        expect(Background.pressAction([]) == nil, "nothing to press")
+
+        // MARK: A note typing in its window in front, interrupted
+
+        expect(Background.interrupt(situation(front: true, focused: true, idle: 30)) == nil, "the person still idle there: carry on")
+        expect(Background.interrupt(situation(front: true, focused: true, idle: 0.2)) == .typing, "they typed there again: stop")
+        expect(Background.interrupt(situation(front: true, focused: true, idle: 1.9)) == .typing, "within the pause")
+        expect(Background.interrupt(situation(front: false, focused: false, idle: 0.1)) == .left, "they went to another app: stop")
+        expect(Background.interrupt(situation(front: true, focused: false, idle: 30)) == .left, "another of its windows came forward")
+        expect(Background.interrupt(situation(note: false, front: true, focused: true, idle: 0)) == nil,
+               "Petal AI's plain chat is never interrupted this way (it has Escape)")
+        let partWay = Background.interrupted(.typing, app: "Slack", typed: "Hello th", of: "Hello there")
+        expect(partWay.contains("started typing") && partWay.contains("“Hello th”") && partWay.contains("Return wasn't pressed")
+               && partWay.contains("Don't type it again"), "part way: what went, no Return, not again", partWay)
+        let none = Background.interrupted(.left, app: "Slack", typed: "", of: "Hello")
+        expect(none.contains("moved away") && none.contains("before typing anything"), "nothing typed yet", none)
+        let all = Background.interrupted(.typing, app: "Slack", typed: "Hello", of: "Hello")
+        expect(all.contains("all of it") && all.contains("Return wasn't pressed"), "all typed, Return held back", all)
+
+        // MARK: Typed in the background, read back
+
+        expect(Background.typed(before: "Send the invoice today", after: "Send the invoice today", text: "Send the invoice",
+                                replace: true) == .ignored,
+               "replacing: the old text merely holding the new one is not done")
+        expect(Background.typed(before: "Send the invoice today", after: "Send the invoice", text: "Send the invoice", replace: true) == .done,
+               "replacing: exactly the text")
+        expect(Background.typed(before: "old", after: "Send the invoice\n", text: "Send the invoice", replace: true) == .done,
+               "a trailing newline the field adds")
+        expect(Background.typed(before: "old", after: "oldSend the invoice", text: "Send the invoice", replace: true) == .uncertain,
+               "replacing: appended instead of replaced is not done")
+        expect(Background.typed(before: "Send", after: "Send", text: "Send", replace: true) == .done, "already just that")
+        expect(Background.typed(before: "Hi ", after: "Hi there", text: "there", replace: false, at: 3) == .done, "inserted at the cursor")
+        expect(Background.typed(before: "Hi ", after: "Hi ", text: "there", replace: false, at: 3) == .ignored, "nothing changed")
+        expect(Background.typed(before: "there Hi ", after: "there Hi ", text: "there", replace: false, at: 9) == .ignored,
+               "the old text holding the words already isn't done")
+        expect(Background.typed(before: "Hi ", after: "thereHi ", text: "there", replace: false, at: 3) == .uncertain,
+               "in the wrong place")
+        expect(Background.typed(before: "Hi ", after: "Hi therethere", text: "there", replace: false, at: 3) == .uncertain,
+               "typed twice")
+        expect(Background.typed(before: "Hi xx", after: "Hi there", text: "there", replace: false, at: 3, replaced: 2) == .done,
+               "over a selection")
+        expect(Background.typed(before: "Hi ", after: "Hi there", text: "there", replace: false) == .done, "cursor unknown: grew by just it")
+        expect(Background.typed(before: "Hi ", after: "Hi the", text: "there", replace: false) == .uncertain, "cut short")
+        expect(Background.typed(before: "abc", after: "xyzabc", text: "xyz", replace: false, at: 10) == .uncertain, "a cursor past the end")
 
         // MARK: The preview's pictures
 
@@ -192,8 +268,22 @@ struct BackgroundCheck {
                "nor once the note was stuck to all of its app instead")
         expect(!NotePicture.accepts(NotePicture.Shot(pid: 7, window: 42), taken: shown, now: madePrivate), "nor once made private")
 
+        // A kept picture shows only while the note still has the window it was taken of.
+        let kept = NotePicture.Kept(seen: shown, image: "window 42")
+        expect(NotePicture.current(kept, now: shown) == "window 42", "the same window: its picture shows")
+        expect(NotePicture.current(kept, now: moved) == nil, "the note moved to another window: the old picture never shows")
+        var otherApp = shown; otherApp.pid = 9; otherApp.app = "com.google.Chrome"
+        expect(NotePicture.current(kept, now: otherApp) == nil, "nor once it's in another app")
+        expect(NotePicture.current(kept, now: appWide) == nil, "nor once it's stuck to all of the app")
+        expect(NotePicture.current(kept, now: closed) == nil && NotePicture.current(kept, now: madePrivate) == nil,
+               "nor once its window closed or its app was made private")
+        expect(NotePicture.current(NotePicture.Kept<String>?.none, now: shown) == nil, "no picture kept")
+        let keptWide = NotePicture.Kept(seen: appWide, image: "any of Safari's")
+        expect(NotePicture.current(keptWide, now: appWide) == "any of Safari's", "an app's note keeps its app's picture")
+
         // MARK: What's said
 
+        expect(Background.Reason.opens.words("Slack").contains("another app"), "opening elsewhere says so")
         for reason in Background.Reason.allCases {
             let words = reason.words("T3 Code")
             expect(words.contains("Nothing was done"), "\(reason) says nothing was done")

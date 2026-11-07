@@ -79,6 +79,33 @@ enum Background {
         situation.appFront && situation.windowFocused && situation.idle < pause
     }
 
+    // MARK: A note typing in its window in front
+
+    /// What ends a note's typing in its window in front (it went ahead because the person was idle there), read
+    /// again before every batch of keys, a focus change and Return: the person typing or clicking there again
+    /// (`typing`), or that window no longer the one in front (`left`). Nil: carry on. Petal AI's plain chat never
+    /// asks (it has its guard and Escape).
+    enum Interrupt: Equatable { case typing, left }
+
+    static func interrupt(_ situation: Situation) -> Interrupt? {
+        switch way(situation) {
+        case .foreground: nil
+        case .wait: .typing
+        case .background: .left
+        }
+    }
+
+    /// What the AI is told when its typing was interrupted: how much of `text` went (`typed`, its start), and that
+    /// Return wasn't pressed.
+    static func interrupted(_ why: Interrupt, app: String, typed: String, of text: String) -> String {
+        let who = why == .typing ? "The person started typing in \(app)'s window" : "The person moved away from \(app)'s window"
+        let what: String
+        if typed.isEmpty { what = "before typing anything" }
+        else if typed == text { what = "after typing all of it, and Return wasn't pressed" }
+        else { what = "part way: only “\(typed)” of “\(text)” was typed, and Return wasn't pressed" }
+        return "\(who), so Petal stopped \(what). Don't type it again: wait until they're done, then petal_ui to see what the field holds now."
+    }
+
     // MARK: Each action in the background
 
     /// What can't be done in the background, so the window must come forward (the person brings it).
@@ -99,6 +126,8 @@ enum Background {
         case didntStick
         /// A tab's note acts only while its tab is the one showing.
         case tab
+        /// It opens something in another app (a link, a file), which would come to the front.
+        case opens
 
         /// For the note's line: "Waiting for you: <status>".
         var status: String {
@@ -111,6 +140,7 @@ enum Background {
             case .ignored: "needs the window in front: the app ignores typing in the background"
             case .didntStick: "needs the window in front: the text didn't stay in the field"
             case .tab: "needs its tab showing"
+            case .opens: "needs the window in front: that opens another app"
             }
         }
 
@@ -125,6 +155,7 @@ enum Background {
             case .vault: why = "Filling from the vault needs that window in front."
             case .ignored: why = "\(app) ignored the typing while it was in the background."
             case .didntStick: why = "The text didn't stay in that field in the background."
+            case .opens: why = "That opens something in another app (a link or a file), which would come to the front over what the person is using."
             case .tab:
                 return "This note's tab isn't the one showing in its window, and a browser doesn't let anything use a tab in the background. Nothing was done. Ask the person to show that tab (clicking this note in the AI button's preview does), then petal_ui again."
             }
@@ -204,6 +235,46 @@ enum Background {
         }
     }
 
+    /// What a press may do in the background: AXPress, AXPick or AXConfirm, never AXOpen (it opens a file or an item
+    /// in another app). Nil: none of them.
+    static func pressAction(_ actions: [String]) -> String? {
+        ["AXPress", "AXPick", "AXConfirm"].first(where: actions.contains)
+    }
+
+    /// A press that would open something in another app, which comes to the front over the person's: a link, unless
+    /// it's a web address in a browser (it opens there); anything with an address that isn't a web one (a file in
+    /// Finder, mailto:, an app's own scheme); a web address outside a browser (the default browser comes forward).
+    static func pressOpens(role: String, url: String?, browser: Bool) -> Bool {
+        let address = url?.trimmingCharacters(in: .whitespaces) ?? ""
+        guard role == "AXLink" || !address.isEmpty else { return false }
+        let scheme = URL(string: address)?.scheme?.lowercased()
+        return !(browser && (scheme == "http" || scheme == "https"))
+    }
+
+    /// Typed in the background, read back: `done` only when the field says exactly what was asked; `ignored` when
+    /// nothing changed (the app ignored the keys); anything else is `uncertain`, never counted as done.
+    enum Typed: Equatable { case done, ignored, uncertain }
+
+    /// `replace`: the field's whole value must be the text (spaces at the ends aside). Else the text goes in at the
+    /// cursor, `at` (its UTF-16 offset, when the field said) over `replaced` selected units: the value must have
+    /// changed by exactly that, with the text there (anywhere, when the cursor wasn't known).
+    static func typed(before: String, after: String, text: String, replace: Bool, at: Int? = nil, replaced: Int = 0) -> Typed {
+        let trim = { (value: String) in value.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if replace {
+            if trim(after) == trim(text) { return .done }
+            return after == before ? .ignored : .uncertain
+        }
+        if after == before { return text.isEmpty ? .done : .ignored }
+        let now = Array(after.utf16), was = Array(before.utf16), new = Array(text.utf16)
+        guard now.count == was.count - replaced + new.count else { return .uncertain }
+        if let at {
+            guard at >= 0, at + new.count <= now.count, at <= was.count else { return .uncertain }
+            let fits = Array(now[at..<(at + new.count)]) == new && Array(now[..<at]) == Array(was[..<at])
+            return fits ? .done : .uncertain
+        }
+        return replaced == 0 && after.contains(text) ? .done : .uncertain
+    }
+
     /// Return after typing goes only where keys may.
     static func returnGoes(appFront: Bool) -> Bool { !appFront }
 
@@ -225,12 +296,22 @@ enum Background {
         case window
     }
 
-    /// After a background act, read right before anything is put back: the note's app (`note`) in front now, and
-    /// when the person last pressed a key, clicked or scrolled (uptime). Only an app that jumped forward with no
-    /// input from the person since the baseline is undone, and only back to what was in front then.
-    static func restore(_ baseline: Baseline, note: pid_t, noteFrontNow: Bool, lastInput: TimeInterval) -> Restore {
-        guard noteFrontNow, lastInput < baseline.at, let before = baseline.front else { return .none }
-        return before == note ? .window : .app(before)
+    /// After a background act, read right before anything is put back: the app in front now (`frontNow`: the
+    /// note's, or any other a press opened, such as Safari for a link), and when the person last pressed a key,
+    /// clicked or scrolled (uptime). Only an app that came forward with no input from the person since the baseline
+    /// is undone, and only back to what was in front then; the note's app still in front, as it was, may have raised
+    /// the note's window over the person's.
+    static func restore(_ baseline: Baseline, note: pid_t, frontNow: pid_t?, lastInput: TimeInterval) -> Restore {
+        guard let now = frontNow, lastInput < baseline.at, let before = baseline.front else { return .none }
+        if now == before { return before == note ? .window : .none }
+        return .app(before)
+    }
+
+    /// Something came forward in another app than the note's and the person's (a link opened in a browser, a file in
+    /// its app), with no input from the person since the baseline: the AI is told, whether or not it was put back.
+    static func opened(_ baseline: Baseline, note: pid_t, frontNow: pid_t?, lastInput: TimeInterval) -> Bool {
+        guard let now = frontNow, lastInput < baseline.at else { return false }
+        return now != note && now != baseline.front
     }
 }
 
@@ -279,6 +360,19 @@ enum NotePicture {
     static func hidden(app: String?, private isPrivate: (String) -> Bool) -> Bool {
         guard let app, !app.isEmpty else { return false }
         return isPrivate(app)
+    }
+
+    /// A picture kept for a note, with the note as it was when the picture was taken: shown only while the note
+    /// still has that very window (`current`), never an older window's after it moved.
+    struct Kept<Image> {
+        var seen: Seen
+        var image: Image
+    }
+
+    /// The kept picture to show for the note as it is now, if it's still of the note's window.
+    static func current<Image>(_ kept: Kept<Image>?, now: Seen) -> Image? {
+        guard let kept, keeps(taken: kept.seen, now: now) else { return nil }
+        return kept.image
     }
 
     /// A picture shows (and is kept) only for a note stuck to a window still there, of an app not kept private.

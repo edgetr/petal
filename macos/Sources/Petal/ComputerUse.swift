@@ -1887,11 +1887,23 @@ enum Acting {
             case .clean: break
             }
             if outcome.error != nil { break }
+            // A note in its window in front went ahead because the person was idle there. Before every batch of keys,
+            // the focus and Return: should they start typing there again (or leave that window), it stops, says how
+            // much went, and never presses Return after it.
+            var sent = 0
+            func interrupted() -> String? {
+                guard stayBehind, let why = Background.interrupt(situation(map)) else { return nil }
+                let typed = String(decoding: Array(options.text.utf16.prefix(sent)), as: UTF16.self)
+                return Background.interrupted(why, app: map.appName, typed: typed, of: options.text)
+            }
             var typed = false
             // A native field takes its new value directly; a web page's needs keys, so its page hears them.
             if !node.web, UIMap.isText(node) {
+                if let why = interrupted() { outcome.error = why; break }
                 switch insert(options.text, into: element, replace: options.replace, cancel: cancel) {
-                case .done: typed = true
+                case .done:
+                    typed = true
+                    sent = options.text.utf16.count
                 case .unsure:
                     // Never typed a second time: it may be there already.
                     typed = true
@@ -1923,6 +1935,7 @@ enum Acting {
             }
             if !typed || submit {
                 guard !cancel.stopped else { return outcome }
+                if let why = interrupted() { outcome.error = why; break }
                 if let error = focus(element, pid: pid, name: name, cancel: cancel) {
                     if cancel.stopped { return outcome }
                     outcome.error = error
@@ -1933,15 +1946,20 @@ enum Acting {
                 // Never ⌘A over a whole document: only once the keyboard is in this field.
                 if options.replace, let all = UIMap.parseKey("cmd-a") {
                     guard keysGoTo(element, pid: pid) else { outcome.error = "The cursor left \(name); nothing was typed."; break }
+                    if let why = interrupted() { outcome.error = why; break }
                     guard post(all, to: pid, cancel: cancel) else { return outcome }
                 }
-                guard type(options.text, to: pid, cancel: cancel, still: { keysGoTo(element, pid: pid) }) else {
+                let went = type(options.text, to: pid, cancel: cancel, still: { keysGoTo(element, pid: pid) && interrupted() == nil },
+                                progress: { sent = $0 })
+                guard went else {
                     if cancel.stopped { return outcome }
-                    outcome.error = "The cursor left \(name) while typing, so Petal stopped there. Call petal_ui to see what was typed."
+                    outcome.error = interrupted()
+                        ?? "The cursor left \(name) while typing, so Petal stopped there. Call petal_ui to see what was typed."
                     break
                 }
             }
             if submit, let enter = UIMap.parseKey("return") {
+                if let why = interrupted() { outcome.error = why; break }
                 guard keysGoTo(element, pid: pid) else { outcome.error = "The cursor left \(name) before Return: it was typed, not sent."; break }
                 guard post(enter, to: pid, cancel: cancel) else { return outcome }
             }
@@ -2071,8 +2089,13 @@ enum Acting {
         let after: String? = Windows.value(element, kAXValueAttribute)
         if replace {
             guard let after else { return .unsure }
-            if after == text || after.contains(text) { return .done }
-            return after == before ? .no : .unsure
+            // Only the whole value as asked is done: the old text merely holding it ("Send the invoice today" for
+            // "Send the invoice") isn't.
+            switch Background.typed(before: before ?? "", after: after, text: text, replace: true) {
+            case .done: return .done
+            case .ignored: return before == nil ? .unsure : .no
+            case .uncertain: return .unsure
+            }
         }
         let length = text.utf16.count
         if let selection, let there = string(element, CFRange(location: selection.location, length: length)) {
@@ -2265,8 +2288,9 @@ enum Acting {
 
     /// Text as keystrokes to the app's process, a few characters at a time, each batch only while `still` holds
     /// (the keyboard is still in the field); false when stopped or moved part way.
-    static func type(_ text: String, to pid: pid_t, cancel: Cancel, still: () -> Bool) -> Bool {
+    static func type(_ text: String, to pid: pid_t, cancel: Cancel, still: () -> Bool, progress: (Int) -> Void = { _ in }) -> Bool {
         let source = CGEventSource(stateID: .privateState)
+        var sent = 0
         for chunk in UIMap.batches(text) {
             // `still` asks the app, which takes a moment: a Stop meanwhile is heard before the next characters go.
             if cancel.stopped || !still() || cancel.stopped { return false }
@@ -2275,6 +2299,8 @@ enum Acting {
                 chunk.withUnsafeBufferPointer { event?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: $0.baseAddress) }
                 event?.postToPid(pid)
             }
+            sent += chunk.count
+            progress(sent)
             usleep(8_000)
         }
         return true

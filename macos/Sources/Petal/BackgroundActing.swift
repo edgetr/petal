@@ -20,6 +20,18 @@ extension Acting {
         return Background.Situation(note: true, appFront: appFront, windowFocused: appFront && windowInFront(map), idle: idle())
     }
 
+    /// The app in front, read through Accessibility (off the main thread, and at once, where NSWorkspace hears of it
+    /// only through the main thread).
+    nonisolated static func frontApp() -> pid_t? {
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.5)
+        if let app: AXUIElement = Windows.value(system, kAXFocusedApplicationAttribute) {
+            var pid: pid_t = 0
+            if AXUIElementGetPid(app, &pid) == .success { return pid }
+        }
+        return NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
+
     static func quietly(_ action: String, entry: ComputerUse.Entry?, map: ComputerUse.Map, prepared: Prepared, options: Options,
                         cancel: Cancel, baseline: Background.Baseline) -> Outcome {
         var outcome = Outcome()
@@ -55,7 +67,11 @@ extension Acting {
         var changed = false
         func clear() -> Bool {
             guard !cancel.stopped else { return false }
-            switch Background.behind(situation(map), plannedFront: front, changed: changed) {
+            let now = situation(map)
+            // A Stop, steering, a new turn or the app made private (which stops `cancel`) may have come during that
+            // read: heard here, right before the change.
+            guard !cancel.stopped else { return false }
+            switch Background.behind(now, plannedFront: front, changed: changed) {
             case .go:
                 changed = true
                 return true
@@ -67,6 +83,9 @@ extension Acting {
             return false
         }
 
+        /// Typed but not as asked, in the background: never counted as done, never sent.
+        let uncertain = "Petal couldn't confirm \(name) took that in the background (it doesn't read as asked now), so it isn't done and Return wasn't pressed. Call petal_ui to see what \(name) holds; then ask the person to bring the window forward (clicking this note in the AI button's preview does it) and type it there."
+
         /// The text as keys to its app alone, once `element` has that app's keyboard; stops if the app comes to the
         /// front meanwhile (keys would then be the person's). False when nothing more should happen.
         func keys(into element: AXUIElement) -> Bool {
@@ -77,6 +96,7 @@ extension Acting {
                 return false
             }
             let before = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
+            let caret = options.replace ? nil : selectedRange(element)
             if options.replace, let all = UIMap.parseKey("cmd-a") {
                 guard keysGoTo(element, pid: pid), !isFront(pid) else { outcome.error = "The cursor left \(name); nothing was typed."; return false }
                 guard clear(), post(all, to: pid, cancel: cancel) else { return false }
@@ -90,12 +110,15 @@ extension Acting {
             }
             usleep(150_000)
             let after = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
-            // Nothing changed: the app ignored keys while it was in the background.
-            if after == before, !after.contains(options.text) {
-                outcome.needs = .ignored
-                return false
+            // Done only when the field says just what was asked: nothing changed means the app ignored keys in the
+            // background; anything else isn't counted as done.
+            switch Background.typed(before: before, after: after, text: options.text, replace: options.replace,
+                                    at: caret.map(\.location), replaced: caret.map(\.length) ?? 0) {
+            case .done: return true
+            case .ignored: outcome.needs = .ignored
+            case .uncertain: outcome.error = uncertain
             }
-            return true
+            return false
         }
 
         /// The act itself. Every way out of it (done, refused, stopped part way) goes on to the same putting back below.
@@ -111,10 +134,20 @@ extension Acting {
                     outcome.error = why
                     break
                 }
+                // A link or a file opens in another app, which would come to the front: that needs the window in front.
+                let address = (Windows.value(element, kAXURLAttribute) as URL?)?.absoluteString ?? Windows.value(element, kAXURLAttribute)
+                let role = fresh?.role ?? entry?.node.role ?? ""
+                if Background.pressOpens(role: role, url: address, browser: VaultReader.known.contains(map.bundle)) {
+                    outcome.needs = .opens
+                    return
+                }
                 let actions = Reader.actions(element)
-                if let done = ["AXPress", "AXPick", "AXConfirm", "AXOpen"].first(where: actions.contains) {
+                if let done = Background.pressAction(actions) {
                     guard clear() else { return }
                     if AXUIElementPerformAction(element, done as CFString) == .success { break }
+                } else if actions.contains("AXOpen") {
+                    outcome.needs = .opens
+                    return
                 }
                 if ["AXRow", "AXCell", "AXTab", "AXRadioButton"].contains(entry?.node.role ?? "") {
                     guard clear() else { return }
@@ -156,7 +189,9 @@ extension Acting {
                     switch insert(options.text, into: element, replace: options.replace, cancel: cancel) {
                     case .done: break
                     case .unsure:
-                        say("Petal may not have typed it (the field didn't say what it holds now): call petal_ui to see \(name) before typing again.")
+                        // Never counted as done, and never sent.
+                        outcome.error = uncertain
+                        return
                     case .stopped: return
                     case .no:
                         guard keysAfter else { outcome.needs = .didntStick; return }
@@ -223,28 +258,41 @@ extension Acting {
         }
         act()
 
-        // Nothing comes forward. An app that jumped to the front by itself gives the person back the app they were
-        // using; one that raised the note's window over theirs (the app they use) gives them their window back.
-        // Either way only if they did nothing since the baseline (taken with the app in front, before anything was
-        // prepared), read again right before: otherwise it's theirs to decide.
-        if isFront(pid) {
-            let lastInput = ProcessInfo.processInfo.systemUptime - idle()
-            switch Background.restore(baseline, note: pid, noteFrontNow: true, lastInput: lastInput) {
-            case .app(let person):
-                if let theirApp = NSRunningApplication(processIdentifier: person) {
-                    theirApp.activate()
-                    say("\(map.appName) came to the front by itself after that; Petal put back the app the person was using.")
-                }
-            case .window:
-                if front, !windowMain, windowInFront(map), let theirs {
-                    AXUIElementPerformAction(theirs, kAXRaiseAction as CFString)
-                    AXUIElementSetAttributeValue(theirs, kAXMainAttribute as CFString, kCFBooleanTrue)
-                    say("That brought this window forward in \(map.appName); Petal put the person's window back in front.")
-                }
-            case .none:
-                if baseline.front != pid { say("\(map.appName) came to the front after that.") }
-                else if front, !windowMain, windowInFront(map) { say("That brought this window forward in \(map.appName).") }
+        // Nothing comes forward. Any app that came to the front after it (the note's own, or another a press opened,
+        // such as a browser for a link) gives the person back the app they were using; one that raised the note's
+        // window over theirs (the app they use) gives them their window back. Either way only if they did nothing
+        // since the baseline (taken with the app in front, before anything was prepared), read again right before:
+        // otherwise it's theirs to decide. A press gets a moment for what it opens to come forward.
+        var now = frontApp()
+        if changed, action == "press", now == baseline.front {
+            for _ in 0..<5 {
+                usleep(100_000)
+                now = frontApp()
+                if now != baseline.front { break }
             }
+        }
+        if now == getpid() { now = nil }   // Petal's own windows are never put away here
+        let lastInput = ProcessInfo.processInfo.systemUptime - idle()
+        let opened = Background.opened(baseline, note: pid, frontNow: now, lastInput: lastInput)
+        let other = now.flatMap { NSRunningApplication(processIdentifier: $0)?.localizedName } ?? "another app"
+        switch Background.restore(baseline, note: pid, frontNow: now, lastInput: lastInput) {
+        case .app(let person):
+            if let theirApp = NSRunningApplication(processIdentifier: person) {
+                theirApp.activate()
+                say(opened
+                    ? "That opened something in \(other), which came to the front; Petal put back the app the person was using. What it opened is in \(other), which this note can't see."
+                    : "\(map.appName) came to the front by itself after that; Petal put back the app the person was using.")
+            }
+        case .window:
+            if front, !windowMain, windowInFront(map), let theirs {
+                AXUIElementPerformAction(theirs, kAXRaiseAction as CFString)
+                AXUIElementSetAttributeValue(theirs, kAXMainAttribute as CFString, kCFBooleanTrue)
+                say("That brought this window forward in \(map.appName); Petal put the person's window back in front.")
+            }
+        case .none:
+            if opened { say("That opened something in \(other), which is in front now.") }
+            else if now == pid, baseline.front != pid { say("\(map.appName) came to the front after that.") }
+            else if now == pid, front, !windowMain, windowInFront(map) { say("That brought this window forward in \(map.appName).") }
         }
         // Its own change (text, caret, focus, scroll) becomes what's expected next, as in the foreground.
         if outcome.error == nil, outcome.needs == nil, !outcome.again, !cancel.stopped, ["type", "focus", "scroll", "key"].contains(action) {
