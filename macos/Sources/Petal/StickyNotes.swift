@@ -841,6 +841,12 @@ extension ClaudePanel {
             // Another window of the app in front. An open note stuck to another of its windows steps away at once,
             // before the read: it never stays over the window that came forward while the app answers.
             guard notesOn, let front = NSWorkspace.shared.frontmostApplication, event.pid == front.processIdentifier else { return }
+            if let window = event.window {
+                // That window is in front from now on, before the read says more (its tab, its frame): a note closing
+                // meanwhile is judged against it, never against the window that was in front before.
+                lastFront = FrontPlace(pid: event.pid, app: front.bundleIdentifier ?? "", window: window, tab: nil)
+                lastFrontFrame = nil
+            }
             if isOpen, current.attached, let place = current.place, place.kind != .app, place.pid == event.pid,
                let window = event.window, let mine = place.window, mine != window {
                 looks += 1
