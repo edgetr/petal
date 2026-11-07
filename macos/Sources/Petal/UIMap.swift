@@ -495,10 +495,23 @@ enum UIMap {
     /// Any word anywhere in a control's names is a paste word ("Quick paste", "Clipboard: paste here"): refused while
     /// the clipboard holds a secret, even when `clip(control:)` can't tell.
     static func mightPaste(_ node: UINode) -> Bool {
-        if identifierWords(node.identifier).contains("paste") { return true }
-        return [node.title, node.label, node.help].contains { text in
+        mentions(node, foldedPaste, foldedPasteStarts)
+    }
+
+    /// Any word anywhere in a control's names is a copy or cut word ("Click to copy API key", "Kopyalamak için
+    /// tıkla"): it gets a Copy button's checks (the window read for secrets first, the clipboard put back after),
+    /// even when `clip(control:)` can't tell.
+    static func mightCopy(_ node: UINode) -> Bool {
+        mentions(node, foldedCopy, foldedCopyStarts)
+    }
+
+    /// One of `words` is a word of its title, description, help or the app's own name for it ("copyApiKey"), or one of
+    /// `starts` (languages written without spaces) is anywhere in them.
+    private static func mentions(_ node: UINode, _ words: Set<String>, _ starts: [String]) -> Bool {
+        if identifierWords(node.identifier).map(fold).contains(where: words.contains) { return true }
+        return [node.title, node.label, node.help, node.identifier].contains { text in
             let folded = fold(text)
-            return words(folded).contains(where: foldedPaste.contains) || foldedPasteStarts.contains(where: folded.contains)
+            return Self.words(folded).contains(where: words.contains) || starts.contains(where: folded.contains)
         }
     }
 
@@ -523,6 +536,49 @@ enum UIMap {
             return "The window changed (another control has the keyboard now); look again with petal_ui."
         }
         return nil
+    }
+
+    // MARK: Has the control changed?
+
+    /// What a control means, as `petal_ui` saw it: what it is, what it says, and a switch's state. The same button may
+    /// mean the opposite a moment later (Mute becomes Unmute when the person mutes by keyboard while asked), so this
+    /// is read again right before acting, and any change refuses the act. Kept by Petal, never told to the AI.
+    struct Meaning: Equatable {
+        var role = ""
+        var subrole = ""
+        var title = ""
+        var label = ""
+        /// A checkbox's, radio button's, switch's or toggle's value ("1", "0", "2"); empty for every other control.
+        var state = ""
+    }
+
+    /// A control that is on or off: a checkbox, radio button, switch or toggle (its value is its state).
+    static func isToggle(role: String, subrole: String) -> Bool {
+        ["AXCheckBox", "AXRadioButton"].contains(role) || ["AXSwitch", "AXToggle"].contains(subrole)
+    }
+
+    /// The meaning as kept: each text tidied and cut to 200 characters (as Reader cuts them), the state only for a toggle.
+    static func meaning(role: String, subrole: String, title: String, label: String, value: String = "") -> Meaning {
+        func clean(_ text: String) -> String { String(tidy(text).prefix(200)) }
+        return Meaning(role: role, subrole: subrole, title: clean(title), label: clean(label),
+                       state: isToggle(role: role, subrole: subrole) ? clean(value) : "")
+    }
+
+    /// Why an act can't go ahead on a control that meant `then` and means `now`, or nil. `secret`: a text holding one
+    /// of the vault's secrets, which the reason never repeats.
+    static func changed(_ then: Meaning, _ now: Meaning, secret: (String) -> Bool = { _ in false }) -> String? {
+        guard then != now else { return nil }
+        let look = "; look again with petal_ui."
+        if then.role != now.role || then.subrole != now.subrole {
+            return "That control changed (it's a \(kind(UINode(role: now.role, subrole: now.subrole))) now)" + look
+        }
+        if then.title != now.title || then.label != now.label {
+            let said = name(UINode(role: now.role, title: now.title, label: now.label))
+            if said.isEmpty { return "That control changed (it has no name now)" + look }
+            return "That control changed (it now says \(secret(said) ? hidden : said))" + look
+        }
+        let state = now.state == "1" ? "on" : now.state == "0" ? "off" : now.state == "2" ? "mixed" : truncate(now.state, 40)
+        return "That control changed (it's \(state.isEmpty ? "different" : state) now)" + look
     }
 
     // MARK: Menus

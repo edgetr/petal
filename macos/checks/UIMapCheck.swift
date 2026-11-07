@@ -242,6 +242,41 @@ struct UIMapCheck {
         expect(UIMap.mightPaste(UINode(role: "AXButton", help: "Quick paste from the clipboard")), "might paste: a word anywhere")
         expect(UIMap.mightPaste(UINode(role: "AXButton", label: "クリップボードから貼り付け")), "might paste: inside Japanese text")
         expect(!UIMap.mightPaste(UINode(role: "AXButton", title: "Clipboard history")), "might paste: not every clipboard button")
+        expect(UIMap.mightCopy(UINode(role: "AXButton", title: "Click to copy API key")), "might copy: a word anywhere")
+        expect(UIMap.clip(control: UINode(role: "AXButton", title: "Click to copy API key")) == nil, "might copy: what clip can't tell")
+        expect(UIMap.mightCopy(UINode(role: "AXButton", label: "API anahtarını kopyala")), "might copy: Turkish, last word")
+        expect(UIMap.mightCopy(UINode(role: "AXButton", help: "Zum Kopieren klicken")), "might copy: German, in the help")
+        expect(UIMap.mightCopy(UINode(role: "AXButton", label: "Cut selection")), "might copy: cut")
+        expect(UIMap.mightCopy(UINode(role: "AXButton", identifier: "copyApiKeyButton")), "might copy: the app's own name")
+        expect(UIMap.mightCopy(UINode(role: "AXButton", identifier: "btn-kopyala")), "might copy: an identifier in another language")
+        expect(UIMap.mightCopy(UINode(role: "AXButton", title: "APIキーをコピーする")), "might copy: inside Japanese text")
+        expect(UIMap.mightCopy(UINode(role: "AXButton", title: "Clé API (cliquer pour copier)")), "might copy: French")
+        expect(!UIMap.mightCopy(UINode(role: "AXButton", title: "Shortcuts")), "might copy: not inside another word")
+        expect(!UIMap.mightCopy(UINode(role: "AXButton", title: "Show API key")), "might copy: an ordinary button")
+        expect(!UIMap.mightPaste(UINode(role: "AXButton", title: "Click to copy")), "a copy button doesn't paste")
+
+        // A control whose meaning changed (Mute became Unmute while the person was asked) is never pressed.
+        let mute = UIMap.meaning(role: "AXButton", subrole: "", title: "Mute", label: "")
+        expect(UIMap.changed(mute, UIMap.meaning(role: "AXButton", subrole: "", title: "  Mute ", label: "")) == nil, "meaning: the same, spaces aside")
+        let unmute = UIMap.changed(mute, UIMap.meaning(role: "AXButton", subrole: "", title: "Unmute", label: ""))
+        expect(unmute == "That control changed (it now says Unmute); look again with petal_ui.", "meaning: Mute became Unmute", unmute ?? "nil")
+        let described = UIMap.meaning(role: "AXButton", subrole: "", title: "", label: "Microphone on")
+        expect(UIMap.changed(described, UIMap.meaning(role: "AXButton", subrole: "", title: "", label: "Microphone off"))?.contains("Microphone off") == true,
+               "meaning: its description changed")
+        let on = UIMap.meaning(role: "AXCheckBox", subrole: "AXSwitch", title: "Wi-Fi", label: "", value: "1")
+        let off = UIMap.changed(on, UIMap.meaning(role: "AXCheckBox", subrole: "AXSwitch", title: "Wi-Fi", label: "", value: "0"))
+        expect(off == "That control changed (it's off now); look again with petal_ui.", "meaning: a switch turned off", off ?? "nil")
+        let toggle = UIMap.meaning(role: "AXButton", subrole: "AXToggle", title: "Bold", label: "", value: "0")
+        expect(UIMap.changed(toggle, UIMap.meaning(role: "AXButton", subrole: "AXToggle", title: "Bold", label: "", value: "1")) != nil, "meaning: a toggle's state")
+        expect(UIMap.meaning(role: "AXButton", subrole: "", title: "Send", label: "", value: "3").state.isEmpty
+               && UIMap.meaning(role: "AXTextField", subrole: "", title: "", label: "To", value: "a@b.c").state.isEmpty,
+               "meaning: only a toggle's value counts")
+        let kind = UIMap.changed(mute, UIMap.meaning(role: "AXCheckBox", subrole: "", title: "Mute", label: ""))
+        expect(kind?.contains("checkbox") == true, "meaning: its kind changed", kind ?? "nil")
+        expect(UIMap.changed(mute, UIMap.meaning(role: "AXButton", subrole: "", title: "", label: ""))?.contains("no name") == true, "meaning: its name went")
+        let leaked = UIMap.changed(mute, UIMap.meaning(role: "AXButton", subrole: "", title: "Copy sk-live-4f9a2b7c1d", label: ""),
+                                   secret: { $0.contains("sk-live") })
+        expect(leaked?.contains("sk-live") == false && leaked?.contains(UIMap.hidden) == true, "meaning: a secret is never repeated", leaked ?? "nil")
 
         // The clipboard, a window's title or a selection: the secrets go, the rest stays.
         expect(vault.redacted("sk-live-4f9a2b7c1d") == UIMap.hidden, "a whole secret, hidden")

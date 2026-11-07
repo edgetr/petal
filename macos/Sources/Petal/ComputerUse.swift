@@ -26,6 +26,9 @@ final class ComputerUse {
     struct Entry {
         let element: AXUIElement
         let node: UINode
+        /// What it said and, for a switch, whether it was on, as read (before any redaction): read again right
+        /// before acting, so a Mute that became Unmute isn't pressed.
+        let meaning: UIMap.Meaning
     }
 
     /// One window's controls, as the last `petal_ui` saw them, and what the window showed then.
@@ -168,8 +171,8 @@ final class ComputerUse {
                     var list: [[String: Any]] = []
                     for (index, node) in picked.shown.enumerated() {
                         let id = "e\(index + 1)"
-                        guard let element = reading.elements[node.order] else { continue }
-                        entries[id] = Entry(element: element, node: node)
+                        guard let element = reading.elements[node.order], let meaning = reading.meanings[node.order] else { continue }
+                        entries[id] = Entry(element: element, node: node, meaning: meaning)
                         var item: [String: Any] = ["id": id, "role": UIMap.kind(node), "name": UIMap.name(node),
                                                    "frame": [node.frame.minX, node.frame.minY, node.frame.width, node.frame.height].map { Int($0.rounded()) }]
                         if let value = UIMap.value(node) { item["value"] = value }
@@ -587,6 +590,7 @@ enum Reader {
         var windowFrame = CGRect.zero
         var nodes: [UINode] = []
         var elements: [Int: AXUIElement] = [:]   // by the node's order
+        var meanings: [Int: UIMap.Meaning] = [:] // by the node's order
         var lists: [AXUIElement] = []
         var fingerprint = UIMap.Fingerprint()
         var gone = false
@@ -652,6 +656,10 @@ enum Reader {
             if UIMap.valueRoles.contains(role), !UIMap.isSecure(node) {
                 node.value = text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
             }
+            let toggle = UIMap.isToggle(role: role, subrole: node.subrole)
+            let meaning = UIMap.meaning(role: role, subrole: node.subrole, title: node.title, label: node.label,
+                                        value: !toggle ? "" : UIMap.valueRoles.contains(role) ? node.value
+                                            : text(Windows.value(element, kAXValueAttribute) as CFTypeRef?))
             node = UIMap.redact(node) { vault.matches($0) }
             if UIMap.isSecure(node) || UIMap.looksSecret(node)
                 || [node.title, node.label, node.help, node.placeholder, node.value].contains(UIMap.hidden) {
@@ -667,6 +675,7 @@ enum Reader {
             if UIMap.isActionable(node) {
                 reading.nodes.append(node)
                 reading.elements[order] = element
+                reading.meanings[order] = meaning
             }
             if listRoles.contains(role), reading.lists.count < 6 { reading.lists.append(element) }
             order += 1
@@ -764,6 +773,17 @@ enum Reader {
             for child in children.prefix(8).reversed() { stack.append((child, depth + 1)) }
         }
         return words.joined(separator: " ")
+    }
+
+    /// What a control means now (UIMap.Meaning): its kind and words in one message, and a switch's state in a second
+    /// (never a password field's value); nil when it's gone or its app didn't answer.
+    static func meaning(_ element: AXUIElement) -> UIMap.Meaning? {
+        let found = values(element, [kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute])
+        guard let role = found[kAXRoleAttribute] as? String, !role.isEmpty else { return nil }
+        let subrole = found[kAXSubroleAttribute] as? String ?? ""
+        let value = UIMap.isToggle(role: role, subrole: subrole) ? text(Windows.value(element, kAXValueAttribute) as CFTypeRef?) : ""
+        return UIMap.meaning(role: role, subrole: subrole, title: found[kAXTitleAttribute] as? String ?? "",
+                             label: found[kAXDescriptionAttribute] as? String ?? "", value: value)
     }
 
     /// A control's names and kind, in one message to its app (never its value): enough to tell a password field, a
@@ -893,15 +913,18 @@ enum Acting {
             return prepared
         }
         if let entry {
-            var role: CFTypeRef?
-            let result = AXUIElementCopyAttributeValue(entry.element, kAXRoleAttribute as CFString, &role)
-            if result == .invalidUIElement || role == nil {
+            guard let meaning = Reader.meaning(entry.element) else {
                 prepared.error = "That control isn't there anymore: the window changed. " + changed
                 return prepared
             }
             let frame = Windows.frame(of: entry.element) ?? .zero
             if UIMap.moved(frame, entry.node.frame) {
                 prepared.error = "That control moved: the window changed since petal_ui. " + changed
+                return prepared
+            }
+            // Where it was is not enough: the same button may mean the opposite now (Mute became Unmute).
+            if let why = UIMap.changed(entry.meaning, meaning, secret: { VaultIndex.current().matches($0) }) {
+                prepared.error = why
                 return prepared
             }
             if frame.width > 0 { prepared.spot = CGPoint(x: frame.midX, y: frame.midY) }
@@ -1066,7 +1089,7 @@ enum Acting {
         "That's too much to check for saved secrets; \(verb) it yourself."
     }
 
-    /// Before a Copy or Cut button: the window, read again now (every control, and every text in it), shows no vault
+    /// Before a Copy or Cut button (or one whose names mention copying): the window, read again now (every control, and every text in it), shows no vault
     /// secret and no password, token or API key field, since a button like "Copy API key" copies its own key
     /// whatever has the keyboard. Off the main thread.
     static func copyButtonRefusal(_ map: ComputerUse.Map) -> String? {
@@ -1102,8 +1125,9 @@ enum Acting {
         }
     }
 
-    /// After a Copy or Cut button: if the clipboard changed (within `wait`) and now holds a vault secret, something a
-    /// password manager marks private, or too much to check, what it held before goes back at once; then why.
+    /// After any press: if the clipboard changed (within `wait`) and now holds a vault secret, something a password
+    /// manager marks private, or too much to check, what it held before goes back at once; then why. Unchanged, it
+    /// only compares the change count. Off the main thread.
     static func copiedSecret(since saved: Clipboard, wait: TimeInterval = 0.6, _ pasteboard: NSPasteboard = .general) -> String? {
         let until = Date().addingTimeInterval(wait)
         while pasteboard.changeCount == saved.count, Date() < until { usleep(30_000) }
@@ -1145,27 +1169,30 @@ enum Acting {
                 outcome.error = why
                 break
             }
-            // A Copy or Cut button copies what it's for, not what has the keyboard: never in a window showing a
-            // secret, and should one reach the clipboard anyway, what was there goes back at once.
-            var saved: Clipboard?
-            if clip == .copy {
-                if let why = copyButtonRefusal(map) {
-                    outcome.error = why
-                    break
-                }
-                saved = Clipboard.save()
+            // A Copy or Cut button (or one whose names mention copying: "Click to copy API key") copies what it's for,
+            // not what has the keyboard: never in a window showing a secret.
+            if clip == .copy || UIMap.mightCopy(fresh) || entry.map({ UIMap.mightCopy($0.node) }) == true,
+               let why = copyButtonRefusal(map) {
+                outcome.error = why
+                break
             }
+            // Any press may copy (a key's icon button that says nothing): should a secret reach the clipboard, what
+            // was there goes back at once.
+            let saved = Clipboard.save()
             let actions = Reader.actions(element)
             if let done = ["AXPress", "AXPick", "AXConfirm", "AXOpen"].first(where: actions.contains) {
                 guard !cancel.stopped else { return outcome }
                 if AXUIElementPerformAction(element, done as CFString) == .success {
-                    if let saved, let why = copiedSecret(since: saved) { outcome.error = why }
+                    if let why = copiedSecret(since: saved) { outcome.error = why }
                     break
                 }
             }
             if ["AXRow", "AXCell", "AXTab", "AXRadioButton"].contains(entry?.node.role ?? "") {
                 guard !cancel.stopped else { return outcome }
-                if AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) == .success { break }
+                if AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) == .success {
+                    if let why = copiedSecret(since: saved) { outcome.error = why }
+                    break
+                }
             }
             outcome.error = "\(name) can't be pressed through Accessibility. Only a real click would do it, and Petal never moves the person's pointer: ask them to click it, or try a menu item or a key."
         case "focus":
