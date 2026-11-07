@@ -341,9 +341,10 @@ final class Assist {
                 // An address or a file, in its app (or the one named).
                 let url = target.contains("://") ? URL(string: target) : URL(fileURLWithPath: (target as NSString).expandingTildeInPath)
                 guard let url else { return fail("That isn't an address or a file.") }
-                let appURL = name.isEmpty ? nil : Apps.url(Self.bundleID(name))
-                // Launch Services may wait on the disk or the app: off the main thread.
+                // Finding the app (a scan of the Applications folders) and Launch Services wait on the disk or the
+                // app: off the main thread.
                 return Self.off({
+                    let appURL = name.isEmpty ? nil : NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID(name))
                     if let appURL {
                         NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: NSWorkspace.OpenConfiguration())
                     } else {
@@ -351,10 +352,17 @@ final class Assist {
                     }
                 }) { send(["opened": target]) }
             }
-            let id = Self.bundleID(name)
-            guard Apps.url(id) != nil else { return fail("No app called \(name) is installed.") }
-            app.docks.launch(id)
-            send(["opened": Apps.name(id)])
+            // The name is looked up off the main thread (it scans the Applications folders); the launch is the dock's.
+            var found: (id: String, url: URL?) = (name, nil)
+            Self.off({
+                let id = Self.bundleID(name)
+                found = (id, NSWorkspace.shared.urlForApplication(withBundleIdentifier: id))
+            }) { [weak self] in
+                guard let self else { return }
+                guard found.url != nil else { return fail("No app called \(name) is installed.") }
+                self.app.docks.launch(found.id)
+                send(["opened": Apps.name(found.id)])
+            }
         case "quit", "hide", "focus":
             guard let running = running(name) else { return fail("\(name) isn't open.") }
             let label = running.localizedName ?? name
@@ -393,7 +401,7 @@ final class Assist {
     }
 
     /// A bundle id for an app's name (or the id itself).
-    private static func bundleID(_ name: String) -> String {
+    nonisolated private static func bundleID(_ name: String) -> String {
         if name.contains(".") && !name.contains(" ") { return name }
         return MCP.apps(matching: name).first { ($0["name"] ?? "").caseInsensitiveCompare(name) == .orderedSame }?["id"]
             ?? MCP.apps(matching: name).first?["id"] ?? name

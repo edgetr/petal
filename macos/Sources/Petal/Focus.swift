@@ -81,7 +81,16 @@ final class Brain {
     }
 
     private func next() {
-        guard !busy, !queue.isEmpty, let provider = PetalApp.shared.chatProvider, let path = PetalApp.shared.paths[provider] else { return }
+        guard !busy, !queue.isEmpty else { return }
+        // No AI chosen (all of them turned off): everyone waiting hears nothing, so a routine waiting on an answer
+        // moves on. One chosen but not found yet (at launch) is waited for.
+        guard let provider = PetalApp.shared.chatProvider else {
+            let waiting = queue
+            queue = []
+            for job in waiting { job.done(nil) }
+            return
+        }
+        guard let path = PetalApp.shared.paths[provider] else { return }
         // On an API key with none saved, nothing is asked (and nothing falls back to the subscription).
         guard PetalApp.shared.aiReady(provider) else {
             let waiting = queue
