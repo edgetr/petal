@@ -289,7 +289,14 @@ extension ClaudePanel {
         for index in NoteRules.letGo([place] + others.map(\.place)) where index > 0 { detach(others[index - 1]) }
         for (link, chat) in savedPlaces where chat.id != note.agent.chatID && chat.place.map({ NoteRules.samePlace($0, place) }) == true {
             savedPlaces[link] = nil
-            guard live(chat: chat.id) == nil else { continue }
+            if let held = live(chat: chat.id) {
+                // Open as a plain chat (picked from Chats): it lets go too, or its next save would claim the place
+                // back. A live note stuck there was already let go of above.
+                guard held.place == nil else { continue }
+                held.agent.keptPlace = nil
+                if let now = held.agent.saved { Chats.save(now) }
+                continue
+            }
             var unstuck = chat
             unstuck.place = nil
             Chats.save(unstuck)
