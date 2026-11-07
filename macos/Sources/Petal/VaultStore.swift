@@ -397,11 +397,19 @@ final class VaultModel {
         }
     }
 
-    /// The JSON inside a Proton Pass zip, with macOS's own unzip (in memory: nothing is written out).
+    /// The vault's JSON inside a Proton Pass zip (Vault.protonZipMember: its data.json, never an attachment), with
+    /// macOS's own unzip (in memory: nothing is written out).
     nonisolated private static func unzipJSON(_ url: URL) -> Data? {
+        guard let listing = unzip(["-Z1", url.path]), let names = String(data: listing, encoding: .utf8),
+              let member = Vault.protonZipMember(names.split(whereSeparator: \.isNewline).map(String.init)) else { return nil }
+        return unzip(["-p", url.path, member])
+    }
+
+    /// What /usr/bin/unzip with `arguments` printed, or nil when it failed or printed nothing.
+    nonisolated private static func unzip(_ arguments: [String]) -> Data? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        process.arguments = ["-p", url.path, "*.json"]
+        process.arguments = arguments
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice

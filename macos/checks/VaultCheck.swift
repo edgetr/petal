@@ -73,6 +73,9 @@ struct VaultCheck {
         answeredFromVault()
         paymentNoSubmit()
         monthMenus()
+        selectMenus()
+        identityNotes()
+        protonZip()
         if failures > 0 { print("vault: \(failures) failed"); exit(1) }
         print("vault: ok")
     }
@@ -838,6 +841,10 @@ struct VaultCheck {
             expect(UIMap.readFailed(failing), "\(failing): a failed read")
             for role in ["AXStaticText", "AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"] {
                 expect(UIMap.textUnread(role: role, errors: [0, failing]), "\(role) whose text failed to read (\(failing)) may show a secret")
+            }
+            for role in ["AXButton", "AXLink", "AXCell", "AXMenuItem", "AXMenuButton", "AXPopUpButton", "AXCheckBox",
+                         "AXRadioButton", "AXTab", "AXRow", "AXHeading", "AXSomethingNew"] {
+                expect(UIMap.textUnread(role: role, errors: [failing]), "a \(role) whose title failed to read (\(failing)) may show a saved key")
             }
             expect(!UIMap.textUnread(role: "AXGroup", errors: [failing]) && !UIMap.textUnread(role: "AXScrollArea", errors: [failing]),
                    "a group's failed title isn't text it shows (what's under it is read)")
@@ -1867,5 +1874,83 @@ struct VaultCheck {
         expect(Vault.pickMonth("13", from: short) == nil && Vault.pickMonth("x", from: short) == nil, "not a month")
         expect(Vault.pick("04", from: short) == 4, "pick finds a month's short name too")
         expect(Vault.pickMonth("04", from: ["2024", "2025", "2026"]) == nil, "a year menu has no month")
+    }
+
+    /// A synthetic Accessibility tree for a select's options.
+    final class Node {
+        let role: String
+        var title = "", value = "", label = ""
+        var children: [Node] = []
+        init(_ role: String, title: String = "", value: String = "", _ children: [Node] = []) {
+            self.role = role; self.title = title; self.value = value; self.children = children
+        }
+    }
+
+    /// Chromium's select lists its options right under its pop-up button (named only by value), and opens its own
+    /// menu as the app's; Safari and AppKit put them in a menu under the button.
+    static func selectMenus() {
+        func options(_ popup: Node, opened: Bool = false, app: [Node] = []) -> (items: [Node], inMenu: Bool) {
+            Vault.selectOptions(popup, opened: opened, appMenus: app, role: { $0.role }, children: { $0.children })
+        }
+        func pick(_ items: [Node], _ wanted: String) -> Int? {
+            Vault.pickOption(titles: items.map(\.title), values: items.map(\.value), labels: items.map(\.label)) { Vault.pick(wanted, from: $0) }
+        }
+        let countries = ["Germany", "Türkiye", "United States"]
+        let chromium = Node("AXPopUpButton", value: "Germany", countries.map { Node("AXMenuItem", value: $0) })
+        let direct = options(chromium)
+        expect(direct.items.count == 3 && !direct.inMenu, "Chromium: options as direct menu items, without opening")
+        expect(pick(direct.items, "Turkey") == 1, "Chromium: picked by value when it has no title")
+        let appKit = Node("AXPopUpButton", title: "Country", [Node("AXMenu", countries.map { Node("AXMenuItem", title: $0) })])
+        let child = options(appKit)
+        expect(child.items.count == 3 && !child.inMenu && pick(child.items, "United States of America") == 2, "a menu under the button")
+        let open = Node("AXMenu", ["01", "02", "03"].map { Node("AXMenuItem", title: $0) })
+        let native = options(chromium, opened: true, app: [Node("AXMenuBar", [Node("AXMenuBarItem", title: "File")]), open])
+        expect(native.inMenu && native.items.count == 3 && pick(native.items, "02") == 1, "opened: the app's own open menu first, never its menu bar")
+        let bare = Node("AXPopUpButton", value: "Germany")
+        expect(options(bare).items.isEmpty && options(bare, opened: true, app: [Node("AXMenu")]).items.isEmpty, "nothing shown: nothing to press")
+        let separated = Node("AXPopUpButton", [Node("AXMenu", [Node("AXMenuItem", title: "A"), Node("AXSplitter"), Node("AXMenuItem", title: "B")])])
+        expect(options(separated).items.map(\.title) == ["A", "B"], "only menu items count")
+        expect(Vault.pickOption(titles: ["", ""], values: ["", ""], labels: ["Germany", "Turkey"]) { Vault.pick("Türkiye", from: $0) } == 1,
+               "named only by description")
+        expect(Vault.pickOption(titles: ["x", "y"], values: ["Germany", "Turkey"], labels: []) { Vault.pick("Turkey", from: $0) } == 1,
+               "titles that don't match fall back to values")
+    }
+
+    /// A Proton Pass identity's note stays with its contact info, from JSON and CSV, and through Petal's own export.
+    static func identityNotes() {
+        let json = #"""
+        {"version":"1.21","encrypted":false,"vaults":{"s1":{"name":"Personal","items":[
+          {"state":1,"data":{"type":"identity","metadata":{"name":"Deniz","note":"gate code is on the fridge"},"content":{"fullName":"Deniz Kaya","email":"deniz@example.com","city":"İstanbul"}}},
+          {"state":1,"data":{"type":"identity","metadata":{"name":"Only a note","note":"call after 6"},"content":{}}}
+        ]}}}
+        """#
+        guard let parsed = Vault.importData(Data(json.utf8)) else { return expect(false, "Proton identity JSON with a note") }
+        let contacts = parsed.items.filter { $0.kind == .contact }
+        expect(contacts.first?[.notes] == "gate code is on the fridge", "JSON: metadata.note on the contact info")
+        expect(parsed.items.first { $0.kind == .address }?[.notes] == "", "the address doesn't repeat it")
+        expect(contacts.last?.title == "Only a note" && contacts.last?[.notes] == "call after 6", "an identity with only a note keeps it")
+        let csv = #"""
+        type,name,url,autofillUrls,email,username,password,note,totp,createTime,modifyTime,vault
+        identity,Home,,,,,,"{""fullName"":""Deniz Kaya"",""email"":""deniz@example.com"",""note"":""spare key with Ayşe""}",,1,2,Personal
+        """#
+        let row = Vault.importCSV(csv)?.items.first { $0.kind == .contact }
+        expect(row?[.notes] == "spare key with Ayşe" && row?[.email] == "deniz@example.com", "CSV: the note inside the identity's content")
+        let plain = "type,name,fullName,email,note\r\nidentity,Mum,Ayşe Kaya,ayse@example.com,birthday in May\r\n"
+        let mum = Vault.importCSV(plain)?.items.first
+        expect(mum?.kind == .contact && mum?[.name] == "Ayşe Kaya" && mum?[.notes] == "birthday in May", "a contact row's plain note")
+        if let first = contacts.first {
+            let back = Vault.importData(Vault.exportJSON([first]))?.items.first
+            expect(back?[.notes] == "gate code is on the fridge" && back?.kind == .contact, "Petal's export round-trips it")
+        }
+    }
+
+    /// Proton Pass's zip: its data.json, never an attachment's JSON.
+    static func protonZip() {
+        let names = ["Proton Pass/", "Proton Pass/data.json", "Proton Pass/files/s1_i1_report.json", "Proton Pass/files/s1_i2_cfg.json"]
+        expect(Vault.protonZipMember(names) == "Proton Pass/data.json", "the vault's data.json, attachments left")
+        expect(Vault.protonZipMember(["data.json", "files/x.json"]) == "data.json", "one data.json at the top")
+        expect(Vault.protonZipMember(["Proton Pass/data.pgp", "Proton Pass/files/a.json"]) == nil, "encrypted or attachments only: nothing")
+        expect(Vault.protonZipMember(["a.json", "b.json"]) == nil && Vault.protonZipMember([]) == nil, "no data.json: nothing")
+        expect(Vault.protonZipMember(["other/data.json"]) == nil, "a data.json elsewhere isn't the vault")
     }
 }

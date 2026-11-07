@@ -1252,20 +1252,24 @@ extension UIMap {
         }
     }
 
-    /// Roles that show text of their own in a picture (what they say, or what's typed in them).
-    static let textRoles: Set<String> = ["AXStaticText", "AXTextField", "AXTextArea", "AXComboBox", "AXSearchField",
-                                         "AXHeading", "AXLink", "AXCell"]
+    /// Roles that hold other things and draw no text of their own (their title or description isn't in the picture;
+    /// what's under them is read). Every other role may show text: labels, fields, buttons, links, cells, rows, menu
+    /// items, tabs, and roles Petal doesn't know.
+    static let silentRoles: Set<String> = ["AXApplication", "AXWindow", "AXGroup", "AXScrollArea", "AXScrollBar", "AXSplitGroup",
+                                           "AXSplitter", "AXWebArea", "AXList", "AXOutline", "AXTable", "AXBrowser", "AXColumn",
+                                           "AXTabGroup", "AXRadioGroup", "AXToolbar", "AXLayoutArea", "AXGrowArea", "AXMatte",
+                                           "AXRuler", "AXDrawer", "AXSheet", "AXImage"]
 
     /// Reading an attribute failed (an AXError's raw value), rather than saying there's nothing there: anything but
     /// 0 success, -25212 no value, -25205 attribute unsupported and -25208 not implemented.
     static func readFailed(_ error: Int32) -> Bool { ![0, -25212, -25205, -25208].contains(error) }
 
-    /// Whether an element may show text a picture's check couldn't read: one that shows text (`textRoles`, or one
-    /// whose role couldn't be read, `roleError`) with any of its texts (title, description, help, placeholder, value:
-    /// `errors`) failing to read. Then it's covered as if it held a secret, or, with nothing around it that has
-    /// bounds, the window isn't read whole.
+    /// Whether an element may show text a picture's check couldn't read: one that may show text (any role but
+    /// `silentRoles`, or one whose role couldn't be read, `roleError`) with any of its texts (title, description,
+    /// help, placeholder, value: `errors`) failing to read. Then it's covered as if it held a secret, or, with nothing
+    /// around it that has bounds, the window isn't read whole.
     static func textUnread(role: String, roleError: Int32 = 0, errors: [Int32]) -> Bool {
-        (textRoles.contains(role) || readFailed(roleError)) && errors.contains(where: readFailed)
+        (!silentRoles.contains(role) || readFailed(roleError)) && errors.contains(where: readFailed)
     }
 
     /// Whether a scan that must see a whole window (what a picture would show) saw all that's under an element: not

@@ -154,35 +154,53 @@ enum VaultFiller {
         return false
     }
 
-    /// Opens a pop-up menu (a web page's select), picks the item that is `wanted` (Vault.pick: "Türkiye" finds
-    /// "Turkey"; a year as "2027" or "27", whichever the menu has), or closes it again with nothing picked when none is.
+    /// Picks the item that is `wanted` from a pop-up menu (a web page's select; Vault.pick: "Türkiye" finds "Turkey";
+    /// a year as "2027" or "27", whichever the menu has): straight from its options when it shows them closed, else
+    /// by opening it and pressing the item in the menu that opens (under it, or the app's own: Chromium's), or
+    /// closes it again with nothing picked when none is.
     static func choose(_ wanted: String, in popup: AXUIElement, pid: pid_t, cancel: Acting.Cancel,
                        pick: ([String]) -> Int?) -> String? {
-        func items() -> [AXUIElement] {
-            let children: [AXUIElement] = Windows.value(popup, kAXChildrenAttribute) ?? []
-            let menu = children.first { (Windows.value($0, kAXRoleAttribute) as String?) == "AXMenu" }
-            return (menu.flatMap { Windows.value($0, kAXChildrenAttribute) as [AXUIElement]? } ?? [])
-                .filter { (Windows.value($0, kAXRoleAttribute) as String?) == "AXMenuItem" }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.5)
+        func role(_ element: AXUIElement) -> String { Windows.value(element, kAXRoleAttribute) ?? "" }
+        func children(_ element: AXUIElement) -> [AXUIElement] { Windows.value(element, kAXChildrenAttribute) ?? [] }
+        // The menus this app shows open: its own (a select's native menu), or the one holding what has its keyboard.
+        func appMenus() -> [AXUIElement] {
+            var menus = children(app).filter { role($0) == "AXMenu" }
+            var current: AXUIElement? = Windows.value(app, kAXFocusedUIElementAttribute)
+            for _ in 0..<3 {
+                guard let at = current else { break }
+                if role(at) == "AXMenu" { menus.append(at); break }
+                current = Windows.value(at, kAXParentAttribute)
+            }
+            return menus
         }
+        func index(_ list: [AXUIElement]) -> Int? {
+            func texts(_ name: String) -> [String] { list.map { (Windows.value($0, name) as String?) ?? "" } }
+            return Vault.pickOption(titles: texts(kAXTitleAttribute), values: texts(kAXValueAttribute),
+                                    labels: texts(kAXDescriptionAttribute), pick: pick)
+        }
+        func close() { if let escape = UIMap.parseKey("escape") { Acting.post(escape, to: pid, cancel: Acting.Cancel()) } }
         guard !cancel.stopped else { return ComputerUse.stoppedText }
-        var list = items()
-        var opened = false
-        if list.isEmpty {
-            AXUIElementPerformAction(popup, kAXPressAction as CFString)
-            opened = true
-            for _ in 0..<5 where list.isEmpty { usleep(80_000); list = items() }
+        // Shown without opening it: pressed there.
+        let shown = Vault.selectOptions(popup, opened: false, appMenus: [], role: role, children: children).items
+        if let at = index(shown), AXUIElementPerformAction(shown[at], kAXPressAction as CFString) == .success { return nil }
+        guard !cancel.stopped else { return ComputerUse.stoppedText }
+        AXUIElementPerformAction(popup, kAXPressAction as CFString)
+        var list: [AXUIElement] = []
+        for attempt in 0..<6 {
+            usleep(80_000)
+            let found = Vault.selectOptions(popup, opened: true, appMenus: appMenus(), role: role, children: children)
+            list = found.items
+            if found.inMenu || (attempt >= 3 && !list.isEmpty) { break }
         }
-        let titles = list.map { (Windows.value($0, kAXTitleAttribute) as String?) ?? "" }
-        guard let index = pick(titles) else {
-            if opened, let escape = UIMap.parseKey("escape") { Acting.post(escape, to: pid, cancel: cancel) }
+        guard let at = index(list) else {
+            close()
             return list.isEmpty ? "That menu didn't open through Accessibility; ask the person to pick it." : "Petal didn't find a matching item in that menu; ask the person to pick it."
         }
-        guard !cancel.stopped else {
-            if opened, let escape = UIMap.parseKey("escape") { Acting.post(escape, to: pid, cancel: Acting.Cancel()) }
-            return ComputerUse.stoppedText
-        }
-        guard AXUIElementPerformAction(list[index], kAXPressAction as CFString) == .success else {
-            if opened, let escape = UIMap.parseKey("escape") { Acting.post(escape, to: pid, cancel: cancel) }
+        guard !cancel.stopped else { close(); return ComputerUse.stoppedText }
+        guard AXUIElementPerformAction(list[at], kAXPressAction as CFString) == .success else {
+            close()
             return "Couldn't pick it from that menu; ask the person to pick it."
         }
         return nil

@@ -781,6 +781,38 @@ enum Vault {
         }
     }
 
+    /// A web page's select's options, as Accessibility shows them (`role`, `children`): Chromium lists them as menu
+    /// items right under its pop-up button, open or not; Safari and AppKit in a menu under it. Once Petal opened it
+    /// (`opened`), first the items of a menu the app shows (`appMenus`: Chromium's own menu for a select opens apart
+    /// from the page, as the app's), pressed there so that menu closes. Empty when none shows any.
+    /// `inMenu`: they're the app's open menu's.
+    static func selectOptions<Node>(_ popup: Node, opened: Bool, appMenus: [Node], role: (Node) -> String,
+                                    children: (Node) -> [Node]) -> (items: [Node], inMenu: Bool) {
+        func items(_ menus: [Node]) -> [Node] {
+            for menu in menus where role(menu) == "AXMenu" {
+                let found = children(menu).filter { role($0) == "AXMenuItem" }
+                if !found.isEmpty { return found }
+            }
+            return []
+        }
+        if opened {
+            let open = items(appMenus)
+            if !open.isEmpty { return (open, true) }
+        }
+        let below = children(popup)
+        let direct = below.filter { role($0) == "AXMenuItem" }
+        return (direct.isEmpty ? items(below) : direct, false)
+    }
+
+    /// Which option is wanted (`pick` over their names): by their titles, else their values, else their
+    /// descriptions (Chromium may name an option only in its value).
+    static func pickOption(titles: [String], values: [String], labels: [String], pick: ([String]) -> Int?) -> Int? {
+        for names in [titles, values, labels] where names.contains(where: { !$0.isEmpty }) {
+            if let index = pick(names) { return index }
+        }
+        return nil
+    }
+
     /// Which of a year menu's items is the card's year, whether the menu says "2027" or "27".
     static func pickYear(_ expiry: String, from options: [String]) -> Int? {
         guard let parts = expiryParts(expiry) else { return nil }
@@ -1295,10 +1327,14 @@ enum Vault {
                 item[.notes] = value(notes)
                 result.items.append(item)
             case .contact?:
-                let found = person(title: value(title), name: value(full), email: value(email), phone: value(phone),
+                var found = person(title: value(title), name: value(full), email: value(email), phone: value(phone),
                                    address: [.street: value(street), .street2: value(street2), .city: value(city), .region: value(region),
                                              .postalCode: value(postal), .country: value(country)])
-                if !found.isEmpty { result.items += found; continue }
+                if !found.isEmpty {
+                    if protonNote(value(notes)) == nil { found[0][.notes] = value(notes) }
+                    result.items += found
+                    continue
+                }
                 // Proton Pass puts an identity's details in its note, as JSON.
                 guard !value(notes).isEmpty else { result.skipped += 1; continue }
                 guard let content = protonNote(value(notes)) else { result.unreadable.append(unreadable(value(title), .contact)); continue }
@@ -1423,22 +1459,26 @@ enum Vault {
         return item
     }
 
-    /// A Proton Pass identity as contact info and its address (its JSON export's content, or a CSV row's note).
-    static func protonIdentity(title: String, content: [String: Any]) -> [VaultItem] {
+    /// A Proton Pass identity as contact info and its address (its JSON export's content, or a CSV row's note), with
+    /// the identity's own note (the JSON's `metadata.note`, else the content's `note`) on the contact info.
+    static func protonIdentity(title: String, content: [String: Any], note: String? = nil) -> [VaultItem] {
         func text(_ names: String...) -> String { names.lazy.compactMap { content[$0] as? String }.first { !$0.isEmpty } ?? "" }
         let full = text("fullName")
         let parts = [text("firstName"), text("middleName"), text("lastName")].filter { !$0.isEmpty }.joined(separator: " ")
         return person(title: title, name: full.isEmpty ? parts : full, email: text("email"), phone: text("phoneNumber", "phone"),
                       address: [.street: text("streetAddress"), .street2: text("floor"), .city: text("city"),
-                                .region: text("stateOrProvince"), .postalCode: text("zipOrPostalCode"), .country: text("countryOrRegion")])
+                                .region: text("stateOrProvince"), .postalCode: text("zipOrPostalCode"), .country: text("countryOrRegion")],
+                      note: note.flatMap { $0.isEmpty ? nil : $0 } ?? text("note"))
     }
 
-    /// An identity as Petal keeps it: contact info, and its address as an Address linked to it.
-    static func person(title: String, name: String, email: String, phone: String, address: [VaultField: String]) -> [VaultItem] {
+    /// An identity as Petal keeps it: contact info (with its note), and its address as an Address linked to it.
+    static func person(title: String, name: String, email: String, phone: String, address: [VaultField: String],
+                       note: String = "") -> [VaultItem] {
         var contact = VaultItem(kind: .contact, title: title.isEmpty ? (name.isEmpty ? "Contact info" : name) : title)
         contact[.name] = name
         contact[.email] = email
         contact[.phone] = phone
+        contact[.notes] = note
         var home = VaultItem(kind: .address, title: "Home")
         for (field, value) in address { home[field] = value }
         let hasAddress = !home.fields.isEmpty
@@ -1498,7 +1538,7 @@ enum Vault {
                     guard let item = protonCard(title: title, content: content, note: note) else { result.skipped += 1; continue }
                     result.items.append(item)
                 case .contact?:
-                    let found = protonIdentity(title: title, content: content)
+                    let found = protonIdentity(title: title, content: content, note: note)
                     if found.isEmpty { result.skipped += 1 } else { result.items += found }
                 default:
                     result.skipped += 1
@@ -1506,6 +1546,15 @@ enum Vault {
             }
         }
         return result
+    }
+
+    /// Which file of a Proton Pass zip (its members' names, as `unzip -Z1` lists them) is the vault: "Proton Pass/
+    /// data.json", else the one data.json at the top. Attachments (under "Proton Pass/files/") and an encrypted
+    /// data.pgp never are. nil when there's no such file, or more than one at the top.
+    static func protonZipMember(_ names: [String]) -> String? {
+        if names.contains("Proton Pass/data.json") { return "Proton Pass/data.json" }
+        let top = names.filter { $0.caseInsensitiveCompare("data.json") == .orderedSame }
+        return top.count == 1 ? top[0] : nil
     }
 
     /// Any export Petal reads: JSON (Petal's, Proton Pass's) or CSV.
