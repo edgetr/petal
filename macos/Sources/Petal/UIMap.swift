@@ -199,6 +199,19 @@ enum UIMap {
             || [node.title, node.label, node.help, node.placeholder, node.value].contains { !$0.isEmpty && $0 != hidden && secret($0) }
     }
 
+    /// Which part covers the one read `at` in a picture: itself when it has bounds (`frames`, by when each was read),
+    /// else the nearest that holds it (`parents`, -1 for none) with some. nil: none has, so the window isn't read whole.
+    static func cover(frames: [CGRect], parents: [Int], at: Int) -> Int? {
+        var index = at
+        var steps = 0
+        while index >= 0, index < frames.count, steps <= frames.count {
+            if frames[index].width > 0, frames[index].height > 0 { return index }
+            index = parents[index]
+            steps += 1
+        }
+        return nil
+    }
+
     /// What to black out of a picture taken between two reads of a window (`before`, `after`: where each part that
     /// may show a secret was, by an id for the element, the same id in both for the same element), so wherever it
     /// was while the picture was taken, it's covered: the bounding box of where it was in each, which takes in the
@@ -834,6 +847,13 @@ enum UIMap {
     /// A control with a text already hidden still counts by what else it shows. `hid`: something was.
     static func hideJoined(_ nodes: [UINode], matches: (String) -> Bool, going: () -> Bool = { true }) -> (nodes: [UINode], hid: Bool) {
         var out = nodes
+        let which = joinedHidden(nodes, matches: matches, going: going)
+        for index in which { hideAll(&out[index]) }
+        return (out, !which.isEmpty)
+    }
+
+    /// Which of `nodes` (by index) `hideJoined` hides.
+    static func joinedHidden(_ nodes: [UINode], matches: (String) -> Bool, going: () -> Bool = { true }) -> Set<Int> {
         var pieces: [TextPiece] = []
         var owners: [Int] = []
         for (index, node) in nodes.enumerated() {
@@ -845,10 +865,25 @@ enum UIMap {
         if let joined = joinedSecrets(pieces, matches: matches, going: going) {
             found = joined
         } else {
-            found = Set(pieces.indices.filter { pieces[$0].text.count <= joinLength && pieces[$0].text.contains(where: \.isNumber) })
+            found = Set(pieces.indices.filter { isShortPiece(pieces[$0].text) })
         }
-        for piece in found { hideAll(&out[owners[piece]]) }
-        return (out, !found.isEmpty)
+        return Set(found.map { owners[$0] })
+    }
+
+    /// A text short enough to be a piece and with a digit in it: what's hidden when the pieces can't be checked whole.
+    static func isShortPiece(_ text: String) -> Bool {
+        text.count <= joinLength && text.contains(where: \.isNumber)
+    }
+
+    /// What has the keyboard (`focus`, the orders it was found at in its window's read) is a piece of a secret the
+    /// window shows only in pieces (`hidden`, from `joinedHidden`), so nothing of it is told selected or copied: a
+    /// card number in four fields of four digits, copied or selected a field at a time, would be whole again. When the
+    /// window wasn't read whole, or the control wasn't found in it (`complete` false), any of its texts (`texts`)
+    /// short with a digit in it counts as a piece, as hideJoined does when it runs out of time.
+    static func focusInJoined(focus: Set<Int>, hidden: Set<Int>, complete: Bool, texts: [String]) -> Bool {
+        if !focus.isDisjoint(with: hidden) { return true }
+        if complete, !focus.isEmpty { return false }
+        return texts.contains(where: isShortPiece)
     }
 
     /// The same element (CFEqual: for Accessibility, the same control of the same app), or neither.

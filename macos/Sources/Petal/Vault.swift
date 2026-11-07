@@ -235,6 +235,28 @@ enum Vault {
         }
     }
 
+    /// Which version of `item` this is: changed by any edit (its fields, kind, places or when it was saved). Only
+    /// compared within this run (Hasher is seeded per process), never saved or shown. A Buy and the fills Petal
+    /// planned hold it: an item edited meanwhile (another number while the Buy card was open) fills nothing.
+    static func revision(_ item: VaultItem) -> Int {
+        var hasher = Hasher()
+        hasher.combine(item.id)
+        hasher.combine(item.kind.rawValue)
+        hasher.combine(item.updated.timeIntervalSinceReferenceDate)
+        for key in item.fields.keys.sorted() { hasher.combine(key); hasher.combine(item.fields[key]) }
+        hasher.combine(item.sites)
+        hasher.combine(item.apps)
+        return hasher.finalize()
+    }
+
+    /// `item` is still the version `revision` was taken of; a plan with none (what the person typed) matches any.
+    static func sameRevision(_ revision: Int?, _ item: VaultItem) -> Bool {
+        revision.map { $0 == Vault.revision(item) } ?? true
+    }
+
+    /// Why nothing was filled when the item changed in the vault after Petal planned the fill or the person said Buy.
+    static let changedText = "That item changed in the vault since Petal asked (it was edited meanwhile): nothing was filled. Call fill again, so the person is asked about it as it is now."
+
     /// "Visa •••• 4242".
     static func cardName(_ item: VaultItem) -> String {
         let digits = item[.number].filter(\.isNumber)
@@ -879,21 +901,25 @@ enum Vault {
         /// The tab Buy was said in: the browser's own id for it (if it gave one then) and its page.
         var tab: Tab
         var card: String
+        /// The card as it was when the person said Buy (`Vault.revision`): edited since, it isn't covered.
+        var revision: Int?
         var turn: String
 
-        init(host: String, path: String, window: UInt32, tab: Tab, card: String, turn: String) {
+        init(host: String, path: String, window: UInt32, tab: Tab, card: String, revision: Int? = nil, turn: String) {
             self.host = host
             self.path = path
             self.window = window
             self.tab = tab
             self.card = card
+            self.revision = revision
             self.turn = turn
         }
 
         /// The Buy for `place`, or nil when Petal can't tell which tab and page it is.
-        init?(place: Place, window: UInt32, card: String, turn: String) {
+        init?(place: Place, window: UInt32, card: String, revision: Int? = nil, turn: String) {
             guard place.web, let host = place.shop, place.tab.page != nil else { return nil }
-            self.init(host: host, path: Vault.path(place.topURL ?? place.frameURL), window: window, tab: place.tab, card: card, turn: turn)
+            self.init(host: host, path: Vault.path(place.topURL ?? place.frameURL), window: window, tab: place.tab, card: card,
+                      revision: revision, turn: turn)
         }
 
         /// `place` is still the tab and page Buy was said on: its page the same (and the browser's id for the tab,
@@ -906,8 +932,8 @@ enum Vault {
             return UIMap.same(page, now)
         }
 
-        func covers(_ place: Place, window: UInt32?, card: String, turn: String) -> Bool {
-            !token.revoked && turn == self.turn && card == self.card && window == self.window && same(place)
+        func covers(_ place: Place, window: UInt32?, card: String, revision: Int? = nil, turn: String) -> Bool {
+            !token.revoked && turn == self.turn && card == self.card && revision == self.revision && window == self.window && same(place)
         }
 
         /// Its window, seen showing anything but the tab and page Buy was said on: the checkout is over.

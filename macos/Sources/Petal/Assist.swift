@@ -295,6 +295,9 @@ final class Assist {
                 var node = Reader.node(field)
                 if !UIMap.isSecure(node) { node.value = Windows.value(field, kAXValueAttribute) ?? "" }
                 return UIMap.selectionHidden(in: node, filled: Sensitive.isFilled(field, pid: pid), secret: VaultIndex.current().matches)
+                    // Nor one piece of a secret the window shows in pieces (a card number as four fields): selected a
+                    // field at a time, it would be told whole.
+                    || Reader.inJoinedSecret(pid: pid, window: number, controls: [field])
             } == true
             let shownSelection = selected.isEmpty ? "" : inSecret ? Self.selectionInSecret
                 : Self.shownText(selected, limit: 8000) ?? Self.tooMuchSelected

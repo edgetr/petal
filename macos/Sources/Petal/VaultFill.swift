@@ -7,6 +7,9 @@ import Security
 /// (VaultFiller), and filled through ComputerUse's line, with its pointer, Stop and window checks.
 struct VaultFillPlan {
     var itemID = ""
+    /// The item as Petal planned with it (`Vault.revision`); edited since, nothing fills. nil: what the person typed
+    /// into Petal's card (`given`), not an item.
+    var revision: Int?
     /// The item's title, for the history ("Filled your GitHub password on github.com").
     var title = ""
     var field: VaultField
@@ -57,6 +60,8 @@ enum VaultFiller {
             four = Vault.fourDigitYear(plan.field, format: plan.yearFormat, hints: [node.placeholder, node.label, node.title, node.help],
                                        maxLength: room)
         }
+        // The item as it was when Petal planned the fill (and the person said Buy on it), not one edited since.
+        if let saved, !Vault.sameRevision(plan.revision, saved) { return Vault.changedText }
         guard let text = plan.given.map({ Vault.typed(plan.field, $0) }) ?? saved.flatMap({ Vault.text($0, plan.field, fourDigitYear: four) }),
               !text.isEmpty else { return "That isn't in the vault anymore." }
         guard !cancel.stopped else { return cancel.buyEnded ? Acting.buyEndedText : ComputerUse.stoppedText }
@@ -539,12 +544,14 @@ extension Assist {
             for (offset, pair) in wanted.enumerated() {
                 let field = Vault.field(pair.word, kind: item.kind)!
                 var plan = VaultFillPlan(itemID: item.id, title: item.title, field: field, place: places[offset], target: targets[offset])
+                plan.revision = Vault.revision(item)
                 plan.task = task
                 plan.yearFormat = (args["yearFormat"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                     ?? ((args["fourDigitYear"] as? Bool).map { $0 ? "YYYY" : "YY" })
                 plan.payment = item.kind == .card
                 let bought = item.kind == .card
-                    && self.computer.checkout(caller, token: token, place: places[offset], window: map.windowID, card: item.id) != nil
+                    && self.computer.checkout(caller, token: token, place: places[offset], window: map.windowID, card: item.id,
+                                              revision: plan.revision) != nil
                 switch Vault.decide(item, field, target: targets[offset], place: places[offset], checkout: bought) {
                 case .refuse(let why): return fail("\(pair.id): \(why) Nothing was filled.")
                 case .ask(_, let why):
@@ -616,11 +623,18 @@ extension Assist {
         let asked = map.windowID.map { computer.endBuys(in: $0) } ?? 0
         ask("vault-buy", "Buy on \(shop)?", detail: detail, always: true, warn: true, allow: "Buy", owner: caller) { allowed in
             guard allowed else { return send(["declined": "The person said Don't: nothing was filled. Don't buy it, and don't find another way."]) }
-            guard self.computer.allowCheckout(caller, token: token, place: place, map: map, card: item.id, asked: asked) else {
-                return fail("That Buy card is over (a newer one was asked for this window, or the reply ended): nothing was filled. " + Self.over)
+            // The card as the Buy card showed it: edited in Settings while the card was open, the Buy counts for
+            // nothing (read off the main thread; the Keychain may wait).
+            let shown = Vault.revision(item)
+            VaultStore.load { result in
+                guard case .success(let items) = result else { return fail(VaultStore.unreadableText + " Nothing was filled; try again in a moment.") }
+                guard let now = items.first(where: { $0.id == item.id }), Vault.sameRevision(shown, now) else { return fail(Vault.changedText) }
+                guard self.computer.allowCheckout(caller, token: token, place: place, map: map, card: item.id, revision: shown, asked: asked) else {
+                    return fail("That Buy card is over (a newer one was asked for this window, or the reply ended): nothing was filled. " + Self.over)
+                }
+                self.did("You said Buy on \(shop) (\(Vault.cardName(item)))")
+                bought()
             }
-            self.did("You said Buy on \(shop) (\(Vault.cardName(item)))")
-            bought()
         }
     }
 

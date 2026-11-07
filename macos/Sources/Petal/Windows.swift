@@ -686,7 +686,10 @@ final class AXWatcher: @unchecked Sendable {
         let element = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(element, 0.3)
         var added = 0
-        let browser = Browsers.kind(app.bundleIdentifier ?? "") != nil
+        // Every browser a Buy can be said in (the vault's trusted ones: Phi, T3 Code, … too), so another tab ends it
+        // there as well; notes still act only on Browsers.kind's.
+        let bundle = app.bundleIdentifier ?? ""
+        let browser = Browsers.kind(bundle) != nil || VaultReader.browsers[bundle] != nil
         let names = isDock ? Self.missionControlOpened + Self.missionControlClosed
             : Self.appNotifications + (browser ? Self.browserNotifications : [])
         for name in names where AXObserverAddNotification(observer, element, name as CFString, nil) == .success { added += 1 }
@@ -754,7 +757,7 @@ final class AXWatcher: @unchecked Sendable {
             guard wantsTitles || watched else { return }
             send(.titleChanged, window: windowIDs[element] ?? (watched ? Windows.id(of: element) : nil), element: element)
         case kAXFocusedUIElementChangedNotification, kAXSelectedChildrenChangedNotification:
-            // Only browsers are asked for these. The window isn't looked up (it waits on the app): the listener
+            // Only browsers (and the vault's trusted ones) are asked for these. The window isn't looked up (it waits on the app): the listener
             // checks it's the one in front.
             guard wantsTitles else { return }
             send(.tabSwitched)

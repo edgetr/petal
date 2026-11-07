@@ -384,7 +384,7 @@ final class ComputerUse {
         // Payment info fills only under the Buy that covers this page now, and stops the moment that Buy ends.
         var buy: Vault.BuyToken?
         if plan.payment {
-            guard let covering = checkout(caller, token: token, place: plan.place, window: map.windowID, card: plan.itemID) else {
+            guard let covering = checkout(caller, token: token, place: plan.place, window: map.windowID, card: plan.itemID, revision: plan.revision) else {
                 return fail(Acting.buyEndedText)
             }
             buy = covering
@@ -397,20 +397,21 @@ final class ComputerUse {
 
     /// The Buy said in this reply that covers payment info at `place` (its exact host and page, this window and tab,
     /// this card), or nil. A window seen showing another page or tab ends that Buy.
-    func checkout(_ caller: String, token: Acting.Cancel, place: Vault.Place, window: CGWindowID?, card: String) -> Vault.BuyToken? {
+    func checkout(_ caller: String, token: Acting.Cancel, place: Vault.Place, window: CGWindowID?, card: String, revision: Int?) -> Vault.BuyToken? {
         guard live(caller, token), let current = sessions[caller] else { return nil }
         if let window { seen(place, window: window) }
         let turn = Self.turnName(current)
-        return sessions[caller]?.checkouts.first { $0.covers(place, window: window, card: card, turn: turn) }?.token
+        return sessions[caller]?.checkouts.first { $0.covers(place, window: window, card: card, revision: revision, turn: turn) }?.token
     }
 
     /// The person said Buy on `place`'s host: payment info from `card` fills there, in that window, for the rest of
     /// this reply. It doesn't let Petal AI use the browser otherwise: pressing the order button asks as any act does
     /// (unless the reply may use the browser already). False when the reply ended while they were asked.
-    /// `asked`: the Buy card's number (endBuys); a newer card asked in that window since means no Buy.
-    func allowCheckout(_ caller: String, token: Acting.Cancel, place: Vault.Place, map: Map, card: String, asked: Int) -> Bool {
+    /// `asked`: the Buy card's number (endBuys); a newer card asked in that window since means no Buy. `revision`: the
+    /// card as shown on the Buy card (`Vault.revision`); only that version of it fills.
+    func allowCheckout(_ caller: String, token: Acting.Cancel, place: Vault.Place, map: Map, card: String, revision: Int, asked: Int) -> Bool {
         guard live(caller, token), let current = sessions[caller], let window = map.windowID, buyCards[window] == asked,
-              let bought = Vault.Checkout(place: place, window: window, card: card, turn: Self.turnName(current)) else { return false }
+              let bought = Vault.Checkout(place: place, window: window, card: card, revision: revision, turn: Self.turnName(current)) else { return false }
         sessions[caller]?.checkouts.removeAll { $0.window == window }
         sessions[caller]?.checkouts.append(bought)
         watchBuy(map)
@@ -930,6 +931,10 @@ enum Reader {
         /// another one.
         var page: AXUIElement?
         var pageURL: String?
+        /// The orders at which the controls asked about (`focus`) were met, and those hidden as pieces of a secret
+        /// several show together (`UIMap.joinedHidden`).
+        var focusOrders: Set<Int> = []
+        var joined: Set<Int> = []
     }
 
     static let attributes = [kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute,
@@ -941,7 +946,8 @@ enum Reader {
     static let listRoles: Set<String> = ["AXTable", "AXOutline", "AXList", "AXBrowser"]
 
     /// `deep`: also read every other control's text, for `holdsSecret` (a dashboard's key shown as plain text).
-    static func read(pid: pid_t, window wanted: UInt32?, budget: TimeInterval, deep: Bool = false) -> Reading {
+    /// `focus`: controls whose orders are noted (`focusOrders`), to tell whether one is a piece of a joined secret.
+    static func read(pid: pid_t, window wanted: UInt32?, budget: TimeInterval, deep: Bool = false, focus: [AXUIElement] = []) -> Reading {
         var reading = Reading()
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
@@ -992,6 +998,7 @@ enum Reader {
             node.order = order
             node.parent = parent
             node.sibling = sibling
+            if focus.contains(where: { CFEqual($0, element) }) { reading.focusOrders.insert(order) }
             if role == "AXWebArea", reading.page == nil {
                 reading.page = element
                 reading.pageURL = VaultReader.url(element)
@@ -1051,11 +1058,26 @@ enum Reader {
         }
         // Bounded as the picture's check is; out of time, every short text with a digit is hidden instead.
         let joinBy = Date().addingTimeInterval(0.5)
-        let joined = UIMap.hideJoined(walked, matches: vault.matches, going: { Date() < joinBy })
-        if joined.hid { reading.holdsSecret = true }
-        reading.nodes = told.map { joined.nodes[$0] }
+        reading.joined = UIMap.joinedHidden(walked, matches: vault.matches, going: { Date() < joinBy })
+        if !reading.joined.isEmpty { reading.holdsSecret = true }
+        for index in reading.joined { UIMap.hideAll(&walked[index]) }
+        reading.nodes = told.map { walked[$0] }
         reading.fingerprint = fingerprint(app: app, window: window, lists: reading.lists)
         return reading
+    }
+
+    /// One of `controls` (what has the keyboard in window `window` of `pid`) is a piece of a secret its window shows
+    /// only in pieces (`UIMap.focusInJoined`), or the window couldn't be checked: then nothing of it is selected out
+    /// or copied. Reads the whole window (within a second), so never on the main thread.
+    static func inJoinedSecret(pid: pid_t, window: UInt32?, controls: [AXUIElement]) -> Bool {
+        guard !controls.isEmpty else { return false }
+        guard let reading = VaultIndex.settled({ _ in read(pid: pid, window: window, budget: 1.0, focus: controls) }),
+              !reading.vaultUnreadable, !reading.gone, reading.window != nil else { return true }
+        let texts = controls.flatMap { control -> [String] in
+            let found = values(control, [kAXSelectedTextAttribute, kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute])
+            return [kAXSelectedTextAttribute, kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute].compactMap { found[$0] as? String }
+        }
+        return UIMap.focusInJoined(focus: reading.focusOrders, hidden: reading.joined, complete: !reading.timedOut, texts: texts)
     }
 
     /// What the window shows now that an act depends on (UIMap.Fingerprint): its title, the control with the
@@ -1449,6 +1471,11 @@ enum Acting {
                 case .clean: break
                 }
             }
+        }
+        // Nor one piece of a secret the window shows in pieces (a card number as four fields of four digits): copied
+        // a field at a time, it would be whole again.
+        if Reader.inJoinedSecret(pid: map.pid, window: map.windowID, controls: [element, focused].compactMap { $0 }) {
+            return "What has the keyboard is part of a secret this window shows in pieces (a card number, a key): Petal doesn't copy it. petal_vault fills a saved one where it's needed (action: fill)."
         }
         return nil
     }

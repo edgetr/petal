@@ -78,7 +78,18 @@ enum Sensitive {
         var visited = 0
         // Text shown in the picture, to look for a secret split over several pieces (a card number in fours).
         var pieces: [UIMap.TextPiece] = []
-        var pieceElements: [AXUIElement] = []
+        var pieceAt: [Int] = []
+        // Every element read, its frame and its parent (by when each was read): a part with no bounds of its own is
+        // covered by the nearest around it that has some (UIMap.cover).
+        var elements: [AXUIElement] = []
+        var frames: [CGRect] = []
+        var parents: [Int] = []
+        /// Covers the part read `at`: by its own frame, else its nearest ancestor's; false when none has one.
+        func cover(_ at: Int) -> Bool {
+            guard let index = UIMap.cover(frames: frames, parents: parents, at: at) else { return false }
+            scan.found.append((elements[index], frames[index].insetBy(dx: -4, dy: -4)))
+            return true
+        }
         while let (element, depth, parent, order) = stack.popLast() {
             guard visited < 40_000, Date() < deadline else { scan.complete = false; return scan }
             let me = visited
@@ -105,6 +116,10 @@ enum Sensitive {
             node.placeholder = values[kAXPlaceholderValueAttribute] as? String ?? ""
             node.identifier = values[kAXIdentifierAttribute] as? String ?? ""
             let frame = Reader.frame(values[kAXPositionAttribute], values[kAXSizeAttribute])
+            elements.append(element)
+            frames.append(frame)
+            parents.append(parent)
+            let placed = frame.width > 0 && frame.height > 0
             // Named for a secret only counts for a field one types into: a window or page called "API keys" isn't
             // blacked out whole (its text is still searched below).
             var secret = UIMap.isSecure(node) || UIMap.looksSecretField(node) || mine.contains { CFEqual($0, element) }
@@ -113,14 +128,17 @@ enum Sensitive {
                 let value = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
                 secret = [node.title, node.label, node.help, node.placeholder, value].contains { !$0.isEmpty && vault.matches($0) }
                 let shown = [value, node.title, node.label].first { !$0.isEmpty } ?? ""
-                if !secret, !shown.isEmpty, frame.width > 0, frame.height > 0, frame.intersects(around) {
+                // One with no bounds may be in the picture: it counts, covered by what's around it if need be.
+                if !secret, !shown.isEmpty, !placed || frame.intersects(around) {
                     pieces.append(UIMap.TextPiece(text: shown, parent: parent, order: order, frame: frame))
-                    pieceElements.append(element)
+                    pieceAt.append(me)
                 }
             }
-            if secret, frame.width > 0, frame.height > 0 { scan.found.append((element, frame.insetBy(dx: -4, dy: -4))) }
+            // A part that may show a secret with no bounds of its own (an attribute that failed, or a zero size):
+            // what holds it is covered, else the window isn't read whole.
+            if secret, !cover(me) { scan.complete = false; return scan }
             // Far down a page or scrolled away: not in the picture.
-            if depth > 0, frame.width > 0, frame.height > 0, !frame.intersects(around) { continue }
+            if depth > 0, placed, !frame.intersects(around) { continue }
             // A list's rows showing (what's scrolled away isn't in the picture), else every child. Children that
             // couldn't be read, or that lie deeper than the scan goes, leave the window not read whole.
             let names = Reader.listRoles.contains(role) ? ["AXVisibleRows", "AXVisibleChildren", kAXChildrenAttribute] : [kAXChildrenAttribute]
@@ -135,7 +153,7 @@ enum Sensitive {
             scan.complete = false
             return scan
         }
-        for index in joined { scan.found.append((pieceElements[index], pieces[index].frame.insetBy(dx: -4, dy: -4))) }
+        for index in joined where !cover(pieceAt[index]) { scan.complete = false; return scan }
         return scan
     }
 

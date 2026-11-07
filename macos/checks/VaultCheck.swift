@@ -60,6 +60,9 @@ struct VaultCheck {
         wideCardGaps()
         importDetails()
         cardDigits()
+        joinedFocus()
+        missingFrames()
+        buyRevision()
         if failures > 0 { print("vault: \(failures) failed"); exit(1) }
         print("vault: ok")
     }
@@ -1112,6 +1115,75 @@ struct VaultCheck {
             [node.value, node.title, node.help].allSatisfy { $0 == UIMap.hidden } && UIMap.name(node) == UIMap.hidden
         }, "a joined piece hides its value, title, help and name")
         expect(all[1].title == "Card", "its label stays")
+    }
+
+    /// Copying, or petal_look's selection, in one of four fields that show a card number together is refused: each
+    /// field alone holds no secret. A field of a window that couldn't be read whole counts when it's a short text
+    /// with a digit.
+    static func joinedFocus() {
+        let index = UIMap.SecretIndex(sample().flatMap(Vault.secrets))
+        let nodes = ["Card", "4111", "1111", "1111", "1111", "Order 1234"].enumerated().map { pair -> UINode in
+            var node = UINode(role: "AXTextField")
+            node.value = pair.element
+            node.parent = pair.offset == 5 ? 9 : 0
+            node.sibling = pair.offset
+            node.order = pair.offset
+            node.frame = CGRect(x: CGFloat(pair.offset) * 60, y: pair.offset == 5 ? 400 : 200, width: 50, height: 20)
+            return node
+        }
+        let hidden = UIMap.joinedHidden(nodes, matches: index.matches)
+        expect(hidden == [1, 2, 3, 4], "the four groups are the joined secret's pieces")
+        for at in 1...4 {
+            expect(UIMap.focusInJoined(focus: [at], hidden: hidden, complete: true, texts: [nodes[at].value]), "piece \(at) isn't copied or told selected")
+        }
+        expect(!UIMap.focusInJoined(focus: [0], hidden: hidden, complete: true, texts: ["Card"]), "the label next to it is")
+        expect(!UIMap.focusInJoined(focus: [5], hidden: hidden, complete: true, texts: ["Order 1234"]), "a field elsewhere with digits is")
+        // Not read whole, or the field not found in the read: a short text with a digit counts as a piece.
+        expect(UIMap.focusInJoined(focus: [5], hidden: [], complete: false, texts: ["4111"]), "out of time: a short piece with digits counts")
+        expect(UIMap.focusInJoined(focus: [], hidden: [], complete: true, texts: ["4111"]), "not found in the read: a short piece with digits counts")
+        expect(!UIMap.focusInJoined(focus: [], hidden: [], complete: false, texts: ["Hello there"]), "not read whole: words without digits are fine")
+        // hideJoined hides exactly what joinedHidden finds.
+        let (shown, any) = UIMap.hideJoined(nodes, matches: index.matches)
+        expect(any && (1...4).allSatisfy { shown[$0].value == UIMap.hidden } && shown[5].value == "Order 1234", "hideJoined agrees")
+    }
+
+    /// A part of a picture that may show a secret but has no bounds of its own is covered by the nearest part holding
+    /// it that has some; when none has, the window isn't read whole.
+    static func missingFrames() {
+        let window = CGRect(x: 0, y: 0, width: 800, height: 600)
+        let group = CGRect(x: 10, y: 10, width: 200, height: 40)
+        // 0 the window, 1 a group, 2 a field in it with no size, 3 a field with its own frame, 4 under 2 (no frame either).
+        let frames = [window, group, .zero, CGRect(x: 20, y: 60, width: 100, height: 20), CGRect(x: 30, y: 30, width: 0, height: 10)]
+        let parents = [-1, 0, 1, 0, 2]
+        expect(UIMap.cover(frames: frames, parents: parents, at: 3) == 3, "a part with bounds covers itself")
+        expect(UIMap.cover(frames: frames, parents: parents, at: 2) == 1, "a part with no bounds: its group is covered")
+        expect(UIMap.cover(frames: frames, parents: parents, at: 4) == 1, "two levels without bounds: the nearest that has some")
+        let bare: [CGRect] = [.zero, .zero, .zero]
+        expect(UIMap.cover(frames: bare, parents: [-1, 0, 1], at: 2) == nil, "nothing around it has bounds: not read whole")
+        expect(UIMap.cover(frames: [.zero, .zero], parents: [1, 0], at: 0) == nil, "a loop of parents ends")
+    }
+
+    /// A fill planned (or a Buy said) for an item covers only that version of it: edited meanwhile, nothing fills.
+    static func buyRevision() {
+        guard let card = sample().first(where: { $0.kind == .card }) else { return expect(false, "a sample card") }
+        let shown = Vault.revision(card)
+        expect(Vault.sameRevision(shown, card) && Vault.revision(card) == shown, "the same item, the same version")
+        var edited = card
+        edited[.number] = "5555 5555 5555 4444"
+        expect(!Vault.sameRevision(shown, edited), "another number: another version")
+        var resaved = card
+        resaved.updated = card.updated.addingTimeInterval(1)
+        expect(!Vault.sameRevision(shown, resaved), "saved again: another version")
+        var renamed = card
+        renamed.title = card.title + " (old)"
+        expect(Vault.sameRevision(shown, renamed), "only its name changed in memory: the same version")
+        expect(Vault.sameRevision(nil, edited), "what the person typed on the card has no version to match")
+        let tabA = NSObject()
+        let pay = Vault.Place(web: true, frameURL: "https://shop.example/pay", topURL: "https://shop.example/pay", tabURL: "https://shop.example/pay",
+                              tab: Vault.Tab(id: "1", page: tabA), bundle: "com.google.Chrome", appName: "Chrome", signed: true)
+        guard let bought = Vault.Checkout(place: pay, window: 7, card: card.id, revision: shown, turn: "3|") else { return expect(false, "a Buy") }
+        expect(bought.covers(pay, window: 7, card: card.id, revision: shown, turn: "3|"), "the card as shown on the Buy card fills")
+        expect(!bought.covers(pay, window: 7, card: card.id, revision: Vault.revision(edited), turn: "3|"), "the card edited since doesn't")
     }
 
     /// petal_look's selection in a field holding a secret isn't told, whatever is selected; elsewhere it is.
