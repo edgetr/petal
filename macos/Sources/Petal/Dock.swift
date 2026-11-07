@@ -1242,6 +1242,10 @@ struct ClaudeButton: View {
             KeyframeTrack { CubicKeyframe(1, duration: 0.22); SpringKeyframe(0.86, duration: 0.1); SpringKeyframe(1.0, duration: 0.35, spring: .bouncy) }
         }
         .clearGlass(in: .circle, pressed: pressed)
+        // A sticky note waits for the person (its window in front, its tab showing, an answer): hovering shows which.
+        .overlay(alignment: .topTrailing) {
+            if app.claude.needsYou { Badge(text: "✦", icon: size * 0.8).offset(x: size * 0.08, y: -size * 0.08) }
+        }
         .animation(.easeOut(duration: 0.12), value: hovering)
         .animation(.spring(response: 0.32, dampingFraction: 0.6), value: fileOver)
         .slotFrame(dock, "claude")
@@ -1249,7 +1253,9 @@ struct ClaudeButton: View {
         .slotMouse(SlotMouse(left: { app.claude.toggle() }, right: { Menus.settings(for: dock) },
                            hover: { on in
                                hovering = on
-                               app.tooltips.show(on ? app.usageTooltip : nil, over: "claude", in: dock)
+                               // The notes at work, as an app's windows show; with none, the usage tooltip.
+                               if app.previews.hoverNotes(on, in: dock) { app.tooltips.hide() }
+                               else { app.tooltips.show(on ? app.usageTooltip : nil, over: "claude", in: dock) }
                            },
                            // A file dropped on it goes to the AI: "summarize it", "what's in it?".
                            files: { urls in

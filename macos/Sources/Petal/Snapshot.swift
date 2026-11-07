@@ -109,6 +109,30 @@ enum Snapshot {
         app.previews.preview(windows: sampleWindows, pictures: false)
         write(render(AnyView(PreviewView(id: "com.apple.Safari") {}), app: app, size: nil), name: "preview-titles", folder: folder)
         app.previews.preview(windows: [], pictures: false)
+        // Over the AI button: sticky notes at work in their windows in the background, one waiting for the person,
+        // one done, and one in an app kept private (no picture).
+        let editor = NSImage(size: NSSize(width: 240, height: 150), flipped: false) { rect in
+            NSColor(white: 0.1, alpha: 1).setFill(); rect.fill()
+            NSColor(white: 0.16, alpha: 1).setFill(); NSRect(x: 0, y: 0, width: 58, height: rect.height).fill()
+            NSColor(red: 0.85, green: 0.21, blue: 0.5, alpha: 0.8).setFill(); NSRect(x: 72, y: 18, width: 150, height: 18).fill()
+            NSColor(white: 0.32, alpha: 1).setFill()
+            for row in 0..<4 { NSRect(x: 72, y: 128 - CGFloat(row) * 20, width: CGFloat(150 - row * 22), height: 8).fill() }
+            return true
+        }
+        let ids = (0..<4).map { _ in UUID() }
+        let notes = [
+            NotePreviewItem(id: ids[0], app: "com.apple.Safari", appName: "Safari", title: "Find the cheapest flight to Lisbon",
+                            line: "Waiting for you: " + Background.Reason.menu.status, working: true, needsYou: true, hidden: false,
+                            pid: 0, window: nil, attached: true),
+            NotePreviewItem(id: ids[1], app: "com.apple.Terminal", appName: "T3 Code", title: "Answer the agent's questions",
+                            line: NoteStatus.step("Typing in “Ask anything”"), working: true, needsYou: false, hidden: false,
+                            pid: 0, window: nil, attached: true),
+            NotePreviewItem(id: ids[2], app: "com.apple.mail", appName: "Mail", title: "Sort this week's receipts", line: "Done",
+                            working: false, needsYou: false, hidden: true, pid: 0, window: nil, attached: true),
+        ]
+        app.previews.preview(notes: notes, thumbnails: [ids[0]: picture, ids[1]: editor])
+        write(render(AnyView(PreviewView(id: Previews.notes) {}), app: app, size: nil), name: "preview-notes", folder: folder)
+        app.previews.preview(notes: nil)
         // The sites' own icons, fetched from the sites (up to 10 s).
         let samples = ["https://github.com", "https://www.figma.com"]
         for id in samples { _ = Sites.shared.icon(id) }
