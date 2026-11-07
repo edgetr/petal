@@ -12,12 +12,22 @@ final class IPC {
     /// A function that answers later (the AI's tools waiting for the person to allow something): it calls `reply`
     /// once, on the main thread.
     typealias Later = @MainActor ([String], @escaping @MainActor (String) -> Void) -> Void
+    /// A function that needs to know who's asking (the vault, for agents outside Petal): Petal works it out from the
+    /// socket itself (AgentCallers), never from what the caller says.
+    typealias From = @MainActor ([String], AgentAccess.Caller, @escaping @MainActor (String) -> Void) -> Void
     private var handlers: [String: Handler] = [:]
     private var later: [String: Later] = [:]
+    private var from: [String: From] = [:]
     private var fd: Int32 = -1
+    /// The functions registered with `onFrom`: the socket's thread identifies their callers before they run.
+    nonisolated static let identified: Set<String> = ["assist", "agentKeys"]
 
     func on(_ name: String, _ handler: @escaping Handler) { handlers[name] = handler }
     func onLater(_ name: String, _ handler: @escaping Later) { later[name] = handler }
+    func onFrom(_ name: String, _ handler: @escaping From) {
+        precondition(Self.identified.contains(name))
+        from[name] = handler
+    }
 
     /// Another Petal answers on the socket already: this one mustn't take it from it.
     nonisolated static func answering() -> Bool {
@@ -91,6 +101,8 @@ final class IPC {
         }
         let done = DispatchSemaphore(value: 0)
         let answer = Answer()
+        // Who's asking, read here (off the main thread) from the socket itself.
+        let caller = Self.identified.contains(words.first ?? "") ? AgentCallers.identify(client: client) : nil
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
                 let name = words.first ?? ""
@@ -100,12 +112,14 @@ final class IPC {
                     answer.text = text
                     done.signal()
                 }
-                if let handler = self.later[name] {
+                if let handler = self.from[name], let caller {
+                    handler(Array(words.dropFirst()), caller, finish)
+                } else if let handler = self.later[name] {
                     handler(Array(words.dropFirst()), finish)
                 } else if let handler = self.handlers[name] {
                     finish(handler(Array(words.dropFirst())))
                 } else {
-                    finish("unknown function; try: " + (Array(self.handlers.keys) + Array(self.later.keys)).sorted().joined(separator: ", "))
+                    finish("unknown function; try: " + (Array(self.handlers.keys) + Array(self.later.keys) + Array(self.from.keys)).sorted().joined(separator: ", "))
                 }
             }
         }

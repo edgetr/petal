@@ -29,6 +29,11 @@ final class Assist {
         var warn = false
         /// The word on the button that says yes ("Allow", "Buy").
         var allow = "Allow"
+        /// An Always of its own, even where Don't is the default: "Always for this project" for an agent outside
+        /// Petal (AgentCallers.swift), kept as a grant rather than in aiAllowed.
+        var keep: String?
+        /// The agent asking, when it's one outside Petal: its mark on the card.
+        var mark: AgentAccess.Agent?
         var takesKeys: Bool { form != nil }
     }
 
@@ -70,14 +75,17 @@ final class Assist {
     /// Allowed already (Full access, or Always for this kind), or asked with a card; `done` hears the answer.
     /// `always`: asked even with Full access (the vault). `form`: the card takes what the person types for the vault,
     /// handed to `typed` before `done`. `warn`: Don't is the default (what's asked doesn't match).
+    /// `keep`: the label of an Always kept as `kept` says (an agent's grant), shown even when Don't is the default.
     func ask(_ kind: String, _ title: String, detail: String = "", always: Bool = false, form: VaultForm? = nil, warn: Bool = false,
-             allow: String = "Allow", owner: String? = nil, typed: ((VaultForm.Answer) -> Void)? = nil, done: @escaping (Bool) -> Void) {
+             allow: String = "Allow", owner: String? = nil, keep: String? = nil, mark: AgentAccess.Agent? = nil, kept: (() -> Void)? = nil,
+             typed: ((VaultForm.Answer) -> Void)? = nil, done: @escaping (Bool) -> Void) {
         // `always` (the vault) asks every time: neither Full access nor an earlier Always skips it.
         if form == nil, !always, !warn, config.string("claudeAccess") == "full" || config.strings("aiAllowed").contains(kind) { return done(true) }
         settle(false)   // one question at a time: a newer one replaces an older one, which is declined
         formTyped = typed
+        keptAlways = keep == nil ? nil : kept
         let request = Request(kind: kind, title: title, detail: detail, every: always || warn, owner: owner, form: form, warn: warn,
-                              allow: allow)
+                              allow: allow, keep: keep, mark: mark)
         pending = request
         answer = done
         // In the chat when it's open and the question is its own (the card shows there); over the dock otherwise
@@ -94,6 +102,7 @@ final class Assist {
     }
 
     @ObservationIgnored private var formTyped: ((VaultForm.Answer) -> Void)?
+    @ObservationIgnored private var keptAlways: (() -> Void)?
 
     /// Shows a made-up question, for `Petal --snapshot`.
     func preview(_ request: Request?) { pending = request }
@@ -107,6 +116,7 @@ final class Assist {
             formTyped?(typed)
         }
         formTyped = nil
+        if choice == .always, pending.keep != nil { keptAlways?() }
         if choice == .always, !pending.every {
             var allowed = config.strings("aiAllowed")
             if !allowed.contains(pending.kind) { allowed.append(pending.kind); config.set("aiAllowed", allowed) }
@@ -116,6 +126,7 @@ final class Assist {
 
     private func settle(_ allowed: Bool) {
         formTyped = nil
+        keptAlways = nil
         giveUp?.cancel()
         giveUp = nil
         let done = answer

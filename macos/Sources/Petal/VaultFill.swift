@@ -422,6 +422,24 @@ extension Assist {
         }
     }
 
+    /// "your GitHub login", "your Visa •••• 4242", for an agent's card and the history.
+    static func agentNoun(_ item: VaultItem) -> String {
+        switch item.kind {
+        case .login: "your \(item.title) login"
+        case .apiKey: "your \(item.title) key"
+        case .card: "your \(Vault.cardName(item))"
+        case .contact: "your contact info for \(item.title)"
+        case .address: "your \(item.title) address"
+        case .unsorted: "your “\(item.title)”"
+        }
+    }
+
+    /// Who's asking, in a card's words: "Petal AI", or an agent outside Petal ("Codex in T3 Code").
+    func speaker(_ caller: String?) -> String {
+        guard let who = caller.flatMap({ AgentGrants.shared.callers[$0] }), who.agent != .petal else { return "Petal AI" }
+        return who.label
+    }
+
     private static let hidden = "Petal fills these itself; you never see a password, card number, security code or key."
     private static let over = ComputerUse.stoppedText + " Don't carry on in this reply: say what's left and wait for them."
 
@@ -604,52 +622,58 @@ extension Assist {
             }
             // One fill, one place: a card's question is about one page or app only.
             if let mixed = Vault.mixed(item.kind, places) { return fail(mixed) }
-            var plans: [VaultFillPlan] = []
-            var asked: [VaultField] = []
-            var reasons: [String] = []
-            var askPlace: Vault.Place?
-            var buyPlace: Vault.Place?
-            for (offset, pair) in wanted.enumerated() {
-                let field = Vault.field(pair.word, kind: item.kind)!
-                var plan = VaultFillPlan(itemID: item.id, title: item.title, field: field, place: places[offset], target: targets[offset])
-                plan.revision = Vault.revision(item)
-                plan.task = task
-                plan.yearFormat = (args["yearFormat"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-                    ?? ((args["fourDigitYear"] as? Bool).map { $0 ? "YYYY" : "YY" })
-                plan.payment = item.kind == .card
-                let bought = item.kind == .card
-                    && self.computer.checkout(caller, token: token, place: places[offset], window: map.windowID, card: item.id,
-                                              revision: plan.revision) != nil
-                switch Vault.decide(item, field, target: targets[offset], place: places[offset], checkout: bought) {
-                case .refuse(let why): return fail("\(pair.id): \(why) Nothing was filled.")
-                case .ask(_, let why):
-                    asked.append(field)
-                    if !reasons.contains(why) { reasons.append(why) }
-                    askPlace = askPlace ?? places[offset]
-                case .buy: buyPlace = buyPlace ?? places[offset]
-                case .fill: break
-                }
-                plans.append(plan)
-            }
-            // Return goes once, after the last field; never after payment info (it could place the order).
-            if args["submit"] as? Bool == true, !plans.isEmpty {
-                if let refusal = Vault.submitRefusal(item.kind) { return fail(refusal) }
-                plans[plans.count - 1].submit = true
-            }
-            let go: (Bool) -> Void = { allowed in
+            // An agent outside Petal asks first, unless the person granted it this item in this project.
+            let noun = Self.agentNoun(item)
+            let at = "\(places[0].web ? "on" : "in") \(places[0].where_)"
+            self.agentGate(caller, grant: item.id, title: item.title, what: "fill \(noun) \(at)", task: task, did: "used \(noun) \(at)", fail: fail) {
                 guard self.computer.live(caller, token) else { return fail(Self.over) }
-                self.vaultFillAll(plans, entries: entries, map: map, caller: caller, token: token, allowed: allowed, send: send)
-            }
-            if let buyPlace {
-                return self.vaultBuy(item, place: buyPlace, args: args, map: map, caller: caller, token: token, send: send, fail: fail) { go(true) }
-            }
-            // One card for every field that doesn't match, naming them all. Payment info a Buy covers fills on that
-            // Buy, without asking to use the browser.
-            guard let askPlace else { return go(item.kind == .card) }
-            self.ask("vault-fill", Vault.question(item, asked, place: askPlace), detail: reasons.joined(separator: " "), always: true, warn: true,
-                     allow: "Fill anyway", owner: caller) { allowed in
-                guard allowed else { return send(["declined": "The person didn't let Petal fill it. Don't find another way."]) }
-                go(true)
+                var plans: [VaultFillPlan] = []
+                var asked: [VaultField] = []
+                var reasons: [String] = []
+                var askPlace: Vault.Place?
+                var buyPlace: Vault.Place?
+                for (offset, pair) in wanted.enumerated() {
+                    let field = Vault.field(pair.word, kind: item.kind)!
+                    var plan = VaultFillPlan(itemID: item.id, title: item.title, field: field, place: places[offset], target: targets[offset])
+                    plan.revision = Vault.revision(item)
+                    plan.task = task
+                    plan.yearFormat = (args["yearFormat"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                        ?? ((args["fourDigitYear"] as? Bool).map { $0 ? "YYYY" : "YY" })
+                    plan.payment = item.kind == .card
+                    let bought = item.kind == .card
+                        && self.computer.checkout(caller, token: token, place: places[offset], window: map.windowID, card: item.id,
+                                                  revision: plan.revision) != nil
+                    switch Vault.decide(item, field, target: targets[offset], place: places[offset], checkout: bought) {
+                    case .refuse(let why): return fail("\(pair.id): \(why) Nothing was filled.")
+                    case .ask(_, let why):
+                        asked.append(field)
+                        if !reasons.contains(why) { reasons.append(why) }
+                        askPlace = askPlace ?? places[offset]
+                    case .buy: buyPlace = buyPlace ?? places[offset]
+                    case .fill: break
+                    }
+                    plans.append(plan)
+                }
+                // Return goes once, after the last field; never after payment info (it could place the order).
+                if args["submit"] as? Bool == true, !plans.isEmpty {
+                    if let refusal = Vault.submitRefusal(item.kind) { return fail(refusal) }
+                    plans[plans.count - 1].submit = true
+                }
+                let go: (Bool) -> Void = { allowed in
+                    guard self.computer.live(caller, token) else { return fail(Self.over) }
+                    self.vaultFillAll(plans, entries: entries, map: map, caller: caller, token: token, allowed: allowed, send: send)
+                }
+                if let buyPlace {
+                    return self.vaultBuy(item, place: buyPlace, args: args, map: map, caller: caller, token: token, send: send, fail: fail) { go(true) }
+                }
+                // One card for every field that doesn't match, naming them all. Payment info a Buy covers fills on that
+                // Buy, without asking to use the browser.
+                guard let askPlace else { return go(item.kind == .card) }
+                self.ask("vault-fill", Vault.question(item, asked, place: askPlace), detail: reasons.joined(separator: " "), always: true, warn: true,
+                         allow: "Fill anyway", owner: caller) { allowed in
+                    guard allowed else { return send(["declined": "The person didn't let Petal fill it. Don't find another way."]) }
+                    go(true)
+                }
             }
         }
     }
@@ -688,7 +712,8 @@ extension Assist {
         let what = UIMap.truncate(UIMap.tidy(args["buying"] as? String ?? ""), 160)
         let price = UIMap.truncate(UIMap.tidy(args["price"] as? String ?? ""), 40)
         let said = [what, price].filter { !$0.isEmpty }.joined(separator: ", ")
-        let detail = (said.isEmpty ? "Petal AI didn't say what it's buying." : "Petal AI says: “\(said)”.") + " Pays with \(Vault.cardName(item))."
+        let who = speaker(caller)
+        let detail = (said.isEmpty ? "\(who) didn't say what it's buying." : "\(who) says: “\(said)”.") + " Pays with \(Vault.cardName(item))."
         // A new Buy card for this window ends the Buy already in it (another card on the same checkout), before the
         // person answers: a Don't, a closed card or no answer never leaves the earlier one usable.
         let asked = map.windowID.map { computer.endBuys(in: $0) } ?? 0
@@ -754,7 +779,7 @@ extension Assist {
             form.username = args["username"] as? String ?? ""
             if kind == .apiKey, let read, read.web { form.site = read.host ?? "" }
             // What doesn't match comes first, in Petal's words; then what Petal AI said, marked as its own.
-            let said = why.isEmpty ? "" : "Petal AI says: “\(UIMap.truncate(UIMap.tidy(why), 300))”"
+            let said = why.isEmpty ? "" : "\(self.speaker(caller)) says: “\(UIMap.truncate(UIMap.tidy(why), 300))”"
             let detail = [warning ?? "", said].filter { !$0.isEmpty }.joined(separator: "\n\n")
             self.ask("vault-new", form.heading, detail: detail, always: true, form: form, warn: warning != nil, owner: caller, typed: { answer in
                 guard live() else { return send(["declined": Self.over]) }
@@ -898,40 +923,46 @@ extension Assist {
             if let (index, why) = Vault.unasked(item, roles, targets: Array(targets.prefix(roles.count)), places: Array(places.prefix(roles.count))) {
                 return fail("\(ids[index]): Petal didn't make a password here: \(why)")
             }
-            VaultStore.queue.async {
-                item[.password] = Vault.password(length: length, symbols: symbols, allowed: allowed, random: VaultStore.random)
-                VaultIndex.remember(Vault.secrets(item))
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        // The reply ended while the password was made: nothing is saved or filled.
-                        guard self.computer.live(caller, token) else { return fail(Self.over) }
-                        let saving = item
-                        VaultStore.queue.async {
-                            // Stopped, or the reply ended, while the save waited its turn: nothing is saved.
-                            guard !token.stopped else {
-                                return DispatchQueue.main.async { MainActor.assumeIsolated { fail(Self.over) } }
-                            }
-                            let ok = VaultStore.save([saving])
-                            DispatchQueue.main.async {
-                                MainActor.assumeIsolated {
-                                    guard self.computer.live(caller, token) else {
-                                        return fail(ok ? "Petal saved the new password as \(saving.title) but filled nothing: " + Self.over : Self.over)
-                                    }
-                                    guard ok else { return fail("The Keychain didn't take the new password, so nothing was filled.") }
-                                    self.did("Made a strong password for \(place.where_) and saved it in the vault")
-                                    // The login as saved: edited while the fill waits to be allowed (another site), it fills nothing.
-                                    let revision = Vault.revision(Vault.normalized(saving))
-                                    let plans = roles.indices.map { index -> VaultFillPlan in
-                                        var plan = VaultFillPlan(itemID: saving.id, title: saving.title, field: roles[index], place: places[index], target: targets[index])
-                                        plan.revision = revision
-                                        plan.task = task
-                                        return plan
-                                    }
-                                    self.vaultFillAll(plans, entries: Array(entries.prefix(roles.count)), map: map, caller: caller, token: token, allowed: false) { result in
-                                        var reply = (result as? [String: Any]) ?? [:]
-                                        reply["saved"] = Vault.shown(saving)
-                                        reply["note"] = "Petal made a strong password and saved it as \(saving.title); you never see it."
-                                        send(reply)
+            // An agent outside Petal asks first, unless the person granted it new logins in this project.
+            let at = "\(place.web ? "on" : "in") \(place.where_)"
+            self.agentGate(caller, grant: AgentAccess.Grant.newLogins, title: "New logins", what: "make a new login \(at)", task: task,
+                           did: "started a new login \(at)", fail: fail) {
+                guard self.computer.live(caller, token) else { return fail(Self.over) }
+                VaultStore.queue.async {
+                    item[.password] = Vault.password(length: length, symbols: symbols, allowed: allowed, random: VaultStore.random)
+                    VaultIndex.remember(Vault.secrets(item))
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            // The reply ended while the password was made: nothing is saved or filled.
+                            guard self.computer.live(caller, token) else { return fail(Self.over) }
+                            let saving = item
+                            VaultStore.queue.async {
+                                // Stopped, or the reply ended, while the save waited its turn: nothing is saved.
+                                guard !token.stopped else {
+                                    return DispatchQueue.main.async { MainActor.assumeIsolated { fail(Self.over) } }
+                                }
+                                let ok = VaultStore.save([saving])
+                                DispatchQueue.main.async {
+                                    MainActor.assumeIsolated {
+                                        guard self.computer.live(caller, token) else {
+                                            return fail(ok ? "Petal saved the new password as \(saving.title) but filled nothing: " + Self.over : Self.over)
+                                        }
+                                        guard ok else { return fail("The Keychain didn't take the new password, so nothing was filled.") }
+                                        self.did("Made a strong password for \(place.where_) and saved it in the vault")
+                                        // The login as saved: edited while the fill waits to be allowed (another site), it fills nothing.
+                                        let revision = Vault.revision(Vault.normalized(saving))
+                                        let plans = roles.indices.map { index -> VaultFillPlan in
+                                            var plan = VaultFillPlan(itemID: saving.id, title: saving.title, field: roles[index], place: places[index], target: targets[index])
+                                            plan.revision = revision
+                                            plan.task = task
+                                            return plan
+                                        }
+                                        self.vaultFillAll(plans, entries: Array(entries.prefix(roles.count)), map: map, caller: caller, token: token, allowed: false) { result in
+                                            var reply = (result as? [String: Any]) ?? [:]
+                                            reply["saved"] = Vault.shown(saving)
+                                            reply["note"] = "Petal made a strong password and saved it as \(saving.title); you never see it."
+                                            send(reply)
+                                        }
                                     }
                                 }
                             }

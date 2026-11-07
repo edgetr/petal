@@ -222,6 +222,7 @@ struct VaultSettings: View {
                         .buttonStyle(.plain)
                 }
             }
+            AgentsCard()
             transfer
             Text("Petal AI never sees a password, card number, security code or key. It sees usernames, contact info and addresses so it can type them in for you.")
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)

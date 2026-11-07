@@ -5,7 +5,7 @@ import AppKit
 enum CLI {
     static let commands: Set<String> = ["mode", "stay", "current", "desktop", "ask", "chat", "search", "settings", "reveal", "check",
                                         "dock", "restart", "version", "update", "modes", "get", "set", "restore-dock", "restore-windows", "help", "logs", "chats",
-                                        "recipe", "suggest", "summary", "overview", "personal", "bench"]
+                                        "recipe", "suggest", "summary", "overview", "personal", "bench", "run"]
 
     static let help = """
     petal mode <id>           put this Desktop in a mode (waits out a focus countdown)
@@ -34,6 +34,13 @@ enum CLI {
     petal bench quiet         only hovering the icons and a setting back and forth (no app or mode changes)
     petal restore-windows     bring back every window put away for another mode, even if Petal crashed
     petal personal …          your own changes to Petal's code, kept through updates (petal personal help)
+    petal run --key "<title>" [--env NAME] [--stdin] -- <command…>
+                              run a command with an API key from your vault, for an agent testing with a real
+                              key: the key goes in the command's variable (ANTHROPIC_API_KEY, OPENAI_API_KEY, …;
+                              --env names another, --stdin writes it to the command's input), and is taken out of
+                              what the command prints. Petal asks you first, unless you said Always for that
+                              agent in that project (Settings, Vault, Agents). It keeps keys out of the agent's
+                              chat and logs; a command written to leak one still can.
     """
 
     /// Runs a command and exits. Commands that need the running Petal reach it over its socket.
@@ -73,6 +80,8 @@ enum CLI {
             print(MCP.petal("chat", rest.joined(separator: " ")))
         case "personal":
             Personal.command(rest)
+        case "run":
+            AgentRun.run(rest)
         case "restore-windows":
             restoreWindows()
         case "restore-dock":

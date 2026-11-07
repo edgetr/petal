@@ -11,6 +11,13 @@ enum Snapshot {
         VaultStore.standIn(vault)
         let app = PetalApp()
         VaultModel.shared.preview(vault)
+        // Made-up grants for Settings › Vault › Agents: nothing is read or written.
+        let home = NSHomeDirectory()
+        AgentGrants.shared.preview([
+            AgentAccess.Grant(item: vault.first { $0.kind == .apiKey }?.id ?? "", title: "OpenAI", project: home + "/petal", agent: .codex),
+            AgentAccess.Grant(item: vault.first { $0.kind == .login }?.id ?? "", title: "GitHub", project: home + "/petal", agent: .claude),
+            AgentAccess.Grant(item: AgentAccess.Grant.newLogins, title: "New logins", project: home + "/edgetr", agent: .any),
+        ])
         let dock = ScreenDock()
         dock.desktop = 1
         dock.mode = app.config.mode(forDesktop: 1)
@@ -197,6 +204,15 @@ enum Snapshot {
                                                   form: VaultForm(kind: .address))),
             ("card-vault-buy", Assist.Request(kind: "vault-buy", title: "Buy on shop.example?",
                                               detail: "Petal AI says: “Sony WH-1000XM5 headphones, $279”. Pays with Visa •••• 4242.", every: true, warn: true, allow: "Buy")),
+            ("card-agent-key", Assist.Request(kind: "agent-key", title: "Codex in T3 Code wants your OpenAI key for “npm test” in ~/petal",
+                                              detail: "It never sees it: Petal gives it to the command and takes it out of what the command prints.",
+                                              every: true, warn: true, allow: "Allow once", keep: "Always for this project", mark: .codex)),
+            ("card-agent-fill", Assist.Request(kind: "agent-vault", title: "Claude Code in T3 Code wants to fill your GitHub login on github.com in ~/petal",
+                                               detail: "It says: “Sign in to test the new settings page”. It never sees the secret: Petal fills it in itself.",
+                                               every: true, warn: true, allow: "Allow once", keep: "Always for this project", mark: .claude)),
+            ("card-agent-unknown", Assist.Request(kind: "agent-key", title: "An unknown program (claude) wants your OpenAI key for “node app.js” in ~/petal",
+                                                  detail: "Petal can't tell what this program is: it isn't an agent Petal knows, signed by its maker. It never sees it: Petal gives it to the command and takes it out of what the command prints.",
+                                                  every: true, warn: true, allow: "Allow once", mark: .unknown)),
             ("card-vault-mismatch", Assist.Request(kind: "vault-fill", title: "Fill your github.com password on githuh-login.com?",
                                                    detail: "This login is saved for github.com. This page is githuh-login.com: if it only looks like github.com, it may be trying to take your password.",
                                                    every: true, warn: true, allow: "Fill anyway")),

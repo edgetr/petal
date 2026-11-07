@@ -16,8 +16,9 @@ if _NSGetExecutablePath(&executableBuffer, &executableSize) == 0 {
     }
 }
 
-// `Petal --mcp`: Claude's Petal tools on stdin and stdout, started by the Claude panel's session.
-if CommandLine.arguments.contains("--mcp") { MCP.run() }
+// `Petal --mcp`: Claude's Petal tools on stdin and stdout, started by the Claude panel's session. (Not a command
+// `petal run` starts that has --mcp among its own words.)
+if CommandLine.arguments.contains("--mcp") && CommandLine.arguments.dropFirst().first != "run" { MCP.run() }
 
 MainActor.assumeIsolated {
     let app = NSApplication.shared

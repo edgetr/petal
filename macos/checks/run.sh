@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Checks the window maths (tiling and parking), when the dock looks at the windows, and which controls Petal AI is
 # told about (UIMap), where AI sticky notes show and sit (NoteLayout), how a note works in the background and what its
-# preview says (Background), and the vault's pure side (sites, 2FA codes, exports, when it fills by itself), without
+# preview says (Background), the vault's pure side (sites, 2FA codes, exports, when it fills by itself), and agents
+# using the vault (AgentAccess: petal run's variables and redaction, who's asking, projects and grants), without
 # running Petal, moving any window or touching the Keychain:
 #   macos/checks/run.sh
 set -euo pipefail
@@ -20,3 +21,5 @@ swiftc -parse-as-library -O -o "$out/background" Sources/Petal/Background.swift 
 "$out/background"
 swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Petal/UIMap.swift checks/VaultCheck.swift
 "$out/vault"
+swiftc -parse-as-library -O -o "$out/agents" Sources/Petal/AgentAccess.swift checks/AgentAccessCheck.swift
+"$out/agents"

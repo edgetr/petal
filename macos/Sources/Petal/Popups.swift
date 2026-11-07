@@ -1112,7 +1112,8 @@ struct AppIcons: View {
 
 /// The weekly summary: time in each mode, its top apps, and how focus cards went. Plain and kind.
 /// Petal AI wants to do something that changes things: Allow once, Always (for this kind), or Don't. The chat panel
-/// shows the same question in the conversation when it's open.
+/// shows the same question in the conversation when it's open. An agent outside Petal asking for the vault gets
+/// Always for this project, Allow once, and Don't as the default (AgentVault.swift).
 struct AskCard: View {
     @Environment(PetalApp.self) private var app
 
@@ -1128,6 +1129,11 @@ struct AskRequestView: View {
     @Environment(PetalApp.self) private var app
     let request: Assist.Request
 
+    /// Whose question it is: the chat's AI, or an agent outside Petal (Claude Code, Codex, or a terminal's).
+    @ViewBuilder private var mark: some View {
+        if let agent = request.mark { AgentMark(agent: agent) } else { ProviderMark(provider: app.chatProvider) }
+    }
+
     var body: some View {
         if let form = request.form { VaultFormView(request: request, form: form) } else { question }
     }
@@ -1135,7 +1141,7 @@ struct AskRequestView: View {
     private var question: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 10) {
-                ProviderMark(provider: app.chatProvider).frame(width: 18, height: 18)
+                mark.frame(width: 18, height: 18)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(request.title).font(.system(size: 13, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
                     if !request.detail.isEmpty {
@@ -1148,6 +1154,7 @@ struct AskRequestView: View {
                 Spacer()
                 if request.warn {
                     // Something doesn't match, or it pays: Don't is the one to press without thinking.
+                    if let keep = request.keep { Button(keep) { app.assist.choose(.always, for: request.id) }.buttonStyle(.glass) }
                     Button(request.allow) { app.assist.choose(.once, for: request.id) }.buttonStyle(.glass)
                     Button("Don't") { app.assist.choose(.no, for: request.id) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
                 } else {

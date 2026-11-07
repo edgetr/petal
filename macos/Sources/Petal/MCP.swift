@@ -10,7 +10,8 @@ enum MCP {
     static let settingsFile = folder.appending(path: "settings.json")
     static let modesFile = folder.appending(path: "modes.json")
     static let dockFile = folder.appending(path: "dock.json")
-    static let socket = folder.appending(path: "petal.sock").path
+    /// The running Petal's socket (`PETAL_SOCKET` points a client at another, for testing).
+    static let socket = ProcessInfo.processInfo.environment["PETAL_SOCKET"].flatMap { $0.isEmpty ? nil : $0 } ?? folder.appending(path: "petal.sock").path
 
     static let description: [String: Any] = {
         guard let url = Bundle.main.url(forResource: "tools", withExtension: "json", subdirectory: "mcp"),
