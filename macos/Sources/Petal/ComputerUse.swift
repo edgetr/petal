@@ -935,6 +935,12 @@ enum Reader {
         /// several show together (`UIMap.joinedHidden`).
         var focusOrders: Set<Int> = []
         var joined: Set<Int> = []
+        /// The joined pieces' texts in reading order, the orders of everything that holds one (a page's web area),
+        /// and whether the pieces were checked whole (else `joined` is the fallback's: short texts that are part of a
+        /// vault secret).
+        var joinedTexts: [String] = []
+        var aroundJoined: Set<Int> = []
+        var joinedWhole = true
     }
 
     static let attributes = [kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute,
@@ -1003,8 +1009,9 @@ enum Reader {
                 reading.page = element
                 reading.pageURL = VaultReader.url(element)
             }
-            // A password field's value is never read.
-            if UIMap.valueRoles.contains(role), !UIMap.isSecure(node) {
+            // A password field's value is never read. A static text's is, for secrets shown in pieces (a web page's
+            // spans show their text only there); it's never told.
+            if UIMap.valueRoles.contains(role) || role == "AXStaticText", !UIMap.isSecure(node) {
                 node.value = text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
             }
             let toggle = UIMap.isToggle(role: role, subrole: node.subrole)
@@ -1056,10 +1063,17 @@ enum Reader {
                 stack.append((child, depth + 1, inner, web || role == "AXWebArea", me, index))
             }
         }
-        // Bounded as the picture's check is; out of time, every short text with a digit is hidden instead.
+        // Bounded as the picture's check is; out of time, every short text with a digit that's part of a vault secret
+        // is hidden instead.
         let joinBy = Date().addingTimeInterval(0.5)
-        reading.joined = UIMap.joinedHidden(walked, matches: vault.matches, going: { Date() < joinBy })
+        (reading.joined, reading.joinedWhole) = UIMap.joinedHidden(walked, matches: vault.matches, part: vault.holdsPart,
+                                                                   going: { Date() < joinBy })
         if !reading.joined.isEmpty { reading.holdsSecret = true }
+        for index in reading.joined.sorted() {
+            if let path = UIMap.pieceText(walked[index]) { reading.joinedTexts.append(walked[index][keyPath: path]) }
+            var at = walked[index].parent
+            while at >= 0, at < walked.count, reading.aroundJoined.insert(at).inserted { at = walked[at].parent }
+        }
         for index in reading.joined { UIMap.hideAll(&walked[index]) }
         reading.nodes = told.map { walked[$0] }
         reading.fingerprint = fingerprint(app: app, window: window, lists: reading.lists)
@@ -1073,11 +1087,14 @@ enum Reader {
         guard !controls.isEmpty else { return false }
         guard let reading = VaultIndex.settled({ _ in read(pid: pid, window: window, budget: 1.0, focus: controls) }),
               !reading.vaultUnreadable, !reading.gone, reading.window != nil else { return true }
-        let texts = controls.flatMap { control -> [String] in
-            let found = values(control, [kAXSelectedTextAttribute, kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute])
-            return [kAXSelectedTextAttribute, kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute].compactMap { found[$0] as? String }
+        // What would go out: what's selected, or a control's value when it tells no selection.
+        let selected = controls.compactMap { control -> String? in
+            let found = values(control, [kAXSelectedTextAttribute, kAXValueAttribute])
+            return found[kAXSelectedTextAttribute] as? String ?? found[kAXValueAttribute] as? String
         }
-        return UIMap.focusInJoined(focus: reading.focusOrders, hidden: reading.joined, complete: !reading.timedOut, texts: texts)
+        return UIMap.focusInJoined(focus: reading.focusOrders, hidden: reading.joined, around: reading.aroundJoined,
+                                   pieces: reading.joinedTexts, complete: !reading.timedOut && reading.joinedWhole,
+                                   selected: selected, part: VaultIndex.current().holdsPart)
     }
 
     /// What the window shows now that an act depends on (UIMap.Fingerprint): its title, the control with the

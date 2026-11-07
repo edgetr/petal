@@ -1131,17 +1131,69 @@ struct VaultCheck {
             node.frame = CGRect(x: CGFloat(pair.offset) * 60, y: pair.offset == 5 ? 400 : 200, width: 50, height: 20)
             return node
         }
-        let hidden = UIMap.joinedHidden(nodes, matches: index.matches)
-        expect(hidden == [1, 2, 3, 4], "the four groups are the joined secret's pieces")
-        for at in 1...4 {
-            expect(UIMap.focusInJoined(focus: [at], hidden: hidden, complete: true, texts: [nodes[at].value]), "piece \(at) isn't copied or told selected")
+        let (hidden, whole) = UIMap.joinedHidden(nodes, matches: index.matches, part: index.holdsPart)
+        expect(whole && hidden == [1, 2, 3, 4], "the four groups are the joined secret's pieces")
+        let pieces = hidden.sorted().map { nodes[$0].value }
+        func copied(_ focus: Set<Int>, around: Set<Int> = [0], complete: Bool = true, _ selected: String, in vault: UIMap.SecretIndex? = nil) -> Bool {
+            let vault = vault ?? index
+            return UIMap.focusInJoined(focus: focus, hidden: hidden, around: around, pieces: pieces, complete: complete,
+                                       selected: [selected], part: vault.holdsPart)
         }
-        expect(!UIMap.focusInJoined(focus: [0], hidden: hidden, complete: true, texts: ["Card"]), "the label next to it is")
-        expect(!UIMap.focusInJoined(focus: [5], hidden: hidden, complete: true, texts: ["Order 1234"]), "a field elsewhere with digits is")
-        // Not read whole, or the field not found in the read: a short text with a digit counts as a piece.
-        expect(UIMap.focusInJoined(focus: [5], hidden: [], complete: false, texts: ["4111"]), "out of time: a short piece with digits counts")
-        expect(UIMap.focusInJoined(focus: [], hidden: [], complete: true, texts: ["4111"]), "not found in the read: a short piece with digits counts")
-        expect(!UIMap.focusInJoined(focus: [], hidden: [], complete: false, texts: ["Hello there"]), "not read whole: words without digits are fine")
+        for at in 1...4 {
+            expect(copied([at], nodes[at].value), "piece \(at) isn't copied or told selected")
+        }
+        expect(!copied([0], around: [], "Card"), "the label next to it is")
+        expect(!copied([5], "Order 1234"), "a field elsewhere with digits is")
+        // What has the keyboard holds the pieces (a page's web area showing a card in four spans): what's selected in
+        // it isn't told or copied when it's in them, a piece at a time, across two, or with words around it.
+        expect(copied([0], "4111"), "a container's selection that is one piece is hidden")
+        expect(copied([0], "11 11"), "across two pieces")
+        expect(copied([0], "Card: 4111,"), "with words and punctuation around it")
+        expect(copied([0], "1"), "even one digit of it")
+        expect(!copied([0], "Total"), "words that aren't in the pieces are fine")
+        expect(!copied([0], "Order 2026"), "nor digits that aren't")
+        expect(!copied([0], around: [], "4111"), "a control that doesn't hold the pieces isn't checked against them")
+        // Not read whole, or the field not found: what's selected counts only when it's part of a vault secret.
+        expect(copied([5], around: [], complete: false, "4111"), "out of time: a piece of the vault's card counts")
+        expect(copied([], around: [], "1111 1"), "not found in the read: a piece of the vault's card counts")
+        expect(!copied([5], around: [], complete: false, "Hello there"), "not read whole: words without digits are fine")
+        expect(!copied([5], around: [], complete: false, "9058"), "not read whole: digits that aren't part of a secret are fine")
+        expect(!copied([], around: [], "Order 2026"), "not found: an order number is fine")
+        expect(!UIMap.focusInJoined(focus: [5], hidden: [], complete: false, selected: ["4111"], part: UIMap.SecretIndex([]).holdsPart),
+               "an empty vault never refuses on this ground")
+        expect(UIMap.focusInJoined(focus: [5], hidden: [], complete: false, selected: ["4111"], part: UIMap.SecretIndex.unavailable.holdsPart),
+               "a vault that can't be read may hold anything")
+        // holdsPart: parts of secrets, separators aside; nothing of an empty vault.
+        expect(index.holdsPart("4111") && index.holdsPart("1 1 1 1") && index.holdsPart("4111 1111 1111 1111"), "a card's pieces are parts of it")
+        expect(index.holdsPart("abcd") && index.holdsPart("sk-a"), "a key's pieces are parts of it")
+        expect(!index.holdsPart("9058") && !index.holdsPart("Order 2026") && !index.holdsPart(""), "other digits aren't")
+        expect(!UIMap.SecretIndex([]).holdsPart("4111"), "an empty vault holds no part")
+        // Static text (a web page's span) shows its text only as its value: it counts as a piece.
+        let spans = ["4111", "1111", "1111", "1111"].enumerated().map { pair -> UINode in
+            var node = UINode(role: "AXStaticText")
+            node.value = pair.element
+            node.parent = 0
+            node.sibling = pair.offset
+            node.order = pair.offset + 1
+            node.frame = CGRect(x: CGFloat(pair.offset) * 44, y: 100, width: 40, height: 20)
+            return node
+        }
+        let page = [UINode(role: "AXWebArea")] + spans
+        expect(UIMap.joinedHidden(page, matches: index.matches).hidden == [1, 2, 3, 4], "four static texts showing a card are its pieces")
+        // Out of time with an empty vault: nothing is hidden as a piece; with the card, only its parts are.
+        let plain = ["Order", "9058", "4111"].enumerated().map { pair -> UINode in
+            var node = UINode(role: "AXTextField")
+            node.value = pair.element
+            node.parent = 0
+            node.sibling = pair.offset
+            node.order = pair.offset
+            return node
+        }
+        let empty = UIMap.SecretIndex([])
+        let late = UIMap.joinedHidden(plain, matches: empty.matches, part: empty.holdsPart, going: { false })
+        expect(!late.whole && late.hidden.isEmpty, "not checked whole, empty vault: nothing hidden")
+        let lateCard = UIMap.joinedHidden(plain, matches: index.matches, part: index.holdsPart, going: { false })
+        expect(lateCard.hidden == [2], "not checked whole: only a part of the vault's card is hidden")
         // hideJoined hides exactly what joinedHidden finds.
         let (shown, any) = UIMap.hideJoined(nodes, matches: index.matches)
         expect(any && (1...4).allSatisfy { shown[$0].value == UIMap.hidden } && shown[5].value == "Order 1234", "hideJoined agrees")

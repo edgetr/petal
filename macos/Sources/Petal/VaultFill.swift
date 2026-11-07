@@ -97,14 +97,19 @@ enum VaultFiller {
                 return cancel.stopped ? ComputerUse.stoppedText : "The cursor left the field; nothing was filled."
             }
         }
-        // And before each batch of keys.
+        // And before each batch of keys: the slow checks first (the page, a tab note's tab), then, immediately before
+        // the keys go, the quick ones (the window in front, the keyboard in this field), so a click elsewhere while
+        // the page was being read never gets them.
         var moved: String?
         var typed = false
         let still = {
-            guard keysGo(to: element, pid: pid) else { return false }
             moved = stillOnPage(plan, element: element, map: map, cancel: cancel, typed: typed)
+            if moved == nil, let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
+                moved = ClaudePanel.tabNotShowing + (typed ? " Petal stopped partway; what went in may need clearing." : "")
+            }
+            guard moved == nil, !cancel.stopped, Acting.windowInFront(map), keysGo(to: element, pid: pid) else { return false }
             typed = true
-            return moved == nil
+            return true
         }
         guard Acting.type(text, to: pid, cancel: cancel, still: still) else {
             if let moved { return moved }
