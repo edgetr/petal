@@ -413,7 +413,7 @@ extension ClaudePanel {
         note.agent.restore(chat)
         notes.append(note)
         guard let place = chat.place?.sanitized else { present(note); return prune() }
-        if notes.contains(where: { $0 !== note && $0.attached && $0.place.map { NoteRules.samePlace($0, place) } == true }) {
+        if holdsPlace(place, besides: note) {
             // Another note holds its place now (the list may still show the chat as it was before): it opens as a
             // plain chat and lets go of the place, or its next save would claim it back.
             note.agent.keptPlace = nil
@@ -466,9 +466,13 @@ extension ClaudePanel {
                             // (two copies of one chat would make its tab unsure). As it may be kept: sanitized now. Not
                             // when another note here has that tab (by its id or button) or place since: it opens as a
                             // plain chat, keeping its link.
-                            if !self.notes.contains(where: { $0 !== note && $0.attached && $0.place.map { NoteRules.samePlace($0, stuck) } == true }) {
+                            if !self.holdsPlace(stuck, besides: note) {
                                 _ = self.attach(note, stuck.sanitized)
                                 self.unlink(chatID)
+                            } else {
+                                // It lets go of the place, or its next save would claim it back.
+                                note.agent.keptPlace = nil
+                                if let now = note.agent.saved { Chats.save(now) }
                             }
                         } else if there == false {
                             note.agent.keptPlace = nil
@@ -480,6 +484,15 @@ extension ClaudePanel {
                     }
                 }
             }
+        }
+    }
+
+    /// Another note holds `place`: stuck there, or a tab's note whose window went that may still come back with its
+    /// tab (its tab moved to another window Petal hasn't looked at yet).
+    private func holdsPlace(_ place: NotePlace, besides note: StickyNote) -> Bool {
+        notes.contains { other in
+            other !== note && (other.attached || (other.windowGone && other.place?.kind == .tab))
+                && other.place.map { NoteRules.samePlace($0, place) } == true
         }
     }
 
@@ -818,8 +831,14 @@ extension ClaudePanel {
     private func windowEvent(_ event: WindowEvents.Event) {
         switch event.kind {
         case .focused:
-            // Another window of the app in front.
+            // Another window of the app in front. An open note stuck to another of its windows steps away at once,
+            // before the read: it never stays over the window that came forward while the app answers.
             guard notesOn, let front = NSWorkspace.shared.frontmostApplication, event.pid == front.processIdentifier else { return }
+            if isOpen, current.attached, let place = current.place, place.kind != .app, place.pid == event.pid,
+               let window = event.window, let mine = place.window, mine != window {
+                looks += 1
+                stepAway()
+            }
             look(at: front)
         case .titleChanged, .tabSwitched:
             // A browser's window shows another tab (or its tab another page; two tabs alike change no title, but
@@ -828,6 +847,8 @@ extension ClaudePanel {
                   let bundle = front.bundleIdentifier, Browsers.kind(bundle) != nil, event.window == nil || event.window == lastFront?.window,
                   notes.contains(where: { $0.attached && $0.place?.kind == .tab && $0.place?.app == bundle }) || recoverableTabs(bundle)
             else { return }
+            // Only a look, never a step away first: these also come when the keyboard moves inside the same page
+            // (a click into a field), and the note would blink on every click.
             lookSoon(at: front.processIdentifier)
         case .moved, .resized:
             // The open note's window: the note goes with it, where the person left it.
