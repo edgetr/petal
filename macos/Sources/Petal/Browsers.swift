@@ -113,8 +113,8 @@ final class Browsers {
         guard let id = app.bundleIdentifier, let kind = Self.kind(id) else { return done(nil) }
         switch kind {
         case .gecko:
-            guard let window else { return done(Self.geckoAddress(pid: app.processIdentifier)) }
-            // A note's own window, found by id (or frame and title), read off the main thread.
+            // Accessibility, which waits on a busy browser: off the main thread. The front window, or a note's own
+            // (found by id, or frame and title).
             let pid = app.processIdentifier
             queue.async {
                 let url = Self.geckoAddress(pid: pid, window: window)

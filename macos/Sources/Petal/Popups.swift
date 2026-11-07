@@ -105,11 +105,20 @@ final class GlassPanel: NSPanel {
     /// Gone from sight, letting the mouse through, and showing nothing (so nothing in it keeps drawing), but still
     /// on the screen: taking a window with macOS's glass off the screen waits on the window server for up to half
     /// a second, which held the dock up every time a preview, a card or a tooltip went away.
+    /// One that took typing (a reply card, a secret) gives it back to the app in front, so keys don't go on to a
+    /// card no one can see.
     func hide() {
         guard alphaValue != 0 || !ignoresMouseEvents else { return }
         alphaValue = 0
         ignoresMouseEvents = true
         hosting.rootView = AnyView(EmptyView())
+        if isKeyWindow {
+            takesKeys = false
+            resignKey()
+            if let front = NSWorkspace.shared.frontmostApplication, front != NSRunningApplication.current {
+                front.activate(from: NSRunningApplication.current, options: [])
+            }
+        }
     }
 
     /// Showing, not just on the screen (see `hide`).

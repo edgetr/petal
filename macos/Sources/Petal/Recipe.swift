@@ -180,16 +180,30 @@ enum Recipe {
     /// Adds the plan's modes, and its look when asked.
     @discardableResult
     static func apply(_ plan: Plan, look: Bool) throws -> [String: Any] {
+        // Ids made unique against the modes there now (a plan made earlier, or two imports at once, may share one).
+        // Worked out once, before the change: Petal runs a change again when it writes the file.
+        var taken = Set((MCP.read(MCP.modesFile)?["modes"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })
+        let ids = plan.modes.map { mode -> String in
+            var id = mode.id, n = 2
+            while taken.contains(id) { id = "\(mode.id)-\(n)"; n += 1 }
+            taken.insert(id)
+            return id
+        }
+        let added = zip(plan.modes, ids).map { mode, id -> [String: Any] in
+            var object = mode.object
+            object["id"] = id
+            return object
+        }
         try MCP.update(MCP.modesFile, fallback: ["defaultMode": plan.modes.first?.id ?? "", "workspaces": [:], "modes": []]) { root in
-            root["modes"] = (root["modes"] as? [[String: Any]] ?? []) + plan.modes.map(\.object)
-            if (root["defaultMode"] as? String ?? "").isEmpty { root["defaultMode"] = plan.modes.first?.id ?? "" }
+            root["modes"] = (root["modes"] as? [[String: Any]] ?? []) + added
+            if (root["defaultMode"] as? String ?? "").isEmpty { root["defaultMode"] = ids.first ?? "" }
             if root["workspaces"] == nil { root["workspaces"] = [String: Any]() }
         }
         if look {
             if !plan.look.isEmpty { try MCP.update(MCP.settingsFile) { $0.merge(plan.look) { _, new in new } } }
             if !plan.dock.isEmpty { try MCP.update(MCP.dockFile) { $0.merge(plan.dock) { _, new in new } } }
         }
-        return ["modes": plan.modes.map { ["id": $0.id, "name": $0.name, "apps": $0.apps] }, "missing": plan.missing, "look": look]
+        return ["modes": zip(plan.modes, ids).map { ["id": $1, "name": $0.name, "apps": $0.apps] }, "missing": plan.missing, "look": look]
     }
 
     private static func same(_ a: Any?, _ b: Any?) -> Bool {
