@@ -17,6 +17,8 @@ struct UINode: Equatable {
     var pressable = false    // a group, image or text that says it can be pressed
     var web = false          // inside a web page
     var order = 0            // reading order (depth first)
+    var parent = -1          // the order of what holds it (-1: the window)
+    var sibling = 0          // its place among that parent's children
     var clip: CGRect?        // what's showing of the scroll areas it's in; nil when it's in none
 }
 
@@ -164,36 +166,192 @@ enum UIMap {
     /// Words in a field's name or identifier that say it holds a secret, even when it isn't a password field.
     static let secretWords = ["password", "passwd", "passcode", "passphrase", "token", "secret", "api key", "apikey", "api_key",
                               "api-key", "access key", "private key"]
+    /// A payment form's card number and security code fields, by their names and autofill identifiers.
+    static let paymentWords = ["card number", "cardnumber", "card-number", "card_number", "cc-number", "ccnumber", "cc-csc",
+                               "security code", "securitycode", "security-code", "card verification", "cvv", "cvc", "csc"]
 
-    /// A field whose name or identifier says it holds a password, token, secret or API key.
+    /// A field whose name or identifier says it holds a password, token, secret, API key, card number or security code.
     static func looksSecret(_ node: UINode) -> Bool {
         let words = [node.title, node.label, node.placeholder, node.help, node.identifier].joined(separator: " ").lowercased()
-        return secretWords.contains { words.contains($0) }
+        return secretWords.contains { words.contains($0) } || paymentWords.contains { words.contains($0) }
+    }
+
+    /// A field one types into whose name says it holds a secret. A window, page or heading named "API keys" or
+    /// "Reset your password" isn't one: what they show is still searched for the vault's own secrets.
+    static func looksSecretField(_ node: UINode) -> Bool {
+        (isText(node) || isSecure(node)) && looksSecret(node)
+    }
+
+    /// petal_look tells nothing of what's selected in a field holding a secret: a password field, one named for a
+    /// password, key, card number or security code, one Petal filled with a secret (`filled`), or one whose text
+    /// (`node.value`, all of it) holds a vault secret (`secret`, as petal_ui's `holdsSecret`): an API key pasted into
+    /// a field called "Value". Not even what isn't a secret by itself: a key or card number selected a few characters
+    /// at a time would be told whole over a few looks.
+    static func selectionHidden(in node: UINode, filled: Bool, secret: (String) -> Bool) -> Bool {
+        holdsSecret(node, filled: filled, secret: secret)
+    }
+
+    /// A control read for petal_ui holds a secret, so Copy and Cut stay away from its window: a password field, a
+    /// field one types into named for a secret, a field Petal filled with a secret (`filled`, whatever it shows now:
+    /// what's left of a cut or edited card number is still part of it), or any of its text holding a vault secret
+    /// (`secret`, given the text as read, before it's redacted). A heading or label named "Card number" isn't one by
+    /// its name alone.
+    static func holdsSecret(_ node: UINode, filled: Bool = false, secret: (String) -> Bool) -> Bool {
+        filled || isSecure(node) || looksSecretField(node)
+            || [node.title, node.label, node.help, node.placeholder, node.value].contains { !$0.isEmpty && $0 != hidden && secret($0) }
+    }
+
+    /// What the AI is told a field reads after typing into it (`now`, read back): "(hidden)" for a field named for a
+    /// secret, one Petal filled with a secret (`filled`), or text holding a vault secret; else the text, tidied and short.
+    static func typedValue(_ now: String, node: UINode, filled: Bool, secret: (String) -> Bool) -> String {
+        filled || looksSecret(node) || secret(now) ? hidden : truncate(tidy(now), 200)
+    }
+
+    /// Which part covers the one read `at` in a picture: itself when it has bounds (`frames`, by when each was read),
+    /// else the nearest that holds it (`parents`, -1 for none) with some. nil: none has, so the window isn't read whole.
+    static func cover(frames: [CGRect], parents: [Int], at: Int) -> Int? {
+        var index = at
+        var steps = 0
+        while index >= 0, index < frames.count, steps <= frames.count {
+            if frames[index].width > 0, frames[index].height > 0 { return index }
+            index = parents[index]
+            steps += 1
+        }
+        return nil
+    }
+
+    /// What a picture's check read of a window (Sensitive.scan): each element read, by an id that is its place among
+    /// those read (an element gone before it could be read gets none, so nothing after it shifts), its frame and its
+    /// parent's id, and the text each shows in the picture, to look for a secret shown in pieces.
+    struct ScanParts<Element> {
+        private(set) var elements: [Element] = []
+        private(set) var frames: [CGRect] = []
+        private(set) var parents: [Int] = []
+        private(set) var pieces: [TextPiece] = []
+        /// Each piece's element, by id.
+        private(set) var pieceAt: [Int] = []
+
+        /// An element read, with its frame and its parent's id (-1 for none): its id.
+        mutating func read(_ element: Element, frame: CGRect, parent: Int) -> Int {
+            elements.append(element)
+            frames.append(frame)
+            parents.append(parent)
+            return elements.count - 1
+        }
+
+        /// The element `id` shows `text`, its place among its parent's children `order`.
+        mutating func shows(_ text: String, id: Int, order: Int) {
+            pieces.append(TextPiece(text: text, parent: parents[id], order: order, frame: frames[id]))
+            pieceAt.append(id)
+        }
+
+        /// What covers element `id` in the picture (`UIMap.cover`), with its frame; nil when nothing around it has bounds.
+        func cover(_ id: Int) -> (element: Element, frame: CGRect)? {
+            UIMap.cover(frames: frames, parents: parents, at: id).map { (elements[$0], frames[$0]) }
+        }
+
+        /// The ids of the elements whose pieces show a secret only together (`joinedSecrets`), or nil when they
+        /// couldn't be checked whole.
+        func joined(matches: (String) -> Bool, spans: ((String) -> [Range<Int>])? = nil, going: () -> Bool = { true }) -> [Int]? {
+            UIMap.joinedSecrets(pieces, matches: matches, spans: spans, going: going).map { $0.sorted().map { pieceAt[$0] } }
+        }
+    }
+
+    /// What to black out of a picture taken between two reads of a window (`before`, `after`: where each part that
+    /// may show a secret was, by an id for the element, the same id in both for the same element), so wherever it
+    /// was while the picture was taken, it's covered: the bounding box of where it was in each, which takes in the
+    /// way between. Nil (no picture): a part found in only one of the reads (it appeared, or went, meanwhile), or
+    /// one that moved more than a quarter of the window's width or height (scrolling or animating: where it was in
+    /// the picture can't be told).
+    static func blackouts(before: [(id: Int, rect: CGRect)], after: [(id: Int, rect: CGRect)], window: CGRect) -> [CGRect]? {
+        func grouped(_ list: [(id: Int, rect: CGRect)]) -> [Int: CGRect] {
+            list.reduce(into: [:]) { out, part in out[part.id] = out[part.id].map { $0.union(part.rect) } ?? part.rect }
+        }
+        let then = grouped(before), now = grouped(after)
+        guard Set(then.keys) == Set(now.keys) else { return nil }
+        var out: [CGRect] = []
+        for (id, a) in then.sorted(by: { $0.key < $1.key }) {
+            guard let b = now[id] else { return nil }
+            let dx = max(abs(a.minX - b.minX), abs(a.maxX - b.maxX)), dy = max(abs(a.minY - b.minY), abs(a.maxY - b.maxY))
+            if dx > window.width / 4 || dy > window.height / 4 { return nil }
+            out.append(a.union(b))
+        }
+        return out
     }
 
     /// The vault's secrets as hashes (Swift's, seeded afresh in each process): a whole secret, every run of `piece`
     /// characters of a longer one, and a short one (`short` to `piece` - 1 characters, a PIN) as a word of its own
-    /// inside text, so text holding a secret, or part of a long one, is caught without keeping the secrets.
+    /// inside text, so text holding a secret, or part of a long one, is caught without keeping the secrets. A card's
+    /// security code (any secret of 3 or 4 digits) is caught wherever it isn't part of a longer number ("CVV: 737",
+    /// "cvc737", "CVV1234", not 737 in 17370). A card number is also caught across whatever separates its digits ("4242\u{00A0}4242", "4242.4242",
+    /// full-width digits), and digits are digits in any script.
     struct SecretIndex {
         static let piece = 8
         static let short = 4
+        /// A security code's length: digits only, caught inside text by numeric boundaries. The shortest secret
+        /// looked for inside text.
+        static let code = 3...4
         /// Text longer than this (in UTF-8 bytes, about 1 MB) isn't searched: it counts as holding a secret, and
         /// Petal doesn't move or show it.
         static let limit = 1_000_000
-        /// What a check of some text found.
-        enum Check: Equatable { case clean, secret, tooLong }
+        /// What a check of some text found. `unreadable`: the vault couldn't be read, so nothing can be checked.
+        enum Check: Equatable { case clean, secret, tooLong, unreadable }
+        /// A card number's length in digits.
+        static let cardDigits = 12...19
+        /// At most this many characters between two digits of a card number when any of them is something other
+        /// than a separator ("4242 · 4242", "4242)(4242").
+        static let cardGap = 3
+        /// At most this many separators between two digits of a card number ("4242    4242", a line break and an
+        /// indent): spaces of any kind, line breaks, dots, slashes, dashes and invisible characters.
+        static let cardSeparators = 16
+
+        /// What may stand between a card number's digits however many there are (up to `cardSeparators`).
+        static func separator(_ character: Character) -> Bool {
+            if character.isWhitespace || character.isNewline || "./\\".contains(character) { return true }
+            return character.unicodeScalars.allSatisfy { scalar in
+                switch scalar.properties.generalCategory {
+                case .format, .dashPunctuation, .spaceSeparator, .lineSeparator, .paragraphSeparator, .control: return true
+                default: return false
+                }
+            }
+        }
 
         private var wholes = Set<Int>()
         /// Every `piece` characters of a longer secret, as `window` hashes them.
         private var pieces = Set<UInt64>()
         /// Short secrets by their length, as `window` hashes them.
         private var shorts: [Int: Set<UInt64>] = [:]
+        /// 3- and 4-digit secrets (security codes), by their length, as `window` hashes them.
+        private var numbers: [Int: Set<UInt64>] = [:]
+        /// Every `piece` digits of a card number (a secret that is 12 to 19 digits and separators), as `window`
+        /// hashes ASCII digits: found in text whatever separates the digits.
+        private var cards = Set<UInt64>()
+        /// The vault couldn't be read (Keychain locked or refusing): every text counts as possibly secret.
+        private(set) var unreadable = false
+
+        /// The index when the vault can't be read: nothing is shown or moved as if it were checked.
+        static var unavailable: SecretIndex {
+            var index = SecretIndex([])
+            index.unreadable = true
+            return index
+        }
 
         init(_ secrets: [String]) {
             for secret in secrets where !secret.isEmpty {
                 wholes.insert(secret.hashValue)
-                let codes = Self.codes(Array(secret))
-                if codes.count >= Self.short, codes.count < Self.piece {
+                let characters = Array(secret)
+                let digitsOnly = characters.compactMap(Self.digit)
+                if Self.cardDigits.contains(digitsOnly.count),
+                   characters.allSatisfy({ Self.digit($0) != nil || !($0.isLetter || $0.isNumber) }) {
+                    Self.roll(digitsOnly.map { Self.digitCodes[$0] }, Self.piece) { _, hash in cards.insert(hash); return true }
+                }
+                // Digits of any script count as their ASCII digits (`codes` hashes them so, here and in what's
+                // searched, one character each): a code saved as "１２３" is found as "123", and the other way round.
+                let codes = Self.codes(characters)
+                let digits = characters.allSatisfy { Self.digit($0) != nil }
+                if digits, Self.code.contains(codes.count) {
+                    numbers[codes.count, default: []].insert(Self.window(codes[...]))
+                } else if codes.count >= Self.short, codes.count < Self.piece {
                     shorts[codes.count, default: []].insert(Self.window(codes[...]))
                 }
                 guard codes.count >= Self.piece else { continue }
@@ -201,12 +359,27 @@ enum UIMap {
             }
         }
 
-        var isEmpty: Bool { wholes.isEmpty }
+        var isEmpty: Bool { wholes.isEmpty && !unreadable }
+
+        /// The ASCII digits' hashes, 0 to 9.
+        private static let digitCodes: [UInt64] = (0...9).map { UInt64(bitPattern: Int64(Character(String($0)).hashValue)) }
+
+        /// The digit a character shows (0 to 9) in any script ("４", "٤"), a mark on it aside; nil for anything else.
+        static func digit(_ character: Character) -> Int? {
+            if let ascii = character.asciiValue { return (48...57).contains(ascii) ? Int(ascii - 48) : nil }
+            guard let first = character.unicodeScalars.first, first.properties.numericType == .decimal,
+                  let value = first.properties.numericValue, value >= 0, value <= 9 else { return nil }
+            return Int(value)
+        }
 
         /// Each character's own hash (Swift's, seeded afresh in each process), once, so every window after the first
-        /// costs a multiply and an add: a 1 MB log is searched in a few milliseconds.
+        /// costs a multiply and an add: a 1 MB log is searched in a few milliseconds. A digit in another script hashes
+        /// as its ASCII digit.
         private static func codes(_ characters: [Character]) -> [UInt64] {
-            characters.map { UInt64(bitPattern: Int64($0.hashValue)) }
+            characters.map { character in
+                if !character.isASCII, let digit = digit(character) { return digitCodes[digit] }
+                return UInt64(bitPattern: Int64(character.hashValue))
+            }
         }
 
         private static let base: UInt64 = 1_099_511_628_211
@@ -242,18 +415,61 @@ enum UIMap {
                     return going
                 }
             }
-            guard going, !pieces.isEmpty else { return }
-            Self.roll(codes, Self.piece) { start, hash in
-                if pieces.contains(hash) { going = found(start, Self.piece) }
-                return going
+            for (length, hashes) in numbers where going {
+                Self.roll(codes, length) { start, hash in
+                    if hashes.contains(hash), Self.numberEdge(characters, start), Self.numberEdge(characters, start + length) { going = found(start, length) }
+                    return going
+                }
             }
+            if going, !pieces.isEmpty {
+                Self.roll(codes, Self.piece) { start, hash in
+                    if pieces.contains(hash) { going = found(start, Self.piece) }
+                    return going
+                }
+            }
+            guard going, !cards.isEmpty else { return }
+            // A card number's digits with whatever is between them: runs of digits are joined across up to
+            // `cardSeparators` separators (spaces of any kind, line breaks, dots, slashes, dashes, invisible
+            // characters), or `cardGap` characters when one of them is something else, never across a letter.
+            var digits: [UInt64] = []
+            var at: [Int] = []
+            var gap = 0
+            var plain = true
+            func flush() {
+                Self.roll(digits, Self.piece) { start, hash in
+                    if cards.contains(hash) { going = found(at[start], at[start + Self.piece - 1] - at[start] + 1) }
+                    return going
+                }
+                digits.removeAll(keepingCapacity: true)
+                at.removeAll(keepingCapacity: true)
+            }
+            for (index, character) in characters.enumerated() {
+                if let digit = Self.digit(character) {
+                    digits.append(Self.digitCodes[digit])
+                    at.append(index)
+                    gap = 0
+                    plain = true
+                } else if !digits.isEmpty {
+                    gap += 1
+                    plain = plain && Self.separator(character)
+                    if character.isLetter || gap > (plain ? Self.cardSeparators : Self.cardGap) {
+                        flush()
+                        gap = 0
+                        plain = true
+                        guard going else { return }
+                    }
+                }
+            }
+            flush()
         }
 
         /// `text` is a secret, holds `piece` characters or more of one, or holds a short one whole, not run into the
         /// letters or digits around it ("Door PIN: 739251", but not 1234 in 12345); or it's too long to check. All of
         /// it is searched, however long, up to `limit`.
         func check(_ text: String) -> Check {
-            guard !wholes.isEmpty, !text.isEmpty else { return .clean }
+            guard !text.isEmpty else { return .clean }
+            if unreadable { return .unreadable }
+            guard !wholes.isEmpty else { return .clean }
             guard text.utf8.count <= Self.limit else { return .tooLong }
             if wholes.contains(text.hashValue) || wholes.contains(text.trimmingCharacters(in: .whitespacesAndNewlines).hashValue) { return .secret }
             var hit = false
@@ -261,7 +477,8 @@ enum UIMap {
             return hit ? .secret : .clean
         }
 
-        /// `check` found a secret, or the text was too long to look through: either way it isn't shown or moved.
+        /// `check` found a secret, the text was too long to look through, or the vault couldn't be read: either way it
+        /// isn't shown or moved.
         func matches(_ text: String) -> Bool { check(text) != .clean }
 
         /// Between `at - 1` and `at` is the end of a word: not a letter or digit running on into another.
@@ -270,12 +487,55 @@ enum UIMap {
             return !(characters[at - 1].isLetter || characters[at - 1].isNumber) || !(characters[at].isLetter || characters[at].isNumber)
         }
 
+        /// Between `at - 1` and `at` is the end of a number: not two digits (of any script) side by side.
+        static func numberEdge(_ characters: [Character], _ at: Int) -> Bool {
+            guard at > 0, at < characters.count else { return true }
+            return digit(characters[at - 1]) == nil || digit(characters[at]) == nil
+        }
+
+        /// The parts of `text` that `redacted` would hide, each as it's shown (runs that touch joined, so a card
+        /// number shown whole is one part with its spaces): only the secret, never the words around it. All of
+        /// `text` when it is a secret, is too long to check, or the vault can't be read; none when it holds none.
+        func parts(_ text: String) -> [String] {
+            let characters = Array(text)
+            return spans(text).map { String(characters[$0]) }
+        }
+
+        /// Where `parts` are in `text`, in characters.
+        func spans(_ text: String) -> [Range<Int>] {
+            guard !text.isEmpty else { return [] }
+            let characters = Array(text)
+            if unreadable { return [0..<characters.count] }
+            guard !wholes.isEmpty else { return [] }
+            guard text.utf8.count <= Self.limit else { return [0..<characters.count] }
+            if wholes.contains(text.hashValue) || wholes.contains(text.trimmingCharacters(in: .whitespacesAndNewlines).hashValue) {
+                return [0..<characters.count]
+            }
+            var marked = [Bool](repeating: false, count: characters.count)
+            scan(characters) { start, length in
+                for at in start..<start + length { marked[at] = true }
+                return true
+            }
+            var out: [Range<Int>] = []
+            var at = 0
+            while at < characters.count {
+                guard marked[at] else { at += 1; continue }
+                let start = at
+                while at < characters.count, marked[at] { at += 1 }
+                out.append(start..<at)
+            }
+            return out
+        }
+
         /// `text` with every part that `matches` would catch replaced by "(hidden)": a whole secret, every run of
         /// `piece` characters of a longer one (runs that touch join, so a long secret goes as one), and a short one
         /// as a word of its own. The rest of the text stays, so a clipboard holding a key among other lines still
-        /// says what else is there. Text too long to check is "(hidden)" whole.
+        /// says what else is there. Text too long to check, or any text while the vault can't be read, is "(hidden)"
+        /// whole.
         func redacted(_ text: String) -> String {
-            guard !wholes.isEmpty, !text.isEmpty else { return text }
+            guard !text.isEmpty else { return text }
+            if unreadable { return UIMap.hidden }
+            guard !wholes.isEmpty else { return text }
             guard text.utf8.count <= Self.limit else { return UIMap.hidden }
             if wholes.contains(text.hashValue) || wholes.contains(text.trimmingCharacters(in: .whitespacesAndNewlines).hashValue) { return UIMap.hidden }
             let characters = Array(text)
@@ -303,9 +563,12 @@ enum UIMap {
     }
 
     /// What the AI may be told of a control: a password field's value never, a field that looks like it holds a
-    /// secret as "(hidden)", and any text holding a vault secret as "(hidden)".
-    static func redact(_ node: UINode, secret: (String) -> Bool) -> UINode {
+    /// secret as "(hidden)", one Petal filled with one (`filled`, however its text was cut or edited since) with every
+    /// text of its hidden, its name too, and any text holding a vault secret as "(hidden)".
+    static func redact(_ node: UINode, filled: Bool = false, secret: (String) -> Bool) -> UINode {
         var out = node
+        // A filled field's name may echo what's in it too (a page that repeats the card number in its label).
+        if filled { hideAll(&out) }
         if isSecure(node) { out.value = "" }
         else if looksSecret(node), !node.value.isEmpty { out.value = hidden }
         for path in [\UINode.title, \.label, \.help, \.placeholder, \.value] where out[keyPath: path] != hidden && secret(out[keyPath: path]) {
@@ -557,6 +820,252 @@ enum UIMap {
         text.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init)
     }
 
+    // MARK: Text shown in pieces
+
+    /// A bit of text a window shows (a static text's value, a label), with what holds it (`parent`, any number that
+    /// stands for it), its place among that parent's children, and where it is on the screen.
+    struct TextPiece {
+        var text: String
+        var parent: Int
+        var order: Int
+        var frame: CGRect
+    }
+
+    /// At most this many neighbours are joined, up to this many characters, out of at most this many pieces (more
+    /// than that and the window isn't checked whole).
+    static let joinRun = 8
+    static let joinLength = 160
+    static let joinPieces = 12_000
+
+    /// Which pieces show a secret only together (a card number as four "4111"s, an API key in short spans, a PIN one
+    /// digit a box): runs of up to `joinRun` neighbours, joined with spaces or run together, that `matches` catches
+    /// when no shorter run inside them does (a single piece is checked on
+    /// its own already). Neighbours are a parent's children in order, and pieces on one line with little room
+    /// between them. nil when there are too many pieces, or `going` says time's up first. `spans` (where the secrets are
+    /// in a text, `SecretIndex.spans`): a piece holding a secret by itself (a card number in one span) takes its
+    /// neighbours along only when a secret runs on into them, so the order number beside it isn't a piece; without
+    /// it, any run starting there does.
+    static func joinedSecrets(_ pieces: [TextPiece], matches: (String) -> Bool, spans: ((String) -> [Range<Int>])? = nil,
+                              going: () -> Bool = { true }) -> Set<Int>? {
+        let usable = pieces.indices.filter { !pieces[$0].text.isEmpty && pieces[$0].text.count <= joinLength }
+        guard usable.count <= joinPieces else { return nil }
+        guard usable.count >= 2 else { return [] }
+        var groups: [[Int]] = []
+        // A parent's children, in order.
+        var byParent: [Int: [Int]] = [:]
+        for index in usable { byParent[pieces[index].parent, default: []].append(index) }
+        for (_, list) in byParent where list.count > 1 { groups.append(list.sorted { pieces[$0].order < pieces[$1].order }) }
+        // One line: the middles level within half the shorter's height, left to right, close together.
+        let placed = usable.filter { pieces[$0].frame.width > 0 && pieces[$0].frame.height > 0 }.sorted { pieces[$0].frame.midY < pieces[$1].frame.midY }
+        var line: [Int] = []
+        func closeLine() {
+            let row = line.sorted { pieces[$0].frame.minX < pieces[$1].frame.minX }
+            var run: [Int] = []
+            for index in row {
+                if let last = run.last {
+                    let a = pieces[last].frame, b = pieces[index].frame
+                    let gap = b.minX - a.maxX
+                    if gap > max(a.height, b.height) * 1.5 || gap < -a.width / 2 {
+                        if run.count > 1 { groups.append(run) }
+                        run = []
+                    }
+                }
+                run.append(index)
+            }
+            if run.count > 1 { groups.append(run) }
+            line = []
+        }
+        for index in placed {
+            if let first = line.first {
+                let a = pieces[first].frame, b = pieces[index].frame
+                if abs(b.midY - a.midY) > min(a.height, b.height) / 2 { closeLine() }
+            }
+            line.append(index)
+        }
+        closeLine()
+
+        // A run's text both ways: with a space between pieces (a card number's groups, words), and run together (an
+        // API key in short spans, a PIN one digit a box), with where each piece is in it.
+        func joined(_ group: [Int], _ from: Int, _ to: Int, tight: Bool) -> (text: String, at: [Range<Int>]) {
+            var text = ""
+            var at: [Range<Int>] = []
+            var count = 0
+            for index in group[from...to] {
+                if !tight, !text.isEmpty { text += " "; count += 1 }
+                let piece = pieces[index].text
+                text += piece
+                at.append(count..<count + piece.count)
+                count += piece.count
+            }
+            return (text, at)
+        }
+        // How the run from `from` to `to` holds a secret: spaced (false), run together (true), or not at all (nil).
+        // `past`: only a secret reaching past that many characters (the first piece, caught alone already) counts.
+        func caught(_ group: [Int], _ from: Int, _ to: Int, past: Int? = nil) -> Bool? {
+            for tight in [false, true] {
+                let text = joined(group, from, to, tight: tight).text
+                guard matches(text) else { continue }
+                if let past, let spans, !spans(text).contains(where: { $0.upperBound > past }) { continue }
+                return tight
+            }
+            return nil
+        }
+        var found = Set<Int>()
+        for group in groups {
+            guard going() else { return nil }
+            for start in group.indices {
+                let first = pieces[group[start]].text
+                var length = first.count
+                let alone = spans != nil && matches(first)
+                var end = start + 1
+                while end < group.count, end - start < joinRun {
+                    length += 1 + pieces[group[end]].text.count
+                    if length > joinLength { break }
+                    // Caught already by the first piece alone: only a secret reaching past it joins the rest.
+                    guard let tight = caught(group, start, end, past: alone ? first.count : nil) else { end += 1; continue }
+                    // Only the shortest run: one starting further in that's caught too (or a piece caught on its own,
+                    // already covered) is marked from there.
+                    if caught(group, start + 1, end) == nil {
+                        for at in start...end { found.insert(group[at]) }
+                        // A long secret may run on past the shortest run that shows it (its last few characters in
+                        // the next piece): every piece the secret reaches is marked.
+                        if let spans {
+                            var next = end + 1
+                            while next < group.count, next - start < joinRun {
+                                length += 1 + pieces[group[next]].text.count
+                                if length > joinLength { break }
+                                let run = joined(group, start, next, tight: tight)
+                                guard spans(run.text).contains(where: { $0.overlaps(run.at[next - start]) }) else { break }
+                                found.insert(group[next])
+                                next += 1
+                            }
+                        }
+                    }
+                    break
+                }
+            }
+        }
+        return found
+    }
+
+    /// The text of a control's that counts as its piece: its value when it's told, or a static text's (a web page's
+    /// span shows its text only there), never a password field's; else its title, else its description; one already
+    /// hidden is passed over.
+    static func pieceText(_ node: UINode) -> WritableKeyPath<UINode, String>? {
+        if valueRoles.contains(node.role) || node.role == "AXStaticText", !isSecure(node), !node.value.isEmpty, node.value != hidden { return \.value }
+        if !node.title.isEmpty, node.title != hidden { return \.title }
+        if !node.label.isEmpty, node.label != hidden { return \.label }
+        return nil
+    }
+
+    /// Every text of a control's that goes out (its value, title, description, help and placeholder, and so its
+    /// name), hidden.
+    static func hideAll(_ node: inout UINode) {
+        for path in [\UINode.value, \.title, \.label, \.help, \.placeholder] where !node[keyPath: path].isEmpty {
+            node[keyPath: path] = hidden
+        }
+    }
+
+    /// `nodes` (every control read, by `order`, as read: before anything of them is redacted, so a piece holding part
+    /// of a secret by itself still finds the rest beside it) with a secret only several show
+    /// together (a card number as four fields of four digits) hidden in every piece of it, as `joinedSecrets` finds
+    /// them: neighbours within a parent, or on one line. When the pieces can't be checked whole (too many, or `going`
+    /// says time's up), only a piece that `matches` catches by itself is hidden: pieces that are a secret only
+    /// together can't be told apart from ordinary short texts then. A control hidden this way has every
+    /// text of its hidden (`hideAll`), not only its piece: the digits may be in its title as well as its value.
+    /// A control with a text already hidden still counts by what else it shows. `hid`: something was.
+    static func hideJoined(_ nodes: [UINode], matches: (String) -> Bool, spans: ((String) -> [Range<Int>])? = nil,
+                           going: () -> Bool = { true }) -> (nodes: [UINode], hid: Bool) {
+        var out = nodes
+        let which = joinedHidden(nodes, matches: matches, spans: spans, going: going).hidden
+        for index in which { hideAll(&out[index]) }
+        return (out, !which.isEmpty)
+    }
+
+    /// Which of `nodes` (by index) `hideJoined` hides, and whether they were checked whole (else the fallback hid them).
+    static func joinedHidden(_ nodes: [UINode], matches: (String) -> Bool, spans: ((String) -> [Range<Int>])? = nil,
+                             going: () -> Bool = { true }) -> (hidden: Set<Int>, whole: Bool) {
+        var pieces: [TextPiece] = []
+        var owners: [Int] = []
+        for (index, node) in nodes.enumerated() {
+            guard !isSecure(node), let path = pieceText(node) else { continue }
+            pieces.append(TextPiece(text: node[keyPath: path], parent: node.parent, order: node.sibling, frame: node.frame))
+            owners.append(index)
+        }
+        let found: Set<Int>
+        let joined = joinedSecrets(pieces, matches: matches, spans: spans, going: going)
+        if let joined {
+            found = joined
+        } else {
+            found = Set(pieces.indices.filter { matches(pieces[$0].text) })
+        }
+        return (Set(found.map { owners[$0] }), joined != nil)
+    }
+
+    /// The secrets a control shows whole in its own text (its value, title or description, never a password
+    /// field's), each only the secret's part of the text (`SecretIndex.parts`), not the words around it.
+    static func ownSecrets(_ node: UINode, secret: (String) -> Bool, parts: (String) -> [String]) -> [String] {
+        guard !isSecure(node) else { return [] }
+        return [node.value, node.title, node.label].filter { !$0.isEmpty && $0 != hidden && secret($0) }.flatMap(parts)
+    }
+
+    /// `own` (each control's `ownSecrets`, by order) given to it and to everything that holds it in `nodes` (by
+    /// `parent`): a page's web area has the keyboard while a span of it is selected, so it's checked against the
+    /// secrets it shows.
+    static func guardedSecrets(_ nodes: [UINode], own: [Int: [String]]) -> [Int: [String]] {
+        var out: [Int: [String]] = [:]
+        for (order, parts) in own where !parts.isEmpty {
+            var at = order
+            var seen = Set<Int>()
+            while at >= 0, at < nodes.count, seen.insert(at).inserted {
+                out[at, default: []].append(contentsOf: parts)
+                at = nodes[at].parent
+            }
+        }
+        return out
+    }
+
+    /// Nothing of what has the keyboard (`focus`, the orders it was found at in its window's read) is told selected
+    /// or copied, since it may be a piece of a secret the window shows only in pieces (`hidden`, from `joinedHidden`;
+    /// `pieces`, their texts, in reading order): a card number in four fields of four digits, or four spans of a page,
+    /// copied or selected a piece at a time, would be whole again. So: the control is one of the pieces; or it holds
+    /// some (`around`: the pieces' ancestors, a page's web area) or wasn't found in the read, and what's selected in
+    /// it (`selected`) is in them (`inPieces`). `pieces` are given only when the window's pieces were checked whole
+    /// (`joinedHidden`'s `whole`). When the window wasn't read whole (`complete` false) or the control wasn't found,
+    /// what's selected is refused only when it holds a secret by itself (`matches`, the redaction's own rules: a
+    /// whole secret, a run of one, a code standing alone, a card number across separators): an ordinary word or
+    /// digit isn't refused because some secret happens to contain it.
+    /// `guarded` (from `guardedSecrets`): a control showing a secret whole by itself (a card number in one span of a
+    /// page) and everything holding it, with the secret's parts. The same rule as the pieces: when what has the
+    /// keyboard is one of them, or wasn't found, what's selected in it is refused when it's in a part (selecting a
+    /// card number four digits at a time would show it whole); what isn't in the secret is selected as usual.
+    static func focusInJoined(focus: Set<Int>, hidden: Set<Int>, around: Set<Int> = [], pieces: [String] = [],
+                              guarded: [Int: [String]] = [:], complete: Bool,
+                              selected: [String], matches: (String) -> Bool) -> Bool {
+        if !focus.isDisjoint(with: hidden) { return true }
+        let found = complete && !focus.isEmpty
+        if !pieces.isEmpty, !found || !focus.isDisjoint(with: around), selected.contains(where: { inPieces($0, pieces) }) { return true }
+        if !guarded.isEmpty {
+            let parts = found ? Set(focus.flatMap { guarded[$0] ?? [] }) : Set(guarded.values.joined())
+            if selected.contains(where: { text in parts.contains { inPieces(text, [$0]) } }) { return true }
+        }
+        if found { return false }
+        return selected.contains(where: matches)
+    }
+
+    /// `text` (its separators left out) is in what `pieces` show one after another, or any word of it is in one of
+    /// them (pieces shown in another order than they're read): a selection holding even a little of a secret shown
+    /// in pieces.
+    static func inPieces(_ text: String, _ pieces: [String]) -> Bool {
+        func compact(_ text: String) -> String { String(text.filter { !SecretIndex.separator($0) }) }
+        let whole = compact(text)
+        guard !whole.isEmpty else { return false }
+        let shown = pieces.map(compact).filter { !$0.isEmpty }
+        if shown.joined().contains(whole) { return true }
+        let words = text.split(whereSeparator: { !($0.isLetter || $0.isNumber) }).map(String.init)
+        return words.contains { word in shown.contains { $0.contains(word) } }
+    }
+
     /// The same element (CFEqual: for Accessibility, the same control of the same app), or neither.
     static func same(_ a: AnyObject?, _ b: AnyObject?) -> Bool {
         switch (a, b) {
@@ -733,6 +1242,75 @@ enum UIMap {
         case "menu": return "Choosing \(thing)"
         case "key": return "Pressing \(key)"
         default: return action.capitalized
+        }
+    }
+}
+
+// MARK: - Reading that must be whole
+
+extension UIMap {
+    /// `build`, done again while `generation` moved on under it (something it depends on changed meanwhile), at most
+    /// `attempts` times: the value and the generation it holds for, or nil when it never settled. The vault's index
+    /// and what's redacted with it use this, so a secret Petal starts typing while either is made is never missed.
+    static func settled<T>(attempts: Int = 3, generation: () -> Int, _ build: () -> T) -> (value: T, generation: Int)? {
+        for _ in 0..<max(1, attempts) {
+            let before = generation()
+            let value = build()
+            if generation() == before { return (value, before) }
+        }
+        return nil
+    }
+
+    /// What asking an element for its children through Accessibility said.
+    enum ChildRead: Equatable {
+        case children(Int)
+        /// It has none (the attribute isn't there or holds nothing).
+        case none
+        /// The element went away meanwhile: nothing of it shows any more.
+        case gone
+        /// The app didn't answer (busy, or an error): what's under it is unknown.
+        case unreadable
+    }
+
+    /// An AXError's raw value (and how many children came back) as a ChildRead: 0 success, -25202 invalid element,
+    /// -25205 attribute unsupported, -25212 no value, -25208 not implemented; anything else (-25204 cannot complete,
+    /// -25200 failure, …) is unreadable.
+    static func childRead(error: Int32, count: Int) -> ChildRead {
+        switch error {
+        case 0: return count > 0 ? .children(count) : .none
+        case -25205, -25212, -25208: return .none
+        case -25202: return .gone
+        default: return .unreadable
+        }
+    }
+
+    /// Roles that hold other things and draw no text of their own (their title or description isn't in the picture;
+    /// what's under them is read). Every other role may show text: labels, fields, buttons, links, cells, rows, menu
+    /// items, tabs, and roles Petal doesn't know.
+    static let silentRoles: Set<String> = ["AXApplication", "AXWindow", "AXGroup", "AXScrollArea", "AXScrollBar", "AXSplitGroup",
+                                           "AXSplitter", "AXWebArea", "AXList", "AXOutline", "AXTable", "AXBrowser", "AXColumn",
+                                           "AXTabGroup", "AXRadioGroup", "AXToolbar", "AXLayoutArea", "AXGrowArea", "AXMatte",
+                                           "AXRuler", "AXDrawer", "AXSheet", "AXImage"]
+
+    /// Reading an attribute failed (an AXError's raw value), rather than saying there's nothing there: anything but
+    /// 0 success, -25212 no value, -25205 attribute unsupported and -25208 not implemented.
+    static func readFailed(_ error: Int32) -> Bool { ![0, -25212, -25205, -25208].contains(error) }
+
+    /// Whether an element may show text a picture's check couldn't read: one that may show text (any role but
+    /// `silentRoles`, or one whose role couldn't be read, `roleError`) with any of its texts (title, description,
+    /// help, placeholder, value: `errors`) failing to read. Then it's covered as if it held a secret, or, with nothing
+    /// around it that has bounds, the window isn't read whole.
+    static func textUnread(role: String, roleError: Int32 = 0, errors: [Int32]) -> Bool {
+        (!silentRoles.contains(role) || readFailed(roleError)) && errors.contains(where: readFailed)
+    }
+
+    /// Whether a scan that must see a whole window (what a picture would show) saw all that's under an element: not
+    /// when its children couldn't be read, nor when it has children past the deepest the scan goes.
+    static func covered(_ read: ChildRead, depth: Int, maxDepth: Int) -> Bool {
+        switch read {
+        case .unreadable: return false
+        case .children: return depth < maxDepth
+        case .none, .gone: return true
         }
     }
 }

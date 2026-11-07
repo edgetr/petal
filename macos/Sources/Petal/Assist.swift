@@ -21,9 +21,15 @@ final class Assist {
         let kind: String      // what Always remembers: "quit", "close", "trash"
         let title: String     // "Quit Spotify"
         let detail: String    // a line more, or ""
-        var secret = false    // asks the person for a secret (the vault), typed into the card
         var every = false     // asked every time: no Always
         var owner: String?    // the chat asking (ComputerUse): its Stop, or its next turn, answers Don't
+        /// Asks the person to type something into the vault (a login, a card, …), into the card itself.
+        var form: VaultForm?
+        /// What's asked doesn't match (a login on another site), or it pays: Don't is the default.
+        var warn = false
+        /// The word on the button that says yes ("Allow", "Buy").
+        var allow = "Allow"
+        var takesKeys: Bool { form != nil }
     }
 
     struct Memory: Identifiable, Equatable {
@@ -62,14 +68,16 @@ final class Assist {
     enum Choice { case once, always, no }
 
     /// Allowed already (Full access, or Always for this kind), or asked with a card; `done` hears the answer.
-    /// `always`: asked even with Full access (the vault). `secret`: the card takes a secret, handed to `typed`.
-    func ask(_ kind: String, _ title: String, detail: String = "", always: Bool = false, secret: Bool = false, owner: String? = nil,
-             typed: ((String) -> Void)? = nil, done: @escaping (Bool) -> Void) {
+    /// `always`: asked even with Full access (the vault). `form`: the card takes what the person types for the vault,
+    /// handed to `typed` before `done`. `warn`: Don't is the default (what's asked doesn't match).
+    func ask(_ kind: String, _ title: String, detail: String = "", always: Bool = false, form: VaultForm? = nil, warn: Bool = false,
+             allow: String = "Allow", owner: String? = nil, typed: ((VaultForm.Answer) -> Void)? = nil, done: @escaping (Bool) -> Void) {
         // `always` (the vault) asks every time: neither Full access nor an earlier Always skips it.
-        if !secret, !always, config.string("claudeAccess") == "full" || config.strings("aiAllowed").contains(kind) { return done(true) }
+        if form == nil, !always, !warn, config.string("claudeAccess") == "full" || config.strings("aiAllowed").contains(kind) { return done(true) }
         settle(false)   // one question at a time: a newer one replaces an older one, which is declined
-        secretTyped = typed
-        let request = Request(kind: kind, title: title, detail: detail, secret: secret, every: always, owner: owner)
+        formTyped = typed
+        let request = Request(kind: kind, title: title, detail: detail, every: always || warn, owner: owner, form: form, warn: warn,
+                              allow: allow)
         pending = request
         answer = done
         // In the chat when it's open and the question is its own (the card shows there); over the dock otherwise
@@ -85,20 +93,20 @@ final class Assist {
         DispatchQueue.main.asyncAfter(deadline: .now() + 120, execute: work)
     }
 
-    @ObservationIgnored private var secretTyped: ((String) -> Void)?
+    @ObservationIgnored private var formTyped: ((VaultForm.Answer) -> Void)?
 
     /// Shows a made-up question, for `Petal --snapshot`.
     func preview(_ request: Request?) { pending = request }
 
     /// The answer to the question `id` (a newer question replaced an older one, which was answered Don't then: an
-    /// answer meant for the older one, or a secret typed for it, never goes to the newer).
-    func choose(_ choice: Choice, secret: String = "", for id: UUID? = nil) {
+    /// answer meant for the older one, or what was typed for it, never goes to the newer).
+    func choose(_ choice: Choice, typed: VaultForm.Answer? = nil, for id: UUID? = nil) {
         guard let pending, id == nil || pending.id == id else { return }
-        if pending.secret, choice != .no {
-            guard !secret.isEmpty else { return }
-            secretTyped?(secret)
+        if let form = pending.form, choice != .no {
+            guard let typed, form.complete(typed) else { return }
+            formTyped?(typed)
         }
-        secretTyped = nil
+        formTyped = nil
         if choice == .always, !pending.every {
             var allowed = config.strings("aiAllowed")
             if !allowed.contains(pending.kind) { allowed.append(pending.kind); config.set("aiAllowed", allowed) }
@@ -107,6 +115,7 @@ final class Assist {
     }
 
     private func settle(_ allowed: Bool) {
+        formTyped = nil
         giveUp?.cancel()
         giveUp = nil
         let done = answer
@@ -173,7 +182,7 @@ final class Assist {
                 did("Made a page: \(title)", undo: .open(file.path, title))
                 send(["opened": file.path])
             } catch { fail(error.localizedDescription) }
-        case "petal_vault": vault(args, send, fail)
+        case "petal_vault": vault(args, caller: note, send, fail)
         case "petal_ui", "petal_act": computer.handle(name, args, note: note, send: send, fail: fail)
         case "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
             app.routines.handle(name, args, send, fail)
@@ -279,8 +288,21 @@ final class Assist {
             let selected: String = focused.flatMap { Windows.value($0, kAXSelectedTextAttribute) } ?? ""
             // Nothing of the vault's secrets goes to the AI: not in the title, the selection, nor the clipboard.
             let title = Self.withoutSecrets(realTitle)
-            let shownSelection = selected.isEmpty ? "" : Self.shownText(selected, limit: 8000) ?? Self.tooMuchSelected
+            // Nothing selected in a field holding a secret, not even part of one: a card number selected four
+            // digits at a time would otherwise be told whole over four looks.
+            let inSecret = !selected.isEmpty && focused.map { field in
+                // The field's whole text, checked against the vault: a saved key in a field named nothing secret.
+                var node = Reader.node(field)
+                if !UIMap.isSecure(node) { node.value = Windows.value(field, kAXValueAttribute) ?? "" }
+                return UIMap.selectionHidden(in: node, filled: Sensitive.isFilled(field, pid: pid), secret: VaultIndex.current().matches)
+                    // Nor one piece of a secret the window shows in pieces (a card number as four fields): selected a
+                    // field at a time, it would be told whole.
+                    || Reader.inJoinedSecret(pid: pid, window: number, controls: [field])
+            } == true
+            let shownSelection = selected.isEmpty ? "" : inSecret ? Self.selectionInSecret
+                : Self.shownText(selected, limit: 8000) ?? Self.tooMuchSelected
             let shownClipboard = clipboard.map { Self.shownText($0, limit: 4000) ?? Self.tooMuchClipboard }
+            let looked = window
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     result["window"] = title
@@ -307,8 +329,20 @@ final class Assist {
                             // Its tab, seen showing: the note follows it (a chat kept from before Petal restarted
                             // takes the tab's button from now on).
                             if let tabPlace, let before, let note { self.app.claude.tabSeen(note: note, was: tabPlace, tab: before.tab, window: before.window) }
-                            if picture != nil { self.did(shot == "screen" ? "Looked at your screen" : "Looked at \(front.localizedName ?? "a window")") }
-                            send(result)
+                            let told = {
+                                if picture != nil { self.did(shot == "screen" ? "Looked at your screen" : "Looked at \(front.localizedName ?? "a window")") }
+                                send(result)
+                            }
+                            // A Buy said in this window (by any chat) ends if it now shows another tab or page, before
+                            // the AI hears (or sees) what's in it: the same check petal_ui, fills and acts make.
+                            guard let looked, let number, self.computer.hasBuy(in: number) else { return told() }
+                            self.vaultTab(window: looked, pid: pid, bundle: front.bundleIdentifier ?? "", appName: front.localizedName ?? "",
+                                          windowID: number, frame: frame) { pages in
+                                self.computer.seen(pages, window: number)
+                                // Made private while the tab was read: none of it goes.
+                                if self.neverLook(front.bundleIdentifier) { return refuse(privately) }
+                                told()
+                            }
                         }
                         guard let tabPlace, let before else { return tell() }
                         Self.queue.async {
@@ -327,14 +361,15 @@ final class Assist {
                     let finish = {
                         guard !shot.isEmpty else { return deliver(nil) }
                         Task {
-                            let path = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", hiding: hidden)
-                            if let path {
+                            let picture = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", hiding: hidden)
+                            if let path = picture.path {
                                 result["screenshot"] = path
-                                result["screenshotNote"] = "A PNG of the \(shot == "screen" ? "screen" : "window"); read it to see it."
+                                result["screenshotNote"] = "A PNG of the \(shot == "screen" ? "screen" : "window"); read it to see it. Black boxes are fields that may hold a password, card number, security code or key: Petal hides them."
+                                    + (picture.note.map { " " + $0 } ?? "")
                             } else {
-                                result["screenshotNote"] = Capture.allowed ? "Couldn't take the picture." : "Petal needs Screen Recording for pictures (Petal's settings, Permissions)."
+                                result["screenshotNote"] = picture.note ?? (Capture.allowed ? "Couldn't take the picture." : "Petal needs Screen Recording for pictures (Petal's settings, Permissions).")
                             }
-                            deliver(path)
+                            deliver(picture.path)
                         }
                     }
                     guard Browsers.kind(front.bundleIdentifier ?? "") != nil else { return finish() }
@@ -367,6 +402,7 @@ final class Assist {
     }
 
     nonisolated static let tooMuchClipboard = "The clipboard holds too much to check for saved secrets: Petal doesn't read it."
+    nonisolated static let selectionInSecret = "The selection is in a field holding a secret (a password, key, card number or security code): Petal doesn't read it."
     nonisolated static let tooMuchSelected = "What's selected is too much to check for saved secrets: Petal doesn't read it."
 
     /// What password managers mark what they copy with (nspasteboard.org's markers, and 1Password's own): the
@@ -381,9 +417,10 @@ final class Assist {
     static var clipboardIsPrivate: Bool { isConcealed(NSPasteboard.general) }
 
     /// `text` with the vault's secrets in it (whole, 8 characters or more of one, or a short one as a word) as
-    /// "(hidden)", the same matching petal_ui uses. May read the Keychain: never on the main thread.
+    /// "(hidden)", the same matching petal_ui uses; all of it "(hidden)" while the vault can't be read. May read the
+    /// Keychain: never on the main thread.
     nonisolated static func withoutSecrets(_ text: String) -> String {
-        text.isEmpty ? text : VaultIndex.current().redacted(text)
+        text.isEmpty ? text : VaultIndex.settled { $0.redacted(text) } ?? UIMap.hidden
     }
 
     /// The app in front (never Petal itself), or the running app called `name`.
@@ -401,36 +438,138 @@ final class Assist {
             ?? apps.first { $0.localizedName?.localizedCaseInsensitiveContains(name) == true }
     }
 
-    /// A picture of one window (its number), or of the main screen, saved in Petal's caches; its path.
-    /// `window` nil is the whole screen; a window that can't be found is no picture, never the screen instead.
-    nonisolated private static func screenshot(_ window: CGWindowID?, screen: Bool = false, hiding: Set<pid_t> = []) async -> String? {
-        guard screen || window != nil else { return nil }
+    /// A picture of one window (its number), or of the main screen, saved in Petal's caches: its path, and what was
+    /// left out. `window` nil is the whole screen; a window that can't be found is no picture, never the screen
+    /// instead. What may show a secret is blacked out first (Sensitive), in memory: no picture is written before.
+    /// A window Petal can't read whole through Accessibility is no picture (or, on the screen, isn't in it).
+    /// The window server keeps where each window is; what Accessibility finds is placed by where it is now, so a window
+    /// that moved or changed size between the list and the picture would have its blackouts in the wrong place, as
+    /// would a field that scrolled far, appeared or went while it was taken: then it's taken again once, and after
+    /// that there's no picture.
+    nonisolated private static func screenshot(_ window: CGWindowID?, screen: Bool = false, hiding: Set<pid_t> = []) async -> (path: String?, note: String?) {
+        var why: String?
+        for _ in 0..<2 {
+            let taken = await capture(window, screen: screen, hiding: hiding)
+            if !taken.moved { return (taken.path, taken.note) }
+            why = taken.note
+        }
+        return (nil, why ?? "A window moved or changed size while Petal took the picture, so it couldn't be sure what it hid: no picture. Try again once it's still.")
+    }
+
+    nonisolated static let scrolledText = "Something that may be secret scrolled, appeared or went while Petal took the picture, so it couldn't be sure what it hid: no picture. Try again once the window is still."
+
+    /// Where the window server has a window now (top-left origin, as Accessibility and ScreenCaptureKit count), or
+    /// nil when it's gone.
+    nonisolated private static func frame(of window: CGWindowID) -> CGRect? {
+        guard let list = CGWindowListCopyWindowInfo(.optionIncludingWindow, window) as? [[String: Any]],
+              let info = list.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == window }),
+              let bounds = info[kCGWindowBounds as String] as? NSDictionary else { return nil }
+        return CGRect(dictionaryRepresentation: bounds as CFDictionary)
+    }
+
+    /// The window is still where (and the size) it was when the picture's place for it was worked out.
+    nonisolated private static func still(_ window: SCWindow) -> Bool {
+        guard let now = frame(of: window.windowID) else { return false }
+        let then = window.frame
+        return abs(now.minX - then.minX) <= 1 && abs(now.minY - then.minY) <= 1 && abs(now.width - then.width) <= 1 && abs(now.height - then.height) <= 1
+    }
+
+    nonisolated private static func capture(_ window: CGWindowID?, screen: Bool, hiding: Set<pid_t>) async -> (path: String?, note: String?, moved: Bool) {
+        guard screen || window != nil else { return (nil, nil, false) }
+        // Nothing can be checked for the vault's secrets while it can't be read: no picture at all.
+        if VaultIndex.current().unreadable {
+            return (nil, VaultStore.unreadableText + " Petal can't hide its secrets in a picture, so it takes none: try again in a moment.", false)
+        }
         guard CGPreflightScreenCaptureAccess(),
               // One window may be behind others or on another Desktop (a note's): every window is listed then.
-              let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: window == nil) else { return nil }
+              let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: window == nil) else { return (nil, nil, false) }
         let filter: SCContentFilter
-        let size: CGSize
+        let area: CGRect
+        var note: String?
+        // Each window in the picture, with its Accessibility window, read again once the picture is taken.
+        var watched: [(window: SCWindow, element: AXUIElement, pid: pid_t, visible: CGRect, before: Sensitive.Scan)] = []
+        var rects: [CGRect] = []
         if !screen {
-            guard let window, let match = content.windows.first(where: { $0.windowID == window }) else { return nil }
+            guard let window, let match = content.windows.first(where: { $0.windowID == window }), let pid = match.owningApplication?.processID else { return (nil, nil, false) }
+            guard let element = Sensitive.window(pid: pid, id: window) else {
+                return (nil, "Petal couldn't read that window through Accessibility, so it can't hide what may be secret in it: no picture.", false)
+            }
+            let before = Sensitive.scan(window: element, pid: pid, visible: match.frame, deadline: Date().addingTimeInterval(3))
+            guard before.complete else {
+                return (nil, "Petal couldn't check all of that window for passwords and card numbers in time (it's very big, or the app didn't answer): no picture.", false)
+            }
+            // Moved while it was read: its blackouts may be in the wrong place.
+            guard still(match) else { return (nil, nil, true) }
+            watched = [(match, element, pid, match.frame, before)]
             filter = SCContentFilter(desktopIndependentWindow: match)
-            size = match.frame.size
+            area = match.frame
         } else if let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first {
             // The screen without the apps kept private, and without Petal's own windows: its previews, banners,
             // cards and stacks can show what's in those apps (and the chat itself needn't be in the picture).
             // Notification banners too: they belong to Notification Center, not their app, and can show a private
-            // app's messages.
+            // app's messages. Only the windows checked are in the picture: one that opens meanwhile isn't.
             let me = ProcessInfo.processInfo.processIdentifier
-            filter = SCContentFilter(display: display, excludingApplications: content.applications.filter {
-                hiding.contains($0.processID) || $0.processID == me || $0.bundleIdentifier == "com.apple.notificationcenterui"
-            }, exceptingWindows: [])
-            size = CGSize(width: display.width, height: display.height)
-        } else { return nil }
+            area = CGDisplayBounds(display.displayID)
+            let deadline = Date().addingTimeInterval(6)
+            var included: [SCWindow] = []
+            var left: [String] = []
+            var overlays = 0
+            for candidate in content.windows where candidate.isOnScreen && candidate.frame.intersects(area) {
+                guard let owner = candidate.owningApplication, !hiding.contains(owner.processID), owner.processID != me,
+                      owner.bundleIdentifier != "com.apple.notificationcenterui" else { continue }
+                if let element = Sensitive.window(pid: owner.processID, id: candidate.windowID) {
+                    let found = Sensitive.scan(window: element, pid: owner.processID, visible: candidate.frame.intersection(area),
+                                               deadline: min(deadline, Date().addingTimeInterval(2)))
+                    if found.complete {
+                        included.append(candidate)
+                        watched.append((candidate, element, owner.processID, candidate.frame.intersection(area), found))
+                        continue
+                    }
+                } else if candidate.windowLayer != 0 {
+                    // The menu bar, menus, pop-overs and other overlays have no window of their own in Accessibility,
+                    // so nothing in them was checked (a context menu can quote the selected text): left out.
+                    overlays += 1
+                    continue
+                }
+                let name = owner.applicationName.isEmpty ? "a window" : owner.applicationName
+                if !left.contains(name) { left.append(name) }
+            }
+            var notes: [String] = []
+            if !left.isEmpty {
+                notes.append("Left out (Petal couldn't check them for passwords and card numbers): \(left.joined(separator: ", ")).")
+            }
+            if overlays > 0 { notes.append("Menus, the menu bar and other overlays aren't in the picture: Petal can't check them for secrets.") }
+            if !notes.isEmpty { note = notes.joined(separator: " ") }
+            filter = SCContentFilter(display: display, including: included)
+        } else { return (nil, nil, false) }
         let configuration = SCStreamConfiguration()
-        let scale = min(2, 2000 / max(1, max(size.width, size.height)))   // sharp enough to read, small enough to send
-        configuration.width = Int(size.width * scale)
-        configuration.height = Int(size.height * scale)
+        let scale = min(2, 2000 / max(1, max(area.width, area.height)))   // sharp enough to read, small enough to send
+        configuration.width = Int(area.width * scale)
+        configuration.height = Int(area.height * scale)
         configuration.showsCursor = false
-        guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) else { return nil }
+        configuration.ignoreShadowsSingleWindow = true
+        guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) else { return (nil, note, false) }
+        // Read again now, each part matched to itself in the read before: one that moved while the picture was taken
+        // is covered from where it was to where it is. On the screen, a window that can't be read whole again, or
+        // where something secret appeared, went or scrolled far meanwhile, is covered completely; a window alone is
+        // taken again (once).
+        for item in watched {
+            let after = Sensitive.scan(window: item.element, pid: item.pid, visible: item.visible, deadline: Date().addingTimeInterval(2))
+            if !after.complete, !screen {
+                return (nil, "Petal couldn't check all of that window for passwords and card numbers in time: no picture.", false)
+            }
+            if after.complete, let covered = Sensitive.blackouts(item.before, after, window: item.window.frame) {
+                rects += covered
+            } else if screen {
+                rects.append(item.window.frame)
+            } else {
+                return (nil, scrolledText, true)
+            }
+            // The picture placed it where it was listed; what was found is where it is now. Moved meanwhile: taken
+            // again (nothing is written).
+            guard still(item.window) else { return (nil, nil, true) }
+        }
+        guard let clean = Sensitive.blackOut(image, rects, origin: area.origin, scale: CGFloat(image.width) / max(1, area.width)) else { return (nil, note, false) }
         let folder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "Petal/look")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         // Only the newest few are kept.
@@ -438,9 +577,9 @@ final class Assist {
         for file in old.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }).dropFirst(10) { try? FileManager.default.removeItem(at: file) }
         // Its own name (two notes looking in the same second never share a picture), in time order for the above.
         let url = folder.appending(path: "look-\(Int(Date().timeIntervalSince1970 * 1000))-\(UUID().uuidString.prefix(8)).png")
-        let rep = NSBitmapImageRep(cgImage: image)
-        guard let data = rep.representation(using: .png, properties: [:]), (try? data.write(to: url, options: .atomic)) != nil else { return nil }
-        return url.path
+        let rep = NSBitmapImageRep(cgImage: clean)
+        guard let data = rep.representation(using: .png, properties: [:]), (try? data.write(to: url, options: .atomic)) != nil else { return (nil, note, false) }
+        return (url.path, note, false)
     }
 
     // MARK: Apps

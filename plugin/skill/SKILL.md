@@ -34,12 +34,19 @@ Use, in this order:
    first use of an app in a reply asks the user; from a session outside Petal's own chat, the first in a task (pass
    the same `task` words with each act; a new task, two quiet minutes or a Stop asks again). Menus and keys go only to the window `petal_ui` looked at, and an
    act on a window that changed since (another row selected, another title) is refused: call `petal_ui` again.
-   Never private apps or password fields (`petal_vault` types secrets); what only a real click could do, ask the
-   user to do. Only the user turns `computerUse` on.
+   Never private apps or password fields; what only a real click could do, ask the user to do. Only the user
+   turns `computerUse` on.
+   The vault (`petal_vault`, macOS): logins, contact info, addresses, payment info and API keys, filled by Petal
+   into fields from `petal_ui` without the AI seeing a secret (`action: fill`, the item and `fields`
+   {field: id}). A login fills by itself on its own site or app, an API key on its service's site, this Mac or an
+   app; elsewhere Petal asks the user. An `unsorted` item (saved before the vault had kinds) shows only its title
+   and always asks before it fills (field `value`); the user sorts it in Settings › Vault. Payment info waits for one "Buy?" card per checkout (pass what you're buying
+   and the price). Missing details: `action: request` (the user types them into Petal's card); a new account:
+   `action: new_login`. Never ask for a password, card or key in the chat.
    In Petal's own panel each chat is a sticky note (`aiNotes`): stuck to the browser tab, window, or all of the
    app it was opened on (a chip on the note changes which), so `petal_look` looks there even after the user moves
-   on (`front: true` for what's in front now; a tab's note says its tab under `noteTab`, and reads and acts only
-   while that tab is the one its window shows: otherwise ask the user to switch back to it). The user can drag a
+   on (`front: true` for what's in front now; a tab's note says its tab under `noteTab`, and reads, acts and fills
+   only while that tab is the one its window shows: otherwise ask the user to switch back to it). The user can drag a
    note anywhere on its window; it comes back there whenever that tab, window or app is in front again.
    Changes apply instantly. `petal_export_recipe` / `petal_import_recipe` share a dock as a `.petal` file (modes,
    apps by name, look; nothing personal) or add one someone shared (`look: true` also takes its look; say what it

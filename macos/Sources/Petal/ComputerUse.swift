@@ -13,7 +13,7 @@ import SwiftUI
 /// The first act on an app in a reply asks the person (Assist.ask, kind `computer:<bundle id>`): Allow covers that
 /// app for the rest of the reply, Always for good, unless the chat has Full access. An AI session outside Petal has
 /// no replies Petal can see: its Allow lasts one task (the same `task`, with no more than two minutes between acts).
-/// Never apps kept private (`aiNeverLook`), never password fields, never a vault secret: the vault types its own.
+/// Never apps kept private (`aiNeverLook`), never password fields, never a vault secret: the vault fills its own (VaultFill.swift).
 ///
 /// Each chat is its own caller (its note's id, or `mcp-<pid>` for the Petal tools of an AI session outside Petal):
 /// callers never share a window's ids or what the person allowed. An act only goes ahead on the window `petal_ui`
@@ -63,6 +63,9 @@ final class ComputerUse {
         var stopped = false
         var last = Date()
         let cancel = Acting.Cancel()
+        /// The Buy cards the person answered Buy in this reply: each lets payment info fill on its exact host, in its
+        /// window, with its card (Vault.Checkout).
+        var checkouts: [Vault.Checkout] = []
     }
 
     /// One action, waiting its turn: the cursor does one thing at a time.
@@ -96,12 +99,19 @@ final class ComputerUse {
     }
 
     /// By caller. Never shared between two chats.
-    private var maps: [String: Map] = [:]
+    private(set) var maps: [String: Map] = [:]
     /// By caller: how many times its note was stuck to something else (`placeChanged`). A map, or a petal_ui under
     /// way, from before the last is no use.
     private var places: [String: Int] = [:]
     nonisolated static let moved = "This note was stuck somewhere else (its tab, its window or all of its app) since that petal_ui. Call petal_ui again for fresh ids."
-    private var sessions: [String: Session] = [:] { didSet { standGuard() } }
+    private var sessions: [String: Session] = [:] {
+        didSet {
+            // A Buy gone from every reply (its window moved on or closed, replaced, its reply over) is revoked at once.
+            Vault.Checkout.revoke(oldValue.values.flatMap(\.checkouts), keeping: sessions.values.flatMap(\.checkouts))
+            standGuard()
+            unwatchBuys()
+        }
+    }
     private var closed: [String: Closed] = [:]
     private var line: [Job] = [] { didSet { standGuard() } }
     private var busy = false { didSet { standGuard() } }
@@ -133,7 +143,7 @@ final class ComputerUse {
     }
 
     /// Why Petal can't use apps now (turned off, or no Accessibility), or nil.
-    private func refusal() -> String? {
+    func refusal() -> String? {
         guard app.config.bool("computerUse") else { return "Using apps is off in Petal's settings (computerUse); only the person can turn it on." }
         guard Windows.trusted else { return "Petal needs Accessibility for this (Petal's settings, Permissions)." }
         return nil
@@ -141,7 +151,7 @@ final class ComputerUse {
 
     /// The same, for one app: asked again right before every action and before a petal_ui answer goes back, since the
     /// person may have changed their mind meanwhile.
-    private func refusal(for bundle: String, name: String) -> String? {
+    func refusal(for bundle: String, name: String) -> String? {
         if let refusal = refusal() { return refusal }
         if assist.neverLook(bundle) { return "The user keeps \(name) private: Petal doesn't look into it or use it." }
         return nil
@@ -185,7 +195,8 @@ final class ComputerUse {
             if let tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
                 return DispatchQueue.main.async { fail(ClaudePanel.tabNotShowing) }
             }
-            let reading = Reader.read(pid: pid, window: wanted, budget: 1.5)
+            // Read again if the vault (or a secret Petal typed) changed meanwhile: nothing goes out unchecked against it.
+            let settled = VaultIndex.settled { _ in Reader.read(pid: pid, window: wanted, budget: 1.5) }
             let seen = tabPlace.flatMap { ClaudePanel.tabShowing($0) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -193,6 +204,9 @@ final class ComputerUse {
                     if let refusal = self.refusal(for: bundle, name: name) { return fail(refusal) }
                     // The note was stuck somewhere else while it read: what it read was for the old place.
                     if self.places[caller, default: 0] != stuck { return fail(Self.moved) }
+                    guard let reading = settled, !reading.vaultUnreadable else {
+                        return fail(VaultStore.unreadableText + " Petal can't hide its secrets, so it doesn't read windows until it can: try again in a moment.")
+                    }
                     if reading.gone { return fail("This note's window is closed (it was in \(name)). front: true uses what's in front now.") }
                     guard let window = reading.window else { return fail("\(name) has no window open.") }
                     // Another tab came forward while it read (or Petal can't tell any more): nothing it read goes back.
@@ -220,16 +234,26 @@ final class ComputerUse {
                         if !UIMap.isVisible(node, window: reading.windowFrame) { item["offscreen"] = true }
                         list.append(item)
                     }
-                    self.maps[caller] = Map(pid: pid, bundle: bundle, appName: name, window: window, windowID: reading.windowID,
-                                            windowFrame: reading.windowFrame, lists: reading.lists, fingerprint: reading.fingerprint,
-                                            entries: entries, count: entries.count, made: Date(), tabPlace: stuckTab, place: stuck)
+                    let made = Map(pid: pid, bundle: bundle, appName: name, window: window, windowID: reading.windowID,
+                                   windowFrame: reading.windowFrame, lists: reading.lists, fingerprint: reading.fingerprint,
+                                   entries: entries, count: entries.count, made: Date(), tabPlace: stuckTab, place: stuck)
+                    self.maps[caller] = made
                     self.keepSweeping()
                     var result: [String: Any] = ["app": name, "window": reading.title, "elements": list,
                                                  "note": "Act with petal_act by id. These ids last until the next petal_ui, or 5 minutes; call petal_ui again once the window changes."]
                     if picked.left > 0 { result["more"] = "\(picked.left) more not listed: pass find (a word in its name) to narrow." }
                     if reading.timedOut { result["partial"] = "The window is big: this is what Petal read in time." }
                     if list.isEmpty { result["empty"] = "No controls found\(find.isEmpty ? "" : " matching “\(find)”"). The app may not support Accessibility well; petal_look with a screenshot shows it." }
-                    send(result)
+                    // A Buy said in this window (by any chat) ends if what was just read is another tab or page,
+                    // before the AI hears what it read.
+                    guard let id = reading.windowID, self.hasBuy(in: id) else { return send(result) }
+                    self.assist.vaultShown(made, pages: reading.pages, title: reading.title) { pages in
+                        self.seen(pages, window: id)
+                        // Stuck somewhere else, turned off or made private meanwhile: these ids are no use.
+                        if let refusal = self.refusal(for: bundle, name: name) { return fail(refusal) }
+                        if self.places[caller, default: 0] != stuck { return fail(Self.moved) }
+                        send(result)
+                    }
                 }
             }
         }
@@ -287,7 +311,7 @@ final class ComputerUse {
         case "type":
             guard !options.text.isEmpty else { return fail("Give the text to type.") }
             if let entry, UIMap.isSecure(entry.node) {
-                return fail("That's a password field: Petal never types into those for you. Use petal_vault (action: use) to type a saved secret, or ask the person.")
+                return fail("That's a password field: petal_act never types there. petal_vault fills a saved password (action: fill), or asks the person for one (action: request).")
             }
         case "scroll":
             guard ["", "up", "down", "left", "right"].contains(options.direction) else { return fail("direction is up, down, left or right (or none, to bring the control into view).") }
@@ -306,7 +330,203 @@ final class ComputerUse {
 
         let job = Job(caller: caller, action: action, entry: entry, map: map, bundle: bundle, caption: caption, options: options,
                       cancel: Acting.Cancel(under: session.cancel), send: send, fail: fail)
-        if session.apps.contains(bundle) { return enqueue(job) }
+        // A Buy said in this window lasts only while it shows the tab and page it was said on: looked at before
+        // every act there (an act may be what leaves it, or the person may have).
+        guard let window = map.windowID, hasBuy(in: window) else { return proceed(job) }
+        assist.vaultTab(map) { [weak self] pages in
+            guard let self else { return }
+            self.seen(pages, window: window)
+            self.proceed(job)
+        }
+    }
+
+    /// A job the reply may do now, or the first in an app it hasn't used yet (asked first).
+    private func proceed(_ job: Job) {
+        guard let session = sessions[job.caller], !session.stopped, !job.cancel.stopped else { return job.fail(whyStopped(job)) }
+        if session.apps.contains(job.bundle) { return enqueue(job) }
+        admit(job, session: session)
+    }
+
+    /// The reply a vault call belongs to, taken as the call comes in (nil when that reply can't act): every later
+    /// step of the call checks it's still that reply (`live`), so a card answered or a save finished after the person
+    /// stopped or steered it never acts in the next reply.
+    func token(_ caller: String, task: String) -> Acting.Cancel? {
+        let current = session(caller, task: UIMap.tidy(task).lowercased())
+        sessions[caller]?.last = Date()
+        keepSweeping()
+        return current.stopped || current.cancel.stopped ? nil : current.cancel
+    }
+
+    /// The reply `token` came from is still the caller's, and wasn't stopped.
+    func live(_ caller: String, _ token: Acting.Cancel) -> Bool {
+        guard let current = sessions[caller] else { return false }
+        return current.cancel === token && !current.stopped && !token.stopped
+    }
+
+    /// A field filled from the vault (VaultFill.swift): the same line, pointer, Stop and checks as petal_act, on a
+    /// control of the window petal_ui looked at, in the reply `token` came from. `allowed`: the person just said yes
+    /// to this very fill on its card, which lets it into the app for that fill alone (typing only: Return after it
+    /// asks as petal_act does); otherwise the app is asked about as petal_act asks.
+    func fill(_ plan: VaultFillPlan, entry: Entry, map: Map, caller: String, token: Acting.Cancel, allowed: Bool,
+              send: @escaping (Any) -> Void, fail: @escaping (String) -> Void) {
+        sessions[caller]?.last = Date()
+        keepSweeping()
+        guard live(caller, token), let session = sessions[caller] else {
+            return fail(Self.stoppedText + " Don't carry on in this reply: say what's left and wait for them.")
+        }
+        guard maps[caller]?.id == map.id else { return fail("The window was looked at again (or 5 minutes passed) since these ids. " + Acting.changed) }
+        guard let target = NSRunningApplication(processIdentifier: map.pid), !target.isTerminated else { return fail("\(map.appName) isn't open.") }
+        let bundle = target.bundleIdentifier ?? "\(target.processIdentifier)"
+        if let refusal = refusal(for: bundle, name: map.appName) { return fail(refusal) }
+        var options = Acting.Options()
+        options.fill = plan
+        options.submit = plan.submit
+        // Payment info fills only under the Buy that covers this page now, and stops the moment that Buy ends.
+        var buy: Vault.BuyToken?
+        if plan.payment {
+            guard let covering = checkout(caller, token: token, place: plan.place, window: map.windowID, card: plan.itemID, revision: plan.revision) else {
+                return fail(Acting.buyEndedText)
+            }
+            buy = covering
+        }
+        let job = Job(caller: caller, action: "fill", entry: entry, map: map, bundle: bundle, caption: "Filling your \(plan.field.words)",
+                      options: options, cancel: Acting.Cancel(under: token, buy: buy), send: send, fail: fail)
+        // Return after the fill presses as petal_act does: it asks to use the app, whatever card allowed the fill.
+        if Vault.fillAdmitted(allowed: allowed, submit: plan.submit, appAllowed: session.apps.contains(bundle)) { return enqueue(job) }
+        admit(job, session: session)
+    }
+
+    /// The Buy said in this reply that covers payment info at `place` (its exact host and page, this window and tab,
+    /// this card), or nil. A window seen showing another page or tab ends that Buy.
+    func checkout(_ caller: String, token: Acting.Cancel, place: Vault.Place, window: CGWindowID?, card: String, revision: Int?) -> Vault.BuyToken? {
+        guard live(caller, token), let current = sessions[caller] else { return nil }
+        if let window { seen([place], window: window) }
+        let turn = Self.turnName(current)
+        return sessions[caller]?.checkouts.first { $0.covers(place, window: window, card: card, revision: revision, turn: turn) }?.token
+    }
+
+    /// The person said Buy on `place`'s host: payment info from `card` fills there, in that window, for the rest of
+    /// this reply. It doesn't let Petal AI use the browser otherwise: pressing the order button asks as any act does
+    /// (unless the reply may use the browser already). False when the reply ended while they were asked.
+    /// `asked`: the Buy card's number (endBuys); a newer card asked in that window since means no Buy. `revision`: the
+    /// card as shown on the Buy card (`Vault.revision`); only that version of it fills.
+    func allowCheckout(_ caller: String, token: Acting.Cancel, place: Vault.Place, map: Map, card: String, revision: Int, asked: Int) -> Bool {
+        guard live(caller, token), let current = sessions[caller], let window = map.windowID, buyCards[window] == asked,
+              let bought = Vault.Checkout(place: place, window: window, card: card, revision: revision, turn: Self.turnName(current)) else { return false }
+        sessions[caller]?.checkouts.removeAll { $0.window == window }
+        sessions[caller]?.checkouts.append(bought)
+        watchBuy(map)
+        return true
+    }
+
+    /// The newest Buy card asked in each window: Buy on an older card that's still open counts for nothing.
+    private var buyCards: [CGWindowID: Int] = [:]
+
+    /// A Buy card is about to show for `window`: every chat's Buy in it ends now (and is revoked, stopping what
+    /// fills under it), whatever the person answers. The card's number, for `allowCheckout`.
+    func endBuys(in window: CGWindowID) -> Int {
+        for caller in Array(sessions.keys) {
+            guard let list = sessions[caller]?.checkouts else { continue }
+            let left = Vault.Checkout.asking(list, window: window)
+            if left.count != list.count { sessions[caller]?.checkouts = left }
+        }
+        let card = (buyCards[window] ?? 0) + 1
+        buyCards[window] = card
+        return card
+    }
+
+    /// Some chat's Buy is in this window.
+    func hasBuy(in window: CGWindowID) -> Bool {
+        sessions.values.contains { $0.checkouts.contains { $0.window == window } }
+    }
+
+    /// `window` was seen showing `pages` (by a read or an act of any chat, or after its title changed): every Buy in
+    /// it whose own tab and page isn't one of them is over, for good.
+    func seen(_ pages: [Vault.Place], window: CGWindowID) {
+        for caller in Array(sessions.keys) {
+            guard let list = sessions[caller]?.checkouts, list.contains(where: { $0.window == window }) else { continue }
+            let left = Vault.Checkout.seen(list, pages: pages, window: window)
+            if left.count != list.count { sessions[caller]?.checkouts = left }
+        }
+    }
+
+    // MARK: Watching a Buy's window
+
+    /// Each window with a Buy in it, as looked at when Buy was said: its title is watched (a tab switch or a new page
+    /// changes it), and so is its browser's tab selection (two tabs titled alike change no title), and what it shows
+    /// is read again then.
+    private var buyWindows: [CGWindowID: Map] = [:]
+    /// Browsers whose Buy windows are being read again after a tab switch (`true`: switched again meanwhile, so read
+    /// once more when this read is done).
+    private var buyTabReads: [pid_t: Bool] = [:]
+
+    private func watchBuy(_ map: Map) {
+        guard let id = map.windowID, buyWindows[id] == nil else { return }
+        if buyWindows.isEmpty {
+            WindowEvents.shared.listen("buy") { [weak self] event in self?.buyEvent(event) }
+            // Tab switches are passed on only while someone wants them, notes on or off.
+            WindowEvents.shared.titles("buy", true)
+        }
+        buyWindows[id] = map
+        AXWatcher.shared.watchTitle(map.window, pid: map.pid)
+    }
+
+    /// Stops watching windows no Buy is in anymore (sessions changed).
+    private func unwatchBuys() {
+        guard !buyWindows.isEmpty else { return }
+        let windows = Set(sessions.values.flatMap { $0.checkouts.map(\.window) })
+        for (id, map) in buyWindows where !windows.contains(id) {
+            AXWatcher.shared.unwatchTitle(map.window, pid: map.pid)
+            buyWindows[id] = nil
+        }
+        if buyWindows.isEmpty {
+            WindowEvents.shared.stopListening("buy")
+            buyTabReads = [:]
+        }
+    }
+
+    private func buyEvent(_ event: WindowEvents.Event) {
+        if event.kind == .tabSwitched { return buyTabSwitched(event.pid) }
+        guard let id = event.window, let map = buyWindows[id] else { return }
+        switch event.kind {
+        case .closed:
+            for caller in Array(sessions.keys) { sessions[caller]?.checkouts.removeAll { $0.window == id } }
+            buyCards[id] = nil   // a card still open for it counts for nothing
+        case .titleChanged:
+            assist.vaultTab(map) { [weak self] pages in self?.seen(pages, window: id) }
+        default:
+            break
+        }
+    }
+
+    /// A browser with a Buy in one of its windows selected another tab, or the keyboard moved within its page (the
+    /// event doesn't say which window, nor tell the two apart): each of its Buy windows is read again, and a Buy ends
+    /// only if the window now shows another tab or page (`seen`), never for the event itself.
+    private func buyTabSwitched(_ pid: pid_t) {
+        guard buyWindows.values.contains(where: { $0.pid == pid }) else { return }
+        if buyTabReads[pid] != nil { buyTabReads[pid] = true; return }
+        buyTabReads[pid] = false
+        let maps = buyWindows.filter { $0.value.pid == pid }
+        var left = maps.count
+        for (id, map) in maps {
+            assist.vaultTab(map) { [weak self] pages in
+                guard let self else { return }
+                self.seen(pages, window: id)
+                left -= 1
+                guard left == 0 else { return }
+                let again = self.buyTabReads.removeValue(forKey: pid) == true
+                if again { self.buyTabSwitched(pid) }
+            }
+        }
+    }
+
+    /// A reply's name for its Buys: its turn (and an outside session's task).
+    private static func turnName(_ session: Session) -> String { "\(session.turn)|\(session.task)" }
+
+    /// The first act on an app in a reply asks the person; Allow lets the reply use it.
+    private func admit(_ job: Job, session: Session) {
+        let caller = job.caller, name = job.appName, bundle = job.bundle, caption = job.caption
+        let send = job.send, fail = job.fail
         let first = caption.prefix(1).lowercased() + caption.dropFirst()
         let lasting = session.turn == Self.outside ? "For this task" : "Until this reply is done"
         assist.ask("computer:\(bundle)", "Let Petal AI use \(name)?",
@@ -413,11 +633,16 @@ final class ComputerUse {
         }
     }
 
-    /// While any reply may act (a session the person allowed, not stopped, or an action waiting or under way),
-    /// Escape stops it and a small Stop stays on the screen, between actions too.
+    /// While any reply may act (a session the person allowed an app or a Buy, not stopped, or an action waiting or
+    /// under way), Escape stops it and a small Stop stays on the screen, between actions too.
     private func standGuard() {
-        let live = busy || !line.isEmpty || sessions.values.contains { !$0.stopped && !$0.apps.isEmpty && !$0.cancel.stopped }
+        let live = busy || !line.isEmpty || sessions.values.contains(where: Self.mayAct)
         cursor.stand(live)
+    }
+
+    /// A reply the person let use an app, or fill payment info after Buy, and that wasn't stopped.
+    private static func mayAct(_ session: Session) -> Bool {
+        !session.stopped && !session.cancel.stopped && (!session.apps.isEmpty || !session.checkouts.isEmpty)
     }
 
     private func enqueue(_ job: Job) {
@@ -455,7 +680,8 @@ final class ComputerUse {
     /// the person stopped it.
     private func whyStopped(_ job: Job) -> String {
         if let refusal = refusal(for: job.bundle, name: job.appName) { return refusal }
-        return job.map.place != places[job.caller, default: 0] ? Self.moved : Self.stoppedText
+        if job.map.place != places[job.caller, default: 0] { return Self.moved }
+        return job.cancel.buyEnded ? Acting.buyEndedText : Self.stoppedText
     }
 
     /// Checks the window and control are as the map said, glides the cursor there, then checks it all again and does
@@ -544,6 +770,12 @@ final class ComputerUse {
         // What its own typing, focusing or scrolling changed in the window isn't a change behind its back.
         if let fingerprint = outcome.fingerprint, maps[job.caller]?.id == job.map.id { maps[job.caller]?.fingerprint = fingerprint }
         assist.did(historyLine(job, outcome))
+        if let plan = job.options.fill {
+            var reply: [String: Any] = ["filled": plan.field.rawValue, "app": job.appName]
+            if let note = outcome.note { reply["note"] = note }
+            if plan.submit { reply["next"] = "The window may have changed: call petal_ui again before using more ids." }
+            return job.send(reply)
+        }
         var reply: [String: Any] = ["done": job.caption, "app": job.appName]
         if let value = outcome.value { reply["value"] = value }
         if let chose = outcome.chose { reply["chose"] = chose }
@@ -563,6 +795,10 @@ final class ComputerUse {
         case "focus": return "Went to \(thing) in \(job.appName)"
         case "scroll": return "Scrolled in \(job.appName)"
         case "menu": return "Chose \(outcome.chose ?? job.options.path.joined(separator: " › ")) in \(job.appName)"
+        case "fill":
+            let plan = job.options.fill
+            let place = plan?.place.web == true ? plan?.place.host ?? job.appName : job.appName
+            return "Filled your \(plan.map { $0.title.isEmpty ? "" : $0.title + " " } ?? "")\(plan?.field.words ?? "details") on \(place)"
         default:
             let key = job.options.key?.label ?? "a key"
             return "Pressed \(key)\(outcome.chose.map { " (\($0))" } ?? "") in \(job.appName)"
@@ -575,12 +811,13 @@ final class ComputerUse {
     /// every other reply that may use apps now (Stop means Petal AI stops using them). A Petal chat's reply can't use
     /// apps again; an AI session outside Petal asks again at its next task.
     func stop() {
-        var callers = Set(sessions.filter { !$0.value.stopped && !$0.value.apps.isEmpty }.keys).union(line.map(\.caller))
+        var callers = Set(sessions.filter { Self.mayAct($0.value) }.keys).union(line.map(\.caller))
         if let caller = acting?.caller ?? lastCaller { callers.insert(caller) }
-        // All marked stopped first, so Stop never comes back for one still to be stopped.
+        // All marked stopped first, so Stop never comes back for one still to be stopped; a Buy goes with it.
         for caller in callers {
             close(caller)
             sessions[caller]?.stopped = true
+            sessions[caller]?.checkouts = []
         }
         cursor.hide()
         for caller in callers {
@@ -689,6 +926,25 @@ enum Reader {
         /// Somewhere in the window (any control, not only those told): a vault secret, a password field, or a control
         /// whose names say it holds a password, token or API key. A Copy button there may copy it.
         var holdsSecret = false
+        /// The vault couldn't be read: nothing was read, since nothing could be checked for its secrets.
+        var vaultUnreadable = false
+        /// The web pages met (each tab page in a browser, several side by side in one split into panes) and their
+        /// addresses: a Buy in this window ends when its own page isn't one of them.
+        var pages: [(page: AXUIElement, url: String?)] = []
+        /// The orders at which the controls asked about (`focus`) were met, and those hidden as pieces of a secret
+        /// several show together (`UIMap.joinedHidden`).
+        var focusOrders: Set<Int> = []
+        var joined: Set<Int> = []
+        /// The joined pieces' texts in reading order, the orders of everything that holds one (a page's web area),
+        /// and whether the pieces were checked whole (else `joined` is the fallback's: short texts that are part of a
+        /// vault secret).
+        var joinedTexts: [String] = []
+        var aroundJoined: Set<Int> = []
+        var joinedWhole = true
+        /// Controls showing a secret whole in their own text (a card number in one span of a page), and everything
+        /// that holds one, with the secret's parts (`UIMap.guardedSecrets`): selecting it a little at a time would
+        /// show it whole.
+        var guarded: [Int: [String]] = [:]
     }
 
     static let attributes = [kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute,
@@ -700,7 +956,8 @@ enum Reader {
     static let listRoles: Set<String> = ["AXTable", "AXOutline", "AXList", "AXBrowser"]
 
     /// `deep`: also read every other control's text, for `holdsSecret` (a dashboard's key shown as plain text).
-    static func read(pid: pid_t, window wanted: UInt32?, budget: TimeInterval, deep: Bool = false) -> Reading {
+    /// `focus`: controls whose orders are noted (`focusOrders`), to tell whether one is a piece of a joined secret.
+    static func read(pid: pid_t, window wanted: UInt32?, budget: TimeInterval, deep: Bool = false, focus: [AXUIElement] = []) -> Reading {
         var reading = Reading()
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
@@ -713,6 +970,7 @@ enum Reader {
         guard let window = window ?? all.first else { return reading }
         // Nothing that holds a vault secret is told to the AI: not a control's text, not the window's title.
         let vault = VaultIndex.current()
+        guard !vault.unreadable else { reading.vaultUnreadable = true; return reading }
         reading.window = window
         reading.windowID = Windows.id(of: window)
         let title: String = Windows.value(window, kAXTitleAttribute) ?? ""
@@ -721,10 +979,20 @@ enum Reader {
         reading.windowFrame = Windows.frame(of: window) ?? .zero
 
         let deadline = Date().addingTimeInterval(budget)
-        var stack: [(element: AXUIElement, depth: Int, clip: CGRect?, web: Bool)] = [(window, 0, nil, false)]
+        // Each element: its parent (by order) and its place among that parent's children, for secrets in pieces.
+        var stack: [(element: AXUIElement, depth: Int, clip: CGRect?, web: Bool, parent: Int, sibling: Int)] = [(window, 0, nil, false, -1, 0)]
         var order = 0
         var visited = 0
-        while let (element, depth, clip, web) = stack.popLast() {
+        // Every element read (by order), and which of them are told: a secret shown only by several together (a card
+        // number in four fields) is hidden in each before anything goes out.
+        var walked: [UINode] = []
+        // Each as read, before anything of it is hidden or cut short: the pieces of a secret shown in several are
+        // looked for in these, so a piece that holds part of it by itself (an Amex number as 37828224 and 6310005)
+        // still finds the rest beside it.
+        var whole: [UINode] = []
+        var told: [Int] = []
+        var own: [Int: [String]] = [:]
+        while let (element, depth, clip, web, parent, sibling) = stack.popLast() {
             if visited >= 5000 || Date() > deadline { reading.timedOut = true; break }
             visited += 1
             let values = Self.values(element, attributes)
@@ -743,17 +1011,42 @@ enum Reader {
             node.web = web
             node.clip = clip
             node.order = order
-            // A password field's value is never read.
-            if UIMap.valueRoles.contains(role), !UIMap.isSecure(node) {
+            node.parent = parent
+            node.sibling = sibling
+            if focus.contains(where: { CFEqual($0, element) }) { reading.focusOrders.insert(order) }
+            // The tab's page: never an app's own (T3 Code's t3code://app/ page holds its sites' pages).
+            if role == "AXWebArea", reading.pages.count < VaultReader.panes {
+                let address = VaultReader.url(element)
+                if Vault.isTabPage(address) { reading.pages.append((element, address)) }
+            }
+            // A password field's value is never read. A static text's is, for secrets shown in pieces (a web page's
+            // spans show their text only there); it's never told.
+            if UIMap.valueRoles.contains(role) || role == "AXStaticText", !UIMap.isSecure(node) {
                 node.value = text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
             }
             let toggle = UIMap.isToggle(role: role, subrole: node.subrole)
             let meaning = UIMap.meaning(role: role, subrole: node.subrole, title: node.title, label: node.label,
                                         value: !toggle ? "" : UIMap.valueRoles.contains(role) ? node.value
                                             : text(Windows.value(element, kAXValueAttribute) as CFTypeRef?))
-            node = UIMap.redact(node) { vault.matches($0) }
-            if UIMap.isSecure(node) || UIMap.looksSecret(node)
-                || [node.title, node.label, node.help, node.placeholder, node.value].contains(UIMap.hidden) {
+            // Each text matched against the vault once, for both what's told and whether Copy may go.
+            var matched: [String: Bool] = [:]
+            let secret = { (text: String) -> Bool in
+                if let known = matched[text] { return known }
+                let found = vault.matches(text)
+                matched[text] = found
+                return found
+            }
+            // Named for a secret counts only for a field one types into: a heading "Card number" doesn't keep Copy
+            // away from the page (what it shows is still matched against the vault).
+            // A field Petal filled with a secret stays hidden whatever it shows now (part of a card number left
+            // after an edit is still part of it).
+            let filled = Sensitive.isFilled(element, pid: pid)
+            whole.append(node)
+            let parts = UIMap.ownSecrets(node, secret: secret, parts: vault.parts)
+            if !parts.isEmpty { own[order] = parts }
+            let holds = UIMap.holdsSecret(node, filled: filled, secret: secret)
+            node = UIMap.redact(node, filled: filled, secret: secret)
+            if holds {
                 reading.holdsSecret = true
             } else if deep, !UIMap.valueRoles.contains(role), vault.matches(text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)) {
                 reading.holdsSecret = true
@@ -763,8 +1056,9 @@ enum Reader {
             if UIMap.pressableRoles.contains(role), depth > 0, !UIMap.name(node).isEmpty {
                 node.pressable = actions(element).contains(kAXPressAction as String)
             }
+            walked.append(node)
             if UIMap.isActionable(node) {
-                reading.nodes.append(node)
+                told.append(order)
                 reading.elements[order] = element
                 reading.meanings[order] = meaning
             }
@@ -780,10 +1074,44 @@ enum Reader {
             } else {
                 children = Windows.value(element, kAXChildrenAttribute) ?? []
             }
-            for child in children.prefix(500).reversed() { stack.append((child, depth + 1, inner, web || role == "AXWebArea")) }
+            let me = order - 1
+            for (index, child) in children.prefix(500).enumerated().reversed() {
+                stack.append((child, depth + 1, inner, web || role == "AXWebArea", me, index))
+            }
         }
+        // Bounded as the picture's check is; out of time, only a text that holds a secret by itself is hidden.
+        let joinBy = Date().addingTimeInterval(0.5)
+        (reading.joined, reading.joinedWhole) = UIMap.joinedHidden(whole, matches: vault.matches, spans: vault.spans, going: { Date() < joinBy })
+        if !reading.joined.isEmpty { reading.holdsSecret = true }
+        for index in reading.joined.sorted() {
+            if let path = UIMap.pieceText(whole[index]) { reading.joinedTexts.append(whole[index][keyPath: path]) }
+            var at = walked[index].parent
+            while at >= 0, at < walked.count, reading.aroundJoined.insert(at).inserted { at = walked[at].parent }
+        }
+        for index in reading.joined { UIMap.hideAll(&walked[index]) }
+        reading.guarded = UIMap.guardedSecrets(whole, own: own)
+        reading.nodes = told.map { walked[$0] }
         reading.fingerprint = fingerprint(app: app, window: window, lists: reading.lists)
         return reading
+    }
+
+    /// One of `controls` (what has the keyboard in window `window` of `pid`) is a piece of a secret its window shows
+    /// only in pieces, or holds one shown whole and what's selected is part of it (`UIMap.focusInJoined`), or the
+    /// window couldn't be checked: then nothing of it is selected out or copied. Reads the whole window (within a second), so never on the main thread.
+    static func inJoinedSecret(pid: pid_t, window: UInt32?, controls: [AXUIElement]) -> Bool {
+        guard !controls.isEmpty else { return false }
+        guard let reading = VaultIndex.settled({ _ in read(pid: pid, window: window, budget: 1.0, focus: controls) }),
+              !reading.vaultUnreadable, !reading.gone, reading.window != nil else { return true }
+        // What would go out: what's selected, or a control's value when it tells no selection.
+        let selected = controls.compactMap { control -> String? in
+            let found = values(control, [kAXSelectedTextAttribute, kAXValueAttribute])
+            return found[kAXSelectedTextAttribute] as? String ?? found[kAXValueAttribute] as? String
+        }
+        // The pieces count only when they were checked whole; else what's selected counts by the vault's own rules.
+        return UIMap.focusInJoined(focus: reading.focusOrders, hidden: reading.joined, around: reading.aroundJoined,
+                                   pieces: reading.joinedWhole ? reading.joinedTexts : [], guarded: reading.guarded,
+                                   complete: !reading.timedOut && reading.joinedWhole,
+                                   selected: selected, matches: VaultIndex.current().matches)
     }
 
     /// What the window shows now that an act depends on (UIMap.Fingerprint): its title, the control with the
@@ -951,6 +1279,8 @@ enum Acting {
         var direction = ""
         var path: [String] = []
         var key: UIMap.Key?
+        /// A field filled from the vault (VaultFill.swift).
+        var fill: VaultFillPlan?
     }
 
     struct Prepared {
@@ -976,18 +1306,29 @@ enum Acting {
         private let lock = NSLock()
         private var flag = false
         private let parent: Cancel?
-        init(under parent: Cancel? = nil) { self.parent = parent }
+        /// A payment fill's Buy: revoking it stops the fill as a Stop would.
+        private let buy: Vault.BuyToken?
+        init(under parent: Cancel? = nil, buy: Vault.BuyToken? = nil) {
+            self.parent = parent
+            self.buy = buy
+        }
         var stopped: Bool {
             lock.lock()
             let own = flag
             lock.unlock()
-            return own || (parent?.stopped ?? false)
+            return own || buyEnded || (parent?.stopped ?? false)
         }
+        /// The Buy this fill was made under is over.
+        var buyEnded: Bool { (buy?.revoked ?? false) || (parent?.buyEnded ?? false) }
         func stop() { lock.lock(); flag = true; lock.unlock() }
+        /// Ends the Buy this fill was made under, for good: its page moved on while it filled.
+        func endBuy() { buy?.revoke() }
     }
 
+    static let buyEndedText = "The Buy is over (the tab moved on, the window closed, or the reply ended): no more payment info was filled. Don't try another way; if the person still wants it, fill again on the checkout page and Petal asks them again."
+
     static let changed = "Call petal_ui again for fresh ids."
-    static let password = "That's a password field: Petal doesn't type there. petal_vault types a saved secret."
+    static let password = "That's a password field: petal_act doesn't type there. petal_vault fills a saved password (action: fill)."
 
     /// The window is still there, where the map said and showing what it showed (the same title, the same rows
     /// selected, the same control with the keyboard); so is the control. Then where the cursor goes, and for a
@@ -1022,8 +1363,10 @@ enum Acting {
                 prepared.error = "That control moved: the window changed since petal_ui. " + changed
                 return prepared
             }
-            // Where it was is not enough: the same button may mean the opposite now (Mute became Unmute).
-            if let why = UIMap.changed(entry.meaning, meaning, secret: { VaultIndex.current().matches($0) }) {
+            // Where it was is not enough: the same button may mean the opposite now (Mute became Unmute). A field
+            // Petal filled never has its new name told (it may echo what's in it).
+            let filled = Sensitive.isFilled(entry.element, pid: map.pid)
+            if let why = UIMap.changed(entry.meaning, meaning, secret: { filled || VaultIndex.current().matches($0) }) {
                 prepared.error = why
                 return prepared
             }
@@ -1099,7 +1442,7 @@ enum Acting {
     // MARK: The clipboard and the vault
 
     /// Never a vault secret onto the clipboard, where petal_look could read it, nor off it into a window, nor anything
-    /// pasted into a password field: the vault types its own, asking the person every time. The one check for every
+    /// pasted into a password field: the vault fills its own (VaultFill.swift). The one check for every
     /// way Petal copies or pastes (a key, a menu item, a button), right before it, in the window it acts on (`perform`).
     static func clipboardRefusal(_ map: ComputerUse.Map, _ element: AXUIElement?, clip: UIMap.Clip?) -> String? {
         switch clip {
@@ -1132,11 +1475,11 @@ enum Acting {
         for control in [element, focused].compactMap({ $0 }) {
             let node = Reader.node(control)
             if UIMap.isSecure(node) {
-                return pasting ? "A password field has the cursor: Petal doesn't paste there. petal_vault types a saved secret, asking the person every time."
-                    : "A password field has the cursor: Petal doesn't type there. petal_vault types a saved secret."
+                return pasting ? "A password field has the cursor: Petal doesn't paste there. petal_vault fills a saved one (action: fill)."
+                    : "A password field has the cursor: Petal doesn't type there. petal_vault fills a saved one (action: fill)."
             }
             if pasting, UIMap.looksSecret(node) {
-                return "The cursor is in a field for a password or token: Petal doesn't paste there. petal_vault types a saved secret, asking the person every time."
+                return "The cursor is in a field for a password or token: Petal doesn't paste there. petal_vault fills a saved one (action: fill)."
             }
         }
         return nil
@@ -1153,16 +1496,26 @@ enum Acting {
             return "The keyboard is in another window of \(map.appName); nothing was copied."
         }
         for control in [element, focused].compactMap({ $0 }) {
+            // A field Petal filled with a secret, whatever it shows now (part of a card number left after an edit).
+            if Sensitive.isFilled(control, pid: map.pid) {
+                return "That field holds a secret Petal filled in: Petal doesn't copy it. petal_vault fills a saved one where it's needed (action: fill)."
+            }
             let found = Reader.values(control, [kAXSelectedTextAttribute, kAXValueAttribute])
             for name in [kAXSelectedTextAttribute, kAXValueAttribute] {
                 guard let text = found[name] as? String else { continue }
                 switch Assist.vaultCheck(text) {
                 case .secret:
-                    return "What's selected holds one of the vault's secrets: Petal doesn't copy it. petal_vault types a saved secret where it's needed, asking the person every time."
+                    return "What's selected holds one of the vault's secrets: Petal doesn't copy it. petal_vault fills a saved one where it's needed (action: fill)."
                 case .tooLong: return tooMuch("copy")
+                case .unreadable: return vaultUnreadable("copy")
                 case .clean: break
                 }
             }
+        }
+        // Nor one piece of a secret the window shows in pieces (a card number as four fields of four digits): copied
+        // a field at a time, it would be whole again.
+        if Reader.inJoinedSecret(pid: map.pid, window: map.windowID, controls: [element, focused].compactMap { $0 }) {
+            return "What has the keyboard is part of a secret this window shows in pieces (a card number, a key): Petal doesn't copy it. petal_vault fills a saved one where it's needed (action: fill)."
         }
         return nil
     }
@@ -1171,13 +1524,14 @@ enum Acting {
     /// private (what petal_look won't read): then why nothing is pasted. Off the main thread: the Keychain and an
     /// app's promised clipboard data may take a while.
     nonisolated static func pasteRefusal(_ pasteboard: NSPasteboard = .general) -> String? {
-        let refusal = "The clipboard holds a secret (one of the vault's, or a password manager's): Petal doesn't paste it. petal_vault types a saved secret, asking the person every time."
+        let refusal = "The clipboard holds a secret (one of the vault's, or a password manager's): Petal doesn't paste it. petal_vault fills a saved one (action: fill)."
         if Assist.isConcealed(pasteboard) { return refusal }
         for type in [NSPasteboard.PasteboardType.string, .html, .rtf, .URL] {
             guard let text = pasteboard.string(forType: type) else { continue }
             switch Assist.vaultCheck(text) {
             case .secret: return refusal
             case .tooLong: return tooMuch("paste")
+            case .unreadable: return vaultUnreadable("paste")
             case .clean: break
             }
         }
@@ -1189,14 +1543,20 @@ enum Acting {
         "That's too much to check for saved secrets; \(verb) it yourself."
     }
 
+    /// While the vault can't be read, nothing can be checked for its secrets, so nothing is moved.
+    nonisolated static func vaultUnreadable(_ verb: String) -> String {
+        VaultStore.unreadableText + " Petal can't check this for saved secrets, so it doesn't \(verb) it: ask the person, or try again in a moment."
+    }
+
     /// Before a Copy or Cut button (or one whose names mention copying): the window, read again now (every control, and every text in it), shows no vault
     /// secret and no password, token or API key field, since a button like "Copy API key" copies its own key
     /// whatever has the keyboard. Off the main thread.
     static func copyButtonRefusal(_ map: ComputerUse.Map) -> String? {
-        let reading = Reader.read(pid: map.pid, window: map.windowID, budget: 1.5, deep: true)
+        guard let reading = VaultIndex.settled({ _ in Reader.read(pid: map.pid, window: map.windowID, budget: 1.5, deep: true) }),
+              !reading.vaultUnreadable else { return vaultUnreadable("copy") }
         if reading.gone || reading.window == nil { return "That window is gone; nothing was copied. " + changed }
         if reading.holdsSecret {
-            return "This window shows a secret (one of the vault's, or a password, token or API key): Petal doesn't press its Copy buttons. petal_vault types a saved secret where it's needed, asking the person every time."
+            return "This window shows a secret (one of the vault's, or a password, token or API key): Petal doesn't press its Copy buttons. petal_vault fills a saved one where it's needed (action: fill)."
         }
         if reading.timedOut { return "Petal couldn't read all of this window in time to check it for secrets, so nothing was copied: ask the person to copy it." }
         return nil
@@ -1221,7 +1581,7 @@ enum Acting {
     /// alone for good. `then` gets why it was cleared, or nil, on the main thread.
     final class CopyWatch: @unchecked Sendable {
         nonisolated static let queue = DispatchQueue(label: "petal.computer.clipboard", qos: .userInitiated)
-        static let cleared = "That button copied a saved secret (or more text than Petal can check for one); Petal cleared the clipboard. petal_vault types a saved secret where it's needed, asking the person every time."
+        static let cleared = "That button copied a saved secret (or more text than Petal can check for one); Petal cleared the clipboard. petal_vault fills a saved one where it's needed (action: fill)."
 
         private let mark: CopyMark
         private let until: TimeInterval
@@ -1364,8 +1724,9 @@ enum Acting {
         case "type":
             guard let element, let node = entry?.node else { break }
             switch Assist.vaultCheck(options.text) {
-            case .secret: outcome.error = "That's one of the vault's secrets: petal_vault types it, after asking."
+            case .secret: outcome.error = "That's one of the vault's secrets: petal_vault fills it (action: fill)."
             case .tooLong: outcome.error = tooMuch("type")
+            case .unreadable: outcome.error = vaultUnreadable("type")
             case .clean: break
             }
             if outcome.error != nil { break }
@@ -1414,7 +1775,13 @@ enum Acting {
             usleep(120_000)
             let now = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
             if !now.isEmpty, !options.submit {
-                outcome.value = UIMap.looksSecret(node) || Assist.isVaultSecret(now) ? UIMap.hidden : UIMap.truncate(UIMap.tidy(now), 200)
+                outcome.value = UIMap.typedValue(now, node: node, filled: Sensitive.isFilled(element, pid: pid), secret: Assist.isVaultSecret)
+            }
+        case "fill":
+            guard let element, let plan = options.fill else { break }
+            if let error = VaultFiller.fill(plan, into: element, map: map, cancel: cancel) {
+                if cancel.stopped { return outcome }
+                outcome.error = error
             }
         case "scroll":
             guard let element else { break }
@@ -1494,7 +1861,7 @@ enum Acting {
         }
         // Petal's own change (text, caret, focus, scroll) becomes what's expected next, so its next step isn't taken
         // for someone else's.
-        if outcome.error == nil, !cancel.stopped, ["type", "focus", "scroll", "key"].contains(action) {
+        if outcome.error == nil, !cancel.stopped, ["type", "focus", "scroll", "key", "fill"].contains(action) {
             let app = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(app, 0.5)
             outcome.fingerprint = Reader.fingerprint(app: app, window: map.window, lists: map.lists)
