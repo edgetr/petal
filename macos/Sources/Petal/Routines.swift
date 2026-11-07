@@ -484,7 +484,7 @@ final class Routines {
         var approved = approved
         let rule = rule ?? ruleVersion[routine.id, default: 0]
         /// Deleted or changed while it ran (a Shortcut exporting, a card waiting): the rest of it doesn't happen.
-        func current() -> Bool { rule == ruleVersion[routine.id, default: 0] && list.contains { $0.id == routine.id } }
+        func current() -> Bool { isOn && rule == ruleVersion[routine.id, default: 0] && list.contains { $0.id == routine.id } }
         func finish() {
             if !said.isEmpty { record(routine, said: said, moves: moves, made: made) }
             done(moves)
@@ -676,7 +676,7 @@ final class Routines {
                     quick(prompt, "r|\(routine.id)|\(rule)|\(key)") { answer in
                         // The rule changed while the AI answered: its answer is for the old rule, so nothing is
                         // learned or moved by it.
-                        guard rule == self.ruleVersion[routine.id, default: 0] else { return finish(nil) }
+                        guard self.isOn, rule == self.ruleVersion[routine.id, default: 0] else { return finish(nil) }
                         let picked = (answer?["folders"] as? [String: Any])?["1"] ?? answer?["folder"]
                         guard let name = Self.folderName(picked, among: folders.map(\.name)) else { return finish(nil) }
                         self.learn(routine.id, [key: name])
@@ -1263,7 +1263,7 @@ final class Routines {
     }
 
     /// A line about a file for the AI: its kind and size, the site it was downloaded from, and with `peek` a PDF's
-    /// title or the start of a text file.
+    /// title. Never its contents.
     nonisolated static func facts(_ file: URL, peek: Bool) -> String {
         var parts: [String] = []
         let type = UTType(filenameExtension: file.pathExtension)
@@ -1278,12 +1278,8 @@ final class Routines {
                !title.trimmingCharacters(in: .whitespaces).isEmpty {
                 parts.append("titled “\(title.prefix(80))”")
             }
-        } else if type?.conforms(to: .plainText) == true, size < 512_000, let handle = try? FileHandle(forReadingFrom: file) {
-            let start = String(decoding: handle.readData(ofLength: 400), as: UTF8.self)
-            try? handle.close()
-            let words = start.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(160)
-            if !words.isEmpty { parts.append("starting “\(words)”") }
         }
+        // Never what's inside a file: sorting runs unattended, and a text file can be a password export.
         return parts.joined(separator: ", ")
     }
 
