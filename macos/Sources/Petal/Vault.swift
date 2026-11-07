@@ -6,7 +6,15 @@ import Foundation
 
 enum VaultKind: String, Codable, CaseIterable, Identifiable {
     case login, contact, address, card, apiKey
+    /// A secret from before kinds (or of a kind this Petal doesn't know): Petal can't tell what it is or where it
+    /// belongs, so filling it asks every time, anywhere, until the person sorts it in Settings › Vault.
+    case unsorted
     var id: String { rawValue }
+
+    /// The kinds a person or Petal AI makes: never unsorted.
+    static let made: [VaultKind] = [.login, .contact, .address, .card, .apiKey]
+    /// What an unsorted secret can be sorted into (Vault.sort says where its secret goes).
+    static let sortable: [VaultKind] = [.login, .apiKey, .card]
 
     var name: String {
         switch self {
@@ -15,6 +23,7 @@ enum VaultKind: String, Codable, CaseIterable, Identifiable {
         case .address: "Address"
         case .card: "Payment info"
         case .apiKey: "API key"
+        case .unsorted: "Unsorted"
         }
     }
 
@@ -25,6 +34,7 @@ enum VaultKind: String, Codable, CaseIterable, Identifiable {
         case .address: "Addresses"
         case .card: "Payment info"
         case .apiKey: "API keys"
+        case .unsorted: "Unsorted"
         }
     }
 
@@ -35,6 +45,7 @@ enum VaultKind: String, Codable, CaseIterable, Identifiable {
         case .address: "house.fill"
         case .card: "creditcard.fill"
         case .apiKey: "chevron.left.forwardslash.chevron.right"
+        case .unsorted: "questionmark.square.dashed"
         }
     }
 
@@ -45,7 +56,7 @@ enum VaultKind: String, Codable, CaseIterable, Identifiable {
         case .contact: [.name, .relationship, .email, .phone]
         case .address: [.name, .street, .street2, .city, .region, .postalCode, .country, .phone]
         case .card: [.name, .number, .expiry, .securityCode]
-        case .apiKey: [.value]
+        case .apiKey, .unsorted: [.value]
         }
     }
 
@@ -93,7 +104,7 @@ enum VaultField: String, CaseIterable, Codable {
         case .month: "Expiry month"
         case .year: "Expiry year"
         case .securityCode: "Security code"
-        case .value: "Key"
+        case .value: kind == .unsorted ? "Secret" : "Key"
         case .notes: "Notes"
         }
     }
@@ -145,7 +156,8 @@ struct VaultItem: Codable, Equatable, Identifiable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
-        kind = (try? c.decode(VaultKind.self, forKey: .kind)) ?? .apiKey
+        // A kind this Petal doesn't know is unsorted: asked about wherever it goes, never filled by itself.
+        kind = (try? c.decode(VaultKind.self, forKey: .kind)) ?? .unsorted
         title = (try? c.decode(String.self, forKey: .title)) ?? ""
         sites = (try? c.decode([String].self, forKey: .sites)) ?? []
         apps = (try? c.decode([String].self, forKey: .apps)) ?? []
@@ -177,7 +189,7 @@ enum Vault {
 
     /// What the AI is told of an item: its kind, title, sites and apps, a login's username, a card's name, last four
     /// digits and expiry, contact info and addresses whole (with an address's contact), an API key's title and
-    /// service. Never a password, card number, security code, key or notes.
+    /// service; an unsorted secret's title only. Never a password, card number, security code, key or notes.
     static func shown(_ item: VaultItem, in items: [VaultItem] = []) -> [String: Any] {
         var out: [String: Any] = ["id": item.id, "kind": item.kind.rawValue, "title": item.title]
         if !item.sites.isEmpty { out["sites"] = item.sites }
@@ -205,6 +217,8 @@ enum Vault {
             }
         case .apiKey:
             out["hasKey"] = !item[.value].isEmpty
+        case .unsorted:
+            break
         }
         return out
     }
@@ -217,6 +231,7 @@ enum Vault {
         case .contact: return [item.isMe ? "Me" : item[.relationship].capitalized, item[.email], item[.phone]].filter { !$0.isEmpty }.joined(separator: " · ")
         case .address: return [item[.name], item[.street], item[.city]].filter { !$0.isEmpty }.joined(separator: ", ")
         case .apiKey: return item.sites.first ?? "Any app"
+        case .unsorted: return "Not sorted yet"
         }
     }
 
@@ -286,14 +301,32 @@ enum Vault {
 
     // MARK: Old items
 
-    /// Before kinds, the vault kept a secret under a name ("OpenAI key" → the secret). Each becomes an API key with
-    /// that name as its title, so `petal_vault` callers that use the name still find it.
+    /// Before kinds, the vault kept a secret under a name ("OpenAI key", "GitHub password" → the secret), with
+    /// nothing saying what it is or where it belongs. Each becomes unsorted, with that name as its title: `petal_vault`
+    /// callers that use the name still find it, and filling it asks every time, anywhere (Vault.decide), until the
+    /// person sorts it in Settings › Vault.
     static func migrate(_ old: [(name: String, secret: String)]) -> [VaultItem] {
         old.filter { !$0.secret.isEmpty }.map { pair in
-            var item = VaultItem(kind: .apiKey, title: pair.name.isEmpty ? "Key" : pair.name)
+            var item = VaultItem(kind: .unsorted, title: pair.name.isEmpty ? "Secret" : pair.name)
             item[.value] = pair.secret
             return item
         }
+    }
+
+    /// An unsorted secret as the kind the person says it is, its secret where that kind keeps it (a login's
+    /// password, a key, a card's number), the same id. Its site, service or app is the person's to add.
+    static func sort(_ item: VaultItem, as kind: VaultKind) -> VaultItem {
+        guard item.kind == .unsorted, VaultKind.sortable.contains(kind) else { return item }
+        var sorted = item
+        sorted.kind = kind
+        let secret = item[.value]
+        sorted.fields[VaultField.value.rawValue] = nil
+        switch kind {
+        case .login: sorted[.password] = secret
+        case .card: sorted[.number] = secret
+        default: sorted[.value] = secret
+        }
+        return sorted
     }
 
     // MARK: Passwords
@@ -422,6 +455,7 @@ enum Vault {
     /// - payment info only on secure web pages (https), and only once this checkout's one "Buy?" card was answered
     ///   Buy (`checkout`, which Checkout.covers decides): before that, nothing of the card goes into the page;
     /// - contact info and addresses fill freely: they aren't secrets;
+    /// - an unsorted secret (Petal doesn't know what it is or where it belongs) always asks, wherever it is;
     /// - a password only into a password field; a card number, security code or key into a password field or a
     ///   text field; a country or region also by picking from a pop-up menu; the rest into text fields.
     static func decide(_ item: VaultItem, _ field: VaultField, target: Target, place: Place, checkout: Bool = false) -> Decision {
@@ -457,7 +491,17 @@ enum Vault {
             return checkout ? .fill : .buy(shop: shop)
         case .contact, .address:
             return .fill
+        case .unsorted:
+            return .ask(title: question(item, [field], place: place), detail: unsortedWhy(item, place))
         }
+    }
+
+    /// Why an unsorted secret is asked about wherever it goes, with what Petal can tell of the place.
+    static func unsortedWhy(_ item: VaultItem, _ place: Place) -> String {
+        let what = "Petal doesn't know what “\(item.title)” is or where it belongs (it was saved before the vault sorted things), so it can't tell this is the right place. Fill it only if you're sure, and sort it in Settings › Vault so Petal can tell next time."
+        if place.unverified { return what + " " + unverifiedWhy(place) }
+        if place.web, let problem = pageProblem(place) { return what + " " + problem }
+        return what
     }
 
     /// An https page, or one on this Mac (http://localhost, 127.0.0.1, [::1]).
@@ -636,6 +680,8 @@ enum Vault {
         default: found = nil
         }
         if kind == .login, found == .email { return .username }
+        // An unsorted secret is one value, whatever the AI calls it.
+        if kind == .unsorted, [.password, .value].contains(found) { return .value }
         return found
     }
 
@@ -670,7 +716,7 @@ enum Vault {
     /// The one question for filling `fields` of `item` where it doesn't match: "Fill your github.com username and
     /// password on githuh.com?".
     static func question(_ item: VaultItem, _ fields: [VaultField], place: Place) -> String {
-        if item.kind == .apiKey { return "Fill your “\(item.title)” on \(place.where_)?" }
+        if [.apiKey, .unsorted].contains(item.kind) { return "Fill your “\(item.title)” \(place.web ? "on" : "in") \(place.where_)?" }
         var words: [String] = []
         for field in fields where !words.contains(field.words) { words.append(field.words) }
         let list = words.count <= 1 ? words.joined() : words.dropLast().joined(separator: ", ") + " and " + words[words.count - 1]
@@ -692,7 +738,7 @@ enum Vault {
     /// Why one fill's fields can't go together, or nil: a login's, key's or card's fields in more than one page or
     /// app (a login form with its password in another site's frame). One card answers for one place only.
     static func mixed(_ kind: VaultKind, _ places: [Place]) -> String? {
-        guard [.login, .apiKey, .card].contains(kind) else { return nil }
+        guard [.login, .apiKey, .card, .unsorted].contains(kind) else { return nil }
         var seen: [String] = [], names: [String] = []
         for place in places where !seen.contains(destination(kind, place)) {
             seen.append(destination(kind, place))
@@ -843,6 +889,13 @@ enum Vault {
         /// changed): a Buy whose window shows another tab or page is over, and coming back doesn't bring it back.
         static func seen(_ checkouts: [Checkout], place: Place, window: UInt32?) -> [Checkout] {
             checkouts.filter { !$0.left(place, window: window) }
+        }
+
+        /// What's left of `checkouts` once a new Buy card is about to show for `window` (another card on the same
+        /// checkout, say): every Buy in that window ends then, whatever the person answers (Buy, Don't, closing the
+        /// card, or no answer), so an earlier card's Buy never stays usable beside a Don't.
+        static func asking(_ checkouts: [Checkout], window: UInt32) -> [Checkout] {
+            checkouts.filter { $0.window != window }
         }
 
         /// Revokes every Buy in `before` that isn't in `after` (however it went), so nothing filled under it goes on.
@@ -1050,6 +1103,7 @@ enum Vault {
         case "identity", "contact", "contactinfo": return .contact
         case "address": return .address
         case "apikey": return .apiKey
+        case "unsorted": return .unsorted
         default: return nil
         }
     }
@@ -1140,7 +1194,7 @@ enum Vault {
             let parts: [VaultField] = [.street, .street2, .city, .region, .postalCode, .country]
             guard parts.contains(where: { !a[$0].isEmpty }) else { return false }
             return parts.allSatisfy { addressPart(a[$0], $0) == addressPart(b[$0], $0) } && a[.contact] == b[.contact]
-        case .apiKey:
+        case .apiKey, .unsorted:
             return a.title.lowercased() == b.title.lowercased()
         }
     }
@@ -1168,16 +1222,20 @@ enum Vault {
         var older = 0
     }
 
-    /// An import against what's saved. Something already there changes nothing unless it differs: a login only when
-    /// its password does; anything else takes the import's fields. A secret (a password, security code or key) is
-    /// replaced only when Petal's own export (`petal`, which keeps ids and dates) says it's newer: from any other
-    /// export, a different secret is a conflict, kept as it is and said. Petal's export older than what's saved
-    /// changes nothing. An entry repeated with the same id (Petal's export) lands on one item, the later winning.
+    /// An import against what's saved. Something already there changes nothing unless it differs. Matched by its id
+    /// (Petal's own export, which keeps ids and dates): a newer entry is the whole item again (every field, its
+    /// title, sites and apps), restored as it was backed up. Matched by what it holds (the same site and username,
+    /// card number, …): a login takes only the import's password (and its notes where none are saved, or Petal's newer
+    /// ones); anything else takes the import's fields. Either way a secret (a password, security code or key) is
+    /// replaced only when Petal's own export says it's newer: from any other export, a different secret is a
+    /// conflict, kept as it is and said. Petal's export older than what's saved changes nothing. An entry repeated
+    /// with the same id (Petal's export) lands on one item, the later winning.
     /// Matching is one to one, whatever the export: each entry is the saved item with its id, else one alike that no
     /// other entry took; when every one alike is taken, it's added as an item of its own. So nothing in a file is
-    /// lost: only the very same thing again (in the vault, or earlier in a file from another app) counts as already
-    /// there, and each conflict is its own entry's. Petal's export's items with different ids stay apart however
-    /// alike; an imported address whose contact turned out to be one already saved is linked to that one.
+    /// lost: only the very same thing again (every field, secrets and the rest, the same as a saved item no other
+    /// entry took, or as an earlier entry of a file from another app) counts as already there, and each conflict is
+    /// its own entry's. Petal's export's items with different ids stay apart however alike, each with its own
+    /// record and details; an imported address whose contact turned out to be one already saved is linked to that one.
     static func merge(existing: [VaultItem], incoming: [VaultItem], petal: Bool = false, at date: Date = Date()) -> Merge {
         var result = Merge()
         var current = existing
@@ -1187,39 +1245,52 @@ enum Vault {
         // A saved item matched by what it holds (not its id) → the entry in the file that took it: one each, so two
         // of the file's entries alike (the same site and username) never fold into one or fight over one conflict.
         var claimed: [String: String] = [:]
+        // Another app's file: its entries so far, as the file has them (its rows have no ids to tell repeats apart).
+        var earlier: [VaultItem] = []
+        func free(_ saved: VaultItem, for item: VaultItem) -> Bool {
+            !fromFile.contains(saved.id) && (claimed[saved.id] ?? item.id) == item.id
+        }
         // Contacts first, so addresses can follow their contact.
         let ordered = incoming.filter { $0.kind != .address } + incoming.filter { $0.kind == .address }
         for var item in ordered {
             if item.kind == .address, let link = renamed[item[.contact]] { item[.contact] = link }
+            defer { if !petal { earlier.append(item) } }
             var index = current.firstIndex { $0.id == item.id }
+            let byID = petal && index != nil
             if index == nil {
-                // The very same thing again: already there. In Petal's export, its other entries are never this one.
-                let pool = petal ? current.filter { !fromFile.contains($0.id) } : current + result.conflicts
-                if let saved = pool.first(where: { same($0, item) && holds($0, item) }) {
-                    if claimed[saved.id] == nil, !fromFile.contains(saved.id) { claimed[saved.id] = item.id }
+                // The very same thing again: a row this file already had, or a saved item no other entry took.
+                if let twin = earlier.first(where: { identical($0, item) }) {
+                    if item.kind == .contact { renamed[item.id] = renamed[twin.id] ?? twin.id }
+                    result.same += 1
+                    continue
+                }
+                if let saved = current.first(where: { free($0, for: item) && identical($0, item) }) {
+                    claimed[saved.id] = item.id
                     if saved.kind == .contact { renamed[item.id] = saved.id }
                     result.same += 1
                     continue
                 }
                 // One alike that no other entry took; one an entry of the file has by its id is that entry's.
-                index = current.firstIndex { saved in
-                    !fromFile.contains(saved.id) && (claimed[saved.id] ?? item.id) == item.id && same(saved, item)
-                }
+                index = current.firstIndex { free($0, for: item) && same($0, item) }
             }
             if let index {
                 let saved = current[index]
                 if saved.id != item.id { claimed[saved.id] = item.id }
                 if saved.kind == .contact { renamed[item.id] = saved.id }
-                guard !holds(saved, item) else { result.same += 1; continue }
                 var next = saved
-                if saved.kind == .login {
-                    next[.password] = item[.password]
-                    if next[.notes].isEmpty { next[.notes] = item[.notes] }
+                if byID {
+                    // Petal's own backup of this very item: all of it, as backed up.
+                    next = item
+                } else if saved.kind == .login {
+                    if !item[.password].isEmpty { next[.password] = item[.password] }
+                    let newer = petal && item.updated > saved.updated
+                    if next[.notes].isEmpty || (newer && !item[.notes].isEmpty) { next[.notes] = item[.notes] }
                 } else {
                     next.fields = saved.fields.merging(item.fields) { _, new in new }
                     next.sites = saved.sites + item.sites.filter { !saved.sites.contains($0) }
                     next.title = item.title.isEmpty ? saved.title : item.title
                 }
+                guard !identical(next, saved) else { result.same += 1; continue }
                 let replaces = replacesSecret(saved, with: next)
                 if petal {
                     // Petal's own dates say which is newer.
@@ -1255,13 +1326,11 @@ enum Vault {
         return result
     }
 
-    /// `saved` already holds all `item` would give it: a login its password (or the item has none); anything else
-    /// every field, site and its title.
-    static func holds(_ saved: VaultItem, _ item: VaultItem) -> Bool {
-        if saved.kind == .login { return item[.password].isEmpty || saved[.password] == item[.password] }
-        let fields = saved.fields.merging(item.fields) { _, new in new }
-        let sites = saved.sites + item.sites.filter { !saved.sites.contains($0) }
-        return fields == saved.fields && sites == saved.sites && saved.title == item.title
+    /// The very same item, its id and date aside: its kind, title, every field (secrets, notes and the rest), sites,
+    /// apps and who signed them.
+    static func identical(_ a: VaultItem, _ b: VaultItem) -> Bool {
+        a.kind == b.kind && a.title == b.title && a.fields == b.fields && Set(a.sites) == Set(b.sites)
+            && Set(a.apps) == Set(b.apps) && a.appSigners == b.appSigners
     }
 
     /// `next` has a secret `saved` holds, different (not one `saved` didn't have yet).

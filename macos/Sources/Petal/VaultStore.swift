@@ -11,7 +11,8 @@ import Security
 /// ahead on it.
 ///
 /// Before kinds, the vault kept a secret under a name (account "OpenAI key", data the secret): the first load
-/// moves each into an API key (Vault.migrate), deleting the old item only once the new one is saved. A record that
+/// moves each into an unsorted item (Vault.migrate: asked about wherever it fills until the person sorts it),
+/// deleting the old item only once the new one is saved. A record that
 /// doesn't read as an item (an old name that happens to start with "item:") is such a secret, never dropped.
 enum VaultStore {
     static let service = "tech.edgetr.petal.vault"
@@ -74,7 +75,7 @@ enum VaultStore {
         }
     }
 
-    /// Reads every record (on `queue`). An old secret becomes an API key, the old record deleted only once the
+    /// Reads every record (on `queue`). An old secret becomes an unsorted item, the old record deleted only once the
     /// new one is in; if the Keychain refuses the new one, the old stays and the secret is still listed (and hidden
     /// from the AI) under the new item for now. A record the Keychain won't give is an error for the whole read.
     private static func readAll() throws -> [VaultItem] {

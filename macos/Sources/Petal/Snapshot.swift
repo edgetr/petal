@@ -241,7 +241,9 @@ enum Snapshot {
         card[.expiry] = "04/27"
         var key = VaultItem(kind: .apiKey, title: "OpenAI", sites: ["platform.openai.com"])
         key[.value] = "sample-key-123456"
-        return [github, bank, me, deniz, home, card, key]
+        // Secrets from before kinds, waiting to be sorted.
+        let old = Vault.migrate([("Figma password", "sample-password-3"), ("Stripe key", "sample-key-654321")])
+        return [github, bank, me, deniz, home, card, key] + old
     }
 
     private static func render(_ view: AnyView, app: PetalApp, size: CGSize?) -> NSImage? {

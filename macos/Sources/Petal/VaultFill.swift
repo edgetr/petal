@@ -326,8 +326,11 @@ extension Assist {
             guard case .success(let items) = read else { return send(["error": VaultStore.unreadableText + " Try again in a moment."]) }
             var list = items.filter { kind == nil || $0.kind == kind }
             if let site { list = list.filter { $0.kind != .login || $0.sites.contains { VaultSite.matches(host: site, saved: $0) } } }
-            send(["items": list.map { Vault.shown($0, in: items) },
-                  "note": Self.hidden + " Fill with action fill: the item's id and fields {field: id from petal_ui}."])
+            var note = Self.hidden + " Fill with action fill: the item's id and fields {field: id from petal_ui}."
+            if list.contains(where: { $0.kind == .unsorted }) {
+                note += " An unsorted item was saved before the vault had kinds: Petal doesn't know what it is, so filling it (field value) asks the person every time."
+            }
+            send(["items": list.map { Vault.shown($0, in: items) }, "note": note])
         }
     }
 
@@ -565,9 +568,14 @@ extension Assist {
         let price = UIMap.truncate(UIMap.tidy(args["price"] as? String ?? ""), 40)
         let said = [what, price].filter { !$0.isEmpty }.joined(separator: ", ")
         let detail = (said.isEmpty ? "Petal AI didn't say what it's buying." : "Petal AI says: “\(said)”.") + " Pays with \(Vault.cardName(item))."
+        // A new Buy card for this window ends the Buy already in it (another card on the same checkout), before the
+        // person answers: a Don't, a closed card or no answer never leaves the earlier one usable.
+        let asked = map.windowID.map { computer.endBuys(in: $0) } ?? 0
         ask("vault-buy", "Buy on \(shop)?", detail: detail, always: true, warn: true, allow: "Buy", owner: caller) { allowed in
             guard allowed else { return send(["declined": "The person said Don't: nothing was filled. Don't buy it, and don't find another way."]) }
-            guard self.computer.allowCheckout(caller, token: token, place: place, map: map, card: item.id) else { return fail(Self.over) }
+            guard self.computer.allowCheckout(caller, token: token, place: place, map: map, card: item.id, asked: asked) else {
+                return fail("That Buy card is over (a newer one was asked for this window, or the reply ended): nothing was filled. " + Self.over)
+            }
             self.did("You said Buy on \(shop) (\(Vault.cardName(item)))")
             bought()
         }
@@ -583,6 +591,7 @@ extension Assist {
     private func vaultRequest(_ args: [String: Any], caller: String?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let legacyName = (args["name"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         let kind = (args["kind"] as? String).flatMap { $0.isEmpty ? nil : Vault.kindNamed($0) } ?? (legacyName.isEmpty ? .login : .apiKey)
+        guard VaultKind.made.contains(kind) else { return fail("kind is login, contact, address, card or apiKey.") }
         var mapped: [(VaultField, String)] = []
         if kind != .card {
             for (key, value) in args["fields"] as? [String: Any] ?? [:] {
@@ -655,6 +664,7 @@ extension Assist {
             case .address: item.title = "Home"
             case .card: item.title = Vault.brand(item[.number].filter(\.isNumber)) ?? "Card"
             case .apiKey: item.title = item.sites.first ?? "API key"
+            case .unsorted: item.title = "Secret"
             }
         }
         let live = { token.map { self.computer.live(caller ?? "", $0) } ?? true }
@@ -810,7 +820,8 @@ extension Assist {
         VaultStore.load { read in
             guard self.computer.live(caller, token) else { return fail(Self.over) }
             guard case .success(let items) = read else { return fail(VaultStore.unreadableText + " Nothing was filled; try again in a moment.") }
-            guard let item = Vault.find(items, name), [.apiKey, .login].contains(item.kind) else {
+            // An unsorted secret (an old name's) still works by its name: its fill asks the person every time.
+            guard let item = Vault.find(items, name), [.apiKey, .login, .unsorted].contains(item.kind) else {
                 return fail("There's no “\(name)” in the vault. action list shows what's there; fill is the way to fill a field.")
             }
             var forwarded = args

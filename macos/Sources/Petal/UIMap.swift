@@ -255,8 +255,10 @@ enum UIMap {
                    characters.allSatisfy({ Self.digit($0) != nil || !($0.isLetter || $0.isNumber) }) {
                     Self.roll(digitsOnly.map { Self.digitCodes[$0] }, Self.piece) { _, hash in cards.insert(hash); return true }
                 }
+                // Digits of any script count as their ASCII digits (`codes` hashes them so, here and in what's
+                // searched, one character each): a code saved as "１２３" is found as "123", and the other way round.
                 let codes = Self.codes(characters)
-                let digits = characters.allSatisfy { $0.isASCII && $0.isNumber }
+                let digits = characters.allSatisfy { Self.digit($0) != nil }
                 if digits, Self.code.contains(codes.count) {
                     numbers[codes.count, default: []].insert(Self.window(codes[...]))
                 } else if codes.count >= Self.short, codes.count < Self.piece {
@@ -390,10 +392,10 @@ enum UIMap {
             return !(characters[at - 1].isLetter || characters[at - 1].isNumber) || !(characters[at].isLetter || characters[at].isNumber)
         }
 
-        /// Between `at - 1` and `at` is the end of a number: not two digits side by side.
+        /// Between `at - 1` and `at` is the end of a number: not two digits (of any script) side by side.
         static func numberEdge(_ characters: [Character], _ at: Int) -> Bool {
             guard at > 0, at < characters.count else { return true }
-            return !characters[at - 1].isNumber || !characters[at].isNumber
+            return digit(characters[at - 1]) == nil || digit(characters[at]) == nil
         }
 
         /// `text` with every part that `matches` would catch replaced by "(hidden)": a whole secret, every run of

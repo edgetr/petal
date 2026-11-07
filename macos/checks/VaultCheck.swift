@@ -46,6 +46,11 @@ struct VaultCheck {
         buyRevoked()
         buyTokens()
         joinedControls()
+        unsortedSecrets()
+        buyReplaced()
+        petalNotesKept()
+        petalRestoresWhole()
+        anyScriptCodes()
         oneToOne()
         oneToOneEverywhere()
         nameHeuristics()
@@ -280,11 +285,13 @@ struct VaultCheck {
     static func migration() {
         let items = Vault.migrate([("OpenAI key", "sk-hunter22"), ("Empty", ""), ("", "x1")])
         expect(items.count == 2, "empty secrets dropped")
-        expect(items[0].kind == .apiKey && items[0].title == "OpenAI key" && items[0][.value] == "sk-hunter22", "a name and secret become an API key")
-        expect(items[1].title == "Key", "a nameless one gets a title")
+        expect(items[0].kind == .unsorted && items[0].title == "OpenAI key" && items[0][.value] == "sk-hunter22", "a name and secret become unsorted")
+        expect(items[1].title == "Secret", "a nameless one gets a title")
         expect(Vault.find(items, "openai KEY")?.id == items[0].id, "found by its old name")
         let old = #"{"id":"abc","kind":"login","title":"T"}"#
         expect((try? JSONDecoder().decode(VaultItem.self, from: Data(old.utf8)))?.title == "T", "lenient decoding")
+        let unknown = #"{"id":"abc","kind":"passkey","title":"T","fields":{"value":"x"}}"#
+        expect((try? JSONDecoder().decode(VaultItem.self, from: Data(unknown.utf8)))?.kind == .unsorted, "a kind this Petal doesn't know is unsorted, never an API key")
     }
 
     static func shown() {
@@ -477,7 +484,7 @@ struct VaultCheck {
                "an item under another id isn't trusted as one")
         expect(Vault.stored(account: "OpenAI", data: Data("sk-1".utf8), marked: false) == .legacy(name: "OpenAI", secret: "sk-1"), "a plain old name")
         expect(Vault.stored(account: "x", data: Data([0xff, 0xfe, 0x00]), marked: false) == .unreadable, "bytes that aren't text")
-        expect(Vault.migrate([("item:work", "sk-legacy-123")]).first?.title == "item:work", "it becomes an API key under its name")
+        expect(Vault.migrate([("item:work", "sk-legacy-123")]).first.map { $0.title == "item:work" && $0.kind == .unsorted } == true, "it becomes unsorted under its name")
 
         // Logins for apps: a login is the same only for the same site or app and username.
         var slack = VaultItem(kind: .login, title: "Slack", apps: ["com.tinyspeck.slackmacgap"])
@@ -958,6 +965,134 @@ struct VaultCheck {
         secure.subrole = "AXSecureTextField"
         let mixed = [secure, field("1111", parent: 0, sibling: 1, x: 60, order: 1)]
         expect(!UIMap.hideJoined(mixed, matches: index.matches).hid, "a password field isn't a piece")
+    }
+
+    /// A secret from before kinds is unsorted: the AI sees its title and "unsorted"; filling it asks everywhere, a
+    /// password field on its own site or an app's text field alike, and its old name still finds it. Sorted, it's
+    /// that kind (its secret where that kind keeps it, the same id) and fills by the normal rules.
+    static func unsortedSecrets() {
+        guard let old = Vault.migrate([("GitHub password", "hunter2-hunter2")]).first else { return expect(false, "an old secret") }
+        expect(old.kind == .unsorted && old[.value] == "hunter2-hunter2", "an old name and secret become unsorted")
+        expect(Vault.find([old], "github PASSWORD")?.id == old.id, "old callers still find it by its name")
+        let shown = Vault.shown(old)
+        expect(Set(shown.keys) == ["id", "kind", "title"] && shown["kind"] as? String == "unsorted" && shown["title"] as? String == "GitHub password",
+               "the AI sees its title and unsorted, nothing more (\(shown.keys.sorted()))")
+        expect(UIMap.SecretIndex(Vault.secrets(old)).matches("pw: hunter2-hunter2"), "its secret stays hidden from the AI")
+        let secure = Vault.Target(secure: true, text: true), text = Vault.Target(secure: false, text: true)
+        let github = Vault.Place(web: true, frameURL: "https://github.com/login", topURL: "https://github.com/login", bundle: "com.apple.Safari",
+                                 appName: "Safari", signed: true)
+        let local = Vault.Place(web: true, frameURL: "http://localhost:3000/", topURL: "http://localhost:3000/", bundle: "com.apple.Safari",
+                                appName: "Safari", signed: true)
+        let mail = Vault.Place(bundle: "com.apple.mail", appName: "Mail", signed: true, team: "apple")
+        let field = Vault.field("password", kind: .unsorted)
+        expect(field == .value && Vault.field("key", kind: .unsorted) == .value, "whatever the AI calls it, it's the one value")
+        for (target, place, name) in [(secure, github, "a password field on github.com"), (text, mail, "Mail's compose field"),
+                                      (text, local, "this Mac's page"), (secure, mail, "an app's password field")] {
+            if case .ask(let title, let detail) = Vault.decide(old, .value, target: target, place: place) {
+                expect(title.contains("GitHub password") && detail.contains("doesn't know what"), "\(name): the card says why")
+            } else {
+                expect(false, "\(name): an unsorted secret asks first")
+            }
+        }
+        if case .refuse = Vault.decide(old, .username, target: text, place: github) {} else { expect(false, "it has no username to fill") }
+        expect(Vault.mixed(.unsorted, [github, mail]) != nil, "one place at a time")
+        expect(!VaultKind.made.contains(.unsorted) && VaultKind.sortable == [.login, .apiKey, .card], "nobody makes one; it's sorted into these")
+        // Sorted as a login for github.com: its password, the same id, and it fills there by itself.
+        var login = Vault.sort(old, as: .login)
+        expect(login.id == old.id && login.kind == .login && login[.password] == "hunter2-hunter2" && login[.value].isEmpty, "sorted as a login")
+        login.sites = ["github.com"]
+        expect(Vault.decide(login, .password, target: secure, place: github) == .fill, "then it fills on its own site")
+        if case .ask = Vault.decide(login, .password, target: secure, place: mail) {} else { expect(false, "and asks elsewhere, as any login") }
+        let key = Vault.sort(old, as: .apiKey), card = Vault.sort(old, as: .card)
+        expect(key.kind == .apiKey && key[.value] == "hunter2-hunter2" && card.kind == .card && card[.number] == "hunter2-hunter2",
+               "an API key keeps it as its key, a card as its number")
+        expect(Vault.sort(login, as: .apiKey) == login && Vault.sort(old, as: .contact) == old, "only an unsorted secret is sorted, only into those")
+        // Petal's own export keeps it unsorted.
+        expect(Vault.importData(Vault.exportJSON([old]))?.items.first?.kind == .unsorted, "a backup keeps it unsorted")
+    }
+
+    /// Buy said for card A, then a Buy card for card B on the same checkout: A's Buy ends before the person answers,
+    /// so a Don't (or no answer) leaves no Buy at all. Another window's Buy stays.
+    static func buyReplaced() {
+        let tab = NSObject()
+        let pay = Vault.Place(web: true, frameURL: "https://checkout.shop.example/pay", topURL: "https://checkout.shop.example/pay",
+                              tabURL: "https://checkout.shop.example/pay", tab: Vault.Tab(id: "11", page: tab),
+                              bundle: "com.google.Chrome", appName: "Chrome", signed: true)
+        guard let a = Vault.Checkout(place: pay, window: 7, card: "card-a", turn: "3|"),
+              let other = Vault.Checkout(place: pay, window: 9, card: "card-a", turn: "3|") else { return expect(false, "two Buys") }
+        let before = [a, other]
+        let after = Vault.Checkout.asking(before, window: 7)
+        Vault.Checkout.revoke(before, keeping: after)
+        expect(after.count == 1 && after[0].window == 9, "a new Buy card for window 7 ends the Buy in it")
+        expect(a.token.revoked && !a.covers(pay, window: 7, card: "card-a", turn: "3|"), "card A's Buy covers nothing once card B's is asked")
+        expect(!other.token.revoked && other.covers(pay, window: 9, card: "card-a", turn: "3|"), "another window's Buy stays")
+    }
+
+    /// Petal's export with two items alike (the same site, username and password) but other notes: each keeps its
+    /// own record; "already there" only for one with every field the same as a saved item no other entry took.
+    static func petalNotesKept() {
+        let then = Date(timeIntervalSince1970: 1_700_000_000), now = Date(timeIntervalSince1970: 1_800_000_000)
+        func login(_ notes: String, updated: Date) -> VaultItem {
+            var item = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"], updated: updated)
+            item[.username] = "ada"; item[.password] = "same-password"; item[.notes] = notes
+            return item
+        }
+        let saved = login("work", updated: then)
+        let work = login("work", updated: now), personal = login("personal", updated: now)
+        let merged = Vault.merge(existing: [saved], incoming: [work, personal], petal: true, at: now)
+        expect(merged.same == 1 && merged.added == 1 && merged.save.count == 1 && merged.save[0].id == personal.id && merged.save[0][.notes] == "personal",
+               "the one alike in every field is already there, the other is added with its own notes")
+        // The other way round: the first takes the saved item (newer, so its notes), the second is added.
+        let reversed = Vault.merge(existing: [saved], incoming: [personal, work], petal: true, at: now)
+        var vault = [saved]
+        for item in reversed.save { if let at = vault.firstIndex(where: { $0.id == item.id }) { vault[at] = item } else { vault.append(item) } }
+        expect(Set(vault.map { $0[.notes] }) == ["work", "personal"] && vault.count == 2, "every note is kept (\(vault.map { $0[.notes] }))")
+        // Alike but with other notes isn't "already there".
+        let alone = Vault.merge(existing: [saved], incoming: [personal], petal: true, at: now)
+        expect(alone.same == 0 && alone.save.first?[.notes] == "personal", "other notes aren't the same thing again")
+        // Another app's file: the very same row twice is still one.
+        var row = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"]); row[.username] = "ada"; row[.password] = "same-password"; row[.notes] = "work"
+        var again = row; again.id = Vault.newID()
+        let csv = Vault.merge(existing: [saved], incoming: [row, again])
+        expect(csv.same == 2 && csv.added == 0, "another app's same row twice matches the saved one once and repeats")
+    }
+
+    /// Petal's own backup of an item (the same id), newer than what's saved: all of it comes back (username,
+    /// password, title, sites, notes), not just its password. A login only alike (another id) still changes only
+    /// its password (and notes).
+    static func petalRestoresWhole() {
+        let then = Date(timeIntervalSince1970: 1_700_000_000), now = Date(timeIntervalSince1970: 1_800_000_000)
+        var saved = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"], updated: then)
+        saved[.username] = "ada"; saved[.password] = "old"; saved[.notes] = "n1"
+        var backup = saved
+        backup.title = "GitHub (work)"; backup.sites = ["github.com", "gist.github.com"]; backup.updated = now
+        backup[.username] = "ada.lovelace"; backup[.password] = "new"; backup[.notes] = "n2"
+        let restored = Vault.merge(existing: [saved], incoming: [backup], petal: true, at: now)
+        expect(restored.save == [backup] && restored.updated == ["GitHub (work)"], "the whole item comes back as backed up")
+        var older = backup; older.updated = then.addingTimeInterval(-10)
+        let kept = Vault.merge(existing: [saved], incoming: [older], petal: true, at: now)
+        expect(kept.save.isEmpty && kept.older == 1, "an older backup of it changes nothing")
+        var tie = backup; tie.updated = then
+        let tied = Vault.merge(existing: [saved], incoming: [tie], petal: true, at: now)
+        expect(tied.save.isEmpty && tied.conflicts == [tie], "the same date, another password: the whole backup is offered")
+        // Matched only by site and username (another id): the narrower rule.
+        var alike = backup; alike.id = Vault.newID(); alike[.username] = "ada"
+        let inferred = Vault.merge(existing: [saved], incoming: [alike], petal: true, at: now)
+        expect(inferred.save.count == 1 && inferred.save[0].id == saved.id && inferred.save[0].title == "GitHub" && inferred.save[0].sites == ["github.com"]
+               && inferred.save[0][.password] == "new" && inferred.save[0][.notes] == "n2", "alike by site and username: its password and newer notes")
+    }
+
+    /// A 3- or 4-digit secret in any script's digits is found in any script's digits, and what's hidden is the
+    /// whole of what the text shows.
+    static func anyScriptCodes() {
+        let wide = UIMap.SecretIndex(["１２３"])
+        expect(wide.matches("CVV: 123") && wide.matches("CVV: １２３") && wide.matches("CVV ١٢٣"), "a code saved in full-width digits, in any digits")
+        expect(!wide.matches("1234") && !wide.matches("１２３４") && !wide.matches("Order ٠١٢٣"), "not inside a longer number")
+        expect(wide.redacted("CVV: １２３!") == "CVV: \(UIMap.hidden)!" && wide.redacted("cvc 123.") == "cvc \(UIMap.hidden).", "the whole code is hidden, as the text shows it")
+        let ascii = UIMap.SecretIndex(["4567"])
+        expect(ascii.redacted("PIN ٤٥٦٧ ok") == "PIN \(UIMap.hidden) ok" && ascii.matches("PIN４５６７"), "an ASCII code shown in other digits")
+        var card = VaultItem(kind: .card, title: "Visa"); card[.number] = "4111111111111111"; card[.securityCode] = "７３７"
+        expect(UIMap.SecretIndex(Vault.secrets(card)).matches("cvc 737"), "a card's full-width security code")
     }
 
     /// Petal's own export with two items alike (the same site and username) and ids the vault doesn't have: one may

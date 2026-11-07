@@ -26,6 +26,7 @@ struct VaultForm: Equatable {
         case .address: "Add an address"
         case .card: "Add payment info"
         case .apiKey: "Add an API key"
+        case .unsorted: "Add a secret"
         }
     }
 
@@ -33,7 +34,7 @@ struct VaultForm: Equatable {
         switch kind {
         case .login: place.isEmpty ? "Petal AI never sees it." : "Petal AI never sees it. Only filled on \(place)."
         case .card: "Petal AI never sees the card number or security code. Petal asks you before it pays."
-        case .apiKey: "Petal AI never sees it."
+        case .apiKey, .unsorted: "Petal AI never sees it."
         case .contact, .address: "Petal AI sees this, so it can fill it in for you."
         }
     }
@@ -57,6 +58,7 @@ struct VaultForm: Equatable {
         case .apiKey: return has(.value) && !answer.title.trimmingCharacters(in: .whitespaces).isEmpty
         case .address: return has(.street)
         case .contact: return has(.name) || has(.email) || has(.phone)
+        case .unsorted: return false
         }
     }
 }
@@ -159,7 +161,8 @@ struct VaultFormView: View {
 // MARK: - Settings › Vault
 
 /// Every item in the vault: tabs by kind with counts, search, a new item of each kind, each editable; showing a
-/// password, card number, security code or key asks for Touch ID or the Mac's password first. Import (Apple
+/// password, card number, security code or key asks for Touch ID or the Mac's password first. Secrets from before
+/// kinds wait under All to be sorted (what each one is), and fill only after asking until then. Import (Apple
 /// Passwords, Chrome, Proton Pass, Petal) by button or drop, and export (Petal's file, or logins as CSV) after Touch ID.
 struct VaultSettings: View {
     @Environment(PetalApp.self) private var app
@@ -185,7 +188,7 @@ struct VaultSettings: View {
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .glassEffect(.clear.interactive(), in: .capsule)
                     Menu {
-                        ForEach(VaultKind.allCases) { kind in
+                        ForEach(VaultKind.made) { kind in
                             Button { start(kind) } label: { Label(kind.name, systemImage: kind.symbol) }
                         }
                     } label: {
@@ -196,8 +199,9 @@ struct VaultSettings: View {
             }
             if let editing {
                 VaultEditor(item: editing, isNew: isNew) { self.editing = nil }
-                    .id(editing.id)
+                    .id(editing.id + editing.kind.rawValue)
             }
+            if tab == nil, model.loaded, !model.unreadable, !unsorted.isEmpty { sortCard }
             Card {
                 let shown = filtered
                 if !model.loaded && !snapshotting {
@@ -227,10 +231,28 @@ struct VaultSettings: View {
         .modifier(DropExport(on: !snapshotting, dropping: $dropping) { importFile($0) })
     }
 
+    /// Secrets from before kinds, under All: what each one is decides where it fills by itself.
+    private var unsorted: [VaultItem] {
+        model.items.filter { $0.kind == .unsorted }.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+    }
+
+    private var sortCard: some View {
+        Card(title: "Sort these: tell Petal what each one is",
+             footer: "Petal asks before filling these anywhere. Once you say what one is, it fills like the rest.") {
+            ForEach(unsorted) { item in
+                HStack(spacing: 8) {
+                    Button { isNew = false; editing = item } label: { VaultRow(item: item) }
+                        .buttonStyle(.plain)
+                    SortMenu { kind in isNew = false; editing = Vault.sort(item, as: kind) }
+                }
+            }
+        }
+    }
+
     private var tabs: some View {
         HStack(spacing: 6) {
             tabButton(nil, "All", model.items.count)
-            ForEach(VaultKind.allCases) { kind in tabButton(kind, kind.plural, model.items.filter { $0.kind == kind }.count) }
+            ForEach(VaultKind.made) { kind in tabButton(kind, kind.plural, model.items.filter { $0.kind == kind }.count) }
         }
     }
 
@@ -249,7 +271,8 @@ struct VaultSettings: View {
     private var filtered: [VaultItem] {
         let words = search.trimmingCharacters(in: .whitespaces).lowercased()
         return model.items.filter { item in
-            guard tab == nil || item.kind == tab else { return false }
+            // Unsorted ones have their own card above.
+            guard item.kind != .unsorted, tab == nil || item.kind == tab else { return false }
             guard !words.isEmpty else { return true }
             let public_ = [item.title, Vault.subtitle(item)] + item.sites + item.kind.fields.filter { !$0.isSecret }.map { item[$0] }
             return public_.contains { $0.lowercased().contains(words) }
@@ -414,6 +437,30 @@ struct VaultRow: View {
     }
 }
 
+/// "What is it?": the kinds an unsorted secret can be sorted into.
+struct SortMenu: View {
+    var label = "What is it?"
+    let picked: (VaultKind) -> Void
+
+    var body: some View {
+        Menu(label) {
+            ForEach(VaultKind.sortable) { kind in
+                Button { picked(kind) } label: { Label(sortName(kind), systemImage: kind.symbol) }
+            }
+        }
+        .menuStyle(.button).buttonStyle(.glass).controlSize(.small).fixedSize()
+    }
+
+    private func sortName(_ kind: VaultKind) -> String {
+        switch kind {
+        case .login: "A login (a password for a website or app)"
+        case .apiKey: "An API key (for a service)"
+        case .card: "A card number"
+        default: kind.name
+        }
+    }
+}
+
 /// One item, editable. Its secrets show as dots until Touch ID or the Mac's password (for an item already saved).
 struct VaultEditor: View {
     @Environment(PetalApp.self) private var app
@@ -435,8 +482,17 @@ struct VaultEditor: View {
     }
 
     var body: some View {
-        Card(title: isNew ? "New \(item.kind.name.lowercased())" : item.kind.name) {
+        Card(title: isNew ? "New \(item.kind.name.lowercased())" : sorting ? "\(item.kind.name) (was unsorted)" : item.kind.name) {
             row(titleLabel) { TextField(titlePrompt, text: $item.title) }
+            if item.kind == .unsorted {
+                row("What is it?") {
+                    HStack {
+                        Text("Petal asks before filling it anywhere until you say.").font(.system(size: 12)).foregroundStyle(.secondary)
+                        Spacer(minLength: 8)
+                        SortMenu(label: "Choose…") { kind in item = Vault.sort(item, as: kind) }
+                    }
+                }
+            }
             if item.kind == .login || item.kind == .apiKey {
                 row(item.kind == .login ? "Websites" : "Service (website)") {
                     TextField(item.kind == .login ? "github.com, gist.github.com" : "platform.openai.com", text: $sites)
@@ -471,6 +527,9 @@ struct VaultEditor: View {
         }
     }
 
+    /// An unsorted secret being given its kind here: saved as that kind, with the same id.
+    private var sorting: Bool { model.items.first { $0.id == item.id }?.kind == .unsorted && item.kind != .unsorted }
+
     private var titleLabel: String {
         switch item.kind {
         case .address: "Label (Home, Work…)"
@@ -486,6 +545,7 @@ struct VaultEditor: View {
         case .address: "Home"
         case .card: "Visa"
         case .apiKey: "OpenAI"
+        case .unsorted: "GitHub password"
         }
     }
 
@@ -568,7 +628,8 @@ struct VaultEditor: View {
     /// Showing what's saved asks for Touch ID or the Mac's password first (not for what's just been typed).
     private func reveal(_ field: VaultField) {
         if showing.contains(field) { showing.remove(field); return }
-        let saved = model.items.first { $0.id == item.id }.map { !$0[field].isEmpty } ?? false
+        // Saved as another kind (an unsorted secret being sorted): its secret moved fields, and still asks.
+        let saved = model.items.first { $0.id == item.id }.map { !$0[field].isEmpty || $0.kind != item.kind } ?? false
         guard saved else { showing.insert(field); return }
         model.unlock("show your \(field.words)") { ok in if ok { showing.insert(field) } }
     }

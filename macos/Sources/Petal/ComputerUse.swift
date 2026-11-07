@@ -366,13 +366,30 @@ final class ComputerUse {
     /// The person said Buy on `place`'s host: payment info from `card` fills there, in that window, for the rest of
     /// this reply. It doesn't let Petal AI use the browser otherwise: pressing the order button asks as any act does
     /// (unless the reply may use the browser already). False when the reply ended while they were asked.
-    func allowCheckout(_ caller: String, token: Acting.Cancel, place: Vault.Place, map: Map, card: String) -> Bool {
-        guard live(caller, token), let current = sessions[caller], let window = map.windowID,
+    /// `asked`: the Buy card's number (endBuys); a newer card asked in that window since means no Buy.
+    func allowCheckout(_ caller: String, token: Acting.Cancel, place: Vault.Place, map: Map, card: String, asked: Int) -> Bool {
+        guard live(caller, token), let current = sessions[caller], let window = map.windowID, buyCards[window] == asked,
               let bought = Vault.Checkout(place: place, window: window, card: card, turn: Self.turnName(current)) else { return false }
         sessions[caller]?.checkouts.removeAll { $0.window == window }
         sessions[caller]?.checkouts.append(bought)
         watchBuy(map)
         return true
+    }
+
+    /// The newest Buy card asked in each window: Buy on an older card that's still open counts for nothing.
+    private var buyCards: [CGWindowID: Int] = [:]
+
+    /// A Buy card is about to show for `window`: every chat's Buy in it ends now (and is revoked, stopping what
+    /// fills under it), whatever the person answers. The card's number, for `allowCheckout`.
+    func endBuys(in window: CGWindowID) -> Int {
+        for caller in Array(sessions.keys) {
+            guard let list = sessions[caller]?.checkouts else { continue }
+            let left = Vault.Checkout.asking(list, window: window)
+            if left.count != list.count { sessions[caller]?.checkouts = left }
+        }
+        let card = (buyCards[window] ?? 0) + 1
+        buyCards[window] = card
+        return card
     }
 
     /// Some chat's Buy is in this window.
@@ -419,6 +436,7 @@ final class ComputerUse {
         switch event.kind {
         case .closed:
             for caller in Array(sessions.keys) { sessions[caller]?.checkouts.removeAll { $0.window == id } }
+            buyCards[id] = nil   // a card still open for it counts for nothing
         case .titled:
             assist.vaultTab(map) { [weak self] place in self?.seen(place, window: id) }
         default:
