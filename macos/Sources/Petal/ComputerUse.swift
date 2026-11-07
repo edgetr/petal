@@ -15,6 +15,11 @@ import SwiftUI
 /// no replies Petal can see: its Allow lasts one task (the same `task`, with no more than two minutes between acts).
 /// Never apps kept private (`aiNeverLook`), never password fields, never a vault secret: the vault fills its own (VaultFill.swift).
 ///
+/// A sticky note acting on its own window works in the background (Background.swift, BackgroundActing.swift): no
+/// pointer, nothing brought forward, the person's keyboard untouched; what can't be done that way it hands back to the
+/// person ("needs the window in front"). Only when the person has that very window in front does it use its pointer,
+/// and never while they're typing or clicking in it.
+///
 /// Each chat is its own caller (its note's id, or `mcp-<pid>` for the Petal tools of an AI session outside Petal):
 /// callers never share a window's ids or what the person allowed. An act only goes ahead on the window `petal_ui`
 /// looked at, as it was then (UIMap.Fingerprint), checked before the cursor sets off and again right before the
@@ -52,6 +57,8 @@ final class ComputerUse {
         var tabPlace: NotePlace? = nil
         /// Its chat's `places` count when it was read: a note stuck somewhere else since can't use it.
         var place = 0
+        /// Read for a sticky note's own window (or tab), not `front: true` or another app: its acts go in the background.
+        var ownPlace = false
     }
 
     /// One chat's reply (its turn; one task of an AI session outside Petal): the apps it may use, whether the person
@@ -66,6 +73,10 @@ final class ComputerUse {
         /// The Buy cards the person answered Buy in this reply: each lets payment info fill on its exact host, in its
         /// window, with its card (Vault.Checkout).
         var checkouts: [Vault.Checkout] = []
+        /// It acted (or will act) with the pointer, where the person sees it: Escape and the small Stop stand for it.
+        /// A note working only in the background leaves the person's Escape alone; its Stop is on the note and in
+        /// the AI button's preview.
+        var shown = false
     }
 
     /// One action, waiting its turn: the cursor does one thing at a time.
@@ -81,6 +92,8 @@ final class ComputerUse {
         let cancel: Acting.Cancel
         let send: (Any) -> Void
         let fail: (String) -> Void
+        /// Done in the background, with no pointer.
+        var quiet = false
         var appName: String { map.appName }
     }
 
@@ -193,7 +206,7 @@ final class ComputerUse {
         let stuck = places[caller, default: 0]
         Self.readQueue.async {
             if let tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
-                return DispatchQueue.main.async { fail(ClaudePanel.tabNotShowing) }
+                return DispatchQueue.main.async { MainActor.assumeIsolated { self.waitsFor(caller, .tab) }; fail(ClaudePanel.tabNotShowing) }
             }
             // Read again if the vault (or a secret Petal typed) changed meanwhile: nothing goes out unchecked against it.
             let settled = VaultIndex.settled { _ in Reader.read(pid: pid, window: wanted, budget: 1.5) }
@@ -212,7 +225,7 @@ final class ComputerUse {
                     // Another tab came forward while it read (or Petal can't tell any more): nothing it read goes back.
                     var stuckTab: NotePlace?
                     if let tabPlace {
-                        guard let seen, seen.window == reading.windowID else { return fail(ClaudePanel.tabNotShowing) }
+                        guard let seen, seen.window == reading.windowID else { self.waitsFor(caller, .tab); return fail(ClaudePanel.tabNotShowing) }
                         self.app.claude.tabSeen(note: caller, was: tabPlace, tab: seen.tab, window: seen.window)
                         var now = tabPlace
                         if let tab = now.tab { now.tab = NoteRules.follow(tab, to: seen.tab, keepWords: true) }
@@ -236,9 +249,12 @@ final class ComputerUse {
                     }
                     let made = Map(pid: pid, bundle: bundle, appName: name, window: window, windowID: reading.windowID,
                                    windowFrame: reading.windowFrame, lists: reading.lists, fingerprint: reading.fingerprint,
-                                   entries: entries, count: entries.count, made: Date(), tabPlace: stuckTab, place: stuck)
+                                   entries: entries, count: entries.count, made: Date(), tabPlace: stuckTab, place: stuck,
+                                   ownPlace: place != nil)
                     self.maps[caller] = made
                     self.keepSweeping()
+                    // Its tab shows again: the note no longer waits for that.
+                    if place != nil, self.agent(caller)?.needs == Background.Reason.tab.status { self.waitsFor(caller, nil) }
                     var result: [String: Any] = ["app": name, "window": reading.title, "elements": list,
                                                  "note": "Act with petal_act by id. These ids last until the next petal_ui, or 5 minutes; call petal_ui again once the window changes."]
                     if picked.left > 0 { result["more"] = "\(picked.left) more not listed: pass find (a word in its name) to narrow." }
@@ -529,8 +545,11 @@ final class ComputerUse {
         let send = job.send, fail = job.fail
         let first = caption.prefix(1).lowercased() + caption.dropFirst()
         let lasting = session.turn == Self.outside ? "For this task" : "Until this reply is done"
-        assist.ask("computer:\(bundle)", "Let Petal AI use \(name)?",
-                   detail: "First, \(first). \(lasting) it can press, type and choose menus in \(name) with its own pointer; yours stays where it is. Esc stops it.",
+        // A note on its own window works there in the background: said so, since nothing will show it working.
+        let detail = job.map.ownPlace
+            ? "First, \(first). \(lasting) it can press and type in this note's \(name) window in the background, while you work elsewhere: nothing comes forward, and your pointer and keyboard stay yours. Stop it from its note."
+            : "First, \(first). \(lasting) it can press, type and choose menus in \(name) with its own pointer; yours stays where it is. Esc stops it."
+        assist.ask("computer:\(bundle)", "Let Petal AI use \(name)?", detail: detail,
                    owner: caller) { allowed in
             // The note was stuck somewhere else while the person was asked (its card was taken away): look again.
             if job.map.place != self.places[caller, default: 0] { return fail(Self.moved) }
@@ -636,7 +655,10 @@ final class ComputerUse {
     /// While any reply may act (a session the person allowed an app or a Buy, not stopped, or an action waiting or
     /// under way), Escape stops it and a small Stop stays on the screen, between actions too.
     private func standGuard() {
-        let live = busy || !line.isEmpty || sessions.values.contains(where: Self.mayAct)
+        // Only for what acts where the person sees it: a note working in the background never takes their Escape.
+        let seen = { (job: Job) in !job.map.ownPlace || self.sessions[job.caller]?.shown == true }
+        let live = (busy && acting?.quiet != true) || line.contains(where: seen)
+            || sessions.values.contains { Self.mayAct($0) && $0.shown }
         cursor.stand(live)
     }
 
@@ -646,6 +668,7 @@ final class ComputerUse {
     }
 
     private func enqueue(_ job: Job) {
+        if !job.map.ownPlace { sessions[job.caller]?.shown = true }
         line.append(job)
         next()
     }
@@ -654,6 +677,9 @@ final class ComputerUse {
         guard !busy, let index = line.firstIndex(where: { !watching.contains($0.caller) }) else { return }
         let job = line.remove(at: index)
         if job.cancel.stopped { job.fail(whyStopped(job)); return next() }
+        var current = job
+        current.quiet = job.map.ownPlace
+        acting = current
         busy = true
         run(job)
     }
@@ -690,11 +716,86 @@ final class ComputerUse {
     /// the window is checked right before the change, in the same breath; a Stop, the turn's end, using apps turned off
     /// or the app made private stop `cancel`, which every change checks first.
     private func run(_ job: Job) {
-        acting = job
+        // A note's act on its own window is quiet until it's decided otherwise: deciding takes nothing from the
+        // person's Escape.
+        var current = job
+        current.quiet = job.map.ownPlace
+        acting = current
         lastCaller = job.caller
         sessions[job.caller]?.last = Date()
         if let error = stale(job) { job.fail(error); return finished() }
         let map = maps[job.caller] ?? job.map
+        agent(job.caller)?.activity = job.caption
+        guard map.ownPlace else { return show(job, map) }
+        decide(job, map, since: Date())
+    }
+
+    /// A note acting on its own window: in the background, unless the person has that very window in front (then
+    /// with the pointer, as always), and never while they're typing or clicking in it: it waits for a pause, a few
+    /// seconds at most (Background.way). Read right before, off the main thread.
+    private func decide(_ job: Job, _ map: Map, since: Date) {
+        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier == map.pid
+        Self.actQueue.async {
+            let situation = Background.Situation(note: true, appFront: front, windowFocused: front && Acting.windowInFront(map),
+                                                 idle: Acting.idle())
+            let way = Background.way(situation)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if let error = self.stale(job) { job.fail(error); return self.finished() }
+                    switch way {
+                    case .foreground:
+                        self.acting = job
+                        self.sessions[job.caller]?.shown = true
+                        self.standGuard()
+                        self.agent(job.caller)?.quietly = false
+                        self.show(job, map)
+                    case .background:
+                        self.quietly(job, map)
+                    case .wait:
+                        guard Date().timeIntervalSince(since) < Background.patience else {
+                            job.fail("The person is typing in \(map.appName)'s window right now, so nothing was done there. Wait a little, then petal_ui and try again.")
+                            return self.finished()
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.decide(job, map, since: since) }
+                    }
+                }
+            }
+        }
+    }
+
+    /// In the background: no pointer, nothing brought forward. The window, what's selected in it, what has its
+    /// keyboard and the control are checked right before the change, with nothing in between, and a tab's note acts
+    /// only while its tab is the one showing.
+    private func quietly(_ job: Job, _ map: Map) {
+        var job = job
+        job.quiet = true
+        acting = job
+        standGuard()
+        agent(job.caller)?.quietly = true
+        let cancel = job.cancel
+        // The app the person is using, to give back should the note's app jump forward by itself.
+        let person = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        Self.actQueue.async {
+            var outcome = Acting.Outcome()
+            if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
+                outcome.needs = .tab
+            } else if !cancel.stopped {
+                let checked = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options)
+                if let error = checked.error {
+                    outcome.error = error
+                } else if !cancel.stopped {
+                    outcome = Acting.quietly(job.action, entry: job.entry, map: map, prepared: checked, options: job.options,
+                                             cancel: cancel, person: person)
+                }
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self.done(job, outcome) }
+            }
+        }
+    }
+
+    /// With the pointer, where the person sees it.
+    private func show(_ job: Job, _ map: Map) {
         let cancel = job.cancel
         // Stop shows at once, before Petal reads the window (a slow app can take a while to answer).
         let near = job.entry.map { CGPoint(x: $0.node.frame.midX, y: $0.node.frame.midY) }
@@ -748,7 +849,7 @@ final class ComputerUse {
     /// A copy-like press is watched (`Acting.CopyWatch`) before its reply goes back, even if stopped meanwhile: the
     /// line moves on at once, and only that chat's next action waits for it.
     private func done(_ job: Job, _ outcome: Acting.Outcome) {
-        cursor.rest()
+        if !job.quiet { cursor.rest() }
         defer { finished() }
         guard let mark = outcome.copied else { return answer(job, outcome) }
         watching.insert(job.caller)
@@ -766,7 +867,13 @@ final class ComputerUse {
             return job.fail(cleared)
         }
         if job.cancel.stopped { return job.fail(whyStopped(job)) }
+        // What the background can't do: the person brings the window forward (the note says so, and the AI button).
+        if let reason = outcome.needs {
+            waitsFor(job.caller, reason)
+            return job.fail(reason.words(job.appName))
+        }
         if let error = outcome.error { return job.fail(error) }
+        if job.map.ownPlace { waitsFor(job.caller, nil) }
         // What its own typing, focusing or scrolling changed in the window isn't a change behind its back.
         if let fingerprint = outcome.fingerprint, maps[job.caller]?.id == job.map.id { maps[job.caller]?.fingerprint = fingerprint }
         assist.did(historyLine(job, outcome))
@@ -777,6 +884,7 @@ final class ComputerUse {
             return job.send(reply)
         }
         var reply: [String: Any] = ["done": job.caption, "app": job.appName]
+        if job.quiet { reply["background"] = "Done in the background: nothing came forward, and the person's pointer and keyboard weren't touched." }
         if let value = outcome.value { reply["value"] = value }
         if let chose = outcome.chose { reply["chose"] = chose }
         if let note = outcome.note { reply["note"] = note }
@@ -803,6 +911,15 @@ final class ComputerUse {
             let key = job.options.key?.label ?? "a key"
             return "Pressed \(key)\(outcome.chose.map { " (\($0))" } ?? "") in \(job.appName)"
         }
+    }
+
+    /// The chat's own Agent (a note's, or Petal AI's plain chat), for its line in the preview.
+    private func agent(_ caller: String) -> Agent? { app.claude.note(withID: caller)?.agent }
+
+    /// A note now waits for the person (its window in front, its tab showing), or no longer does.
+    private func waitsFor(_ caller: String, _ reason: Background.Reason?) {
+        guard let agent = agent(caller), agent.needs != reason?.status else { return }
+        agent.needs = reason?.status
     }
 
     // MARK: Stopping
@@ -959,6 +1076,8 @@ enum Reader {
     /// `focus`: controls whose orders are noted (`focusOrders`), to tell whether one is a piece of a joined secret.
     static func read(pid: pid_t, window wanted: UInt32?, budget: TimeInterval, deep: Bool = false, focus: [AXUIElement] = []) -> Reading {
         var reading = Reading()
+        // An Electron app's tree, asked for the first time, fills in a moment later.
+        if AccessibilityTree.wake(pid) { usleep(300_000) }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
         var window: AXUIElement? = Windows.value(app, kAXFocusedWindowAttribute) ?? Windows.value(app, kAXMainWindowAttribute)
@@ -1299,6 +1418,8 @@ enum Acting {
         var fingerprint: UIMap.Fingerprint?
         /// A copy-like press: the clipboard is watched from here before the reply goes back.
         var copied: CopyMark?
+        /// In the background, it can't be done without the window in front: nothing was done.
+        var needs: Background.Reason?
     }
 
     /// Stop, seen at once from any thread. A job's is under its turn's: stopping the turn stops every job in it.

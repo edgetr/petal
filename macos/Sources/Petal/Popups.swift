@@ -408,6 +408,8 @@ final class Popups {
 @MainActor @Observable
 final class Previews {
     static let media = "media"
+    /// Over the AI button: the sticky notes at work (NotePreviews.swift).
+    static let notes = "claude"
 
     private(set) var thumbnails: [String: NSImage] = [:]
     /// The windows the open preview shows, listed off the main thread.
@@ -424,6 +426,14 @@ final class Previews {
     @ObservationIgnored private var listed: [String: [AppWindow]] = [:]
     /// While a menu from the dock is open, nothing opens behind it.
     @ObservationIgnored private var held = false
+    /// Pictures of the windows the notes work in, by note.
+    private(set) var noteThumbs: [UUID: NSImage] = [:]
+    @ObservationIgnored private var capturingNotes = false
+    @ObservationIgnored private var noteCount = 0
+    /// Made-up notes, for `Petal --snapshot`.
+    @ObservationIgnored private var sampleNotes: [NotePreviewItem]?
+    /// The notes the AI button's preview shows.
+    var noteItems: [NotePreviewItem] { sampleNotes ?? PetalApp.shared.claude.previewItems }
     /// Accessibility answers each app in its own time (up to 0.3 s for a busy one), so windows are listed here, each
     /// app on its own: a slow one never holds up the next.
     nonisolated private static let queue = DispatchQueue(label: "petal.previews", qos: .userInitiated, attributes: .concurrent)
@@ -476,6 +486,34 @@ final class Previews {
         list(id) { [weak self] found in self?.listed[id] = found }
     }
 
+    /// The pointer on the AI button. True when its preview has notes to show (working, waiting for the person, or
+    /// done and not seen), or is open: then it takes the tooltip's place. False with none: the tooltip as before.
+    @discardableResult
+    func hoverNotes(_ on: Bool, in dock: ScreenDock) -> Bool {
+        if !on {
+            guard hoveredID == Self.notes else { return false }
+            hoveredID = ""
+            showTask?.cancel()
+            scheduleHide()
+            return true
+        }
+        // Over the open chat it would only cover it.
+        guard !PetalApp.shared.claude.isOpen, !noteItems.isEmpty else {
+            if showing == Self.notes { close() }
+            return false
+        }
+        hoveredID = Self.notes
+        showTask?.cancel()
+        guard !held, canOpen(in: dock) else { return true }
+        if showing != nil && showing != Self.notes {
+            hideTask?.cancel()
+            show(Self.notes, windows: [], in: dock)   // straight from another app's preview
+            return true
+        }
+        schedule(Self.notes, in: dock)
+        return true
+    }
+
     /// The pointer on the now-playing tile.
     func hoverMedia(_ on: Bool, in dock: ScreenDock) {
         if !on && hoveredID != Self.media { return }
@@ -504,6 +542,10 @@ final class Previews {
     }
 
     private func open(_ id: String, in dock: ScreenDock) {
+        if id == Self.notes {
+            guard !noteItems.isEmpty else { return scheduleHide() }
+            return show(id, windows: [], in: dock)
+        }
         if id == Self.media {
             guard PetalApp.shared.signals.nowPlaying != nil else { return scheduleHide() }
             return show(id, windows: [], in: dock)
@@ -528,6 +570,7 @@ final class Previews {
         pictures = Capture.allowed
         PetalApp.shared.popups.showPreview(id, in: dock)
         capture(found)
+        if id == Self.notes { noteCount = noteItems.count; captureNotes() }
         refresh?.invalidate()
         refresh = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.again() }
@@ -537,6 +580,15 @@ final class Previews {
     /// Once a second while it's open: the windows again (one may have closed), and new pictures of them.
     private func again() {
         guard let id = showing else { return }
+        if id == Self.notes {
+            let items = noteItems
+            if items.isEmpty { return close() }
+            if items.count != noteCount {
+                noteCount = items.count
+                PetalApp.shared.popups.refit()
+            }
+            return captureNotes()
+        }
         if id == Self.media {
             if PetalApp.shared.signals.nowPlaying == nil { close() }
             return
@@ -595,6 +647,30 @@ final class Previews {
         thumbnails = thumbnails.filter { minimized.contains($0.key) }
         windows = []
         showing = nil
+        let notes = Set(PetalApp.shared.claude.notes.map(\.id))
+        noteThumbs = noteThumbs.filter { notes.contains($0.key) }
+    }
+
+    /// New pictures of the notes' windows, off the main thread (ScreenCaptureKit), one round at a time; none of a
+    /// private app's.
+    private func captureNotes() {
+        guard sampleNotes == nil, Capture.allowed, !capturingNotes else { return }
+        let targets = noteItems.prefix(4).filter { $0.attached && !$0.hidden }.map { (id: $0.id, pid: $0.pid, window: $0.window) }
+        guard !targets.isEmpty else { return }
+        capturingNotes = true
+        Task {
+            let pictures = await Capture.notes(targets)
+            capturingNotes = false
+            // A note's app made private while it was taken: its picture isn't kept.
+            let hidden = Set(noteItems.filter(\.hidden).map(\.id))
+            for (id, image) in pictures where !hidden.contains(id) && showing == Self.notes { noteThumbs[id] = image }
+        }
+    }
+
+    /// What `Petal --snapshot` draws the AI button's preview with.
+    func preview(notes: [NotePreviewItem]?, thumbnails: [UUID: NSImage] = [:]) {
+        sampleNotes = notes
+        noteThumbs = thumbnails
     }
 
     /// Each window's id in the window server ties it to ScreenCaptureKit's window exactly; the frame is the fallback.
@@ -635,8 +711,9 @@ struct PreviewView: View {
     let done: () -> Void
 
     var body: some View {
-        let windows = id == Previews.media ? [] : app.previews.windows
+        let windows = id == Previews.media || id == Previews.notes ? [] : app.previews.windows
         VStack(alignment: .leading, spacing: 12) {
+            if id == Previews.notes { NotesPreview(done: done) }
             if app.config.bool("nowPlaying"), let playing = app.signals.nowPlaying, id == Previews.media || id == playing.player {
                 MediaControls(playing: playing)
             }

@@ -30,7 +30,11 @@ Use, in this order:
    moved files back), `petal_routine_delete`. Routines only move files, never delete them.
    Using the user's apps (`computerUse`): `petal_ui` lists the front window's controls with ids (e12), and
    `petal_act` presses, types, focuses or scrolls one by id, chooses a menu item by path ("File > Export…") or
-   presses a key (cmd-s), through Accessibility with Petal's own pink pointer; the user's pointer never moves. The
+   presses a key (cmd-s), through Accessibility with Petal's own pink pointer; the user's pointer never moves. In a
+   sticky note, on the note's own window, it works in the background instead (no pointer, nothing comes forward,
+   the user's keyboard untouched); what can't be done there (menus and keys in the app the user is using, copying
+   and pasting, the vault, a tab that isn't showing) comes back as "needs the window in front": ask the user to
+   bring it forward (clicking the note in the AI button's preview does), then `petal_ui` again. The
    first use of an app in a reply asks the user; from a session outside Petal's own chat, the first in a task (pass
    the same `task` words with each act; a new task, two quiet minutes or a Stop asks again). Menus and keys go only to the window `petal_ui` looked at, and an
    act on a window that changed since (another row selected, another title) is refused: call `petal_ui` again.

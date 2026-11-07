@@ -57,6 +57,13 @@ final class Agent {
     @ObservationIgnored private var runID = UUID()   // a stopped run's late lines don't belong to the next chat
     /// Counts the runs (each reply is one): what Petal AI may use in an app lasts one reply (ComputerUse.swift).
     @ObservationIgnored private(set) var turn = 0
+    /// What it's doing now, in plain words (its latest step): the AI button's preview and the note say it.
+    var activity = ""
+    /// What it needs the person for (Background.Reason.status: its window in front, its tab showing), until it acts
+    /// again, its next turn starts, or the person opens it after it's done.
+    var needs: String?
+    /// Its last act in an app was in the background (a note working in its own window while the person is elsewhere).
+    var quietly = false
 
     var app: PetalApp { PetalApp.shared }
 
@@ -179,6 +186,9 @@ final class Agent {
         stop()
         process = nil
         running = false
+        activity = ""
+        needs = nil
+        quietly = false
         runID = UUID()
         queued = []
         waiting = []
@@ -305,6 +315,9 @@ final class Agent {
         // before the count moves on), and this one asks again.
         app.assist.computer.end(noteID.uuidString)
         turn += 1
+        activity = ""
+        needs = nil
+        quietly = false
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = provider.chatArguments(chat)
@@ -348,6 +361,7 @@ final class Agent {
                 MainActor.assumeIsolated {
                     guard self.runID == id else { return }
                     self.running = false
+                    self.activity = ""
                     // The turn is over: its tools can't answer anymore, so nothing it asked of Petal goes ahead.
                     self.app.assist.computer.end(self.noteID.uuidString)
                     // What was written while it worked goes now (steering: straight after it stopped).
@@ -385,7 +399,9 @@ final class Agent {
         case .text(let text):
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty { messages.append(Message(kind: .claude, text: trimmed)) }
-        case .step(let text): messages.append(Message(kind: .step, text: text))
+        case .step(let text):
+            messages.append(Message(kind: .step, text: text))
+            activity = text
         case .denials(let denials):
             pendingAsk = denials
             messages.append(Message(kind: .ask, text: denials.map(\.label).joined(separator: "\n")))
@@ -491,7 +507,7 @@ final class Agent {
 
         Memory: below is what you remember about this user. When you learn something lasting that will help later (a preference, a habit, how they like things done, what a mode is for), save it yourself with petal_remember (learned: true; with the mode's id when it's about one mode) and say so in a word or two. When they say remember or forget something, do it with petal_remember or petal_forget. Forget what turns out wrong or out of date. Never keep passwords, secrets, or anything private they wouldn't want kept.
 
-        Using the user's apps for them (when computerUse is on): petal_ui lists the controls of the window in front (in a sticky note, its own window), each with an id like e12, its kind, name, value and place. petal_act then presses, types into, focuses or scrolls one by its id, chooses a menu item by its path (\"File > Export…\") or presses a key (cmd-s). Petal moves a pink pointer of its own, never the user's, and asks the user before it uses each app. Call petal_ui first, and again after anything that changes the window: ids from before may be gone, and an act that fails because the window changed means call petal_ui again. Prefer petal_apps and petal_windows to open, quit, bring forward or arrange, and a menu item or key over hunting for a button. When something can only be done with a real click (a canvas, a game, a control Accessibility can't reach), say so and ask the user to do it. Never type a password, card or key yourself: petal_vault fills them. If the user stops it, stop and say what's left.
+        Using the user's apps for them (when computerUse is on): petal_ui lists the controls of the window in front (in a sticky note, its own window), each with an id like e12, its kind, name, value and place. petal_act then presses, types into, focuses or scrolls one by its id, chooses a menu item by its path (\"File > Export…\") or presses a key (cmd-s). Petal moves a pink pointer of its own, never the user's, and asks the user before it uses each app. In a sticky note, on the note's own window, it works in the background instead: no pointer, nothing comes forward, the user keeps working elsewhere. Some things can't be done in the background (menus and keys while they use that app, copying and pasting, the vault, an app that ignores background typing, a tab that isn't showing): petal_act then does nothing and says the window must be in front. Say in one line what you need and ask the user to bring it forward (clicking this note in the AI button's preview does it), and carry on with petal_ui once it's there; don't bring it forward yourself with petal_windows or petal_apps unless they ask. Call petal_ui first, and again after anything that changes the window: ids from before may be gone, and an act that fails because the window changed means call petal_ui again. Prefer petal_apps and petal_windows to open, quit, bring forward or arrange, and a menu item or key over hunting for a button. When something can only be done with a real click (a canvas, a game, a control Accessibility can't reach), say so and ask the user to do it. Never type a password, card or key yourself: petal_vault fills them. If the user stops it, stop and say what's left.
 
         Petal's vault (petal_vault) holds the user's logins, contact info (each with who they are to the user: "me", "girlfriend", "mom"), addresses (each may belong to a contact), payment info and API keys. You see usernames, contact info and addresses in full, and a card's name, last four digits and expiry; never a password, card number, security code or key: Petal fills those itself. To log in: petal_ui, then petal_vault fill with fields {username: id, password: id} (Petal finds the login saved for that site); if there's none, petal_vault request (kind login, the same fields): the user types it into Petal's card and Petal fills it. For a new account, new_login (username, password_id, confirm_id) makes, saves and fills a strong password. For a shipping or contact form, find the person with list (kind contact; "my girlfriend" is the contact whose relationship says so, "me" is the user) and their address (kind address, its contact), then fill with item and fields, a field at a time or all at once, a country menu too. To pay, fill the card's fields with item, fields, buying (what you're buying, in a few words) and price: Petal shows the user one Buy card for that page's host first; once they say Buy, finish and place the order there by pressing its order button with petal_act (fill never presses Return after payment info; using the browser may ask once, like any app), and if they say Don't, stop. Fill one page or app at a time. Petal decides what fills by itself and what asks; when it asks and the user says no, don't find another way. A 2FA code: read it from the user's mail with petal_ui and type it with petal_act. Never ask the user to paste a password, card or key into the chat. Some apps the user keeps private: petal_look shows only their name.
 
@@ -515,6 +531,9 @@ final class Agent {
                 prompt += "\n\nThis chat is a sticky note on \(tab)\(inMode). When the user says this, here or what I'm looking at, they mean that tab, even after they've gone elsewhere: petal_look looks at its window and says which tab the note is on (front: true looks at what's in front now instead). The user may read your reply later, from that tab."
             case .window:
                 prompt += "\n\nThis chat is a sticky note on one window: \(window)\(inMode). When the user says this, here or what I'm looking at, they mean that window, even after they've gone to another app: petal_look looks at it (front: true looks at what's in front now instead). The user may read your reply later, from that window."
+            }
+            if app.config.bool("computerUse") {
+                prompt += " With petal_ui and petal_act you work in it in the background while the user does something else\(place.kind == .tab ? " (only while its tab is the one showing in its window)" : ""): you can take your time, research with your own tools, and fill in or press what's needed there. When petal_act says it needs the window in front, ask the user."
             }
         }
         let remembered = app.assist.memoryBrief(mode: place?.mode)
@@ -849,6 +868,8 @@ final class ClaudePanel {
         incomingFiles = []
         note.away = false
         if note.ready { note.ready = false; updateReady() }
+        // Done, and now in front of the person: what it waited for them for is said in its reply.
+        if !note.agent.running, note.agent.needs != nil { note.agent.needs = nil }
         if let card = app.popups.card, card.noteID == note.id { app.popups.dismissCard() }
         isOpen = true
         if let text, send {
@@ -933,6 +954,8 @@ struct ClaudePanelView: View {
             header
             // The window this note is stuck to.
             if let place = agent.place { NotePlaceLine(panel: panel, place: place, gone: panel.current.windowGone).padding(.top, -6) }
+            // Working in its window in the background, or waiting for the person to bring it forward.
+            if NoteActivityLine.shows(agent) { NoteActivityLine(panel: panel, note: panel.current).padding(.top, -8) }
             ZStack(alignment: .top) {
                 // A chat with only messages still to send (kept from before Petal quit) shows them, with Send now.
         Group { if agent.messages.isEmpty && agent.queued.isEmpty { empty } else { conversation } }
@@ -959,6 +982,7 @@ struct ClaudePanelView: View {
         .onAppear { focused = true }
         .onChange(of: agent.messages.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: agent.running) { _, _ in DispatchQueue.main.async { panel.fit() } }
+        .onChange(of: NoteActivityLine.shows(agent)) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: panel.optionsOpen) { _, open in if open { panel.chatsOpen = false }; DispatchQueue.main.async { panel.fit() } }
         .onChange(of: panel.chatsOpen) { _, open in if open { panel.optionsOpen = false }; DispatchQueue.main.async { panel.fit() } }
         .onChange(of: panel.attachments.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
