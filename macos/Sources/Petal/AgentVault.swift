@@ -170,6 +170,8 @@ extension Assist {
                 }
                 found.append((item, variable))
             }
+            // Before asking: two keys never go in one variable, where the second would quietly replace the first.
+            if let clash = AgentAccess.sameVariable(found.map { ($0.item.title, $0.variable) }) { return fail(clash) }
             let titles = found.map(\.item.title)
             let place = AgentAccess.shown(who.project, home: home)
             let record = "\(who.label) used your \(titles.joined(separator: ", ")) key\(titles.count == 1 ? "" : "s")"

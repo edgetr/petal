@@ -1,9 +1,10 @@
 import Foundation
 
 // Checks AgentAccess.swift: which variable `petal run` puts a key in, taking keys out of what a command prints (as
-// themselves, hex, percent-encoded and base64, wrapped onto lines, and split across reads), reading `petal run`'s words,
-// who's asking from a chain of processes, which project a folder is (a T3 worktree is its main checkout; a forged
-// `.git` file is not, checked on throwaway folders in the temporary folder), which grants cover a use (only verified
+// themselves, hex, percent-encoded as each encoder writes it, and base64, wrapped onto lines and indented, and split
+// across reads), reading `petal run`'s words, two keys in one variable, who's asking from a chain of processes (and
+// whose signature is read), which project a folder is (a T3 worktree is its main checkout; a forged `.git` file or a
+// linked `.git` is not, checked on throwaway folders in the temporary folder), which grants cover a use (only verified
 // agents'), and that a request with no identity is refused. No process or Keychain is read. Run with macos/checks/run.sh.
 @main
 struct AgentAccessCheck {
@@ -16,15 +17,19 @@ struct AgentAccessCheck {
     static func main() {
         variables()
         redaction()
+        percentForms()
         splitReads()
         wrapped()
         running()
         callers()
         projects()
         worktrees()
+        linkedGit()
+        systemPrograms()
         grants()
         gates()
         words()
+        sameVariable()
         if failures > 0 { print("\(failures) agent access check(s) failed"); exit(1) }
         print("agent access: all checks passed")
     }
@@ -87,6 +92,57 @@ struct AgentAccessCheck {
         expect(redact([(unicode, "U")], "→\(unicode)←") == "→[U key]←", "a key in any script")
     }
 
+    /// Percent-encoded as each encoder writes it, each keeping a different set of characters as they are (the key
+    /// has "/", "+" and "="): Python's `quote` (keeps "/") and `quote_plus` (a space as "+"), JavaScript's
+    /// `encodeURIComponent` and `encodeURI` (keeps "/", "+" and "="), in uppercase or lowercase hex, and mixed.
+    static func percentForms() {
+        func encode(_ text: String, keeping: String, plus: Bool = false, lower: Bool = false) -> String {
+            let kept = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789" + keeping)
+            var out = text.addingPercentEncoding(withAllowedCharacters: kept)!
+            if plus { out = out.replacingOccurrences(of: "%20", with: "+") }
+            if lower {
+                var low = ""
+                var rest = Substring(out)
+                while let percent = rest.firstIndex(of: "%") {
+                    low += rest[..<percent]
+                    let end = rest.index(percent, offsetBy: 3)
+                    low += rest[percent..<end].lowercased()
+                    rest = rest[end...]
+                }
+                out = low + rest
+            }
+            return out
+        }
+        let quote = "_.-~/", quotePlus = "_.-~", component = "-_.!~*'()", uri = "-_.!~*'();,/?:@&=+$#"
+        for secret in [key, "my secret/key+=0123"] {
+            for (keeping, plus, name) in [(quote, false, "quote"), (quotePlus, true, "quote_plus"), (component, false, "encodeURIComponent"), (uri, false, "encodeURI")] {
+                for lower in [false, true] {
+                    let encoded = encode(secret, keeping: keeping, plus: plus, lower: lower)
+                    let text = "GET https://api.example.com/v1?key=\(encoded)&x=1 200"
+                    let out = redact([(secret, "K")], text)
+                    expect(out == "GET https://api.example.com/v1?key=[K key]&x=1 200", "\(name)\(lower ? " (lowercase hex)" : "") of \(secret)", out)
+                    // And split across two reads anywhere.
+                    let bytes = Array(text.utf8)
+                    for cut in 1..<bytes.count {
+                        var redactor = AgentAccess.Redactor([(secret: secret, label: "K")])
+                        let split = redactor.feed(Array(bytes[..<cut])) + redactor.feed(Array(bytes[cut...])) + redactor.finish()
+                        if String(decoding: split, as: UTF8.self) != out { expect(false, "\(name) split at \(cut)", String(decoding: split, as: UTF8.self)); break }
+                    }
+                }
+            }
+        }
+        // Every character encoded, and a mix of encoded and not.
+        let all = Array(key.utf8).map { String(format: "%%%02X", $0) }.joined()
+        expect(redact([(key, "K")], "[\(all)]") == "[[K key]]", "every character encoded")
+        let mixed = Array(key.utf8).enumerated().map { $0.offset % 2 == 0 ? String(format: "%%%02x", $0.element) : String(UnicodeScalar($0.element)) }.joined()
+        expect(redact([(key, "K")], mixed) == "[K key]", "a mix of encoded and not", redact([(key, "K")], mixed))
+        // Ordinary percent signs and other encoded text stay as they are.
+        let plain = "100% done, %2F is a slash, 50%% off, ends with %"
+        expect(redact([(key, "K")], plain) == plain, "other percent-encoded text untouched", redact([(key, "K")], plain))
+        let near = encode(String(key.dropLast()) + "X", keeping: quote)
+        expect(redact([(key, "K")], near) == near, "a different key encoded isn't this one")
+    }
+
     /// The command's output arrives a read at a time: a key split anywhere across reads, or arriving a byte at a
     /// time, is still taken out, and nothing of the text around it is lost, doubled or held back once it's over.
     static func splitReads() {
@@ -135,7 +191,10 @@ struct AgentAccessCheck {
         }
         for prefix in ["", "a", "ab", "Bearer ", "user:"] {
             let encoded = Data((prefix + long).utf8).base64EncodedString()
-            for (every, separator, name) in [(76, "\r\n", "MIME"), (76, "\n", "encodebytes"), (64, "\n", "PEM"), (40, "\n    ", "indented"), (20, " ", "spaced")] {
+            let yaml = "\n" + String(repeating: " ", count: 8), deep = "\n" + String(repeating: " ", count: 24)
+            for (every, separator, name) in [(76, "\r\n", "MIME"), (76, "\n", "encodebytes"), (64, "\n", "PEM"), (40, "\n    ", "indented"), (20, " ", "spaced"),
+                                             (76, yaml, "YAML, 8 spaces"), (76, deep, "YAML, 24 spaces"), (76, "\r\n" + String(repeating: " ", count: 12), "CRLF and an indent"),
+                                             (76, "\n\t\t\t", "tabs"), (76, "  \n      ", "trailing blanks and an indent")] {
                 let body = wrap(encoded, every: every, with: separator)
                 let text = "data:\n" + body + "\nend\n"
                 let whole = redact([(long, "K")], text)
@@ -168,7 +227,11 @@ struct AgentAccessCheck {
         expect(redact([(long, "K")], spread) == spread, "a gap after every character isn't how base64 wraps")
         let half = core.index(core.startIndex, offsetBy: core.count / 2)
         let gap = String(core[..<half]) + String(repeating: " ", count: 9) + String(core[half...])
-        expect(redact([(long, "K")], gap) == gap, "nor a gap wider than a line break and its indent")
+        expect(redact([(long, "K")], gap) == gap, "nor a gap of more than 8 blanks on one line")
+        let indent = String(core[..<half]) + "\n" + String(repeating: " ", count: 65) + String(core[half...])
+        expect(redact([(long, "K")], indent) == indent, "nor an indent deeper than 64")
+        let blankLine = String(core[..<half]) + "\n\n" + String(core[half...])
+        expect(redact([(long, "K")], blankLine) == blankLine, "nor a blank line between")
         expect(redact([(long, "K")], "plain words, with\nline breaks and  spaces") == "plain words, with\nline breaks and  spaces", "ordinary text untouched")
     }
 
@@ -335,6 +398,60 @@ struct AgentAccessCheck {
         expect(project("w2") == root + "/elsewhere", "an entry reached through a link is the repository it really is in", project("w2"))
     }
 
+    /// A `.git` that is a link (to a real worktree's `.git` file, or to a repository's `.git` folder) never makes a
+    /// folder part of that project; and a `.git` that resolves to another folder's (as a link does) doesn't pass the
+    /// worktree's backlink.
+    static func linkedGit() {
+        let fm = FileManager.default
+        let made = fm.temporaryDirectory.appending(path: "petal-agent-link-\(UUID().uuidString)").path
+        try? fm.createDirectory(atPath: made, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(atPath: made) }
+        guard let root = AgentCallers.realPath(made) else { return expect(false, "a throwaway folder") }
+        func folder(_ path: String) { try? fm.createDirectory(atPath: root + "/" + path, withIntermediateDirectories: true) }
+        func file(_ path: String, _ text: String) { try? text.write(toFile: root + "/" + path, atomically: true, encoding: .utf8) }
+        func link(_ path: String, to target: String) { try? fm.createSymbolicLink(atPath: root + "/" + path, withDestinationPath: root + "/" + target) }
+        func project(_ path: String) -> String { AgentAccess.project(root + "/" + path, files: AgentCallers.disk) }
+
+        folder("trusted/.git/worktrees/wt")
+        folder("wt/src")
+        file("wt/.git", "gitdir: \(root)/trusted/.git/worktrees/wt\n")
+        file("trusted/.git/worktrees/wt/gitdir", "\(root)/wt/.git\n")
+        expect(project("wt/src") == root + "/trusted", "the real worktree still is its main checkout")
+        folder("copycat/sub")
+        link("copycat/.git", to: "wt/.git")
+        expect(AgentCallers.gitMark(root + "/copycat") == .link, "a linked .git is read as a link")
+        expect(project("copycat/sub") == root + "/copycat", "a .git linked to a worktree's: its own folder", project("copycat/sub"))
+        folder("mirror")
+        link("mirror/.git", to: "trusted/.git")
+        expect(project("mirror") == root + "/mirror", "a .git linked to a repository's: its own folder", project("mirror"))
+        // A dangling link is still a link, never the folder above.
+        folder("dangling")
+        link("dangling/.git", to: "nowhere/.git")
+        expect(project("dangling") == root + "/dangling", "a dangling .git link: its own folder")
+
+        // The backlink must name a .git in this very folder: a disk where /x/.git resolves to /wt/.git (as a link
+        // would, were it read as a file) doesn't pass.
+        let resolved = AgentAccess.GitFiles(mark: { ["/t": .folder, "/x": .file("gitdir: /t/.git/worktrees/wt")][$0] }, real: { path in
+            let path = AgentAccess.standard(path)
+            return path == "/x/.git" ? "/wt/.git" : path
+        }, read: { AgentAccess.standard($0) == "/t/.git/worktrees/wt/gitdir" ? "/wt/.git\n" : nil })
+        expect(AgentAccess.project("/x", files: resolved) == "/x", "a .git resolving to another folder's doesn't borrow its project")
+        let honest = AgentAccess.GitFiles(mark: { ["/t": .folder, "/wt": .file("gitdir: /t/.git/worktrees/wt")][$0] }, real: { AgentAccess.standard($0) },
+                                          read: { AgentAccess.standard($0) == "/t/.git/worktrees/wt/gitdir" ? "/wt/.git\n" : nil })
+        expect(AgentAccess.project("/wt", files: honest) == "/t", "while the real worktree on that disk is its main checkout")
+    }
+
+    /// Only macOS's own programs go unread; agents under /usr/local and /opt (Homebrew) have their signature checked.
+    static func systemPrograms() {
+        for path in ["/bin/zsh", "/sbin/launchd", "/usr/bin/env", "/usr/sbin/sshd", "/usr/libexec/sshd-session", "/System/Library/CoreServices/x"] {
+            expect(AgentAccess.systemProgram(path), "\(path) is macOS's own")
+        }
+        for path in ["/usr/local/bin/claude", "/usr/local/Cellar/codex/1.0/bin/codex", "/opt/homebrew/bin/codex", "/usr/binx/claude",
+                     "/Users/me/.local/bin/claude", "/Applications/T3 Code.app/Contents/MacOS/T3 Code", ""] {
+            expect(!AgentAccess.systemProgram(path), "\(path) has its signature read")
+        }
+    }
+
     static func grants() {
         let grant = AgentAccess.Grant(item: "anthropic", title: "Anthropic", project: "/Users/me/petal", agent: .codex)
         func who(_ agent: AgentAccess.Agent, _ project: String) -> AgentAccess.Caller {
@@ -379,6 +496,15 @@ struct AgentAccessCheck {
         expect(AgentAccess.gate(own) == .petal, "Petal's own chat: the vault's own rules")
         expect(AgentAccess.gate(codex) == .check(codex), "another agent: checked against its grants")
         expect(AgentAccess.gate(AgentAccess.Caller(agent: .unknown, host: nil, project: "/p")) != .petal, "an unknown program is checked")
+    }
+
+    /// Two keys that would go in one variable are refused before anyone is asked, with what to do.
+    static func sameVariable() {
+        let clash = AgentAccess.sameVariable([("OpenAI work", "OPENAI_API_KEY"), ("Anthropic", "ANTHROPIC_API_KEY"), ("OpenAI home", "OPENAI_API_KEY")])
+        expect(clash?.contains("OpenAI work") == true && clash?.contains("OpenAI home") == true && clash?.contains("--env") == true,
+               "two OpenAI keys in OPENAI_API_KEY: refused, saying --env", clash ?? "nil")
+        expect(AgentAccess.sameVariable([("OpenAI work", "OPENAI_API_KEY"), ("OpenAI home", "OPENAI_HOME_KEY")]) == nil, "each in its own: fine")
+        expect(AgentAccess.sameVariable([("A", nil), ("B", nil), ("C", "C_KEY")]) == nil, "keys on the command's input don't clash")
     }
 
     static func words() {

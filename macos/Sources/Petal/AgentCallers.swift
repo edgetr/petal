@@ -22,7 +22,7 @@ enum AgentCallers {
             guard let info = bsdInfo(current) else { break }
             var process = AgentAccess.Process(pid: current, path: path(of: current))
             // Who signed it, for everything above what connected that could be an agent (never a system shell).
-            if !chain.isEmpty, !process.path.hasPrefix("/bin/"), !process.path.hasPrefix("/usr/"), !process.path.hasPrefix("/System/") {
+            if !chain.isEmpty, !AgentAccess.systemProgram(process.path) {
                 (process.team, process.identifier) = signer(current, start: info.start)
             }
             chain.append(process)
@@ -81,10 +81,14 @@ enum AgentCallers {
 
     nonisolated static func gitMark(_ folder: String) -> AgentAccess.GitMark? {
         let git = folder == "/" ? "/.git" : folder + "/.git"
-        var isFolder: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: git, isDirectory: &isFolder) else { return nil }
-        if isFolder.boolValue { return .folder }
-        return smallFile(git).map { .file($0) }
+        var info = stat()
+        guard lstat(git, &info) == 0 else { return nil }
+        switch info.st_mode & S_IFMT {
+        case S_IFLNK: return .link
+        case S_IFDIR: return .folder
+        case S_IFREG: return smallFile(git).map { .file($0) }
+        default: return nil
+        }
     }
 
     /// `path` with every link resolved, or nil when nothing is there.

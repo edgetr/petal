@@ -49,24 +49,47 @@ enum AgentAccess {
     // MARK: Taking keys out of what a command prints
 
     /// What a command prints, with every key `petal run` gave it replaced by "[<title> key]" before it reaches the
-    /// agent: the key itself, in hex, percent-encoded, and base64 (standard or URL-safe, at any of the three places
-    /// it can start in a longer encoding, and wrapped onto lines as MIME, PEM and `base64.encodebytes` write it: the
-    /// whole span, line breaks and all). Fed a read at a time: the end of a read that could be the start of a key is
-    /// held back (`carry`) until the next read says, so a key split across two reads is still taken out.
+    /// agent: the key itself, in hex, percent-encoded (each character as itself or as %XX in either case, as Python's
+    /// `quote` and `quote_plus`, JavaScript's `encodeURI` and `encodeURIComponent` and any mix of them write it), and
+    /// base64 (standard or URL-safe, at any of the three places it can start in a longer encoding, and wrapped onto
+    /// lines as MIME, PEM, `base64.encodebytes` and an indented YAML block write it: the whole span, line breaks and
+    /// all). Fed a read at a time: the end of a read that could be the start of a key is held back (`carry`) until the
+    /// next read says, so a key split across two reads is still taken out.
     struct Redactor {
+        private enum Kind: Hashable {
+            /// Byte for byte.
+            case plain
+            /// Base64: a gap (`gap`) may come between any two of its characters, at most `maxRuns` times, as when an
+            /// encoder wraps its lines.
+            case wraps
+            /// Percent-encoding: each byte as itself, or as %XX (hex in either case), or a space as "+".
+            case percent
+        }
         private struct Pattern {
             let bytes: [UInt8]
             let replacement: [UInt8]
-            /// Base64: whitespace may come between any two of its characters (`maxRun` bytes at a time, at most
-            /// `maxRuns` times), as when an encoder wraps its lines.
-            let wraps: Bool
-            var maxRuns: Int { wraps ? bytes.count / 4 + 1 : 0 }
+            let kind: Kind
+            var maxRuns: Int { kind == .wraps ? bytes.count / 4 + 1 : 0 }
             /// The most bytes a match can span.
-            var span: Int { bytes.count + maxRuns * Redactor.maxRun }
+            var span: Int {
+                switch kind {
+                case .plain: bytes.count
+                case .wraps: bytes.count + maxRuns * Redactor.maxGap
+                case .percent: bytes.count * 3
+                }
+            }
+            /// The bytes a match can start with.
+            var firsts: [UInt8] {
+                guard kind == .percent else { return [bytes[0]] }
+                return [bytes[0], UInt8(ascii: "%")] + (bytes[0] == 0x20 ? [UInt8(ascii: "+")] : [])
+            }
         }
-        /// A line break and the indent after it ("\r\n    ").
-        static let maxRun = 8
-        /// Patterns by their first byte, longest first.
+        /// A gap in wrapped base64: up to `maxBlanks` spaces or tabs, then maybe a line break (CRLF, LF or CR) and an
+        /// indent of up to `maxIndent` spaces or tabs (a YAML block nested a few levels deep).
+        static let maxBlanks = 8
+        static let maxIndent = 64
+        static let maxGap = maxBlanks + 2 + maxIndent
+        /// Patterns by the bytes they can start with, longest first.
         private var byFirst = [[Pattern]](repeating: [], count: 256)
         private var longest = 0
         private var carry: [UInt8] = []
@@ -81,17 +104,21 @@ enum AgentAccess {
                 for form in forms {
                     let bytes = Array(form.utf8)
                     guard !bytes.isEmpty, seen.insert(bytes).inserted else { continue }
-                    all.append(Pattern(bytes: bytes, replacement: replacement, wraps: wrapped.contains(form)))
+                    all.append(Pattern(bytes: bytes, replacement: replacement, kind: wrapped.contains(form) ? .wraps : .plain))
                 }
+                // Percent-encoded, in any of the ways encoders write it (the key as itself stays a plain pattern too).
+                let bytes = Array(secret.utf8)
+                if bytes.count >= 8 { all.append(Pattern(bytes: bytes, replacement: replacement, kind: .percent)) }
             }
             for pattern in all.sorted(by: { $0.bytes.count > $1.bytes.count }) {
-                byFirst[Int(pattern.bytes[0])].append(pattern)
+                for first in pattern.firsts { byFirst[Int(first)].append(pattern) }
                 longest = max(longest, pattern.span)
             }
         }
 
-        /// The ways a key is commonly printed. Short keys (under 8 characters) only as themselves, and base64 only
-        /// where at least 12 characters of it come from the key alone: shorter pieces would take out ordinary text.
+        /// The ways a key is commonly printed, byte for byte (percent-encoding is matched character by character,
+        /// in `compare`). Short keys (under 8 characters) only as themselves, and base64 only where at least 12
+        /// characters of it come from the key alone: shorter pieces would take out ordinary text.
         static func forms(of secret: String) -> [String] {
             let bytes = Array(secret.utf8)
             guard bytes.count >= 4 else { return [] }
@@ -99,21 +126,6 @@ enum AgentAccess {
             guard bytes.count >= 8 else { return out }
             out.append(bytes.map { String(format: "%02x", $0) }.joined())
             out.append(bytes.map { String(format: "%02X", $0) }.joined())
-            let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-            if let encoded = secret.addingPercentEncoding(withAllowedCharacters: unreserved), encoded != secret {
-                out.append(encoded)
-                // The same with lowercase hex digits (%2f), as some encoders write it.
-                var lower = ""
-                var rest = Substring(encoded)
-                while let percent = rest.firstIndex(of: "%") {
-                    lower += rest[..<percent]
-                    let end = rest.index(percent, offsetBy: 3, limitedBy: rest.endIndex) ?? rest.endIndex
-                    lower += rest[percent..<end].lowercased()
-                    rest = rest[end...]
-                }
-                lower += rest
-                if lower != encoded { out.append(lower) }
-            }
             return out + base64Forms(of: secret)
         }
 
@@ -184,29 +196,64 @@ enum AgentAccess {
 
         private enum Outcome: Equatable { case match(Int), partial, none }
 
-        private static func whitespace(_ byte: UInt8) -> Bool { byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D }
+        private static func blank(_ byte: UInt8) -> Bool { byte == 0x20 || byte == 0x09 }
+
+        private static func hex(_ byte: UInt8) -> UInt8? {
+            switch byte {
+            case UInt8(ascii: "0")...UInt8(ascii: "9"): byte - UInt8(ascii: "0")
+            case UInt8(ascii: "a")...UInt8(ascii: "f"): byte - UInt8(ascii: "a") + 10
+            case UInt8(ascii: "A")...UInt8(ascii: "F"): byte - UInt8(ascii: "A") + 10
+            default: nil
+            }
+        }
 
         /// `pattern` at `index`: found (and how many bytes it spans), cut off by the end of what's read so far, or not
-        /// there. A wrapping pattern skips bounded runs of whitespace between its characters.
+        /// there. A wrapping pattern skips bounded gaps between its characters; a percent pattern takes each byte as
+        /// itself or encoded.
         private static func compare(_ pattern: Pattern, _ buffer: [UInt8], at index: Int) -> Outcome {
             let count = buffer.count
             var position = index
             var runs = 0
             for (offset, byte) in pattern.bytes.enumerated() {
-                if pattern.wraps, offset > 0 {
-                    var run = 0
-                    while position < count, whitespace(buffer[position]) {
-                        run += 1
+                if pattern.kind == .wraps, offset > 0 {
+                    let before = position
+                    var blanks = 0
+                    while position < count, blank(buffer[position]) {
+                        blanks += 1
                         position += 1
-                        if run > maxRun { return .none }
+                        if blanks > maxBlanks { return .none }
                     }
-                    if run > 0 {
+                    var broke = false
+                    if position < count, buffer[position] == 0x0D { position += 1; broke = true }
+                    if position < count, buffer[position] == 0x0A { position += 1; broke = true }
+                    if broke {
+                        var indent = 0
+                        while position < count, blank(buffer[position]) {
+                            indent += 1
+                            position += 1
+                            if indent > maxIndent { return .none }
+                        }
+                    }
+                    if position > before {
                         runs += 1
                         if runs > pattern.maxRuns { return .none }
                     }
                 }
                 guard position < count else { return .partial }
-                guard buffer[position] == byte else { return .none }
+                let found = buffer[position]
+                if pattern.kind == .percent {
+                    if found == UInt8(ascii: "%") {
+                        guard position + 2 < count else { return .partial }
+                        if let high = hex(buffer[position + 1]), let low = hex(buffer[position + 2]), high << 4 | low == byte {
+                            position += 3
+                            continue
+                        }
+                    }
+                    guard found == byte || (byte == 0x20 && found == UInt8(ascii: "+")) else { return .none }
+                    position += 1
+                    continue
+                }
+                guard found == byte else { return .none }
                 position += 1
             }
             return .match(position - index)
@@ -339,6 +386,12 @@ enum AgentAccess {
         return Caller(agent: .command, host: host, project: project, program: peer.file, pid: pid)
     }
 
+    /// macOS's own programs (a shell, `env`), whose signer Petal doesn't read: never an agent. Not /usr/local or
+    /// /opt, where Homebrew puts Claude Code and Codex.
+    static func systemProgram(_ path: String) -> Bool {
+        ["/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/System/"].contains { path.hasPrefix($0) }
+    }
+
     /// The app the chain runs in: the outermost app bundle of the highest process inside one ("/Applications/T3 Code
     /// (Nightly).app/…" → "T3 Code"), without a trailing "(Nightly)" or "(Beta)".
     static func hostApp(_ chain: [Process]) -> String? {
@@ -354,15 +407,17 @@ enum AgentAccess {
 
     // MARK: Projects
 
-    /// What's at a folder's `.git`: a repository's own folder, or a file pointing at one (a worktree's, a submodule's).
+    /// What's at a folder's `.git`: a repository's own folder, a file pointing at one (a worktree's, a submodule's),
+    /// or a symbolic link (anyone can link a folder's `.git` to another project's; git never makes one).
     enum GitMark: Equatable {
         case folder
         case file(String)
+        case link
     }
 
     /// How `project` looks at the disk (AgentCallers.disk reads the real one; the checks hand in their own).
     struct GitFiles: Sendable {
-        /// What's at `folder`/.git.
+        /// What's at `folder`/.git, without following a link there.
         var mark: @Sendable (String) -> GitMark?
         /// A path with every link resolved (realpath), or nil when nothing is there.
         var real: @Sendable (String) -> String?
@@ -380,6 +435,8 @@ enum AgentAccess {
                 switch mark {
                 case .folder: return folder
                 case .file(let text): return worktreeMain(folder, gitFile: text, files: files) ?? folder
+                // Never the linked repository's project: only the folder itself.
+                case .link: return folder
                 }
             }
             guard folder != "/" else { return start }
@@ -390,9 +447,10 @@ enum AgentAccess {
 
     /// The main checkout of the worktree at `folder`, whose `.git` file says `gitFile`, only when git itself made it
     /// so: the gitdir it names exists and is an entry in a repository's `.git/worktrees/`, and that entry's own
-    /// `gitdir` file points back at this folder's `.git` (every path with its links resolved). A `.git` file anyone
-    /// can write ("gitdir: ~/trusted/.git/worktrees/x" in a folder of their own) never borrows another project's
-    /// grants; nil, and the project is the folder itself.
+    /// `gitdir` file points back at this folder's `.git` (every path with its links resolved), a `.git` in this very
+    /// folder. A `.git` file anyone can write ("gitdir: ~/trusted/.git/worktrees/x" in a folder of their own), or a
+    /// `.git` linked to a real worktree's, never borrows another project's grants; nil, and the project is the folder
+    /// itself.
     static func worktreeMain(_ folder: String, gitFile: String, files: GitFiles) -> String? {
         guard let line = gitFile.split(whereSeparator: \.isNewline).first(where: { $0.hasPrefix("gitdir:") }) else { return nil }
         var target = line.dropFirst("gitdir:".count).trimmingCharacters(in: .whitespaces)
@@ -409,6 +467,10 @@ enum AgentAccess {
             .map({ $0.trimmingCharacters(in: .whitespaces) }), !back.isEmpty else { return nil }
         let pointed = back.hasPrefix("/") ? back : entry + "/" + back
         guard let here = files.real(folder + "/.git").map(standard), files.real(pointed).map(standard) == here else { return nil }
+        // That .git is this folder's own, not another's reached through a link.
+        guard let real = files.real(pointed).map(standard), (real as NSString).lastPathComponent == ".git",
+              let mine = files.real(folder).map(standard), (real as NSString).deletingLastPathComponent == mine,
+              (here as NSString).deletingLastPathComponent == mine else { return nil }
         return main
     }
 
@@ -539,6 +601,20 @@ enum AgentAccess {
     struct RunError: Error, Equatable {
         let text: String
         init(_ text: String) { self.text = text }
+    }
+
+    /// Two keys going in the same variable (two OpenAI keys, both OPENAI_API_KEY by default): what to tell the
+    /// agent, or nil when every key has its own. `keys` are each key's title and variable (nil for --stdin).
+    static func sameVariable(_ keys: [(title: String, variable: String?)]) -> String? {
+        var first: [String: String] = [:]
+        for key in keys {
+            guard let variable = key.variable else { continue }
+            if let other = first[variable] {
+                return "“\(other)” and “\(key.title)” would both go in \(variable): say each one's variable with --env NAME after its --key."
+            }
+            first[variable] = key.title
+        }
+        return nil
     }
 
     /// The command as the card shows it: its words, quoted where they have spaces.

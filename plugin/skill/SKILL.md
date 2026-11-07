@@ -108,7 +108,8 @@ When the user says "get the Anthropic key from Petal to test this" or "use the l
 - Run the command through Petal: `petal run --key "Anthropic" -- npm test`. Petal puts the key in the command's
   variable for its service (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `GITHUB_TOKEN`,
   `STRIPE_SECRET_KEY`; `--env NAME` after a `--key` for another), or writes it to the command's input with
-  `--stdin`. Several `--key`s are fine. What the command prints comes back with the key replaced by
+  `--stdin`. Several `--key`s are fine; two that would go in the same variable (two OpenAI keys) each need their own
+  `--env`. What the command prints comes back with the key replaced by
   `[Anthropic key]`, and its exit code is the command's. `petal_vault` `action: list` (`kind: apiKey`) shows the
   titles.
 - A server you start to test (a bring-your-own-key app): start it with `petal run` so it has the key, or fill the
