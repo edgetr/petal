@@ -579,7 +579,8 @@ final class Previews {
     /// A still of a minimized window, taken once.
     func snapshot(_ window: AppWindow) {
         guard thumbnails[window.id] == nil, Capture.allowed else { return }
-        let target = (window: window, number: Windows.id(of: window.element))
+        // The window server's number is in its id, as in `capture`: no Accessibility call on the main thread.
+        let target = (window: window, number: window.id.split(separator: "w").last.flatMap { CGWindowID(String($0)) })
         Task {
             let pictures = await Capture.capture([target])
             for (id, image) in pictures { thumbnails[id] = image }

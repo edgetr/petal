@@ -240,15 +240,46 @@ final class Routines {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 
-    private func saveRoutines() {
-        let object: [String: Any] = ["routines": list.map(\.json)]
+    /// Makes `change` to the routines and writes them. If routines.json was edited by hand since Petal last read
+    /// it, the change is made to what's in the file instead, so that edit is never written over (a routine finishing
+    /// and noting its last run mustn't bring back one deleted in the file, or undo an edit there).
+    private func saveRoutines(_ change: @escaping (inout [Routine]) -> Void) {
+        change(&list)
+        let mine = list
+        let known = stamp
         let url = Self.file
         Self.io.async {
+            var routines = mine
+            var outside = false
+            if let now = Self.modified(url), now != known,
+               let disk = (Config.parse(url)?["routines"] as? [[String: Any]])?.compactMap(Routine.init) {
+                routines = disk
+                change(&routines)
+                outside = true
+            }
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            Config.writeObject(object, to: url)
+            Config.writeObject(["routines": routines.map(\.json)], to: url)
             let stamp = Self.modified(url)
-            DispatchQueue.main.async { MainActor.assumeIsolated { self.stamp = stamp } }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.stamp = stamp
+                    if outside { self.adopt(routines) }
+                }
+            }
         }
+    }
+
+    /// The routines as they are in the file now. One whose rule changed there (or that's gone) drops what was
+    /// decided under the old one, as when it's saved through Petal.
+    private func adopt(_ routines: [Routine]) {
+        for old in list {
+            let new = routines.first { $0.id == old.id }
+            if new == nil || new!.words != old.words || new!.actions != old.actions || new!.trigger != old.trigger {
+                ruleChanged(old.id, gone: new == nil)
+            }
+        }
+        list = routines
+        watch()
     }
 
     private func saveLog() {
@@ -361,16 +392,7 @@ final class Routines {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.stamp = now
-                    // Edited in the file: a routine whose rule changed (or that's gone) drops what was decided under
-                    // the old one, as when it's saved through Petal.
-                    for old in self.list {
-                        let new = routines.first { $0.id == old.id }
-                        if new == nil || new!.words != old.words || new!.actions != old.actions || new!.trigger != old.trigger {
-                            self.ruleChanged(old.id, gone: new == nil)
-                        }
-                    }
-                    self.list = routines
-                    self.watch()
+                    self.adopt(routines)   // edited in the file
                 }
             }
         }
@@ -518,10 +540,12 @@ final class Routines {
     }
 
     private func setLastRun(_ id: String, _ date: Date, result: String? = nil) {
-        guard let index = list.firstIndex(where: { $0.id == id }) else { return }
-        list[index].lastRun = date
-        if let result { list[index].lastResult = result }
-        saveRoutines()
+        guard list.contains(where: { $0.id == id }) else { return }
+        saveRoutines { list in
+            guard let index = list.firstIndex(where: { $0.id == id }) else { return }
+            list[index].lastRun = date
+            if let result { list[index].lastResult = result }
+        }
     }
 
     private func record(_ routine: Routine, said: [String], moves: [Move], made: [String]) {
@@ -807,16 +831,22 @@ final class Routines {
     // MARK: Changing them (the settings window, and Petal AI's tools)
 
     func setOn(_ id: String, _ on: Bool) {
-        guard let index = list.firstIndex(where: { $0.id == id }) else { return }
-        list[index].on = on
-        saveRoutines()
+        guard list.contains(where: { $0.id == id }) else { return }
+        // Turned off: an AI answer or a card still on its way doesn't move anything, and its queued files are dropped.
+        if !on {
+            ruleVersion[id, default: 0] += 1
+            plans[id] = nil
+            jobs.removeAll { $0.id == id }
+        }
+        saveRoutines { list in
+            if let index = list.firstIndex(where: { $0.id == id }) { list[index].on = on }
+        }
         watch()
     }
 
     func delete(_ id: String) {
-        list.removeAll { $0.id == id }
         ruleChanged(id, gone: true)
-        saveRoutines()
+        saveRoutines { $0.removeAll { $0.id == id } }
         watch()
     }
 
@@ -841,15 +871,18 @@ final class Routines {
             if old.words != routine.words || old.actions != routine.actions || old.trigger != routine.trigger {
                 ruleChanged(routine.id, gone: false)
             }
-            var routine = routine
-            routine.lastRun = list[index].lastRun
-            routine.lastResult = list[index].lastResult
-            list[index] = routine
-        } else {
-            list.append(routine)
         }
         plans[routine.id] = nil
-        saveRoutines()
+        saveRoutines { list in
+            if let index = list.firstIndex(where: { $0.id == routine.id }) {
+                var routine = routine
+                routine.lastRun = list[index].lastRun
+                routine.lastResult = list[index].lastResult
+                list[index] = routine
+            } else {
+                list.append(routine)
+            }
+        }
         watch()
     }
 
