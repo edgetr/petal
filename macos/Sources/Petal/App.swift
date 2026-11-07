@@ -459,8 +459,8 @@ final class PetalApp {
             // process that connected, whatever it says, so it never stands in for a note or another session.
             let claimed = args.dropFirst(2).first ?? ""
             let caller = who.agent == .petal && !claimed.isEmpty ? claimed : "mcp-\(who.pid)"
-            AgentGrants.shared.seen(caller, who)
-            assist.handle(args.first ?? "", args.dropFirst().first ?? "{}", note: caller, reply: reply)
+            // Who it is goes with the request itself, never looked up again later.
+            assist.handle(args.first ?? "", args.dropFirst().first ?? "{}", note: caller, who: who, reply: reply)
         }
         // `petal run` asking for API keys (AgentCallers.swift).
         ipc.onFrom("agentKeys") { [unowned self] args, who, reply in

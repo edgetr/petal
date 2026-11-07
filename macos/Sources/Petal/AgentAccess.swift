@@ -4,7 +4,8 @@ import Foundation
 /// secrets: the pure side. Which variable `petal run` puts a key in, taking a key out of what a command prints
 /// (`Redactor`), who's asking, from the processes Petal read itself (`Caller`), which project that is, and the
 /// person's grants (`Grant`). Nothing here reads a process, the Keychain or a file (AgentCallers.swift and
-/// AgentRun.swift do), so `macos/checks/run.sh` checks it.
+/// AgentRun.swift do; `project` reads the disk only through the `GitFiles` it's handed), so `macos/checks/run.sh`
+/// checks it.
 enum AgentAccess {
     // MARK: Which variable
 
@@ -49,10 +50,22 @@ enum AgentAccess {
 
     /// What a command prints, with every key `petal run` gave it replaced by "[<title> key]" before it reaches the
     /// agent: the key itself, in hex, percent-encoded, and base64 (standard or URL-safe, at any of the three places
-    /// it can start in a longer encoding). Fed a read at a time: the end of a read that could be the start of a key
-    /// is held back (`carry`) until the next read says, so a key split across two reads is still taken out.
+    /// it can start in a longer encoding, and wrapped onto lines as MIME, PEM and `base64.encodebytes` write it: the
+    /// whole span, line breaks and all). Fed a read at a time: the end of a read that could be the start of a key is
+    /// held back (`carry`) until the next read says, so a key split across two reads is still taken out.
     struct Redactor {
-        private struct Pattern { let bytes: [UInt8]; let replacement: [UInt8] }
+        private struct Pattern {
+            let bytes: [UInt8]
+            let replacement: [UInt8]
+            /// Base64: whitespace may come between any two of its characters (`maxRun` bytes at a time, at most
+            /// `maxRuns` times), as when an encoder wraps its lines.
+            let wraps: Bool
+            var maxRuns: Int { wraps ? bytes.count / 4 + 1 : 0 }
+            /// The most bytes a match can span.
+            var span: Int { bytes.count + maxRuns * Redactor.maxRun }
+        }
+        /// A line break and the indent after it ("\r\n    ").
+        static let maxRun = 8
         /// Patterns by their first byte, longest first.
         private var byFirst = [[Pattern]](repeating: [], count: 256)
         private var longest = 0
@@ -63,15 +76,17 @@ enum AgentAccess {
             var all: [Pattern] = []
             for (secret, label) in secrets {
                 let replacement = Array("[\(label) key]".utf8)
-                for form in Self.forms(of: secret) {
+                let forms = Self.forms(of: secret)
+                let wrapped = Set(Self.base64Forms(of: secret))
+                for form in forms {
                     let bytes = Array(form.utf8)
                     guard !bytes.isEmpty, seen.insert(bytes).inserted else { continue }
-                    all.append(Pattern(bytes: bytes, replacement: replacement))
+                    all.append(Pattern(bytes: bytes, replacement: replacement, wraps: wrapped.contains(form)))
                 }
             }
             for pattern in all.sorted(by: { $0.bytes.count > $1.bytes.count }) {
                 byFirst[Int(pattern.bytes[0])].append(pattern)
-                longest = max(longest, pattern.bytes.count)
+                longest = max(longest, pattern.span)
             }
         }
 
@@ -99,8 +114,15 @@ enum AgentAccess {
                 lower += rest
                 if lower != encoded { out.append(lower) }
             }
-            // In base64 a key starts at one of three places in a group of three bytes. Each gives a run of characters
-            // that come from the key's bits alone, whatever is around it.
+            return out + base64Forms(of: secret)
+        }
+
+        /// In base64 a key starts at one of three places in a group of three bytes. Each gives a run of characters
+        /// that come from the key's bits alone, whatever is around it: standard and URL-safe.
+        static func base64Forms(of secret: String) -> [String] {
+            let bytes = Array(secret.utf8)
+            guard bytes.count >= 8 else { return [] }
+            var out: [String] = []
             for offset in 0..<3 {
                 let encoded = Array(Data(Array(repeating: 0, count: offset) + bytes).base64EncodedString().utf8)
                 let first = (8 * offset + 5) / 6
@@ -131,9 +153,9 @@ enum AgentAccess {
             out.reserveCapacity(count)
             var index = 0
             while index < hold {
-                if let pattern = match(buffer, at: index) {
+                if let (pattern, length) = match(buffer, at: index) {
                     out += pattern.replacement
-                    index += pattern.bytes.count
+                    index += length
                 } else {
                     out.append(buffer[index])
                     index += 1
@@ -148,28 +170,52 @@ enum AgentAccess {
         private func held(_ buffer: [UInt8]) -> Int {
             let count = buffer.count
             for start in max(0, count - longest + 1)..<count {
-                let tail = buffer[start...]
-                if byFirst[Int(buffer[start])].contains(where: { $0.bytes.count > tail.count && $0.bytes.starts(with: tail) }) { return start }
+                if byFirst[Int(buffer[start])].contains(where: { Self.compare($0, buffer, at: start) == .partial }) { return start }
             }
             return count
         }
 
-        private func match(_ buffer: [UInt8], at index: Int) -> Pattern? {
-            for pattern in byFirst[Int(buffer[index])] where index + pattern.bytes.count <= buffer.count {
-                var same = true
-                for offset in 1..<pattern.bytes.count where buffer[index + offset] != pattern.bytes[offset] {
-                    same = false
-                    break
-                }
-                if same { return pattern }
+        private func match(_ buffer: [UInt8], at index: Int) -> (Pattern, Int)? {
+            for pattern in byFirst[Int(buffer[index])] {
+                if case .match(let length) = Self.compare(pattern, buffer, at: index) { return (pattern, length) }
             }
             return nil
+        }
+
+        private enum Outcome: Equatable { case match(Int), partial, none }
+
+        private static func whitespace(_ byte: UInt8) -> Bool { byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D }
+
+        /// `pattern` at `index`: found (and how many bytes it spans), cut off by the end of what's read so far, or not
+        /// there. A wrapping pattern skips bounded runs of whitespace between its characters.
+        private static func compare(_ pattern: Pattern, _ buffer: [UInt8], at index: Int) -> Outcome {
+            let count = buffer.count
+            var position = index
+            var runs = 0
+            for (offset, byte) in pattern.bytes.enumerated() {
+                if pattern.wraps, offset > 0 {
+                    var run = 0
+                    while position < count, whitespace(buffer[position]) {
+                        run += 1
+                        position += 1
+                        if run > maxRun { return .none }
+                    }
+                    if run > 0 {
+                        runs += 1
+                        if runs > pattern.maxRuns { return .none }
+                    }
+                }
+                guard position < count else { return .partial }
+                guard buffer[position] == byte else { return .none }
+                position += 1
+            }
+            return .match(position - index)
         }
     }
 
     // MARK: Who's asking
 
-    /// The kinds of caller. A grant names one (or `any`, for every agent that's confirmed).
+    /// The kinds of caller. A grant names a verified agent (or `any`, for every verified agent).
     enum Agent: String, Codable, CaseIterable {
         case claude, codex, opencode
         /// A command the person ran in a terminal, with no agent above it.
@@ -193,8 +239,13 @@ enum AgentAccess {
             }
         }
 
+        /// Signed by its maker, checked by Petal (Claude Code, Codex): only these are ever allowed Always, and only
+        /// these does a grant (even one for any agent) cover. Everything else (opencode, known by its name only; a
+        /// command with no verified agent above it; an unknown program) is allowed once at a time.
+        var verified: Bool { AgentAccess.makers[self] != nil }
+
         /// What a grant can name, in Settings.
-        static let grantable: [Agent] = [.claude, .codex, .opencode, .any]
+        static let grantable: [Agent] = [.claude, .codex, .any]
     }
 
     /// Who signed each agent: its maker's Team ID and the identifier its maker gives it. A program that only looks
@@ -250,8 +301,6 @@ enum AgentAccess {
         var project: String
         /// What connected, by name, for an unknown program ("nc", "python3").
         var program: String = ""
-        /// The agent is signed by its maker (Claude Code, Codex); false for one Petal knows only by name (opencode).
-        var confirmed = true
         /// What connected is Petal's own code (`petal run`, `Petal --mcp`): only it is ever handed a key.
         var peerIsPetal = true
         /// The process that connected.
@@ -266,8 +315,8 @@ enum AgentAccess {
             }
         }
 
-        /// May be granted Always (an unknown program and Petal's own chats never are).
-        var grantable: Bool { ![.unknown, .petal, .any].contains(agent) }
+        /// May be granted Always, and covered by a grant: only an agent signed by its maker (`Agent.verified`).
+        var grantable: Bool { agent.verified }
     }
 
     /// Who's asking: `chain` is the process that connected to Petal's socket, then its parent, and so on up.
@@ -285,7 +334,7 @@ enum AgentAccess {
         for process in chain.dropFirst() {
             guard let agent = process.agent else { continue }
             if agent == .unknown { return Caller(agent: .unknown, host: host, project: project, program: process.file, pid: pid) }
-            return Caller(agent: agent, host: host, project: project, program: process.file, confirmed: makers[agent] != nil, pid: pid)
+            return Caller(agent: agent, host: host, project: project, program: process.file, pid: pid)
         }
         return Caller(agent: .command, host: host, project: project, program: peer.file, pid: pid)
     }
@@ -311,28 +360,56 @@ enum AgentAccess {
         case file(String)
     }
 
+    /// How `project` looks at the disk (AgentCallers.disk reads the real one; the checks hand in their own).
+    struct GitFiles: Sendable {
+        /// What's at `folder`/.git.
+        var mark: @Sendable (String) -> GitMark?
+        /// A path with every link resolved (realpath), or nil when nothing is there.
+        var real: @Sendable (String) -> String?
+        /// A small file's text, or nil.
+        var read: @Sendable (String) -> String?
+    }
+
     /// The project a folder belongs to: the nearest git repository above it (a worktree's main checkout, so T3's
     /// worktrees of ~/petal are all ~/petal), else the folder itself. `path` is absolute with links resolved.
-    static func project(_ path: String, git: (String) -> GitMark?) -> String {
+    static func project(_ path: String, files: GitFiles) -> String {
         let start = standard(path)
         var folder = start
         while true {
-            if let mark = git(folder) {
+            if let mark = files.mark(folder) {
                 switch mark {
                 case .folder: return folder
-                case .file(let text):
-                    guard let line = text.split(separator: "\n").first(where: { $0.hasPrefix("gitdir:") }) else { return folder }
-                    var target = line.dropFirst("gitdir:".count).trimmingCharacters(in: .whitespaces)
-                    if !target.hasPrefix("/") { target = folder + "/" + target }
-                    target = standard(target)
-                    if let worktrees = target.range(of: "/.git/worktrees/") { return String(target[..<worktrees.lowerBound]) }
-                    return folder
+                case .file(let text): return worktreeMain(folder, gitFile: text, files: files) ?? folder
                 }
             }
             guard folder != "/" else { return start }
             folder = (folder as NSString).deletingLastPathComponent
             if folder.isEmpty { folder = "/" }
         }
+    }
+
+    /// The main checkout of the worktree at `folder`, whose `.git` file says `gitFile`, only when git itself made it
+    /// so: the gitdir it names exists and is an entry in a repository's `.git/worktrees/`, and that entry's own
+    /// `gitdir` file points back at this folder's `.git` (every path with its links resolved). A `.git` file anyone
+    /// can write ("gitdir: ~/trusted/.git/worktrees/x" in a folder of their own) never borrows another project's
+    /// grants; nil, and the project is the folder itself.
+    static func worktreeMain(_ folder: String, gitFile: String, files: GitFiles) -> String? {
+        guard let line = gitFile.split(whereSeparator: \.isNewline).first(where: { $0.hasPrefix("gitdir:") }) else { return nil }
+        var target = line.dropFirst("gitdir:".count).trimmingCharacters(in: .whitespaces)
+        guard !target.isEmpty else { return nil }
+        if !target.hasPrefix("/") { target = folder + "/" + target }
+        guard let entry = files.real(target).map(standard) else { return nil }
+        // <main>/.git/worktrees/<name>
+        let parts = entry.split(separator: "/")
+        guard parts.count >= 4, parts[parts.count - 2] == "worktrees", parts[parts.count - 3] == ".git" else { return nil }
+        let main = "/" + parts.dropLast(3).joined(separator: "/")
+        guard files.mark(main) == .folder, files.real(main + "/.git").map(standard) == main + "/.git" else { return nil }
+        // The entry points back here (git writes the worktree's .git file's path, absolute or relative to the entry).
+        guard let back = files.read(entry + "/gitdir")?.split(whereSeparator: \.isNewline).first
+            .map({ $0.trimmingCharacters(in: .whitespaces) }), !back.isEmpty else { return nil }
+        let pointed = back.hasPrefix("/") ? back : entry + "/" + back
+        guard let here = files.real(folder + "/.git").map(standard), files.real(pointed).map(standard) == here else { return nil }
+        return main
     }
 
     /// An absolute path without "." and "..", or a trailing slash.
@@ -375,8 +452,12 @@ enum AgentAccess {
 
         static let newLogins = "*new-logins"
 
+        /// Only a verified agent's grant (or any agent's) is ever kept: one for opencode, a command or an unknown
+        /// program, even from an older file, counts for nothing.
+        var storable: Bool { agent == .any || agent.verified }
+
         func covers(item: String, project: String, agent: Agent) -> Bool {
-            guard self.item == item, ![.unknown, .petal, .any].contains(agent) else { return false }
+            guard self.item == item, storable, agent.verified else { return false }
             guard self.agent == .any || self.agent == agent else { return false }
             let mine = AgentAccess.standard(self.project), theirs = AgentAccess.standard(project)
             return theirs == mine || theirs.hasPrefix(mine == "/" ? "/" : mine + "/")
@@ -385,6 +466,20 @@ enum AgentAccess {
 
     static func granted(_ grants: [Grant], item: String, caller: Caller) -> Grant? {
         grants.first { $0.covers(item: item, project: caller.project, agent: caller.agent) }
+    }
+
+    /// How a vault use goes on, from the identity Petal read off the socket when the request came in and carried
+    /// with it (never looked up again later): Petal's own chats keep the vault's own rules, any other caller is
+    /// checked against its grants and asked, and a request that came with no identity is refused.
+    enum Gate: Equatable {
+        case petal
+        case check(Caller)
+        case refuse
+    }
+
+    static func gate(_ who: Caller?) -> Gate {
+        guard let who else { return .refuse }
+        return who.agent == .petal ? .petal : .check(who)
     }
 
     // MARK: petal run

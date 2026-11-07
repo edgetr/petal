@@ -159,8 +159,9 @@ final class Assist {
     // MARK: The tools
 
     /// One of Petal AI's tools, from `Petal --mcp` (["assist", name, json]); the reply is one line of JSON.
-    /// `note`: the sticky note whose chat asks (PETAL_NOTE), so looking looks at its window.
-    func handle(_ name: String, _ json: String, note: String? = nil, reply: @escaping @MainActor (String) -> Void) {
+    /// `note`: the sticky note whose chat asks (PETAL_NOTE), so looking looks at its window. `who`: who's asking, as
+    /// Petal read it off the socket when the request came in (AgentCallers).
+    func handle(_ name: String, _ json: String, note: String? = nil, who: AgentAccess.Caller? = nil, reply: @escaping @MainActor (String) -> Void) {
         let args = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
         let send: (Any) -> Void = { result in
             let object: Any = JSONSerialization.isValidJSONObject(result) ? result : ["result": "\(result)"]
@@ -193,7 +194,7 @@ final class Assist {
                 did("Made a page: \(title)", undo: .open(file.path, title))
                 send(["opened": file.path])
             } catch { fail(error.localizedDescription) }
-        case "petal_vault": vault(args, caller: note, send, fail)
+        case "petal_vault": vault(args, caller: note, who: who, send, fail)
         case "petal_ui", "petal_act": computer.handle(name, args, note: note, send: send, fail: fail)
         case "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
             app.routines.handle(name, args, send, fail)

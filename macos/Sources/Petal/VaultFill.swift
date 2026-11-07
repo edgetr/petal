@@ -411,13 +411,14 @@ extension Assist {
     /// `request` what's missing through Petal's card; `new_login` a strong password made, saved and filled. The AI
     /// never sees a password, card number, security code or key. Every step after the first checks the call's reply
     /// is still going (ComputerUse.token).
-    func vault(_ args: [String: Any], caller: String?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    /// `who`: who's asking, read off the socket when the call came in and carried with it to every card and gate.
+    func vault(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         switch (args["action"] as? String ?? "list").lowercased() {
         case "list": vaultList(args, send)
-        case "fill": vaultFill(args, caller: caller, send, fail)
-        case "request": vaultRequest(args, caller: caller, send, fail)
-        case "new_login", "generate": vaultNewLogin(args, caller: caller, send, fail)
-        case "use": vaultUse(args, caller: caller, send, fail)
+        case "fill": vaultFill(args, caller: caller, who: who, send, fail)
+        case "request": vaultRequest(args, caller: caller, who: who, send, fail)
+        case "new_login", "generate": vaultNewLogin(args, caller: caller, who: who, send, fail)
+        case "use": vaultUse(args, caller: caller, who: who, send, fail)
         default: fail("action is list, fill, request or new_login.")
         }
     }
@@ -435,8 +436,8 @@ extension Assist {
     }
 
     /// Who's asking, in a card's words: "Petal AI", or an agent outside Petal ("Codex in T3 Code").
-    func speaker(_ caller: String?) -> String {
-        guard let who = caller.flatMap({ AgentGrants.shared.callers[$0] }), who.agent != .petal else { return "Petal AI" }
+    func speaker(_ who: AgentAccess.Caller?) -> String {
+        guard let who, who.agent != .petal else { return "Petal AI" }
         return who.label
     }
 
@@ -579,7 +580,7 @@ extension Assist {
 
     // MARK: fill
 
-    private func vaultFill(_ args: [String: Any], caller: String?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func vaultFill(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         if let refusal = computer.refusal() { return fail(refusal) }
         guard let wanted = wantedFields(args), !wanted.isEmpty else {
             return fail("Give fields: {field: id} with ids from petal_ui, like {\"username\": \"e3\", \"password\": \"e4\"} (or field and id for one).")
@@ -625,7 +626,7 @@ extension Assist {
             // An agent outside Petal asks first, unless the person granted it this item in this project.
             let noun = Self.agentNoun(item)
             let at = "\(places[0].web ? "on" : "in") \(places[0].where_)"
-            self.agentGate(caller, grant: item.id, title: item.title, what: "fill \(noun) \(at)", task: task, did: "used \(noun) \(at)", fail: fail) {
+            self.agentGate(caller, who: who, grant: item.id, title: item.title, what: "fill \(noun) \(at)", task: task, did: "used \(noun) \(at)", fail: fail) {
                 guard self.computer.live(caller, token) else { return fail(Self.over) }
                 var plans: [VaultFillPlan] = []
                 var asked: [VaultField] = []
@@ -664,7 +665,7 @@ extension Assist {
                     self.vaultFillAll(plans, entries: entries, map: map, caller: caller, token: token, allowed: allowed, send: send)
                 }
                 if let buyPlace {
-                    return self.vaultBuy(item, place: buyPlace, args: args, map: map, caller: caller, token: token, send: send, fail: fail) { go(true) }
+                    return self.vaultBuy(item, place: buyPlace, args: args, map: map, caller: caller, who: who, token: token, send: send, fail: fail) { go(true) }
                 }
                 // One card for every field that doesn't match, naming them all. Payment info a Buy covers fills on that
                 // Buy, without asking to use the browser.
@@ -704,7 +705,7 @@ extension Assist {
     /// The one card before payment info goes into a shop's page: "Buy on checkout.shop.example?", what Petal AI says
     /// it's buying (its words, marked as such) and the card. Buy lets that card's payment info fill on that exact
     /// host, in that window and tab, for the rest of the reply; Don't (the default) fills nothing.
-    private func vaultBuy(_ item: VaultItem, place: Vault.Place, args: [String: Any], map: ComputerUse.Map, caller: String, token: Acting.Cancel,
+    private func vaultBuy(_ item: VaultItem, place: Vault.Place, args: [String: Any], map: ComputerUse.Map, caller: String, who asker: AgentAccess.Caller?, token: Acting.Cancel,
                           send: @escaping (Any) -> Void, fail: @escaping (String) -> Void, bought: @escaping () -> Void) {
         guard let shop = place.shop, map.windowID != nil, place.tab.page != nil else {
             return fail("Petal couldn't tell which page, tab or window this is, so it fills no payment info here.")
@@ -712,7 +713,7 @@ extension Assist {
         let what = UIMap.truncate(UIMap.tidy(args["buying"] as? String ?? ""), 160)
         let price = UIMap.truncate(UIMap.tidy(args["price"] as? String ?? ""), 40)
         let said = [what, price].filter { !$0.isEmpty }.joined(separator: ", ")
-        let who = speaker(caller)
+        let who = speaker(asker)
         let detail = (said.isEmpty ? "\(who) didn't say what it's buying." : "\(who) says: “\(said)”.") + " Pays with \(Vault.cardName(item))."
         // A new Buy card for this window ends the Buy already in it (another card on the same checkout), before the
         // person answers: a Don't, a closed card or no answer never leaves the earlier one usable.
@@ -741,7 +742,7 @@ extension Assist {
     /// payment info: that waits for Buy), and the card says plainly when that page or app isn't where a login or key
     /// belongs (not secure, another site in a frame, an app Petal can't verify); for a login, "Save to your vault"
     /// (on by default) keeps it for that site.
-    private func vaultRequest(_ args: [String: Any], caller: String?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func vaultRequest(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let legacyName = (args["name"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         let kind = (args["kind"] as? String).flatMap { $0.isEmpty ? nil : Vault.kindNamed($0) } ?? (legacyName.isEmpty ? .login : .apiKey)
         guard VaultKind.made.contains(kind) else { return fail("kind is login, contact, address, card or apiKey.") }
@@ -779,7 +780,7 @@ extension Assist {
             form.username = args["username"] as? String ?? ""
             if kind == .apiKey, let read, read.web { form.site = read.host ?? "" }
             // What doesn't match comes first, in Petal's words; then what Petal AI said, marked as its own.
-            let said = why.isEmpty ? "" : "\(self.speaker(caller)) says: “\(UIMap.truncate(UIMap.tidy(why), 300))”"
+            let said = why.isEmpty ? "" : "\(self.speaker(who)) says: “\(UIMap.truncate(UIMap.tidy(why), 300))”"
             let detail = [warning ?? "", said].filter { !$0.isEmpty }.joined(separator: "\n\n")
             self.ask("vault-new", form.heading, detail: detail, always: true, form: form, warn: warning != nil, owner: caller, typed: { answer in
                 guard live() else { return send(["declined": Self.over]) }
@@ -889,7 +890,7 @@ extension Assist {
     /// A new account: Petal makes a strong password, saves it as a login for the page it read, and fills the
     /// password field (and the one confirming it, and the username): only where every one of those fields would
     /// fill by itself (one secure page of that site, or an app Petal verified).
-    private func vaultNewLogin(_ args: [String: Any], caller: String?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func vaultNewLogin(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         if let refusal = computer.refusal() { return fail(refusal) }
         let passwordID = args["password_id"] as? String ?? args["id"] as? String ?? ""
         guard !passwordID.isEmpty else { return fail("Give password_id (the new password field's id from petal_ui), and confirm_id if the page asks for it twice.") }
@@ -925,7 +926,7 @@ extension Assist {
             }
             // An agent outside Petal asks first, unless the person granted it new logins in this project.
             let at = "\(place.web ? "on" : "in") \(place.where_)"
-            self.agentGate(caller, grant: AgentAccess.Grant.newLogins, title: "New logins", what: "make a new login \(at)", task: task,
+            self.agentGate(caller, who: who, grant: AgentAccess.Grant.newLogins, title: "New logins", what: "make a new login \(at)", task: task,
                            did: "started a new login \(at)", fail: fail) {
                 guard self.computer.live(caller, token) else { return fail(Self.over) }
                 VaultStore.queue.async {
@@ -978,7 +979,7 @@ extension Assist {
     /// An older way to fill: a saved key or password by its name, into a field. It goes through `fill` with every
     /// one of fill's checks (the field's id from petal_ui, its page or app, its kind, Stop): `id`, else the one field
     /// petal_ui saw with the cursor.
-    private func vaultUse(_ args: [String: Any], caller: String?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func vaultUse(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let name = (args["name"] as? String ?? args["item"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return fail("Give the item's id or name (action list shows them), and fill with action fill.") }
         var id = (args["id"] as? String ?? "").trimmingCharacters(in: .whitespaces)
@@ -1009,7 +1010,7 @@ extension Assist {
             forwarded["field"] = nil
             forwarded["id"] = nil
             forwarded["fields"] = [item.kind == .login ? "password" : "value": picked]
-            self.vaultFill(forwarded, caller: caller, send, fail)
+            self.vaultFill(forwarded, caller: caller, who: who, send, fail)
         }
     }
 }

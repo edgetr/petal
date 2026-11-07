@@ -48,8 +48,8 @@ Use, in this order:
    and the price). Missing details: `action: request` (the user types them into Petal's card); a new account:
    `action: new_login`. Never ask for a password, card or key in the chat. From a session outside Petal's own chat
    (T3 Code, a terminal), the first time you use an item in a project (or make a login there) Petal asks the user:
-   Always for this project, Allow once or Don't. They can allow it ahead in Settings › Vault › Agents; an
-   unanswered card counts as Don't after two minutes. API keys for commands: see below.
+   Always for this project (Claude Code or Codex only), Allow once or Don't. They can allow it ahead in Settings ›
+   Vault › Agents; an unanswered card counts as Don't after two minutes. API keys for commands: see below.
    In Petal's own panel each chat is a sticky note (`aiNotes`): stuck to the browser tab, window, or all of the
    app it was opened on (a chip on the note changes which), so `petal_look` looks there even after the user moves
    on (`front: true` for what's in front now; a tab's note says its tab under `noteTab`, and reads, acts and fills

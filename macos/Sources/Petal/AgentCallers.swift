@@ -29,7 +29,7 @@ enum AgentCallers {
             current = info.parent
         }
         let folder = workingFolder(pid).map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path } ?? "/"
-        let project = AgentAccess.project(folder, git: gitMark)
+        let project = AgentAccess.project(folder, files: disk)
         return AgentAccess.caller(chain: chain, petalPID: petal, peerIsPetal: peerIsPetal, project: project)
     }
 
@@ -76,14 +76,29 @@ enum AgentCallers {
         return path.isEmpty ? nil : path
     }
 
+    /// The real disk, for `AgentAccess.project`.
+    nonisolated static let disk = AgentAccess.GitFiles(mark: { gitMark($0) }, real: { realPath($0) }, read: { smallFile($0) })
+
     nonisolated static func gitMark(_ folder: String) -> AgentAccess.GitMark? {
         let git = folder == "/" ? "/.git" : folder + "/.git"
         var isFolder: ObjCBool = false
         guard FileManager.default.fileExists(atPath: git, isDirectory: &isFolder) else { return nil }
         if isFolder.boolValue { return .folder }
-        guard let handle = FileHandle(forReadingAtPath: git) else { return nil }
+        return smallFile(git).map { .file($0) }
+    }
+
+    /// `path` with every link resolved, or nil when nothing is there.
+    nonisolated static func realPath(_ path: String) -> String? {
+        guard let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
+    /// The first 4 KB of a file, as text.
+    nonisolated static func smallFile(_ path: String) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? handle.close() }
-        return .file(String(decoding: (try? handle.read(upToCount: 4096)) ?? Data(), as: UTF8.self))
+        return String(decoding: (try? handle.read(upToCount: 4096)) ?? Data(), as: UTF8.self)
     }
 
     private static let lock = NSLock()

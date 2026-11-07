@@ -11,8 +11,6 @@ final class AgentGrants {
 
     private(set) var grants: [AgentAccess.Grant] = []
     private(set) var loaded = false
-    /// Who each caller on the socket is, by the id Assist knows it by ("mcp-<pid>", a note's id).
-    @ObservationIgnored var callers: [String: AgentAccess.Caller] = [:]
 
     nonisolated static var file: URL {
         if let path = ProcessInfo.processInfo.environment["PETAL_AGENT_GRANTS"], !path.isEmpty { return URL(fileURLWithPath: path) }
@@ -26,7 +24,8 @@ final class AgentGrants {
     func load() {
         guard !loaded else { return }
         Self.queue.async {
-            let read = (try? Data(contentsOf: Self.file)).flatMap { try? JSONDecoder().decode([AgentAccess.Grant].self, from: $0) } ?? []
+            // A grant for an agent Petal can't verify (opencode, from an older Petal) counts for nothing: left out.
+            let read = ((try? Data(contentsOf: Self.file)).flatMap { try? JSONDecoder().decode([AgentAccess.Grant].self, from: $0) } ?? []).filter(\.storable)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard !self.loaded else { return }
@@ -39,7 +38,7 @@ final class AgentGrants {
     }
 
     func add(_ grant: AgentAccess.Grant) {
-        guard !grants.contains(where: { $0.item == grant.item && $0.project == grant.project && $0.agent == grant.agent }) else { return }
+        guard grant.storable, !grants.contains(where: { $0.item == grant.item && $0.project == grant.project && $0.agent == grant.agent }) else { return }
         grants.append(grant)
         save()
     }
@@ -66,12 +65,6 @@ final class AgentGrants {
         }
     }
 
-    /// Remembers who a caller is (pruned so it never grows without end).
-    func seen(_ id: String, _ caller: AgentAccess.Caller) {
-        if callers.count > 200 { callers = callers.filter { $0.key == id } }
-        callers[id] = caller
-    }
-
     /// Grants are read before the first answer that needs them.
     func whenLoaded(_ then: @escaping @MainActor () -> Void) {
         if loaded { return then() }
@@ -89,12 +82,19 @@ extension Assist {
     var home: String { NSHomeDirectory() }
 
     /// Before an agent outside Petal uses a vault item (`grant`: the item's id, or new logins): what it's allowed.
-    /// Petal's own chats keep their rules (no grant). An agent with a grant for this item in this project goes on;
-    /// any other asks the person with a card: Always for this project (never for an unknown program, or the home
-    /// folder), Allow once, or Don't (the default). Every use is kept in What Petal AI did.
-    func agentGate(_ caller: String?, grant item: String, title: String, what: String, task: String, did done: String,
+    /// `who` is the identity read off the socket when the request came in, carried with it: with none, nothing
+    /// goes on. Petal's own chats keep their rules (no grant). A verified agent with a grant for this item in this
+    /// project goes on; any other asks the person with a card: Always for this project (only for Claude Code or
+    /// Codex signed by its maker, never the home folder), Allow once, or Don't (the default). Every use is kept in
+    /// What Petal AI did.
+    func agentGate(_ caller: String, who identity: AgentAccess.Caller?, grant item: String, title: String, what: String, task: String, did done: String,
                    fail: @escaping (String) -> Void, go: @escaping () -> Void) {
-        guard let caller, let who = AgentGrants.shared.callers[caller], who.agent != .petal else { return go() }
+        let who: AgentAccess.Caller
+        switch AgentAccess.gate(identity) {
+        case .petal: return go()
+        case .refuse: return fail("Petal couldn't tell who's asking, so it used nothing from the vault. Try again.")
+        case .check(let caller): who = caller
+        }
         let grants = AgentGrants.shared
         grants.whenLoaded { [self] in
             let place = AgentAccess.shown(who.project, home: home)
@@ -122,7 +122,8 @@ extension Assist {
         if !said.isEmpty { lines.append("It says: “\(said)”.") }
         switch who.agent {
         case .unknown: lines.append("Petal can't tell what this program is: it isn't an agent Petal knows, signed by its maker.")
-        case .opencode: lines.append("Petal knows opencode by its name only; it can't confirm who made it.")
+        case .opencode: lines.append("Petal knows opencode by its name only; it can't confirm who made it, so it's allowed once at a time.")
+        case .command: lines.append("Petal sees no agent it can confirm above this command, so it's allowed once at a time.")
         default: break
         }
         lines.append(how)
@@ -173,18 +174,34 @@ extension Assist {
             let place = AgentAccess.shown(who.project, home: home)
             let record = "\(who.label) used your \(titles.joined(separator: ", ")) key\(titles.count == 1 ? "" : "s")"
                 + (command.isEmpty ? "" : " for “\(AgentAccess.clipped(command, 60))”") + " in \(place)"
-            let give = {
-                self.did(record)
-                send(["keys": found.map { pair -> [String: Any] in
-                    var key: [String: Any] = ["title": pair.item.title, "secret": pair.item[.value]]
-                    if let variable = pair.variable { key["env"] = variable }
-                    return key
-                }])
+            // Read again right before the keys go (the card may have waited): each item still there as it was when
+            // Petal asked (its revision), and still allowed, by the card just answered (`approved`) or by a grant that
+            // still covers it. Edited, replaced, deleted or no longer granted: no key is given at all.
+            let give = { (approved: Set<String>) in
+                VaultStore.load { read in
+                    guard case .success(let now) = read else { return fail(VaultStore.unreadableText + " No key was given; try again in a moment.") }
+                    var keys: [[String: Any]] = []
+                    for pair in found {
+                        guard let item = now.first(where: { $0.id == pair.item.id }), item.kind == .apiKey,
+                              Vault.sameRevision(Vault.revision(pair.item), item), !item[.value].isEmpty else {
+                            return fail("“\(pair.item.title)” changed in the vault while Petal asked (edited, replaced or deleted): no key was given. Run the command again, so the person is asked about it as it is now.")
+                        }
+                        guard who.agent == .petal || approved.contains(item.id)
+                            || AgentAccess.granted(AgentGrants.shared.grants, item: item.id, caller: who) != nil else {
+                            return fail("The person no longer lets \(who.label) use “\(item.title)” here: no key was given. Don't find another way; ask them.")
+                        }
+                        var key: [String: Any] = ["title": item.title, "secret": item[.value]]
+                        if let variable = pair.variable { key["env"] = variable }
+                        keys.append(key)
+                    }
+                    self.did(record)
+                    send(["keys": keys])
+                }
             }
-            if who.agent == .petal { return give() }
+            if who.agent == .petal { return give([]) }
             AgentGrants.shared.whenLoaded {
                 let missing = found.filter { AgentAccess.granted(AgentGrants.shared.grants, item: $0.item.id, caller: who) == nil }
-                guard !missing.isEmpty else { return give() }
+                guard !missing.isEmpty else { return give([]) }
                 let keep = who.grantable && !AgentAccess.tooBroad(who.project, home: self.home)
                 let it = missing.count == 1 ? "it" : "them"
                 let detail = self.agentDetail(who, said: "", how: "It never sees \(it): Petal gives \(it) to the command and takes \(it) out of what the command prints.")
@@ -196,7 +213,7 @@ extension Assist {
                              }
                          }) { allowed in
                     guard allowed else { return fail("The person didn't let \(who.label) use \(missing.count == 1 ? "that key" : "those keys"). Don't find another way; ask them.") }
-                    give()
+                    give(Set(missing.map(\.item.id)))
                 }
             }
         }
@@ -291,7 +308,7 @@ struct AgentsCard: View {
         problem = nil
         // A folder in a repository is that repository (a worktree is its main checkout); read off the main thread.
         DispatchQueue.global(qos: .userInitiated).async {
-            let found = AgentAccess.project(url.resolvingSymlinksInPath().path, git: AgentCallers.gitMark)
+            let found = AgentAccess.project(url.resolvingSymlinksInPath().path, files: AgentCallers.disk)
             DispatchQueue.main.async {
                 if AgentAccess.tooBroad(found, home: NSHomeDirectory()) {
                     project = nil
