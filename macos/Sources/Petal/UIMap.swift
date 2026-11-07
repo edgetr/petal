@@ -178,7 +178,8 @@ enum UIMap {
     /// characters of a longer one, and a short one (`short` to `piece` - 1 characters, a PIN) as a word of its own
     /// inside text, so text holding a secret, or part of a long one, is caught without keeping the secrets. A card's
     /// 3-digit security code is caught wherever it isn't part of a longer number ("CVV: 737", "cvc737", not 737 in
-    /// 17370).
+    /// 17370). A card number is also caught across whatever separates its digits ("4242\u{00A0}4242", "4242.4242",
+    /// full-width digits), and digits are digits in any script.
     struct SecretIndex {
         static let piece = 8
         static let short = 4
@@ -187,8 +188,12 @@ enum UIMap {
         /// Text longer than this (in UTF-8 bytes, about 1 MB) isn't searched: it counts as holding a secret, and
         /// Petal doesn't move or show it.
         static let limit = 1_000_000
-        /// What a check of some text found.
-        enum Check: Equatable { case clean, secret, tooLong }
+        /// What a check of some text found. `unreadable`: the vault couldn't be read, so nothing can be checked.
+        enum Check: Equatable { case clean, secret, tooLong, unreadable }
+        /// A card number's length in digits.
+        static let cardDigits = 12...19
+        /// At most this many characters between two digits of a card number ("4242 - 4242").
+        static let cardGap = 3
 
         private var wholes = Set<Int>()
         /// Every `piece` characters of a longer secret, as `window` hashes them.
@@ -197,11 +202,28 @@ enum UIMap {
         private var shorts: [Int: Set<UInt64>] = [:]
         /// 3-digit secrets (security codes), as `window` hashes them.
         private var numbers: [Int: Set<UInt64>] = [:]
+        /// Every `piece` digits of a card number (a secret that is 12 to 19 digits and separators), as `window`
+        /// hashes ASCII digits: found in text whatever separates the digits.
+        private var cards = Set<UInt64>()
+        /// The vault couldn't be read (Keychain locked or refusing): every text counts as possibly secret.
+        private(set) var unreadable = false
+
+        /// The index when the vault can't be read: nothing is shown or moved as if it were checked.
+        static var unavailable: SecretIndex {
+            var index = SecretIndex([])
+            index.unreadable = true
+            return index
+        }
 
         init(_ secrets: [String]) {
             for secret in secrets where !secret.isEmpty {
                 wholes.insert(secret.hashValue)
                 let characters = Array(secret)
+                let digitsOnly = characters.compactMap(Self.digit)
+                if Self.cardDigits.contains(digitsOnly.count),
+                   characters.allSatisfy({ Self.digit($0) != nil || !($0.isLetter || $0.isNumber) }) {
+                    Self.roll(digitsOnly.map { Self.digitCodes[$0] }, Self.piece) { _, hash in cards.insert(hash); return true }
+                }
                 let codes = Self.codes(characters)
                 let digits = characters.allSatisfy { $0.isASCII && $0.isNumber }
                 if digits, codes.count == Self.code {
@@ -214,12 +236,27 @@ enum UIMap {
             }
         }
 
-        var isEmpty: Bool { wholes.isEmpty }
+        var isEmpty: Bool { wholes.isEmpty && !unreadable }
+
+        /// The ASCII digits' hashes, 0 to 9.
+        private static let digitCodes: [UInt64] = (0...9).map { UInt64(bitPattern: Int64(Character(String($0)).hashValue)) }
+
+        /// The digit a character shows (0 to 9) in any script ("４", "٤"), a mark on it aside; nil for anything else.
+        static func digit(_ character: Character) -> Int? {
+            if let ascii = character.asciiValue { return (48...57).contains(ascii) ? Int(ascii - 48) : nil }
+            guard let first = character.unicodeScalars.first, first.properties.numericType == .decimal,
+                  let value = first.properties.numericValue, value >= 0, value <= 9 else { return nil }
+            return Int(value)
+        }
 
         /// Each character's own hash (Swift's, seeded afresh in each process), once, so every window after the first
-        /// costs a multiply and an add: a 1 MB log is searched in a few milliseconds.
+        /// costs a multiply and an add: a 1 MB log is searched in a few milliseconds. A digit in another script hashes
+        /// as its ASCII digit.
         private static func codes(_ characters: [Character]) -> [UInt64] {
-            characters.map { UInt64(bitPattern: Int64($0.hashValue)) }
+            characters.map { character in
+                if !character.isASCII, let digit = digit(character) { return digitCodes[digit] }
+                return UInt64(bitPattern: Int64(character.hashValue))
+            }
         }
 
         private static let base: UInt64 = 1_099_511_628_211
@@ -261,18 +298,50 @@ enum UIMap {
                     return going
                 }
             }
-            guard going, !pieces.isEmpty else { return }
-            Self.roll(codes, Self.piece) { start, hash in
-                if pieces.contains(hash) { going = found(start, Self.piece) }
-                return going
+            if going, !pieces.isEmpty {
+                Self.roll(codes, Self.piece) { start, hash in
+                    if pieces.contains(hash) { going = found(start, Self.piece) }
+                    return going
+                }
             }
+            guard going, !cards.isEmpty else { return }
+            // A card number's digits with whatever is between them (spaces of any kind, dots, slashes, dashes): runs of
+            // digits are joined across at most `cardGap` other characters, never across a letter.
+            var digits: [UInt64] = []
+            var at: [Int] = []
+            var gap = 0
+            func flush() {
+                Self.roll(digits, Self.piece) { start, hash in
+                    if cards.contains(hash) { going = found(at[start], at[start + Self.piece - 1] - at[start] + 1) }
+                    return going
+                }
+                digits.removeAll(keepingCapacity: true)
+                at.removeAll(keepingCapacity: true)
+            }
+            for (index, character) in characters.enumerated() {
+                if let digit = Self.digit(character) {
+                    digits.append(Self.digitCodes[digit])
+                    at.append(index)
+                    gap = 0
+                } else if !digits.isEmpty {
+                    gap += 1
+                    if character.isLetter || gap > Self.cardGap {
+                        flush()
+                        gap = 0
+                        guard going else { return }
+                    }
+                }
+            }
+            flush()
         }
 
         /// `text` is a secret, holds `piece` characters or more of one, or holds a short one whole, not run into the
         /// letters or digits around it ("Door PIN: 739251", but not 1234 in 12345); or it's too long to check. All of
         /// it is searched, however long, up to `limit`.
         func check(_ text: String) -> Check {
-            guard !wholes.isEmpty, !text.isEmpty else { return .clean }
+            guard !text.isEmpty else { return .clean }
+            if unreadable { return .unreadable }
+            guard !wholes.isEmpty else { return .clean }
             guard text.utf8.count <= Self.limit else { return .tooLong }
             if wholes.contains(text.hashValue) || wholes.contains(text.trimmingCharacters(in: .whitespacesAndNewlines).hashValue) { return .secret }
             var hit = false
@@ -280,7 +349,8 @@ enum UIMap {
             return hit ? .secret : .clean
         }
 
-        /// `check` found a secret, or the text was too long to look through: either way it isn't shown or moved.
+        /// `check` found a secret, the text was too long to look through, or the vault couldn't be read: either way it
+        /// isn't shown or moved.
         func matches(_ text: String) -> Bool { check(text) != .clean }
 
         /// Between `at - 1` and `at` is the end of a word: not a letter or digit running on into another.
@@ -298,9 +368,12 @@ enum UIMap {
         /// `text` with every part that `matches` would catch replaced by "(hidden)": a whole secret, every run of
         /// `piece` characters of a longer one (runs that touch join, so a long secret goes as one), and a short one
         /// as a word of its own. The rest of the text stays, so a clipboard holding a key among other lines still
-        /// says what else is there. Text too long to check is "(hidden)" whole.
+        /// says what else is there. Text too long to check, or any text while the vault can't be read, is "(hidden)"
+        /// whole.
         func redacted(_ text: String) -> String {
-            guard !wholes.isEmpty, !text.isEmpty else { return text }
+            guard !text.isEmpty else { return text }
+            if unreadable { return UIMap.hidden }
+            guard !wholes.isEmpty else { return text }
             guard text.utf8.count <= Self.limit else { return UIMap.hidden }
             if wholes.contains(text.hashValue) || wholes.contains(text.trimmingCharacters(in: .whitespacesAndNewlines).hashValue) { return UIMap.hidden }
             let characters = Array(text)
@@ -758,6 +831,55 @@ enum UIMap {
         case "menu": return "Choosing \(thing)"
         case "key": return "Pressing \(key)"
         default: return action.capitalized
+        }
+    }
+}
+
+// MARK: - Reading that must be whole
+
+extension UIMap {
+    /// `build`, done again while `generation` moved on under it (something it depends on changed meanwhile), at most
+    /// `attempts` times: the value and the generation it holds for, or nil when it never settled. The vault's index
+    /// and what's redacted with it use this, so a secret Petal starts typing while either is made is never missed.
+    static func settled<T>(attempts: Int = 3, generation: () -> Int, _ build: () -> T) -> (value: T, generation: Int)? {
+        for _ in 0..<max(1, attempts) {
+            let before = generation()
+            let value = build()
+            if generation() == before { return (value, before) }
+        }
+        return nil
+    }
+
+    /// What asking an element for its children through Accessibility said.
+    enum ChildRead: Equatable {
+        case children(Int)
+        /// It has none (the attribute isn't there or holds nothing).
+        case none
+        /// The element went away meanwhile: nothing of it shows any more.
+        case gone
+        /// The app didn't answer (busy, or an error): what's under it is unknown.
+        case unreadable
+    }
+
+    /// An AXError's raw value (and how many children came back) as a ChildRead: 0 success, -25202 invalid element,
+    /// -25205 attribute unsupported, -25212 no value, -25208 not implemented; anything else (-25204 cannot complete,
+    /// -25200 failure, …) is unreadable.
+    static func childRead(error: Int32, count: Int) -> ChildRead {
+        switch error {
+        case 0: return count > 0 ? .children(count) : .none
+        case -25205, -25212, -25208: return .none
+        case -25202: return .gone
+        default: return .unreadable
+        }
+    }
+
+    /// Whether a scan that must see a whole window (what a picture would show) saw all that's under an element: not
+    /// when its children couldn't be read, nor when it has children past the deepest the scan goes.
+    static func covered(_ read: ChildRead, depth: Int, maxDepth: Int) -> Bool {
+        switch read {
+        case .unreadable: return false
+        case .children: return depth < maxDepth
+        case .none, .gone: return true
         }
     }
 }

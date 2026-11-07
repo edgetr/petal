@@ -202,6 +202,13 @@ struct VaultSettings: View {
                 let shown = filtered
                 if !model.loaded && !snapshotting {
                     ProgressView().controlSize(.small)
+                } else if model.unreadable {
+                    HStack {
+                        Text("Your vault can't be read right now. The Keychain didn't answer, or the Mac is locked.")
+                            .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Button("Try Again") { model.load() }.buttonStyle(.glass)
+                    }
                 } else if shown.isEmpty {
                     Text(model.items.isEmpty ? "Nothing yet. Add an item, import an export, or let Petal AI ask for what it needs." : "Nothing matches.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
@@ -333,9 +340,8 @@ struct VaultSettings: View {
             panel.allowedContentTypes = [format == .petal ? .json : .commaSeparatedText]
             panel.message = "This file will hold your secrets as plain text."
             guard panel.runModal() == .OK, let url = panel.url else { return }
-            model.export(format, to: url) { ok in
-                exported = ok ? "Saved to \(url.lastPathComponent). It holds your secrets as plain text: keep it safe, and move it to the Trash once you're done."
-                    : "Petal couldn't write that file."
+            model.export(format, to: url) { failed in
+                exported = failed ?? "Saved to \(url.lastPathComponent). It holds your secrets as plain text: keep it safe, and move it to the Trash once you're done."
             }
         }
     }

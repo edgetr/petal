@@ -345,6 +345,16 @@ enum Vault {
         var popup = false
     }
 
+    /// Which tab a page is in, as Petal read it itself: the browser's own id for the tab (Chromium's tab id, Safari's
+    /// tab index) when it gave one, and the tab's page (its outermost web area, as Accessibility gives it: each tab has
+    /// its own, and most navigations make a new one).
+    struct Tab: Equatable {
+        var id: String?
+        var page: AnyObject?
+
+        static func == (a: Tab, b: Tab) -> Bool { a.id == b.id && UIMap.same(a.page, b.page) }
+    }
+
     /// Where it is, as Petal read it itself (never from the AI).
     struct Place: Equatable {
         /// Inside a web page.
@@ -355,6 +365,8 @@ enum Vault {
         var topURL: String?
         /// The browser's own answer for the tab, where it gives one.
         var tabURL: String?
+        /// The tab itself (a web page only).
+        var tab = Tab()
         var bundle = ""
         var appName = ""
         /// The app's code signature is valid, from Apple's certificates, and names this bundle id.
@@ -568,18 +580,26 @@ enum Vault {
         return found
     }
 
-    /// Why the place a field is in now isn't the one Petal decided on (another page, another app), or nil: read
-    /// again right before filling, so a page that moved on meanwhile never gets it.
-    static func moved(from then: Place, to now: Place) -> String? {
+    /// Why the place a field is in now isn't the one Petal decided on (another page, another app, another tab), or
+    /// nil: read again right before filling, so a page that moved on meanwhile never gets it. `samePage`: the tab's
+    /// page must also still be at the same path (payment info: the checkout page Buy was said on).
+    static func moved(from then: Place, to now: Place, samePage: Bool = false) -> String? {
         if then.web != now.web || then.bundle != now.bundle { return "That field isn't in the same app or page anymore; nothing was filled. Call petal_ui again." }
         guard then.web else {
             return then.team == now.team ? nil : "Petal couldn't verify \(now.appName) is the same app anymore; nothing was filled."
         }
         func origin(_ url: String?) -> String { url.map { "\(VaultSite.scheme($0) ?? "")://\(VaultSite.host($0) ?? "")" } ?? "" }
-        if origin(then.frameURL) != origin(now.frameURL) || origin(then.topURL) != origin(now.topURL) {
+        if origin(then.frameURL) != origin(now.frameURL) || origin(then.topURL) != origin(now.topURL)
+            || (then.tab.page != nil && !UIMap.same(then.tab.page, now.tab.page))
+            || (samePage && path(then.topURL ?? then.frameURL) != path(now.topURL ?? now.frameURL)) {
             return "The page changed (it's \(now.host ?? "another page") now); nothing was filled. Call petal_ui again."
         }
         return nil
+    }
+
+    /// An address's path ("/checkout/payment"), without its query or fragment; "" when it has none or can't be read.
+    static func path(_ url: String?) -> String {
+        url.flatMap { URLComponents(string: $0.trimmingCharacters(in: .whitespacesAndNewlines))?.path } ?? ""
     }
 
     /// The one question for filling `fields` of `item` where it doesn't match: "Fill your github.com username and
@@ -668,27 +688,53 @@ enum Vault {
         return Requested(warning: warnings.isEmpty ? nil : warnings.joined(separator: " "))
     }
 
-    /// The person said Buy on one "Buy on <host>?" card: payment info fills there with that card, in that window,
-    /// for the rest of that reply, while its tab stays on that host. Another host (a subdomain or another shop),
-    /// window, card or reply asks again; a page that leaves the host ends it.
+    /// The person said Buy on one "Buy on <host>?" card: payment info fills there with that card, in that window
+    /// and tab, on that page, for the rest of that reply. Another host (a subdomain or another shop), page, tab,
+    /// window, card or reply asks again; the window showing anything else (another page or tab, even of the same
+    /// shop) ends it, and coming back doesn't bring it back.
     struct Checkout: Equatable {
         /// The shop's exact host (the tab's whole page).
         var host: String
+        /// The shop page's path when Buy was said.
+        var path: String
         var window: UInt32
-        /// The browser's own answer for the window's tab when Buy was said, if it gave one.
-        var tab: String?
+        /// The tab Buy was said in: the browser's own id for it (if it gave one then) and its page.
+        var tab: Tab
         var card: String
         var turn: String
 
-        func covers(_ place: Place, window: UInt32?, card: String, turn: String) -> Bool {
-            guard turn == self.turn, card == self.card, window == self.window, place.shop == host else { return false }
-            if tab != nil { return place.tabURL.flatMap(VaultSite.host) == tab }
-            return true
+        init(host: String, path: String, window: UInt32, tab: Tab, card: String, turn: String) {
+            self.host = host
+            self.path = path
+            self.window = window
+            self.tab = tab
+            self.card = card
+            self.turn = turn
         }
 
-        /// The same window, now on another host: the checkout is over.
+        /// The Buy for `place`, or nil when Petal can't tell which tab and page it is.
+        init?(place: Place, window: UInt32, card: String, turn: String) {
+            guard place.web, let host = place.shop, place.tab.page != nil else { return nil }
+            self.init(host: host, path: Vault.path(place.topURL ?? place.frameURL), window: window, tab: place.tab, card: card, turn: turn)
+        }
+
+        /// `place` is still the tab and page Buy was said on: its page the same (and the browser's id for the tab,
+        /// when it gave one then), on the same host and path, the browser's own answer agreeing.
+        func same(_ place: Place) -> Bool {
+            guard place.web, place.shop == host, Vault.path(place.topURL ?? place.frameURL) == path else { return false }
+            if let tabHost = place.tabURL.flatMap(VaultSite.host), tabHost != host { return false }
+            if tab.id != nil, place.tab.id != tab.id { return false }
+            guard let page = tab.page, let now = place.tab.page else { return false }
+            return UIMap.same(page, now)
+        }
+
+        func covers(_ place: Place, window: UInt32?, card: String, turn: String) -> Bool {
+            turn == self.turn && card == self.card && window == self.window && same(place)
+        }
+
+        /// Its window, seen showing anything but the tab and page Buy was said on: the checkout is over.
         func left(_ place: Place, window: UInt32?) -> Bool {
-            window == self.window && place.web && place.shop != host
+            window == self.window && !same(place)
         }
     }
 
@@ -795,6 +841,8 @@ enum Vault {
         var items: [VaultItem] = []
         /// Rows or entries with nothing Petal keeps (a note, an empty row, one in the trash).
         var skipped = 0
+        /// Petal's own export: its items keep their ids, and two with different ids are never the same.
+        var petal = false
     }
 
     /// A password export as CSV, by its header's names in any order: Apple Passwords (Title, URL, Username, Password,
@@ -892,7 +940,7 @@ enum Vault {
     /// Petal's own export, or Proton Pass's unencrypted JSON (its logins, credit cards and identities, an identity's
     /// address as an Address linked to it; what's in its trash is left). nil when it's neither.
     static func importJSON(_ data: Data) -> Imported? {
-        if let export = try? JSONDecoder().decode(Export.self, from: data), export.petalVault >= 1 { return Imported(items: export.items) }
+        if let export = try? JSONDecoder().decode(Export.self, from: data), export.petalVault >= 1 { return Imported(items: export.items, petal: true) }
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let vaults = root["vaults"] as? [String: Any] else { return nil }
         var result = Imported()
         for case let vault as [String: Any] in vaults.values {
@@ -946,8 +994,9 @@ enum Vault {
     }
 
     /// The same thing saved twice: the same id (Petal's own export), else a login for the same site or app and username,
-    /// a card with the same number, contact info with the same email (or name), an address with the same first line
-    /// and postal code, an API key with the same title.
+    /// a card with the same number, contact info with the same email (or name), an address with every line, city,
+    /// region, postal code and country the same (case, accents and spacing aside) for the same contact, an API key
+    /// with the same title.
     static func same(_ a: VaultItem, _ b: VaultItem) -> Bool {
         if a.id == b.id { return true }
         guard a.kind == b.kind else { return false }
@@ -965,10 +1014,19 @@ enum Vault {
             if !a[.email].isEmpty || !b[.email].isEmpty { return a[.email].lowercased() == b[.email].lowercased() }
             return !a[.name].isEmpty && a[.name].lowercased() == b[.name].lowercased()
         case .address:
-            return !a[.street].isEmpty && fold(a[.street]) == fold(b[.street]) && fold(a[.postalCode]) == fold(b[.postalCode])
+            let parts: [VaultField] = [.street, .street2, .city, .region, .postalCode, .country]
+            guard parts.contains(where: { !a[$0].isEmpty }) else { return false }
+            return parts.allSatisfy { addressPart(a[$0], $0) == addressPart(b[$0], $0) } && a[.contact] == b[.contact]
         case .apiKey:
             return a.title.lowercased() == b.title.lowercased()
         }
+    }
+
+    /// A line of an address as compared: case, accents and spacing aside, a country by one of its names.
+    static func addressPart(_ text: String, _ field: VaultField) -> String {
+        let folded = fold(text).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard field == .country else { return folded }
+        return countryNames.first { $0.contains(folded) }?.first ?? folded
     }
 
     struct Merge {
@@ -983,18 +1041,25 @@ enum Vault {
 
     /// An import against what's saved. Something already there changes nothing unless it differs: a login only when
     /// its password does (then the import's, newer, is kept); anything else takes the import's fields. A later entry
-    /// of the same file wins over an earlier one. Petal's own export keeps its ids and dates; an imported address
-    /// whose contact turned out to be one already saved is linked to that one.
-    static func merge(existing: [VaultItem], incoming: [VaultItem], at date: Date = Date()) -> Merge {
+    /// of the same file wins over an earlier one. Petal's own export (`petal`) keeps its ids and dates, and its items
+    /// with different ids stay apart however alike; an imported address whose contact turned out to be one already
+    /// saved is linked to that one.
+    static func merge(existing: [VaultItem], incoming: [VaultItem], petal: Bool = false, at date: Date = Date()) -> Merge {
         var result = Merge()
         var current = existing
+        let fromFile = Set(incoming.map(\.id))
         var touched: [String: Int] = [:]   // item id → index in result.save
         var renamed: [String: String] = [:]   // an imported contact's id → the saved one's
         // Contacts first, so addresses can follow their contact.
         let ordered = incoming.filter { $0.kind != .address } + incoming.filter { $0.kind == .address }
         for var item in ordered {
             if item.kind == .address, let link = renamed[item[.contact]] { item[.contact] = link }
-            if let index = current.firstIndex(where: { same($0, item) }) {
+            let index = current.firstIndex { saved in
+                if saved.id == item.id { return true }
+                if petal, fromFile.contains(saved.id) { return false }
+                return same(saved, item)
+            }
+            if let index {
                 var saved = current[index]
                 if saved.kind == .contact { renamed[item.id] = saved.id }
                 if saved.kind == .login {

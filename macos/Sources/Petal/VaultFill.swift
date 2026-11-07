@@ -29,15 +29,23 @@ enum VaultFiller {
     static func fill(_ plan: VaultFillPlan, into element: AXUIElement, map: ComputerUse.Map, cancel: Acting.Cancel) -> String? {
         let pid = map.pid
         // The same page or app as when Petal decided: a page that moved on meanwhile never gets it.
+        // Payment info also stays on the very page Buy was said on.
+        let card: Set<VaultField> = [.number, .securityCode, .expiry, .month, .year]
         let now = VaultReader.place(of: element, pid: pid, bundle: map.bundle, appName: map.appName)
-        if let why = Vault.moved(from: plan.place, to: now) { return why }
+        if let why = Vault.moved(from: plan.place, to: now, samePage: card.contains(plan.field)) { return why }
         if !plan.place.web, plan.place.signed, !now.signed { return "Petal couldn't verify \(map.appName) anymore; nothing was filled." }
         // Still the kind of field it was: a password field if it was one, a menu if it was one.
         if VaultReader.target(element) != plan.target {
             return "That field changed since petal_ui; nothing was filled. Call petal_ui again."
         }
         // What to put in: from the vault now (the AI never holds it), or what the person just typed into the card.
-        guard let text = plan.given ?? VaultStore.item(plan.itemID).flatMap({ Vault.text($0, plan.field, fourDigitYear: plan.fourDigitYear) }),
+        let saved: VaultItem?
+        if plan.given == nil {
+            do { saved = try VaultStore.item(plan.itemID) } catch { return VaultStore.unreadableText + " Nothing was filled." }
+        } else {
+            saved = nil
+        }
+        guard let text = plan.given ?? saved.flatMap({ Vault.text($0, plan.field, fourDigitYear: plan.fourDigitYear) }),
               !text.isEmpty else { return "That isn't in the vault anymore." }
         guard !cancel.stopped else { return ComputerUse.stoppedText }
         // Hidden from the AI before a key goes, saved in the vault or not: in petal_ui, petal_look, the clipboard and
@@ -136,6 +144,7 @@ enum VaultReader {
         "org.mozilla.nightly": "43AQ936H96", "com.microsoft.edgemac": "UBF8T346G9", "com.brave.Browser": "KL8N8XSYF4",
         "com.brave.Browser.beta": "KL8N8XSYF4", "company.thebrowser.Browser": "S6N382Y83G", "com.vivaldi.Vivaldi": "4XF3XNRN6Y",
         "com.operasoftware.Opera": "A2P9LX4JPN", "net.imput.helium": "S4Q33XPHB4", "com.t3tools.t3code": "ARK85ZXQ4Z",
+        "at.studio.AsideBrowser": "8CPD4K4TBB", "com.phibrowser.Mac": "87DQ3HMK5G",
     ]
 
     /// The addresses of the web areas around `element`: the nearest (a login or payment frame's own) and the
@@ -143,22 +152,48 @@ enum VaultReader {
     /// another app's web view): the app, and who signed it.
     static func place(of element: AXUIElement, pid: pid_t, bundle: String, appName: String) -> Vault.Place {
         var place = Vault.Place(bundle: bundle, appName: appName)
-        var areas: [String?] = []
+        var areas: [(element: AXUIElement, url: String?)] = []
         var current: AXUIElement? = element
         for _ in 0..<120 {
             guard let at = current else { break }
             let role: String = Windows.value(at, kAXRoleAttribute) ?? ""
-            if role == "AXWebArea" { areas.append(url(at)) }
+            if role == "AXWebArea" { areas.append((at, url(at))) }
             if role == "AXWindow" || role == "AXApplication" { break }
             current = Windows.value(at, kAXParentAttribute)
         }
-        if !areas.isEmpty, isBrowser(pid: pid, bundle: bundle) {
+        if let top = areas.last, isBrowser(pid: pid, bundle: bundle) {
             place.web = true
-            place.frameURL = areas.first ?? nil
-            place.topURL = areas.last ?? nil
+            place.frameURL = areas.first?.url
+            place.topURL = top.url
+            place.tab.page = top.element
         } else {
             place.team = signer(pid: pid, bundle: bundle)
             place.signed = place.team != nil || signed(pid: pid, bundle: bundle)
+        }
+        return place
+    }
+
+    /// The page a browser window shows (its tab's outermost web area), as a place: what a Buy is checked against
+    /// before each act in that window. Not a web page (another app, or none found in time): `web` false.
+    static func page(in window: AXUIElement, pid: pid_t, bundle: String, appName: String) -> Vault.Place {
+        var place = Vault.Place(bundle: bundle, appName: appName)
+        guard isBrowser(pid: pid, bundle: bundle) else { return place }
+        var queue: [(AXUIElement, Int)] = [(window, 0)]
+        var seen = 0
+        let deadline = Date().addingTimeInterval(1)
+        while !queue.isEmpty, seen < 3000, Date() < deadline {
+            let (element, depth) = queue.removeFirst()
+            seen += 1
+            if (Windows.value(element, kAXRoleAttribute) as String?) == "AXWebArea" {
+                place.web = true
+                place.frameURL = url(element)
+                place.topURL = place.frameURL
+                place.tab.page = element
+                return place
+            }
+            guard depth < 30 else { continue }
+            let children: [AXUIElement] = Windows.value(element, kAXChildrenAttribute) ?? []
+            queue += children.map { ($0, depth + 1) }
         }
         return place
     }
@@ -255,7 +290,8 @@ extension Assist {
     private func vaultList(_ args: [String: Any], _ send: @escaping (Any) -> Void) {
         let kind = (args["kind"] as? String).flatMap { $0.isEmpty ? nil : Vault.kindNamed($0) }
         let site = (args["site"] as? String).flatMap(VaultSite.host)
-        VaultStore.load { items in
+        VaultStore.load { read in
+            guard case .success(let items) = read else { return send(["error": VaultStore.unreadableText + " Try again in a moment."]) }
             var list = items.filter { kind == nil || $0.kind == kind }
             if let site { list = list.filter { $0.kind != .login || $0.sites.contains { VaultSite.matches(host: site, saved: $0) } } }
             send(["items": list.map { Vault.shown($0, in: items) },
@@ -280,22 +316,49 @@ extension Assist {
         return "There's no \(ids.joined(separator: ", ")) in the last petal_ui (ids last until the next petal_ui or 5 minutes). Call petal_ui again."
     }
 
-    /// Where the controls are and what kind each is (and the browser's own answer for the tab), read off the main
-    /// thread, handed back on it with the vault's items.
+    /// Where the controls are and what kind each is (and the browser's own answer for the tab: its address and its
+    /// id for it), read off the main thread, handed back on it with the vault's items (nil when the vault can't be
+    /// read).
     private func vaultPlaces(_ map: ComputerUse.Map, _ entries: [ComputerUse.Entry],
-                             done: @escaping @MainActor (_ places: [Vault.Place], _ targets: [Vault.Target], _ items: [VaultItem]) -> Void) {
+                             done: @escaping @MainActor (_ places: [Vault.Place], _ targets: [Vault.Target], _ items: [VaultItem]?) -> Void) {
         ComputerUse.readQueue.async {
             let places = entries.map { VaultReader.place(of: $0.element, pid: map.pid, bundle: map.bundle, appName: map.appName) }
             let targets = entries.map { VaultReader.target($0.element) }
             let title: String = Windows.value(map.window, kAXTitleAttribute) ?? ""
-            let items = VaultStore.items()
+            let items = try? VaultStore.items()
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard places.contains(where: \.web), let running = NSRunningApplication(processIdentifier: map.pid) else { return done(places, targets, items) }
-                    // The browser's own answer for this window's tab, where it gives one (Automation allowed).
-                    let window = Browsers.Window(number: map.windowID, title: title, frame: map.windowFrame)
-                    self.app.browsers.frontURL(of: running, window: window) { tab in
-                        done(places.map { var p = $0; if p.web { p.tabURL = tab }; return p }, targets, items)
+                    guard places.contains(where: \.web) else { return done(places, targets, items) }
+                    self.withTab(map, title: title) { url, id in
+                        done(places.map { var p = $0; if p.web { p.tabURL = url; p.tab.id = id }; return p }, targets, items)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The browser's own answer for the tab of `map`'s window (its address and its id for the tab), where it gives
+    /// one (Automation allowed).
+    private func withTab(_ map: ComputerUse.Map, title: String, done: @escaping @MainActor (_ url: String?, _ id: String?) -> Void) {
+        guard let running = NSRunningApplication(processIdentifier: map.pid) else { return done(nil, nil) }
+        let window = Browsers.Window(number: map.windowID, title: title, frame: map.windowFrame)
+        app.browsers.tab(of: running, window: window) { url, id in MainActor.assumeIsolated { done(url, id) } }
+    }
+
+    /// What `map`'s window shows now (its tab's page, with the browser's own answer for the tab), read off the main
+    /// thread: a Buy in that window is checked against it before every act there (ComputerUse).
+    func vaultTab(_ map: ComputerUse.Map, done: @escaping @MainActor (Vault.Place) -> Void) {
+        ComputerUse.readQueue.async {
+            let place = VaultReader.page(in: map.window, pid: map.pid, bundle: map.bundle, appName: map.appName)
+            let title: String = Windows.value(map.window, kAXTitleAttribute) ?? ""
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard place.web else { return done(place) }
+                    self.withTab(map, title: title) { url, id in
+                        var place = place
+                        place.tabURL = url
+                        place.tab.id = id
+                        done(place)
                     }
                 }
             }
@@ -335,6 +398,7 @@ extension Assist {
         guard let token = computer.token(caller, task: task) else { return fail(Self.over) }
         vaultPlaces(map, entries) { places, targets, items in
             guard self.computer.live(caller, token) else { return fail(Self.over) }
+            guard let items else { return fail(VaultStore.unreadableText + " Nothing was filled; try again in a moment.") }
             // The item: named, else the login saved for this page (or app), else the only card saved.
             let first = Vault.field(wanted[0].word)!
             let item: VaultItem
@@ -429,8 +493,8 @@ extension Assist {
     /// host, in that window and tab, for the rest of the reply; Don't (the default) fills nothing.
     private func vaultBuy(_ item: VaultItem, place: Vault.Place, args: [String: Any], map: ComputerUse.Map, caller: String, token: Acting.Cancel,
                           send: @escaping (Any) -> Void, fail: @escaping (String) -> Void, bought: @escaping () -> Void) {
-        guard let shop = place.shop, map.windowID != nil else {
-            return fail("Petal couldn't tell which page or window this is, so it fills no payment info here.")
+        guard let shop = place.shop, map.windowID != nil, place.tab.page != nil else {
+            return fail("Petal couldn't tell which page, tab or window this is, so it fills no payment info here.")
         }
         let what = UIMap.truncate(UIMap.tidy(args["buying"] as? String ?? ""), 160)
         let price = UIMap.truncate(UIMap.tidy(args["price"] as? String ?? ""), 40)
@@ -658,8 +722,9 @@ extension Assist {
         guard let caller, let token = computer.token(caller, task: args["task"] as? String ?? "") else {
             return fail(caller == nil ? ComputerUse.oldTools : Self.over)
         }
-        VaultStore.load { items in
+        VaultStore.load { read in
             guard self.computer.live(caller, token) else { return fail(Self.over) }
+            guard case .success(let items) = read else { return fail(VaultStore.unreadableText + " Nothing was filled; try again in a moment.") }
             guard let item = Vault.find(items, name), [.apiKey, .login].contains(item.kind) else {
                 return fail("There's no “\(name)” in the vault. action list shows what's there; fill is the way to fill a field.")
             }

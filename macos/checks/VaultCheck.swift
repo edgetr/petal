@@ -2,8 +2,10 @@ import Foundation
 
 // Checks the vault's pure side (Vault.swift): sites and registrable names, when Petal fills by itself (logins, API
 // keys, the one Buy card for payment info, contact info and addresses), picking from a menu, the importers (Apple
-// Passwords, Chrome, Proton Pass CSV and JSON, Petal's own) and exporters, password making, old items, and that what
-// the AI is told never holds a secret. No Keychain, no window, no screen.
+// Passwords, Chrome, Proton Pass CSV and JSON, Petal's own) and exporters, password making, old items, that what
+// the AI is told never holds a secret (card numbers whatever separates their digits, an unreadable vault hiding
+// everything, the index made again while it changes), when a picture's check of a window is whole, and which
+// addresses are the same. No Keychain, no window, no screen.
 
 @main
 struct VaultCheck {
@@ -32,6 +34,11 @@ struct VaultCheck {
         records()
         places()
         checkouts()
+        unicodeCards()
+        unreadableVault()
+        settling()
+        coverage()
+        addresses()
         if failures > 0 { print("vault: \(failures) failed"); exit(1) }
         print("vault: ok")
     }
@@ -530,16 +537,33 @@ struct VaultCheck {
         expect(Vault.question(login, [.username, .password], place: frame) == "Fill your github.com username and password on evil.example?", "one question names every field")
     }
 
-    /// A Buy covers its exact host, window, tab, card and reply only.
+    /// A Buy covers its exact host and page, window, tab, card and reply only; its window seen on anything else ends it.
     static func checkouts() {
-        func web(_ frame: String, tab: String? = nil) -> Vault.Place {
-            Vault.Place(web: true, frameURL: frame, topURL: frame, tabURL: tab, bundle: "com.apple.Safari", appName: "Safari", signed: true)
+        let tabA = NSObject(), tabB = NSObject()
+        func web(_ frame: String, tab: String? = nil, page: AnyObject? = tabA, id: String? = "11", top: String? = nil) -> Vault.Place {
+            Vault.Place(web: true, frameURL: frame, topURL: top ?? frame, tabURL: tab, tab: Vault.Tab(id: id, page: page),
+                        bundle: "com.google.Chrome", appName: "Chrome", signed: true)
         }
         let pay = web("https://checkout.shop.example/pay", tab: "https://checkout.shop.example/pay")
-        let bought = Vault.Checkout(host: "checkout.shop.example", window: 7, tab: "checkout.shop.example", card: "visa", turn: "3|")
+        guard let bought = Vault.Checkout(place: pay, window: 7, card: "visa", turn: "3|") else { return expect(false, "a Buy for a page Petal read") }
+        expect(bought.host == "checkout.shop.example" && bought.path == "/pay" && bought.tab.id == "11", "bound to its host, path and tab")
+        expect(Vault.Checkout(place: web("https://checkout.shop.example/pay", page: nil), window: 7, card: "visa", turn: "3|") == nil,
+               "no Buy for a page whose tab Petal couldn't read")
         expect(bought.covers(pay, window: 7, card: "visa", turn: "3|"), "the same checkout")
-        expect(bought.covers(web("https://checkout.shop.example/confirm", tab: "https://checkout.shop.example/confirm"), window: 7, card: "visa", turn: "3|"),
-               "another page of the same host")
+        expect(bought.covers(web("https://checkout.shop.example/pay?step=2#card", tab: "https://checkout.shop.example/pay?step=2"), window: 7, card: "visa", turn: "3|"),
+               "the same page with another query")
+        expect(bought.covers(web("https://js.stripe.com/frame", tab: "https://checkout.shop.example/pay", top: "https://checkout.shop.example/pay"), window: 7, card: "visa", turn: "3|"),
+               "a payment company's frame on that page")
+        expect(!bought.covers(web("https://checkout.shop.example/confirm", tab: "https://checkout.shop.example/confirm"), window: 7, card: "visa", turn: "3|"),
+               "another page of the same shop asks again")
+        expect(!bought.covers(web("https://checkout.shop.example/pay", tab: "https://checkout.shop.example/pay", id: "12"), window: 7, card: "visa", turn: "3|"),
+               "another tab of the same shop in that window (the browser's id)")
+        expect(!bought.covers(web("https://checkout.shop.example/pay", tab: "https://checkout.shop.example/pay", page: tabB), window: 7, card: "visa", turn: "3|"),
+               "another tab, or the page loaded again (another page element)")
+        expect(!bought.covers(web("https://checkout.shop.example/pay", tab: "https://checkout.shop.example/pay", id: nil), window: 7, card: "visa", turn: "3|"),
+               "the browser's id for the tab can't be read now, though it could then")
+        expect(!bought.covers(web("https://checkout.shop.example/pay", tab: "https://checkout.shop.example/pay", page: nil), window: 7, card: "visa", turn: "3|"),
+               "the page can't be read now")
         expect(!bought.covers(web("https://other.shop.example/pay", tab: "https://other.shop.example/pay"), window: 7, card: "visa", turn: "3|"), "a subdomain asks again")
         expect(!bought.covers(web("https://evil.example/pay", tab: "https://evil.example/pay"), window: 7, card: "visa", turn: "3|"), "another shop")
         expect(!bought.covers(pay, window: 8, card: "visa", turn: "3|"), "another window")
@@ -547,8 +571,123 @@ struct VaultCheck {
         expect(!bought.covers(pay, window: 7, card: "amex", turn: "3|"), "another card")
         expect(!bought.covers(pay, window: 7, card: "visa", turn: "4|"), "the next reply")
         expect(!bought.covers(web("https://checkout.shop.example/pay", tab: "https://evil.example/"), window: 7, card: "visa", turn: "3|"), "the tab says another host")
-        expect(!bought.covers(web("https://checkout.shop.example/pay"), window: 7, card: "visa", turn: "3|"), "the tab can't be read now, though it could then")
+        // Without an id from the browser (Firefox, or Automation not allowed), the page element is the tab.
+        let firefox = web("https://checkout.shop.example/pay", id: nil)
+        if let plain = Vault.Checkout(place: firefox, window: 7, card: "visa", turn: "3|") {
+            expect(plain.covers(firefox, window: 7, card: "visa", turn: "3|"), "no browser id: the same page element")
+            expect(!plain.covers(web("https://checkout.shop.example/pay", page: tabB, id: nil), window: 7, card: "visa", turn: "3|"), "no browser id: another page element")
+        } else {
+            expect(false, "a Buy without the browser's id")
+        }
         expect(bought.left(web("https://evil.example/"), window: 7) && !bought.left(pay, window: 7) && !bought.left(web("https://evil.example/"), window: 8),
                "leaving the host in that window ends it")
+        expect(bought.left(web("https://checkout.shop.example/pay", tab: "https://checkout.shop.example/pay", id: "12"), window: 7),
+               "another tab seen in that window ends it, so coming back asks again")
+        expect(bought.left(web("https://checkout.shop.example/cart", tab: "https://checkout.shop.example/cart"), window: 7), "another page of the shop ends it")
+        // Filling re-checks the page itself right before the keys.
+        expect(Vault.moved(from: pay, to: pay) == nil, "the same page fills")
+        expect(Vault.moved(from: pay, to: web("https://checkout.shop.example/pay", tab: "https://checkout.shop.example/pay", page: tabB)) != nil,
+               "another page element doesn't")
+        let later = web("https://checkout.shop.example/done", tab: "https://checkout.shop.example/done")
+        expect(Vault.moved(from: pay, to: later) == nil && Vault.moved(from: pay, to: later, samePage: true) != nil,
+               "payment info also needs the same path")
+    }
+
+    /// A card number whatever separates its digits, and in other scripts' digits: hidden whole, with its separators.
+    static func unicodeCards() {
+        let index = UIMap.SecretIndex(sample().flatMap(Vault.secrets))
+        for (text, what) in [("4111\u{00A0}1111\u{00A0}1111\u{00A0}1111", "no-break spaces"), ("4111\u{2007}1111\u{2007}1111\u{2007}1111", "figure spaces"),
+                             ("4111\u{202F}1111\u{202F}1111\u{202F}1111", "narrow no-break spaces"), ("4111\u{2009}1111\u{2009}1111\u{2009}1111", "thin spaces"),
+                             ("4111.1111.1111.1111", "dots"), ("4111/1111/1111/1111", "slashes"), ("4111 - 1111 - 1111 - 1111", "spaced dashes"),
+                             ("4111\u{200B}1111\u{200B}1111\u{200B}1111", "zero-width spaces"), ("４１１１ １１１１ １１１１ １１１１", "full-width digits"),
+                             ("4 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1", "every digit apart"), ("4111\n1111\n1111\n1111", "line breaks")] {
+            expect(index.matches(text), "a card number with \(what) is caught")
+            // (The sample's repeated 1111 groups may take a space next to it too.)
+            let shown = index.redacted("Card: \(text) ok")
+            expect(shown.hasPrefix("Card: \(UIMap.hidden)") && shown.hasSuffix("ok") && !shown.contains { UIMap.SecretIndex.digit($0) != nil },
+                   "a card number with \(what) is hidden whole: \(shown)")
+        }
+        expect(index.matches("ends …1111 1111 1111"), "twelve of its digits are enough")
+        let other = UIMap.SecretIndex(Vault.secrets(.number, "5555444433331111"))
+        expect(other.matches("5555\u{00A0}·\u{00A0}4444") && !other.matches("5555 card 4444") && !other.matches("5555 \u{00A0} - 4444"),
+               "half a card number across a few separators is caught; across a word, or more than 3 characters, it isn't")
+        expect(!index.matches("Call 4111 2222 3333") && !index.matches("4111.11"), "other numbers aren't")
+        expect(!index.matches("Visa •••• 1111"), "the last four still aren't a secret")
+        expect(index.redacted("Order 1234 5678, card 4111 1111 1111 1111.") == "Order 1234 5678, card \(UIMap.hidden).", "only the card number goes")
+        // A full-width security code is the same code.
+        expect(index.matches("CVV ７３７") && !index.matches("１７３７０"), "a security code in full-width digits")
+        expect(UIMap.SecretIndex.digit("٤") == 4 && UIMap.SecretIndex.digit("x") == nil && UIMap.SecretIndex.digit("²") == nil, "digits in any script, not superscripts")
+    }
+
+    /// A vault that can't be read hides everything rather than nothing.
+    static func unreadableVault() {
+        let none = UIMap.SecretIndex.unavailable
+        expect(none.unreadable && !none.isEmpty, "unreadable, and not an empty vault")
+        expect(none.check("hello") == .unreadable && none.matches("hello") && none.check("") == .clean, "nothing counts as checked")
+        expect(none.redacted("hello") == UIMap.hidden && none.redacted("") == "", "nothing is shown")
+        expect(UIMap.SecretIndex([]).check("hello") == .clean && UIMap.SecretIndex([]).isEmpty, "an empty vault hides nothing")
+    }
+
+    /// The index and what's redacted with it are made again while the vault changes under them.
+    static func settling() {
+        var generation = 0
+        var builds = 0
+        let once = UIMap.settled(generation: { generation }) { builds += 1; return builds }
+        expect(once?.value == 1 && once?.generation == 0 && builds == 1, "nothing changed: built once")
+        builds = 0
+        // A secret Petal is about to type arrives while the first index is made: it's made again.
+        let again = UIMap.settled(generation: { generation }) { () -> Int in
+            builds += 1
+            if builds == 1 { generation += 1 }
+            return builds
+        }
+        expect(again?.value == 2 && again?.generation == 1, "a change meanwhile: made again, for the newer generation")
+        builds = 0
+        let never = UIMap.settled(attempts: 3, generation: { generation }) { () -> Int in generation += 1; builds += 1; return builds }
+        expect(never == nil && builds == 3, "always changing: given up after 3, never a stale one")
+    }
+
+    /// A picture's check of a window is whole only when every part under it was read.
+    static func coverage() {
+        expect(UIMap.childRead(error: 0, count: 3) == .children(3) && UIMap.childRead(error: 0, count: 0) == .none, "children, or none")
+        expect(UIMap.childRead(error: -25205, count: 0) == .none && UIMap.childRead(error: -25212, count: 0) == .none, "no such attribute: none")
+        expect(UIMap.childRead(error: -25202, count: 0) == .gone, "the element went away")
+        expect(UIMap.childRead(error: -25204, count: 0) == .unreadable && UIMap.childRead(error: -25200, count: 0) == .unreadable,
+               "a busy or failing app: unreadable, never none")
+        expect(!UIMap.covered(.unreadable, depth: 3, maxDepth: 80), "unreadable children: not whole")
+        expect(UIMap.covered(.children(4), depth: 3, maxDepth: 80) && !UIMap.covered(.children(4), depth: 80, maxDepth: 80),
+               "children past the deepest level: not whole")
+        expect(UIMap.covered(.none, depth: 80, maxDepth: 80) && UIMap.covered(.gone, depth: 3, maxDepth: 80), "a leaf, or gone: whole")
+    }
+
+    /// Two flats in one building are two addresses; the same address saved twice is one.
+    static func addresses() {
+        func address(_ street2: String, id: String = Vault.newID(), contact: String = "c1", street: String = "Bağdat Cd. 12", city: String = "İstanbul",
+                     country: String = "Turkey") -> VaultItem {
+            var item = VaultItem(id: id, kind: .address, title: "Home")
+            item[.street] = street
+            item[.street2] = street2
+            item[.city] = city
+            item[.postalCode] = "34728"
+            item[.country] = country
+            item[.contact] = contact
+            return item
+        }
+        let one = address("Apartment 1"), two = address("Apartment 2")
+        expect(!Vault.same(one, two), "another flat is another address")
+        expect(Vault.same(one, address("apartment  1", street: "BAGDAT CD. 12", city: "Istanbul", country: "Türkiye")),
+               "case, accents, spacing and the country's name aside, the same address")
+        expect(!Vault.same(one, address("Apartment 1", contact: "c2")), "the same address for another person is theirs")
+        expect(!Vault.same(one, address("Apartment 1", city: "Ankara")), "another city")
+        let imported = Vault.merge(existing: [one], incoming: [address("Apartment 2"), address("Apartment 1")])
+        expect(imported.added == 1 && imported.same == 1, "an import adds the other flat and keeps the one saved")
+        // Petal's own export: its items keep their ids, and two with different ids stay two however alike.
+        let a = address("Apartment 1", id: "aaaa"), b = address("Apartment 1", id: "bbbb")
+        let own = Vault.merge(existing: [], incoming: [a, b], petal: true)
+        expect(own.added == 2 && Set(own.save.map(\.id)) == ["aaaa", "bbbb"], "distinct ids in Petal's export stay distinct")
+        let again = Vault.merge(existing: own.save, incoming: [a, b], petal: true)
+        expect(again.added == 0 && again.same == 2, "importing it again adds nothing")
+        let elsewhere = Vault.merge(existing: [one], incoming: [address("Apartment 1", id: "cccc")], petal: true)
+        expect(elsewhere.added == 0 && elsewhere.same == 1, "Petal's export from another Mac still finds the address saved here")
     }
 }

@@ -102,19 +102,28 @@ extension Assist {
         vaultCheck(text) != .clean
     }
 
-    /// The same, saying which: a secret, or too long to check.
+    /// The same, saying which: a secret, too long to check, or the vault couldn't be read (nothing checked).
     nonisolated static func vaultCheck(_ text: String) -> UIMap.SecretIndex.Check {
-        text.isEmpty ? .clean : VaultIndex.current().check(text)
+        text.isEmpty ? .clean : VaultIndex.settled { $0.check(text) } ?? .unreadable
     }
 
     /// What may be told of `text`: the vault's secrets in it as "(hidden)", all of it searched, then cut to `limit`
-    /// characters; nil when it's too long to search. Off the main thread.
+    /// characters; nil when it's too long to search. While the vault can't be read, it says so instead of the text.
+    /// Off the main thread.
     nonisolated static func shownText(_ text: String, limit: Int) -> String? {
-        let index = VaultIndex.current()
-        guard index.isEmpty || text.utf8.count <= UIMap.SecretIndex.limit else { return nil }
-        let clean = index.redacted(text)
-        return clean.count > limit ? String(clean.prefix(limit)) : clean
+        let shown: String?? = VaultIndex.settled { index in
+            if index.unreadable { return Self.vaultUnreadable }
+            guard index.isEmpty || text.utf8.count <= UIMap.SecretIndex.limit else { return nil }
+            let clean = index.redacted(text)
+            return clean.count > limit ? String(clean.prefix(limit)) : clean
+        }
+        switch shown {
+        case .some(let text): return text   // nil inside: too long to search
+        case .none: return Self.vaultUnreadable
+        }
     }
+
+    nonisolated static let vaultUnreadable = "(hidden: Petal can't read the vault right now, so it can't check this for saved secrets)"
 }
 
 /// The vault's secrets as hashes (UIMap.SecretIndex), read from the Keychain once and again only after the vault
@@ -132,6 +141,7 @@ enum VaultIndex {
     static func changed() {
         lock.lock()
         index = nil
+        failedAt = nil
         generation += 1
         lock.unlock()
         DispatchQueue.main.async { MainActor.assumeIsolated { VaultModel.shared.changed() } }
@@ -154,16 +164,46 @@ enum VaultIndex {
         lock.unlock()
     }
 
+    /// When the vault last couldn't be read: asked again a second later at the soonest, so a locked Keychain isn't
+    /// asked once per control petal_ui reads.
+    nonisolated(unsafe) private static var failedAt: Date?
+
+    private static var now: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return generation
+    }
+
+    /// The index for the vault and what Petal typed as they are now: made again (a few times at most) while a save,
+    /// a removal or a secret Petal is about to type changed them under it, so no reader gets one that misses it.
+    /// `unavailable` when the vault can't be read, or kept changing.
     static func current() -> UIMap.SecretIndex {
         lock.lock()
         if let index { lock.unlock(); return index }
-        let started = generation
-        let extra = typed
+        if let failedAt, Date().timeIntervalSince(failedAt) < 1 { lock.unlock(); return .unavailable }
         lock.unlock()
-        let made = UIMap.SecretIndex(VaultStore.items().flatMap(Vault.secrets) + extra)
+        let made = UIMap.settled(generation: { now }) { () -> UIMap.SecretIndex? in
+            lock.lock()
+            let extra = typed
+            lock.unlock()
+            guard let items = try? VaultStore.items() else { return nil }
+            return UIMap.SecretIndex(items.flatMap(Vault.secrets) + extra)
+        }
         lock.lock()
-        if generation == started { index = made }   // a change meanwhile is read next time
-        lock.unlock()
-        return made
+        defer { lock.unlock() }
+        guard let made, let built = made.value else {
+            // Never a shorter index: what can't be checked isn't shown. The Keychain is asked again next time.
+            if let made, made.value == nil { failedAt = Date() }
+            return .unavailable
+        }
+        failedAt = nil
+        if generation == made.generation { index = built }   // a change since is read next time
+        return built
+    }
+
+    /// `work` with the current index, done again (a few times at most) if the vault or what Petal typed changed
+    /// while it ran, so redacted text never goes out with an index that misses a secret; nil when it kept changing.
+    static func settled<T>(_ work: (UIMap.SecretIndex) -> T) -> T? {
+        UIMap.settled(generation: { now }) { work(current()) }?.value
     }
 }

@@ -336,9 +336,10 @@ final class Assist {
     static var clipboardIsPrivate: Bool { isConcealed(NSPasteboard.general) }
 
     /// `text` with the vault's secrets in it (whole, 8 characters or more of one, or a short one as a word) as
-    /// "(hidden)", the same matching petal_ui uses. May read the Keychain: never on the main thread.
+    /// "(hidden)", the same matching petal_ui uses; all of it "(hidden)" while the vault can't be read. May read the
+    /// Keychain: never on the main thread.
     nonisolated static func withoutSecrets(_ text: String) -> String {
-        text.isEmpty ? text : VaultIndex.current().redacted(text)
+        text.isEmpty ? text : VaultIndex.settled { $0.redacted(text) } ?? UIMap.hidden
     }
 
     /// The app in front (never Petal itself), or the running app called `name`.
@@ -362,6 +363,10 @@ final class Assist {
     /// A window Petal can't read whole through Accessibility is no picture (or, on the screen, isn't in it).
     nonisolated private static func screenshot(_ window: CGWindowID?, screen: Bool = false, hiding: Set<pid_t> = []) async -> (path: String?, note: String?) {
         guard screen || window != nil else { return (nil, nil) }
+        // Nothing can be checked for the vault's secrets while it can't be read: no picture at all.
+        if VaultIndex.current().unreadable {
+            return (nil, VaultStore.unreadableText + " Petal can't hide its secrets in a picture, so it takes none: try again in a moment.")
+        }
         guard CGPreflightScreenCaptureAccess(),
               // One window may be behind others or on another Desktop (a note's): every window is listed then.
               let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: window == nil) else { return (nil, nil) }
@@ -394,6 +399,7 @@ final class Assist {
             let deadline = Date().addingTimeInterval(6)
             var included: [SCWindow] = []
             var left: [String] = []
+            var overlays = 0
             for candidate in content.windows where candidate.isOnScreen && candidate.frame.intersects(area) {
                 guard let owner = candidate.owningApplication, !hiding.contains(owner.processID), owner.processID != me,
                       owner.bundleIdentifier != "com.apple.notificationcenterui" else { continue }
@@ -407,16 +413,20 @@ final class Assist {
                         continue
                     }
                 } else if candidate.windowLayer != 0 {
-                    // The menu bar, menus and other overlays, which have no window of their own in Accessibility.
-                    included.append(candidate)
+                    // The menu bar, menus, pop-overs and other overlays have no window of their own in Accessibility,
+                    // so nothing in them was checked (a context menu can quote the selected text): left out.
+                    overlays += 1
                     continue
                 }
                 let name = owner.applicationName.isEmpty ? "a window" : owner.applicationName
                 if !left.contains(name) { left.append(name) }
             }
+            var notes: [String] = []
             if !left.isEmpty {
-                note = "Left out (Petal couldn't check them for passwords and card numbers): \(left.joined(separator: ", "))."
+                notes.append("Left out (Petal couldn't check them for passwords and card numbers): \(left.joined(separator: ", ")).")
             }
+            if overlays > 0 { notes.append("Menus, the menu bar and other overlays aren't in the picture: Petal can't check them for secrets.") }
+            if !notes.isEmpty { note = notes.joined(separator: " ") }
             filter = SCContentFilter(display: display, including: included)
         } else { return (nil, nil) }
         let configuration = SCStreamConfiguration()

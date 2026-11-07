@@ -164,11 +164,15 @@ final class ComputerUse {
         let wanted = place?.window
         let find = args["find"] as? String ?? ""
         Self.readQueue.async {
-            let reading = Reader.read(pid: pid, window: wanted, budget: 1.5)
+            // Read again if the vault (or a secret Petal typed) changed meanwhile: nothing goes out unchecked against it.
+            let settled = VaultIndex.settled { _ in Reader.read(pid: pid, window: wanted, budget: 1.5) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Turned off, or the app made private, while it read: nothing it read goes back.
                     if let refusal = self.refusal(for: bundle, name: name) { return fail(refusal) }
+                    guard let reading = settled, !reading.vaultUnreadable else {
+                        return fail(VaultStore.unreadableText + " Petal can't hide its secrets, so it doesn't read windows until it can: try again in a moment.")
+                    }
                     if reading.gone { return fail("This note's window is closed (it was in \(name)). front: true uses what's in front now.") }
                     guard let window = reading.window else { return fail("\(name) has no window open.") }
                     let picked = UIMap.select(reading.nodes, window: reading.windowFrame, find: find)
@@ -271,7 +275,20 @@ final class ComputerUse {
 
         let job = Job(caller: caller, action: action, entry: entry, map: map, bundle: bundle, caption: caption, options: options,
                       cancel: Acting.Cancel(under: session.cancel), send: send, fail: fail)
-        if session.apps.contains(bundle) { return enqueue(job) }
+        // A Buy said in this window lasts only while it shows the tab and page it was said on: looked at before
+        // every act there (an act may be what leaves it, or the person may have).
+        guard let window = map.windowID, session.checkouts.contains(where: { $0.window == window }) else { return proceed(job) }
+        assist.vaultTab(map) { [weak self] place in
+            guard let self else { return }
+            self.sessions[caller]?.checkouts.removeAll { $0.left(place, window: window) }
+            self.proceed(job)
+        }
+    }
+
+    /// A job the reply may do now, or the first in an app it hasn't used yet (asked first).
+    private func proceed(_ job: Job) {
+        guard let session = sessions[job.caller], !session.stopped, !job.cancel.stopped else { return job.fail(whyStopped(job)) }
+        if session.apps.contains(job.bundle) { return enqueue(job) }
         admit(job, session: session)
     }
 
@@ -315,8 +332,8 @@ final class ComputerUse {
         admit(job, session: session)
     }
 
-    /// Whether a Buy the person said in this reply covers payment info at `place` (its exact host, this window and
-    /// tab, this card). A window whose page left the host it was bought on ends that Buy.
+    /// Whether a Buy the person said in this reply covers payment info at `place` (its exact host and page, this
+    /// window and tab, this card). A window seen showing another page or tab ends that Buy.
     func checkout(_ caller: String, token: Acting.Cancel, place: Vault.Place, window: CGWindowID?, card: String) -> Bool {
         guard live(caller, token), let current = sessions[caller] else { return false }
         sessions[caller]?.checkouts.removeAll { $0.left(place, window: window) }
@@ -328,8 +345,8 @@ final class ComputerUse {
     /// this reply. It doesn't let Petal AI use the browser otherwise: pressing the order button asks as any act does
     /// (unless the reply may use the browser already). False when the reply ended while they were asked.
     func allowCheckout(_ caller: String, token: Acting.Cancel, place: Vault.Place, window: CGWindowID?, card: String) -> Bool {
-        guard live(caller, token), let current = sessions[caller], let host = place.shop, let window else { return false }
-        let bought = Vault.Checkout(host: host, window: window, tab: place.tabURL.flatMap(VaultSite.host), card: card, turn: Self.turnName(current))
+        guard live(caller, token), let current = sessions[caller], let window,
+              let bought = Vault.Checkout(place: place, window: window, card: card, turn: Self.turnName(current)) else { return false }
         sessions[caller]?.checkouts.removeAll { $0.window == window }
         sessions[caller]?.checkouts.append(bought)
         return true
@@ -446,11 +463,16 @@ final class ComputerUse {
         }
     }
 
-    /// While any reply may act (a session the person allowed, not stopped, or an action waiting or under way),
-    /// Escape stops it and a small Stop stays on the screen, between actions too.
+    /// While any reply may act (a session the person allowed an app or a Buy, not stopped, or an action waiting or
+    /// under way), Escape stops it and a small Stop stays on the screen, between actions too.
     private func standGuard() {
-        let live = busy || !line.isEmpty || sessions.values.contains { !$0.stopped && !$0.apps.isEmpty && !$0.cancel.stopped }
+        let live = busy || !line.isEmpty || sessions.values.contains(where: Self.mayAct)
         cursor.stand(live)
+    }
+
+    /// A reply the person let use an app, or fill payment info after Buy, and that wasn't stopped.
+    private static func mayAct(_ session: Session) -> Bool {
+        !session.stopped && !session.cancel.stopped && (!session.apps.isEmpty || !session.checkouts.isEmpty)
     }
 
     private func enqueue(_ job: Job) {
@@ -605,12 +627,13 @@ final class ComputerUse {
     /// every other reply that may use apps now (Stop means Petal AI stops using them). A Petal chat's reply can't use
     /// apps again; an AI session outside Petal asks again at its next task.
     func stop() {
-        var callers = Set(sessions.filter { !$0.value.stopped && !$0.value.apps.isEmpty }.keys).union(line.map(\.caller))
+        var callers = Set(sessions.filter { Self.mayAct($0.value) }.keys).union(line.map(\.caller))
         if let caller = acting?.caller ?? lastCaller { callers.insert(caller) }
-        // All marked stopped first, so Stop never comes back for one still to be stopped.
+        // All marked stopped first, so Stop never comes back for one still to be stopped; a Buy goes with it.
         for caller in callers {
             close(caller)
             sessions[caller]?.stopped = true
+            sessions[caller]?.checkouts = []
         }
         cursor.hide()
         for caller in callers {
@@ -700,6 +723,8 @@ enum Reader {
         /// Somewhere in the window (any control, not only those told): a vault secret, a password field, or a control
         /// whose names say it holds a password, token or API key. A Copy button there may copy it.
         var holdsSecret = false
+        /// The vault couldn't be read: nothing was read, since nothing could be checked for its secrets.
+        var vaultUnreadable = false
     }
 
     static let attributes = [kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute,
@@ -724,6 +749,7 @@ enum Reader {
         guard let window = window ?? all.first else { return reading }
         // Nothing that holds a vault secret is told to the AI: not a control's text, not the window's title.
         let vault = VaultIndex.current()
+        guard !vault.unreadable else { reading.vaultUnreadable = true; return reading }
         reading.window = window
         reading.windowID = Windows.id(of: window)
         let title: String = Windows.value(window, kAXTitleAttribute) ?? ""
@@ -1173,6 +1199,7 @@ enum Acting {
                 case .secret:
                     return "What's selected holds one of the vault's secrets: Petal doesn't copy it. petal_vault fills a saved one where it's needed (action: fill)."
                 case .tooLong: return tooMuch("copy")
+                case .unreadable: return vaultUnreadable("copy")
                 case .clean: break
                 }
             }
@@ -1191,6 +1218,7 @@ enum Acting {
             switch Assist.vaultCheck(text) {
             case .secret: return refusal
             case .tooLong: return tooMuch("paste")
+            case .unreadable: return vaultUnreadable("paste")
             case .clean: break
             }
         }
@@ -1202,11 +1230,17 @@ enum Acting {
         "That's too much to check for saved secrets; \(verb) it yourself."
     }
 
+    /// While the vault can't be read, nothing can be checked for its secrets, so nothing is moved.
+    nonisolated static func vaultUnreadable(_ verb: String) -> String {
+        VaultStore.unreadableText + " Petal can't check this for saved secrets, so it doesn't \(verb) it: ask the person, or try again in a moment."
+    }
+
     /// Before a Copy or Cut button (or one whose names mention copying): the window, read again now (every control, and every text in it), shows no vault
     /// secret and no password, token or API key field, since a button like "Copy API key" copies its own key
     /// whatever has the keyboard. Off the main thread.
     static func copyButtonRefusal(_ map: ComputerUse.Map) -> String? {
-        let reading = Reader.read(pid: map.pid, window: map.windowID, budget: 1.5, deep: true)
+        guard let reading = VaultIndex.settled({ _ in Reader.read(pid: map.pid, window: map.windowID, budget: 1.5, deep: true) }),
+              !reading.vaultUnreadable else { return vaultUnreadable("copy") }
         if reading.gone || reading.window == nil { return "That window is gone; nothing was copied. " + changed }
         if reading.holdsSecret {
             return "This window shows a secret (one of the vault's, or a password, token or API key): Petal doesn't press its Copy buttons. petal_vault fills a saved one where it's needed (action: fill)."
@@ -1379,6 +1413,7 @@ enum Acting {
             switch Assist.vaultCheck(options.text) {
             case .secret: outcome.error = "That's one of the vault's secrets: petal_vault fills it (action: fill)."
             case .tooLong: outcome.error = tooMuch("type")
+            case .unreadable: outcome.error = vaultUnreadable("type")
             case .clean: break
             }
             if outcome.error != nil { break }

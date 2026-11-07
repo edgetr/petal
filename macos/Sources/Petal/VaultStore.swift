@@ -5,7 +5,10 @@ import Security
 /// The vault's items in the Keychain (service `tech.edgetr.petal.vault`), never in a plain file: one generic password
 /// per item, its account `item:<id>`, its data the item as JSON, marked as Petal's format (kSecAttrGeneric,
 /// Vault.format). Read once and kept until it changes. Every read and write of the Keychain runs on `queue`, one at a
-/// time and in order, never on the main thread; a read that a save overtook is never kept (`generation`).
+/// time and in order, never on the main thread; a read that a save overtook is never kept (`generation`). A read the
+/// Keychain refused, whole or in part (locked, busy, access denied), is an error, never a shorter vault: it isn't
+/// kept, the next ask reads again, and nothing that needs every item (an export, an import, the AI's redaction) goes
+/// ahead on it.
 ///
 /// Before kinds, the vault kept a secret under a name (account "OpenAI key", data the secret): the first load
 /// moves each into an API key (Vault.migrate), deleting the old item only once the new one is saved. A record that
@@ -29,8 +32,8 @@ enum VaultStore {
     nonisolated(unsafe) private static var stand: [VaultItem]?
 
     /// Runs `work` on `queue` (at once when already on it), waiting for it.
-    private static func serially<T>(_ work: () -> T) -> T {
-        DispatchQueue.getSpecific(key: onQueue) == true ? work() : queue.sync(execute: work)
+    private static func serially<T>(_ work: () throws -> T) rethrows -> T {
+        DispatchQueue.getSpecific(key: onQueue) == true ? try work() : try queue.sync(execute: work)
     }
 
     static func standIn(_ items: [VaultItem]) {
@@ -44,18 +47,26 @@ enum VaultStore {
 
     // MARK: Reading (off the main thread)
 
-    /// Every item, newest first. Reads the Keychain the first time and after a change.
-    static func items() -> [VaultItem] {
+    /// The Keychain didn't give the whole vault (`status`: its error).
+    struct Unreadable: Error, Equatable {
+        var status: OSStatus
+    }
+
+    static let unreadableText = "Your vault can't be read right now (the Keychain didn't answer, or the Mac is locked)."
+
+    /// Every item, newest first. Reads the Keychain the first time and after a change; throws Unreadable when it
+    /// couldn't read all of it (nothing kept: the next ask reads again).
+    static func items() throws -> [VaultItem] {
         lock.lock()
         if let stand { lock.unlock(); return stand.sorted { $0.updated > $1.updated } }
         if let cache { lock.unlock(); return cache }
         lock.unlock()
-        return serially {
+        return try serially {
             lock.lock()
             if let cache { lock.unlock(); return cache }
             let started = generation
             lock.unlock()
-            let sorted = readAll().sorted { $0.updated > $1.updated }
+            let sorted = try readAll().sorted { $0.updated > $1.updated }
             lock.lock()
             if generation == started { cache = sorted }   // a save meanwhile: read again next time
             lock.unlock()
@@ -65,12 +76,12 @@ enum VaultStore {
 
     /// Reads every record (on `queue`). An old secret becomes an API key, the old record deleted only once the
     /// new one is in; if the Keychain refuses the new one, the old stays and the secret is still listed (and hidden
-    /// from the AI) under the new item for now.
-    private static func readAll() -> [VaultItem] {
+    /// from the AI) under the new item for now. A record the Keychain won't give is an error for the whole read.
+    private static func readAll() throws -> [VaultItem] {
         var found: [VaultItem] = []
         var unreadable = 0
-        for (account, marked) in accounts() {
-            guard let data = read(account) else { continue }
+        for (account, marked) in try accounts() {
+            guard let data = try read(account) else { continue }   // deleted since it was listed
             switch Vault.stored(account: account, data: data, marked: marked) {
             case .item(let item):
                 found.append(item)
@@ -86,12 +97,13 @@ enum VaultStore {
         return found
     }
 
-    static func item(_ id: String) -> VaultItem? { items().first { $0.id == id } }
+    static func item(_ id: String) throws -> VaultItem? { try items().first { $0.id == id } }
 
-    /// The items, read on `queue`, handed back on the main thread.
-    static func load(_ done: @escaping @MainActor ([VaultItem]) -> Void) {
+    /// The items (or why they couldn't be read), read on `queue`, handed back on the main thread.
+    static func load(_ done: @escaping @MainActor (Result<[VaultItem], Unreadable>) -> Void) {
         queue.async {
-            let list = items()
+            let list: Result<[VaultItem], Unreadable>
+            do { list = .success(try items()) } catch { list = .failure(error as? Unreadable ?? Unreadable(status: errSecInternalError)) }
             DispatchQueue.main.async { MainActor.assumeIsolated { done(list) } }
         }
     }
@@ -145,12 +157,16 @@ enum VaultStore {
 
     // MARK: The Keychain
 
-    /// Every record's account, and whether it's marked as Petal's item format.
-    private static func accounts() -> [(account: String, marked: Bool)] {
+    /// Every record's account, and whether it's marked as Petal's item format. None saved is an empty list; any
+    /// other refusal throws.
+    private static func accounts() throws -> [(account: String, marked: Bool)] {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                     kSecMatchLimit as String: kSecMatchLimitAll, kSecReturnAttributes as String: true]
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let found = result as? [[String: Any]] else { return [] }
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess else { throw Unreadable(status: status) }
+        guard let found = result as? [[String: Any]] else { throw Unreadable(status: errSecDecode) }
         return found.compactMap { attributes in
             guard let account = attributes[kSecAttrAccount as String] as? String else { return nil }
             let generic = (attributes[kSecAttrGeneric as String] as? Data).map { String(decoding: $0, as: UTF8.self) }
@@ -158,12 +174,15 @@ enum VaultStore {
         }
     }
 
-    private static func read(_ account: String) -> Data? {
+    /// One record's data; nil when it was deleted since it was listed; throws when the Keychain won't give it.
+    private static func read(_ account: String) throws -> Data? {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
                                     kSecAttrAccount as String: account, kSecReturnData as String: true]
         var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
-        return result as? Data
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data else { throw Unreadable(status: status == errSecSuccess ? errSecDecode : status) }
+        return data
     }
 
     private static func write(_ item: VaultItem) -> Bool {
@@ -208,12 +227,20 @@ final class VaultModel {
     static let shared = VaultModel()
     private(set) var items: [VaultItem] = []
     private(set) var loaded = false
+    /// The last read of the Keychain didn't give the whole vault: Settings says so instead of showing fewer items.
+    private(set) var unreadable = false
     /// Touch ID or the Mac's password was given this recently: a saved password shows without asking again.
     var unlockedUntil = Date.distantPast
 
     func load() {
-        VaultStore.load { list in
-            self.items = list
+        VaultStore.load { read in
+            switch read {
+            case .success(let list):
+                self.items = list
+                self.unreadable = false
+            case .failure:
+                self.unreadable = true
+            }
             self.loaded = true
         }
     }
@@ -262,14 +289,19 @@ final class VaultModel {
             var result = Imported(file: url)
             let data = url.pathExtension.lowercased() == "zip" ? Self.unzipJSON(url) : try? Data(contentsOf: url)
             if let data, let parsed = Vault.importData(data) {
-                let merge = Vault.merge(existing: VaultStore.items(), incoming: parsed.items)
-                if VaultStore.save(merge.save) {
+                // Merged against the whole vault only: against part of it, what's saved would be added again.
+                if let existing = try? VaultStore.items() {
+                    let merge = Vault.merge(existing: existing, incoming: parsed.items, petal: parsed.petal)
+                    if VaultStore.save(merge.save) {
                     result.added = merge.added
                     result.same = merge.same
                     result.updated = merge.updated
                     result.skipped = parsed.skipped
+                    } else {
+                        result.failed = "The Keychain didn't take them. Nothing was added."
+                    }
                 } else {
-                    result.failed = "The Keychain didn't take them. Nothing was added."
+                    result.failed = VaultStore.unreadableText + " Nothing was imported."
                 }
             } else {
                 result.failed = data == nil ? "Petal couldn't read that file." : "That isn't an export Petal knows (Apple Passwords, Chrome, Proton Pass or Petal)."
@@ -295,14 +327,17 @@ final class VaultModel {
     enum ExportFormat { case petal, csv }
 
     /// Writes the vault to `url` (Petal's file with every kind, or logins as a CSV), off the main thread. The file
-    /// holds the secrets as plain text: only after Touch ID or the Mac's password (the settings window asks).
-    func export(_ format: ExportFormat, to url: URL, done: @escaping (Bool) -> Void) {
+    /// holds the secrets as plain text: only after Touch ID or the Mac's password (the settings window asks). Never
+    /// part of the vault: when the Keychain doesn't give all of it, nothing is written. `done`: why it failed, or nil.
+    func export(_ format: ExportFormat, to url: URL, done: @escaping (String?) -> Void) {
         VaultStore.queue.async {
-            let items = VaultStore.items()
+            guard let items = try? VaultStore.items() else {
+                return DispatchQueue.main.async { done(VaultStore.unreadableText + " Nothing was exported.") }
+            }
             let data = format == .petal ? Vault.exportJSON(items) : Data(Vault.exportCSV(items).utf8)
             let ok = (try? data.write(to: url, options: [.atomic])) != nil
             if ok { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path) }
-            DispatchQueue.main.async { done(ok) }
+            DispatchQueue.main.async { done(ok ? nil : "Petal couldn't write that file.") }
         }
     }
 

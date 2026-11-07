@@ -45,6 +45,8 @@ enum Sensitive {
         let around = visible.insetBy(dx: -40, dy: -40)
         var scan = Scan()
         let vault = VaultIndex.current()
+        // A vault that can't be read can't be searched for: no window is checked whole.
+        guard !vault.unreadable else { scan.complete = false; return scan }
         let mine = filled(of: pid)
         var stack: [(element: AXUIElement, depth: Int)] = [(window, 0)]
         var visited = 0
@@ -54,8 +56,9 @@ enum Sensitive {
             var raw: CFArray?
             let error = AXUIElementCopyMultipleAttributeValues(element, names, AXCopyMultipleAttributeOptions(rawValue: 0), &raw)
             guard error == .success, let list = raw as? [AnyObject] else {
-                // The window itself, or an app too busy to answer: not read whole. An element gone meanwhile: skipped.
-                if depth == 0 || error == .cannotComplete { scan.complete = false; return scan }
+                // The window itself, or an app too busy to answer or failing: not read whole. An element gone
+                // meanwhile: skipped (nothing of it shows any more).
+                if depth == 0 || UIMap.childRead(error: error.rawValue, count: 0) != .gone { scan.complete = false; return scan }
                 continue
             }
             var values: [String: Any] = [:]
@@ -81,18 +84,36 @@ enum Sensitive {
             if secret, frame.width > 0, frame.height > 0 { scan.rects.append(frame.insetBy(dx: -4, dy: -4)) }
             // Far down a page or scrolled away: not in the picture.
             if depth > 0, frame.width > 0, frame.height > 0, !frame.intersects(around) { continue }
-            guard depth < 80 else { continue }
-            let children: [AXUIElement]
-            if Reader.listRoles.contains(role) {
-                children = Windows.value(element, "AXVisibleRows") ?? Windows.value(element, "AXVisibleChildren") ?? Windows.value(element, kAXChildrenAttribute) ?? []
-            } else {
-                children = Windows.value(element, kAXChildrenAttribute) ?? []
-            }
+            // A list's rows showing (what's scrolled away isn't in the picture), else every child. Children that
+            // couldn't be read, or that lie deeper than the scan goes, leave the window not read whole.
+            let names = Reader.listRoles.contains(role) ? ["AXVisibleRows", "AXVisibleChildren", kAXChildrenAttribute] : [kAXChildrenAttribute]
+            let (read, children) = Self.children(element, names)
+            guard UIMap.covered(read, depth: depth, maxDepth: Self.maxDepth) else { scan.complete = false; return scan }
             // A page that shows nothing of itself to Accessibility can't be checked.
             if role == "AXWebArea", children.isEmpty, frame.width > 40, frame.height > 40 { scan.complete = false; return scan }
             for child in children.reversed() { stack.append((child, depth + 1)) }
         }
         return scan
+    }
+
+    static let maxDepth = 80
+
+    /// An element's children by the first of `names` it has, with what reading them said (an error kept, never
+    /// taken for "none").
+    static func children(_ element: AXUIElement, _ names: [String]) -> (UIMap.ChildRead, [AXUIElement]) {
+        for name in names {
+            var raw: CFTypeRef?
+            let error = AXUIElementCopyAttributeValue(element, name as CFString, &raw)
+            let list = error == .success ? (raw as? [AXUIElement]) : nil
+            if error == .success, raw != nil, list == nil { return (.unreadable, []) }   // not a list of elements
+            let read = UIMap.childRead(error: error.rawValue, count: list?.count ?? 0)
+            switch read {
+            case .none: continue
+            case .children: return (read, list ?? [])
+            case .gone, .unreadable: return (read, [])
+            }
+        }
+        return (.none, [])
     }
 
     /// The Accessibility window of `pid` with this window server id.
