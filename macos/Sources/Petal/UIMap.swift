@@ -357,26 +357,105 @@ enum UIMap {
         return key.command && ["w", "q"].contains(key.character ?? "")
     }
 
-    /// The menu item copies or cuts ("Edit › Copy", "Cut", "Copy Link").
-    static func copies(menu title: String?) -> Bool {
-        guard let last = title.flatMap({ menuPath($0).last }), let first = words(last).first else { return false }
-        return first == "copy" || first == "cut"
+    // MARK: The clipboard
+
+    /// What a menu item, key or button does with the clipboard: copy (or cut) puts something on it, paste takes it off.
+    enum Clip { case copy, paste }
+
+    /// ⌘V with any other modifiers (⌥⇧⌘V pastes and matches style) pastes; ⌘C and ⌘X copy.
+    static func clip(key: Key) -> Clip? {
+        guard key.command else { return nil }
+        return clip(character: key.character)
     }
 
-    /// ⌘C or ⌘X, with any other modifiers.
-    static func copies(key: Key) -> Bool {
-        key.command && ["c", "x"].contains(key.character ?? "")
+    /// A menu item's shortcut as Accessibility gives it (AXMenuItemCmdChar, AXMenuItemCmdModifiers; 8 is "no ⌘"):
+    /// the same in every language, so it's what a menu item is known by first.
+    static func clip(shortcut character: String?, modifiers: Int = 0) -> Clip? {
+        guard modifiers & 8 == 0 else { return nil }
+        return clip(character: character)
     }
 
-    /// The menu item pastes ("Edit › Paste", "Paste and Match Style", "Paste Item").
-    static func pastes(menu title: String?) -> Bool {
-        guard let last = title.flatMap({ menuPath($0).last }) else { return false }
-        return words(last).first == "paste"
+    private static func clip(character: String?) -> Clip? {
+        switch character?.lowercased() {
+        case "v": return .paste
+        case "c", "x": return .copy
+        default: return nil
+        }
     }
 
-    /// ⌘V, with any other modifiers (⌥⇧⌘V pastes and matches style).
-    static func pastes(key: Key) -> Bool {
-        key.command && key.character == "v"
+    /// The app's own name for it (AXIdentifier), which for AppKit's menu items and buttons is often the action's
+    /// selector: "paste:", "pasteAsPlainText:", "copy:", "cut:", a web page's "paste-button".
+    static func clip(identifier: String) -> Clip? {
+        let parts = identifierWords(identifier)
+        if parts.contains("paste") { return .paste }
+        if parts.contains("copy") || parts.contains("cut") { return .copy }
+        return nil
+    }
+
+    /// "pasteAsPlainText:" as ["paste", "as", "plain", "text"].
+    static func identifierWords(_ identifier: String) -> [String] {
+        var parts: [String] = []
+        var current = ""
+        for character in identifier {
+            guard character.isLetter else {
+                if !current.isEmpty { parts.append(current); current = "" }
+                continue
+            }
+            if character.isUppercase, current.last?.isLowercase == true { parts.append(current); current = "" }
+            current.append(character)
+        }
+        if !current.isEmpty { parts.append(current) }
+        return parts.map { $0.lowercased() }
+    }
+
+    /// The words of a Paste, Copy or Cut command in the languages macOS speaks most, for when the shortcut and the
+    /// app's own name for it don't say: the first word of the title ("Paste and Match Style", "Düzen › Yapıştır").
+    static let pasteWords = ["paste", "yapıştır", "einsetzen", "einfügen", "coller", "pegar", "incolla", "colar", "plakken", "plak",
+                             "вставить", "вставка"]
+    static let copyWords = ["copy", "cut", "kopyala", "kes", "kopieren", "ausschneiden", "copier", "couper", "copiar", "cortar", "copia",
+                            "taglia", "recortar", "kopiëren", "kopieer", "knippen", "knip", "скопировать", "копировать", "вырезать"]
+    /// Languages written without spaces: how the title starts.
+    static let pasteStarts = ["ペースト", "貼り付け", "粘贴", "粘貼", "貼上", "붙여넣"]
+    static let copyStarts = ["コピー", "カット", "拷贝", "拷貝", "复制", "剪切", "剪下", "복사", "잘라내"]
+    private static let foldedPaste = Set(pasteWords.map(fold)), foldedCopy = Set(copyWords.map(fold))
+    private static let foldedPasteStarts = pasteStarts.map(fold), foldedCopyStarts = copyStarts.map(fold)
+
+    /// Lowercase, without accents, and Turkish's dotless ı as i ("YAPIŞTIR" and "Yapıştır" alike).
+    static func fold(_ text: String) -> String {
+        text.lowercased().replacingOccurrences(of: "ı", with: "i").folding(options: .diacriticInsensitive, locale: nil)
+    }
+
+    /// The last part of a menu path, or a button's title, says Paste, Copy or Cut (in any of the languages above).
+    static func clip(title: String?) -> Clip? {
+        guard let last = title.flatMap({ menuPath($0).last }) else { return nil }
+        let folded = fold(last)
+        if let first = words(folded).first {
+            if foldedPaste.contains(first) { return .paste }
+            if foldedCopy.contains(first) { return .copy }
+        }
+        if foldedPasteStarts.contains(where: folded.hasPrefix) { return .paste }
+        if foldedCopyStarts.contains(where: folded.hasPrefix) { return .copy }
+        return nil
+    }
+
+    /// A menu item: its shortcut first, then the app's own name for it, then its words.
+    static func clip(menuItem title: String?, identifier: String = "", character: String? = nil, modifiers: Int = 0) -> Clip? {
+        clip(shortcut: character, modifiers: modifiers) ?? clip(identifier: identifier) ?? clip(title: title)
+    }
+
+    /// A button or other control: the app's own name for it, then its title, description and help.
+    static func clip(control node: UINode) -> Clip? {
+        clip(identifier: node.identifier) ?? [node.title, node.label, node.help].lazy.compactMap { clip(title: $0) }.first
+    }
+
+    /// Any word anywhere in a control's names is a paste word ("Quick paste", "Clipboard: paste here"): refused while
+    /// the clipboard holds a secret, even when `clip(control:)` can't tell.
+    static func mightPaste(_ node: UINode) -> Bool {
+        if identifierWords(node.identifier).contains("paste") { return true }
+        return [node.title, node.label, node.help].contains { text in
+            let folded = fold(text)
+            return words(folded).contains(where: foldedPaste.contains) || foldedPasteStarts.contains(where: folded.contains)
+        }
     }
 
     static func words(_ text: String) -> [String] {

@@ -752,6 +752,23 @@ enum Reader {
         return words.joined(separator: " ")
     }
 
+    /// A control's names and kind, in one message to its app (never its value): enough to tell a password field, a
+    /// field for a token, or a Paste button.
+    static func node(_ element: AXUIElement) -> UINode {
+        let names = [kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute,
+                     kAXPlaceholderValueAttribute, kAXIdentifierAttribute]
+        let found = values(element, names)
+        func string(_ name: String) -> String { String((found[name] as? String ?? "").prefix(200)) }
+        var node = UINode(role: string(kAXRoleAttribute))
+        node.subrole = string(kAXSubroleAttribute)
+        node.title = string(kAXTitleAttribute)
+        node.label = string(kAXDescriptionAttribute)
+        node.help = string(kAXHelpAttribute)
+        node.placeholder = string(kAXPlaceholderValueAttribute)
+        node.identifier = string(kAXIdentifierAttribute)
+        return node
+    }
+
     /// Several attributes in one message to the app (one round trip, not ten).
     static func values(_ element: AXUIElement, _ names: [String]) -> [String: Any] {
         var raw: CFArray?
@@ -903,13 +920,24 @@ enum Acting {
                 prepared.error = password
                 return prepared
             }
-            if entry == nil, focusedIsSecure(app) {
-                prepared.error = "A password field has the cursor: Petal doesn't type there. petal_vault types a saved secret."
+            if entry == nil, let why = secretFieldRefusal(map, nil, pasting: false) {
+                prepared.error = why
                 return prepared
             }
             if known == nil, action == "key", let key = options.key, key.command, let found = menuEquivalent(app, key) {
                 prepared.menuItem = found.item
                 prepared.menuTitle = found.title
+            }
+        case "press":
+            // A Paste button: never a secret off the clipboard, nor into a password field (early here; again right
+            // before the press).
+            if let entry {
+                let pastes = UIMap.clip(control: entry.node) == .paste
+                if pastes || UIMap.mightPaste(entry.node),
+                   let why = pasteRefusal() ?? (pastes ? secretFieldRefusal(map, nil, pasting: true) : nil) {
+                    prepared.error = why
+                    return prepared
+                }
             }
         default: break
         }
@@ -921,9 +949,11 @@ enum Acting {
             prepared.error = why
             return prepared
         }
-        // A secret on the clipboard is never pasted (early here; again right before the paste). What a copy takes is
-        // checked only in perform, once the window is in front: the keyboard may be in another window until then.
-        if UIMap.pastes(menu: prepared.menuTitle) || key.map(UIMap.pastes(key:)) == true, let why = pasteRefusal() {
+        // A secret on the clipboard is never pasted, nor anything into a password field (early here; again right
+        // before the paste). What a copy takes is checked only in perform, once the window is in front: the keyboard
+        // may be in another window until then.
+        if clip(key: key, item: prepared.menuItem, title: prepared.menuTitle) == .paste,
+           let why = pasteRefusal() ?? secretFieldRefusal(map, nil, pasting: true) {
             prepared.error = why
         }
         return prepared
@@ -931,12 +961,47 @@ enum Acting {
 
     // MARK: The clipboard and the vault
 
-    /// Never a vault secret onto the clipboard, where petal_look could read it, nor off it into a window: the vault
-    /// types its own, asking the person every time. Both are checked right before the key or the menu item, in the
-    /// window it acts on (`perform`).
-    static func clipboardRefusal(_ map: ComputerUse.Map, _ element: AXUIElement?, menu: String?, key: UIMap.Key?) -> String? {
-        if UIMap.copies(menu: menu) || key.map(UIMap.copies(key:)) == true, let why = copyRefusal(map, element) { return why }
-        if UIMap.pastes(menu: menu) || key.map(UIMap.pastes(key:)) == true, let why = pasteRefusal() { return why }
+    /// Never a vault secret onto the clipboard, where petal_look could read it, nor off it into a window, nor anything
+    /// pasted into a password field: the vault types its own, asking the person every time. The one check for every
+    /// way Petal copies or pastes (a key, a menu item, a button), right before it, in the window it acts on (`perform`).
+    static func clipboardRefusal(_ map: ComputerUse.Map, _ element: AXUIElement?, clip: UIMap.Clip?) -> String? {
+        switch clip {
+        case .copy?: return copyRefusal(map, element)
+        case .paste?: return pasteRefusal() ?? secretFieldRefusal(map, element, pasting: true)
+        case nil: return nil
+        }
+    }
+
+    /// What a key, or the menu item it or a menu path chose, does with the clipboard: the key itself first, then the
+    /// item's shortcut (the same in every language), its selector, and last its words.
+    static func clip(key: UIMap.Key?, item: AXUIElement?, title: String?) -> UIMap.Clip? {
+        if let key, let clip = UIMap.clip(key: key) { return clip }
+        guard let item else { return title.flatMap { UIMap.clip(title: $0) } }
+        let found = Reader.values(item, [kAXMenuItemCmdCharAttribute, kAXMenuItemCmdModifiersAttribute, kAXIdentifierAttribute, kAXTitleAttribute])
+        let own = found[kAXTitleAttribute] as? String ?? ""
+        return UIMap.clip(menuItem: own.isEmpty ? title : own, identifier: found[kAXIdentifierAttribute] as? String ?? "",
+                          character: found[kAXMenuItemCmdCharAttribute] as? String,
+                          modifiers: (found[kAXMenuItemCmdModifiersAttribute] as? NSNumber)?.intValue ?? 0)
+            ?? title.flatMap { UIMap.clip(title: $0) }
+    }
+
+    /// What has the app's keyboard now (and `element`, which a key focuses first) is a password field, or, for a
+    /// paste, a field whose names say it holds a password or token: then why nothing goes in. Every key and every
+    /// paste (a key, a menu item or a button) asks this right before it.
+    static func secretFieldRefusal(_ map: ComputerUse.Map, _ element: AXUIElement?, pasting: Bool) -> String? {
+        let app = AXUIElementCreateApplication(map.pid)
+        AXUIElementSetMessagingTimeout(app, 0.5)
+        let focused: AXUIElement? = Windows.value(app, kAXFocusedUIElementAttribute)
+        for control in [element, focused].compactMap({ $0 }) {
+            let node = Reader.node(control)
+            if UIMap.isSecure(node) {
+                return pasting ? "A password field has the cursor: Petal doesn't paste there. petal_vault types a saved secret, asking the person every time."
+                    : "A password field has the cursor: Petal doesn't type there. petal_vault types a saved secret."
+            }
+            if pasting, UIMap.looksSecret(node) {
+                return "The cursor is in a field for a password or token: Petal doesn't paste there. petal_vault types a saved secret, asking the person every time."
+            }
+        }
         return nil
     }
 
@@ -985,6 +1050,24 @@ enum Acting {
         switch action {
         case "press":
             guard let element else { break }
+            // A Copy, Cut or Paste button gets the same checks as the keys and menu items, in its window, in front.
+            let fresh = Reader.node(element)
+            if let clip = UIMap.clip(control: fresh) ?? entry.flatMap({ UIMap.clip(control: $0.node) }) {
+                if let error = bringWindow(map, cancel: cancel) {
+                    if cancel.stopped { return outcome }
+                    outcome.error = error
+                    break
+                }
+                if let why = clipboardRefusal(map, nil, clip: clip) {
+                    outcome.error = why
+                    break
+                }
+            }
+            // And whatever might paste, never while a secret is on the clipboard.
+            if UIMap.mightPaste(fresh) || entry.map({ UIMap.mightPaste($0.node) }) == true, let why = pasteRefusal() {
+                outcome.error = why
+                break
+            }
             let actions = Reader.actions(element)
             if let done = ["AXPress", "AXPick", "AXConfirm", "AXOpen"].first(where: actions.contains) {
                 guard !cancel.stopped else { return outcome }
@@ -1075,8 +1158,9 @@ enum Acting {
                 outcome.error = error
                 break
             }
-            // Right before it: what a copy takes, in this window now, and what a paste puts in.
-            if let why = clipboardRefusal(map, nil, menu: prepared.menuTitle, key: nil) {
+            // Right before it: what a copy takes, in this window now, what a paste puts in, and where. The item is known
+            // by its shortcut first, so a menu in any language counts.
+            if let why = clipboardRefusal(map, nil, clip: clip(key: nil, item: item, title: prepared.menuTitle)) {
                 outcome.error = why
                 break
             }
@@ -1101,9 +1185,10 @@ enum Acting {
                 }
             }
             // A shortcut its menus have is chosen there (any app, in front or not); otherwise the key itself. Either
-            // way, right before it: what a copy takes, in this window now, and what a paste puts in.
+            // way, right before it: what a copy takes, in this window now, what a paste puts in, and where.
+            let clipping = clip(key: key, item: prepared.menuItem, title: prepared.menuTitle)
             if let item = prepared.menuItem {
-                if let why = clipboardRefusal(map, element, menu: prepared.menuTitle, key: key) {
+                if let why = clipboardRefusal(map, element, clip: clipping) {
                     outcome.error = why
                     break
                 }
@@ -1122,11 +1207,9 @@ enum Acting {
                 guard keysGoTo(element, pid: pid) else { outcome.error = "The cursor left \(name); the key wasn't sent."; break }
             } else {
                 guard windowInFront(map) else { outcome.error = "That window isn't in front anymore; the key wasn't sent."; break }
-                let app = AXUIElementCreateApplication(pid)
-                AXUIElementSetMessagingTimeout(app, 0.5)
-                guard !focusedIsSecure(app) else { outcome.error = "A password field has the cursor: Petal doesn't type there."; break }
+                if let why = secretFieldRefusal(map, nil, pasting: false) { outcome.error = why; break }
             }
-            if let why = clipboardRefusal(map, element, menu: prepared.menuTitle, key: key) {
+            if let why = clipboardRefusal(map, element, clip: clipping) {
                 outcome.error = why
                 break
             }

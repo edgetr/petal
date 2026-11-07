@@ -201,14 +201,47 @@ struct UIMapCheck {
         expect(UIMap.unsure(unknownNow, unknownNow, destructive: false, age: 60) == nil, "not destructive: goes")
         expect(UIMap.unsure(five, five, destructive: true, age: 600) == nil, "known selection: goes")
 
-        // Copy and Cut, by menu or key.
-        expect(UIMap.copies(menu: "Edit › Copy") && UIMap.copies(menu: "Edit › Cut") && UIMap.copies(menu: "Edit › Copy Link"), "copy menu items")
-        expect(!UIMap.copies(menu: "Edit › Paste") && !UIMap.copies(menu: "File › Duplicate") && !UIMap.copies(menu: nil), "not copying")
-        expect(["cmd-c", "cmd-x", "cmd-shift-c", "⌘C"].allSatisfy { UIMap.parseKey($0).map(UIMap.copies(key:)) == true }, "copy keys")
-        expect(["c", "cmd-v", "ctrl-c"].allSatisfy { UIMap.parseKey($0).map(UIMap.copies(key:)) == false }, "not copy keys")
-        expect(UIMap.pastes(menu: "Edit › Paste") && UIMap.pastes(menu: "Edit › Paste and Match Style") && !UIMap.pastes(menu: "Edit › Copy") && !UIMap.pastes(menu: nil), "paste menu items")
-        expect(["cmd-v", "cmd-shift-alt-v", "⌘V"].allSatisfy { UIMap.parseKey($0).map(UIMap.pastes(key:)) == true }, "paste keys")
-        expect(["v", "cmd-c", "ctrl-v"].allSatisfy { UIMap.parseKey($0).map(UIMap.pastes(key:)) == false }, "not paste keys")
+        // Copy, Cut and Paste: by key, by a menu item's shortcut (any language), by the app's own name, by words.
+        func keyClip(_ text: String) -> UIMap.Clip? { UIMap.parseKey(text).flatMap(UIMap.clip(key:)) }
+        expect(["cmd-c", "cmd-x", "cmd-shift-c", "⌘C"].allSatisfy { keyClip($0) == .copy }, "copy keys")
+        expect(["c", "ctrl-c", "cmd-s"].allSatisfy { keyClip($0) == nil } && keyClip("cmd-v") == .paste, "not copy keys")
+        expect(["cmd-v", "cmd-shift-alt-v", "⌘V"].allSatisfy { keyClip($0) == .paste }, "paste keys")
+        expect(["v", "ctrl-v"].allSatisfy { keyClip($0) == nil }, "not paste keys")
+        expect(UIMap.clip(shortcut: "V") == .paste && UIMap.clip(shortcut: "V", modifiers: 3) == .paste, "⌘V and ⌥⇧⌘V paste")
+        expect(UIMap.clip(shortcut: "C") == .copy && UIMap.clip(shortcut: "X") == .copy, "⌘C and ⌘X copy")
+        expect(UIMap.clip(shortcut: "V", modifiers: 8) == nil && UIMap.clip(shortcut: "S") == nil && UIMap.clip(shortcut: nil) == nil, "no ⌘, or another key")
+        // A menu item's shortcut beats its words: Turkish, Japanese, or a title that says nothing.
+        expect(UIMap.clip(menuItem: "Düzen › Yapıştır", character: "V") == .paste, "Yapıştır with ⌘V")
+        expect(UIMap.clip(menuItem: "Édition › Bidule", character: "V", modifiers: 3) == .paste, "any title with ⌥⇧⌘V")
+        expect(UIMap.clip(menuItem: "File › Save", character: "S") == nil, "⌘S is neither")
+        expect(UIMap.clip(menuItem: "Edit › Something", identifier: "pasteAsPlainText:") == .paste, "a paste selector")
+        expect(UIMap.clip(menuItem: "Edit › Something", identifier: "cut:") == .copy && UIMap.clip(identifier: "copy:") == .copy, "copy and cut selectors")
+        expect(UIMap.clip(identifier: "paste-button") == .paste && UIMap.clip(identifier: "PasteButton") == .paste, "a web page's or app's paste button")
+        expect(UIMap.clip(identifier: "_NS:123") == nil && UIMap.clip(identifier: "shortcutsButton") == nil && UIMap.clip(identifier: "copyright") == nil
+               && UIMap.clip(identifier: "NSPasteboardHistory") == nil, "other identifiers")
+        // Words, as a fallback, in the languages macOS speaks most.
+        let pasteTitles = ["Edit › Paste", "Edit › Paste and Match Style", "Düzen › Yapıştır", "DÜZEN › YAPIŞTIR", "Bearbeiten › Einsetzen",
+                           "Bearbeiten › Einfügen", "Édition › Coller", "Edición › Pegar", "Modifica › Incolla", "Editar › Colar",
+                           "Wijzig › Plakken", "編集 › ペースト", "編集 › 貼り付け", "编辑 › 粘贴", "편집 › 붙여넣기", "Правка › Вставить",
+                           "Edit › Paste…"]
+        for title in pasteTitles { expect(UIMap.clip(title: title) == .paste, "paste: \(title)", "\(String(describing: UIMap.clip(title: title)))") }
+        let copyTitles = ["Edit › Copy", "Edit › Cut", "Edit › Copy Link", "Düzen › Kopyala", "Düzen › Kes", "Bearbeiten › Kopieren",
+                          "Bearbeiten › Ausschneiden", "Édition › Copier", "Édition › Couper", "Edición › Copiar", "Edición › Cortar",
+                          "Modifica › Copia", "Modifica › Taglia", "Editar › Recortar", "Wijzig › Kopiëren", "Wijzig › Knippen",
+                          "編集 › コピー", "編集 › カット", "编辑 › 拷贝", "编辑 › 复制", "编辑 › 剪切", "편집 › 복사", "편집 › 잘라내기",
+                          "Правка › Скопировать", "Правка › Копировать", "Правка › Вырезать"]
+        for title in copyTitles { expect(UIMap.clip(title: title) == .copy, "copy: \(title)", "\(String(describing: UIMap.clip(title: title)))") }
+        for title in ["File › Duplicate", "File › Export…", "Edit › Select All", "Düzen › Tümünü Seç", "Format › Pasteboard", nil] as [String?] {
+            expect(UIMap.clip(title: title) == nil, "neither: \(title ?? "nil")")
+        }
+        // Buttons: the app's own name, then the title, description and help.
+        expect(UIMap.clip(control: UINode(role: "AXButton", label: "Yapıştır")) == .paste, "a Turkish Paste button")
+        expect(UIMap.clip(control: UINode(role: "AXButton", identifier: "paste:")) == .paste, "a toolbar button by its selector")
+        expect(UIMap.clip(control: UINode(role: "AXButton", help: "Copy")) == .copy, "a Copy button by its help")
+        expect(UIMap.clip(control: UINode(role: "AXButton", title: "Send")) == nil, "an ordinary button")
+        expect(UIMap.mightPaste(UINode(role: "AXButton", help: "Quick paste from the clipboard")), "might paste: a word anywhere")
+        expect(UIMap.mightPaste(UINode(role: "AXButton", label: "クリップボードから貼り付け")), "might paste: inside Japanese text")
+        expect(!UIMap.mightPaste(UINode(role: "AXButton", title: "Clipboard history")), "might paste: not every clipboard button")
 
         // The clipboard, a window's title or a selection: the secrets go, the rest stays.
         expect(vault.redacted("sk-live-4f9a2b7c1d") == UIMap.hidden, "a whole secret, hidden")
