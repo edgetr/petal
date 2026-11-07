@@ -156,6 +156,36 @@ struct NoteLayoutCheck {
         expect(NoteRules.samePage("https://a.com/x#top", "https://a.com/x/"), "the same page, whatever its fragment")
         expect(!NoteRules.sameURL("", ""), "no address is never the same address")
 
+        // How many tabs share an address: counted with the rule matching uses.
+        let listed = ["https://a.com/app", "https://a.com/app/", "https://a.com/app#x", "https://b.com", ""]
+        expect(NoteRules.shared("https://a.com/app", among: listed) == 2, "/app and /app/ are one address, counted twice",
+               "\(String(describing: NoteRules.shared("https://a.com/app", among: listed)))")
+        expect(NoteRules.shared("https://a.com/app/", among: listed) == 2, "from either side")
+        expect(NoteRules.shared("https://a.com/app#x", among: listed) == 1, "a fragment is another address")
+        expect(NoteRules.shared("https://c.com", among: listed) == nil, "not in the listing: unknown, never none")
+        expect(NoteRules.shared("", among: listed) == nil && NoteRules.shared("https://a.com/app", among: [""]) == nil,
+               "no address, or no listing: unknown")
+        let slashNote = place(.tab, pid: 3, app: chrome, tab: NoteTab(index: 1, count: 2, shared: NoteRules.shared("https://a.com/app", among: listed),
+                                                                         url: "https://a.com/app", title: ""))
+        expect(!NoteRules.fits(slashNote, chromeFront(NoteTab(id: "5", index: 2, count: 2, shared: NoteRules.shared("https://a.com/app/", among: listed),
+                                                                url: "https://a.com/app/", title: ""))),
+               "after a restart, a note on /app isn't taken by /app/ while both are open")
+
+        // Firefox and Zen can't count by address (their strips show titles): unknown, so never found again by it.
+        let inbox = place(.tab, pid: 3, app: "org.mozilla.firefox", tab: NoteTab(index: 1, count: 2, shared: 1, url: "https://mail.example.com/inbox", title: "Inbox (3)"))
+        expect(!NoteRules.fits(inbox, FrontPlace(pid: 4, app: "org.mozilla.firefox", window: 9,
+                                                 tab: NoteTab(element: 3, index: 2, count: 2, url: "https://mail.example.com/inbox", title: "Inbox (5)"))),
+               "after a restart, a Firefox tab isn't found by its address: another tab may have it")
+
+        // A read that didn't count (a note's AI reading its tab) keeps the count made for the same address.
+        let counted = NoteTab(id: "41", index: 1, count: 2, shared: 1, url: "https://a.com/app", title: "")
+        expect(NoteRules.follow(counted, to: NoteTab(id: "41", index: 2, count: 3, url: "https://a.com/app/", title: ""), keepWords: true).shared == 1,
+               "an uncounted read of the same address keeps its count")
+        expect(NoteRules.follow(counted, to: NoteTab(id: "41", index: 2, count: 3, url: "https://a.com/other", title: ""), keepWords: true).shared == nil,
+               "a new address drops it")
+        expect(NoteRules.follow(counted, to: NoteTab(id: "41", index: 2, count: 3, shared: 2, url: "https://a.com/app", title: ""), keepWords: true).shared == 2,
+               "a counted read replaces it")
+
         // Never saved: a tab's button means nothing once Petal quits.
         let saved = try! JSONEncoder().encode(s1)
         let back = try! JSONDecoder().decode(NoteTab.self, from: saved)

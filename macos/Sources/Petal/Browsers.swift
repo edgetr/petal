@@ -204,7 +204,8 @@ final class Browsers {
                 end tell
                 """).map { Self.fields($0, 6) } ?? []
             guard fields.count >= 6, !fields[0].isEmpty else { return nil }
-            return NoteTab(id: fields[0], index: Int(fields[1]), count: Int(fields[2]), shared: shared(fields[3]), url: fields[4], title: fields[5])
+            return NoteTab(id: fields[0], index: Int(fields[1]), count: Int(fields[2]), shared: shared(fields[4], among: fields[3]),
+                           url: fields[4], title: fields[5])
         case .safari?:
             guard access(bundleID) == .allowed, Windows.trusted else { return nil }
             let app = AXUIElementCreateApplication(pid)
@@ -232,7 +233,7 @@ final class Browsers {
             let count = Int(fields[1])
             let after = window.flatMap { strip(of: $0) }
             let element = tabElement(before, after, index: index, count: count, pid: pid, window: window.flatMap { Windows.id(of: $0) })
-            return NoteTab(element: element, index: index, count: count, shared: shared(fields[2]), url: fields[3], title: fields[4])
+            return NoteTab(element: element, index: index, count: count, shared: shared(fields[3], among: fields[2]), url: fields[3], title: fields[4])
         case .gecko?:
             return geckoTab(pid: pid)
         case nil:
@@ -240,17 +241,21 @@ final class Browsers {
         }
     }
 
-    /// AppleScript that counts the tabs of every window of the browser with the address `u` into `k` (0 when it
-    /// can't: a count half done would say a tab is the only one when it isn't).
+    /// AppleScript that lists the address of every tab of every window of the browser into `k`, apart by character
+    /// 30, for Petal to count the ones that are `u`'s (`shared`) with the same rule matching uses; empty when it
+    /// can't (a list half done would say a tab is the only one when it isn't).
     nonisolated private static let sharedScript = """
-        set k to 0
+        set k to ""
         if u is not "" then
         try
         repeat with x in windows
-        set k to k + (count of (tabs of x whose URL is u))
+        repeat with v in (get URL of tabs of x)
+        set s to contents of v
+        if s is not missing value then set k to k & s & (character id 30)
+        end repeat
         end repeat
         on error
-        set k to 0
+        set k to ""
         end try
         end if
         """
@@ -318,9 +323,9 @@ final class Browsers {
         return matches.count == 1 ? matches[0].tab : nil
     }
 
-    /// How many tabs share the address, as a script counted them: nil when it couldn't (0).
-    nonisolated private static func shared(_ field: String) -> Int? {
-        Int(field).flatMap { $0 > 0 ? $0 : nil }
+    /// How many tabs of the browser have the address `url`, from `sharedScript`'s list: nil when it couldn't list them.
+    nonisolated private static func shared(_ url: String, among listing: String) -> Int? {
+        NoteRules.shared(url, among: listing.components(separatedBy: "\u{1E}"))
     }
 
     /// A script's answer split at tabs into `count` fields; the last (a title) keeps any tab of its own.
@@ -456,7 +461,8 @@ final class Browsers {
     /// Firefox's and Zen's front window (or `wanted`, one of its windows by the window server's number, none if it
     /// isn't there): the selected tab in its tab strip (its button, place, how many, its title) and the address
     /// field, through Accessibility, both read again at the end so they're the same tab's. Best effort: what each
-    /// version shows differs. The front window's tab also says how many tabs of every window have its title.
+    /// version shows differs. Its `shared` is unknown: the strips show titles, not addresses, so after a restart a
+    /// Firefox or Zen tab is never found again by its address.
     nonisolated static func geckoTab(pid: pid_t, window wanted: CGWindowID? = nil) -> NoteTab? {
         guard Windows.trusted else { return nil }
         let app = AXUIElementCreateApplication(pid)
@@ -511,23 +517,7 @@ final class Browsers {
             element = TabElements.shared.number(for: again.element, pid: pid, window: number)
         }
         let title = strip.map { $0.titles[$0.selected] } ?? ""
-        var shared: Int?
-        if wanted == nil, element != nil, !title.isEmpty {
-            // Every window's strip, by title (the strip shows no addresses); a window not read in time: unknown.
-            var total = strip.map { $0.titles.filter { $0 == title }.count } ?? 0
-            let until = Date().addingTimeInterval(0.6)
-            for other in all where Windows.id(of: other) != number {
-                guard Date() < until else { total = 0; break }
-                if let tabs = Self.strip(of: other, deadline: min(until, Date().addingTimeInterval(0.3))) {
-                    total += tabs.titles.filter { $0 == title }.count
-                } else if Date() >= until {
-                    total = 0
-                    break
-                }
-            }
-            shared = total > 0 ? total : nil
-        }
-        return NoteTab(element: element, index: strip.map { $0.selected + 1 }, count: strip?.tabs.count, shared: shared,
+        return NoteTab(element: element, index: strip.map { $0.selected + 1 }, count: strip?.tabs.count,
                        url: address ?? "", title: title.isEmpty ? windowTitle : title)
     }
     // MARK: Closing

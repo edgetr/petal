@@ -26,10 +26,10 @@ enum NoteScope: String, Codable, Sendable, CaseIterable {
 ///   (an Accessibility element, the same for as long as the tab lives, wherever it moves in its strip and whatever
 ///   page it shows). It means something only while this Petal runs, so it's never saved. A tab dragged to another
 ///   window gets another button and loses its note. No strip (Safari hides it for a window's only tab): no element.
-/// - `shared`: how many tabs of the whole browser (every window) have its address (Firefox and Zen: its title),
-///   itself included; nil when unknown. Only after the browser (or Petal) restarted, with no id or element that still
-///   means anything, is a tab found again by its address, and only when no other tab of the browser has it, now and
-///   when the note last saw it.
+/// - `shared`: how many tabs of the whole browser (every window) have its address (`NoteRules.sameURL`), itself
+///   included; nil when unknown (Firefox and Zen always: their tab strips show titles, never addresses). Only after
+///   the browser (or Petal) restarted, with no id or element that still means anything, is a tab found again by its
+///   address, and only when no other tab of the browser has it, now and when the note last saw it.
 /// - `index`, `count`: its place in its window (1 is the first) and how many tabs the window had: for its key only.
 struct NoteTab: Codable, Equatable, Sendable {
     var id: String?
@@ -166,6 +166,13 @@ enum NoteRules {
         return !x.isEmpty && x == y
     }
 
+    /// How many of the browser's tabs (`urls`: every tab of every window) have the address `url` (`sameURL`, as
+    /// matching uses), itself included; nil when unknown: no address, or the listing doesn't have it.
+    static func shared(_ url: String, among urls: [String]) -> Int? {
+        let count = urls.filter { sameURL($0, url) }.count
+        return count > 0 ? count : nil
+    }
+
     /// The same page, whatever its #fragment.
     static func samePage(_ a: String, _ b: String) -> Bool {
         let x = plain(a, fragment: false), y = plain(b, fragment: false)
@@ -300,14 +307,15 @@ enum NoteRules {
     }
 
     /// The note's tab as it is now: its id or element, place, address and title follow it (a private app's address
-    /// and title are never kept).
+    /// and title are never kept). A read that didn't count the tabs sharing its address (`shared` nil) keeps the
+    /// count made for the same address; a new address drops it.
     static func follow(_ tab: NoteTab, to front: NoteTab, keepWords: Bool) -> NoteTab {
         var next = tab
         if front.id != nil { next.id = front.id }
         if front.element != nil { next.element = front.element }
         next.index = front.index
         next.count = front.count
-        next.shared = front.shared
+        if front.shared != nil || !sameURL(tab.url, front.url) { next.shared = front.shared }
         if keepWords {
             next.url = front.url
             next.title = front.title

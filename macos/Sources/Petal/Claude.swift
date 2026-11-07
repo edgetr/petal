@@ -30,7 +30,15 @@ final class Agent {
     /// The sticky note this chat is (StickyNotes.swift): its tools are told, so they look at its window.
     let noteID = UUID()
     /// The window the note is stuck to; nil for a chat stuck to none.
-    var place: NotePlace? { didSet { if place != oldValue { keep() } } }
+    var place: NotePlace? {
+        didSet {
+            guard place != oldValue else { return }
+            // Stuck to something else (its tab, its window, all of its app): what its AI read for the old one is no
+            // use, and nothing it asked for there goes ahead.
+            if place?.kind != oldValue?.kind { app.assist.computer.placeChanged(noteID.uuidString) }
+            keep()
+        }
+    }
     /// The AI the chat's first message was asked with, before it has a session (a note waiting for a slot keeps it).
     @ObservationIgnored private var askedWith: Provider?
     /// The window a kept chat was stuck to, kept in its saves until the note sticks to a window again (or learns

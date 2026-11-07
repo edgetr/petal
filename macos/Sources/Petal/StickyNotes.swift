@@ -199,6 +199,9 @@ extension ClaudePanel {
             notes.append(note)
             return attach(note, place)
         }
+        // Which window is in front isn't known (no Accessibility, or an app slow to answer): a new note there could
+        // never be found again, so it's the plain chat instead.
+        if front.unread { return looseNote }
         return attach(StickyNote(), place)
     }
 
