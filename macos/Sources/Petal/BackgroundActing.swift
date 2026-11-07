@@ -63,47 +63,53 @@ extension Acting {
 
         /// Right before each change: the person may have come back to the note's window (or its app) during the reads
         /// since it decided. Before the first change it's decided again (the foreground rules, with their pause);
-        /// after one, it stops there. Never a change in the window the person is now using.
+        /// after one, it stops there. Never a change in the window the person is now using. Every change goes through
+        /// `gate`, which runs this and then the change at once, with nothing read in between (Background.Gate): the
+        /// shared helpers (focus, insert, typing, scrolling) do their reads first and take the gate for their changes.
         var changed = false
-        func clear() -> Bool {
-            guard !cancel.stopped else { return false }
+        func clear() -> Background.Verdict {
+            guard !cancel.stopped else { return .no }
             let now = situation(map)
             // A Stop, steering, a new turn or the app made private (which stops `cancel`) may have come during that
             // read: heard here, right before the change.
-            guard !cancel.stopped else { return false }
+            guard !cancel.stopped else { return .no }
             switch Background.behind(now, plannedFront: front, changed: changed) {
             case .go:
                 changed = true
-                return true
+                return .go
             case .again:
                 outcome.again = true
             case .stop:
                 outcome.error = "The person came back to \(map.appName)'s window while Petal worked there in the background, so it stopped part way. Call petal_ui to see what was done."
             }
-            return false
+            return .no
         }
+        let gate = Background.Gate(clear)
 
         /// Typed but not as asked, in the background: never counted as done, never sent.
         let uncertain = "Petal couldn't confirm \(name) took that in the background (it doesn't read as asked now), so it isn't done and Return wasn't pressed. Call petal_ui to see what \(name) holds; then ask the person to bring the window forward (clicking this note in the AI button's preview does it) and type it there."
 
+        /// Gives `element` its app's keyboard (the gate right before the focus is set). False when nothing more
+        /// should happen (the gate's refusal has set the outcome already).
+        func focused(_ element: AXUIElement) -> Bool {
+            guard let error = focus(element, pid: pid, name: name, cancel: cancel, gate: gate) else { return true }
+            if !cancel.stopped, !gate.refused { outcome.error = error }
+            return false
+        }
+
         /// The text as keys to its app alone, once `element` has that app's keyboard; stops if the app comes to the
         /// front meanwhile (keys would then be the person's). False when nothing more should happen.
         func keys(into element: AXUIElement) -> Bool {
-            guard clear() else { return false }
             guard !isFront(pid) else { outcome.needs = .keys; return false }
-            if let error = focus(element, pid: pid, name: name, cancel: cancel) {
-                if !cancel.stopped { outcome.error = error }
-                return false
-            }
+            guard focused(element) else { return false }
             let before = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
             let caret = options.replace ? nil : selectedRange(element)
             if options.replace, let all = UIMap.parseKey("cmd-a") {
                 guard keysGoTo(element, pid: pid), !isFront(pid) else { outcome.error = "The cursor left \(name); nothing was typed."; return false }
-                guard clear(), post(all, to: pid, cancel: cancel) else { return false }
+                guard gate.mutate({ post(all, to: pid, cancel: cancel) }) == true else { return false }
             }
-            guard clear() else { return false }
-            guard type(options.text, to: pid, cancel: cancel, still: { keysGoTo(element, pid: pid) && !isFront(pid) }) else {
-                if !cancel.stopped {
+            guard type(options.text, to: pid, cancel: cancel, still: { keysGoTo(element, pid: pid) && !isFront(pid) }, gate: gate) else {
+                if !cancel.stopped, !gate.refused {
                     outcome.error = "\(map.appName) came to the front, or the cursor left \(name), while Petal typed, so it stopped there. Call petal_ui to see what was typed."
                 }
                 return false
@@ -143,34 +149,34 @@ extension Acting {
                 }
                 let actions = Reader.actions(element)
                 if let done = Background.pressAction(actions) {
-                    guard clear() else { return }
-                    if AXUIElementPerformAction(element, done as CFString) == .success { break }
+                    guard let pressed = gate.mutate({ AXUIElementPerformAction(element, done as CFString) }) else { return }
+                    if pressed == .success { break }
                 } else if actions.contains("AXOpen") {
                     outcome.needs = .opens
                     return
                 }
                 if ["AXRow", "AXCell", "AXTab", "AXRadioButton"].contains(entry?.node.role ?? "") {
-                    guard clear() else { return }
-                    if AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) == .success { break }
+                    guard let picked = gate.mutate({ AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) }) else { return }
+                    if picked == .success { break }
                 }
                 outcome.error = "\(name) can't be pressed through Accessibility, and in the background Petal never clicks for real: try a menu item or a key, or ask the person to click it."
             case .scroll:
                 guard let element else { break }
-                guard clear() else { return }
                 if options.direction.isEmpty {
-                    if AXUIElementPerformAction(element, "AXScrollToVisible" as CFString) != .success {
+                    guard let scrolled = gate.mutate({ AXUIElementPerformAction(element, "AXScrollToVisible" as CFString) }) else { return }
+                    if scrolled != .success {
                         outcome.error = "\(name) can't be scrolled into view through Accessibility; give a direction instead."
                     }
-                } else if let error = scroll(element, options.direction, cancel: cancel) {
+                } else if let error = scroll(element, options.direction, cancel: cancel, gate: gate) {
                     outcome.error = error
                 }
             case .focus:
                 guard let element else { break }
                 if isSecure(element) { outcome.error = password; break }
-                guard clear() else { return }
-                if AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) != .success {
-                    guard clear() else { return }
-                    if AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) != .success {
+                guard let set = gate.mutate({ AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) }) else { return }
+                if set != .success {
+                    guard let selected = gate.mutate({ AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) }) else { return }
+                    if selected != .success {
                         outcome.error = "\(name) can't take the focus through Accessibility."
                     }
                 }
@@ -185,8 +191,8 @@ extension Acting {
                 if outcome.error != nil { break }
                 if isSecure(element) { outcome.error = password; break }
                 if case .setValue(let keysAfter) = step {
-                    guard clear() else { return }
-                    switch insert(options.text, into: element, replace: options.replace, cancel: cancel) {
+                    // insert reads the field first, then the gate and the value together.
+                    switch insert(options.text, into: element, replace: options.replace, cancel: cancel, gate: gate) {
                     case .done: break
                     case .unsure:
                         // Never counted as done, and never sent.
@@ -200,12 +206,14 @@ extension Acting {
                 } else {
                     guard keys(into: element) else { return }
                 }
-                // Return goes only to a background app, and only once the keyboard is in this field.
+                // Return goes only to a background app, and only once the keyboard is in this field: the focus (its
+                // own gate), then where the keyboard is read, then the gate and Return together.
                 if options.submit {
                     if Background.returnGoes(appFront: isFront(pid)), let enter = UIMap.parseKey("return") {
-                        guard clear() else { return }
-                        if focus(element, pid: pid, name: name, cancel: cancel) == nil, keysGoTo(element, pid: pid), !isFront(pid) {
-                            guard clear(), post(enter, to: pid, cancel: cancel) else { return }
+                        let unfocused = focus(element, pid: pid, name: name, cancel: cancel, gate: gate)
+                        if unfocused != nil, cancel.stopped || gate.refused { return }
+                        if unfocused == nil, keysGoTo(element, pid: pid), !isFront(pid) {
+                            guard gate.mutate({ post(enter, to: pid, cancel: cancel) }) == true else { return }
                         } else {
                             say("It was typed, not sent: Return couldn't reach \(name). Press its send button with petal_act instead.")
                         }
@@ -222,30 +230,23 @@ extension Acting {
                 guard let item = prepared.menuItem else { break }
                 // A key its menus have, for a control: that control takes its app's keyboard first (its app is behind).
                 if let element, action == "key" {
-                    guard clear() else { return }
-                    if let error = focus(element, pid: pid, name: name, cancel: cancel) {
-                        if !cancel.stopped { outcome.error = error }
-                        break
-                    }
+                    guard focused(element) else { return }
                 }
-                // Right before it: still the note's window its app acts on, and still not the app in front.
+                // Right before it: still the note's window its app acts on, and still not the app in front (read), then
+                // the gate and the item together.
                 guard windowInFront(map), !isFront(pid) else { outcome.needs = .menu; return }
-                guard clear() else { return }
-                if AXUIElementPerformAction(item, kAXPressAction as CFString) != .success {
+                guard let chosen = gate.mutate({ AXUIElementPerformAction(item, kAXPressAction as CFString) }) else { return }
+                if chosen != .success {
                     outcome.error = "Couldn't choose \(prepared.menuTitle ?? "that item"); its app didn't answer."
                 }
                 outcome.chose = prepared.menuTitle
             case .key:
                 guard let key = options.key else { break }
                 if let element {
-                    guard clear() else { return }
-                    if let error = focus(element, pid: pid, name: name, cancel: cancel) {
-                        if !cancel.stopped { outcome.error = error }
-                        break
-                    }
+                    guard focused(element) else { return }
                 }
                 // Right before the key: its app still behind, and the keyboard still in that control (or that window, with
-                // no password field), or it isn't sent.
+                // no password field), or it isn't sent; then the gate and the key together.
                 guard !isFront(pid) else { outcome.needs = .keys; return }
                 if let element {
                     guard keysGoTo(element, pid: pid) else { outcome.error = "The cursor left \(name); the key wasn't sent."; break }
@@ -253,7 +254,7 @@ extension Acting {
                     guard windowInFront(map) else { outcome.needs = .keys; return }
                     if let why = secretFieldRefusal(map, nil, pasting: false) { outcome.error = why; break }
                 }
-                guard clear(), post(key, to: pid, cancel: cancel) else { return }
+                guard gate.mutate({ post(key, to: pid, cancel: cancel) }) == true else { return }
             }
         }
         act()
@@ -272,6 +273,8 @@ extension Acting {
             }
         }
         if now == getpid() { now = nil }   // Petal's own windows are never put away here
+        // Every read first, then the person's last input, then what's put back at once: nothing read in between.
+        let noteWindowFront = front && !windowMain && now == pid && windowInFront(map)
         let lastInput = ProcessInfo.processInfo.systemUptime - idle()
         let opened = Background.opened(baseline, note: pid, frontNow: now, lastInput: lastInput)
         let other = now.flatMap { NSRunningApplication(processIdentifier: $0)?.localizedName } ?? "another app"
@@ -284,7 +287,7 @@ extension Acting {
                     : "\(map.appName) came to the front by itself after that; Petal put back the app the person was using.")
             }
         case .window:
-            if front, !windowMain, windowInFront(map), let theirs {
+            if noteWindowFront, let theirs {
                 AXUIElementPerformAction(theirs, kAXRaiseAction as CFString)
                 AXUIElementSetAttributeValue(theirs, kAXMainAttribute as CFString, kCFBooleanTrue)
                 say("That brought this window forward in \(map.appName); Petal put the person's window back in front.")
@@ -292,7 +295,7 @@ extension Acting {
         case .none:
             if opened { say("That opened something in \(other), which is in front now.") }
             else if now == pid, baseline.front != pid { say("\(map.appName) came to the front after that.") }
-            else if now == pid, front, !windowMain, windowInFront(map) { say("That brought this window forward in \(map.appName).") }
+            else if noteWindowFront { say("That brought this window forward in \(map.appName).") }
         }
         // Its own change (text, caret, focus, scroll) becomes what's expected next, as in the foreground.
         if outcome.error == nil, outcome.needs == nil, !outcome.again, !cancel.stopped, ["type", "focus", "scroll", "key"].contains(action) {

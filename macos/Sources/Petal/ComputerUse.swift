@@ -761,9 +761,7 @@ final class ComputerUse {
         }
     }
 
-    nonisolated static func typingThere(_ app: String) -> String {
-        "The person is typing in \(app)'s window right now, so nothing was done there. Wait a little, then petal_ui and try again."
-    }
+    nonisolated static func typingThere(_ app: String) -> String { Background.busyThere(app) }
 
     /// In the background: no pointer, nothing brought forward. The window, what's selected in it, what has its
     /// keyboard and the control are checked right before the change, with nothing in between, and a tab's note acts
@@ -797,15 +795,21 @@ final class ComputerUse {
                     // The person came back to that window before anything changed: decided again, by the same
                     // rules (the pointer and its pause if it's in front now), within the same patience.
                     guard outcome.again else { return self.done(job, outcome) }
-                    if let error = self.stale(job) { job.fail(error); return self.finished() }
-                    guard Date().timeIntervalSince(since) < Background.patience else {
-                        job.fail(Self.typingThere(map.appName))
-                        return self.finished()
-                    }
-                    self.decide(job, map, since: since)
+                    self.again(job, map, since: since)
                 }
             }
         }
+    }
+
+    /// Nothing was done because the person came or went right before the first change: decided again, by the same
+    /// rules, within the same patience.
+    private func again(_ job: Job, _ map: Map, since: Date) {
+        if let error = stale(job) { job.fail(error); return finished() }
+        guard Date().timeIntervalSince(since) < Background.patience else {
+            job.fail(Self.typingThere(map.appName))
+            return finished()
+        }
+        decide(job, map, since: since)
     }
 
     /// With the pointer, where the person sees it. `since`: when a note's act first decided which way (its patience).
@@ -865,7 +869,13 @@ final class ComputerUse {
                                 }
                             }
                             DispatchQueue.main.async {
-                                MainActor.assumeIsolated { self.done(job, outcome) }
+                                MainActor.assumeIsolated {
+                                    // A note's person left its window right before the first change: nothing was
+                                    // done, and it's decided again (the background way, now).
+                                    guard outcome.again else { return self.done(job, outcome) }
+                                    self.cursor.rest()
+                                    self.again(job, map, since: since)
+                                }
                             }
                         }
                     }
@@ -1816,252 +1826,264 @@ enum Acting {
         // `stayBehind`: a sticky note's act, decided while its window was in front. Should the person leave it while
         // this runs, nothing is brought forward for the note: it stops there and says the window must be in front.
         func behind() -> Bool { stayBehind && !(isFront(pid) && windowInFront(map)) }
-        // On a Stop the outcome goes back as it is: ComputerUse.done tells the chat it was stopped.
-        switch action {
-        case "press":
-            guard let element else { break }
-            // A Copy, Cut or Paste button gets the same checks as the keys and menu items, in its window, in front.
-            let fresh = Reader.node(element)
-            let clip = UIMap.clip(control: fresh) ?? entry.flatMap({ UIMap.clip(control: $0.node) })
-            if let clip {
-                if behind() { outcome.needs = .clipboard; return outcome }
-                if let error = bringWindow(map, cancel: cancel, stayBehind: stayBehind) {
-                    if cancel.stopped { return outcome }
-                    if stayBehind { outcome.needs = .clipboard; return outcome }
-                    outcome.error = error
-                    break
+        // Every change goes through the gate: a Stop, and for a note the person typing there again or gone elsewhere,
+        // read right before the change with nothing read in between (Background.Gate). What the act needs to read
+        // (where the keyboard is, the window, the clipboard) comes before it.
+        let gate = changeGate(map, cancel: cancel, note: stayBehind)
+        // How much of a `type` went, for what the AI is told if it's interrupted.
+        var sent = 0
+        // On a Stop the outcome goes back as it is: ComputerUse.done tells the chat it was stopped. A refused gate
+        // returns at once; what the person did is said below.
+        func act() {
+            switch action {
+            case "press":
+                guard let element else { break }
+                // A Copy, Cut or Paste button gets the same checks as the keys and menu items, in its window, in front.
+                let fresh = Reader.node(element)
+                let clip = UIMap.clip(control: fresh) ?? entry.flatMap({ UIMap.clip(control: $0.node) })
+                if let clip {
+                    if behind() { outcome.needs = .clipboard; return }
+                    if let error = bringWindow(map, cancel: cancel, stayBehind: stayBehind) {
+                        if cancel.stopped { return }
+                        if stayBehind { outcome.needs = .clipboard; return }
+                        outcome.error = error
+                        break
+                    }
+                    if let why = clipboardRefusal(map, nil, clip: clip) {
+                        outcome.error = why
+                        break
+                    }
                 }
-                if let why = clipboardRefusal(map, nil, clip: clip) {
+                // And whatever might paste, never while a secret is on the clipboard, nor into a password field.
+                if UIMap.mightPaste(fresh) || entry.map({ UIMap.mightPaste($0.node) }) == true,
+                   let why = pasteRefusal() ?? secretFieldRefusal(map, nil, pasting: true) {
                     outcome.error = why
                     break
                 }
-            }
-            // And whatever might paste, never while a secret is on the clipboard, nor into a password field.
-            if UIMap.mightPaste(fresh) || entry.map({ UIMap.mightPaste($0.node) }) == true,
-               let why = pasteRefusal() ?? secretFieldRefusal(map, nil, pasting: true) {
-                outcome.error = why
-                break
-            }
-            // A Copy or Cut button (or one whose names mention copying: "Click to copy API key") copies what it's for,
-            // not what has the keyboard: never in a window showing a secret.
-            let copies = clip == .copy || UIMap.mightCopy(fresh) || entry.map({ UIMap.mightCopy($0.node) }) == true
-            if copies, let why = copyButtonRefusal(map) {
-                outcome.error = why
-                break
-            }
-            // And should a secret reach the clipboard anyway, it's cleared (CopyWatch, after the reply's press): only
-            // the change count now, never what the clipboard holds.
-            let actions = Reader.actions(element)
-            if let done = ["AXPress", "AXPick", "AXConfirm", "AXOpen"].first(where: actions.contains) {
-                guard !cancel.stopped else { return outcome }
-                let mark = copies ? CopyMark.now() : nil
-                if AXUIElementPerformAction(element, done as CFString) == .success {
-                    outcome.copied = mark
+                // A Copy or Cut button (or one whose names mention copying: "Click to copy API key") copies what it's for,
+                // not what has the keyboard: never in a window showing a secret.
+                let copies = clip == .copy || UIMap.mightCopy(fresh) || entry.map({ UIMap.mightCopy($0.node) }) == true
+                if copies, let why = copyButtonRefusal(map) {
+                    outcome.error = why
                     break
                 }
-            }
-            if ["AXRow", "AXCell", "AXTab", "AXRadioButton"].contains(entry?.node.role ?? "") {
-                guard !cancel.stopped else { return outcome }
-                let mark = copies ? CopyMark.now() : nil
-                if AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) == .success {
-                    outcome.copied = mark
-                    break
-                }
-            }
-            outcome.error = "\(name) can't be pressed through Accessibility. Only a real click would do it, and Petal never moves the person's pointer: ask them to click it, or try a menu item or a key."
-        case "focus":
-            guard let element else { break }
-            guard !cancel.stopped else { return outcome }
-            if AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) != .success {
-                guard !cancel.stopped else { return outcome }
-                if AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) != .success {
-                    outcome.error = "\(name) can't take the focus through Accessibility."
-                }
-            }
-        case "type":
-            guard let element, let node = entry?.node else { break }
-            switch Assist.vaultCheck(options.text) {
-            case .secret: outcome.error = "That's one of the vault's secrets: petal_vault fills it (action: fill)."
-            case .tooLong: outcome.error = tooMuch("type")
-            case .unreadable: outcome.error = vaultUnreadable("type")
-            case .clean: break
-            }
-            if outcome.error != nil { break }
-            // A note in its window in front went ahead because the person was idle there. Before every batch of keys,
-            // the focus and Return: should they start typing there again (or leave that window), it stops, says how
-            // much went, and never presses Return after it.
-            var sent = 0
-            func interrupted() -> String? {
-                guard stayBehind, let why = Background.interrupt(situation(map)) else { return nil }
-                let typed = String(decoding: Array(options.text.utf16.prefix(sent)), as: UTF16.self)
-                return Background.interrupted(why, app: map.appName, typed: typed, of: options.text)
-            }
-            var typed = false
-            // A native field takes its new value directly; a web page's needs keys, so its page hears them.
-            if !node.web, UIMap.isText(node) {
-                if let why = interrupted() { outcome.error = why; break }
-                switch insert(options.text, into: element, replace: options.replace, cancel: cancel) {
-                case .done:
-                    typed = true
-                    sent = options.text.utf16.count
-                case .unsure:
-                    // Never typed a second time: it may be there already.
-                    typed = true
-                    say("Petal may not have typed it (the field didn't say what it holds now): call petal_ui to see \(name) before typing again.")
-                case .no: break
-                case .stopped: return outcome
-                }
-            }
-            // Keys (the text, or Return) go wherever the keyboard is: only once it's this field, never a password field.
-            var submit = options.submit
-            if !typed || submit {
-                let unsent = "It was typed, not sent: \(map.appName)'s window went behind before Return, and Petal doesn't bring it forward for a note. Press its send button with petal_act instead."
-                if behind() {
-                    guard typed else { outcome.needs = .keys; return outcome }
-                    say(unsent)
-                    submit = false
-                } else if !isFront(pid) {
-                    if bringForward(pid, cancel: cancel, stayBehind: stayBehind) {
-                        if !stayBehind { say(cameForward) }
-                    } else if cancel.stopped || !stayBehind {
-                        return outcome
-                    } else {
-                        // A note's window went behind between the reads: bringForward refused, nothing came forward.
-                        guard typed else { outcome.needs = .keys; return outcome }
-                        say(unsent)
-                        submit = false
+                // And should a secret reach the clipboard anyway, it's cleared (CopyWatch, after the reply's press): only
+                // the change count now, never what the clipboard holds.
+                let actions = Reader.actions(element)
+                if let done = ["AXPress", "AXPick", "AXConfirm", "AXOpen"].first(where: actions.contains) {
+                    let mark = copies ? CopyMark.now() : nil
+                    guard let pressed = gate.mutate({ AXUIElementPerformAction(element, done as CFString) }) else { return }
+                    if pressed == .success {
+                        outcome.copied = mark
+                        break
                     }
                 }
-            }
-            if !typed || submit {
-                guard !cancel.stopped else { return outcome }
-                if let why = interrupted() { outcome.error = why; break }
-                if let error = focus(element, pid: pid, name: name, cancel: cancel) {
-                    if cancel.stopped { return outcome }
+                if ["AXRow", "AXCell", "AXTab", "AXRadioButton"].contains(entry?.node.role ?? "") {
+                    let mark = copies ? CopyMark.now() : nil
+                    guard let picked = gate.mutate({ AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) }) else { return }
+                    if picked == .success {
+                        outcome.copied = mark
+                        break
+                    }
+                }
+                outcome.error = "\(name) can't be pressed through Accessibility. Only a real click would do it, and Petal never moves the person's pointer: ask them to click it, or try a menu item or a key."
+            case "focus":
+                guard let element else { break }
+                guard let focused = gate.mutate({ AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) }) else { return }
+                if focused != .success {
+                    guard let selected = gate.mutate({ AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) }) else { return }
+                    if selected != .success {
+                        outcome.error = "\(name) can't take the focus through Accessibility."
+                    }
+                }
+            case "type":
+                guard let element, let node = entry?.node else { break }
+                switch Assist.vaultCheck(options.text) {
+                case .secret: outcome.error = "That's one of the vault's secrets: petal_vault fills it (action: fill)."
+                case .tooLong: outcome.error = tooMuch("type")
+                case .unreadable: outcome.error = vaultUnreadable("type")
+                case .clean: break
+                }
+                if outcome.error != nil { break }
+                // A note in its window in front went ahead because the person was idle there. The gate before every
+                // change (the value, the focus, ⌘A, each batch of keys, Return) stops it should they start typing there
+                // again (or leave that window): it says how much went, and never presses Return after it.
+                var typed = false
+                // A native field takes its new value directly; a web page's needs keys, so its page hears them.
+                if !node.web, UIMap.isText(node) {
+                    switch insert(options.text, into: element, replace: options.replace, cancel: cancel, gate: gate) {
+                    case .done:
+                        typed = true
+                        sent = options.text.utf16.count
+                    case .unsure:
+                        // Never typed a second time: it may be there already.
+                        typed = true
+                        say("Petal may not have typed it (the field didn't say what it holds now): call petal_ui to see \(name) before typing again.")
+                    case .no: break
+                    case .stopped: return
+                    }
+                }
+                // Keys (the text, or Return) go wherever the keyboard is: only once it's this field, never a password field.
+                var submit = options.submit
+                if !typed || submit {
+                    let unsent = "It was typed, not sent: \(map.appName)'s window went behind before Return, and Petal doesn't bring it forward for a note. Press its send button with petal_act instead."
+                    if behind() {
+                        guard typed else { outcome.needs = .keys; return }
+                        say(unsent)
+                        submit = false
+                    } else if !isFront(pid) {
+                        if bringForward(pid, cancel: cancel, stayBehind: stayBehind) {
+                            if !stayBehind { say(cameForward) }
+                        } else if cancel.stopped || !stayBehind {
+                            return
+                        } else {
+                            // A note's window went behind between the reads: bringForward refused, nothing came forward.
+                            guard typed else { outcome.needs = .keys; return }
+                            say(unsent)
+                            submit = false
+                        }
+                    }
+                }
+                if !typed || submit {
+                    if let error = focus(element, pid: pid, name: name, cancel: cancel, gate: gate) {
+                        if cancel.stopped || gate.refused { return }
+                        outcome.error = error
+                        break
+                    }
+                }
+                if !typed {
+                    // Never ⌘A over a whole document: only once the keyboard is in this field.
+                    if options.replace, let all = UIMap.parseKey("cmd-a") {
+                        guard keysGoTo(element, pid: pid) else { outcome.error = "The cursor left \(name); nothing was typed."; break }
+                        guard gate.mutate({ post(all, to: pid, cancel: cancel) }) == true else { return }
+                    }
+                    let went = type(options.text, to: pid, cancel: cancel, still: { keysGoTo(element, pid: pid) }, gate: gate,
+                                    progress: { sent = $0 })
+                    guard went else {
+                        if cancel.stopped || gate.refused { return }
+                        outcome.error = "The cursor left \(name) while typing, so Petal stopped there. Call petal_ui to see what was typed."
+                        break
+                    }
+                }
+                // Return: where the keyboard is is read first, then the gate and the key together.
+                if submit, let enter = UIMap.parseKey("return") {
+                    guard keysGoTo(element, pid: pid) else { outcome.error = "The cursor left \(name) before Return: it was typed, not sent."; break }
+                    guard gate.mutate({ post(enter, to: pid, cancel: cancel) }) == true else { return }
+                }
+                usleep(120_000)
+                let now = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
+                if !now.isEmpty, !submit {
+                    outcome.value = UIMap.typedValue(now, node: node, filled: Sensitive.isFilled(element, pid: pid), secret: Assist.isVaultSecret)
+                }
+            case "fill":
+                guard let element, let plan = options.fill else { break }
+                if behind() { outcome.needs = .vault; return }
+                if let error = VaultFiller.fill(plan, into: element, map: map, cancel: cancel, stayBehind: stayBehind, gate: gate) {
+                    if cancel.stopped { return }
+                    outcome.error = error
+                }
+            case "scroll":
+                guard let element else { break }
+                if options.direction.isEmpty {
+                    guard let scrolled = gate.mutate({ AXUIElementPerformAction(element, "AXScrollToVisible" as CFString) }) else { return }
+                    if scrolled != .success {
+                        outcome.error = "\(name) can't be scrolled into view through Accessibility; give a direction instead."
+                    }
+                } else if let error = scroll(element, options.direction, cancel: cancel, gate: gate) {
+                    outcome.error = error
+                }
+            case "menu":
+                guard let item = prepared.menuItem else { break }
+                // A menu command acts on its app's front window: that must be the one petal_ui looked at.
+                if behind() { outcome.needs = .menu; return }
+                if let error = bringWindow(map, cancel: cancel, stayBehind: stayBehind) {
+                    if cancel.stopped { return }
+                    if stayBehind { outcome.needs = .menu; return }
                     outcome.error = error
                     break
                 }
-            }
-            if !typed {
-                // Never ⌘A over a whole document: only once the keyboard is in this field.
-                if options.replace, let all = UIMap.parseKey("cmd-a") {
-                    guard keysGoTo(element, pid: pid) else { outcome.error = "The cursor left \(name); nothing was typed."; break }
-                    if let why = interrupted() { outcome.error = why; break }
-                    guard post(all, to: pid, cancel: cancel) else { return outcome }
-                }
-                let went = type(options.text, to: pid, cancel: cancel, still: { keysGoTo(element, pid: pid) && interrupted() == nil },
-                                progress: { sent = $0 })
-                guard went else {
-                    if cancel.stopped { return outcome }
-                    outcome.error = interrupted()
-                        ?? "The cursor left \(name) while typing, so Petal stopped there. Call petal_ui to see what was typed."
+                // Right before it: what a copy takes, in this window now, what a paste puts in, and where. The item is known
+                // by its shortcut first, so a menu in any language counts.
+                if let why = clipboardRefusal(map, nil, clip: clip(key: nil, item: item, title: prepared.menuTitle)) {
+                    outcome.error = why
                     break
                 }
-            }
-            if submit, let enter = UIMap.parseKey("return") {
-                if let why = interrupted() { outcome.error = why; break }
-                guard keysGoTo(element, pid: pid) else { outcome.error = "The cursor left \(name) before Return: it was typed, not sent."; break }
-                guard post(enter, to: pid, cancel: cancel) else { return outcome }
-            }
-            usleep(120_000)
-            let now = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
-            if !now.isEmpty, !submit {
-                outcome.value = UIMap.typedValue(now, node: node, filled: Sensitive.isFilled(element, pid: pid), secret: Assist.isVaultSecret)
-            }
-        case "fill":
-            guard let element, let plan = options.fill else { break }
-            if behind() { outcome.needs = .vault; return outcome }
-            if let error = VaultFiller.fill(plan, into: element, map: map, cancel: cancel, stayBehind: stayBehind) {
-                if cancel.stopped { return outcome }
-                outcome.error = error
-            }
-        case "scroll":
-            guard let element else { break }
-            guard !cancel.stopped else { return outcome }
-            if options.direction.isEmpty {
-                if AXUIElementPerformAction(element, "AXScrollToVisible" as CFString) != .success {
-                    outcome.error = "\(name) can't be scrolled into view through Accessibility; give a direction instead."
+                guard let chosen = gate.mutate({ AXUIElementPerformAction(item, kAXPressAction as CFString) }) else { return }
+                if chosen != .success {
+                    outcome.error = "Couldn't choose \(prepared.menuTitle ?? "that item"); its app didn't answer."
                 }
-            } else if let error = scroll(element, options.direction, cancel: cancel) {
-                outcome.error = error
-            }
-        case "menu":
-            guard let item = prepared.menuItem else { break }
-            // A menu command acts on its app's front window: that must be the one petal_ui looked at.
-            if behind() { outcome.needs = .menu; return outcome }
-            if let error = bringWindow(map, cancel: cancel, stayBehind: stayBehind) {
-                if cancel.stopped { return outcome }
-                if stayBehind { outcome.needs = .menu; return outcome }
-                outcome.error = error
-                break
-            }
-            // Right before it: what a copy takes, in this window now, what a paste puts in, and where. The item is known
-            // by its shortcut first, so a menu in any language counts.
-            if let why = clipboardRefusal(map, nil, clip: clip(key: nil, item: item, title: prepared.menuTitle)) {
-                outcome.error = why
-                break
-            }
-            guard !cancel.stopped else { return outcome }
-            if AXUIElementPerformAction(item, kAXPressAction as CFString) != .success {
-                outcome.error = "Couldn't choose \(prepared.menuTitle ?? "that item"); its app didn't answer."
-            }
-            outcome.chose = prepared.menuTitle
-        case "key":
-            guard let key = options.key else { break }
-            if behind() { outcome.needs = .keys; return outcome }
-            if let error = bringWindow(map, cancel: cancel, stayBehind: stayBehind) {
-                if cancel.stopped { return outcome }
-                if stayBehind { outcome.needs = .keys; return outcome }
-                outcome.error = error
-                break
-            }
-            if let element {
-                guard !cancel.stopped else { return outcome }
-                if let error = focus(element, pid: pid, name: name, cancel: cancel) {
-                    if cancel.stopped { return outcome }
+                outcome.chose = prepared.menuTitle
+            case "key":
+                guard let key = options.key else { break }
+                if behind() { outcome.needs = .keys; return }
+                if let error = bringWindow(map, cancel: cancel, stayBehind: stayBehind) {
+                    if cancel.stopped { return }
+                    if stayBehind { outcome.needs = .keys; return }
                     outcome.error = error
                     break
                 }
-            }
-            // A shortcut its menus have is chosen there (any app, in front or not); otherwise the key itself. Either
-            // way, right before it: what a copy takes, in this window now, what a paste puts in, and where.
-            let clipping = clip(key: key, item: prepared.menuItem, title: prepared.menuTitle)
-            if let item = prepared.menuItem {
+                if let element {
+                    if let error = focus(element, pid: pid, name: name, cancel: cancel, gate: gate) {
+                        if cancel.stopped || gate.refused { return }
+                        outcome.error = error
+                        break
+                    }
+                }
+                // A shortcut its menus have is chosen there (any app, in front or not); otherwise the key itself. Either
+                // way, right before it: what a copy takes, in this window now, what a paste puts in, and where.
+                let clipping = clip(key: key, item: prepared.menuItem, title: prepared.menuTitle)
+                if let item = prepared.menuItem {
+                    if let why = clipboardRefusal(map, element, clip: clipping) {
+                        outcome.error = why
+                        break
+                    }
+                    guard let chosen = gate.mutate({ AXUIElementPerformAction(item, kAXPressAction as CFString) }) else { return }
+                    if chosen == .success {
+                        outcome.chose = prepared.menuTitle
+                        break
+                    }
+                }
+                if behind() { outcome.needs = .keys; return }
+                if !isFront(pid) {
+                    guard bringForward(pid, cancel: cancel, stayBehind: stayBehind) else {
+                        if !cancel.stopped, stayBehind { outcome.needs = .keys }
+                        return
+                    }
+                    say(cameForward)
+                }
+                // Right before the key: still that control (or still that window, and no password field), or it isn't sent.
+                if let element {
+                    guard keysGoTo(element, pid: pid) else { outcome.error = "The cursor left \(name); the key wasn't sent."; break }
+                } else {
+                    guard windowInFront(map) else { outcome.error = "That window isn't in front anymore; the key wasn't sent."; break }
+                    if let why = secretFieldRefusal(map, nil, pasting: false) { outcome.error = why; break }
+                }
                 if let why = clipboardRefusal(map, element, clip: clipping) {
                     outcome.error = why
                     break
                 }
-                guard !cancel.stopped else { return outcome }
-                if AXUIElementPerformAction(item, kAXPressAction as CFString) == .success {
-                    outcome.chose = prepared.menuTitle
-                    break
-                }
+                guard gate.mutate({ post(key, to: pid, cancel: cancel) }) == true else { return }
+            default: break
             }
-            if behind() { outcome.needs = .keys; return outcome }
-            if !isFront(pid) {
-                guard bringForward(pid, cancel: cancel, stayBehind: stayBehind) else {
-                    if !cancel.stopped, stayBehind { outcome.needs = .keys }
-                    return outcome
-                }
-                say(cameForward)
+        }
+        act()
+        // The person came back to type in that window, or left it, right before a change: nothing more was done. Gone
+        // before anything changed, it's decided again (the background way); otherwise the AI is told how far it got.
+        if !cancel.stopped, let why = gate.interruption {
+            if why == .left, !gate.changed {
+                outcome = Outcome()
+                outcome.again = true
+            } else if action == "type" {
+                let typed = String(decoding: Array(options.text.utf16.prefix(sent)), as: UTF16.self)
+                outcome.error = Background.interrupted(why, app: map.appName, typed: typed, of: options.text)
+            } else if outcome.error == nil {
+                outcome.error = Background.stopped(why, app: map.appName, changed: gate.changed)
             }
-            // Right before the key: still that control (or still that window, and no password field), or it isn't sent.
-            if let element {
-                guard keysGoTo(element, pid: pid) else { outcome.error = "The cursor left \(name); the key wasn't sent."; break }
-            } else {
-                guard windowInFront(map) else { outcome.error = "That window isn't in front anymore; the key wasn't sent."; break }
-                if let why = secretFieldRefusal(map, nil, pasting: false) { outcome.error = why; break }
-            }
-            if let why = clipboardRefusal(map, element, clip: clipping) {
-                outcome.error = why
-                break
-            }
-            guard post(key, to: pid, cancel: cancel) else { return outcome }
-        default: break
+            return outcome
         }
         // Petal's own change (text, caret, focus, scroll) becomes what's expected next, so its next step isn't taken
         // for someone else's.
-        if outcome.error == nil, !cancel.stopped, ["type", "focus", "scroll", "key", "fill"].contains(action) {
+        if outcome.error == nil, outcome.needs == nil, !cancel.stopped, ["type", "focus", "scroll", "key", "fill"].contains(action) {
             let app = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(app, 0.5)
             outcome.fingerprint = Reader.fingerprint(app: app, window: map.window, lists: map.lists)
@@ -2075,8 +2097,9 @@ enum Acting {
 
     /// Sets a native field's text through Accessibility (`replace`: its whole value; else at the cursor, over what's
     /// selected), then reads back what changed: `done` when the text is there, `no` when nothing changed (keys may
-    /// type it), `unsure` when it can't tell, which is never typed again.
-    static func insert(_ text: String, into element: AXUIElement, replace: Bool, cancel: Cancel) -> Insertion {
+    /// type it), `unsure` when it can't tell, which is never typed again. `stopped`: the gate refused it (a Stop, or the
+    /// person), nothing set; its reads all come before the gate, and the value is set right after it.
+    static func insert(_ text: String, into element: AXUIElement, replace: Bool, cancel: Cancel, gate: Background.Gate) -> Insertion {
         let attribute = replace ? kAXValueAttribute : kAXSelectedTextAttribute
         var settable: DarwinBoolean = false
         guard AXUIElementIsAttributeSettable(element, attribute as CFString, &settable) == .success, settable.boolValue else { return .no }
@@ -2084,8 +2107,8 @@ enum Acting {
         let before: String? = Windows.value(element, kAXValueAttribute)
         let count = characters(element)
         let selection = selectedRange(element)
-        guard !cancel.stopped else { return .stopped }
-        guard AXUIElementSetAttributeValue(element, attribute as CFString, text as CFString) == .success else { return .no }
+        guard let set = gate.mutate({ AXUIElementSetAttributeValue(element, attribute as CFString, text as CFString) }) else { return .stopped }
+        guard set == .success else { return .no }
         let after: String? = Windows.value(element, kAXValueAttribute)
         if replace {
             guard let after else { return .unsure }
@@ -2150,12 +2173,14 @@ enum Acting {
     }
 
     /// Gives `element` the keyboard and reads it back from its app: nil once keys sent now land there (and it isn't a
-    /// password field), else why they can't go.
-    static func focus(_ element: AXUIElement, pid: pid_t, name: String, cancel: Cancel) -> String? {
+    /// password field), else why they can't go. The focus is set right after the gate (`gate.refused`: nothing set).
+    static func focus(_ element: AXUIElement, pid: pid_t, name: String, cancel: Cancel, gate: Background.Gate) -> String? {
         if isSecure(element) { return password }
         let refused = "Couldn't put the cursor in \(name) through Accessibility; only a real click would. Ask the person to click into it."
-        guard !cancel.stopped else { return ComputerUse.stoppedText }
-        guard AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success else { return refused }
+        guard let set = gate.mutate({ AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) }) else {
+            return ComputerUse.stoppedText
+        }
+        guard set == .success else { return refused }
         for attempt in 0..<3 {
             if keysGoTo(element, pid: pid) { return nil }
             if attempt < 2 { usleep(60_000) }
@@ -2286,14 +2311,14 @@ enum Acting {
         return true
     }
 
-    /// Text as keystrokes to the app's process, a few characters at a time, each batch only while `still` holds
-    /// (the keyboard is still in the field); false when stopped or moved part way.
-    static func type(_ text: String, to pid: pid_t, cancel: Cancel, still: () -> Bool, progress: (Int) -> Void = { _ in }) -> Bool {
+    /// Text as keystrokes to the app's process, a few characters at a time: before each batch, `still`'s reads (the
+    /// keyboard still in the field), then the gate and the batch at once (Background.send). False when stopped,
+    /// interrupted or moved part way.
+    static func type(_ text: String, to pid: pid_t, cancel: Cancel, still: () -> Bool, gate: Background.Gate,
+                     progress: (Int) -> Void = { _ in }) -> Bool {
         let source = CGEventSource(stateID: .privateState)
         var sent = 0
-        for chunk in UIMap.batches(text) {
-            // `still` asks the app, which takes a moment: a Stop meanwhile is heard before the next characters go.
-            if cancel.stopped || !still() || cancel.stopped { return false }
+        return Background.send(UIMap.batches(text), still: { !cancel.stopped && still() }, gate: gate) { chunk in
             for down in [true, false] {
                 let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)
                 chunk.withUnsafeBufferPointer { event?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: $0.baseAddress) }
@@ -2303,7 +2328,15 @@ enum Acting {
             progress(sent)
             usleep(8_000)
         }
-        return true
+    }
+
+    /// The gate every act's changes go through: a Stop, and for a note acting in its window in front (`note`), the
+    /// person typing there again or gone elsewhere, read just now (Background.verdict).
+    static func changeGate(_ map: ComputerUse.Map, cancel: Cancel, note: Bool) -> Background.Gate {
+        Background.Gate {
+            guard !cancel.stopped else { return .no }
+            return Background.verdict(stopped: cancel.stopped, note: note ? situation(map) : nil)
+        }
     }
 
     /// Keys only reach the app in front: this one comes forward first (through Accessibility; the pointer stays).
@@ -2322,7 +2355,8 @@ enum Acting {
     // MARK: Scrolling
 
     /// Moves the scroll area around `element` (or it) by most of a page, through its scroll bar's value.
-    static func scroll(_ element: AXUIElement, _ direction: String, cancel: Cancel) -> String? {
+    /// Each change right after the gate (refused: nil, nothing changed; the caller reads `gate.refused`).
+    static func scroll(_ element: AXUIElement, _ direction: String, cancel: Cancel, gate: Background.Gate) -> String? {
         var area: AXUIElement? = element
         for _ in 0..<8 {
             guard let current = area else { break }
@@ -2348,12 +2382,14 @@ enum Acting {
         let next = min(1, max(0, current + (direction == "down" || direction == "right" ? step : -step)))
         var settable: DarwinBoolean = false
         let canSet = AXUIElementIsAttributeSettable(bar, kAXValueAttribute as CFString, &settable) == .success && settable.boolValue
-        // On a Stop, nothing more: ComputerUse.done says it was stopped.
-        guard !cancel.stopped else { return nil }
-        if canSet, AXUIElementSetAttributeValue(bar, kAXValueAttribute as CFString, NSNumber(value: next)) == .success { return nil }
-        guard !cancel.stopped else { return nil }
+        // On a Stop (or the person back), nothing more: ComputerUse.done says why.
+        if canSet {
+            guard let set = gate.mutate({ AXUIElementSetAttributeValue(bar, kAXValueAttribute as CFString, NSNumber(value: next)) }) else { return nil }
+            if set == .success { return nil }
+        }
         let action = direction == "down" || direction == "right" ? kAXIncrementAction : kAXDecrementAction
-        if AXUIElementPerformAction(bar, action as CFString) == .success { return nil }
+        guard let stepped = gate.mutate({ AXUIElementPerformAction(bar, action as CFString) }) else { return nil }
+        if stepped == .success { return nil }
         return "That area can't be scrolled through Accessibility; only the person's own scrolling would do it."
     }
 }

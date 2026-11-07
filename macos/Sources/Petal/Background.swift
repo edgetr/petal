@@ -106,6 +106,91 @@ enum Background {
         return "\(who), so Petal stopped \(what). Don't type it again: wait until they're done, then petal_ui to see what the field holds now."
     }
 
+    /// The same for any other act (a press, focus, scroll, menu or key): `changed`, something of it was already done.
+    static func stopped(_ why: Interrupt, app: String, changed: Bool) -> String {
+        switch (why, changed) {
+        case (.typing, false): return busyThere(app)
+        case (.typing, true): return "The person started typing in \(app)'s window, so Petal stopped part way. Don't do it again: wait until they're done, then petal_ui to see what was done."
+        case (.left, false): return "The person moved away from \(app)'s window, so nothing was done there. Call petal_ui and try again."
+        case (.left, true): return "The person moved away from \(app)'s window, so Petal stopped part way. Call petal_ui to see what was done."
+        }
+    }
+
+    /// The person is typing in that window: nothing was done.
+    static func busyThere(_ app: String) -> String {
+        "The person is typing in \(app)'s window right now, so nothing was done there. Wait a little, then petal_ui and try again."
+    }
+
+    /// A vault fill interrupted the same way: never what went in (it's a secret), only whether any of it did, and
+    /// never Return after it.
+    static func fillInterrupted(_ why: Interrupt, app: String, typed: Bool) -> String {
+        let who = why == .typing ? "The person started typing in \(app)'s window" : "The person moved away from \(app)'s window"
+        let what = typed ? "part way: what went in may need clearing, and Return wasn't pressed" : "before filling anything"
+        return "\(who), so Petal stopped \(what). Don't fill it again until they're done; then petal_ui to see the field."
+    }
+
+    // MARK: Guard, then change
+
+    /// What a guard says right before a change.
+    enum Verdict: Equatable {
+        case go
+        /// Stopped (Stop, steering, a new turn), or the background way no longer holds: its own reason is kept by the caller.
+        case no
+        /// A note acting in its window in front: the person typing there again, or gone elsewhere.
+        case interrupted(Interrupt)
+    }
+
+    /// A note's guard in its window in front (and every caller's Stop): `note` is the situation read just now for a
+    /// note, nil for anyone else.
+    static func verdict(stopped: Bool, note: Situation?) -> Verdict {
+        if stopped { return .no }
+        if let note, let why = interrupt(note) { return .interrupted(why) }
+        return .go
+    }
+
+    /// Every change on a note's path (a value set, focus, select-all, each batch of keys, Return, a press, a scroll, a
+    /// menu item) goes through `mutate`: its guard runs, then the change at once, with nothing read in between. The
+    /// reads a change needs (where the keyboard is, the page, the window) come before `mutate`, never inside it
+    /// ahead of the change. One gate per act: it remembers whether it ever let a change through and why it last
+    /// refused.
+    final class Gate {
+        private let check: () -> Verdict
+        /// It let a change through: something of the act was done.
+        private(set) var changed = false
+        /// It refused a change (stopped, or interrupted).
+        private(set) var refused = false
+        /// Why it refused, when the person interrupted.
+        private(set) var interruption: Interrupt?
+
+        init(_ check: @escaping () -> Verdict) { self.check = check }
+
+        /// The guard, then `change` immediately. Nil, with nothing changed, when the guard says no.
+        @discardableResult
+        func mutate<T>(_ change: () -> T) -> T? {
+            switch check() {
+            case .go:
+                changed = true
+                return change()
+            case .no:
+                refused = true
+            case .interrupted(let why):
+                refused = true
+                interruption = why
+            }
+            return nil
+        }
+    }
+
+    /// Sends `chunks` in order (batches of keys). Before each: the reads (`still`: the keyboard still in the field,
+    /// the page still the one), then the gate and the chunk together. False when a read or the gate stopped it.
+    static func send<Chunk>(_ chunks: [Chunk], still: () -> Bool, gate: Gate, post: (Chunk) -> Void) -> Bool {
+        for chunk in chunks {
+            guard still() else { return false }
+            guard gate.mutate({ post(chunk) }) != nil else { return false }
+        }
+        return true
+    }
+
     // MARK: Each action in the background
 
     /// What can't be done in the background, so the window must come forward (the person brings it).

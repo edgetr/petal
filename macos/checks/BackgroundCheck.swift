@@ -191,6 +191,56 @@ struct BackgroundCheck {
         expect(none.contains("moved away") && none.contains("before typing anything"), "nothing typed yet", none)
         let all = Background.interrupted(.typing, app: "Slack", typed: "Hello", of: "Hello")
         expect(all.contains("all of it") && all.contains("Return wasn't pressed"), "all typed, Return held back", all)
+        let fillPart = Background.fillInterrupted(.typing, app: "Safari", typed: true)
+        expect(fillPart.contains("part way") && fillPart.contains("Return wasn't pressed"), "a fill stopped part way says so", fillPart)
+        expect(Background.fillInterrupted(.left, app: "Safari", typed: false).contains("before filling anything"), "a fill stopped before any key")
+        expect(Background.stopped(.typing, app: "Slack", changed: false) == Background.busyThere("Slack"), "typing there before anything: nothing done")
+        expect(Background.stopped(.left, app: "Slack", changed: true).contains("part way"), "left after a change: part way")
+
+        // MARK: Guard, then change
+
+        expect(Background.verdict(stopped: true, note: situation(front: true, focused: true, idle: 30)) == .no, "a Stop refuses")
+        expect(Background.verdict(stopped: false, note: nil) == .go, "Petal AI's plain chat: only its Stop")
+        expect(Background.verdict(stopped: false, note: situation(front: true, focused: true, idle: 30)) == .go, "a note, the person idle there")
+        expect(Background.verdict(stopped: false, note: situation(front: true, focused: true, idle: 0.3)) == .interrupted(.typing),
+               "a note, the person typing there again")
+        expect(Background.verdict(stopped: false, note: situation(front: false)) == .interrupted(.left), "a note, the person gone elsewhere")
+
+        // Every change comes right after its guard: a trace of the reads, the guard and the changes, with stubs. The
+        // guard is the person (scripted: they come back at the third guard).
+        var trace: [String] = []
+        var answers: [Background.Verdict] = [.go, .go, .interrupted(.typing), .go]
+        let gate = Background.Gate {
+            trace.append("guard")
+            return answers.isEmpty ? .go : answers.removeFirst()
+        }
+        // A helper's shape (insert, focus): its reads first, then the gate and the change together.
+        trace.append("read value"); trace.append("read selection")
+        let set = gate.mutate { trace.append("set"); return true }
+        expect(set == true && gate.changed && !gate.refused, "the guard said go: the change was made")
+        // Keys in batches: each batch's reads (the keyboard still in the field), then the guard, then the batch.
+        let sentAll = Background.send(["He", "ll", "o"], still: { trace.append("read keyboard"); return true }, gate: gate) {
+            trace.append("keys \($0)")
+        }
+        expect(!sentAll, "the person came back at the second batch: it stops there")
+        expect(gate.refused && gate.interruption == .typing, "and the gate says why")
+        expect(trace == ["read value", "read selection", "guard", "set", "read keyboard", "guard", "keys He",
+                         "read keyboard", "guard"], "nothing read between a guard and its change; nothing after a refusal", "\(trace)")
+        // Return after an interruption: the focus read, then the guard, which refuses: no Return.
+        var returned = false
+        let refusing = Background.Gate { .interrupted(.left) }
+        refusing.mutate { returned = true }
+        expect(!returned && refusing.refused && !refusing.changed && refusing.interruption == .left, "no Return once the person left")
+        // Every change after a guard: no change without its guard immediately before it.
+        let pairs = zip(trace.dropFirst(), trace).filter { $0.0 == "set" || $0.0.hasPrefix("keys") }
+        expect(pairs.allSatisfy { $0.1 == "guard" }, "each change's step before it is its guard")
+        // A read that fails stops it before any guard or change.
+        var onlyReads: [String] = []
+        let quiet = Background.Gate { onlyReads.append("guard"); return .go }
+        let none2 = Background.send([1, 2], still: { onlyReads.append("read"); return false }, gate: quiet) { onlyReads.append("keys \($0)") }
+        expect(!none2 && onlyReads == ["read"] && !quiet.changed, "the cursor left: no guard, no keys", "\(onlyReads)")
+        let stopped = Background.Gate { .no }
+        expect(stopped.mutate({ 1 }) == nil && stopped.refused && stopped.interruption == nil, "a Stop refuses with no interruption")
 
         // MARK: Typed in the background, read back
 

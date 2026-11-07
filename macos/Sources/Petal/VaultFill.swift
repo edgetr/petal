@@ -9,10 +9,18 @@ import Security
 /// a few at a time (UIMap.batches), or an item picked from a pop-up menu; never the clipboard. A password field's
 /// value is never read back.
 enum VaultFiller {
+    /// Every change (a menu's press, the focus, ⌘A, each batch of keys, Return) goes through `gate` right before it,
+    /// with nothing read in between: a Stop, and for a sticky note's fill (`stayBehind`) the person typing in its
+    /// window again or gone elsewhere, which stops it there and never presses Return after.
     static func fill(_ plan: VaultFillPlan, into element: AXUIElement, map: ComputerUse.Map, cancel: Acting.Cancel,
-                     stayBehind: Bool = false) -> String? {
+                     stayBehind: Bool = false, gate: Background.Gate) -> String? {
         // A sticky note's fill (`stayBehind`): its window must still be in front; nothing comes forward for a note.
         let behind = { stayBehind && !(Acting.isFront(map.pid) && Acting.windowInFront(map)) ? Background.Reason.vault.words(map.appName) : nil }
+        // Why the gate refused a change: the person (said with how far it got, never what went in), else a Stop.
+        func refused(typed: Bool) -> String {
+            if let why = gate.interruption { return Background.fillInterrupted(why, app: map.appName, typed: typed) }
+            return cancel.buyEnded ? Acting.buyEndedText : ComputerUse.stoppedText
+        }
         let pid = map.pid
         // The same page or app as when Petal decided: a page that moved on meanwhile never gets it.
         // Payment info also stays on the very page Buy was said on.
@@ -64,10 +72,13 @@ enum VaultFiller {
                 if cancel.stopped { return cancel.buyEnded ? Acting.buyEndedText : ComputerUse.stoppedText }
                 return stillOnPage(plan, element: element, map: map, cancel: cancel, typed: false)
             }
-            return choose(text, in: element, pid: pid, cancel: cancel, still: still, pick: { titles in
+            // Closing a menu it opened is done after a Stop too, but never once the person is back in that window.
+            let closing = Acting.changeGate(map, cancel: Acting.Cancel(), note: stayBehind)
+            let chose = choose(text, in: element, pid: pid, cancel: cancel, still: still, gate: gate, closing: closing, pick: { titles in
                 if month { return Vault.pickMonth(text, from: titles) }
                 return year.flatMap { Vault.pickYear($0, from: titles) } ?? Vault.pick(text, from: titles)
             })
+            return gate.refused ? refused(typed: gate.changed) : chose
         }
         if let why = behind() { return why }
         if !Acting.isFront(pid) {
@@ -75,8 +86,9 @@ enum VaultFiller {
                 return stayBehind && !cancel.stopped ? Background.Reason.vault.words(map.appName) : ComputerUse.stoppedText
             }
         }
-        guard !cancel.stopped else { return ComputerUse.stoppedText }
-        AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        guard gate.mutate({ AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) }) != nil else {
+            return refused(typed: false)
+        }
         var there = false
         for attempt in 0..<4 {
             if keysGo(to: element, pid: pid) { there = true; break }
@@ -85,15 +97,14 @@ enum VaultFiller {
         guard there else { return "Couldn't put the cursor in that field through Accessibility. Ask the person to click into it, then try again." }
         // Focusing may have moved the page on (its own code going to another address): read again before any key.
         if let why = stillOnPage(plan, element: element, map: map, cancel: cancel, typed: false) { return why }
-        // Over what's there already, only once the keyboard is in this field.
+        // Over what's there already, only once the keyboard is in this field (read first, then the gate and ⌘A).
         if let all = UIMap.parseKey("cmd-a") {
-            guard keysGo(to: element, pid: pid), Acting.post(all, to: pid, cancel: cancel) else {
-                return cancel.stopped ? ComputerUse.stoppedText : "The cursor left the field; nothing was filled."
-            }
+            guard keysGo(to: element, pid: pid) else { return "The cursor left the field; nothing was filled." }
+            guard gate.mutate({ Acting.post(all, to: pid, cancel: cancel) }) == true else { return refused(typed: false) }
         }
-        // And before each batch of keys: the slow checks first (the page, a tab note's tab), then, immediately before
-        // the keys go, the quick ones (the window in front, the keyboard in this field), so a click elsewhere while
-        // the page was being read never gets them.
+        // And before each batch of keys: the slow checks first (the page, a tab note's tab), then the quick ones (the
+        // window in front, the keyboard in this field), then the gate and the keys together, so a click elsewhere
+        // while the page was being read, or the person typing there again, never gets them.
         var moved: String?
         var typed = false
         let still = {
@@ -102,11 +113,11 @@ enum VaultFiller {
                 moved = ClaudePanel.tabNotShowing + (typed ? " Petal stopped partway; what went in may need clearing." : "")
             }
             guard moved == nil, !cancel.stopped, Acting.windowInFront(map), keysGo(to: element, pid: pid) else { return false }
-            typed = true
             return true
         }
-        guard Acting.type(text, to: pid, cancel: cancel, still: still) else {
+        guard Acting.type(text, to: pid, cancel: cancel, still: still, gate: gate, progress: { _ in typed = true }) else {
             if let moved { return moved }
+            if gate.refused { return refused(typed: typed) }
             return cancel.stopped ? ComputerUse.stoppedText : "The cursor left the field while Petal was filling it, so it stopped there. Call petal_ui to see the page."
         }
         // A card number or code a field cut short (a 16-character field given more) isn't a fill: counted here,
@@ -131,9 +142,10 @@ enum VaultFiller {
                     : "The security code didn't fit in that field. Ask the person to check it."
             }
         }
+        // Return: where the keyboard is read first, then the gate and the key together; never after an interruption.
         if plan.submit, let enter = UIMap.parseKey("return") {
             guard keysGo(to: element, pid: pid) else { return "The cursor left the field before Return: it was filled, not sent." }
-            guard Acting.post(enter, to: pid, cancel: cancel) else { return ComputerUse.stoppedText }
+            guard gate.mutate({ Acting.post(enter, to: pid, cancel: cancel) }) == true else { return refused(typed: true) }
         }
         return nil
     }
@@ -172,10 +184,11 @@ enum VaultFiller {
     /// Picks the item that is `wanted` from a pop-up menu (a web page's select; Vault.pick: "Türkiye" finds "Turkey";
     /// a year as "2027" or "27", whichever the menu has): straight from its options when it shows them closed, else
     /// by opening it and pressing the item in the menu that opens (under it, or the app's own: Chromium's), or
-    /// closes it again with nothing picked when none is. `still` is asked right before every press, and its answer
-    /// (stopped, or the page moved on) ends it with nothing more pressed.
+    /// closes it again with nothing picked when none is. `still` is read before every press, and its answer
+    /// (stopped, or the page moved on) ends it with nothing more pressed; then `gate` and the press together (refused:
+    /// nil, with `gate.refused`). Closing the menu goes through `closing`.
     static func choose(_ wanted: String, in popup: AXUIElement, pid: pid_t, cancel: Acting.Cancel,
-                       still: () -> String?, pick: ([String]) -> Int?) -> String? {
+                       still: () -> String?, gate: Background.Gate, closing: Background.Gate, pick: ([String]) -> Int?) -> String? {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.5)
         func role(_ element: AXUIElement) -> String { Windows.value(element, kAXRoleAttribute) ?? "" }
@@ -196,16 +209,17 @@ enum VaultFiller {
             return Vault.pickOption(titles: texts(kAXTitleAttribute), values: texts(kAXValueAttribute),
                                     labels: texts(kAXDescriptionAttribute), pick: pick)
         }
-        func close() { if let escape = UIMap.parseKey("escape") { Acting.post(escape, to: pid, cancel: Acting.Cancel()) } }
+        func close() { if let escape = UIMap.parseKey("escape") { closing.mutate { Acting.post(escape, to: pid, cancel: Acting.Cancel()) } } }
         if let why = still() { return why }
         // Shown without opening it: pressed there.
         let shown = Vault.selectOptions(popup, opened: false, appMenus: [], role: role, children: children).items
         if let at = index(shown) {
             if let why = still() { return why }
-            if AXUIElementPerformAction(shown[at], kAXPressAction as CFString) == .success { return nil }
+            guard let pressed = gate.mutate({ AXUIElementPerformAction(shown[at], kAXPressAction as CFString) }) else { return nil }
+            if pressed == .success { return nil }
         }
         if let why = still() { return why }
-        AXUIElementPerformAction(popup, kAXPressAction as CFString)
+        guard gate.mutate({ AXUIElementPerformAction(popup, kAXPressAction as CFString) }) != nil else { return nil }
         var list: [AXUIElement] = []
         for attempt in 0..<6 {
             usleep(80_000)
@@ -218,7 +232,8 @@ enum VaultFiller {
             return list.isEmpty ? "That menu didn't open through Accessibility; ask the person to pick it." : "Petal didn't find a matching item in that menu; ask the person to pick it."
         }
         if let why = still() { close(); return why }
-        guard AXUIElementPerformAction(list[at], kAXPressAction as CFString) == .success else {
+        guard let picked = gate.mutate({ AXUIElementPerformAction(list[at], kAXPressAction as CFString) }) else { close(); return nil }
+        guard picked == .success else {
             close()
             return "Couldn't pick it from that menu; ask the person to pick it."
         }
