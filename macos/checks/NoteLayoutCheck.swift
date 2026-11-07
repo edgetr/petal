@@ -46,8 +46,12 @@ struct NoteLayoutCheck {
         expect(NoteRules.fits(chromeNote, chromeFront(NoteTab(id: "41", index: 1, count: 1, url: a.url, title: ""), window: 9)),
                "a Chromium tab dragged to another window keeps its note")
         expect(!NoteRules.fits(chromeNote, FrontPlace(pid: 10, app: chrome, window: 5, tab: nil)), "no tab read: a tab's note doesn't show")
-        expect(NoteRules.fits(chromeNote, chromeFront(NoteTab(id: "3", index: 1, count: 1, url: a.url + "/", title: ""), pid: 77, window: 1)),
+        expect(NoteRules.fits(chromeNote, chromeFront(NoteTab(id: "3", index: 1, count: 1, twins: 1, url: a.url + "/", title: ""), pid: 77, window: 1)),
                "after the browser restarted, the same address finds it")
+        expect(!NoteRules.fits(chromeNote, chromeFront(NoteTab(id: "3", index: 1, count: 3, twins: 2, url: a.url, title: ""), pid: 77, window: 1)),
+               "after a restart, of two tabs on its page, not the one in another place")
+        expect(NoteRules.fits(chromeNote, chromeFront(NoteTab(id: "4", index: 2, count: 3, twins: 2, url: a.url, title: ""), pid: 77, window: 1)),
+               "but the one in its place")
         expect(!NoteRules.fits(chromeNote, chromeFront(NoteTab(id: "41", index: 2, count: 3, url: "https://x.com", title: ""), pid: 77)),
                "after a restart a reused id doesn't")
 
@@ -60,8 +64,30 @@ struct NoteLayoutCheck {
         expect(!NoteRules.fits(safariNote, safariFront(NoteTab(index: 3, count: 4, url: "https://apple.com/iphone", title: ""))), "another tab")
         expect(!NoteRules.fits(safariNote, safariFront(NoteTab(index: 3, count: 4, url: "https://apple.com/", title: ""))),
                "another tab on the same site")
-        expect(NoteRules.fits(safariNote, safariFront(NoteTab(index: 1, count: 3, url: s1.url, title: ""))),
+        expect(NoteRules.fits(safariNote, safariFront(NoteTab(index: 1, count: 3, twins: 1, url: s1.url, title: ""))),
                "a tab before it closed: found by its address")
+
+        // Two tabs on the same page are two tabs.
+        expect(!NoteRules.fits(safariNote, safariFront(NoteTab(index: 3, count: 4, twins: 2, url: s1.url, title: "Mac"))),
+               "a duplicate tab in another place has its own note")
+        expect(NoteRules.fits(safariNote, safariFront(NoteTab(index: 2, count: 4, twins: 2, url: s1.url, title: "Mac"))),
+               "of two tabs on its page, the one in its place is its tab")
+        expect(NoteRules.fits(safariNote, safariFront(NoteTab(index: 2, count: 5, twins: 2, url: s1.url, title: "Mac"))),
+               "still in its place after a tab opened after it")
+        expect(!NoteRules.fits(safariNote, safariFront(NoteTab(index: 1, count: 3, url: s1.url, title: ""))),
+               "the address alone, when Petal can't tell how many tabs have it, isn't enough")
+        let gecko = place(.tab, app: "org.mozilla.firefox", tab: NoteTab(url: "https://mozilla.org", title: "Mozilla"))
+        expect(NoteRules.fits(gecko, FrontPlace(pid: 10, app: "org.mozilla.firefox", window: 5, tab: NoteTab(url: "https://mozilla.org", title: ""))),
+               "a browser that tells no places goes by the address")
+
+        // Fragments count.
+        let routed = place(.tab, tab: NoteTab(index: 2, count: 4, twins: 1, url: "https://mail.app/#inbox", title: "Inbox"))
+        expect(!NoteRules.fits(routed, safariFront(NoteTab(index: 3, count: 4, twins: 1, url: "https://mail.app/#sent", title: "Sent"))),
+               "another tab on another #route of the same app isn't its tab")
+        expect(NoteRules.fits(routed, safariFront(NoteTab(index: 2, count: 4, twins: 1, url: "https://mail.app/#sent", title: "Sent"))),
+               "its own tab gone to another #route in its place still is")
+        expect(!NoteRules.fits(routed, safariFront(NoteTab(index: 2, count: 3, twins: 1, url: "https://mail.app/#sent", title: "Sent"))),
+               "but not once the tabs around it changed")
         expect(!NoteRules.fits(safariNote, safariFront(s1, window: 6)), "a Safari tab belongs to its window")
         let navigated = NoteTab(index: 2, count: 4, url: "https://apple.com/mac/compare", title: "Compare")
         expect(NoteRules.fits(safariNote, safariFront(navigated), previous: s1), "went to another page while showing: still its note")
@@ -74,7 +100,13 @@ struct NoteLayoutCheck {
         expect(followed.url == navigated.url && followed.title == "Compare" && followed.index == 2, "the note follows its tab's address")
         let quiet = NoteRules.follow(NoteTab(index: 2, count: 4, url: "", title: ""), to: navigated, keepWords: false)
         expect(quiet.url.isEmpty && quiet.title.isEmpty && quiet.index == 2, "a private app's address and title are never kept")
-        expect(NoteRules.sameURL("https://a.com/x#top", "https://a.com/x/"), "a fragment and trailing slash don't count")
+        expect(NoteRules.sameURL("https://a.com/x/", "https://a.com/x"), "a trailing slash doesn't count")
+        expect(NoteRules.sameURL("https://a.com/x/#top", "https://a.com/x#top"), "nor before a fragment")
+        expect(!NoteRules.sameURL("https://a.com/#/inbox", "https://a.com/#/sent"), "a fragment counts")
+        expect(NoteRules.sameURL("https://a.com/x#", "https://a.com/x"), "an empty fragment doesn't")
+        expect(NoteRules.samePage("https://a.com/x#top", "https://a.com/x/"), "the same page, whatever its fragment")
+        expect(NoteRules.follow(s1, to: NoteTab(index: 3, count: 5, twins: 2, url: s1.url, title: "Mac"), keepWords: true).twins == 2,
+               "the note follows how many tabs share its address")
         expect(!NoteRules.sameURL("", ""), "no address is never the same address")
 
         // MARK: Which note shows
@@ -88,6 +120,11 @@ struct NoteLayoutCheck {
         expect(pick([N(scope: .window, showing: false, name: "first"), N(scope: .window, showing: true, name: "showing")]) == "showing",
                "between equals, the one showing stays")
         expect(pick([]) == nil, "nothing fits, nothing shows")
+        // Notes here first, then chats kept from before: ranked together.
+        expect(pick([N(scope: .window, showing: true, name: "live window"), N(scope: .tab, showing: false, name: "kept tab")]) == "kept tab",
+               "a tab's kept chat beats a window's note here, even the one showing")
+        expect(pick([N(scope: .tab, showing: false, name: "live tab"), N(scope: .tab, showing: false, name: "kept tab")]) == "live tab",
+               "between equals, the note here beats a kept chat")
 
         // MARK: Keys
 

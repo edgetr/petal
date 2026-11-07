@@ -199,11 +199,17 @@ final class Browsers {
                 try
                 set n to title of t
                 end try
-                return ((id of t) as text) & sep & ((active tab index of w) as text) & sep & ((count of tabs of w) as text) & sep & u & sep & n
+                set k to 0
+                if u is not "" then
+                try
+                set k to count of (tabs of w whose URL is u)
+                end try
+                end if
+                return ((id of t) as text) & sep & ((active tab index of w) as text) & sep & ((count of tabs of w) as text) & sep & (k as text) & sep & u & sep & n
                 end tell
-                """).map { Self.fields($0, 5) } ?? []
-            guard fields.count >= 5, !fields[0].isEmpty else { return nil }
-            return NoteTab(id: fields[0], index: Int(fields[1]), count: Int(fields[2]), url: fields[3], title: fields[4])
+                """).map { Self.fields($0, 6) } ?? []
+            guard fields.count >= 6, !fields[0].isEmpty else { return nil }
+            return NoteTab(id: fields[0], index: Int(fields[1]), count: Int(fields[2]), twins: twins(fields[3]), url: fields[4], title: fields[5])
         case .safari?:
             guard access(bundleID) == .allowed else { return nil }
             let fields = run("""
@@ -219,16 +225,27 @@ final class Browsers {
                 try
                 set n to name of t
                 end try
-                return ((index of t) as text) & sep & ((count of tabs of w) as text) & sep & u & sep & n
+                set k to 0
+                if u is not "" then
+                try
+                set k to count of (tabs of w whose URL is u)
+                end try
+                end if
+                return ((index of t) as text) & sep & ((count of tabs of w) as text) & sep & (k as text) & sep & u & sep & n
                 end tell
-                """).map { Self.fields($0, 4) } ?? []
-            guard fields.count >= 4, let index = Int(fields[0]) else { return nil }
-            return NoteTab(index: index, count: Int(fields[1]), url: fields[2], title: fields[3])
+                """).map { Self.fields($0, 5) } ?? []
+            guard fields.count >= 5, let index = Int(fields[0]) else { return nil }
+            return NoteTab(index: index, count: Int(fields[1]), twins: twins(fields[2]), url: fields[3], title: fields[4])
         case .gecko?:
             return geckoTab(pid: pid)
         case nil:
             return nil
         }
+    }
+
+    /// How many tabs share the address, as a script counted them: nil when it couldn't (0).
+    nonisolated private static func twins(_ field: String) -> Int? {
+        Int(field).flatMap { $0 > 0 ? $0 : nil }
     }
 
     /// A script's answer split at tabs into `count` fields; the last (a title) keeps any tab of its own.
@@ -239,14 +256,15 @@ final class Browsers {
     }
 
     /// Shows a note's tab in its window (bringing the note back from its app's icon): a Chromium browser's by its id,
-    /// Safari's by its address, else its place. Firefox and Zen can't be asked. Off the main thread.
-    nonisolated static func select(_ tab: NoteTab, bundleID: String, window: CGWindowID?) {
+    /// Safari's by its address, else its place. Firefox and Zen can't be asked. Off the main thread. `still`: asked
+    /// right before the browser is told, so a bringing cancelled meanwhile switches no tab.
+    nonisolated static func select(_ tab: NoteTab, bundleID: String, window: CGWindowID?, still: () -> Bool) {
         func quoted(_ text: String) -> String {
             "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
         }
         switch kind(bundleID) {
         case .chromium?:
-            guard let id = tab.id, access(bundleID) == .allowed else { return }
+            guard let id = tab.id, access(bundleID) == .allowed, still() else { return }
             _ = run("""
                 tell application id "\(bundleID)"
                 repeat with w in windows
@@ -263,7 +281,7 @@ final class Browsers {
                 return ""
                 """)
         case .safari?:
-            guard let window, access(bundleID) == .allowed else { return }
+            guard let window, access(bundleID) == .allowed, still() else { return }
             let byPlace = tab.index.map { "if (count of tabs of w) ≥ \($0) then set current tab of w to tab \($0) of w" } ?? ""
             _ = run("""
                 tell application id "\(bundleID)"
@@ -296,7 +314,7 @@ final class Browsers {
         guard let window: AXUIElement = Windows.value(app, kAXFocusedWindowAttribute) else { return nil }
         let windowTitle: String = Windows.value(window, kAXTitleAttribute) ?? ""
         var address: String?
-        var strip: (index: Int, count: Int, title: String)?
+        var strip: (index: Int, count: Int, twins: Int, title: String)?
         var queue: [(AXUIElement, Int)] = [(window, 0)]
         var seen = 0
         let deadline = Date().addingTimeInterval(0.4)
@@ -320,14 +338,18 @@ final class Browsers {
                     let value: Any? = Windows.value(tab, kAXValueAttribute)
                     return (value as? NSNumber)?.boolValue == true
                 }) {
-                    strip = (selected + 1, tabs.count, Windows.value(tabs[selected], kAXTitleAttribute) ?? "")
+                    let titles = tabs.map { (Windows.value($0, kAXTitleAttribute) as String?) ?? "" }
+                    let title = titles[selected]
+                    // No addresses in the strip: tabs with the same title are counted as on the same page.
+                    strip = (selected + 1, tabs.count, title.isEmpty ? 0 : titles.filter { $0 == title }.count, title)
                 }
             }
             guard depth < 14, role != kAXWebAreaRole else { continue }   // a page's own fields and tabs aren't the browser's
             queue += children.map { ($0, depth + 1) }
         }
         guard address != nil || strip != nil else { return nil }
-        return NoteTab(index: strip?.index, count: strip?.count, url: address ?? "", title: strip?.title.isEmpty == false ? strip?.title ?? "" : windowTitle)
+        return NoteTab(index: strip?.index, count: strip?.count, twins: strip.flatMap { $0.twins > 0 ? $0.twins : nil }, url: address ?? "",
+                       title: strip?.title.isEmpty == false ? strip?.title ?? "" : windowTitle)
     }
 
     // MARK: Closing

@@ -24,17 +24,21 @@ enum NoteScope: String, Codable, Sendable, CaseIterable {
 ///   window keeps it); after the browser restarts, the address finds it again.
 /// - Safari, Firefox and Zen give tabs no id: `index` is the tab's place in its window (1 is the first) and `count`
 ///   how many tabs the window had, with the address. A tab dragged to another window loses its note.
+/// - `twins`: how many tabs in its window have its address (Firefox and Zen: its title), itself included; nil when
+///   unknown. Two tabs on the same page are told apart by their place, never by the address.
 struct NoteTab: Codable, Equatable, Sendable {
     var id: String?
     var index: Int?
     var count: Int?
+    var twins: Int?
     var url: String
     var title: String
 
-    init(id: String? = nil, index: Int? = nil, count: Int? = nil, url: String, title: String) {
+    init(id: String? = nil, index: Int? = nil, count: Int? = nil, twins: Int? = nil, url: String, title: String) {
         self.id = id
         self.index = index
         self.count = count
+        self.twins = twins
         self.url = url
         self.title = title
     }
@@ -115,32 +119,57 @@ struct FrontPlace: Equatable, Sendable {
 }
 
 enum NoteRules {
-    /// The same address: a #fragment and a trailing slash don't count.
+    /// The same address: a trailing slash doesn't count, a #fragment does (an app's own pages often differ only by it).
     static func sameURL(_ a: String, _ b: String) -> Bool {
-        func plain(_ url: String) -> String {
-            var text = url.trimmingCharacters(in: .whitespaces)
-            if let hash = text.firstIndex(of: "#") { text = String(text[..<hash]) }
-            while text.hasSuffix("/") { text.removeLast() }
-            return text
-        }
-        let x = plain(a), y = plain(b)
+        let x = plain(a, fragment: true), y = plain(b, fragment: true)
         return !x.isEmpty && x == y
+    }
+
+    /// The same page, whatever its #fragment.
+    static func samePage(_ a: String, _ b: String) -> Bool {
+        let x = plain(a, fragment: false), y = plain(b, fragment: false)
+        return !x.isEmpty && x == y
+    }
+
+    private static func plain(_ url: String, fragment keep: Bool) -> String {
+        var text = url.trimmingCharacters(in: .whitespaces)
+        var fragment = ""
+        if let hash = text.firstIndex(of: "#") {
+            fragment = String(text[text.index(after: hash)...])
+            text = String(text[..<hash])
+        }
+        while text.hasSuffix("/") { text.removeLast() }
+        return keep && !fragment.isEmpty && !text.isEmpty ? text + "#" + fragment : text
     }
 
     /// Whether `front` is the note's tab. `previous`: the tab its window showed the last time Petal looked, which
     /// tells a tab that went to another address (same place, as many tabs, a new address) from another tab.
     static func sameTab(_ note: NoteTab, pid notePID: Int32, window noteWindow: UInt32?,
                         _ front: NoteTab, pid frontPID: Int32, window frontWindow: UInt32?, previous: NoteTab?) -> Bool {
-        // The browser restarted since: ids and windows are new, the address finds it.
-        guard notePID == frontPID else { return sameURL(note.url, front.url) }
+        let samePlace = note.index != nil && note.index == front.index
+        // The browser restarted since: ids and windows are new, the address finds it; when several tabs have it,
+        // its place too (a restored window keeps its tabs in order).
+        guard notePID == frontPID else { return sameURL(note.url, front.url) && ((front.twins ?? 1) <= 1 || samePlace) }
         if let a = note.id, let b = front.id { return a == b }
         // No ids: a tab belongs to its window.
         guard noteWindow == nil || frontWindow == nil || noteWindow == frontWindow else { return false }
-        if sameURL(note.url, front.url) { return true }
+        if sameURL(note.url, front.url) {
+            // The only tab with that address (a tab before it closed, or one opened, moved it), or in its place.
+            return onlyOne(front) || samePlace
+        }
+        // Only its #fragment changed, in its place among as many tabs.
+        if samePlace, note.count == front.count, samePage(note.url, front.url) { return true }
         // It went to another address while it was the tab showing: the same place, as many tabs as before.
-        guard let index = note.index, front.index == index, let previous, previous.index == index,
+        guard samePlace, let previous, previous.index == note.index,
               sameURL(previous.url, note.url), previous.count == front.count else { return false }
         return true
+    }
+
+    /// No other tab in its window has its address: as far as Petal can tell (a browser that says nothing of its
+    /// tabs' places has only the address to go by).
+    private static func onlyOne(_ tab: NoteTab) -> Bool {
+        if let twins = tab.twins { return twins <= 1 }
+        return tab.index == nil
     }
 
     /// Whether a note stuck to `place` belongs on what's in front.
@@ -191,6 +220,7 @@ enum NoteRules {
         if front.id != nil { next.id = front.id }
         next.index = front.index
         next.count = front.count
+        next.twins = front.twins
         if keepWords {
             next.url = front.url
             next.title = front.title

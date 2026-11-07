@@ -98,19 +98,35 @@ extension ClaudePanel {
         return (front, previous)
     }
 
-    /// The notes stuck to what's in front.
+    /// The notes stuck to what's in front. A tab's note whose window closed or browser quit counts too: its tab
+    /// (dragged to another window, or back after the browser restarted) takes it back (`adopt`).
     private func fitting(_ front: FrontPlace, previous: NoteTab?) -> [StickyNote] {
-        notes.filter { $0.attached && $0.place.map { NoteRules.fits($0, front, previous: previous) } == true }
-    }
-
-    private func mostSpecific(_ notes: [StickyNote]) -> StickyNote? {
-        NoteRules.pick(notes, scope: { $0.place?.kind ?? .window }, showing: { self.isOpen && $0 === self.current })
+        notes.filter { note in
+            guard let place = note.place, note.attached || place.kind == .tab else { return false }
+            return NoteRules.fits(place, front, previous: previous)
+        }
     }
 
     private func note(for app: NSRunningApplication, _ front: FrontPlace, previous: NoteTab?, title: String) -> StickyNote {
         // An app kept private: its window's title isn't kept or told (and its tabs aren't read).
         let title = PetalApp.shared.assist.neverLook(app.bundleIdentifier) ? "" : title
-        if let note = mostSpecific(fitting(front, previous: previous)) {
+        // The notes here and the chats kept from before Petal (or the browser) last started, together: the most
+        // specific wins (a tab's kept chat over a window's note); between equals, a note here.
+        enum Found { case live(StickyNote), kept(String, SavedChat) }
+        let kept = savedPlaces.filter { $0.value.place.map { NoteRules.fits($0, front, previous: previous) } == true }
+            .sorted { $0.key < $1.key }
+        let found = NoteRules.pick(fitting(front, previous: previous).map(Found.live) + kept.map { Found.kept($0.key, $0.value) },
+                                   scope: { found in
+                                       switch found {
+                                       case .live(let note): note.place?.kind ?? .window
+                                       case .kept(_, let chat): chat.place?.kind ?? .window
+                                       }
+                                   },
+                                   showing: { found in
+                                       if case .live(let note) = found { return self.isOpen && note === self.current }
+                                       return false
+                                   })
+        if case .live(let note)? = found {
             adopt(note, front, title: title)
             return note
         }
@@ -120,8 +136,7 @@ extension ClaudePanel {
                               mode: dock?.mode?.id ?? "", desktop: dock?.desktop, scope: front.tab == nil ? .window : .tab, tab: front.tab)
         // A chat kept for this tab, window or app from before Petal (or the browser) last started, carried on: by
         // the note that already holds it (picked from the list since), or a new one.
-        let kept = savedPlaces.filter { $0.value.place.map { NoteRules.fits($0, front, previous: previous) } == true }
-        if let (key, saved) = NoteRules.pick(kept.map { ($0.key, $0.value) }, scope: { $0.1.place?.kind ?? .window }, showing: { _ in false }) {
+        if case .kept(let key, let saved)? = found {
             savedPlaces.removeValue(forKey: key)
             if let old = saved.place {
                 place.scope = old.scope
@@ -155,6 +170,11 @@ extension ClaudePanel {
     /// addresses are never kept.
     private func adopt(_ note: StickyNote, _ front: FrontPlace, title: String) {
         guard var place = note.place else { return }
+        if note.windowGone, place.kind == .tab {
+            // Its tab is back (in another window, or after its browser restarted): the same chat carries on.
+            note.windowGone = false
+            listenIfNeeded()
+        }
         let quiet = PetalApp.shared.assist.neverLook(place.app)
         switch place.kind {
         case .app:
@@ -194,11 +214,27 @@ extension ClaudePanel {
         let note = current
         guard var place = note.place, place.kind != scope else { return }
         let front = lastFront.flatMap { NoteRules.sameWindow(place, $0) ? $0 : nil }
+        stickTicket += 1
+        let mine = stickTicket
         switch scope {
         case .tab:
-            guard let tab = tabForCurrent else { return }
-            place.tab = tab
-            if let front { place.pid = front.pid; place.window = front.window }
+            // The tab showing in its window now, read again (the one Petal saw last may be another by now), and only
+            // then stuck to; a choice made meanwhile wins.
+            guard tabForCurrent != nil, let running = place.running else { return }
+            let kind = place.kind
+            Self.readFront(of: running) { read in
+                let pid = running.processIdentifier
+                guard mine == self.stickTicket, self.current === note, var now = note.place, now.kind == kind, let tab = read.tab,
+                      NoteRules.sameWindow(now, FrontPlace(pid: pid, app: now.app, window: read.window, tab: nil)) else { return }
+                if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid { self.saw(running, read) }
+                now.tab = tab
+                now.pid = pid
+                if let window = read.window { now.window = window }
+                now.scope = .tab
+                note.place = now
+                self.listenIfNeeded()
+            }
+            return
         case .window:
             // An app's note sticks to the window it's on now.
             if let front, front.window != nil { place.pid = front.pid; place.window = front.window }
@@ -372,31 +408,63 @@ extension ClaudePanel {
         var tab: NoteTab?
     }
 
-    /// Reads what's in front in an app, off the main thread.
+    /// Bumped when the apps kept private change: a tab read under way for an app made private meanwhile is dropped.
+    nonisolated static let privacy = Generation()
+
+    /// Reads what's in front in an app, off the main thread. The browser's tab is read from its front window, the
+    /// window from Accessibility: the tab counts only when the same window is in front before and after it's read
+    /// (once more if not, else no tab). An app made private meanwhile has nothing of its tab or title kept.
     static func readFront(of running: NSRunningApplication, _ done: @escaping @MainActor (FrontRead) -> Void) {
         let pid = running.processIdentifier
         let bundle = running.bundleIdentifier ?? ""
         let tabs = Browsers.kind(bundle) != nil && !PetalApp.shared.assist.neverLook(bundle)
-        windowQueue.async {
-            var read = FrontRead()
-            if Windows.trusted {
-                let element = AXUIElementCreateApplication(pid)
-                AXUIElementSetMessagingTimeout(element, 0.3)
-                if let window: AXUIElement = Windows.value(element, kAXFocusedWindowAttribute) {
-                    read.window = Windows.id(of: window)
-                    read.title = Windows.value(window, kAXTitleAttribute) ?? ""
-                    read.frame = Windows.frame(of: window)
+        let privacy = Self.privacy.now
+        let finish: @Sendable (FrontRead) -> Void = { read in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    var read = read
+                    // Checked again as it's used, on the main thread where the setting changes.
+                    if !Self.privacy.current(privacy) { read.tab = nil }
+                    if PetalApp.shared.assist.neverLook(bundle) { read.tab = nil; read.title = "" }
+                    done(read)
                 }
             }
-            let seen = read
-            guard tabs else { return DispatchQueue.main.async { MainActor.assumeIsolated { done(seen) } } }
+        }
+        windowQueue.async {
+            let seen = focusedWindow(pid)
+            guard tabs else { return finish(seen) }
             tabQueue.async {
-                var withTab = seen
-                withTab.tab = Browsers.activeTab(pid: pid, bundleID: bundle)
-                let found = withTab
-                DispatchQueue.main.async { MainActor.assumeIsolated { done(found) } }
+                var read = seen
+                for _ in 0..<2 {
+                    guard Self.privacy.current(privacy) else { read.tab = nil; break }
+                    let tab = Browsers.activeTab(pid: pid, bundleID: bundle)
+                    let after = focusedWindow(pid)
+                    if after.window == read.window {
+                        read = after
+                        read.tab = tab
+                        break
+                    }
+                    // Another window came forward while the tab was read: the tab may be either's.
+                    read = after
+                    read.tab = nil
+                }
+                finish(read)
             }
         }
+    }
+
+    /// An app's focused window: its number, title and frame. Off the main thread.
+    nonisolated private static func focusedWindow(_ pid: pid_t) -> FrontRead {
+        var read = FrontRead()
+        guard Windows.trusted else { return read }
+        let element = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(element, 0.3)
+        if let window: AXUIElement = Windows.value(element, kAXFocusedWindowAttribute) {
+            read.window = Windows.id(of: window)
+            read.title = Windows.value(window, kAXTitleAttribute) ?? ""
+            read.frame = Windows.frame(of: window)
+        }
+        return read
     }
 
     /// One window's frame now (Accessibility's, top-left origin), when it's its app's focused one; off the main thread.
@@ -420,6 +488,7 @@ extension ClaudePanel {
     /// Starts watching which app is in front (only while notes are stuck to windows does it look further), and reads
     /// the kept chats once, so a window, tab or app that had a note before Petal started gets it back.
     func startNotes() {
+        privateApps = PetalApp.shared.config.strings("aiNeverLook")
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             let running = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
@@ -458,6 +527,14 @@ extension ClaudePanel {
 
     /// `aiNotes` changed (or any setting did): with notes off, nothing listens, nudges or takes the app's click.
     func notesSettingChanged() {
+        let hidden = PetalApp.shared.config.strings("aiNeverLook")
+        if hidden != privateApps {
+            // Apps made private: tab reads under way are dropped, and the tabs last seen are forgotten.
+            privateApps = hidden
+            Self.privacy.cancel()
+            lastTabs = [:]
+            if let front = lastFront, PetalApp.shared.assist.neverLook(front.app) { lastFront?.tab = nil }
+        }
         listenIfNeeded()
         guard !notesOn else { return }
         cancelPending()   // a note's window being brought forward (or a mode's countdown before it) opens nothing
@@ -556,7 +633,9 @@ extension ClaudePanel {
     /// app), where they left it. When several fit (a tab's, its window's, its app's), the most specific shows.
     private func frontChanged(_ front: FrontPlace, previous: NoteTab?, title: String) {
         if let pending = pendingOpen, let place = pending.place {
-            if pending.windowGone ? place.pid == front.pid : NoteRules.sameWindow(place, front) {
+            // A tab's note: its own tab in front (a browser that couldn't be asked to show it waits for the person to).
+            let there = place.kind == .tab ? NoteRules.fits(place, front, previous: previous) : NoteRules.sameWindow(place, front)
+            if pending.windowGone ? place.pid == front.pid : there {
                 pendingOpen = nil
                 // Its window is in front: no more retries (they'd fight a switch the person makes next).
                 bringing = nil
@@ -565,7 +644,7 @@ extension ClaudePanel {
                 // only if nothing else was opened meanwhile and the window is still in front.
                 let ticket = pendingTicket
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    guard ticket == self.pendingTicket, self.inFront(place) else { return }
+                    guard ticket == self.pendingTicket, self.inFront(place), place.kind != .tab || self.lastFront == front else { return }
                     self.present(pending, key: true, fromIcon: true)
                 }
                 return
@@ -731,17 +810,24 @@ extension ClaudePanel {
                 Self.readFront(of: running) { read in
                     guard ticket == self.pendingTicket, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
                     let seen = self.saw(running, read)
-                    guard NoteRules.sameWindow(place, seen.front) else { return }
+                    // A tab's note only on its tab: Firefox and Zen can't be asked to show it, and another browser
+                    // may not have; it stays done (its nudge too) until its tab shows.
+                    let now = note.place ?? place
+                    guard now.kind == .tab ? NoteRules.fits(now, seen.front, previous: seen.previous) : NoteRules.sameWindow(now, seen.front)
+                    else { return }
                     self.present(note, key: true, fromIcon: true)
                 }
             }
             self.bringing = pid
+            // Numbered now: closing, another app coming forward or another bringing stops both the tab's switch and
+            // the window's.
+            let request = NoteFocus.next()
             // A tab's note: its tab shows first (Chromium browsers and Safari; Firefox and Zen can't be asked).
             if place.kind == .tab, let tab = place.tab {
                 let app = place.app, window = place.window
-                Self.tabQueue.async { Browsers.select(tab, bundleID: app, window: window) }
+                Self.tabQueue.async { Browsers.select(tab, bundleID: app, window: window) { NoteFocus.current(request) } }
             }
-            Self.bringForward(pid: pid, window: place.kind == .app ? nil : place.window, app: running.bundleURL)
+            Self.bringForward(pid: pid, window: place.kind == .app ? nil : place.window, app: running.bundleURL, request: request)
         }
         let desktop = place.desktop ?? app.docks.focusedDock?.desktop
         if let desktop, !place.mode.isEmpty, app.config.modes.contains(where: { $0.id == place.mode }),
@@ -755,9 +841,8 @@ extension ClaudePanel {
     /// Brings one window forward, all of it on `windowQueue` (Accessibility and Launch Services may wait on the
     /// app): unminimized, raised, its app in front; through Launch Services when it isn't on the screen (another
     /// Desktop, which macOS then switches to). The pointer stays where it is.
-    nonisolated static func bringForward(pid: pid_t, window number: CGWindowID?, app url: URL?) {
-        // Numbered now: a newer request, or a cancel, stops this one at once, even while it waits on the app.
-        let request = NoteFocus.next()
+    nonisolated static func bringForward(pid: pid_t, window number: CGWindowID?, app url: URL?, request: Int) {
+        // A newer request, or a cancel, stops this one at once, even while it waits on the app.
         windowQueue.async {
             guard NoteFocus.current(request) else { return }
             let element = Windows.windows(of: pid).first { $0.id == "\(pid)-w\(number ?? 0)" }?.element

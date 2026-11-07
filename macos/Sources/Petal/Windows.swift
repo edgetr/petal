@@ -16,6 +16,13 @@ final class Generation: @unchecked Sendable {
 
     func cancel() { _ = next() }
 
+    /// The newest request, without making a new one: checked later with `current`.
+    var now: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return newest
+    }
+
     func current(_ request: Int) -> Bool {
         lock.lock()
         defer { lock.unlock() }

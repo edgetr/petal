@@ -745,6 +745,10 @@ final class ClaudePanel {
     /// The app a note's window is being brought forward in: another app coming forward stops its retries.
     @ObservationIgnored var bringing: pid_t?
     @ObservationIgnored var savedPlaces: [String: SavedChat] = [:]
+    /// Counts the person's choices of what the note sticks to: a tab read for an older one never sticks it.
+    @ObservationIgnored var stickTicket = 0
+    /// The apps kept private (`aiNeverLook`) as notes last heard: a change drops tab reads under way.
+    @ObservationIgnored var privateApps: [String] = []
     @ObservationIgnored var listening = false
     /// The one chat stuck to no window (no app in front, or sticky notes off).
     @ObservationIgnored var loose: StickyNote
