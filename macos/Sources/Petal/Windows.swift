@@ -167,13 +167,21 @@ enum Windows {
         }
     }
 
+    /// Minimizing and closing wait on the app (a busy one for seconds): off the main thread, never in the way of
+    /// the focus queue.
     static func minimize(_ window: AppWindow) {
-        AXUIElementSetAttributeValue(window.element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+        let element = window.element
+        DispatchQueue.global(qos: .userInitiated).async {
+            AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+        }
     }
 
     static func close(_ window: AppWindow) {
-        guard let button: AXUIElement = value(window.element, kAXCloseButtonAttribute) else { return }
-        AXUIElementPerformAction(button, kAXPressAction as CFString)
+        let element = window.element
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let button: AXUIElement = value(element, kAXCloseButtonAttribute) else { return }
+            AXUIElementPerformAction(button, kAXPressAction as CFString)
+        }
     }
 
     /// The title of the front window of the app in front: a browser's is its tab's title.

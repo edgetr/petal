@@ -157,22 +157,32 @@ final class Config {
         }
     }
 
-    /// The three files as they are on disk now (on the writer's queue, after a write).
-    nonisolated private static func snapshot(_ files: [URL]) -> [NSDictionary] { files.map { readObject($0) as NSDictionary } }
+    /// The three files as they are on disk now (on the writer's queue, after a write), with the stamps they had when
+    /// read: a change landing after this is newer than those stamps, so the watcher still sees it.
+    nonisolated private static func snapshot(_ files: [URL]) -> (contents: [NSDictionary], stamps: [Date?]) {
+        let stamps = files.map { stamp($0) }
+        return (files.map { readObject($0) as NSDictionary }, stamps)
+    }
+
+    nonisolated private static func stamp(_ url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
 
     /// One of Petal's writes is done. Once none is still on its way, memory must match all three files: one that
     /// doesn't (someone else's change landed meanwhile, in that file or another) is loaded, and the files' stamps
     /// are taken as they are now, so the watcher never mistakes an unseen change for one already read.
-    private func written(_ disk: [NSDictionary], valid: Bool, stale: Bool) {
+    private func written(_ disk: (contents: [NSDictionary], stamps: [Date?]), valid: Bool, stale: Bool) {
         writing -= 1
         if !valid { NSSound.beep() }
         guard writing == 0 else { return }   // the last write's check covers this one's
         let mine = [modesRoot as NSDictionary, settings as NSDictionary, dock as NSDictionary]
-        if !valid || stale || !zip(disk, mine).allSatisfy({ $0.isEqual($1) }) {
+        if !valid || stale || !zip(disk.contents, mine).allSatisfy({ $0.isEqual($1) }) {
             reload()   // what's on disk stands
             onChange?()
+            stamps = currentStamps()
+        } else {
+            stamps = disk.stamps   // what was read matches memory; anything written since is still news to the watcher
         }
-        stamps = currentStamps()
     }
 
     private var files: [URL] { [modesFile, settingsFile, dockFile] }

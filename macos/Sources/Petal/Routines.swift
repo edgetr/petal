@@ -361,6 +361,14 @@ final class Routines {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.stamp = now
+                    // Edited in the file: a routine whose rule changed (or that's gone) drops what was decided under
+                    // the old one, as when it's saved through Petal.
+                    for old in self.list {
+                        let new = routines.first { $0.id == old.id }
+                        if new == nil || new!.words != old.words || new!.actions != old.actions || new!.trigger != old.trigger {
+                            self.ruleChanged(old.id, gone: new == nil)
+                        }
+                    }
                     self.list = routines
                     self.watch()
                 }
@@ -806,15 +814,22 @@ final class Routines {
     }
 
     func delete(_ id: String) {
-        // Whatever it still has on its way (an AI answer, a queued file) is for a routine that's gone.
-        ruleVersion[id, default: 0] += 1
-        jobs.removeAll { $0.id == id }
         list.removeAll { $0.id == id }
-        learned[id] = nil
-        plans[id] = nil
+        ruleChanged(id, gone: true)
         saveRoutines()
-        saveLearned()
         watch()
+    }
+
+    /// A routine's rule changed, or it's gone: whatever was decided under the old rule (an AI answer on its way, a
+    /// dry run's plan, a card waiting, what the AI learned) no longer holds; a deleted one's queued files are dropped.
+    private func ruleChanged(_ id: String, gone: Bool) {
+        ruleVersion[id, default: 0] += 1
+        plans[id] = nil
+        if gone { jobs.removeAll { $0.id == id } }
+        if learned[id] != nil {
+            learned[id] = nil
+            saveLearned()
+        }
     }
 
     /// Adds or replaces a routine (checked first); in the check, without the rest of Petal.
@@ -824,12 +839,7 @@ final class Routines {
             // doesn't hold any more, so names like those are asked about again.
             let old = list[index]
             if old.words != routine.words || old.actions != routine.actions || old.trigger != routine.trigger {
-                ruleVersion[routine.id, default: 0] += 1
-                plans[routine.id] = nil   // a dry run's plan was for the old rule
-                if learned[routine.id] != nil {
-                    learned[routine.id] = nil
-                    saveLearned()
-                }
+                ruleChanged(routine.id, gone: false)
             }
             var routine = routine
             routine.lastRun = list[index].lastRun

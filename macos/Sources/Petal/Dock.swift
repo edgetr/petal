@@ -633,8 +633,11 @@ final class DockController {
     }
 
     func minimizeAll(_ id: String) {
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: id) {
-            for window in Windows.windows(of: app.processIdentifier) where !window.minimized { Windows.minimize(window) }
+        let pids = NSRunningApplication.runningApplications(withBundleIdentifier: id).map(\.processIdentifier)
+        DispatchQueue.global(qos: .userInitiated).async {   // listing the windows waits on the app too
+            for pid in pids {
+                for window in Windows.windows(of: pid) where !window.minimized { Windows.minimize(window) }
+            }
         }
     }
 
