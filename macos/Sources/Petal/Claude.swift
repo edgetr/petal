@@ -759,6 +759,10 @@ final class ClaudePanel {
         }
         app.tooltips.hide()
         app.popups.closeAll()
+        // Another chat's question waiting doesn't show in this one: it waits over the dock.
+        if let request = app.assist.pending, !app.assist.showsInChat(request), app.popups.card?.kind != .ask {
+            app.popups.show(FocusCard(kind: .ask, title: request.title, reason: request.detail))
+        }
         if again {
             if key { panel?.makeKeyAndOrderFront(nil) }
             fit()
@@ -824,7 +828,7 @@ struct ClaudePanelView: View {
                 else if panel.chatsOpen { ChatsList(panel: panel).transition(.opacity.combined(with: .offset(y: -6))) }
             }
             .frame(minHeight: 180, alignment: .top)
-            if let request = app.assist.pending {
+            if let request = app.assist.pending, app.assist.showsInChat(request) {
                 AskRequestView(request: request).id(request.id).padding(12).background(.white.opacity(0.06), in: .rect(cornerRadius: 14))
             }
             if !panel.attachments.isEmpty || !panel.quotes.isEmpty { attachmentsRow }

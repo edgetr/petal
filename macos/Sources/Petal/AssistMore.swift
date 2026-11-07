@@ -130,7 +130,8 @@ extension Assist {
         return String(data: data, encoding: .utf8)
     }
 
-    /// Whether `text` is one of the vault's secrets or holds 8 characters or more of one: petal_act never types one
+    /// Whether `text` is one of the vault's secrets, holds 8 characters or more of one, or holds a short one (a PIN)
+    /// as a word of its own: petal_act never types one
     /// (the vault types its own, after asking), and petal_ui never shows one. The first call after the vault changes
     /// reads the Keychain: off the main thread.
     nonisolated static func isVaultSecret(_ text: String) -> Bool {

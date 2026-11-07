@@ -99,7 +99,13 @@ struct UIMapCheck {
         expect(vault.matches("token 4f9a2b7c"), "8 characters of a secret")
         expect(!vault.matches("4f9a2b7"), "7 characters aren't enough")
         expect(vault.matches("1234") && vault.matches(" 1234\n"), "a short secret, whole")
-        expect(!vault.matches("Room 1234"), "a short secret isn't looked for inside text")
+        expect(vault.matches("Room 1234") && vault.matches("PIN: 1234.") && vault.matches("(1234)"), "a short secret, as a word inside text")
+        expect(!vault.matches("12345") && !vault.matches("A1234B") && !vault.matches("01234"), "not run into other letters or digits")
+        expect(!vault.matches("123") && !vault.matches("Year 2024"), "nor a part of it, nor other numbers")
+        let pins = UIMap.SecretIndex(["739251", "abc"])
+        expect(pins.matches("Door PIN: 739251"), "a six-digit PIN inside text")
+        expect(!pins.matches("7392510") && !pins.matches("Ref 739251x"), "a PIN inside a longer number or word isn't")
+        expect(pins.matches("abc") && !pins.matches("abc def"), "under 4 characters: only the whole text")
         expect(!vault.matches("Inbox"), "other text")
         expect(!UIMap.SecretIndex([]).matches("anything"), "an empty vault matches nothing")
 
@@ -134,6 +140,21 @@ struct UIMapCheck {
         let secret1 = UIMap.fingerprint(title: "Log in", focusRole: "AXTextField", focusSubrole: "AXSecureTextField", focusValue: "a", selected: [])
         let secret2 = UIMap.fingerprint(title: "Log in", focusRole: "AXTextField", focusSubrole: "AXSecureTextField", focusValue: "ab", selected: [])
         expect(secret1 == secret2 && !secret1.focus.contains("a="), "a password field's value isn't kept")
+        // Two empty fields alike: told apart by where they are, the app's name for them, and the element itself.
+        let to = UIMap.fingerprint(title: "New Message", focusRole: "AXTextField", focusSubrole: "", focusValue: "",
+                                   focusFrame: CGRect(x: 80, y: 60, width: 400, height: 22), selected: [])
+        let cc = UIMap.fingerprint(title: "New Message", focusRole: "AXTextField", focusSubrole: "", focusValue: "",
+                                   focusFrame: CGRect(x: 80, y: 90, width: 400, height: 22), selected: [])
+        expect(UIMap.changed(to, cc)?.contains("keyboard") == true, "another empty field, elsewhere")
+        let named = UIMap.fingerprint(title: "New Message", focusRole: "AXTextField", focusSubrole: "", focusValue: "", focusIdentifier: "cc",
+                                      focusFrame: CGRect(x: 80, y: 60, width: 400, height: 22), selected: [])
+        expect(UIMap.changed(to, named) != nil, "another empty field, named otherwise by its app")
+        let first = NSObject(), second = NSObject()
+        let here = UIMap.fingerprint(title: "T", focusRole: "AXTextField", focusSubrole: "", focusValue: "", focused: first, selected: [])
+        let there = UIMap.fingerprint(title: "T", focusRole: "AXTextField", focusSubrole: "", focusValue: "", focused: second, selected: [])
+        expect(UIMap.changed(here, there) != nil && here != there, "another element in the same place")
+        expect(UIMap.changed(here, UIMap.fingerprint(title: "T", focusRole: "AXTextField", focusSubrole: "", focusValue: "", focused: first, selected: [])) == nil,
+               "the same element")
 
         print("UIMap: \(passed) passed, \(failures) failed")
         if failures > 0 { exit(1) }

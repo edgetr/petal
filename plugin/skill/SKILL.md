@@ -31,7 +31,8 @@ Use, in this order:
    Using the user's apps (`computerUse`): `petal_ui` lists the front window's controls with ids (e12), and
    `petal_act` presses, types, focuses or scrolls one by id, chooses a menu item by path ("File > Export…") or
    presses a key (cmd-s), through Accessibility with Petal's own pink pointer; the user's pointer never moves. The
-   first use of an app in a reply asks the user. Menus and keys go only to the window `petal_ui` looked at, and an
+   first use of an app in a reply asks the user; from a session outside Petal's own chat, the first in a task (pass
+   the same `task` words with each act; a new task, two quiet minutes or a Stop asks again). Menus and keys go only to the window `petal_ui` looked at, and an
    act on a window that changed since (another row selected, another title) is refused: call `petal_ui` again.
    Never private apps or password fields (`petal_vault` types secrets); what only a real click could do, ask the
    user to do. Only the user turns `computerUse` on.

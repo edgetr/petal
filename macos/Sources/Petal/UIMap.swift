@@ -171,17 +171,24 @@ enum UIMap {
         return secretWords.contains { words.contains($0) }
     }
 
-    /// The vault's secrets as hashes (Swift's, seeded afresh in each process): a whole secret, and every run of
-    /// `piece` characters of a longer one, so text holding part of a secret is caught without keeping the secrets.
+    /// The vault's secrets as hashes (Swift's, seeded afresh in each process): a whole secret, every run of `piece`
+    /// characters of a longer one, and a short one (`short` to `piece` - 1 characters, a PIN) as a word of its own
+    /// inside text, so text holding a secret, or part of a long one, is caught without keeping the secrets.
     struct SecretIndex {
         static let piece = 8
+        static let short = 4
         private var wholes = Set<Int>()
         private var pieces = Set<Int>()
+        /// Short secrets by their length.
+        private var shorts: [Int: Set<Int>] = [:]
 
         init(_ secrets: [String]) {
             for secret in secrets where !secret.isEmpty {
                 wholes.insert(secret.hashValue)
                 let characters = Array(secret)
+                if characters.count >= Self.short, characters.count < Self.piece {
+                    shorts[characters.count, default: []].insert(secret.hashValue)
+                }
                 guard characters.count >= Self.piece else { continue }
                 for start in 0...(characters.count - Self.piece) { pieces.insert(String(characters[start..<start + Self.piece]).hashValue) }
             }
@@ -189,17 +196,30 @@ enum UIMap {
 
         var isEmpty: Bool { wholes.isEmpty }
 
-        /// `text` is a secret, or holds `piece` characters or more of one.
+        /// `text` is a secret, holds `piece` characters or more of one, or holds a short one whole, not run into the
+        /// letters or digits around it ("Door PIN: 739251", but not 1234 in 12345).
         func matches(_ text: String) -> Bool {
             guard !wholes.isEmpty, !text.isEmpty else { return false }
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if wholes.contains(text.hashValue) || wholes.contains(trimmed.hashValue) { return true }
             let characters = Array(text)
+            for (length, hashes) in shorts where characters.count >= length {
+                for start in 0...(characters.count - length) where Self.edge(characters, start) && Self.edge(characters, start + length)
+                    && hashes.contains(String(characters[start..<start + length]).hashValue) {
+                    return true
+                }
+            }
             guard !pieces.isEmpty, characters.count >= Self.piece else { return false }
             for start in 0...(characters.count - Self.piece) where pieces.contains(String(characters[start..<start + Self.piece]).hashValue) {
                 return true
             }
             return false
+        }
+
+        /// Between `at - 1` and `at` is the end of a word: not a letter or digit running on into another.
+        static func edge(_ characters: [Character], _ at: Int) -> Bool {
+            guard at > 0, at < characters.count else { return true }
+            return !(characters[at - 1].isLetter || characters[at - 1].isNumber) || !(characters[at].isLetter || characters[at].isNumber)
         }
     }
 
@@ -222,21 +242,42 @@ enum UIMap {
     /// email selected while the person was asked), so the act is refused.
     struct Fingerprint: Equatable {
         var title = ""
+        /// What has the keyboard: its kind, the app's name for it, where it is, and what's in it.
         var focus = ""
         var selection = ""
+        /// The control with the keyboard itself (an AXUIElement): two empty fields alike are still two fields.
+        var focused: AnyObject?
+
+        static func == (a: Fingerprint, b: Fingerprint) -> Bool {
+            a.title == b.title && a.focus == b.focus && a.selection == b.selection && UIMap.same(a.focused, b.focused)
+        }
     }
 
-    static func fingerprint(title: String, focusRole: String, focusSubrole: String, focusValue: String, selected: [String]) -> Fingerprint {
+    static func fingerprint(title: String, focusRole: String, focusSubrole: String, focusValue: String, focusIdentifier: String = "",
+                            focusFrame: CGRect = .zero, focused: AnyObject? = nil, selected: [String]) -> Fingerprint {
         let secure = focusSubrole == "AXSecureTextField"
-        let focus = focusRole.isEmpty ? "" : "\(focusRole)/\(focusSubrole)=" + (secure ? "" : truncate(tidy(focusValue), 200))
-        return Fingerprint(title: tidy(title), focus: focus, selection: selected.map { truncate(tidy($0), 120) }.joined(separator: "\n"))
+        let place = [focusFrame.minX, focusFrame.minY, focusFrame.width, focusFrame.height].map { String(Int($0.rounded())) }.joined(separator: ",")
+        let focus = focusRole.isEmpty ? "" : "\(focusRole)/\(focusSubrole)#\(focusIdentifier)@\(place)=" + (secure ? "" : truncate(tidy(focusValue), 200))
+        return Fingerprint(title: tidy(title), focus: focus, selection: selected.map { truncate(tidy($0), 120) }.joined(separator: "\n"),
+                           focused: focusRole.isEmpty ? nil : focused)
+    }
+
+    /// The same element (CFEqual: for Accessibility, the same control of the same app), or neither.
+    static func same(_ a: AnyObject?, _ b: AnyObject?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return true
+        case let (x?, y?): return CFEqual(x as CFTypeRef, y as CFTypeRef)
+        default: return false
+        }
     }
 
     /// Why an act can't go ahead on a window whose fingerprint is now `now`, or nil.
     static func changed(_ then: Fingerprint, _ now: Fingerprint) -> String? {
         if then.title != now.title { return "The window changed (its title is different now); look again with petal_ui." }
         if then.selection != now.selection { return "The window changed (something else is selected now); look again with petal_ui." }
-        if then.focus != now.focus { return "The window changed (another control has the keyboard now); look again with petal_ui." }
+        if then.focus != now.focus || !same(then.focused, now.focused) {
+            return "The window changed (another control has the keyboard now); look again with petal_ui."
+        }
         return nil
     }
 

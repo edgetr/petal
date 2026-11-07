@@ -757,7 +757,7 @@ struct ClaudeSettings: View {
                 Card(title: "Allowed without asking", footer: "You chose Always for these. Take one away and Petal AI asks again.") {
                     ForEach(app.config.strings("aiAllowed"), id: \.self) { kind in
                         HStack {
-                            Text(AllowedKinds.name(kind)).font(.system(size: 13))
+                            AllowedKindName(kind: kind)
                             Spacer()
                             RoundButton(symbol: "xmark") { app.config.set("aiAllowed", app.config.strings("aiAllowed").filter { $0 != kind }) }
                         }
@@ -922,8 +922,23 @@ enum AllowedKinds {
         case "close": "Closing windows"
         case "trash": "Moving files to the Trash"
         case "tidy": "Tidying many files at once"
-        default: kind.hasPrefix("computer:") ? "Using \(Apps.name(String(kind.dropFirst(9))))" : kind
+        default: kind.hasPrefix("computer:") ? "Using \(Apps.cachedName(String(kind.dropFirst(9))) ?? String(kind.dropFirst(9)))" : kind
         }
+    }
+}
+
+/// A kind's name in the Allowed list: an app's name is read off the main thread (its bundle id until then).
+struct AllowedKindName: View {
+    let kind: String
+    @State private var appName: String?
+
+    var body: some View {
+        Text(appName.map { "Using \($0)" } ?? AllowedKinds.name(kind)).font(.system(size: 13))
+            .task(id: kind) {
+                guard kind.hasPrefix("computer:") else { return }
+                let id = String(kind.dropFirst(9))
+                if Apps.cachedName(id) == nil { Apps.loadName(id) { appName = $0 } }
+            }
     }
 }
 

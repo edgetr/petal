@@ -72,11 +72,13 @@ final class Assist {
         let request = Request(kind: kind, title: title, detail: detail, secret: secret, every: always, owner: owner)
         pending = request
         answer = done
-        // In the chat when it's open (the card shows there); over the dock otherwise (another AI session asking).
-        if !app.claude.isOpen {
-            // Over the dock; with no Petal dock showing (macOS's in use), in the chat, which shows the question.
+        // In the chat when it's open and the question is its own (the card shows there); over the dock otherwise
+        // (another chat or AI session asking).
+        if !app.claude.isOpen || !showsInChat(request) {
+            // Over the dock; with no Petal dock showing (macOS's in use), in the chat asking, which shows the question.
             if app.docks.focusedDock?.panel != nil { app.popups.show(FocusCard(kind: .ask, title: title, reason: detail)) }
-            else { app.claude.open(asking: nil) }
+            else if let owner, let note = app.claude.note(withID: owner) { app.claude.present(note) }
+            else if !app.claude.isOpen { app.claude.open(asking: nil) }
         }
         let work = DispatchWorkItem { [weak self] in self?.settle(false) }
         giveUp = work
@@ -113,6 +115,15 @@ final class Assist {
         pending = nil
         if asked, app.popups.card?.kind == .ask { app.popups.dismissCard() }
         done?(allowed)
+    }
+
+    /// The chat panel shows `request` only when it's that chat's own (or nobody's in particular): another chat's
+    /// question never shows in the one open, where it could be answered for the wrong chat. An AI session outside
+    /// Petal asks over the dock, or in the chat when there's no Petal dock.
+    func showsInChat(_ request: Request) -> Bool {
+        guard let owner = request.owner, owner != app.claude.current.id.uuidString else { return true }
+        if app.claude.note(withID: owner) != nil { return false }
+        return app.docks.focusedDock?.panel == nil
     }
 
     /// The chat `owner` stopped, or moved on to another turn: its question waiting is answered Don't.

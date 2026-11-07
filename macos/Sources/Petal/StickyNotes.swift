@@ -134,6 +134,9 @@ extension ClaudePanel {
     /// window if that's still there; with them off (or its window gone), it's the loose chat.
     func restoreNote(_ chat: SavedChat) {
         cancelPending()
+        // The chat being left stops using the person's apps, and its question waiting is answered Don't: it never
+        // carries on (or asks) behind the chat picked. The one picked, when it's the same, carries on.
+        if live(chat: chat.id) !== current { PetalApp.shared.assist.computer.end(current.id.uuidString) }
         // Its link to its window (savedPlaces) stays: opening the AI there finds the note holding the chat.
         guard notesOn else {
             // With notes off the loose chat is the chat: it becomes the one holding this one (stuck to no window).
@@ -192,6 +195,7 @@ extension ClaudePanel {
             guard let chat = note.agent.saved else { continue }
             for (key, value) in savedPlaces where value.id == chat.id { savedPlaces[key] = chat }
         }
+        var gone = notes.filter { !keep($0) && ($0.windowGone || $0.place == nil) }
         notes.removeAll { !keep($0) && ($0.windowGone || $0.place == nil) }
         let idle = notes.filter { !keep($0) && $0.attached }
         for old in idle.dropLast(30) {
@@ -199,7 +203,10 @@ extension ClaudePanel {
                 savedPlaces[Self.key(place.pid, window)] = chat
             }
             notes.removeAll { $0 === old }
+            gone.append(old)
         }
+        // A note let go takes its window's ids and what it was allowed in apps with it.
+        for note in gone { PetalApp.shared.assist.computer.end(note.id.uuidString, forget: true) }
     }
 
     static func key(_ pid: pid_t, _ window: CGWindowID) -> String { "\(pid)-\(window)" }

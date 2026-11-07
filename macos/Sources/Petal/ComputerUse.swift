@@ -11,13 +11,16 @@ import SwiftUI
 /// it's doing, with a Stop pill; Escape stops it too.
 ///
 /// The first act on an app in a reply asks the person (Assist.ask, kind `computer:<bundle id>`): Allow covers that
-/// app for the rest of the reply, Always for good, unless the chat has Full access. Never apps kept private
-/// (`aiNeverLook`), never password fields, never a vault secret: the vault types its own.
+/// app for the rest of the reply, Always for good, unless the chat has Full access. An AI session outside Petal has
+/// no replies Petal can see: its Allow lasts one task (the same `task`, with no more than two minutes between acts).
+/// Never apps kept private (`aiNeverLook`), never password fields, never a vault secret: the vault types its own.
 ///
 /// Each chat is its own caller (its note's id, or `mcp-<pid>` for the Petal tools of an AI session outside Petal):
 /// callers never share a window's ids or what the person allowed. An act only goes ahead on the window `petal_ui`
-/// looked at, as it was then (UIMap.Fingerprint), and every change it makes checks first that its turn wasn't
-/// stopped, steered or ended, and that using apps is still on and the app not private.
+/// looked at, as it was then (UIMap.Fingerprint), checked before the cursor sets off and again right before the
+/// change; and every change it makes checks first that its turn wasn't stopped, steered or ended, and that using
+/// apps is still on and the app not private (Config's changes stop its `cancel`). Maps and turns nobody uses go
+/// within a minute.
 @MainActor
 final class ComputerUse {
     struct Entry {
@@ -43,10 +46,11 @@ final class ComputerUse {
         let made: Date
     }
 
-    /// One chat's reply (its turn): the apps it may use, whether the person stopped it, and its `cancel`, which
-    /// every action of the turn checks right before it changes anything.
+    /// One chat's reply (its turn; one task of an AI session outside Petal): the apps it may use, whether the person
+    /// stopped it, and its `cancel`, which every action of the turn checks right before it changes anything.
     struct Session {
         var turn: String
+        var task = ""
         var apps: Set<String> = []
         var stopped = false
         var last = Date()
@@ -70,6 +74,8 @@ final class ComputerUse {
     }
 
     nonisolated static let stoppedText = "The person stopped it."
+    /// How long an AI session outside Petal keeps what the person allowed after its last act.
+    static let outsideGrant: TimeInterval = 120
     static let oldTools = "This AI session's Petal tools are from an older Petal: start a new chat or session to use apps."
 
     /// By caller. Never shared between two chats.
@@ -80,6 +86,8 @@ final class ComputerUse {
     private var acting: Job?
     /// Whose actions the cursor showing is for: Stop stops that reply, even between its actions.
     private var lastCaller: String?
+    /// Lets maps and turns nobody uses go (an AI session that quit never says so), while there are any.
+    private var sweeper: Timer?
     let cursor = FakeCursor()
     /// Reading windows and acting have a queue each, so a long read never holds an action (or its Stop) back.
     nonisolated static let readQueue = DispatchQueue(label: "petal.computer.read", qos: .userInitiated)
@@ -94,6 +102,7 @@ final class ComputerUse {
 
     /// `caller`: the chat asking (`Petal --mcp` always sends one).
     func handle(_ name: String, _ args: [String: Any], note caller: String?, send: @escaping (Any) -> Void, fail: @escaping (String) -> Void) {
+        sweep()
         if let refusal = refusal() { return fail(refusal) }
         guard let caller, !caller.isEmpty else { return fail(Self.oldTools) }
         if name == "petal_ui" { look(args, caller: caller, send, fail) } else { act(args, caller: caller, send, fail) }
@@ -162,6 +171,7 @@ final class ComputerUse {
                     self.maps[caller] = Map(pid: pid, bundle: bundle, appName: name, window: window, windowID: reading.windowID,
                                             windowFrame: reading.windowFrame, lists: reading.lists, fingerprint: reading.fingerprint,
                                             entries: entries, count: entries.count, made: Date())
+                    self.keepSweeping()
                     var result: [String: Any] = ["app": name, "window": reading.title, "elements": list,
                                                  "note": "Act with petal_act by id. These ids last until the next petal_ui, or 5 minutes; call petal_ui again once the window changes."]
                     if picked.left > 0 { result["more"] = "\(picked.left) more not listed: pass find (a word in its name) to narrow." }
@@ -176,7 +186,10 @@ final class ComputerUse {
     // MARK: Acting
 
     private func act(_ args: [String: Any], caller: String, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
-        let session = session(caller)
+        let task = UIMap.tidy(args["task"] as? String ?? "").lowercased()
+        let session = session(caller, task: task)
+        sessions[caller]?.last = Date()
+        keepSweeping()
         guard !session.stopped else { return fail(Self.stoppedText + " Don't carry on using apps in this reply: say what's left and wait for them.") }
         let action = (args["action"] as? String ?? "").lowercased()
         let byElement: Set<String> = ["press", "type", "focus", "scroll"]
@@ -242,8 +255,9 @@ final class ComputerUse {
                       cancel: Acting.Cancel(under: session.cancel), send: send, fail: fail)
         if session.apps.contains(bundle) { return enqueue(job) }
         let first = caption.prefix(1).lowercased() + caption.dropFirst()
+        let lasting = session.turn == Self.outside ? "For this task" : "Until this reply is done"
         assist.ask("computer:\(bundle)", "Let Petal AI use \(name)?",
-                   detail: "First, \(first). Until this reply is done it can press, type and choose menus in \(name) with its own pointer; yours stays where it is. Esc stops it.",
+                   detail: "First, \(first). \(lasting) it can press, type and choose menus in \(name) with its own pointer; yours stays where it is. Esc stops it.",
                    owner: caller) { allowed in
             // Its turn ended, the person stopped it, or turned it off, while they were asked.
             if job.cancel.stopped { return fail(self.whyStopped(job)) }
@@ -257,18 +271,58 @@ final class ComputerUse {
         }
     }
 
-    /// The chat's reply this is part of: a Petal chat's turn, or (an AI session outside Petal) five quiet minutes.
+    static let outside = "outside"
+
+    /// The chat's reply this is part of: a Petal chat's turn (stopped, it stays stopped until the next reply). An AI
+    /// session outside Petal has no turns Petal can see: its acts are one task while they name the same `task` and
+    /// come within two minutes of each other, and a Stop ends it; the next act starts afresh and asks again.
     /// A new one stops whatever the last one still had going.
-    private func session(_ caller: String) -> Session {
-        let agent = app.claude.note(withID: caller)?.agent
-        let turn = agent.map { "\($0.turn)" } ?? "other"
-        if let session = sessions[caller], session.turn == turn, agent != nil || Date().timeIntervalSince(session.last) < 300 {
+    private func session(_ caller: String, task: String) -> Session {
+        if let agent = app.claude.note(withID: caller)?.agent {
+            let turn = "\(agent.turn)"
+            if let session = sessions[caller], session.turn == turn { return session }
+            return fresh(caller, turn: turn)
+        }
+        if let session = sessions[caller], session.turn == Self.outside, !session.stopped, session.task == task,
+           Date().timeIntervalSince(session.last) < Self.outsideGrant {
             return session
         }
-        sessions[caller]?.cancel.stop()
-        let fresh = Session(turn: turn)
-        sessions[caller] = fresh
-        return fresh
+        return fresh(caller, turn: Self.outside, task: task)
+    }
+
+    private func fresh(_ caller: String, turn: String, task: String = "") -> Session {
+        if sessions[caller] != nil { cancelWork(of: caller) }
+        var made = Session(turn: turn)
+        made.task = task
+        sessions[caller] = made
+        return made
+    }
+
+    /// Drops what nobody can use anymore: maps past their 5 minutes, an outside session's task gone quiet, a
+    /// Petal chat's turn that's over or whose note is gone. Nothing waiting or under way is touched.
+    private func sweep() {
+        let now = Date()
+        maps = maps.filter { now.timeIntervalSince($0.value.made) <= UIMap.lifetime }
+        let working = Set(line.map(\.caller)).union(acting.map { [$0.caller] } ?? []).union(assist.pending?.owner.map { [$0] } ?? [])
+        for (caller, session) in sessions where !working.contains(caller) {
+            let quiet = now.timeIntervalSince(session.last)
+            if let agent = app.claude.note(withID: caller)?.agent {
+                if !agent.running || "\(agent.turn)" != session.turn { sessions[caller] = nil }
+            } else if session.turn != Self.outside || quiet >= Self.outsideGrant {
+                sessions[caller] = nil
+            }
+        }
+        if maps.isEmpty && sessions.isEmpty {
+            sweeper?.invalidate()
+            sweeper = nil
+        }
+    }
+
+    private func keepSweeping() {
+        guard sweeper == nil else { return }
+        sweeper = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sweep() }
+        }
     }
 
     private func enqueue(_ job: Job) {
@@ -306,9 +360,11 @@ final class ComputerUse {
         refusal(for: job.bundle, name: job.appName) ?? Self.stoppedText
     }
 
-    /// Checks the window and control are as the map said, glides the cursor there, then does it, off the main
-    /// thread; the reply goes back to the chat. Time may have passed since petal_act (the person was asked, other
-    /// actions went first), so everything is checked again here.
+    /// Checks the window and control are as the map said, glides the cursor there, then checks it all again and does
+    /// it, off the main thread; the reply goes back to the chat. Time may have passed since petal_act (the person was
+    /// asked, other actions went first), and the person may have selected something else while the cursor moved, so
+    /// the window is checked right before the change, in the same breath; a Stop, the turn's end, using apps turned off
+    /// or the app made private stop `cancel`, which every change checks first.
     private func run(_ job: Job) {
         acting = job
         lastCaller = job.caller
@@ -316,7 +372,6 @@ final class ComputerUse {
         if let error = stale(job) { job.fail(error); return finished() }
         let map = maps[job.caller] ?? job.map
         let cancel = job.cancel
-        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier == map.pid
         Self.actQueue.async {
             let prepared = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options)
             DispatchQueue.main.async {
@@ -326,10 +381,22 @@ final class ComputerUse {
                     self.cursor.glide(to: Self.screenPoint(prepared.spot), caption: job.caption)
                     DispatchQueue.main.asyncAfter(deadline: .now() + FakeCursor.glide + 0.03) {
                         if let error = self.stale(job) { self.cursor.rest(); job.fail(error); return self.finished() }
-                        if ["press", "menu"].contains(job.action) || (job.action == "key" && prepared.menuItem != nil) { self.cursor.press() }
                         Self.actQueue.async {
-                            let outcome = Acting.perform(job.action, entry: job.entry, map: map, front: front, prepared: prepared,
-                                                         options: job.options, cancel: cancel)
+                            var outcome = Acting.Outcome()
+                            if !cancel.stopped {
+                                // Right before the change: the window, what's selected in it, what has the keyboard
+                                // and the control, again.
+                                let checked = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options, known: prepared)
+                                if let error = checked.error {
+                                    outcome.error = error
+                                } else if !cancel.stopped {
+                                    if ["press", "menu"].contains(job.action) || (job.action == "key" && checked.menuItem != nil) {
+                                        DispatchQueue.main.async { MainActor.assumeIsolated { self.cursor.press() } }
+                                    }
+                                    outcome = Acting.perform(job.action, entry: job.entry, map: map, prepared: checked,
+                                                             options: job.options, cancel: cancel)
+                                }
+                            }
                             DispatchQueue.main.async {
                                 MainActor.assumeIsolated { self.done(job, outcome) }
                             }
@@ -375,7 +442,8 @@ final class ComputerUse {
 
     // MARK: Stopping
 
-    /// The person pressed Stop or Escape: the action under way and the rest of that reply's are cancelled.
+    /// The person pressed Stop or Escape: the action under way and the rest of that reply's are cancelled. A Petal
+    /// chat's reply can't use apps again; an AI session outside Petal asks again at its next act.
     func stop() {
         let caller = acting?.caller ?? lastCaller
         cursor.hide()
@@ -539,11 +607,17 @@ enum Reader {
     /// keyboard when it's in this window, and its lists' selected rows. Kept by Petal, never told to the AI.
     static func fingerprint(app: AXUIElement, window: AXUIElement, lists: [AXUIElement]) -> UIMap.Fingerprint {
         let title: String = Windows.value(window, kAXTitleAttribute) ?? ""
-        var role = "", subrole = "", value = ""
+        var role = "", subrole = "", value = "", identifier = ""
+        var place = CGRect.zero
+        var element: AXUIElement?
         if let focused: AXUIElement = Windows.value(app, kAXFocusedUIElementAttribute),
            let home: AXUIElement = Windows.value(focused, kAXWindowAttribute), CFEqual(home, window) {
-            role = Windows.value(focused, kAXRoleAttribute) ?? ""
-            subrole = Windows.value(focused, kAXSubroleAttribute) ?? ""
+            let found = values(focused, [kAXRoleAttribute, kAXSubroleAttribute, kAXIdentifierAttribute, kAXPositionAttribute, kAXSizeAttribute])
+            role = found[kAXRoleAttribute] as? String ?? ""
+            subrole = found[kAXSubroleAttribute] as? String ?? ""
+            identifier = found[kAXIdentifierAttribute] as? String ?? ""
+            place = frame(found[kAXPositionAttribute], found[kAXSizeAttribute])
+            element = focused
             if subrole != "AXSecureTextField" { value = text(Windows.value(focused, kAXValueAttribute) as CFTypeRef?) }
         }
         var selected: [String] = []
@@ -551,7 +625,8 @@ enum Reader {
             let rows: [AXUIElement] = Windows.value(list, kAXSelectedRowsAttribute) ?? Windows.value(list, kAXSelectedChildrenAttribute) ?? []
             for row in rows.prefix(5) { selected.append(describe(row)) }
         }
-        return UIMap.fingerprint(title: title, focusRole: role, focusSubrole: subrole, focusValue: value, selected: selected)
+        return UIMap.fingerprint(title: title, focusRole: role, focusSubrole: subrole, focusValue: value, focusIdentifier: identifier,
+                                 focusFrame: place, focused: element, selected: selected)
     }
 
     /// A selected row in a few words: its index and the first texts in it.
@@ -660,8 +735,9 @@ enum Acting {
 
     /// The window is still there, where the map said and showing what it showed (the same title, the same rows
     /// selected, the same control with the keyboard); so is the control. Then where the cursor goes, and for a
-    /// menu, its item.
-    static func prepare(_ action: String, entry: ComputerUse.Entry?, map: ComputerUse.Map, options: Options) -> Prepared {
+    /// menu, its item. `known`: checked again right before the change (after the cursor's glide, when the person may
+    /// have selected another email), keeping the menu item found before if it's still there and enabled.
+    static func prepare(_ action: String, entry: ComputerUse.Entry?, map: ComputerUse.Map, options: Options, known: Prepared? = nil) -> Prepared {
         var prepared = Prepared()
         guard let now = Windows.frame(of: map.window), now.width > 0 else {
             prepared.error = "The window is gone (closed, or its app quit). " + changed
@@ -693,7 +769,23 @@ enum Acting {
             }
             if frame.width > 0 { prepared.spot = CGPoint(x: frame.midX, y: frame.midY) }
         }
+        if let known {
+            prepared.spot = known.spot
+            if let item = known.menuItem {
+                var role: CFTypeRef?
+                let there = AXUIElementCopyAttributeValue(item, kAXRoleAttribute as CFString, &role) == .success && role != nil
+                let enabled = (Windows.value(item, kAXEnabledAttribute) as Bool?) != false
+                if there && enabled {
+                    prepared.menuItem = item
+                    prepared.menuTitle = known.menuTitle
+                } else if action == "menu" {
+                    prepared.error = "\(known.menuTitle ?? "That menu item") isn't there or is greyed out now. " + changed
+                    return prepared
+                }
+            }
+        }
         switch action {
+        case "menu" where known != nil: break
         case "menu":
             let found = menuItem(app, path: options.path)
             if let error = found.error { prepared.error = error; return prepared }
@@ -710,7 +802,7 @@ enum Acting {
                 prepared.error = "A password field has the cursor: Petal doesn't type there. petal_vault types a saved secret."
                 return prepared
             }
-            if action == "key", let key = options.key, key.command, let found = menuEquivalent(app, key) {
+            if known == nil, action == "key", let key = options.key, key.command, let found = menuEquivalent(app, key) {
                 prepared.menuItem = found.item
                 prepared.menuTitle = found.title
             }
@@ -719,13 +811,15 @@ enum Acting {
         return prepared
     }
 
-    static func perform(_ action: String, entry: ComputerUse.Entry?, map: ComputerUse.Map, front: Bool, prepared: Prepared, options: Options,
+    static func perform(_ action: String, entry: ComputerUse.Entry?, map: ComputerUse.Map, prepared: Prepared, options: Options,
                         cancel: Cancel) -> Outcome {
         var outcome = Outcome()
         let pid = map.pid
         let element = entry?.element
         let name = entry.map { UIMap.name($0.node) }.flatMap { $0.isEmpty ? nil : "“\($0)”" } ?? "That control"
         let cameForward = "\(map.appName) came to the front to take the keys."
+        func say(_ note: String) { outcome.note = outcome.note.map { $0 + " " + note } ?? note }
+        // On a Stop the outcome goes back as it is: ComputerUse.done tells the chat it was stopped.
         switch action {
         case "press":
             guard let element else { break }
@@ -742,9 +836,11 @@ enum Acting {
         case "focus":
             guard let element else { break }
             guard !cancel.stopped else { return outcome }
-            if AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) != .success,
-               AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) != .success {
-                outcome.error = "\(name) can't take the focus through Accessibility."
+            if AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) != .success {
+                guard !cancel.stopped else { return outcome }
+                if AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue) != .success {
+                    outcome.error = "\(name) can't take the focus through Accessibility."
+                }
             }
         case "type":
             guard let element, let node = entry?.node else { break }
@@ -755,32 +851,34 @@ enum Acting {
             var typed = false
             // A native field takes its new value directly; a web page's needs keys, so its page hears them.
             if !node.web, UIMap.isText(node) {
-                var settable: DarwinBoolean = false
-                let attribute = options.replace ? kAXValueAttribute : kAXSelectedTextAttribute
-                if AXUIElementIsAttributeSettable(element, attribute as CFString, &settable) == .success, settable.boolValue {
-                    guard !cancel.stopped else { return outcome }
-                    if AXUIElementSetAttributeValue(element, attribute as CFString, options.text as CFString) == .success {
-                        let now = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?)
-                        typed = now.contains(String(options.text.prefix(400)))
-                    }
+                switch insert(options.text, into: element, replace: options.replace, cancel: cancel) {
+                case .done: typed = true
+                case .unsure:
+                    // Never typed a second time: it may be there already.
+                    typed = true
+                    say("Petal may not have typed it (the field didn't say what it holds now): call petal_ui to see \(name) before typing again.")
+                case .no: break
+                case .stopped: return outcome
                 }
             }
             // Keys (the text, or Return) go wherever the keyboard is: only once it's this field, never a password field.
             if !typed || options.submit {
-                if !front {
-                    guard !cancel.stopped else { return outcome }
-                    bringForward(pid)
-                    outcome.note = cameForward
+                if !isFront(pid) {
+                    guard bringForward(pid, cancel: cancel) else { return outcome }
+                    say(cameForward)
                 }
                 guard !cancel.stopped else { return outcome }
-                if let error = focus(element, pid: pid, name: name) { outcome.error = error; break }
+                if let error = focus(element, pid: pid, name: name, cancel: cancel) {
+                    if cancel.stopped { return outcome }
+                    outcome.error = error
+                    break
+                }
             }
             if !typed {
                 // Never ⌘A over a whole document: only once the keyboard is in this field.
                 if options.replace, let all = UIMap.parseKey("cmd-a") {
-                    guard !cancel.stopped else { return outcome }
                     guard keysGoTo(element, pid: pid) else { outcome.error = "The cursor left \(name); nothing was typed."; break }
-                    post(all, to: pid)
+                    guard post(all, to: pid, cancel: cancel) else { return outcome }
                 }
                 guard type(options.text, to: pid, cancel: cancel, still: { keysGoTo(element, pid: pid) }) else {
                     if cancel.stopped { return outcome }
@@ -789,9 +887,8 @@ enum Acting {
                 }
             }
             if options.submit, let enter = UIMap.parseKey("return") {
-                guard !cancel.stopped else { return outcome }
                 guard keysGoTo(element, pid: pid) else { outcome.error = "The cursor left \(name) before Return: it was typed, not sent."; break }
-                post(enter, to: pid)
+                guard post(enter, to: pid, cancel: cancel) else { return outcome }
             }
             usleep(120_000)
             let now = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?)
@@ -805,13 +902,17 @@ enum Acting {
                 if AXUIElementPerformAction(element, "AXScrollToVisible" as CFString) != .success {
                     outcome.error = "\(name) can't be scrolled into view through Accessibility; give a direction instead."
                 }
-            } else if let error = scroll(element, options.direction) {
+            } else if let error = scroll(element, options.direction, cancel: cancel) {
                 outcome.error = error
             }
         case "menu":
             guard let item = prepared.menuItem else { break }
             // A menu command acts on its app's front window: that must be the one petal_ui looked at.
-            if let error = bringWindow(map, cancel: cancel) { outcome.error = error; break }
+            if let error = bringWindow(map, cancel: cancel) {
+                if cancel.stopped { return outcome }
+                outcome.error = error
+                break
+            }
             guard !cancel.stopped else { return outcome }
             if AXUIElementPerformAction(item, kAXPressAction as CFString) != .success {
                 outcome.error = "Couldn't choose \(prepared.menuTitle ?? "that item"); its app didn't answer."
@@ -819,10 +920,18 @@ enum Acting {
             outcome.chose = prepared.menuTitle
         case "key":
             guard let key = options.key else { break }
-            if let error = bringWindow(map, cancel: cancel) { outcome.error = error; break }
+            if let error = bringWindow(map, cancel: cancel) {
+                if cancel.stopped { return outcome }
+                outcome.error = error
+                break
+            }
             if let element {
                 guard !cancel.stopped else { return outcome }
-                if let error = focus(element, pid: pid, name: name) { outcome.error = error; break }
+                if let error = focus(element, pid: pid, name: name, cancel: cancel) {
+                    if cancel.stopped { return outcome }
+                    outcome.error = error
+                    break
+                }
             }
             // A shortcut its menus have is chosen there (any app, in front or not); otherwise the key itself.
             if let item = prepared.menuItem {
@@ -832,12 +941,10 @@ enum Acting {
                     break
                 }
             }
-            if !front {
-                guard !cancel.stopped else { return outcome }
-                bringForward(pid)
-                outcome.note = cameForward
+            if !isFront(pid) {
+                guard bringForward(pid, cancel: cancel) else { return outcome }
+                say(cameForward)
             }
-            guard !cancel.stopped else { return outcome }
             // Right before the key: still that control (or still that window, and no password field), or it isn't sent.
             if let element {
                 guard keysGoTo(element, pid: pid) else { outcome.error = "The cursor left \(name); the key wasn't sent."; break }
@@ -847,7 +954,7 @@ enum Acting {
                 AXUIElementSetMessagingTimeout(app, 0.5)
                 guard !focusedIsSecure(app) else { outcome.error = "A password field has the cursor: Petal doesn't type there."; break }
             }
-            post(key, to: pid)
+            guard post(key, to: pid, cancel: cancel) else { return outcome }
         default: break
         }
         if outcome.error == nil, !cancel.stopped, ["type", "focus", "scroll"].contains(action) {
@@ -856,6 +963,70 @@ enum Acting {
             outcome.fingerprint = Reader.fingerprint(app: app, window: map.window, lists: map.lists)
         }
         return outcome
+    }
+
+    // MARK: Putting text in
+
+    enum Insertion { case done, unsure, no, stopped }
+
+    /// Sets a native field's text through Accessibility (`replace`: its whole value; else at the cursor, over what's
+    /// selected), then reads back what changed: `done` when the text is there, `no` when nothing changed (keys may
+    /// type it), `unsure` when it can't tell, which is never typed again.
+    static func insert(_ text: String, into element: AXUIElement, replace: Bool, cancel: Cancel) -> Insertion {
+        let attribute = replace ? kAXValueAttribute : kAXSelectedTextAttribute
+        var settable: DarwinBoolean = false
+        guard AXUIElementIsAttributeSettable(element, attribute as CFString, &settable) == .success, settable.boolValue else { return .no }
+        // Where it goes and what was there, to read back just what was put in (never a truncated copy).
+        let before: String? = Windows.value(element, kAXValueAttribute)
+        let count = characters(element)
+        let selection = selectedRange(element)
+        guard !cancel.stopped else { return .stopped }
+        guard AXUIElementSetAttributeValue(element, attribute as CFString, text as CFString) == .success else { return .no }
+        let after: String? = Windows.value(element, kAXValueAttribute)
+        if replace {
+            guard let after else { return .unsure }
+            if after == text || after.contains(text) { return .done }
+            return after == before ? .no : .unsure
+        }
+        let length = text.utf16.count
+        if let selection, let there = string(element, CFRange(location: selection.location, length: length)) {
+            if there == text { return .done }
+        }
+        guard let count, let now = characters(element) else { return after != nil && after == before ? .no : .unsure }
+        let replaced = selection?.length ?? 0
+        if now == count && replaced == 0 && after == before { return .no }
+        if selection != nil, now - count == length - replaced, length != replaced { return .done }
+        return .unsure
+    }
+
+    /// How many characters a text control holds (its whole text, not what Petal reads of it).
+    static func characters(_ element: AXUIElement) -> Int? {
+        if let count: Int = Windows.value(element, kAXNumberOfCharactersAttribute) { return count }
+        return (Windows.value(element, kAXValueAttribute) as String?)?.utf16.count
+    }
+
+    static func selectedRange(_ element: AXUIElement) -> CFRange? {
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &raw) == .success, let raw,
+              CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+        var range = CFRange()
+        return AXValueGetValue(raw as! AXValue, .cfRange, &range) ? range : nil
+    }
+
+    /// The text at `range`, through the control's own reading of ranges.
+    static func string(_ element: AXUIElement, _ range: CFRange) -> String? {
+        var range = range
+        guard range.location >= 0, let value = AXValueCreate(.cfRange, &range) else { return nil }
+        var raw: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(element, kAXStringForRangeParameterizedAttribute as CFString, value, &raw) == .success else { return nil }
+        return raw as? String
+    }
+
+    /// The app is in front (through Accessibility, off the main thread).
+    static func isFront(_ pid: pid_t) -> Bool {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.5)
+        return (Windows.value(app, kAXFrontmostAttribute) as Bool?) ?? false
     }
 
     // MARK: Focus
@@ -871,9 +1042,10 @@ enum Acting {
 
     /// Gives `element` the keyboard and reads it back from its app: nil once keys sent now land there (and it isn't a
     /// password field), else why they can't go.
-    static func focus(_ element: AXUIElement, pid: pid_t, name: String) -> String? {
+    static func focus(_ element: AXUIElement, pid: pid_t, name: String, cancel: Cancel) -> String? {
         if isSecure(element) { return password }
         let refused = "Couldn't put the cursor in \(name) through Accessibility; only a real click would. Ask the person to click into it."
+        guard !cancel.stopped else { return ComputerUse.stoppedText }
         guard AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success else { return refused }
         for attempt in 0..<3 {
             if keysGoTo(element, pid: pid) { return nil }
@@ -918,6 +1090,7 @@ enum Acting {
         if windowInFront(map) { return nil }
         guard !cancel.stopped else { return ComputerUse.stoppedText }
         AXUIElementPerformAction(map.window, kAXRaiseAction as CFString)
+        guard !cancel.stopped else { return ComputerUse.stoppedText }
         AXUIElementSetAttributeValue(map.window, kAXMainAttribute as CFString, kCFBooleanTrue)
         for _ in 0..<3 {
             usleep(80_000)
@@ -980,8 +1153,11 @@ enum Acting {
 
     // MARK: Keys
 
-    /// One key, down and up, to the app's own process: the person's keyboard and pointer aren't involved.
-    static func post(_ key: UIMap.Key, to pid: pid_t) {
+    /// One key, down and up, to the app's own process: the person's keyboard and pointer aren't involved. False,
+    /// and nothing sent, once stopped.
+    @discardableResult
+    static func post(_ key: UIMap.Key, to pid: pid_t, cancel: Cancel) -> Bool {
+        guard !cancel.stopped else { return false }
         let source = CGEventSource(stateID: .privateState)
         for down in [true, false] {
             guard let event = CGEvent(keyboardEventSource: source, virtualKey: key.code, keyDown: down) else { continue }
@@ -992,6 +1168,7 @@ enum Acting {
             }
             event.postToPid(pid)
         }
+        return true
     }
 
     /// Text as keystrokes to the app's process, a few characters at a time, each batch only while `still` holds
@@ -1000,7 +1177,8 @@ enum Acting {
         let source = CGEventSource(stateID: .privateState)
         var rest = Array(text.utf16)
         while !rest.isEmpty {
-            if cancel.stopped || !still() { return false }
+            // `still` asks the app, which takes a moment: a Stop meanwhile is heard before the next characters go.
+            if cancel.stopped || !still() || cancel.stopped { return false }
             let chunk = Array(rest.prefix(16))
             rest.removeFirst(chunk.count)
             for down in [true, false] {
@@ -1014,17 +1192,20 @@ enum Acting {
     }
 
     /// Keys only reach the app in front: this one comes forward first (through Accessibility; the pointer stays).
-    static func bringForward(_ pid: pid_t) {
+    /// False, and nothing done, once stopped.
+    static func bringForward(_ pid: pid_t, cancel: Cancel) -> Bool {
+        guard !cancel.stopped else { return false }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.5)
         AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
         usleep(150_000)
+        return !cancel.stopped
     }
 
     // MARK: Scrolling
 
     /// Moves the scroll area around `element` (or it) by most of a page, through its scroll bar's value.
-    static func scroll(_ element: AXUIElement, _ direction: String) -> String? {
+    static func scroll(_ element: AXUIElement, _ direction: String, cancel: Cancel) -> String? {
         var area: AXUIElement? = element
         for _ in 0..<8 {
             guard let current = area else { break }
@@ -1049,10 +1230,11 @@ enum Acting {
         let step = whole > page + 1 ? min(1, max(0.02, 0.8 * page / (whole - page))) : 0.25
         let next = min(1, max(0, current + (direction == "down" || direction == "right" ? step : -step)))
         var settable: DarwinBoolean = false
-        if AXUIElementIsAttributeSettable(bar, kAXValueAttribute as CFString, &settable) == .success, settable.boolValue,
-           AXUIElementSetAttributeValue(bar, kAXValueAttribute as CFString, NSNumber(value: next)) == .success {
-            return nil
-        }
+        let canSet = AXUIElementIsAttributeSettable(bar, kAXValueAttribute as CFString, &settable) == .success && settable.boolValue
+        // On a Stop, nothing more: ComputerUse.done says it was stopped.
+        guard !cancel.stopped else { return nil }
+        if canSet, AXUIElementSetAttributeValue(bar, kAXValueAttribute as CFString, NSNumber(value: next)) == .success { return nil }
+        guard !cancel.stopped else { return nil }
         let action = direction == "down" || direction == "right" ? kAXIncrementAction : kAXDecrementAction
         if AXUIElementPerformAction(bar, action as CFString) == .success { return nil }
         return "That area can't be scrolled through Accessibility; only the person's own scrolling would do it."
