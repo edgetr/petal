@@ -167,14 +167,22 @@ enum NoteRules {
     static func sameTab(_ note: NoteTab, pid notePID: Int32, window noteWindow: UInt32?,
                         _ front: NoteTab, pid frontPID: Int32, window frontWindow: UInt32?, previous: NoteTab?) -> Bool {
         let samePlace = note.index != nil && note.index == front.index
+        // It had a twin (another tab on its address) and the tab in front has none now: one of the two closed or went
+        // elsewhere, and the address can't say which is left. Only its place among as many tabs says it's still it.
+        let lostTwin = (note.twins ?? 1) > 1 && onlyOne(front)
+        let inPlace = samePlace && note.count != nil && note.count == front.count
         // The browser restarted since: ids and windows are new, the address finds it; when several tabs have it,
         // its place too (a restored window keeps its tabs in order).
-        guard notePID == frontPID else { return sameURL(note.url, front.url) && ((front.twins ?? 1) <= 1 || samePlace) }
+        guard notePID == frontPID else {
+            return sameURL(note.url, front.url) && (lostTwin ? inPlace : (front.twins ?? 1) <= 1 || samePlace)
+        }
         if let a = note.id, let b = front.id { return a == b }
         // No ids: a tab belongs to its window.
         guard noteWindow == nil || frontWindow == nil || noteWindow == frontWindow else { return false }
         if sameURL(note.url, front.url) {
-            // The only tab with that address (a tab before it closed, or one opened, moved it), or in its place.
+            // The only tab with that address (a tab before it closed, or one opened, moved it), or in its place; once
+            // its twin is gone, only in its place among as many tabs.
+            if lostTwin { return inPlace }
             return onlyOne(front) || samePlace
         }
         // Only its #fragment changed, in its place among as many tabs.
@@ -208,8 +216,8 @@ enum NoteRules {
     }
 
     /// Of the notes stuck to `places`, the ones that belong on what's in front (their indices in `places`). Tab notes
-    /// that fit only by the address (one tab with it closed or went elsewhere, and the one left has it alone, or a
-    /// restarted browser restored it in several windows) can't be told apart: when more than one does, only the one
+    /// that fit only by the address (a restarted browser restored it in several windows; a tab whose twin closed
+    /// fits only in its place, `sameTab`) can't be told apart: when more than one does, only the one
     /// still in its place among as many tabs counts, and if that isn't exactly one, none; and none when a note has
     /// the tab by its own id. A note is never moved onto another note's tab by a guess.
     static func fitting(_ places: [NotePlace], _ front: FrontPlace, previous: NoteTab? = nil) -> [Int] {
@@ -248,15 +256,19 @@ enum NoteRules {
     }
 
     /// Which of a window's tabs (`urls`, in order) to show for a note's tab, when the browser knows tabs only by
-    /// place and address (Safari): the one tab with its address; of several, the one in its place; with none, its
-    /// place only when the window still has as many tabs and that tab is on its page (only its #fragment changed).
+    /// place and address (Safari): the one tab with its address (when it had a twin, only in its place among as many
+    /// tabs: the one left may be the twin); of several, the one in its place; with none, its place only when the
+    /// window still has as many tabs and that tab is on its page (only its #fragment changed).
     /// `missing`: no tab there could be it.
     enum TabChoice: Equatable { case at(Int), missing, unsure }
 
     static func choose(_ tab: NoteTab, urls: [String]) -> TabChoice {
         guard !urls.isEmpty else { return .unsure }
         let same = urls.indices.filter { sameURL(urls[$0], tab.url) }.map { $0 + 1 }
-        if same.count == 1 { return .at(same[0]) }
+        if same.count == 1 {
+            if (tab.twins ?? 1) > 1, tab.index != same[0] || tab.count != urls.count { return .unsure }
+            return .at(same[0])
+        }
         if same.count > 1 {
             guard let index = tab.index, same.contains(index) else { return .unsure }
             return .at(index)
@@ -284,7 +296,8 @@ enum NoteRules {
     }
 
     /// A window's note (or a tab's that knows no tab) whose app is in front, when Petal couldn't tell which window
-    /// is: it neither shows nor steps away until the window is known (the window's focus event looks again).
+    /// is: the window may be another of the app's, so it doesn't show, but it's kept to come back once its own
+    /// window is seen in front (the window's focus event looks again).
     static func windowUnknown(_ place: NotePlace, _ front: FrontPlace) -> Bool {
         (place.kind == .window || place.tab == nil) && place.kind != .app && place.pid == front.pid && front.window == nil
     }

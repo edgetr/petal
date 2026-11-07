@@ -782,6 +782,22 @@ extension ClaudePanel {
         }
     }
 
+    /// Which window of the app in front is focused couldn't be read: looked at again, a little later each time, at
+    /// most three times while it stays unknown (a focus event or another app coming forward looks anyway).
+    private func lookWhileUnknown(_ pid: pid_t) {
+        guard unknownLooks.pid == pid, unknownLooks.count < 3 else { return }
+        unknownLooks.count += 1
+        let item = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier == pid else { return }
+                self.look(at: front)
+            }
+        }
+        lookAgain?.cancel()
+        lookAgain = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4 * Double(unknownLooks.count), execute: item)
+    }
+
     /// A browser's title changes several times as a tab switches or loads: one look once it settles.
     private func lookSoon(at pid: pid_t) {
         lookAgain?.cancel()
@@ -822,12 +838,20 @@ extension ClaudePanel {
         let here = fitting(front, previous: previous)
         let quiet = PetalApp.shared.assist.neverLook(front.app)
         for note in here { adopt(note, front, title: quiet ? "" : title) }
+        if front.window != nil || unknownLooks.pid != front.pid { unknownLooks = (front.pid, 0) }
+        // Its app is in front but not which window (one still opening, the desktop, an app slow to answer): it may be
+        // another window of the app, so the open note steps away (kept to come back, never as if closed), and nothing
+        // takes its place. It shows again only once its own window is seen in front: the window's focus event looks
+        // again, and so does Petal, a few times, in case none comes.
+        var unknown = false
         if isOpen, current.attached, !here.contains(where: { $0 === current }) {
-            // Its app is in front but not yet which window (a new one still opening): it stays as it is, and nothing
-            // takes its place, until the window is known.
-            if let place = current.place, NoteRules.windowUnknown(place, front) { return }
+            unknown = current.place.map { NoteRules.windowUnknown($0, front) } ?? false
             stepAway()
         }
+        if front.window == nil, notes.contains(where: { $0.attached && $0.away && $0.place.map { NoteRules.windowUnknown($0, front) } == true }) {
+            lookWhileUnknown(front.pid)
+        }
+        if unknown { return }
         // The loose chat open stays: a note never takes its place by itself.
         if isOpen && !current.attached { return }
         let shown: StickyNote? = isOpen ? current : nil

@@ -738,6 +738,8 @@ final class ClaudePanel {
     @ObservationIgnored var followAgain = false
     /// Counts the looks at what's in front: only the newest one's answer counts.
     @ObservationIgnored var looks = 0
+    /// The looks again at an app whose focused window couldn't be read, while it stays unknown.
+    @ObservationIgnored var unknownLooks: (pid: pid_t, count: Int) = (0, 0)
     @ObservationIgnored var pendingOpen: StickyNote?
     @ObservationIgnored var pendingTicket = 0
     /// Counts chats picked from the list: one picked after another (before its window was checked) wins.

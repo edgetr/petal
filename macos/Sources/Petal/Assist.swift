@@ -248,10 +248,12 @@ final class Assist {
         let pid = front.processIdentifier
         let shot = args["screenshot"] as? String ?? ((args["screenshot"] as? Bool) == true ? "window" : "")
         // A note stuck to one tab looks only while that tab is the one its window shows: never at another tab.
+        // Checked before reading and again once everything is read, right before it's told (`deliver`).
         let tabPlace = place.flatMap { $0.kind == .tab && $0.tab != nil ? $0 : nil }
         let previous = tabPlace.flatMap { app.claude.lastTab($0) }
         Self.queue.async {
-            if let tabPlace, ClaudePanel.tabShowing(tabPlace, previous: previous) == nil {
+            let before = tabPlace.flatMap { ClaudePanel.tabShowing($0, previous: previous) }
+            if tabPlace != nil, before == nil {
                 return DispatchQueue.main.async { send(["note": ClaudePanel.tabNotShowing]) }
             }
             let element = AXUIElementCreateApplication(pid)
@@ -284,17 +286,46 @@ final class Assist {
                     if !shownSelection.isEmpty { result["selectedText"] = shownSelection }
                     if let shownClipboard { result["clipboard"] = shownClipboard }
                     let hidden = self.privatePIDs
+                    // What was read goes to the AI only if it's still what it was read from: the app not made private
+                    // meanwhile, and a tab note's tab still the one showing in the same window. Else none of it goes
+                    // (the picture is deleted): another tab's text, address or picture is never told as the note's.
+                    let deliver = { (picture: String?) in
+                        let refuse = { (answer: [String: Any]) in
+                            if let picture { try? FileManager.default.removeItem(atPath: picture) }
+                            send(answer)
+                        }
+                        let privately: [String: Any] = ["app": ["name": front.localizedName ?? "", "id": front.bundleIdentifier ?? ""],
+                                                        "private": "The user keeps this app private: Petal doesn't look at what's in it."]
+                        let tell = {
+                            if self.neverLook(front.bundleIdentifier) { return refuse(privately) }
+                            if picture != nil { self.did(shot == "screen" ? "Looked at your screen" : "Looked at \(front.localizedName ?? "a window")") }
+                            send(result)
+                        }
+                        guard let tabPlace, let before else { return tell() }
+                        Self.queue.async {
+                            let after = ClaudePanel.tabShowing(tabPlace, previous: previous)
+                            // The same tab of the same window it read: its id or place and its address unchanged.
+                            let same = after.map { now in
+                                now.window == before.window && before.window == number && now.tab.id == before.tab.id
+                                    && now.tab.index == before.tab.index && now.tab.count == before.tab.count
+                                    && now.tab.url == before.tab.url
+                            } ?? false
+                            DispatchQueue.main.async {
+                                MainActor.assumeIsolated { same ? tell() : refuse(["note": ClaudePanel.tabNotShowing]) }
+                            }
+                        }
+                    }
                     let finish = {
-                        guard !shot.isEmpty else { return send(result) }
+                        guard !shot.isEmpty else { return deliver(nil) }
                         Task {
-                            if let path = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", hiding: hidden) {
-                                self.did(shot == "screen" ? "Looked at your screen" : "Looked at \(front.localizedName ?? "a window")")
+                            let path = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", hiding: hidden)
+                            if let path {
                                 result["screenshot"] = path
                                 result["screenshotNote"] = "A PNG of the \(shot == "screen" ? "screen" : "window"); read it to see it."
                             } else {
                                 result["screenshotNote"] = Capture.allowed ? "Couldn't take the picture." : "Petal needs Screen Recording for pictures (Petal's settings, Permissions)."
                             }
-                            send(result)
+                            deliver(path)
                         }
                     }
                     guard Browsers.kind(front.bundleIdentifier ?? "") != nil else { return finish() }
