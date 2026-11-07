@@ -232,7 +232,9 @@ enum MCP {
             // or were allowed.
             let note = ProcessInfo.processInfo.environment["PETAL_NOTE"] ?? ""
             let caller = note.isEmpty ? "mcp-\(getpid())" : note
-            // A card asking the person first waits up to 120 s: this waits longer, so their answer always arrives.
+            // Petal answers within 150 seconds, or keeps saying it's waiting (a space every 10 s) while a card is up for
+            // the person, however many one request shows (an agent's, then the app's), so their answer always arrives.
+            // Giving up (or this process ending) ends what the request had going, and answers its card Don't.
             let reply = petal(["assist", name, json, caller], timeout: 150)
             guard let data = reply.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) else {
                 throw Failure(reply.isEmpty ? "Petal isn't running" : reply)
@@ -332,8 +334,8 @@ enum MCP {
     /// Asks the running Petal over its socket, as petal-mcp.py does.
     static func petal(_ args: String...) -> String { petal(args) }
 
-    /// `timeout`: seconds to wait for the answer (nil waits as long as it takes). Running out of time says so; it's
-    /// never "Petal isn't running".
+    /// `timeout`: seconds to wait for the answer, or for the next sign Petal is still waiting on the person (nil waits
+    /// as long as it takes). Running out of time says so; it's never "Petal isn't running".
     static func petal(_ args: [String], timeout: Int? = nil) -> String {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return "Petal isn't running" }

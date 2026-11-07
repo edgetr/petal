@@ -1005,6 +1005,14 @@ final class ComputerUse {
         if !closed.isEmpty { keepSweeping() }
     }
 
+    /// The caller's request went unanswered by its asker's leaving (Assist.hungUp): what it had going and waiting
+    /// stops, and what it was allowed goes, but unlike `end` its next request may ask again at once.
+    func abandon(_ caller: String) {
+        if acting?.caller == caller { cursor.hide() }
+        cancelWork(of: caller)
+        sessions[caller] = nil
+    }
+
     /// A note was stuck to something else (its tab, its window or all of its app; Agent.place): its ids, a petal_ui
     /// under way, its actions waiting or under way and its question waiting (its card goes) were for the old place,
     /// so they go, and its AI is told at once to look again. What the person allowed this reply stays.

@@ -123,9 +123,10 @@ extension Assist {
     /// What Petal AI did.
     /// `go` gets the operation's pass (nil for Petal's own chats): the fill checks it again right before each field
     /// (`AgentGrants.still`), and it ends the moment the grant it relies on is removed. The caller finishes it
-    /// (`AgentGrants.finish`) once the operation is done.
+    /// (`AgentGrants.finish`) once the operation is done. `live`: the request is still wanted (its reply not stopped,
+    /// its asker still there), checked once the grants are read, before any card shows.
     func agentGate(_ caller: String, who identity: AgentAccess.Caller?, grant item: String, title: String, what: String, task: String, did done: String,
-                   fail: @escaping (String) -> Void, go: @escaping (AgentPass?) -> Void) {
+                   live: @escaping () -> Bool, fail: @escaping (String) -> Void, go: @escaping (AgentPass?) -> Void) {
         let who: AgentAccess.Caller
         switch AgentAccess.gate(identity) {
         case .petal: return go(nil)
@@ -135,6 +136,7 @@ extension Assist {
         let grants = AgentGrants.shared
         let operation = UUID().uuidString
         grants.whenLoaded { [self] in
+            guard live() else { return fail(ComputerUse.stoppedText) }
             let place = AgentAccess.shown(who.project, home: home)
             let said = AgentAccess.clipped(task, 120)
             let record = "\(who.label) \(done) in \(place)" + (said.isEmpty ? "" : ": “\(said)”")
@@ -176,7 +178,11 @@ extension Assist {
     /// `petal run` asks for keys (["agentKeys", json]): {"keys": [{"ref", "env"}], "command", "stdin"}. Only to
     /// Petal's own `petal run`, which puts them in the command's variables (or input) and takes them out of what it
     /// prints; the agent that ran it never sees them. Asks first as `agentGate` does, one card for every key.
-    func agentKeys(_ json: String, from who: AgentAccess.Caller, reply: @escaping @MainActor (String) -> Void) {
+    /// `request`: `petal run` ended or gave up waiting (its socket closed), its card is answered Don't and no key goes.
+    func agentKeys(_ json: String, from who: AgentAccess.Caller, request: IPC.Pending, reply: @escaping @MainActor (String) -> Void) {
+        let owner = "mcp-\(who.pid)"
+        request.waiting = { [unowned self] in pending?.owner == owner }
+        request.onHangUp { [unowned self] in decline(owner: owner) }
         let send = { (object: [String: Any]) in
             let data = (try? JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])) ?? Data("{}".utf8)
             reply(String(decoding: data, as: UTF8.self))
@@ -229,6 +235,7 @@ extension Assist {
                 let done = { passes.values.forEach(grants.finish) }
                 VaultStore.load { read in
                     defer { done() }
+                    guard !request.hungUp else { return fail("petal run stopped waiting: no key was given.") }
                     guard case .success(let now) = read else { return fail(VaultStore.unreadableText + " No key was given; try again in a moment.") }
                     var keys: [[String: Any]] = []
                     for pair in found {
@@ -255,6 +262,7 @@ extension Assist {
                 return give(Dictionary(found.map { ($0.item.id, pass(.petal, $0.item.id)) }, uniquingKeysWith: { a, _ in a }))
             }
             grants.whenLoaded {
+                guard !request.hungUp else { return fail("petal run stopped waiting: no key was given.") }
                 var passes: [String: AgentPass] = [:]
                 for pair in found {
                     if let grant = AgentAccess.granted(grants.grants, item: pair.item.id, caller: who) { passes[pair.item.id] = pass(.grant(grant.id), pair.item.id) }
@@ -267,7 +275,7 @@ extension Assist {
                 var kept: [String: String] = [:]
                 let detail = self.agentDetail(who, said: "", how: "It never sees \(it): Petal gives \(it) to the command and takes \(it) out of what the command prints.")
                 self.ask("agent-key", AgentAccess.keyQuestion(who, titles: missing.map(\.item.title), command: command, home: self.home), detail: detail,
-                         always: true, warn: true, allow: "Allow once", owner: "mcp-\(who.pid)", keep: keep ? "Always for this project" : nil, mark: who.agent,
+                         always: true, warn: true, allow: "Allow once", owner: owner, keep: keep ? "Always for this project" : nil, mark: who.agent,
                          kept: {
                              for pair in missing {
                                  kept[pair.item.id] = grants.add(AgentAccess.Grant(item: pair.item.id, title: pair.item.title, project: who.project, agent: who.agent))

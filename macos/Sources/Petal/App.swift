@@ -454,17 +454,20 @@ final class PetalApp {
                 DispatchQueue.main.async { MainActor.assumeIsolated { reply(MCP.answer(name, json, plan: plan)) } }
             }
         }
-        ipc.onFrom("assist") { [unowned self] args, who, reply in
+        ipc.onFrom("assist") { [unowned self] args, who, request, reply in
             // Which chat asks: a note's id only from Petal's own chats (Petal started them); any other caller is the
             // process that connected, whatever it says, so it never stands in for a note or another session.
             let claimed = args.dropFirst(2).first ?? ""
             let caller = who.agent == .petal && !claimed.isEmpty ? claimed : "mcp-\(who.pid)"
+            // Its card keeps it waiting however long the person takes; its asker gone, what it had going stops.
+            request.waiting = { [unowned self] in assist.pending?.owner == caller }
+            request.onHangUp { [unowned self] in assist.hungUp(caller) }
             // Who it is goes with the request itself, never looked up again later.
             assist.handle(args.first ?? "", args.dropFirst().first ?? "{}", note: caller, who: who, reply: reply)
         }
         // `petal run` asking for API keys (AgentCallers.swift).
-        ipc.onFrom("agentKeys") { [unowned self] args, who, reply in
-            assist.agentKeys(args.first ?? "{}", from: who, reply: reply)
+        ipc.onFrom("agentKeys") { [unowned self] args, who, request, reply in
+            assist.agentKeys(args.first ?? "{}", from: who, request: request, reply: reply)
         }
         // The kept chats, open in the AI panel.
         ipc.on("chats") { [unowned self] _ in claude.open(asking: nil); claude.chatsOpen = true; return "ok" }

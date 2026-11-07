@@ -22,7 +22,8 @@ enum AgentRun {
             return entry
         }, "command": line, "stdin": request.stdin]
         guard let json = try? JSONSerialization.data(withJSONObject: ask) else { CLI.fail("Couldn't ask Petal.") }
-        // A card waits up to two minutes for the person: this waits a little longer.
+        // Petal answers within 150 seconds, or keeps saying it's waiting while its card is up for the person. Leaving
+        // (an agent stopping this, or giving up) answers its card Don't, so no key is given with nobody to take it.
         let reply = MCP.petal(["agentKeys", String(decoding: json, as: UTF8.self)], timeout: 150)
         guard let object = try? JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any] else {
             CLI.fail(reply.hasPrefix("unknown function") ? "This Petal is too old for petal run: update it (petal update)." : reply.isEmpty ? "Petal didn't answer." : reply)
@@ -105,17 +106,18 @@ enum AgentRun {
             // The keys, one a line, then the end of the input. A command that doesn't read it isn't held up.
             Thread.detachNewThread {
                 let text = Array(keys.map { $0.secret + "\n" }.joined().utf8)
-                writeAll(input.write, text)
+                _ = writeAll(input.write, text)
                 close(input.write)
             }
         }
         var status: Int32 = 0
         while waitpid(child, &status, 0) < 0 && errno == EINTR {}
         // What it printed last, still on its way; something it left running in the background with the same output
-        // isn't waited for: after 2 seconds each stream passes on what's left to read and everything its redactor
-        // held back, and ends. (The wait's own limit is only for an agent that stopped reading what's passed on.)
+        // isn't waited for: 2 seconds on, each stream stops reading, takes only what's in its pipe right then, and
+        // ends. Everything read is passed on however long the agent takes to read it: an agent that paused reading
+        // still gets all of it, and only one that closed its end loses the rest.
         stop.at(.now() + 2)
-        _ = streams.wait(timeout: .now() + 5)
+        streams.wait()
         sources.forEach { $0.cancel() }
         let signalled = status & 0x7f
         if signalled == 0 { return (status >> 8) & 0xff }
@@ -131,46 +133,41 @@ enum AgentRun {
         var passed: Bool { lock.withLock { deadline.map { DispatchTime.now() >= $0 } ?? false } }
     }
 
-    /// Passes what the command prints on `from` to this process's `to`, with the keys taken out, until the end of its
-    /// output or `stop` (something the command left running keeps the output open). Either way, what's left to read
-    /// right then and everything the redactor held back (masked) are passed on before it ends.
+    /// Passes what the command prints on `from` to this process's `to`, with the keys taken out (AgentAccess.relay):
+    /// until the end of its output, or `stop` (something the command left running keeps the output open), and then
+    /// only what's in the pipe right then; all of it written on, however long that takes.
     private static func relay(from: Int32, to: Int32, secrets: [(secret: String, label: String)], stop: Stop) {
         var redactor = AgentAccess.Redactor(secrets)
         var buffer = [UInt8](repeating: 0, count: 65536)
-        var ended = false
-        while !stop.passed {
+        AgentAccess.relay(&redactor, chunk: buffer.count, read: { most in
             var ready = pollfd(fd: from, events: Int16(POLLIN), revents: 0)
             let polled = poll(&ready, 1, 100)
-            if polled < 0, errno == EINTR { continue }
-            if polled < 0 { ended = true; break }
-            if polled == 0 { continue }
-            let count = read(from, &buffer, buffer.count)
-            if count < 0, errno == EINTR { continue }
-            if count <= 0 { ended = true; break }
-            writeAll(to, redactor.feed(Array(buffer[..<count])))
-        }
-        if !ended {
-            // Only what's already there: a background writer never keeps this going (at most 16 reads).
-            _ = fcntl(from, F_SETFL, fcntl(from, F_GETFL) | O_NONBLOCK)
-            for _ in 0..<16 {
-                let count = read(from, &buffer, buffer.count)
-                if count < 0, errno == EINTR { continue }
-                if count <= 0 { break }
-                writeAll(to, redactor.feed(Array(buffer[..<count])))
-            }
-        }
-        writeAll(to, redactor.finish())
+            if polled < 0 { return errno == EINTR ? .nothingYet : .ended }
+            if polled == 0 { return .nothingYet }
+            let count = read(from, &buffer, min(most, buffer.count))
+            if count < 0, errno == EINTR || errno == EAGAIN { return .nothingYet }
+            if count <= 0 { return .ended }
+            return .bytes(Array(buffer[..<count]))
+        }, waiting: {
+            var count: Int32 = 0
+            return ioctl(from, fionread, &count) == 0 ? Int(count) : 0
+        }, write: { writeAll(to, $0) }, stopped: { stop.passed })
         close(from)
     }
 
-    private static func writeAll(_ fd: Int32, _ bytes: [UInt8]) {
+    /// <sys/filio.h>'s FIONREAD, _IOR('f', 127, int), which Swift doesn't import: how many bytes a pipe holds.
+    private static let fionread: UInt = 0x4000_0000 | (UInt(MemoryLayout<Int32>.size) << 16) | (UInt(UInt8(ascii: "f")) << 8) | 127
+
+    /// Writes all of `bytes`, waiting as long as the reader takes; false once its end is closed (or another error).
+    private static func writeAll(_ fd: Int32, _ bytes: [UInt8]) -> Bool {
         var offset = 0
         while offset < bytes.count {
             let written = bytes[offset...].withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
             if written < 0, errno == EINTR { continue }
-            if written <= 0 { return }
+            if written <= 0 { return false }
             offset += written
         }
+        return true
     }
 
     /// The command is a program that can run: a path to one, or a name found in PATH.

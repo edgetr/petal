@@ -851,7 +851,8 @@ def assist(name):
         # Which chat asks: a Petal chat's note (Petal sets PETAL_NOTE for its own), answered about the note's window;
         # any other AI session is this process, so two sessions never share what they looked at or were allowed.
         caller = os.environ.get("PETAL_NOTE") or "mcp-py-%d" % os.getpid()
-        # A card asking the person first waits up to 120 s: this waits longer, so their answer always arrives.
+        # Petal answers within 150 s, or sends a space every 10 s while a card is up for the person (each wait on the
+        # socket starts again), so their answer always arrives; giving up answers the card Don't.
         reply = petal("assist", name, json.dumps(args), caller, timeout=150)
         try:
             out = json.loads(reply)

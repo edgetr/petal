@@ -151,6 +151,15 @@ final class Assist {
         if pending?.owner == owner { settle(false) }
     }
 
+    /// A request's asker went before its answer (an agent that gave up waiting, or quit): what that chat or AI
+    /// session had going stops, its card is answered Don't, and what it was allowed this task goes, so nothing it
+    /// asked for happens with nobody to hear of it; its next request starts afresh and asks again. (An AI session's
+    /// requests share one caller: all of them stop.)
+    func hungUp(_ caller: String) {
+        computer.abandon(caller)
+        decline(owner: caller)
+    }
+
     /// The card went away without an answer (×, Escape, another card): that's Don't.
     func cardClosed() {
         if pending != nil { settle(false) }

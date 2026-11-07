@@ -35,6 +35,7 @@ struct AgentAccessCheck {
         gates()
         words()
         sameVariable()
+        relaying()
         if failures > 0 { print("\(failures) agent access check(s) failed"); exit(1) }
         print("agent access: all checks passed")
     }
@@ -696,5 +697,88 @@ struct AgentAccessCheck {
         expect(AgentAccess.fillQuestion(caller, what: "fill your github.com login", home: "/Users/me")
                == "Codex in T3 Code wants to fill your github.com login in ~/petal", "the fill card's question")
         expect(AgentAccess.clipped("npm\ntest " + String(repeating: "x", count: 80), 20).count == 20, "a long command is cut short on one line")
+    }
+
+    /// `petal run`'s streams (AgentAccess.relay): the moment after the command ends stops the reading, never the
+    /// writing. A pipe of bytes, an agent that may pause, and a clock that passes the deadline while a write waits.
+    static func relaying() {
+        final class Pipe {
+            var bytes: [UInt8] = []
+            var open = true
+            var read = 0
+        }
+        func run(_ pipe: Pipe, chunk: Int = 65536, secrets: [(secret: String, label: String)] = [],
+                 write: ([UInt8]) -> Bool, stopped: () -> Bool, during: (Int) -> Void = { _ in }) {
+            var redactor = AgentAccess.Redactor(secrets)
+            var reads = 0
+            AgentAccess.relay(&redactor, chunk: chunk, read: { most in
+                reads += 1
+                during(reads)
+                guard pipe.read < pipe.bytes.count else { return pipe.open ? .nothingYet : .ended }
+                let end = min(pipe.bytes.count, pipe.read + most)
+                defer { pipe.read = end }
+                return .bytes(Array(pipe.bytes[pipe.read..<end]))
+            }, waiting: { pipe.bytes.count - pipe.read }, write: write, stopped: stopped)
+        }
+
+        // 100,000 bytes, the command gone, the agent paused: the deadline passes while the first write waits, and
+        // still every byte arrives.
+        let pipe = Pipe()
+        pipe.bytes = Array(repeating: UInt8(ascii: "a"), count: 100_000)
+        pipe.open = true   // something left running in the background holds it open
+        var passed = false
+        var delivered: [UInt8] = []
+        run(pipe, write: { bytes in
+            passed = true   // the agent took longer than the deadline to read this
+            delivered += bytes
+            return true
+        }, stopped: { passed })
+        expect(delivered.count == 100_000, "a paused agent still gets every byte once the deadline passed", "\(delivered.count)")
+
+        // After the deadline only what was in the pipe right then: what a background writer adds later isn't read.
+        let busy = Pipe()
+        busy.bytes = Array(repeating: UInt8(ascii: "b"), count: 1000)
+        var stop = false
+        var got = 0
+        run(busy, chunk: 100, write: { bytes in
+            got += bytes.count
+            if got == 100 { stop = true }
+            return true
+        }, stopped: { stop }, during: { _ in
+            if stop { busy.bytes += Array(repeating: UInt8(ascii: "c"), count: 50) }   // written after the deadline
+        })
+        expect(got == 1000, "what was in the pipe at the deadline is passed on", "\(got)")
+        expect(busy.read == 1000, "nothing written after the deadline is read", "\(busy.read)")
+
+        // The keys come out across the deadline too, and what the redactor held back is written at the end.
+        let key = "sk-test-0123456789abcdefXYZ"
+        let keyed = Pipe()
+        keyed.bytes = Array(("before " + key + " after").utf8)
+        var text: [UInt8] = []
+        var halfway = false
+        run(keyed, chunk: 10, secrets: [(secret: key, label: "K")], write: { bytes in
+            text += bytes
+            halfway = true
+            return true
+        }, stopped: { halfway })
+        expect(String(decoding: text, as: UTF8.self) == "before [K key] after", "redacted across the deadline", String(decoding: text, as: UTF8.self))
+
+        // The output's end before the deadline: everything, then done.
+        let short = Pipe()
+        short.bytes = Array("done\n".utf8)
+        short.open = false
+        var all: [UInt8] = []
+        run(short, write: { all += $0; return true }, stopped: { false })
+        expect(all == Array("done\n".utf8), "the output's end passes everything on")
+
+        // An agent that closed its end: nothing more is written, but the output is still read to its end, so the
+        // command never blocks on a full pipe.
+        let closed = Pipe()
+        closed.bytes = Array(repeating: UInt8(ascii: "d"), count: 5000)
+        closed.open = false
+        var writes = 0
+        run(closed, chunk: 1000, write: { _ in writes += 1; return false }, stopped: { false })
+        expect(writes == 1, "no write after the agent's end closed", "\(writes)")
+        expect(closed.read == 5000, "the rest is read and dropped", "\(closed.read)")
     }
 }

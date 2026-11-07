@@ -626,7 +626,8 @@ extension Assist {
             // An agent outside Petal asks first, unless the person granted it this item in this project.
             let noun = Self.agentNoun(item)
             let at = "\(places[0].web ? "on" : "in") \(places[0].where_)"
-            self.agentGate(caller, who: who, grant: item.id, title: item.title, what: "fill \(noun) \(at)", task: task, did: "used \(noun) \(at)", fail: fail) { pass in
+            self.agentGate(caller, who: who, grant: item.id, title: item.title, what: "fill \(noun) \(at)", task: task, did: "used \(noun) \(at)",
+                           live: { self.computer.live(caller, token) }, fail: fail) { pass in
                 // Whatever answer ends the fill ends the agent's pass: an Allow once is never good again.
                 let send = { (reply: Any) in pass.map(AgentGrants.shared.finish); send(reply) }
                 let fail = { (why: String) in pass.map(AgentGrants.shared.finish); fail(why) }
@@ -933,7 +934,7 @@ extension Assist {
             // An agent outside Petal asks first, unless the person granted it new logins in this project.
             let at = "\(place.web ? "on" : "in") \(place.where_)"
             self.agentGate(caller, who: who, grant: AgentAccess.Grant.newLogins, title: "New logins", what: "make a new login \(at)", task: task,
-                           did: "started a new login \(at)", fail: fail) { pass in
+                           did: "started a new login \(at)", live: { self.computer.live(caller, token) }, fail: fail) { pass in
                 // Whatever answer ends it ends the agent's pass: an Allow once is never good again.
                 let send = { (reply: Any) in pass.map(AgentGrants.shared.finish); send(reply) }
                 let fail = { (why: String) in pass.map(AgentGrants.shared.finish); fail(why) }

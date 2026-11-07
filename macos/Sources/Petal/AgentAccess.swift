@@ -305,6 +305,47 @@ enum AgentAccess {
         }
     }
 
+    // MARK: petal run's output
+
+    /// One read from a command's output: bytes, nothing yet (a short wait passed, or a signal), or the output's end.
+    enum Read: Equatable { case bytes([UInt8]), nothingYet, ended }
+
+    /// One of `petal run`'s output streams, apart from the pipes it uses (AgentRun): everything it reads is written
+    /// on with the keys taken out. It reads until the output ends, or until `stopped` (the command ended a moment
+    /// ago, and something it left running in the background keeps the output open): then only what's in the pipe
+    /// right then (`waiting`), and nothing after. Writing is never cut short: whatever was read goes on, and what the
+    /// redactor held back, however long the agent takes to read it (`write` waits for it); only an agent whose end
+    /// closed (`write` false) ends the writing, and the rest is read and dropped, so the command never blocks on a
+    /// full pipe.
+    static func relay(_ redactor: inout Redactor, chunk: Int = 65536, read: (Int) -> Read, waiting: () -> Int,
+                      write: ([UInt8]) -> Bool, stopped: () -> Bool) {
+        var open = true
+        func pass(_ bytes: [UInt8]) {
+            guard open else { return }
+            let out = redactor.feed(bytes)
+            if !out.isEmpty { open = write(out) }
+        }
+        var ended = false
+        reading: while !stopped() {
+            switch read(chunk) {
+            case .bytes(let bytes): pass(bytes)
+            case .nothingYet: continue
+            case .ended: ended = true; break reading
+            }
+        }
+        if !ended {
+            var left = waiting()
+            while left > 0, case .bytes(let bytes) = read(min(chunk, left)) {
+                left -= bytes.count
+                pass(bytes)
+            }
+        }
+        if open {
+            let rest = redactor.finish()
+            if !rest.isEmpty { _ = write(rest) }
+        }
+    }
+
     // MARK: Who's asking
 
     /// The kinds of caller. A grant names a verified agent (or `any`, for every verified agent).
