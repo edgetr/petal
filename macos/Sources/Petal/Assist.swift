@@ -290,7 +290,12 @@ final class Assist {
             let title = Self.withoutSecrets(realTitle)
             // Nothing selected in a field holding a secret, not even part of one: a card number selected four
             // digits at a time would otherwise be told whole over four looks.
-            let inSecret = !selected.isEmpty && focused.map { UIMap.selectionHidden(in: Reader.node($0), filled: Sensitive.isFilled($0, pid: pid)) } == true
+            let inSecret = !selected.isEmpty && focused.map { field in
+                // The field's whole text, checked against the vault: a saved key in a field named nothing secret.
+                var node = Reader.node(field)
+                if !UIMap.isSecure(node) { node.value = Windows.value(field, kAXValueAttribute) ?? "" }
+                return UIMap.selectionHidden(in: node, filled: Sensitive.isFilled(field, pid: pid), secret: VaultIndex.current().matches)
+            } == true
             let shownSelection = selected.isEmpty ? "" : inSecret ? Self.selectionInSecret
                 : Self.shownText(selected, limit: 8000) ?? Self.tooMuchSelected
             let shownClipboard = clipboard.map { Self.shownText($0, limit: 4000) ?? Self.tooMuchClipboard }

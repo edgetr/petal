@@ -352,6 +352,10 @@ struct VaultSettings: View {
         if result.widened > 0 { parts.append("Added sites to \(result.widened) login\(result.widened == 1 ? "" : "s").") }
         if result.older > 0 { parts.append("\(result.older) \(result.older == 1 ? "was" : "were") older in the file than here: Petal kept yours.") }
         if result.skipped > 0 { parts.append("\(result.skipped) had nothing to keep (notes and the like).") }
+        if !result.unreadable.isEmpty {
+            let names = result.unreadable.prefix(5).joined(separator: ", ") + (result.unreadable.count > 5 ? ", …" : "")
+            parts.append("Petal couldn't read \(result.unreadable.count): \(names).")
+        }
         return parts.joined(separator: " ")
     }
 

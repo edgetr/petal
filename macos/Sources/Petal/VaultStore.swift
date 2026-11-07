@@ -285,6 +285,8 @@ final class VaultModel {
         var older = 0
         var widened = 0
         var skipped = 0
+        /// Rows Petal couldn't read, each with why.
+        var unreadable: [String] = []
         var file: URL
         var failed: String?
         var trashed = false
@@ -308,6 +310,7 @@ final class VaultModel {
                     result.older = merge.older
                     result.widened = merge.widened
                     result.skipped = parsed.skipped
+                    result.unreadable = parsed.unreadable
                     } else {
                         result.failed = "The Keychain didn't take them. Nothing was added."
                     }

@@ -451,12 +451,20 @@ final class ComputerUse {
     // MARK: Watching a Buy's window
 
     /// Each window with a Buy in it, as looked at when Buy was said: its title is watched (a tab switch or a new page
-    /// changes it), and what it shows is read again then.
+    /// changes it), and so is its browser's tab selection (two tabs titled alike change no title), and what it shows
+    /// is read again then.
     private var buyWindows: [CGWindowID: Map] = [:]
+    /// Browsers whose Buy windows are being read again after a tab switch (`true`: switched again meanwhile, so read
+    /// once more when this read is done).
+    private var buyTabReads: [pid_t: Bool] = [:]
 
     private func watchBuy(_ map: Map) {
         guard let id = map.windowID, buyWindows[id] == nil else { return }
-        if buyWindows.isEmpty { WindowEvents.shared.listen("buy") { [weak self] event in self?.buyEvent(event) } }
+        if buyWindows.isEmpty {
+            WindowEvents.shared.listen("buy") { [weak self] event in self?.buyEvent(event) }
+            // Tab switches are passed on only while someone wants them, notes on or off.
+            WindowEvents.shared.titles("buy", true)
+        }
         buyWindows[id] = map
         AXWatcher.shared.watchTitle(map.window, pid: map.pid)
     }
@@ -469,10 +477,14 @@ final class ComputerUse {
             AXWatcher.shared.unwatchTitle(map.window, pid: map.pid)
             buyWindows[id] = nil
         }
-        if buyWindows.isEmpty { WindowEvents.shared.stopListening("buy") }
+        if buyWindows.isEmpty {
+            WindowEvents.shared.stopListening("buy")
+            buyTabReads = [:]
+        }
     }
 
     private func buyEvent(_ event: WindowEvents.Event) {
+        if event.kind == .tabSwitched { return buyTabSwitched(event.pid) }
         guard let id = event.window, let map = buyWindows[id] else { return }
         switch event.kind {
         case .closed:
@@ -482,6 +494,27 @@ final class ComputerUse {
             assist.vaultTab(map) { [weak self] place in self?.seen(place, window: id) }
         default:
             break
+        }
+    }
+
+    /// A browser with a Buy in one of its windows selected another tab, or the keyboard moved within its page (the
+    /// event doesn't say which window, nor tell the two apart): each of its Buy windows is read again, and a Buy ends
+    /// only if the window now shows another tab or page (`seen`), never for the event itself.
+    private func buyTabSwitched(_ pid: pid_t) {
+        guard buyWindows.values.contains(where: { $0.pid == pid }) else { return }
+        if buyTabReads[pid] != nil { buyTabReads[pid] = true; return }
+        buyTabReads[pid] = false
+        let maps = buyWindows.filter { $0.value.pid == pid }
+        var left = maps.count
+        for (id, map) in maps {
+            assist.vaultTab(map) { [weak self] place in
+                guard let self else { return }
+                self.seen(place, window: id)
+                left -= 1
+                guard left == 0 else { return }
+                let again = self.buyTabReads.removeValue(forKey: pid) == true
+                if again { self.buyTabSwitched(pid) }
+            }
         }
     }
 

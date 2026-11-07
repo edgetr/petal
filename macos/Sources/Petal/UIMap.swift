@@ -183,10 +183,12 @@ enum UIMap {
     }
 
     /// petal_look tells nothing of what's selected in a field holding a secret: a password field, one named for a
-    /// password, key, card number or security code, or one Petal filled with a secret (`filled`). Not even what
-    /// isn't a secret by itself: a card number selected four digits at a time would be told whole over four looks.
-    static func selectionHidden(in node: UINode, filled: Bool) -> Bool {
-        filled || isSecure(node) || looksSecretField(node)
+    /// password, key, card number or security code, one Petal filled with a secret (`filled`), or one whose text
+    /// (`node.value`, all of it) holds a vault secret (`secret`, as petal_ui's `holdsSecret`): an API key pasted into
+    /// a field called "Value". Not even what isn't a secret by itself: a key or card number selected a few characters
+    /// at a time would be told whole over a few looks.
+    static func selectionHidden(in node: UINode, filled: Bool, secret: (String) -> Bool) -> Bool {
+        filled || holdsSecret(node, secret: secret)
     }
 
     /// A control read for petal_ui holds a secret, so Copy and Cut stay away from its window: a password field, a

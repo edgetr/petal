@@ -220,10 +220,35 @@ struct VaultCheck {
         expect(fromProton?.items.count == 2 && fromProton?.skipped == 1, "Proton Pass CSV: two logins, a note left out")
         expect(fromProton?.items.first?.username == "ada@example.com", "Proton Pass: the email is the username when there's none")
 
+        // Proton Pass's CSV: a card's and an identity's details as JSON in the note column; several URLs in one cell.
+        let protonDetails = #"""
+        type,name,url,autofillUrls,email,username,password,note,totp,createTime,modifyTime,vault
+        creditCard,Visa,,,,,,"{""cardholderName"":""Ada Lovelace"",""cardType"":0,""number"":""4111111111111111"",""verificationNumber"":""737"",""expirationDate"":""2028-09"",""pin"":"""",""note"":""work card""}",,1,2,Personal
+        identity,Home,,,,,,"{""fullName"":"""",""firstName"":""Deniz"",""middleName"":"""",""lastName"":""Kaya"",""email"":""deniz@example.com"",""phoneNumber"":""+90 555 000"",""streetAddress"":""Bağdat Cd. 12"",""floor"":""3"",""city"":""İstanbul"",""stateOrProvince"":"""",""zipOrPostalCode"":""34728"",""countryOrRegion"":""Türkiye"",""extraPersonalDetails"":[],""note"":""""}",,1,2,Personal
+        creditCard,Broken,,,,,,{not json,,1,2,Personal
+        identity,,,,,,,plain words,,1,2,Personal
+        login,Shop,"https://shop.example/login, https://www.shop.example/, https://shop.example/cart,https://pay.example",,ada@example.com,,shop-pass,,,1,2,Personal
+        """#
+        guard let details = Vault.importCSV(protonDetails) else { return expect(false, "Proton Pass CSV with cards and identities") }
+        let csvCard = details.items.first { $0.kind == .card }
+        expect(csvCard?.title == "Visa" && csvCard?[.number] == "4111111111111111" && csvCard?[.name] == "Ada Lovelace"
+               && csvCard?[.securityCode] == "737" && csvCard?[.expiry] == "09/28" && csvCard?[.notes] == "work card",
+               "Proton Pass CSV: a card from its note's JSON")
+        let csvContact = details.items.first { $0.kind == .contact }, csvAddress = details.items.first { $0.kind == .address }
+        expect(csvContact?.title == "Home" && csvContact?[.name] == "Deniz Kaya" && csvContact?[.email] == "deniz@example.com"
+               && csvContact?[.phone] == "+90 555 000", "Proton Pass CSV: an identity's contact info from its note's JSON")
+        expect(csvAddress?[.contact] == csvContact?.id && csvAddress?[.street] == "Bağdat Cd. 12" && csvAddress?[.street2] == "3"
+               && csvAddress?[.city] == "İstanbul" && csvAddress?[.postalCode] == "34728", "and its address, linked to it")
+        expect(details.unreadable == ["Broken (couldn't read the card's details)", "An identity (couldn't read the identity's details)"]
+               && details.skipped == 0, "rows whose details can't be read are said so, not 'nothing to keep' (got \(details.unreadable), \(details.skipped))")
+        let shop = details.items.first { $0.kind == .login }
+        expect(shop?.sites == ["shop.example", "www.shop.example", "pay.example"], "every URL in the cell, each site once (got \(shop?.sites ?? []))")
+        expect(VaultSite.hosts("https://a.example/?q=1,2") == ["a.example"], "a comma inside one address adds no site")
+
         let protonJSON = #"""
         {"version":"1.21","encrypted":false,"vaults":{"s1":{"name":"Personal","items":[
           {"state":1,"data":{"type":"login","metadata":{"name":"GitHub","note":"n"},"content":{"itemEmail":"a@b.com","itemUsername":"ada","password":"gh-pass","urls":["https://github.com/login","https://github.com/"],"totpUri":"otpauth://totp/x?secret=AAAA"}}},
-          {"state":1,"data":{"type":"creditCard","metadata":{"name":"Visa"},"content":{"cardholderName":"Ada","number":"4242424242424242","verificationCode":"123","expirationDate":"2027-04"}}},
+          {"state":1,"data":{"type":"creditCard","metadata":{"name":"Visa"},"content":{"cardholderName":"Ada","number":"4242424242424242","verificationNumber":"123","expirationDate":"2027-04"}}},
           {"state":1,"data":{"type":"identity","metadata":{"name":"Deniz"},"content":{"fullName":"Deniz Kaya","email":"deniz@example.com","phoneNumber":"+90 555","streetAddress":"Bağdat Cd. 12","city":"İstanbul","zipOrPostalCode":"34728","countryOrRegion":"Türkiye"}}},
           {"state":2,"data":{"type":"login","metadata":{"name":"Old"},"content":{"password":"x"}}},
           {"state":1,"data":{"type":"alias","metadata":{"name":"alias"},"content":{}}}
@@ -1100,11 +1125,22 @@ struct VaultCheck {
         plain.title = "Notes"
         var heading = UINode(role: "AXStaticText")
         heading.title = "Card number"
-        expect(UIMap.selectionHidden(in: number, filled: false) && UIMap.selectionHidden(in: code, filled: false)
-               && UIMap.selectionHidden(in: password, filled: false), "a card number, code or password field's selection isn't told")
-        expect(UIMap.selectionHidden(in: plain, filled: true), "nor one in a field Petal filled with a secret")
-        expect(!UIMap.selectionHidden(in: plain, filled: false) && !UIMap.selectionHidden(in: heading, filled: false),
-               "an ordinary field's or a heading's is")
+        let saved = UIMap.SecretIndex(["sk-live-9f8e7d6c5b4a3210"])
+        func hidden(_ node: UINode, filled: Bool = false) -> Bool { UIMap.selectionHidden(in: node, filled: filled, secret: saved.matches) }
+        expect(hidden(number) && hidden(code) && hidden(password), "a card number, code or password field's selection isn't told")
+        expect(hidden(plain, filled: true), "nor one in a field Petal filled with a secret")
+        expect(!hidden(plain) && !hidden(heading), "an ordinary field's or a heading's is")
+        // A field named nothing secret ("Value") holding a saved key: hidden, however little is selected at a time.
+        var generic = UINode(role: "AXTextField")
+        generic.title = "Value"
+        generic.value = "sk-live-9f8e7d6c5b4a3210"
+        expect(hidden(generic), "a generic field holding a saved key hides its selection")
+        generic.value = "export KEY=sk-live-9f8e7d6c5b4a3210 # prod"
+        expect(hidden(generic), "nor when the key is part of the field's text")
+        generic.value = "nothing saved here"
+        expect(!hidden(generic), "a generic field holding no secret still tells its selection")
+        expect(UIMap.selectionHidden(in: generic, filled: false, secret: UIMap.SecretIndex.unavailable.matches),
+               "and while the vault can't be read, nothing selected is told")
         // Copy stays away from a window holding a secret, not from one with a heading named for one.
         let index = UIMap.SecretIndex(["4111111111111111"])
         var text = UINode(role: "AXStaticText")

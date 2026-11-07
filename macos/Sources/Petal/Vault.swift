@@ -1047,6 +1047,8 @@ enum Vault {
         var items: [VaultItem] = []
         /// Rows or entries with nothing Petal keeps (a note, an empty row, one in the trash).
         var skipped = 0
+        /// Rows Petal would keep but couldn't read, each as "Visa (couldn't read the card's details)".
+        var unreadable: [String] = []
         /// Petal's own export: its items keep their ids, and two with different ids are never the same.
         var petal = false
     }
@@ -1079,14 +1081,21 @@ enum Vault {
             switch kind {
             case .login?:
                 guard !value(password).isEmpty else { result.skipped += 1; continue }
-                let host = VaultSite.host(value(url).split(separator: ",").first.map(String.init) ?? "")
+                let hosts = VaultSite.hosts(value(url))
                 var item = VaultItem(kind: .login, title: value(title).trimmingCharacters(in: .whitespaces))
-                if item.title.isEmpty { item.title = host ?? "Login" }
-                if let host { item.sites = [host] }
+                if item.title.isEmpty { item.title = hosts.first ?? "Login" }
+                item.sites = hosts
                 item[.username] = value(user).isEmpty ? value(email) : value(user)
                 item[.password] = value(password)
                 item[.notes] = value(notes)
                 result.items.append(item)
+            case .card? where value(number).isEmpty && type != nil:
+                // Proton Pass puts a card's details in its note, as JSON.
+                guard let content = protonNote(value(notes)) else {
+                    if value(notes).isEmpty { result.skipped += 1 } else { result.unreadable.append(unreadable(value(title), .card)) }
+                    continue
+                }
+                if let card = protonCard(title: value(title), content: content) { result.items.append(card) } else { result.skipped += 1 }
             case .card?:
                 guard !value(number).isEmpty else { result.skipped += 1; continue }
                 var item = VaultItem(kind: .card, title: value(title).isEmpty ? "Card" : value(title))
@@ -1100,12 +1109,60 @@ enum Vault {
                 let found = person(title: value(title), name: value(full), email: value(email), phone: value(phone),
                                    address: [.street: value(street), .street2: value(street2), .city: value(city), .region: value(region),
                                              .postalCode: value(postal), .country: value(country)])
-                if found.isEmpty { result.skipped += 1 } else { result.items += found }
+                if !found.isEmpty { result.items += found; continue }
+                // Proton Pass puts an identity's details in its note, as JSON.
+                guard !value(notes).isEmpty else { result.skipped += 1; continue }
+                guard let content = protonNote(value(notes)) else { result.unreadable.append(unreadable(value(title), .contact)); continue }
+                let identity = protonIdentity(title: value(title), content: content)
+                if identity.isEmpty { result.skipped += 1 } else { result.items += identity }
             default:
                 result.skipped += 1
             }
         }
         return result
+    }
+
+    /// A Proton Pass CSV row's note holding its card's or identity's details as JSON (the item's content, with its
+    /// own note under "note"); nil when it isn't a JSON object.
+    static func protonNote(_ note: String) -> [String: Any]? {
+        let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{") else { return nil }
+        return (try? JSONSerialization.jsonObject(with: Data(trimmed.utf8))) as? [String: Any]
+    }
+
+    /// "Visa (couldn't read the card's details)", for the import's summary.
+    static func unreadable(_ title: String, _ kind: VaultKind) -> String {
+        let name = title.trimmingCharacters(in: .whitespaces)
+        let what = kind == .card ? "the card's details" : "the identity's details"
+        return "\(name.isEmpty ? (kind == .card ? "A card" : "An identity") : name) (couldn't read \(what))"
+    }
+
+    /// The first of `names` that's text and not empty in Proton Pass's content (`note` is the item's note).
+    private static func protonText(_ content: [String: Any], _ names: String...) -> String {
+        names.lazy.compactMap { content[$0] as? String }.first { !$0.isEmpty } ?? ""
+    }
+
+    /// A Proton Pass credit card (its JSON export's content, or a CSV row's note); nil without a number.
+    static func protonCard(title: String, content: [String: Any], note: String? = nil) -> VaultItem? {
+        let number = protonText(content, "number")
+        guard !number.isEmpty else { return nil }
+        var item = VaultItem(kind: .card, title: title.isEmpty ? "Card" : title)
+        item[.name] = protonText(content, "cardholderName")
+        item[.number] = number
+        item[.expiry] = expiry(protonText(content, "expirationDate"))
+        item[.securityCode] = protonText(content, "verificationNumber", "verificationCode")
+        item[.notes] = note ?? protonText(content, "note")
+        return item
+    }
+
+    /// A Proton Pass identity as contact info and its address (its JSON export's content, or a CSV row's note).
+    static func protonIdentity(title: String, content: [String: Any]) -> [VaultItem] {
+        func text(_ names: String...) -> String { names.lazy.compactMap { content[$0] as? String }.first { !$0.isEmpty } ?? "" }
+        let full = text("fullName")
+        let parts = [text("firstName"), text("middleName"), text("lastName")].filter { !$0.isEmpty }.joined(separator: " ")
+        return person(title: title, name: full.isEmpty ? parts : full, email: text("email"), phone: text("phoneNumber", "phone"),
+                      address: [.street: text("streetAddress"), .street2: text("floor"), .city: text("city"),
+                                .region: text("stateOrProvince"), .postalCode: text("zipOrPostalCode"), .country: text("countryOrRegion")])
     }
 
     /// An identity as Petal keeps it: contact info, and its address as an Address linked to it.
@@ -1155,35 +1212,24 @@ enum Vault {
                 guard (entry["state"] as? Int ?? 1) == 1, let data = entry["data"] as? [String: Any] else { result.skipped += 1; continue }
                 let meta = data["metadata"] as? [String: Any] ?? [:]
                 let content = data["content"] as? [String: Any] ?? [:]
-                func text(_ names: String...) -> String { names.lazy.compactMap { content[$0] as? String }.first { !$0.isEmpty } ?? "" }
                 let title = meta["name"] as? String ?? ""
                 let note = meta["note"] as? String ?? ""
                 switch kindNamed(data["type"] as? String ?? "") {
                 case .login?:
-                    let password = text("password")
+                    let password = protonText(content, "password")
                     guard !password.isEmpty else { result.skipped += 1; continue }
                     var hosts: [String] = []
                     for host in (content["urls"] as? [String] ?? []).compactMap(VaultSite.host) where !hosts.contains(host) { hosts.append(host) }
                     var item = VaultItem(kind: .login, title: title.isEmpty ? hosts.first ?? "Login" : title, sites: hosts)
-                    item[.username] = text("itemUsername", "username", "itemEmail", "email")
+                    item[.username] = protonText(content, "itemUsername", "username", "itemEmail", "email")
                     item[.password] = password
                     item[.notes] = note
                     result.items.append(item)
                 case .card?:
-                    guard !text("number").isEmpty else { result.skipped += 1; continue }
-                    var item = VaultItem(kind: .card, title: title.isEmpty ? "Card" : title)
-                    item[.name] = text("cardholderName")
-                    item[.number] = text("number")
-                    item[.expiry] = expiry(text("expirationDate"))
-                    item[.securityCode] = text("verificationCode")
-                    item[.notes] = note
+                    guard let item = protonCard(title: title, content: content, note: note) else { result.skipped += 1; continue }
                     result.items.append(item)
                 case .contact?:
-                    let full = text("fullName")
-                    let parts = [text("firstName"), text("lastName")].filter { !$0.isEmpty }.joined(separator: " ")
-                    let found = person(title: title, name: full.isEmpty ? parts : full, email: text("email"), phone: text("phoneNumber", "phone"),
-                                       address: [.street: text("streetAddress"), .street2: text("floor"), .city: text("city"),
-                                                 .region: text("stateOrProvince"), .postalCode: text("zipOrPostalCode"), .country: text("countryOrRegion")])
+                    let found = protonIdentity(title: title, content: content)
                     if found.isEmpty { result.skipped += 1 } else { result.items += found }
                 default:
                     result.skipped += 1
@@ -1508,6 +1554,14 @@ enum VaultSite {
         while host.hasSuffix(".") { host.removeLast() }
         guard host.contains(".") || host.contains(":") || host == "localhost" else { return nil }
         return host
+    }
+
+    /// Every site in an export's URL column, which may list several ("https://a.example, https://b.example"):
+    /// their hosts, in order, each once.
+    static func hosts(_ list: String) -> [String] {
+        var out: [String] = []
+        for host in list.split(separator: ",").compactMap({ host(String($0)) }) where !out.contains(host) { out.append(host) }
+        return out
     }
 
     static func scheme(_ text: String) -> String? {
