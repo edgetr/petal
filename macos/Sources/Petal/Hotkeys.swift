@@ -82,9 +82,9 @@ final class Hotkeys {
     private func fire(_ key: UInt32) {
         switch key {
         case Self.ask:
-            if app.claude.isOpen { app.claude.close() } else { app.claude.open(asking: nil) }
+            app.claude.toggle()
         case Self.search:
-            app.search.open(in: nil)
+            if app.search.isOpen { app.search.close() } else { app.search.open(in: nil) }
         case 1...9:
             let modes = app.config.modes
             guard Int(key) <= modes.count,

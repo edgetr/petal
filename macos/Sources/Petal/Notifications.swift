@@ -173,11 +173,13 @@ final class Notes {
         let mode = currentMode?.id
         guard mode != shownMode else { return }
         shownMode = mode
+        app.drafts.modeChanged()
         guard let mode, let current = currentMode else { return }
         let waiting = held(in: mode)
         guard !waiting.isEmpty else { return }
         all.removeAll { $0.mode == mode }
         banners.show(held: waiting, for: current)
+        app.drafts.prepare(waiting, for: current)
     }
 
     private func tick() {
@@ -240,7 +242,8 @@ final class Notes {
         if Self.belongs(id, to: mode) { return banners.show(note) }
         note.mode = config.modes.first { $0.id != mode.id && Self.belongs(id, to: $0) }?.id ?? ""
         let brain = app.focus.brain
-        guard brain.enabled else {
+        // An app kept private: held on its own mode (or this one), its words never sent to the AI.
+        guard brain.enabled, !app.assist.neverLook(id) else {
             hold(note, fallback: mode)
             return
         }

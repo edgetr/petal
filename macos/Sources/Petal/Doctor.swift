@@ -99,6 +99,9 @@ enum Doctor {
             note("ok", "dock", "Petal hasn't been set up yet: open it to start.")
         } else if (dock["dock"] as? String ?? "petal") == "petal" && !running {
             note("warn", "dock", "Petal is set to be your dock but isn't running: open Petal.")
+        } else if running && !IPC.answering() {
+            // Running, but `petal` and the AI's tools can't reach it (another copy took its socket, say).
+            note("error", "dock", "Petal is running but doesn't answer `petal` or its AI tools: quit and open Petal again.")
         } else {
             note("ok", "dock", (dock["dock"] as? String ?? "petal") == "petal" ? "Petal is your dock." : "macOS's Dock is in use; Petal's is off.")
         }

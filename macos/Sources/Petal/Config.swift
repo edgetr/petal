@@ -24,6 +24,10 @@ struct Mode: Equatable, Identifiable {
 
     var hex: String { color.hex }
 
+    /// My Dock (macOS's Dock, imported): everything the person uses, the default rather than a focus mode, so it
+    /// has no focus cards and nothing in it is sorted.
+    var isEverything: Bool { id == "dock" }
+
     /// Distracting, or, before the AI has decided, a mode named like one.
     var isDistracting: Bool {
         distracting ?? ["social", "gaming", "games", "entertainment"].contains { $0 == id.lowercased() || $0 == name.lowercased() }
@@ -59,9 +63,11 @@ final class Config {
         "focusGuard": true, "blockDistractions": true, "peeks": true, "holdNotifications": true, "urgentNotifications": true,
         "modeWindows": false, "tiling": false, "tilingGaps": 8, "tilingFloat": [String](), "ai": true, "claudeUsage": true, "autoUpdate": true,
         "claudePath": "", "chatModel": "sonnet", "chatEffort": "medium", "claudeAccess": "auto",
-        "aiProviders": ["claude"], "otherAgents": true,
+        "aiProviders": ["claude"], "otherAgents": true, "aiMemory": true, "aiLearns": true, "dailySummary": "", "aiAllowed": [Any](), "replyDrafts": true, "finderInDock": true, "chatWhileWorking": "steer", "selectionAsk": true, "aiNotes": true, "routines": true,
+        "aiNeverLook": ["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"],
         "shortcuts": true, "schedule": [Any](), "activityLog": true, "suggestModes": true, "summary": true,
         "magnification": false, "magnificationAmount": 0.5, "menuBarIcon": true, "chatProvider": "claude", "codexModel": "", "codexEffort": "medium", "codexPath": "",
+        "claudeAuth": "subscription", "codexAuth": "subscription",
     ]
 
     private(set) var modes: [Mode] = []
@@ -127,14 +133,64 @@ final class Config {
         workspaces.filter { $0.value == mode }.compactMap { Int($0.key) }.sorted()
     }
 
-    /// Puts Desktop `number` in a mode, the way Omarchy remembers a workspace's mode.
+    /// Puts Desktop `number` in a mode, the way Omarchy remembers a workspace's mode. The dock sees it at once; the
+    /// file is written a moment later, off the main thread, so switching mode never waits for the disk.
     func setMode(_ id: String, forDesktop number: Int) {
-        update(modesFile) { root in
-            var map = root["workspaces"] as? [String: Any] ?? [:]
-            map[String(number)] = id
-            root["workspaces"] = map
+        workspaces[String(number)] = id
+        var map = modesRoot["workspaces"] as? [String: Any] ?? [:]
+        map[String(number)] = id
+        modesRoot["workspaces"] = map
+        let file = modesFile
+        let files = self.files
+        writing += 1
+        Self.writer.async {
+            // A file that's there but isn't valid JSON is left alone (see `update`).
+            if !FileManager.default.fileExists(atPath: file.path) || Self.parse(file) != nil {
+                var root = Self.readObject(file)
+                var map = root["workspaces"] as? [String: Any] ?? [:]
+                map[String(number)] = id
+                root["workspaces"] = map
+                Self.writeObject(root, to: file)
+            }
+            let disk = Self.snapshot(files)
+            DispatchQueue.main.async { MainActor.assumeIsolated { PetalApp.shared.config.written(disk, valid: true, stale: false) } }
         }
     }
+
+    /// The three files as they are on disk now (on the writer's queue, after a write), with the stamps they had when
+    /// read: a change landing after this is newer than those stamps, so the watcher still sees it.
+    nonisolated private static func snapshot(_ files: [URL]) -> (contents: [NSDictionary], stamps: [Date?]) {
+        let stamps = files.map { stamp($0) }
+        return (files.map { readObject($0) as NSDictionary }, stamps)
+    }
+
+    nonisolated private static func stamp(_ url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
+    /// One of Petal's writes is done. Once none is still on its way, memory must match all three files: one that
+    /// doesn't (someone else's change landed meanwhile, in that file or another) is loaded, and the files' stamps
+    /// are taken as they are now, so the watcher never mistakes an unseen change for one already read.
+    private func written(_ disk: (contents: [NSDictionary], stamps: [Date?]), valid: Bool, stale: Bool) {
+        writing -= 1
+        if !valid { NSSound.beep() }
+        guard writing == 0 else { return }   // the last write's check covers this one's
+        let mine = [modesRoot as NSDictionary, settings as NSDictionary, dock as NSDictionary]
+        if !valid || stale || !zip(disk.contents, mine).allSatisfy({ $0.isEqual($1) }) {
+            reload()   // what's on disk stands
+            onChange?()
+            stamps = currentStamps()
+        } else {
+            stamps = disk.stamps   // what was read matches memory; anything written since is still news to the watcher
+        }
+    }
+
+    private var files: [URL] { [modesFile, settingsFile, dockFile] }
+
+    /// Writes from `setMode`, one after another, in order.
+    nonisolated private static let writer = DispatchQueue(label: "petal.config.write", qos: .userInitiated)
+    /// Writes not finished yet: the watcher waits for them, so Petal's own write isn't read back as someone's change.
+    @ObservationIgnored private var writing = 0
 
     func setDefaultMode(_ id: String) {
         update(modesFile) { $0["defaultMode"] = id }
@@ -221,7 +277,8 @@ final class Config {
         let apps = SystemDock.apps()
         var mode = self.mode(id: "dock").flatMap { $0.id == "dock" ? $0 : nil }
             ?? Mode(id: "dock", name: "My Dock", icon: "dock.rectangle", color: NSColor(hex: "#d9367f")!,
-                    about: "everyday apps, from macOS's Dock", apps: [], sites: [], focusDelay: 0, allow: [])
+                    about: "everyday apps, from macOS's Dock", apps: [], sites: [], focusDelay: 0, allow: [],
+                    distracting: false)
         mode.apps = apps
         save(mode)
         setDefaultMode("dock")
@@ -231,23 +288,66 @@ final class Config {
 
     // MARK: Files
 
-    private func update(_ file: URL, _ change: (inout [String: Any]) -> Void) {
-        // A file that's there but isn't valid JSON (half-written by an editor, say) is left alone, not replaced
-        // by the one key being changed.
-        if FileManager.default.fileExists(atPath: file.path), Self.parse(file) == nil {
-            NSSound.beep()
-            return
-        }
-        var root = Self.readObject(file)
+    /// A change takes effect at once, in memory: the dock, the settings window and the menus show it in the same
+    /// frame. The file is written a moment later, off the main thread, in order with every other write (reading,
+    /// changing and writing a file took the main thread several milliseconds, and the settings window stuttered).
+    private func update(_ file: URL, _ change: @escaping (inout [String: Any]) -> Void) {
+        var root = file == settingsFile ? settings : file == dockFile ? dock : modesRoot
         change(&root)
-        Self.writeObject(root, to: file)
-        reload()
-        stamps = currentStamps()
-        onChange?()
+        Perf.span("config: in memory") {
+            if file == settingsFile { settings = root } else if file == dockFile { dock = root } else { use(modes: root) }
+        }
+        // Someone else changed a file in the last second, before the watcher read it: read it once this is written.
+        let stale = writing == 0 && currentStamps() != stamps
+        let files = self.files
+        writing += 1
+        Self.writer.async {
+            // A file that's there but isn't valid JSON (half-written by an editor, say) is left alone, not replaced
+            // by the one key being changed.
+            let valid = !FileManager.default.fileExists(atPath: file.path) || Self.parse(file) != nil
+            if valid {
+                var disk = Self.readObject(file)
+                change(&disk)
+                Self.writeObject(disk, to: file)
+            }
+            // What's on disk now: someone else's change may have landed with ours.
+            let disk = Self.snapshot(files)
+            DispatchQueue.main.async { MainActor.assumeIsolated { PetalApp.shared.config.written(disk, valid: valid, stale: stale) } }
+        }
+        Perf.span("config: onChange") { onChange?() }
     }
 
+    /// Waits for every write still under way (on quit).
+    func flush() { Self.writer.sync {} }
+
+    /// settings.json, modes.json or dock.json as Petal has it now (its own changes included, before they're written).
+    func root(of file: URL) -> [String: Any] {
+        file.path == settingsFile.path ? settings : file.path == dockFile.path ? dock : file.path == modesFile.path ? modesRoot : [:]
+    }
+
+    /// A change from Petal's tools (MCP.swift), in order with every other: tried on what Petal has first (so one
+    /// that refuses changes nothing), then made as Petal's own changes are, in memory and then on disk.
+    func change(_ file: URL, fallback: [String: Any], _ edit: @escaping (inout [String: Any]) throws -> Void) throws {
+        var probe = root(of: file)
+        if probe.isEmpty { probe = fallback }
+        try edit(&probe)
+        update(file) { root in
+            if root.isEmpty { root = fallback }
+            try? edit(&root)
+        }
+    }
+
+    /// modes.json as read, for changes made in memory before it's written.
+    @ObservationIgnored private var modesRoot: [String: Any] = [:]
+
     private func reload() {
-        let root = Self.readObject(modesFile)
+        use(modes: Self.readObject(modesFile))
+        settings = Self.readObject(settingsFile)
+        dock = Self.readObject(dockFile)
+    }
+
+    private func use(modes root: [String: Any]) {
+        modesRoot = root
         defaultMode = root["defaultMode"] as? String ?? ""
         workspaces = (root["workspaces"] as? [String: Any] ?? [:]).compactMapValues { $0 as? String }
         modes = (root["modes"] as? [[String: Any]] ?? []).compactMap { m in
@@ -259,8 +359,6 @@ final class Config {
                         allow: m["allow"] as? [String] ?? [], shortcut: m["shortcut"] as? String ?? "",
                         distracting: m["distracting"] as? Bool, hold: m["hold"] as? Bool ?? false)
         }
-        settings = Self.readObject(settingsFile)
-        dock = Self.readObject(dockFile)
     }
 
     /// Looks for changes once a second. Modification times catch both ways a file gets written: replaced whole (as
@@ -270,6 +368,7 @@ final class Config {
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                guard self.writing == 0 else { return }
                 let now = self.currentStamps()
                 guard now != self.stamps else { return }
                 self.stamps = now

@@ -7,7 +7,7 @@ import SwiftUI
 /// first field still asks the AI (when there is one).
 @MainActor
 final class SettingsWindow {
-    private var window: NSWindow?
+    private(set) var window: NSWindow?
 
     func show(_ section: SettingsSection = .dock) {
         if window == nil {
@@ -30,7 +30,7 @@ final class SettingsWindow {
 }
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case dock, modes, claude, focus, apps, look, permissions, about
+    case dock, modes, claude, routines, focus, apps, look, permissions, about
     var id: String { rawValue }
 
     var title: String {
@@ -38,6 +38,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dock: "Dock"
         case .modes: "Modes"
         case .claude: "AI"
+        case .routines: "Routines"
         case .focus: "Focus"
         case .apps: "Apps & Extras"
         case .look: "Look"
@@ -51,6 +52,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dock: "dock.rectangle"
         case .modes: "circle.hexagongrid.fill"
         case .claude: "sparkles"
+        case .routines: "wand.and.sparkles"
         case .focus: "scope"
         case .apps: "square.grid.2x2.fill"
         case .look: "paintbrush.pointed.fill"
@@ -64,6 +66,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dock: Color(red: 0.85, green: 0.21, blue: 0.50)
         case .modes: Color(red: 0.69, green: 0.55, blue: 1.0)
         case .claude: Color(red: 0.85, green: 0.47, blue: 0.34)
+        case .routines: Color(red: 0.95, green: 0.68, blue: 0.22)
         case .focus: Color(red: 0.30, green: 0.68, blue: 0.95)
         case .apps: Color(red: 0.35, green: 0.78, blue: 0.55)
         case .look: Color(red: 1.0, green: 0.62, blue: 0.48)
@@ -77,6 +80,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .dock: "Choose your dock, and where it sits."
         case .modes: "Each Desktop has its own mode, with its own apps."
         case .claude: "Claude, Codex, or no AI at all."
+        case .routines: "What Petal does by itself, in your words."
         case .focus: "Gentle cards when you drift from your mode."
         case .apps: "What the dock shows besides your apps."
         case .look: "Size, motion and color."
@@ -195,6 +199,7 @@ struct SettingsView: View {
         case .dock: DockSettings()
         case .modes: ModesSettings()
         case .claude: ClaudeSettings()
+        case .routines: RoutinesSettings()
         case .focus: FocusSettings()
         case .apps: AppsSettings()
         case .look: LookSettings()
@@ -671,31 +676,43 @@ struct ClaudeSettings: View {
             ProviderList()
         }
         .onAppear { app.aiSetup.refreshAll() }
+        ForEach(app.providers) { APIKeyCard(provider: $0) }
         if let provider = app.chatProvider {
-            Card {
-                HStack(spacing: 18) {
-                    UsageRing(usage: app.usage, size: 64)
-                    VStack(alignment: .leading, spacing: 6) {
-                        if app.usage.limits.isEmpty {
-                            Text(app.usage.help.isEmpty ? "Checking your \(provider.name) usage…" : app.usage.help).foregroundStyle(.secondary)
-                        }
-                        ForEach(app.usage.limits, id: \.label) { limit in
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack {
-                                    Text(limit.label).font(.system(size: 12, weight: .medium))
-                                    Spacer()
-                                    Text("\(Int(limit.percent * 100))%").font(.system(size: 12).monospacedDigit())
-                                    if let reset = limit.resetsAt {
-                                        Text("resets \(reset, style: .relative)").font(.system(size: 11)).foregroundStyle(.secondary)
+            if let spent = app.usage.spentText {
+                Card(footer: provider == .claude ? "What Claude Code reports for Petal's own chats and quick calls on your key. Anthropic's console has the bill."
+                     : "Estimated from Codex's tokens at OpenAI's list prices, for Petal's own chats and quick calls on your key. OpenAI's usage page has the bill.") {
+                    Text(spent).font(.system(size: 20, weight: .semibold).monospacedDigit())
+                }
+            } else {
+                Card {
+                    HStack(spacing: 18) {
+                        UsageRing(usage: app.usage, size: 64)
+                        VStack(alignment: .leading, spacing: 6) {
+                            if app.usage.limits.isEmpty {
+                                Text(app.usage.help.isEmpty ? "Checking your \(provider.name) usage…" : app.usage.help).foregroundStyle(.secondary)
+                            }
+                            ForEach(app.usage.limits, id: \.label) { limit in
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack {
+                                        Text(limit.label).font(.system(size: 12, weight: .medium))
+                                        Spacer()
+                                        Text("\(Int(limit.percent * 100))%").font(.system(size: 12).monospacedDigit())
+                                        if let reset = limit.resetsAt {
+                                            Text("resets \(reset, style: .relative)").font(.system(size: 11)).foregroundStyle(.secondary)
+                                        }
                                     }
+                                    ProgressView(value: limit.percent).tint(UsageRing.color(limit.percent))
                                 }
-                                ProgressView(value: limit.percent).tint(UsageRing.color(limit.percent))
                             }
                         }
                     }
                 }
             }
             Card(title: "Chat") {
+                Picker("Writing while it works", selection: Binding(get: { app.config.string("chatWhileWorking") }, set: { app.config.set("chatWhileWorking", $0) })) {
+                    Text("Steers it").tag("steer")
+                    Text("Waits its turn").tag("queue")
+                }
                 if app.providers.count > 1 {
                     Picker("Chat with", selection: Binding(get: { provider.rawValue }, set: {
                         app.config.set("chatProvider", $0)
@@ -706,10 +723,10 @@ struct ClaudeSettings: View {
                     .pickerStyle(.segmented)
                 }
                 if app.models(for: provider).count > 1 {
-                    let picker = Picker("Model", selection: Binding(get: { app.currentModel(for: provider) }, set: { app.config.set(provider.modelSetting, $0) })) {
+                    Picker("Model", selection: Binding(get: { app.currentModel(for: provider) }, set: { app.config.set(provider.modelSetting, $0) })) {
                         ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
                     }
-                    if provider == .codex { picker.pickerStyle(.menu) } else { picker.pickerStyle(.segmented) }
+                    .pickerStyle(.segmented)
                 }
                 Picker("Effort", selection: Binding(get: { app.config.string(provider.effortSetting) }, set: { app.config.set(provider.effortSetting, $0) })) {
                     ForEach(app.efforts(for: provider), id: \.self) { Text($0.capitalized).tag($0) }
@@ -727,10 +744,181 @@ struct ClaudeSettings: View {
             Card(title: "In the background") {
                 SettingToggle(key: "claudeUsage", title: "Usage ring", detail: "Around the \(provider.name) button, every 5 minutes.")
                 SettingToggle(key: "ai", title: "Sort new apps and sites", detail: "\(provider.name) decides which mode something new belongs to.")
+                DailySummaryRow()
+            }
+            MemoryCard()
+            VaultCard()
+            PrivacyCard()
+            AIHistoryCard()
+            if !app.config.strings("aiAllowed").isEmpty {
+                Card(title: "Allowed without asking", footer: "You chose Always for these. Take one away and Petal AI asks again.") {
+                    ForEach(app.config.strings("aiAllowed"), id: \.self) { kind in
+                        HStack {
+                            Text(AllowedKinds.name(kind)).font(.system(size: 13))
+                            Spacer()
+                            RoundButton(symbol: "xmark") { app.config.set("aiAllowed", app.config.strings("aiAllowed").filter { $0 != kind }) }
+                        }
+                    }
+                }
             }
             Card(title: "Your notes for \(provider.name)", footer: "\(provider.name) reads these every time you ask it something.") {
                 InstructionsEditor()
             }
+        }
+    }
+}
+
+/// What Petal AI remembers, everywhere and per mode, each with a way to forget it.
+struct MemoryCard: View {
+    @Environment(PetalApp.self) private var app
+
+    var body: some View {
+        Card(title: "Memory", footer: "Petal AI keeps what helps it help you, so you don't have to say it twice. All of it is here; ask it to forget anything.") {
+            SettingToggle(key: "aiMemory", title: "Remember what helps", detail: "What you ask it to, and what it notices along the way.")
+            SettingToggle(key: "aiLearns", title: "Learn from each mode", detail: "Once a day, from the apps you use in it and for how long.")
+            if app.config.bool("aiMemory") {
+                if app.assist.memories.isEmpty {
+                    Text("Nothing yet.").font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+                ForEach(app.assist.memories) { memory in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(memory.text).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        Text(app.config.modes.first { $0.id == memory.mode }?.name ?? "Everywhere")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                        RoundButton(symbol: "xmark") { app.assist.forget(id: memory.id, matching: nil) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Everything Petal AI did, newest first, with Undo where it can be undone.
+struct AIHistoryCard: View {
+    @Environment(PetalApp.self) private var app
+
+    var body: some View {
+        Card(title: "What Petal AI did", footer: app.assist.history.isEmpty ? "Things it does on your Mac show here, each with a way back." : nil) {
+            if app.assist.history.isEmpty {
+                Text("Nothing yet.").font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            ForEach(app.assist.history.prefix(30)) { done in
+                HStack(spacing: 8) {
+                    Text(done.text).font(.system(size: 13)).strikethrough(done.undone).foregroundStyle(done.undone ? .secondary : .primary)
+                        .lineLimit(2)
+                    Spacer(minLength: 8)
+                    Text(done.at, style: .relative).font(.system(size: 11)).foregroundStyle(.secondary)
+                    if let undo = done.undo, !done.undone {
+                        if case .open = undo {
+                            Button("Open") { app.assist.undo(done) }.buttonStyle(.glass).controlSize(.small)
+                        } else {
+                            Button("Undo") { app.assist.undo(done) }.buttonStyle(.glass).controlSize(.small)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Secrets Petal AI can use without seeing them: their names, and adding or removing one.
+struct VaultCard: View {
+    @State private var names = Assist.vaultNames()
+    @State private var name = ""
+    @State private var secret = ""
+
+    var body: some View {
+        Card(title: "Vault", footer: "Passwords and keys Petal AI can type in for you, after asking each time. They stay in your Keychain; the AI never sees them.") {
+            ForEach(names, id: \.self) { item in
+                HStack {
+                    Image(systemName: "key.fill").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text(item).font(.system(size: 13))
+                    Spacer()
+                    RoundButton(symbol: "xmark") { Assist.vaultRemove(item); names = Assist.vaultNames() }
+                }
+            }
+            HStack(spacing: 8) {
+                TextField("Name, such as GitHub password", text: $name).textFieldStyle(.roundedBorder)
+                SecureField("Secret", text: $secret).textFieldStyle(.roundedBorder)
+                Button("Add") {
+                    Assist.vaultSave(name.trimmingCharacters(in: .whitespaces), secret)
+                    name = ""; secret = ""
+                    names = Assist.vaultNames()
+                }
+                .buttonStyle(.glass).disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || secret.isEmpty)
+            }
+        }
+    }
+}
+
+/// Apps Petal AI never looks into: it gets their name, never their windows, text or a picture of them.
+struct PrivacyCard: View {
+    @Environment(PetalApp.self) private var app
+
+    var body: some View {
+        let ids = app.config.strings("aiNeverLook")
+        Card(title: "Kept private", footer: "Petal AI sees only these apps' names: never their windows, text or a picture of them.") {
+            ForEach(ids, id: \.self) { id in
+                HStack(spacing: 8) {
+                    Image(nsImage: Apps.icon(id)).resizable().frame(width: 18, height: 18)
+                    Text(Apps.name(id)).font(.system(size: 13))
+                    Spacer()
+                    RoundButton(symbol: "xmark") { app.config.set("aiNeverLook", ids.filter { $0 != id }) }
+                }
+            }
+            Menu("Add an app") {
+                ForEach(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !ids.contains($0.bundleIdentifier ?? "") }
+                    .compactMap { app in app.bundleIdentifier.map { ($0, app.localizedName ?? $0) } }.sorted { $0.1 < $1.1 }, id: \.0) { id, name in
+                    Button(name) { app.config.set("aiNeverLook", ids + [id]) }
+                }
+            }
+            .fixedSize()
+        }
+    }
+}
+
+/// The day's summary: on or off, and when.
+struct DailySummaryRow: View {
+    @Environment(PetalApp.self) private var app
+
+    var body: some View {
+        let time = app.config.string("dailySummary")
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Summary of the day").font(.system(size: 13))
+                Text("A card with your day in each mode, and a line from Petal AI.").font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if !time.isEmpty {
+                DatePicker("", selection: Binding(get: { Self.date(time) }, set: { app.config.set("dailySummary", Self.text($0)) }),
+                           displayedComponents: .hourAndMinute).labelsHidden().datePickerStyle(.field)
+            }
+            Toggle("", isOn: Binding(get: { !time.isEmpty }, set: { app.config.set("dailySummary", $0 ? "18:00" : "") }))
+                .toggleStyle(.switch).labelsHidden()
+        }
+    }
+
+    static func date(_ text: String) -> Date {
+        let parts = text.split(separator: ":").compactMap { Int($0) }
+        return Calendar.current.date(bySettingHour: parts.first ?? 18, minute: parts.dropFirst().first ?? 0, second: 0, of: Date()) ?? Date()
+    }
+
+    static func text(_ date: Date) -> String {
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return String(format: "%02d:%02d", parts.hour ?? 18, parts.minute ?? 0)
+    }
+}
+
+/// What the kinds of thing Petal AI asks about are called.
+enum AllowedKinds {
+    static func name(_ kind: String) -> String {
+        switch kind {
+        case "quit": "Quitting apps"
+        case "close": "Closing windows"
+        case "trash": "Moving files to the Trash"
+        case "tidy": "Tidying many files at once"
+        default: kind
         }
     }
 }
@@ -852,9 +1040,9 @@ struct PermissionsSettings: View {
 
     var body: some View {
         let _ = tick
-        Permission(symbol: "accessibility", title: "Accessibility", detail: "Window lists, minimized windows, badges, and focus cards.",
+        Permission(symbol: "accessibility", title: "Accessibility", detail: "Window previews, minimized windows, badges, and focus cards.",
                    granted: Windows.trusted) { Windows.askForPermission() }
-        Permission(symbol: "rectangle.dashed.badge.record", title: "Screen Recording", detail: "Window previews. Petal never records; it takes a still of a window when you hover its app.",
+        Permission(symbol: "rectangle.dashed.badge.record", title: "Screen Recording", detail: "A picture of each window in previews; without it, they list windows by name. Petal never records: it takes a still while you hover an app.",
                    granted: Capture.allowed) { Capture.askForPermission() }
         Permission(symbol: "bell.badge", title: "Full Disk Access", detail: "Seeing notifications, to hold them in modes that hold them. Petal only reads Notification Center's list.",
                    granted: app.notes.canRead) { NotificationAccessRow.openSettings() }

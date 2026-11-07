@@ -13,29 +13,122 @@ final class Agent {
         let id = UUID()
         let kind: Kind
         let text: String
-        init(kind: Kind, text: String) { self.kind = kind; self.text = text }
+        var opensSettings = false   // an error that Settings › AI fixes (a key or sign-in), with a button there
+        init(kind: Kind, text: String, opensSettings: Bool = false) { self.kind = kind; self.text = text; self.opensSettings = opensSettings }
     }
     struct Denial: Equatable { let tool: String; let label: String; let rules: [String] }
-    enum Event { case session(String), text(String), step(String), denials([Denial]), error(String), finished }
+    enum Event {
+        case session(String), text(String), step(String), denials([Denial]), error(String), finished
+        /// The API refused the key or sign-in; what a turn cost (Claude Code's figure), or Codex's tokens to price.
+        case authFailed, cost(Double), tokens(input: Int, cached: Int, output: Int)
+    }
 
-    private(set) var messages: [Message] = []
+    private(set) var messages: [Message] = [] { didSet { keep() } }
     private(set) var running = false
+    /// This chat, as it's kept (Chats.swift): saved as it goes, so it can be read again and carried on.
+    private(set) var chatID = UUID()
+    /// The sticky note this chat is (StickyNotes.swift): its tools are told, so they look at its window.
+    let noteID = UUID()
+    /// The window the note is stuck to; nil for a chat stuck to none.
+    var place: NotePlace? { didSet { if place != oldValue { keep() } } }
+    /// The AI the chat's first message was asked with, before it has a session (a note waiting for a slot keeps it).
+    @ObservationIgnored private var askedWith: Provider?
+    /// The window a kept chat was stuck to, kept in its saves until the note sticks to a window again (or learns
+    /// it's gone): a chat picked from the list never loses its window while that's being checked.
+    @ObservationIgnored var keptPlace: NotePlace?
+    /// Messages sent while `ClaudePanel.atOnce` other notes worked, in order: they go once one of them is done.
+    private(set) var waiting: [String] = []
+    @ObservationIgnored private var chatProvider: Provider?
     private(set) var pendingAsk: [Denial] = []
     @ObservationIgnored private var sessionID: String?
     @ObservationIgnored private var sessionProvider: Provider?
     @ObservationIgnored private var allowed: [String] = []
     @ObservationIgnored private var process: Process?
     @ObservationIgnored private var errorText = ""
+    @ObservationIgnored private var authFailed = false   // this run's key or sign-in was refused, already said
     @ObservationIgnored private var runID = UUID()   // a stopped run's late lines don't belong to the next chat
 
     var app: PetalApp { PetalApp.shared }
 
+    /// Messages written while it works, sent once the run ends (queued), or at once by ending it (steering).
+    /// Kept with the chat (Chats.swift), so a quit while it works loses none; they're never sent by themselves at
+    /// launch, only with the person's next message or "Send now".
+    private(set) var queued: [String] = [] { didSet { if queued != oldValue { keep() } } }
+    @ObservationIgnored private var steering = 0
+    /// Where the messages waiting for room begin in `messages`: saved as still to send, not as sent.
+    @ObservationIgnored private var waitingFrom: Int?
+    static let approved = "I approved that. Go ahead and run it, then continue."
+
+
     func send(_ text: String) {
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, !running else { return }
+        guard !prompt.isEmpty else { return }
+        if running {
+            // While it works: steer (the run stops where it is and carries on from this message, in the same
+            // session), or queue (sent when it's done), as `chatWhileWorking` says.
+            if app.config.string("chatWhileWorking") == "queue" {
+                queued.append(prompt)
+            } else {
+                // After any steering already waiting, before what's queued: in the order written.
+                queued.insert(prompt, at: min(steering, queued.count))
+                steering += 1
+                messages.append(Message(kind: .step, text: "Steering"))
+                stop()
+            }
+            return
+        }
         pendingAsk = []
+        steering = max(0, steering - 1)
+        if sessionID == nil, askedWith == nil { askedWith = app.chatProvider }
+        let index = messages.count
         messages.append(Message(kind: .user, text: prompt))
+        admit(prompt, from: index)
+    }
+
+    /// The messages still to send (kept from before Petal quit, or written while it worked), now, with `text` after
+    /// them: all in one turn.
+    func sendQueued(with text: String? = nil) {
+        guard !running else { return }
+        var all = queued
+        if let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty { all.append(text) }
+        guard !all.isEmpty else { return }
+        queued = []
+        pendingAsk = []
+        if sessionID == nil, askedWith == nil { askedWith = app.chatProvider }
+        let index = messages.count
+        for text in all { messages.append(Message(kind: .user, text: text)) }
+        admit(all.joined(separator: "\n\n"), from: index)
+    }
+
+    /// Runs now, or (with `ClaudePanel.atOnce` other notes working, or messages already waiting) waits its turn.
+    /// `index`: where its message is in the chat.
+    private func admit(_ prompt: String, from index: Int) {
+        if !waiting.isEmpty || app.claude.working >= ClaudePanel.atOnce {
+            if waiting.isEmpty {
+                waitingFrom = index
+                messages.append(Message(kind: .step, text: "Waiting: \(ClaudePanel.atOnce) other notes are working. This starts when one is done."))
+            }
+            waiting.append(prompt)
+            keep()
+            return
+        }
         run(prompt)
+    }
+
+    /// The messages that waited for room, all in one turn (each is in the chat once already).
+    func runWaiting() {
+        guard !waiting.isEmpty, !running else { return }
+        let prompt = waiting.joined(separator: "\n\n")
+        waiting = []
+        waitingFrom = nil
+        run(prompt)
+    }
+
+    /// The chat's first words, as the chats list shows it.
+    var title: String {
+        guard let first = messages.first(where: { $0.kind == .user }) else { return "" }
+        let line = first.text.components(separatedBy: "\n").first { !$0.hasPrefix(">") && !$0.hasPrefix("From ") && !$0.isEmpty } ?? first.text
+        return String(line.prefix(80))
     }
 
     func allow() {
@@ -43,12 +136,14 @@ final class Agent {
         for denial in pendingAsk { for rule in denial.rules where !allowed.contains(rule) { allowed.append(rule) } }
         pendingAsk = []
         messages.append(Message(kind: .step, text: "Allowed"))
-        run("I approved that. Go ahead and run it, then continue.")
+        admit(Self.approved, from: messages.count)
     }
 
     func deny() {
         pendingAsk = []
         messages.append(Message(kind: .step, text: "Not allowed"))
+        // What was written meanwhile goes now.
+        if !running, !queued.isEmpty { send(queued.removeFirst()) }
     }
 
     func stop() { process?.terminate() }
@@ -59,17 +154,109 @@ final class Agent {
         pendingAsk = [Denial(tool: "Bash", label: sample.last?.text ?? "", rules: [])]
     }
 
-    func reset() {
+    /// The run under way, ended and forgotten: its late lines and its ending belong to no chat now.
+    private func endRun() {
+        let freed = running
         stop()
+        process = nil
+        running = false
         runID = UUID()
+        queued = []
+        waiting = []
+        waitingFrom = nil
+        // Its place among the notes working is free: one waiting for it starts.
+        if freed { DispatchQueue.main.async { PetalApp.shared.claude.startWaiting() } }
+    }
+
+    /// Takes a message out of the queue (or back from steering) before it's sent.
+    func unqueue(_ index: Int) { if queued.indices.contains(index) { queued.remove(at: index) } }
+
+    func reset() {
+        // Cleared without saving: the chat left (kept as it was, follow-ups and all) is never saved half-cleared.
+        switching = true
+        defer { switching = false }
+        endRun()
+        askedWith = nil
+        keptPlace = nil
+        onDisk = false
+        chatID = UUID()
         messages = []
         sessionID = nil
         allowed = []
         pendingAsk = []
     }
 
+    /// While one chat is swapped for another: nothing is saved until the new one is whole.
+    @ObservationIgnored private var switching = false
+    /// This chat has a file in Chats (saved, or picked from there).
+    @ObservationIgnored private var onDisk = false
+
+    /// Saves this chat (from its first message on), with its session to resume.
+    private func keep() {
+        guard !switching else { return }
+        guard let chat = saved else {
+            // Nothing left in it (its last message still to send taken out): its file goes, so it can't come back.
+            if onDisk { Chats.delete(id: chatID); onDisk = false }
+            return
+        }
+        onDisk = true
+        Chats.save(chat)
+        // A window's link to this chat holds it as it is now, never an older copy.
+        if PetalApp.started { PetalApp.shared.claude.chatSaved(chat) }
+    }
+
+    /// This chat as it's kept (nil before its first message).
+    var saved: SavedChat? {
+        // Messages waiting for room aren't sent yet: they're kept as still to send, with what's queued.
+        let sent = waiting.isEmpty ? messages : Array(messages.prefix(min(waitingFrom ?? messages.count, messages.count)))
+        let lines = sent.filter { $0.kind != .ask }.map { SavedChat.Line(kind: Self.name($0.kind), text: $0.text) }
+        let pending = waiting.filter { $0 != Self.approved } + queued
+        // Its first words: the first message, sent or still to send (a chat may be only that).
+        guard let first = messages.first(where: { $0.kind == .user })?.text ?? pending.first else { return nil }
+        let provider = sessionProvider ?? chatProvider ?? app.chatProvider
+        chatProvider = provider
+        let title = first.components(separatedBy: "\n").first { !$0.hasPrefix(">") && !$0.hasPrefix("From ") && !$0.isEmpty } ?? first
+        return SavedChat(id: chatID, title: String(title.prefix(80)), provider: provider?.rawValue ?? "", session: sessionID,
+                         updated: Date(), lines: lines, place: place ?? keptPlace, pending: pending.isEmpty ? nil : pending)
+    }
+
+    private static func name(_ kind: Kind) -> String {
+        switch kind { case .user: "user"; case .claude: "ai"; case .step: "step"; case .ask: "ask"; case .error: "error" }
+    }
+
+    /// A kept chat, back: its messages, and its session, so the next message carries it on (with its own AI).
+    /// `switchProvider`: the chat's AI becomes the one chosen (picked from the list), not only this chat's.
+    func restore(_ chat: SavedChat, switchProvider: Bool = true) {
+        switching = true
+        defer { switching = false }
+        endRun()
+        askedWith = nil
+        keptPlace = chat.place
+        onDisk = true
+        pendingAsk = []
+        allowed = []
+        chatID = chat.id
+        sessionID = chat.session
+        sessionProvider = Provider(rawValue: chat.provider)
+        chatProvider = sessionProvider
+        if switchProvider, let provider = sessionProvider, provider != app.chatProvider, app.providers.contains(provider) {
+            app.config.set("chatProvider", provider.rawValue)
+        }
+        let kinds: [String: Kind] = ["user": .user, "ai": .claude, "step": .step, "error": .error]
+        messages = chat.lines.compactMap { line in kinds[line.kind].map { Message(kind: $0, text: line.text) } }
+        // What was still to send when it was kept: waiting, never sent by itself.
+        queued = chat.pending ?? []
+    }
+
+    /// The AI this chat's session belongs to, while it has one (and that AI is still chosen): a note carries on with
+    /// its own AI, whichever the panel last chose for another.
+    var ownProvider: Provider? {
+        guard let provider = sessionID != nil ? sessionProvider : askedWith, app.providers.contains(provider) else { return nil }
+        return provider
+    }
+
     private func run(_ prompt: String) {
-        guard let provider = app.chatProvider else {
+        guard let provider = ownProvider ?? app.chatProvider else {
             messages.append(Message(kind: .error, text: "Choose an AI in Petal's settings first."))
             return
         }
@@ -77,16 +264,28 @@ final class Agent {
             messages.append(Message(kind: .error, text: "Petal couldn't find \(provider.appName). Set it up in Petal's settings, under AI."))
             return
         }
+        // On an API key with none saved, say so rather than quietly using the subscription.
+        guard app.aiReady(provider) else {
+            messages.append(Message(kind: .error, text: "\(provider.name) is set to use an API key, and there isn't one yet. Add it in Settings › AI, or switch back to your subscription.", opensSettings: true))
+            return
+        }
         if sessionProvider != provider { sessionID = nil; allowed = []; sessionProvider = provider }
         let config = app.config
-        let chat = Provider.Chat(model: config.string(provider.modelSetting), effort: config.string(provider.effortSetting),
+        var chat = Provider.Chat(model: config.string(provider.modelSetting), effort: config.string(provider.effortSetting),
                                  fullAccess: config.string("claudeAccess") == "full", instructions: instructions(provider),
                                  tools: Bundle.main.executablePath ?? "", session: sessionID, allowed: allowed)
+        chat.api = app.usesAPIKey(provider)
+        // A note's tools answer about its window: Petal --mcp passes this on with every call.
+        // Every chat: Petal finds its note's window when a tool is called, so a note that moves follows at once.
+        chat.note = noteID.uuidString
+        authFailed = false
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = provider.chatArguments(chat)
-        process.environment = app.childEnvironment
+        var environment = app.aiEnvironment(provider)
+        if let note = chat.note { environment["PETAL_NOTE"] = note }
+        process.environment = environment
         process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
         let input = Pipe(), output = Pipe(), error = Pipe()
         process.standardInput = input
@@ -124,12 +323,20 @@ final class Agent {
                 MainActor.assumeIsolated {
                     guard self.runID == id else { return }
                     self.running = false
+                    // What was written while it worked goes now (steering: straight after it stopped).
+                    let more = !self.queued.isEmpty && self.pendingAsk.isEmpty
+                    if more {
+                        let next = self.queued.removeFirst()
+                        DispatchQueue.main.async { self.send(next) }
+                    }
                     self.process = nil
                     let status = finished.terminationStatus
                     let detail = self.errorText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if status != 0 && status != 15 && !detail.isEmpty {
+                    if status != 0 && status != 15 && !detail.isEmpty && !self.authFailed {
                         self.messages.append(Message(kind: .error, text: String(detail.suffix(300))))
                     }
+                    // The turn is over (not carried on by a queued message): a note's nudge, and room for one waiting.
+                    if !more { self.app.claude.agentFinished(self) }
                 }
             }
         }
@@ -146,7 +353,8 @@ final class Agent {
 
     private func apply(_ event: Event) {
         switch event {
-        case .session(let id): sessionID = id
+        case .session(let id):
+            if sessionID != id { sessionID = id; keep() }
         case .text(let text):
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty { messages.append(Message(kind: .claude, text: trimmed)) }
@@ -156,6 +364,20 @@ final class Agent {
             messages.append(Message(kind: .ask, text: denials.map(\.label).joined(separator: "\n")))
         case .error(let text): messages.append(Message(kind: .error, text: text))
         case .finished: Task { await app.usage.refresh() }
+        case .authFailed:
+            guard !authFailed, let provider = sessionProvider else { return }
+            authFailed = true
+            stop()
+            messages.append(Message(kind: .error, text: app.usesAPIKey(provider)
+                ? "\(provider.keyMaker) didn't accept your API key. Check it in Settings › AI."
+                : "\(provider.appName) isn't signed in anymore. Sign in again from Settings › AI.", opensSettings: true))
+        case .cost(let dollars):
+            if let provider = sessionProvider, app.usesAPIKey(provider) { app.usage.addSpend(dollars, for: provider) }
+        case .tokens(let input, let cached, let output):
+            guard let provider = sessionProvider, app.usesAPIKey(provider) else { return }
+            let model = app.config.string(provider.modelSetting)
+            app.usage.addSpend(APIPricing.codex(model: model.isEmpty ? (app.codexModels.first?.id ?? "") : model,
+                                                input: input, cached: cached, output: output), for: provider)
         }
     }
 
@@ -194,6 +416,21 @@ final class Agent {
         case "mcp__petal__petal_list_apps": return "Looking up apps"
         case "mcp__petal__petal_switch_mode": return "Switching to  " + (input["id"] as? String ?? "")
         case "mcp__petal__petal_reload": return "Reloading Petal"
+        case "mcp__petal__petal_look": return (input["screenshot"] as? String ?? "").isEmpty ? "Looking at what's in front" : "Looking at your screen"
+        case "mcp__petal__petal_apps": return ((input["action"] as? String ?? "open").capitalized) + "  " + (input["app"] as? String ?? input["open"] as? String ?? "")
+        case "mcp__petal__petal_windows": return (input["action"] as? String ?? "list") == "list" ? "Looking at your windows" : "Arranging windows"
+        case "mcp__petal__petal_trash": return input["undo"] as? Bool == true ? "Putting files back" : "Moving to the Trash"
+        case "mcp__petal__petal_remember": return "Remembering  " + (input["text"] as? String ?? "")
+        case "mcp__petal__petal_forget": return "Forgetting"
+        case "mcp__petal__petal_vault": return (input["action"] as? String) == "use" ? "Typing your “\(input["name"] as? String ?? "")”" : "Looking in your vault"
+        case "mcp__petal__petal_memories": return "Looking at what I remember"
+        case "mcp__petal__petal_show": return "Making a page  " + (input["title"] as? String ?? "")
+        case "mcp__petal__petal_routines": return "Looking at your routines"
+        case "mcp__petal__petal_routine_save": return "Saving routine  " + (input["name"] as? String ?? input["words"] as? String ?? "")
+        case "mcp__petal__petal_routine_run": return input["dryRun"] as? Bool == true ? "Seeing what the routine would do" : "Running the routine"
+        case "mcp__petal__petal_routine_undo": return "Putting files back"
+        case "mcp__petal__petal_routine_delete": return "Deleting a routine"
+        case "mcp__petal__petal_summary": return "Looking at your \((input["days"] as? Int).map { "last \($0) days" } ?? "week")"
         default: return name
         }
     }
@@ -202,10 +439,29 @@ final class Agent {
         var prompt = """
         You are \(provider.name), running inside Petal, the user's dock on macOS. Your replies show in a small panel above the dock: be brief and friendly, short paragraphs, no big headings. You work in the user's home folder.
 
-        Everything about the dock is customizable through you. Use the petal MCP tools: call petal_get_state first, then petal_set_settings (appearance: dockColor, iconSize, accentColor, …; feature switches: bounce, badges, previews, …), petal_set_dock (position, auto-hide), petal_save_mode / petal_delete_mode (focus modes and their apps; apps are bundle identifiers, get them from petal_list_apps; mode icons are SF Symbol names), petal_switch_mode (puts the current Desktop in a mode), petal_export_recipe / petal_import_recipe (share a dock as a .petal file, or add one someone shared), petal_suggestions and petal_summary (from the user's private activity history). A mode's shortcut field names a Shortcut (Shortcuts app) that runs when a Desktop enters the mode, such as one that turns on a Focus; the schedule setting switches modes by the clock. Every Desktop has its own mode. Changes apply instantly. If a request can't be done with settings and Petal's source is on this Mac (path in petal_get_state), you may edit its Swift source, rebuild it with macos/build.sh, copy macos/build/Petal.app over the running app (its path is files.app in petal_get_state), and call petal_reload; mention that a Petal update could replace source edits. You can also help with anything else on the Mac: apps, files, macOS settings (defaults, AppleScript, the shell). If something needs the user's approval, say in one line what it would do; they can allow it from the panel. If something about Petal itself is broken, run `\(Bundle.main.executablePath ?? "Petal") doctor` (and `… doctor --fix`); the petal skill says more.
+        Everything about the dock is customizable through you. Use the petal MCP tools: call petal_get_state first, then petal_set_settings (appearance: dockColor, iconSize, accentColor, …; feature switches: bounce, badges, previews, …), petal_set_dock (position, auto-hide), petal_save_mode / petal_delete_mode (focus modes and their apps; apps are bundle identifiers, get them from petal_list_apps; mode icons are SF Symbol names), petal_switch_mode (puts the current Desktop in a mode), petal_export_recipe / petal_import_recipe (share a dock as a .petal file, or add one someone shared), petal_suggestions and petal_summary (from the user's private activity history). A mode's shortcut field names a Shortcut (Shortcuts app) that runs when a Desktop enters the mode, such as one that turns on a Focus; the schedule setting switches modes by the clock. Every Desktop has its own mode. Changes apply instantly. If a request can't be done with settings or modes, you may change Petal's own code, and the change is kept through updates: run `\(Bundle.main.executableURL?.resolvingSymlinksInPath().path ?? "petal") personal init` (once; it prints where Petal's source is), edit the Swift there, then `… personal save "<what changed, in a few words>"`, which builds, installs and restarts Petal (`… personal undo` takes the last change back). Never copy anything over Petal.app yourself, and never edit the app's files. You can also help with anything else on the Mac: apps, files, macOS settings (defaults, AppleScript, the shell). If something needs the user's approval, say in one line what it would do; they can allow it from the panel. If something about Petal itself is broken, run `\(Bundle.main.executablePath ?? "Petal") doctor` (and `… doctor --fix`); the petal skill says more.
+
+        You're also the user's helper on this Mac, through Petal's tools (Petal holds the Mac's permissions; you don't need any). petal_look shows what they're looking at: the app and window in front, a browser tab's address and title, selected text, and a screenshot when seeing helps (read the PNG path it returns). When they say this, here, or what I'm looking at, look first. A tab's address is there to research from (search the web for similar things, read the page). petal_apps and petal_windows open, quit, bring forward, minimize, close and arrange apps and windows. petal_trash moves files to the Trash: never delete files any other way (no rm). Petal asks the user before quitting, closing or trashing; if they decline, say OK and don't find another way. Files the user hands you arrive as paths: read them (PDFs too) and do what they ask; save an edited copy next to the original with a new name unless they say to replace it.
+
+        Routines: when the user wants something to happen by itself from now on ("keep my Downloads tidy", "when a PDF lands in Downloads, file it under Receipts", "when I open Figma, switch to Design", "every evening tidy my Desktop"), make a routine with petal_routine_save: their own words, plus the trigger and actions you work out from them (Petal runs it with no AI except sorting files by what they are). It acts on new files only; when it says files are there already, show them what it would do with petal_routine_run (dryRun: true) in a line or two, and do it with petal_routine_run if they want. Routines only move files into folders, never delete; petal_routine_undo puts the last ones back, and Settings, Routines lists them all.
+
+        Memory: below is what you remember about this user. When you learn something lasting that will help later (a preference, a habit, how they like things done, what a mode is for), save it yourself with petal_remember (learned: true; with the mode's id when it's about one mode) and say so in a word or two. When they say remember or forget something, do it with petal_remember or petal_forget. Forget what turns out wrong or out of date. Never keep passwords, secrets, or anything private they wouldn't want kept.
+
+        Passwords and other secrets live in Petal's vault (petal_vault): list their names, use one (Petal types it into the field that has the cursor, after asking the user; you never see it), or request one you need (the user types it into Petal's card, never into the chat). Never ask the user to paste a password or key into the chat. Some apps the user keeps private: petal_look shows only their name.
+
+        Replies show as markdown (headings, lists, tables, code). For anything longer than a few lines (a summary of their last month, a report, a comparison, a chart), make a page with petal_show: markdown, or a whole HTML page with inline SVG for charts (no outside scripts or images); it opens in Petal's own window and is kept. Never open files in other apps to show results (no `open` on a .md or .html file). Then say in one line what's on it. petal_summary covers up to their last 30 days of activity (days: 30 for a month), with time per mode and app and a day-by-day breakdown for charts.
+
+        When the user says something in Petal is broken or odd, fix it for them without asking them to type anything: run `\(Bundle.main.executablePath ?? "Petal") doctor` and `… logs`, check petal_get_state, fix what settings can, and change Petal's code with personal (above) when it takes that. Then tell them in plain words what was wrong and what you did.
         """
         let notes = (try? String(contentsOf: app.config.instructionsFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !notes.isEmpty { prompt += "\n\nThe user's own instructions:\n" + notes }
+        if let place, app.config.bool("aiNotes") {
+            let mode = app.config.modes.first { $0.id == place.mode }?.name
+            let window = app.assist.neverLook(place.app) || place.title.isEmpty ? "\(place.appName)'s window" : "\(place.appName)'s window “\(place.title)”"
+            prompt += "\n\nThis chat is a sticky note on one window: \(window)\(mode.map { ", in the \($0) mode" } ?? ""). When the user says this, here or what I'm looking at, they mean that window, even after they've gone to another app: petal_look looks at it (front: true looks at what's in front now instead). The user may read your reply later, from that window."
+        }
+        let remembered = app.assist.memoryBrief(mode: place?.mode)
+        if !remembered.isEmpty { prompt += "\n\nWhat you remember about this user ([id] for petal_forget):\n" + remembered }
         return prompt
     }
 
@@ -227,6 +483,15 @@ final class LineBuffer: @unchecked Sendable {
         }
         return lines
     }
+
+    /// The text after the last newline, taken out.
+    func rest() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        let text = String(decoding: data, as: UTF8.self)
+        data.removeAll()
+        return text
+    }
 }
 
 // MARK: - The panel
@@ -239,6 +504,9 @@ final class InputPanel: NSPanel {
 
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        // Its size is Petal's to set (fit), never the window following its content from the wrong corner: only
+        // its own size for measuring, no minimum or maximum the window would follow.
+        hosting.sizingOptions = [.intrinsicContentSize]
         contentView = hosting
         isFloatingPanel = true
         level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) + 2)
@@ -263,16 +531,57 @@ final class InputPanel: NSPanel {
 
     /// Centered on the screen with the pointer, just above the dock: it comes out of the dock rather than floating
     /// over it.
-    func show<Content: View>(_ content: Content) {
+    func show<Content: View>(_ content: Content, from anchor: CGRect? = nil, key: Bool = true) {
+        load(content)
+        showAgain(from: anchor, key: key)
+    }
+
+    /// Makes and lays out the view without showing it, so the first opening is as quick as the rest.
+    func load<Content: View>(_ content: Content) {
         hosting.rootView = AnyView(content.environment(PetalApp.shared))
-        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
+        hosting.layoutSubtreeIfNeeded()
+    }
+
+    /// Shows what it showed last, placed again over the dock.
+    /// `anchor`: the dock button it was opened from (screen coordinates): on a bottom dock it opens above that
+    /// button (kept on the screen) and grows out of it; otherwise centered over the dock.
+    /// `key: false` shows it without taking the keyboard from the app in front (a note back with its window).
+    func showAgain(from anchor: CGRect? = nil, key: Bool = true) {
+        let screen = anchor.flatMap { a in NSScreen.screens.first { $0.frame.intersects(a) } }
+            ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
         // The content's own 10-point margin around the glass, then 6 points of space over the dock.
         let above = Self.dockReach(on: screen) + 6 - 10
-        setFrame(NSRect(x: screen.frame.midX - size.width / 2, y: screen.frame.minY + above, width: size.width, height: size.height).integral,
-                 display: true)
-        makeKeyAndOrderFront(nil)
+        let bottomDock = PetalApp.shared.config.position == "bottom"
+        var x = screen.frame.midX - size.width / 2
+        if bottomDock, let anchor {
+            x = min(max(anchor.midX - size.width / 2, screen.visibleFrame.minX + 4), screen.visibleFrame.maxX - size.width - 4)
+        }
+        setFrame(NSRect(x: x, y: screen.frame.minY + above, width: size.width, height: size.height).integral, display: true)
+        if key { makeKeyAndOrderFront(nil) } else { orderFrontRegardless() }
+        if let anchor { popIn(from: CGPoint(x: anchor.midX - frame.minX, y: bottomDock ? 0 : size.height / 2)) }
+    }
+
+    /// Grows out of `point` (in the panel), quickly, fading in.
+    private func popIn(from point: CGPoint) {
+        hosting.wantsLayer = true
+        guard let layer = hosting.layer else { return }
+        let pivot = CGPoint(x: point.x - layer.anchorPoint.x * layer.bounds.width, y: point.y - layer.anchorPoint.y * layer.bounds.height)
+        var from = CATransform3DMakeTranslation(pivot.x, pivot.y, 0)
+        from = CATransform3DScale(from, 0.6, 0.6, 1)
+        from = CATransform3DTranslate(from, -pivot.x, -pivot.y, 0)
+        let grow = CABasicAnimation(keyPath: "transform")
+        grow.fromValue = from
+        grow.toValue = CATransform3DIdentity
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        let group = CAAnimationGroup()
+        group.animations = [grow, fade]
+        group.duration = 0.22
+        group.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0.9, 0.25, 1)
+        layer.add(group, forKey: "popIn")
     }
 
     /// How far the dock reaches up from the screen's bottom: Petal's (gap, its 2-point margin, the glass's 4-point
@@ -281,6 +590,7 @@ final class InputPanel: NSPanel {
         let config = PetalApp.shared.config
         if config.whichDock == "macos" { return max(0, screen.visibleFrame.minY - screen.frame.minY) }
         guard config.position != "left", config.position != "right" else { return 0 }
+        if let reach = PetalApp.shared.docks.reach(on: screen) { return reach }
         let gap = config.number("dockMargin") >= 0 ? config.number("dockMargin") : 4
         let icon = max(16, config.number("iconSize"))
         let inset = config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5
@@ -291,47 +601,164 @@ final class InputPanel: NSPanel {
     func fit() {
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
-        guard size != frame.size else { return }
-        setFrame(NSRect(x: frame.midX - size.width / 2, y: frame.minY, width: size.width, height: size.height).integral, display: true,
-                 animate: false)
+        let screen = self.screen ?? NSScreen.main ?? NSScreen.screens[0]
+        let bottom = screen.frame.minY + Self.dockReach(on: screen) + 6 - 10
+        let target = NSRect(x: frame.midX - size.width / 2, y: bottom, width: size.width, height: size.height).integral
+        guard target != frame else { return }
+        setFrame(target, display: true, animate: false)
     }
 }
 
-/// The Claude panel (AskBox.qml).
+/// The Claude panel (AskBox.qml). With `aiNotes` on, it is a sticky note: the chat stuck to the window that was in
+/// front when it opened (StickyNotes.swift); every note keeps its own chat, and several can work at once.
 @MainActor @Observable
 final class ClaudePanel {
-    let agent = Agent()
-    var draft = ""
+    /// Every note this session; the panel shows `current`.
+    var notes: [StickyNote]
+    private(set) var current: StickyNote
+    var agent: Agent { current.agent }
+    var draft: String { get { current.draft } set { current.draft = newValue } }
     var optionsOpen = false
+    /// The kept chats, in place of the conversation.
+    var chatsOpen = false
+    /// Files handed to the AI (dropped on its button or on the panel): sent with the next message.
+    var attachments: [URL] { get { current.attachments } set { current.attachments = newValue } }
+    /// Passages quoted from any app (Ask Petal AI / Add to Petal AI): sent with the next message.
+    struct Quote: Identifiable, Equatable { let id = UUID(); let text: String; let source: String }
+    var quotes: [Quote] { get { current.quotes } set { current.quotes = newValue } }
+    /// Quotes and files handed over while the panel was closed: they go to the note it opens on next.
+    @ObservationIgnored private var incomingQuotes: [Quote] = []
+    @ObservationIgnored private var incomingFiles: [URL] = []
+    /// Apps and modes with a note that's done while the person was elsewhere (their nudges).
+    var readyApps: Set<String> = []
+    var readyModes: [String: Int] = [:]
+    @ObservationIgnored var closeReason: CloseReason?
+    @ObservationIgnored var lastFront: (pid: pid_t, window: CGWindowID?)?
+    @ObservationIgnored var pendingOpen: StickyNote?
+    @ObservationIgnored var pendingTicket = 0
+    /// Counts chats picked from the list: one picked after another (before its window was checked) wins.
+    @ObservationIgnored var restoreTicket = 0
+    /// The app a note's window is being brought forward in: another app coming forward stops its retries.
+    @ObservationIgnored var bringing: pid_t?
+    @ObservationIgnored var savedPlaces: [String: SavedChat] = [:]
+    @ObservationIgnored var listening = false
+    /// The one chat stuck to no window (no app in front, or sticky notes off).
+    @ObservationIgnored var loose: StickyNote
+
+    init() {
+        let note = StickyNote()
+        notes = [note]
+        current = note
+        loose = note
+    }
+
+    func quote(_ text: String, from source: String) {
+        if isOpen {
+            guard !quotes.contains(where: { $0.text == text }) else { return }
+            quotes.append(Quote(text: text, source: source))
+            fit()
+        } else if !incomingQuotes.contains(where: { $0.text == text }) {
+            incomingQuotes.append(Quote(text: text, source: source))
+        }
+    }
+
+    /// Added without opening the chat: the AI button says so for a moment.
+    func noteAdded() {
+        let app = PetalApp.shared
+        guard let dock = app.docks.focusedDock else { return }
+        let count = incomingQuotes.count
+        app.tooltips.show(count == 1 ? "Added to Petal AI" : "\(count) passages for Petal AI", over: "claude", in: dock)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { app.tooltips.show(nil, over: "claude", in: dock) }
+    }
     private(set) var isOpen = false
     @ObservationIgnored private var panel: InputPanel?
 
-    func open(asking text: String?, send: Bool = true) {
+    /// Opens the note of the window in front (a new one if it has none).
+    func open(asking text: String?, send: Bool = true, attaching files: [URL] = []) {
         let app = PetalApp.shared
+        for file in files where !incomingFiles.contains(file) { incomingFiles.append(file) }
         Task { await app.usage.refresh() }
+        // Codex's models, if they couldn't be read at launch (Codex installed or signed in since).
+        if app.chatProvider == .codex && app.codexModels.isEmpty { app.loadCodexModels() }
+        cancelPending()
+        let ticket = pendingTicket
+        // Shown only if nothing closed or opened the panel meanwhile (closing, any way, cancels: `closed`).
+        noteForFront { note in if ticket == self.pendingTicket { self.present(note, asking: text, send: send) } }
+    }
+
+    /// The AI button or its shortcut: opens the note in front, gives the keyboard to one showing without it, or closes.
+    func toggle() {
+        if isOpen, let panel, !panel.isKeyWindow { panel.makeKeyAndOrderFront(nil) }
+        else if isOpen { close() }
+        else { open(asking: nil) }
+    }
+
+    /// Shows a note in the panel. `key: false` leaves the keyboard with the app in front (a note back with its window).
+    /// `fromIcon`: it comes out of its app's icon (back with its window) rather than the AI button.
+    func present(_ note: StickyNote, asking text: String? = nil, send: Bool = true, key: Bool = true, fromIcon: Bool = false) {
+        let app = PetalApp.shared
         if panel == nil {
             let panel = InputPanel()
-            panel.onClose = { [weak self] in self?.isOpen = false; self?.optionsOpen = false }
+            panel.onClose = { [weak self] in
+                self?.isOpen = false
+                self?.optionsOpen = false
+                self?.chatsOpen = false
+                self?.closed()
+                // A question still waiting goes to the dock, where it can be answered.
+                if PetalApp.shared.assist.pending != nil { PetalApp.shared.popups.show(FocusCard(kind: .ask)) }
+            }
             self.panel = panel
         }
+        let again = isOpen && current === note
+        // A note shows (and carries on with) the AI its conversation is with.
+        if let own = note.agent.ownProvider, own != app.chatProvider { app.config.set("chatProvider", own.rawValue) }
+        current = note
+        for quote in incomingQuotes where !note.quotes.contains(where: { $0.text == quote.text }) { note.quotes.append(quote) }
+        for file in incomingFiles where !note.attachments.contains(file) { note.attachments.append(file) }
+        incomingQuotes = []
+        incomingFiles = []
+        note.away = false
+        if note.ready { note.ready = false; updateReady() }
+        if let card = app.popups.card, card.noteID == note.id { app.popups.dismissCard() }
         isOpen = true
         if let text, send {
-            agent.send(text)
-            draft = ""
-        } else {
-            draft = text ?? ""
+            note.agent.send(text)
+            note.draft = ""
+        } else if let text {
+            note.draft = text
         }
         app.tooltips.hide()
         app.popups.closeAll()
-        panel?.show(ClaudePanelView(panel: self))
+        if again {
+            if key { panel?.makeKeyAndOrderFront(nil) }
+            fit()
+        } else {
+            let button = app.docks.focusedDock?.panel?.screenFrame(of: "claude")
+            panel?.show(ClaudePanelView(panel: self), from: fromIcon ? anchor(for: note) ?? button : button, key: key)
+        }
     }
+
+    /// A chat picked from the list (StickyNotes.swift).
+    func restore(_ chat: SavedChat) { restoreNote(chat) }
+
+    /// A note's turn ended (Agent).
+    func agentFinished(_ agent: Agent) {
+        guard let note = notes.first(where: { $0.agent === agent }) else { return }
+        finished(note)
+    }
+
+    func stopAll() { for note in notes { note.agent.stop() } }
 
     func openOptions() {
         open(asking: nil)
         optionsOpen = true
     }
 
-    func close() { panel?.close() }
+    func close() {
+        if closeReason == nil { closeReason = .purpose }
+        panel?.close()
+        closeReason = nil
+    }
 
     func fit() { panel?.fit() }
 }
@@ -343,7 +770,11 @@ struct ClaudePanelView: View {
 
     var agent: Agent { panel.agent }
 
-    static let suggestions = ["Add a Gaming mode to my dock", "Why is my Mac slow right now?", "Make my dock icons a bit bigger"]
+    static let suggestions = ["Explain what I'm looking at", "Tidy up my Downloads", "Something in Petal isn't working right"]
+    /// With files handed over: what people most often want done with them.
+    static let fileSuggestions = ["Summarize it", "What are the key points?", "Make it shorter and clearer"]
+    /// With a passage quoted from another app.
+    static let quoteSuggestions = ["Explain this", "Rewrite it more clearly", "Find more on this"]
 
     var body: some View {
         @Bindable var panel = panel
@@ -352,27 +783,50 @@ struct ClaudePanelView: View {
         // up to half the screen, then scrolls. The options open over what's below the header.
         VStack(alignment: .leading, spacing: 14) {
             header
+            // The window this note is stuck to.
+            if let place = agent.place { NotePlaceLine(place: place, gone: panel.current.windowGone).padding(.top, -6) }
             ZStack(alignment: .top) {
-                Group { if agent.messages.isEmpty { empty } else { conversation } }
+                // A chat with only messages still to send (kept from before Petal quit) shows them, with Send now.
+        Group { if agent.messages.isEmpty && agent.queued.isEmpty { empty } else { conversation } }
                     .frame(maxWidth: .infinity, alignment: .top)
-                    .opacity(panel.optionsOpen ? 0 : 1)
+                    .opacity(panel.optionsOpen || panel.chatsOpen ? 0 : 1)
                 if panel.optionsOpen { options.transition(.opacity.combined(with: .offset(y: -6))) }
+                else if panel.chatsOpen { ChatsList(panel: panel).transition(.opacity.combined(with: .offset(y: -6))) }
             }
             .frame(minHeight: 180, alignment: .top)
+            if let request = app.assist.pending {
+                AskRequestView(request: request).id(request.id).padding(12).background(.white.opacity(0.06), in: .rect(cornerRadius: 14))
+            }
+            if !panel.attachments.isEmpty || !panel.quotes.isEmpty { attachmentsRow }
             input
         }
+        // Exactly this wide whatever it shows: content a little too wide for it (Claude's rows and Codex's differ)
+        // stays put on the left instead of spilling out on both sides, which made switching jump sideways.
+        .frame(width: 524, alignment: .leading)
         .padding(18)
-        .frame(width: 560)
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
         .padding(10)
         .onAppear { focused = true }
         .onChange(of: agent.messages.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: agent.running) { _, _ in DispatchQueue.main.async { panel.fit() } }
-        .onChange(of: panel.optionsOpen) { _, _ in DispatchQueue.main.async { panel.fit() } }
+        .onChange(of: panel.optionsOpen) { _, open in if open { panel.chatsOpen = false }; DispatchQueue.main.async { panel.fit() } }
+        .onChange(of: panel.chatsOpen) { _, open in if open { panel.optionsOpen = false }; DispatchQueue.main.async { panel.fit() } }
+        .onChange(of: panel.attachments.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
+        // Typing a message: the options (or the chats list) step aside for the conversation, no click needed.
+        .onChange(of: panel.draft) { _, text in
+            if !text.isEmpty && (panel.optionsOpen || panel.chatsOpen) { panel.optionsOpen = false; panel.chatsOpen = false }
+        }
+        .onChange(of: panel.quotes.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
+        .onChange(of: app.assist.pending?.id) { _, _ in DispatchQueue.main.async { panel.fit() } }
+        .dropDestination(for: URL.self) { urls, _ in
+            for url in urls where url.isFileURL && !panel.attachments.contains(url) { panel.attachments.append(url) }
+            return !urls.isEmpty
+        }
         .onExitCommand {
-            if panel.optionsOpen { panel.optionsOpen = false } else { panel.close() }
+            if panel.optionsOpen { panel.optionsOpen = false } else if panel.chatsOpen { panel.chatsOpen = false } else { panel.close() }
         }
         .animation(.easeOut(duration: 0.16), value: panel.optionsOpen)
+        .animation(.easeOut(duration: 0.16), value: panel.chatsOpen)
     }
 
     private var header: some View {
@@ -385,19 +839,35 @@ struct ClaudePanelView: View {
                 Text("\(Int(((1 - worst.percent) * 100).rounded()))% left" + (worst.resetsAt.map { " · resets in " + PetalApp.until($0) } ?? ""))
                     .font(.system(size: 12))
                     .foregroundStyle(worst.percent >= 0.9 ? Color(red: 1, green: 0.42, blue: 0.54) : .secondary)
+            } else if let spent = app.usage.spentText {
+                Text(spent).font(.system(size: 12)).foregroundStyle(.secondary)
             }
             Spacer()
+            // The model and effort, on clear glass as × is; the chevron turns up while the options are open.
             Button {
                 panel.optionsOpen.toggle()
             } label: {
-                Text("\(modelName) · \(provider.map { app.config.string($0.effortSetting) } ?? "")  \(panel.optionsOpen ? "⌃" : "⌄")")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Text("\(modelName) · \(provider.map { app.config.string($0.effortSetting) } ?? "")").font(.system(size: 12))
+                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
+                        .rotationEffect(.degrees(panel.optionsOpen ? 180 : 0))
+                }
+                .foregroundStyle(.secondary)
+                .padding(.leading, 10).padding(.trailing, 9)
+                .frame(height: 22)
+                .glassEffect(.clear.interactive(), in: .capsule)
+                .contentShape(.capsule)
             }
             .buttonStyle(.plain)
             if !agent.messages.isEmpty {
-                Button("New chat") { agent.reset() }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
+                Button("New chat") { agent.reset(); panel.chatsOpen = false }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
             }
-            RoundButton(symbol: "xmark") { panel.close() }
+            // The kept chats: read one again, or carry it on.
+            RoundButton(symbol: panel.chatsOpen ? "bubble.left.and.text.bubble.right.fill" : "clock.arrow.circlepath", size: 22) {
+                panel.chatsOpen.toggle()
+            }
+            .help("Your chats")
+            RoundButton(symbol: "xmark", size: 22) { panel.close() }
         }
         .frame(height: 28)
     }
@@ -415,37 +885,23 @@ struct ClaudePanelView: View {
         VStack(alignment: .leading, spacing: 10) {
             if app.providers.count > 1 {
                 OptionRow(title: "Chat with") {
-                    Picker("", selection: Binding(get: { provider.rawValue }, set: {
+                    Segments(options: app.providers.map { ($0.rawValue, $0.name) }, selection: Binding(get: { provider.rawValue }, set: {
                         app.config.set("chatProvider", $0)
                         agent.reset()
                         Task { await app.usage.refresh() }
-                    })) {
-                        ForEach(app.providers) { Text($0.name).tag($0.rawValue) }
-                    }
-                    .pickerStyle(.segmented).labelsHidden()
+                    }))
                 }
             }
             if app.models(for: provider).count > 1 {
                 OptionRow(title: "Model") {
-                    if provider == .codex {
-                        // Codex lists more models than fit side by side.
-                        Picker("", selection: Binding(get: { app.currentModel(for: provider) }, set: { app.config.set(provider.modelSetting, $0) })) {
-                            ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
-                        }
-                        .pickerStyle(.menu).labelsHidden().fixedSize()
-                    } else {
-                        Picker("", selection: Binding(get: { app.currentModel(for: provider) }, set: { app.config.set(provider.modelSetting, $0) })) {
-                            ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
-                        }
-                        .pickerStyle(.segmented).labelsHidden()
-                    }
+                    // Claude's four names, or Codex's newest of each family ("6.1 Sol"): side by side either way.
+                    Segments(options: app.models(for: provider), selection: Binding(get: { app.currentModel(for: provider) },
+                                                                                   set: { app.config.set(provider.modelSetting, $0) }))
                 }
             }
             OptionRow(title: "Effort") {
-                Picker("", selection: Binding(get: { app.config.string(provider.effortSetting) }, set: { app.config.set(provider.effortSetting, $0) })) {
-                    ForEach(app.efforts(for: provider), id: \.self) { Text($0).tag($0) }
-                }
-                .pickerStyle(.segmented).labelsHidden()
+                Segments(options: app.efforts(for: provider).map { ($0, $0) }, selection: Binding(get: { app.config.string(provider.effortSetting) },
+                                                                                                  set: { app.config.set(provider.effortSetting, $0) }))
             }
             OptionRow(title: "Full access") {
                 let full = app.config.string("claudeAccess") == "full"
@@ -465,10 +921,12 @@ struct ClaudePanelView: View {
 
     private var empty: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Ask anything. \(provider?.name ?? "It") can change your dock and modes, your Mac's settings, or your files.")
-                .font(.system(size: 13)).foregroundStyle(.secondary).padding(.bottom, 6)
-            ForEach(Self.suggestions, id: \.self) { suggestion in
-                SuggestionRow(text: suggestion) { agent.send(suggestion) }
+            Text(!panel.quotes.isEmpty ? "What should \(provider?.name ?? "it") do with \(panel.quotes.count == 1 ? "this passage" : "these passages")?"
+                 : panel.attachments.isEmpty ? "Ask anything. \(provider?.name ?? "It") sees what you're looking at, and can work with your apps, windows, files and dock. Drop a file here to hand it over."
+                 : "What should \(provider?.name ?? "it") do with \(panel.attachments.count == 1 ? "it" : "them")?")
+                .font(.system(size: 13)).foregroundStyle(.secondary).padding(.bottom, 6).fixedSize(horizontal: false, vertical: true)
+            ForEach(!panel.quotes.isEmpty ? Self.quoteSuggestions : panel.attachments.isEmpty ? Self.suggestions : Self.fileSuggestions, id: \.self) { suggestion in
+                SuggestionRow(text: suggestion) { panel.draft = suggestion; submit() }
             }
         }
     }
@@ -481,6 +939,23 @@ struct ClaudePanelView: View {
                         MessageView(message: message, last: message.id == agent.messages.last?.id).id(message.id)
                     }
                     if agent.running { TypingDots().id("typing") }
+                    ForEach(Array(agent.queued.enumerated()), id: \.offset) { index, text in
+                        HStack(spacing: 6) {
+                            Spacer(minLength: 100)
+                            Text(text).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
+                                .padding(.horizontal, 12).padding(.vertical, 6)
+                                .background(.white.opacity(0.06), in: .rect(cornerRadius: 12))
+                            RoundButton(symbol: "xmark", size: 18) { agent.unqueue(index) }.help("Don't send it")
+                        }
+                    }
+                    // Left from before (Petal quit while it worked): sent with the next message, or now.
+                    if !agent.running && !agent.queued.isEmpty {
+                        HStack {
+                            Spacer()
+                            Button(agent.queued.count == 1 ? "Send it now" : "Send them now") { agent.sendQueued() }
+                                .buttonStyle(.glass).controlSize(.small)
+                        }
+                    }
                 }
                 .padding(.vertical, 2)
             }
@@ -498,15 +973,19 @@ struct ClaudePanelView: View {
     private var input: some View {
         @Bindable var panel = panel
         return HStack(spacing: 8) {
-            TextField(agent.messages.isEmpty ? "Ask \(provider?.name ?? "AI")…" : "Reply…", text: $panel.draft)
+            TextField(agent.messages.isEmpty ? "Ask \(provider?.name ?? "AI")…"
+                      : agent.running ? (app.config.string("chatWhileWorking") == "queue" ? "Add to what's next…" : "Steer it…") : "Reply…",
+                      text: $panel.draft)
                 .textFieldStyle(.plain)
                 .font(.system(size: 14))
                 .focused($focused)
                 .onSubmit(submit)
+            // While it works: stop, or (with something written) steer or queue it.
+            let stops = agent.running && panel.draft.isEmpty
             Button {
-                if agent.running { agent.stop() } else { submit() }
+                if stops { agent.stop() } else { submit() }
             } label: {
-                Image(systemName: agent.running ? "stop.fill" : "arrow.up")
+                Image(systemName: stops ? "stop.fill" : "arrow.up")
                     .font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
                     .frame(width: 30, height: 30)
                     .background(Color(nsColor: app.accent), in: .circle)
@@ -520,11 +999,94 @@ struct ClaudePanelView: View {
         .overlay(Capsule().strokeBorder(focused ? Color(nsColor: app.accent).opacity(0.6) : .white.opacity(0.1)))
     }
 
+    private var attachmentsRow: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 6) {
+                ForEach(panel.quotes) { quote in
+                    HStack(spacing: 6) {
+                        Image(systemName: "text.quote").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text("“" + quote.text.replacingOccurrences(of: "\n", with: " ").prefix(48) + (quote.text.count > 48 ? "…”" : "”"))
+                            .font(.system(size: 12)).lineLimit(1)
+                        if !quote.source.isEmpty { Text(quote.source).font(.system(size: 11)).foregroundStyle(.secondary) }
+                        Button { panel.quotes.removeAll { $0 == quote } } label: {
+                            Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 10).frame(height: 28)
+                    .glassEffect(.clear, in: .capsule)
+                    .help(quote.text)
+                }
+                ForEach(panel.attachments, id: \.self) { url in
+                    HStack(spacing: 6) {
+                        Image(nsImage: NSWorkspace.shared.icon(forFile: url.path)).resizable().frame(width: 16, height: 16)
+                        Text(url.lastPathComponent).font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
+                        Button { panel.attachments.removeAll { $0 == url } } label: {
+                            Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 10).frame(height: 28)
+                    .glassEffect(.clear, in: .capsule)
+                }
+            }
+        }
+        .scrollIndicators(.never)
+    }
+
     private func submit() {
-        guard !agent.running else { return }
-        let text = panel.draft
+        var text = panel.draft
+        if agent.running && text.trimmingCharacters(in: .whitespaces).isEmpty && panel.quotes.isEmpty && panel.attachments.isEmpty { return }
+        if !panel.quotes.isEmpty {
+            if text.trimmingCharacters(in: .whitespaces).isEmpty { text = "What about this?" }
+            let quoted = panel.quotes.map { q in
+                (q.source.isEmpty ? "" : "From \(q.source):\n") + q.text.components(separatedBy: "\n").map { "> " + $0 }.joined(separator: "\n")
+            }
+            text = quoted.joined(separator: "\n\n") + "\n\n" + text
+            panel.quotes = []
+        }
+        if !panel.attachments.isEmpty {
+            if text.trimmingCharacters(in: .whitespaces).isEmpty { text = "What's in \(panel.attachments.count == 1 ? "this file" : "these files")?" }
+            text += "\n\nFiles I'm handing you:\n" + panel.attachments.map(\.path).joined(separator: "\n")
+            panel.attachments = []
+        }
         panel.draft = ""
-        agent.send(text)
+        panel.optionsOpen = false
+        panel.chatsOpen = false
+        // Messages left to send go first, in the same turn.
+        if !agent.running && !agent.queued.isEmpty { agent.sendQueued(with: text) } else { agent.send(text) }
+    }
+}
+
+/// Choices side by side, every segment the same width whatever its words or which one is chosen (macOS's segmented
+/// control sizes each to its label, in bold when chosen, so choosing reshuffled them), with the choice's highlight
+/// sliding to it. Centered in its row, so rows of choices line up.
+struct Segments: View {
+    let options: [(String, String)]
+    @Binding var selection: String
+    static let width: CGFloat = 66
+    @Namespace private var space
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(options, id: \.0) { id, label in
+                let chosen = id == selection
+                Text(label).font(.system(size: 12.5, weight: .medium)).lineLimit(1).minimumScaleFactor(0.8)
+                    .foregroundStyle(chosen ? .white : .primary.opacity(0.85))
+                    .frame(width: Self.width, height: 24)
+                    .background {
+                        if chosen {
+                            RoundedRectangle(cornerRadius: 7).fill(Color(nsColor: PetalApp.shared.accent))
+                                .matchedGeometryEffect(id: "chosen", in: space)
+                        }
+                    }
+                    .contentShape(.rect)
+                    .onTapGesture { withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) { selection = id } }
+            }
+        }
+        .padding(2)
+        .background(.white.opacity(0.07), in: .rect(cornerRadius: 9))
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -537,6 +1099,7 @@ struct OptionRow<Content: View>: View {
             Text(title).font(.system(size: 12.5)).foregroundStyle(.secondary).frame(width: 84, alignment: .leading)
             content
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -573,17 +1136,22 @@ struct MessageView: View {
         case .user:
             HStack {
                 Spacer(minLength: 100)
-                Text(message.text).font(.system(size: 13.5)).textSelection(.enabled)
+                // Medium: on a 1x screen, regular text over glass gets only grey smoothing and reads soft.
+                Text(message.text).font(.system(size: 13.5, weight: .medium)).textSelection(.enabled)
                     .padding(.horizontal, 14).padding(.vertical, 8)
                     .background(accent.opacity(0.22), in: .rect(cornerRadius: 14))
             }
         case .claude:
-            Text(Self.markdown(message.text)).font(.system(size: 13.5)).lineSpacing(2).textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            MarkdownView(text: message.text).textSelection(.enabled)
         case .step:
             Text("›  " + message.text).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
         case .error:
-            Text(message.text).font(.system(size: 13.5)).foregroundStyle(Color(red: 1, green: 0.42, blue: 0.54)).textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(message.text).font(.system(size: 13.5)).foregroundStyle(Color(red: 1, green: 0.42, blue: 0.54)).textSelection(.enabled)
+                if message.opensSettings {
+                    Button("Open Settings › AI") { app.settings.show(.claude) }.buttonStyle(.glass)
+                }
+            }
         case .ask:
             VStack(alignment: .leading, spacing: 8) {
                 Text("Claude wants to").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -628,19 +1196,41 @@ final class AppSearch {
     var query = ""
     var selection = 0
     private(set) var mode: Mode?
+    /// Counts openings, so the reused view puts the cursor back in its field.
+    private(set) var opens = 0
     @ObservationIgnored private var panel: InputPanel?
+
+    /// At launch: the panel and its view made ahead, hidden.
+    func prepare() {
+        guard panel == nil else { return }
+        let panel = InputPanel()
+        self.panel = panel
+        panel.load(AppSearchView(search: self))
+    }
 
     func open(in dock: ScreenDock?) {
         let app = PetalApp.shared
         mode = (dock ?? app.docks.focusedDock)?.mode
         query = ""
         selection = 0
-        if panel == nil { panel = InputPanel() }
+        opens += 1
         app.tooltips.hide()
-        panel?.show(AppSearchView(search: self))
+        // The view is made once; opening again only shows it, reset to an empty query.
+        let from = (dock ?? app.docks.focusedDock)?.panel?.screenFrame(of: "add")
+        if let panel { panel.showAgain(from: from) } else {
+            let panel = InputPanel()
+            self.panel = panel
+            panel.show(AppSearchView(search: self), from: from)
+        }
     }
 
     func close() { panel?.close() }
+
+    /// Showing now (a second click on "+" closes it).
+    var isOpen: Bool { panel?.isVisible == true }
+
+    /// For `Bench`: the panel, to time how long it takes to draw.
+    var window: NSWindow? { panel }
 
     struct Result: Identifiable, Hashable {
         let id: String
@@ -733,7 +1323,7 @@ struct AppSearchView: View {
                 .onChange(of: search.query) { _, _ in search.selection = 0 }
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(spacing: 2) {
+                    LazyVStack(spacing: 2) {
                         if results.isEmpty { Text("Nothing matches").foregroundStyle(.secondary).padding(.vertical, 20) }
                         ForEach(Array(results.enumerated()), id: \.element.id) { index, result in
                             SearchRow(result: result, selected: index == search.selection, added: search.added(result)) {
@@ -755,6 +1345,7 @@ struct AppSearchView: View {
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
         .padding(10)
         .onAppear { focused = true }
+        .onChange(of: search.opens) { _, _ in focused = true }
         .onExitCommand { search.close() }
     }
 }

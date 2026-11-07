@@ -48,6 +48,9 @@ cp "$ROOT/bin/petal-personal" "$APP/Contents/Resources/personal/petal-personal"
 mkdir -p "$APP/Contents/Resources/skill"
 cp "$ROOT/plugin/skill/SKILL.md" "$APP/Contents/Resources/skill/SKILL.md"
 
+# The commit it's built from: `petal personal` takes Petal's source from it (a release's tag has the same one).
+COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -60,12 +63,30 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
+  <key>PetalSourceCommit</key><string>$COMMIT</string>
   <key>CFBundleIconFile</key><string>Petal</string>
   <key>CFBundleIconName</key><string>Petal</string>
   <key>LSMinimumSystemVersion</key><string>26.0</string>
   <key>LSUIElement</key><true/>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
   <key>NSHumanReadableCopyright</key><string>Edgetr. MIT License.</string>
+  <key>NSServices</key>
+  <array>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>Ask Petal AI</string></dict>
+      <key>NSMessage</key><string>askPetal</string>
+      <key>NSPortName</key><string>Petal</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSRequiredContext</key><dict/>
+    </dict>
+    <dict>
+      <key>NSMenuItem</key><dict><key>default</key><string>Add to Petal AI</string></dict>
+      <key>NSMessage</key><string>addToPetal</string>
+      <key>NSPortName</key><string>Petal</string>
+      <key>NSSendTypes</key><array><string>public.utf8-plain-text</string><string>NSStringPboardType</string></array>
+      <key>NSRequiredContext</key><dict/>
+    </dict>
+  </array>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>

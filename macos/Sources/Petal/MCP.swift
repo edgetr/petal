@@ -69,7 +69,17 @@ enum MCP {
         init(_ text: String) { errorDescription = text }
     }
 
+    /// Inside the running Petal (set at its start): settings, modes and dock changes go through its Config.
+    nonisolated(unsafe) static var inPetal = false
+
+    /// The tools that change settings.json, modes.json or dock.json.
+    static let writeTools: Set<String> = ["petal_set_settings", "petal_reset_settings", "petal_set_dock", "petal_save_mode",
+                                          "petal_delete_mode", "petal_set_default_mode", "petal_import_recipe"]
+
     static func call(_ name: String, _ args: [String: Any]) throws -> Any {
+        // While Petal runs, a change is made by Petal itself, in order with every other change (two notes changing
+        // settings at once never undo each other); only without it is the file changed here, under a lock.
+        if !inPetal, writeTools.contains(name), let done = try viaPetal(name, args) { return done }
         switch name {
         case "petal_get_state":
             let settings = read(settingsFile) ?? [:]
@@ -93,8 +103,30 @@ enum MCP {
             let changes = args["settings"] as? [String: Any] ?? [:]
             let unknown = changes.keys.filter { schema[$0] == nil }.sorted()
             guard unknown.isEmpty else { throw Failure("Unknown settings: \(unknown.joined(separator: ", ")). Use petal_get_state to see them all.") }
+            // What Petal AI may do unasked, and what it may look at, are the person's to widen, never the AI's.
+            let current = read(settingsFile) ?? [:]
+            if let allowed = changes["aiAllowed"] as? [String] {
+                let had = Set(current["aiAllowed"] as? [String] ?? [])
+                if !Set(allowed).isSubset(of: had) { throw Failure("Only the person can allow more, with Always on Petal's card or in its settings.") }
+            }
+            if changes["claudeAccess"] as? String == "full", current["claudeAccess"] as? String != "full" {
+                throw Failure("Only the person can turn on Full access, in the chat's options or Petal's settings.")
+            }
+            if changes.keys.contains("aiNeverLook"), !(changes["aiNeverLook"] is [String]) {
+                throw Failure("aiNeverLook is a list of app ids.")
+            }
+            if changes.keys.contains("aiAllowed"), !(changes["aiAllowed"] is [String]) { throw Failure("aiAllowed is a list.") }
+            if let hidden = changes["aiNeverLook"] as? [String] {
+                let had = Set(current["aiNeverLook"] as? [String] ?? (schema["aiNeverLook"]?.first as? [String] ?? []))
+                if !had.isSubset(of: Set(hidden)) { throw Failure("Only the person can take an app off the private list, in Petal's settings.") }
+            }
             try update(settingsFile) { $0.merge(changes) { _, new in new } }
             return ["ok": true, "changed": changes]
+        case "petal_reset_settings" where (args["keys"] as? [String]).map({ $0.isEmpty || $0.contains("aiNeverLook") }) ?? true:
+            // Everything but the private list, which only the person shortens.
+            var keys = (args["keys"] as? [String]).flatMap { $0.isEmpty ? nil : $0 } ?? Array(schema.keys)
+            keys.removeAll { $0 == "aiNeverLook" }
+            return try call("petal_reset_settings", ["keys": keys.isEmpty ? ["__none__"] : keys])
         case "petal_reset_settings":
             let keys = args["keys"] as? [String] ?? []
             try update(settingsFile) { settings in
@@ -114,7 +146,12 @@ enum MCP {
             }
             if let use = args["use"] as? String {
                 guard ["petal", "macos"].contains(use) else { throw Failure("use must be petal or macos") }
-                done["use"] = petal("dock", use)
+                if inPetal, Thread.isMainThread {
+                    MainActor.assumeIsolated { PetalApp.shared.useDock(use) }
+                    done["use"] = "ok"
+                } else {
+                    done["use"] = petal("dock", use)
+                }
             }
             return done
         case "petal_save_mode":
@@ -167,15 +204,35 @@ enum MCP {
         case "petal_export_recipe":
             return ["path": try Recipe.export(path: args["path"] as? String, name: args["name"] as? String)]
         case "petal_import_recipe":
-            guard let path = args["path"] as? String, !path.isEmpty else { throw Failure("path is required") }
-            let plan = try Recipe.plan(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+            let plan = try importPlan(args)
             return try Recipe.apply(plan, look: args["look"] as? Bool ?? false)
         case "petal_suggestions":
             guard Insights.setting("activityLog") else { return ["suggestions": [], "note": "The activity history is off (activityLog)."] }
             return ["suggestions": Insights.suggestions().map(\.json)]
         case "petal_summary":
             guard Insights.setting("activityLog") else { return ["note": "The activity history is off (activityLog)."] }
-            return Insights.summary(lastWeek: false).json
+            // The last `days` (up to the 30 the history keeps), or from/to (YYYY-MM-DD); the last 7 days by default.
+            let format = DateFormatter()
+            format.dateFormat = "yyyy-MM-dd"
+            let days = min(30, max(1, (args["days"] as? NSNumber)?.intValue ?? 7))
+            let to = (args["to"] as? String).flatMap(format.date).map { $0.addingTimeInterval(86400) } ?? Date()
+            let from = (args["from"] as? String).flatMap(format.date) ?? to.addingTimeInterval(-Double(days) * 86400)
+            var json = Insights.summary(from: from, to: to, title: "From \(format.string(from: from))").json
+            json["byDay"] = Insights.byDay(from: from, to: to)
+            return json
+        case "petal_look", "petal_apps", "petal_windows", "petal_trash", "petal_remember", "petal_forget", "petal_memories", "petal_show", "petal_vault",
+             "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
+            // Petal itself does these, with its own permissions (and asks the person first where it should).
+            let json = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
+            // A sticky note's chat (PETAL_NOTE, set by Petal for its own chats) is answered about the note's window.
+            let note = ProcessInfo.processInfo.environment["PETAL_NOTE"] ?? ""
+            // A card asking the person first waits up to 120 s: this waits longer, so their answer always arrives.
+            let reply = petal(["assist", name, json] + (note.isEmpty ? [] : [note]), timeout: 150)
+            guard let data = reply.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) else {
+                throw Failure(reply.isEmpty ? "Petal isn't running" : reply)
+            }
+            if let error = (object as? [String: Any])?["error"] as? String { throw Failure(error) }
+            return object
         case "petal_reload":
             return ["ok": true, "note": petal("restart") + "; the Claude panel closes."]
         default:
@@ -185,24 +242,78 @@ enum MCP {
 
     // MARK: Files
 
+    /// The three files Petal keeps in memory: inside Petal, asked of it (its own changes may not be written yet).
+    private static func kept(_ url: URL) -> Bool { [settingsFile.path, modesFile.path, dockFile.path].contains(url.path) }
+
+    /// One of the write tools, done by the running Petal (["mcpCall", name, json]); nil when Petal isn't running
+    /// (or is one from before this), to be done here.
+    private static func viaPetal(_ name: String, _ args: [String: Any]) throws -> Any? {
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
+        let reply = petal(["mcpCall", name, json], timeout: 30)
+        if reply.hasPrefix("Petal isn't running") || reply.hasPrefix("unknown function") { return nil }
+        guard let object = try? JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any] else { throw Failure(reply) }
+        if let error = object["error"] as? String { throw Failure(error) }
+        return object["result"] ?? [:]
+    }
+
+    /// What the running Petal does for `viaPetal`: one line of JSON, the result or the error.
+    /// `plan`: a recipe import's plan, made off the main thread (`importPlan`).
+    static func answer(_ name: String, _ json: String, plan: Result<Recipe.Plan, Error>? = nil) -> String {
+        var reply: [String: Any]
+        do {
+            let args = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
+            if let plan {
+                reply = ["result": try Recipe.apply(plan.get(), look: args["look"] as? Bool ?? false)]
+            } else {
+                reply = ["result": try call(name, args)]
+            }
+        } catch {
+            reply = ["error": error.localizedDescription]
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: reply, options: [.withoutEscapingSlashes]))
+            ?? Data("{\"error\": \"Couldn't answer\"}".utf8)
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Runs `body` holding ~/.config/petal/.lock (shared with petal-mcp.py), so two processes changing the files
+    /// while Petal isn't running take turns: each reads, changes and writes inside it.
+    static func locked<T>(_ body: () throws -> T) throws -> T {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let fd = open(folder.appending(path: ".lock").path, O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0 else { return try body() }
+        defer { flock(fd, LOCK_UN); close(fd) }
+        flock(fd, LOCK_EX)
+        return try body()
+    }
+
     static func read(_ url: URL) -> [String: Any]? {
+        if inPetal, Thread.isMainThread, kept(url) { return MainActor.assumeIsolated { PetalApp.shared.config.root(of: url) } }
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
     /// Changes a file in place. A file that's there but isn't valid JSON is left alone, with an error for Claude.
-    static func update(_ url: URL, fallback: [String: Any] = [:], _ change: (inout [String: Any]) throws -> Void) throws {
-        var object: [String: Any]
-        if FileManager.default.fileExists(atPath: url.path) {
-            guard let parsed = read(url) else { throw Failure("\(url.lastPathComponent) isn't valid JSON; fix it first") }
-            object = parsed
-        } else {
-            object = fallback
+    /// Inside Petal, settings, modes and dock changes go through its Config; elsewhere every change is made under
+    /// the lock, read to written, and written whole (renamed into place).
+    static func update(_ url: URL, fallback: [String: Any] = [:], _ change: @escaping (inout [String: Any]) throws -> Void) throws {
+        if inPetal, Thread.isMainThread, kept(url) {
+            return try MainActor.assumeIsolated { try PetalApp.shared.config.change(url, fallback: fallback, change) }
         }
-        try change(&object)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-        try (data + Data("\n".utf8)).write(to: url, options: .atomic)
+        try locked {
+            var object: [String: Any]
+            if FileManager.default.fileExists(atPath: url.path) {
+                guard let data = try? Data(contentsOf: url), let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    throw Failure("\(url.lastPathComponent) isn't valid JSON; fix it first")
+                }
+                object = parsed
+            } else {
+                object = fallback
+            }
+            try change(&object)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            try (data + Data("\n".utf8)).write(to: url, options: .atomic)
+        }
     }
 
     // MARK: The running Petal
@@ -210,10 +321,16 @@ enum MCP {
     /// Asks the running Petal over its socket, as petal-mcp.py does.
     static func petal(_ args: String...) -> String { petal(args) }
 
-    static func petal(_ args: [String]) -> String {
+    /// `timeout`: seconds to wait for the answer (nil waits as long as it takes). Running out of time says so; it's
+    /// never "Petal isn't running".
+    static func petal(_ args: [String], timeout: Int? = nil) -> String {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return "Petal isn't running" }
         defer { close(fd) }
+        if let timeout {
+            var limit = timeval(tv_sec: timeout, tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &limit, socklen_t(MemoryLayout<timeval>.size))
+        }
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         let bytes = Array(socket.utf8)
@@ -228,6 +345,7 @@ enum MCP {
         var buffer = [UInt8](repeating: 0, count: 4096)
         while true {
             let count = Darwin.read(fd, &buffer, buffer.count)
+            if count < 0, errno == EAGAIN || errno == EWOULDBLOCK { return "Petal didn't answer in time" }
             if count <= 0 { break }
             reply.append(buffer, count: count)
             if reply.last == 0x0A { break }
@@ -239,6 +357,16 @@ enum MCP {
     static func apps(matching query: String) -> [[String: String]] {
         installed().filter { query.isEmpty || "\($0.id) \($0.name)".localizedCaseInsensitiveContains(query) }
             .map { ["id": $0.id, "name": $0.name] }
+    }
+
+    /// What importing the recipe in `args` would add (reads it and finds its apps: off the main thread in Petal).
+    static func importPlan(_ args: [String: Any]) throws -> Recipe.Plan {
+        guard let path = args["path"] as? String, !path.isEmpty else { throw Failure("path is required") }
+        return try Recipe.plan(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+    }
+
+    static func importPlan(_ json: String) throws -> Recipe.Plan {
+        try importPlan((try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:])
     }
 
     /// Every app in the usual places: bundle id, name, and where it is.

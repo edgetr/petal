@@ -112,7 +112,7 @@ final class FocusGuard {
 
     /// Steps 1–4 for what's in front.
     func evaluate(_ front: Front, mode: Mode, desktop: Int, asked: Bool = false) {
-        if mode.isDistracting { return ok(front.bundleID) }
+        if mode.isDistracting || mode.isEverything { return ok(front.bundleID) }
         let owners = Self.owners(of: front, in: config.modes)
         if owners.contains(where: { $0.id == mode.id }) { return ok(front.bundleID) }
         if let owner = owners.first(where: \.isDistracting) ?? owners.first {
@@ -124,6 +124,8 @@ final class FocusGuard {
         // Nothing knows it: the AI, once ever per site or app.
         // Sorted before, but no mode fit (or its mode has since let it go): leave it be.
         if sorted[front.key] != nil { return ok(front.bundleID) }
+        // An app kept private is never described to the AI: left as it is.
+        if PetalApp.shared.assist.neverLook(front.bundleID) { return ok(front.bundleID) }
         guard !asked, brain.enabled, !asking.contains(front.key), (failed[front.key].map { Date().timeIntervalSince($0) > 600 } ?? true) else { return }
         asking.insert(front.key)
         let what = front.domain.map { "\(front.name) tab: \($0)" } ?? (front.isBrowser ? "\(front.name) tab" : front.name)

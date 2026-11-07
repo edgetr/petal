@@ -1,9 +1,31 @@
 import AppKit
 import ApplicationServices
 
+/// A request counter any thread can bump or check at once (behind a lock): a newer request makes older ones stand
+/// down, even while they wait on an app that's slow to answer.
+final class Generation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var newest = 0
+
+    func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        newest += 1
+        return newest
+    }
+
+    func cancel() { _ = next() }
+
+    func current(_ request: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return newest == request
+    }
+}
+
 /// An app's window, as Accessibility sees it.
 struct AppWindow: Identifiable, Equatable {
-    let id: String          // pid and position in the app's window list, stable while the window stays
+    let id: String          // pid and the window server's number for it (else its place in the app's list)
     let pid: pid_t
     let title: String
     let minimized: Bool
@@ -20,7 +42,7 @@ struct AppWindow: Identifiable, Equatable {
 /// (System Settings > Privacy & Security > Accessibility); until then these answer empty and the dock still works.
 @MainActor
 enum Windows {
-    static var trusted: Bool { AXIsProcessTrusted() }
+    nonisolated static var trusted: Bool { AXIsProcessTrusted() }
 
     /// Every Accessibility call gives up after 0.3 s, so a hung app can't hang the dock. Called once at start.
     static func limitWaiting() {
@@ -43,16 +65,19 @@ enum Windows {
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
-    static func windows(of pid: pid_t) -> [AppWindow] {
+    nonisolated static func windows(of pid: pid_t) -> [AppWindow] {
         guard trusted else { return [] }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.3)   // a hung app mustn't hang the dock
         guard let list: [AXUIElement] = value(app, kAXWindowsAttribute) else { return [] }
         var result: [AppWindow] = []
         for (index, window) in list.enumerated() {
-            guard let role: String = value(window, kAXSubroleAttribute), role == kAXStandardWindowSubrole as String else { continue }
-            let title: String = value(window, kAXTitleAttribute) ?? ""
             let minimized: Bool = value(window, kAXMinimizedAttribute) ?? false
+            // Only the person's own windows, not dialogs or palettes. A minimized window calls itself a dialog
+            // (macOS 26 and later), so minimized ones count whatever they say.
+            let role: String? = value(window, kAXSubroleAttribute)
+            guard role == kAXStandardWindowSubrole as String || minimized else { continue }
+            let title: String = value(window, kAXTitleAttribute) ?? ""
             var frame = CGRect.zero
             if let position: AXValue = value(window, kAXPositionAttribute), let size: AXValue = value(window, kAXSizeAttribute) {
                 var point = CGPoint.zero, extent = CGSize.zero
@@ -60,18 +85,75 @@ enum Windows {
                 AXValueGetValue(size, .cgSize, &extent)
                 frame = CGRect(origin: point, size: extent)
             }
-            result.append(AppWindow(id: "\(pid)-\(index)", pid: pid, title: title, minimized: minimized,
+            // The window server's number stays with the window as others open, close and minimize around it.
+            let key = id(of: window).map { "\(pid)-w\($0)" } ?? "\(pid)-\(index)"
+            result.append(AppWindow(id: key, pid: pid, title: title, minimized: minimized,
                                     frame: frame, element: window))
         }
         return result
     }
 
     /// Brings one window forward: unminimizes it, raises it, and makes its app the active one. The pointer stays.
-    static func focus(_ window: AppWindow) {
-        if window.minimized { AXUIElementSetAttributeValue(window.element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
-        AXUIElementPerformAction(window.element, kAXRaiseAction as CFString)
-        AXUIElementSetAttributeValue(window.element, kAXMainAttribute as CFString, kCFBooleanTrue)
-        if let app = NSRunningApplication(processIdentifier: window.pid) { bringForward(app) }
+    /// Brings one window to the front. A window on this Desktop comes forward through Accessibility, at once; one
+    /// elsewhere (another Desktop, minimized) goes through Launch Services, which also switches Desktop.
+    ///
+    /// This window is raised last, after its app comes forward, and once more a moment later: bringing an app
+    /// forward through Launch Services asks it to reopen, and an app like Zoom answers by showing its main window
+    /// over the one asked for.
+    /// Each focus request; a later one makes an earlier one stand down, its delayed retries included. A counter
+    /// behind a lock, so a new request reaches it at once, never waiting behind an app that's slow to answer.
+    nonisolated static let focusing = Generation()
+    /// Where focusing happens: every Accessibility call and Launch Services, never on the dock's main thread.
+    nonisolated static let focusQueue = DispatchQueue(label: "petal.windows.focus", qos: .userInitiated)
+
+    static func focus(_ window: AppWindow, onScreen: Bool = false) {
+        let ticket = focusing.next()
+        let element = window.element, pid = window.pid, minimized = window.minimized
+        let app = NSRunningApplication(processIdentifier: window.pid)
+        let url = app?.bundleURL, hidden = app?.isHidden ?? false
+        focusQueue.async {
+            guard focusing.current(ticket) else { return }
+            if minimized { AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) }
+            let raise = {
+                guard focusing.current(ticket) else { return }
+                AXUIElementPerformAction(element, kAXRaiseAction as CFString)
+                AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue)
+                AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            }
+            let bring = {
+                guard focusing.current(ticket) else { return }
+                if let url {
+                    let configuration = NSWorkspace.OpenConfiguration()
+                    configuration.activates = true
+                    configuration.addsToRecentItems = false
+                    NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+                } else {
+                    DispatchQueue.main.async { app?.activate() }
+                }
+            }
+            raise()
+            guard app != nil else { return }
+            var forward = false
+            if onScreen && !minimized && !hidden && focusing.current(ticket) {
+                let element = AXUIElementCreateApplication(pid)
+                AXUIElementSetMessagingTimeout(element, 0.3)
+                forward = AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
+            }
+            if !forward { bring() }
+            raise()
+            // Some apps (Chromium browsers) say yes to coming forward through Accessibility and don't: if it isn't
+            // in front a moment later, Launch Services brings it, which always works.
+            if forward {
+                focusQueue.asyncAfter(deadline: .now() + 0.15) {
+                    guard NSWorkspace.shared.frontmostApplication?.processIdentifier != pid else { return }
+                    bring()
+                    focusQueue.asyncAfter(deadline: .now() + 0.2) { raise() }
+                }
+            }
+            for delay in forward ? [0.12] : [0.15, 0.4] {
+                focusQueue.asyncAfter(deadline: .now() + delay) { raise() }
+            }
+        }
     }
 
     /// Moves and resizes a window (top-left origin).
@@ -85,13 +167,21 @@ enum Windows {
         }
     }
 
+    /// Minimizing and closing wait on the app (a busy one for seconds): off the main thread, never in the way of
+    /// the focus queue.
     static func minimize(_ window: AppWindow) {
-        AXUIElementSetAttributeValue(window.element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+        let element = window.element
+        DispatchQueue.global(qos: .userInitiated).async {
+            AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue)
+        }
     }
 
     static func close(_ window: AppWindow) {
-        guard let button: AXUIElement = value(window.element, kAXCloseButtonAttribute) else { return }
-        AXUIElementPerformAction(button, kAXPressAction as CFString)
+        let element = window.element
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let button: AXUIElement = value(element, kAXCloseButtonAttribute) else { return }
+            AXUIElementPerformAction(button, kAXPressAction as CFString)
+        }
     }
 
     /// The title of the front window of the app in front: a browser's is its tab's title.
@@ -103,7 +193,35 @@ enum Windows {
         return value(window, kAXTitleAttribute) ?? ""
     }
 
-    static func value<T>(_ element: AXUIElement, _ attribute: String) -> T? {
+    /// Presses the app's menu item whose shortcut is ⌘ plus `key` (no other modifiers), the way choosing it from the
+    /// menu would. Returns false when there's none, or no Accessibility. Off the main thread.
+    nonisolated static func pressMenuItem(pid: pid_t, key: String) -> Bool {
+        guard trusted else { return false }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.5)
+        guard let bar: AXUIElement = value(app, kAXMenuBarAttribute),
+              let menus: [AXUIElement] = value(bar, kAXChildrenAttribute) else { return false }
+        func find(_ element: AXUIElement, depth: Int) -> AXUIElement? {
+            guard depth < 4, let children: [AXUIElement] = value(element, kAXChildrenAttribute) else { return nil }
+            for child in children {
+                if let char: String = value(child, kAXMenuItemCmdCharAttribute), char.uppercased() == key,
+                   let modifiers: Int = value(child, kAXMenuItemCmdModifiersAttribute), modifiers == 0,
+                   (value(child, kAXEnabledAttribute) as Bool?) != false {
+                    return child
+                }
+                if let found = find(child, depth: depth + 1) { return found }
+            }
+            return nil
+        }
+        for menu in menus.dropFirst() {   // the first is the app's own menu (About, Quit)
+            if let item = find(menu, depth: 0) {
+                return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
+            }
+        }
+        return false
+    }
+
+    nonisolated static func value<T>(_ element: AXUIElement, _ attribute: String) -> T? {
         var raw: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) == .success, let raw else { return nil }
         return raw as? T
@@ -137,15 +255,15 @@ extension Windows {
     /// `_AXUIElementGetWindow`, the private call every window manager uses to tie an Accessibility window to the
     /// window server's id. Looked up at run time, so a macOS without it leaves per-mode windows and tiling idle
     /// instead of failing to launch.
-    private static let getWindow: GetWindow? = {
+    nonisolated private static let getWindow: GetWindow? = {
         guard let pointer = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow") else { return nil }   // RTLD_DEFAULT
         return unsafeBitCast(pointer, to: GetWindow.self)
     }()
 
-    static var canManage: Bool { getWindow != nil }
+    nonisolated static var canManage: Bool { getWindow != nil }
 
     /// The window server's id of an Accessibility window.
-    static func id(of element: AXUIElement) -> CGWindowID? {
+    nonisolated static func id(of element: AXUIElement) -> CGWindowID? {
         guard let getWindow else { return nil }
         var id: CGWindowID = 0
         return getWindow(element, &id) == .success && id != 0 ? id : nil
@@ -203,7 +321,7 @@ extension Windows {
     }
 
     /// A window's frame now (top-left origin), asked of the app itself.
-    static func frame(of element: AXUIElement) -> CGRect? {
+    nonisolated static func frame(of element: AXUIElement) -> CGRect? {
         guard let position: AXValue = value(element, kAXPositionAttribute), let size: AXValue = value(element, kAXSizeAttribute) else { return nil }
         var point = CGPoint.zero, extent = CGSize.zero
         AXValueGetValue(position, .cgPoint, &point)
@@ -228,7 +346,7 @@ extension Windows {
     /// enhanced interface (for VoiceOver and the like) animate every move, so it's off for the moment of the move, as
     /// Rectangle and AeroSpace do. Returns the frame the app accepted.
     @discardableResult
-    static func place(_ element: AXUIElement, pid: pid_t, _ frame: CGRect, size: Bool = true) -> CGRect? {
+    nonisolated static func place(_ element: AXUIElement, pid: pid_t, _ frame: CGRect, size: Bool = true) -> CGRect? {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.3)
         let enhanced: Bool = value(app, "AXEnhancedUserInterface") ?? false
@@ -275,22 +393,27 @@ extension Windows {
         guard PetalApp.started else { return visible }
         let app = PetalApp.shared, config = app.config
         guard app.docks.shown, !config.autoHide, !respectClear || config.keepWindowsClear else { return visible }
-        // The same strip as Dock.swift's keepWindowsClear keeps.
-        let gap = config.number("dockMargin") >= 0 ? config.number("dockMargin") : 4
-        let icon = max(16, config.number("iconSize"))
-        let inset = config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5
-        let reserve = gap * 2 + 2 + icon + inset * 2 + 8
+        // The same strip as Dock.swift's keepWindowsClear keeps: up to the dock's glass.
+        let top = NSScreen.screens.first?.frame.maxY ?? 0
+        let screen = NSScreen.screens.first { ScreenArea.toAX($0.frame, mainTop: top).equalTo(frame, within: 1) }
+        guard let reserve = app.docks.reach(on: screen) else { return visible }
         return ScreenArea.usable(visible: visible, screen: frame, position: config.position, reserve: reserve)
     }
 }
 
-/// What windows do, for Parking and Tiling: macOS tells other apps nothing about windows opening, closing, moving or
-/// minimizing, except through an Accessibility observer on each app. Observers run only while something listens.
+/// What windows do, for the dock, Parking and Tiling: macOS tells other apps nothing about windows opening, closing,
+/// moving or minimizing, except through an Accessibility observer on each app. Observers run only while something
+/// listens and Petal may use Accessibility, and start or stop when that permission changes, without a restart. They
+/// live on a thread of their own (`AXWatcher`): adding one asks the app, and a hung app must never stall the dock.
+/// Listeners hear about them on the main thread.
 @MainActor
 final class WindowEvents {
     static let shared = WindowEvents()
 
-    enum Kind { case created, closed, focused, minimized, unminimized, moved, resized, activated, launched, quit, hidden, shown, space, screens }
+    /// `missionControl`: Mission Control (or App Exposé) opened; `missionControlEnded`: it closed. macOS's Dock says
+    /// so through Accessibility.
+    enum Kind { case created, closed, focused, minimized, unminimized, moved, resized, activated, launched, quit, hidden, shown, space, screens,
+                     missionControl, missionControlEnded }
     struct Event {
         let kind: Kind
         let pid: pid_t
@@ -299,34 +422,38 @@ final class WindowEvents {
     }
 
     private var listeners: [String: (Event) -> Void] = [:]
-    private var observers: [pid_t: AXObserver] = [:]
-    private var windowIDs: [AXUIElement: CGWindowID] = [:]
     private var tokens: [NSObjectProtocol] = []
-
-    private static let appNotifications = [kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification,
-                                           kAXApplicationHiddenNotification, kAXApplicationShownNotification]
-    private static let windowNotifications = [kAXUIElementDestroyedNotification, kAXMovedNotification, kAXResizedNotification,
-                                              kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
+    /// The observers are running: something listens, and Petal may use Accessibility.
+    private(set) var live = false
 
     func listen(_ key: String, _ handler: @escaping (Event) -> Void) {
-        let starting = listeners.isEmpty
         listeners[key] = handler
-        if starting { start() }
+        checkPermission()
     }
 
     func stopListening(_ key: String) {
         listeners[key] = nil
-        if listeners.isEmpty { stop() }
+        checkPermission()
     }
 
-    private func send(_ kind: Kind, pid: pid_t, window: CGWindowID? = nil, element: AXUIElement? = nil) {
-        let event = Event(kind: kind, pid: pid, window: window, element: element)
+    /// Starts the observers once Accessibility is allowed and someone listens, and stops them when it's taken away or
+    /// nobody does. The dock asks on its timer, so permission granted in System Settings takes effect within a second.
+    func checkPermission() {
+        let wanted = !listeners.isEmpty && Windows.trusted
+        if wanted != live { wanted ? start() : stop() }
+        if live { AXWatcher.shared.watchDock() }   // after Petal restarts macOS's Dock, for Mission Control
+    }
+
+    fileprivate func send(_ event: Event) {
+        guard live else { return }   // one that left the observers' thread just before they stopped
         for handler in listeners.values { handler(event) }
     }
 
+    private func send(_ kind: Kind, pid: pid_t) { send(Event(kind: kind, pid: pid, window: nil, element: nil)) }
+
     private func start() {
-        guard Windows.trusted else { return }
-        for app in NSWorkspace.shared.runningApplications { observe(app) }
+        live = true
+        AXWatcher.shared.start()
         let center = NSWorkspace.shared.notificationCenter
         func on(_ name: Notification.Name, _ body: @escaping @MainActor (NSRunningApplication?) -> Void) {
             tokens.append(center.addObserver(forName: name, object: nil, queue: .main) { note in
@@ -336,24 +463,24 @@ final class WindowEvents {
         }
         on(NSWorkspace.didLaunchApplicationNotification) { [weak self] app in
             guard let self, let app else { return }
-            observe(app)
+            AXWatcher.shared.observe(app)
             send(.launched, pid: app.processIdentifier)
         }
         on(NSWorkspace.didTerminateApplicationNotification) { [weak self] app in
             guard let self, let app else { return }
-            forget(app.processIdentifier)
+            AXWatcher.shared.forget(app.processIdentifier)
+            Windows.forget(pid: app.processIdentifier)
             send(.quit, pid: app.processIdentifier)
         }
         on(NSWorkspace.didActivateApplicationNotification) { [weak self] app in
             guard let self, let app else { return }
-            observe(app)   // an app that wasn't ready when it launched
+            AXWatcher.shared.observe(app)   // an app that wasn't ready when it launched
             send(.activated, pid: app.processIdentifier)
         }
         on(NSWorkspace.activeSpaceDidChangeNotification) { [weak self] _ in
-            guard let self else { return }
             // Accessibility lists only the windows of the Desktops showing: those of the one just shown are new to it.
-            for pid in observers.keys { watchAll(pid) }
-            send(.space, pid: 0)
+            AXWatcher.shared.watchAll()
+            self?.send(.space, pid: 0)
         }
         tokens.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil,
                                                              queue: .main) { [weak self] _ in
@@ -362,48 +489,159 @@ final class WindowEvents {
     }
 
     private func stop() {
+        live = false
         for token in tokens {
             NSWorkspace.shared.notificationCenter.removeObserver(token)
             NotificationCenter.default.removeObserver(token)
         }
         tokens = []
-        for observer in observers.values {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        AXWatcher.shared.stop()
+    }
+}
+
+/// Every app's Accessibility observer, on a thread of its own with its own run loop. Adding an observer, listing an
+/// app's windows and asking a window's id all wait on the app (up to 0.3 s each, for one that hangs), so none of it
+/// happens on the main thread. Everything below runs on this thread; WindowEvents calls in through `perform`.
+final class AXWatcher: @unchecked Sendable {
+    static let shared = AXWatcher()
+
+    private var runLoop: CFRunLoop!
+    private var observers: [pid_t: AXObserver] = [:]
+    /// macOS's Dock (0 until it's watched), watched only for Mission Control, never for its windows.
+    private var dockPID: pid_t = 0
+    private var windowIDs: [AXUIElement: CGWindowID] = [:]
+    private var running = false
+    private var generation = 0   // retries from before a stop are dropped
+
+    /// On the app itself: windows opening, focus, hiding, and (as well as on each window, for one not watched yet)
+    /// minimizing, so a minimized window reaches the dock even if its own observer was never added.
+    private static let appNotifications = [kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification,
+                                           kAXApplicationHiddenNotification, kAXApplicationShownNotification,
+                                           kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
+    private static let windowNotifications = [kAXUIElementDestroyedNotification, kAXMovedNotification, kAXResizedNotification,
+                                              kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
+    /// On macOS's Dock, which draws Mission Control: it opening (all windows, or one app's), and closing. Showing the
+    /// desktop counts as closing, since the Dock doesn't come out for it. (yabai watches the same four.)
+    private static let dockID = "com.apple.dock"
+    private static let missionControlOpened = ["AXExposeShowAllWindows", "AXExposeShowFrontWindows"]
+    private static let missionControlClosed = ["AXExposeExit", "AXExposeShowDesktop"]
+
+    private init() {
+        let ready = DispatchSemaphore(value: 0)
+        let thread = Thread { [unowned self] in
+            runLoop = CFRunLoopGetCurrent()
+            RunLoop.current.add(NSMachPort(), forMode: .default)   // keeps the run loop waiting before any observer exists
+            ready.signal()
+            while true { RunLoop.current.run(mode: .default, before: .distantFuture) }
         }
-        observers = [:]
-        windowIDs = [:]
+        thread.name = "petal.window-events"
+        thread.qualityOfService = .userInitiated
+        thread.start()
+        ready.wait()
     }
 
-    private func observe(_ app: NSRunningApplication, attempt: Int = 0) {
+    private func perform(_ block: @escaping () -> Void) {
+        CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue, block)
+        CFRunLoopWakeUp(runLoop)
+    }
+
+    // MARK: Called from the main thread
+
+    func start() {
+        perform { [self] in
+            running = true
+            generation += 1
+            for app in NSWorkspace.shared.runningApplications { observe(app, attempt: 0, generation: generation) }
+        }
+    }
+
+    func stop() {
+        perform { [self] in
+            running = false
+            generation += 1
+            for observer in observers.values {
+                CFRunLoopRemoveSource(runLoop, AXObserverGetRunLoopSource(observer), .defaultMode)
+            }
+            observers = [:]
+            windowIDs = [:]
+            dockPID = 0
+        }
+    }
+
+    func observe(_ app: NSRunningApplication) {
+        perform { [self] in observe(app, attempt: 0, generation: generation) }
+    }
+
+    /// Watches macOS's Dock again if it isn't watched: Petal restarts it when it hides it, and macOS may not say
+    /// when it's back. Asks Launch Services, so it's on this thread.
+    func watchDock() {
+        perform { [self] in
+            guard running, dockPID == 0,
+                  let dock = NSRunningApplication.runningApplications(withBundleIdentifier: Self.dockID).first else { return }
+            observe(dock, attempt: 0, generation: generation)
+        }
+    }
+
+    func forget(_ pid: pid_t) {
+        perform { [self] in
+            if let observer = observers.removeValue(forKey: pid) {
+                CFRunLoopRemoveSource(runLoop, AXObserverGetRunLoopSource(observer), .defaultMode)
+            }
+            if pid == dockPID { dockPID = 0 }
+            windowIDs = windowIDs.filter { element, _ in
+                var owner: pid_t = 0
+                return AXUIElementGetPid(element, &owner) == .success && owner != pid
+            }
+        }
+    }
+
+    /// Watches every window not watched yet, of every app: after a Desktop change, which brings windows into view.
+    func watchAll() {
+        perform { [self] in for pid in Array(observers.keys) { watchAll(pid) } }
+    }
+
+    /// How many apps and windows are being watched (`Petal --bench`). Waits for this thread.
+    func counts() -> (apps: Int, windows: Int) {
+        var result = (0, 0)
+        let done = DispatchSemaphore(value: 0)
+        perform { [self] in result = (observers.count, windowIDs.count); done.signal() }
+        done.wait()
+        return result
+    }
+
+    // MARK: On this thread
+
+    private func observe(_ app: NSRunningApplication, attempt: Int, generation: Int) {
         let pid = app.processIdentifier
-        guard observers[pid] == nil, app.activationPolicy == .regular, pid != ProcessInfo.processInfo.processIdentifier,
-              !app.isTerminated else { return }
+        let isDock = app.bundleIdentifier == Self.dockID
+        guard running, generation == self.generation, observers[pid] == nil, app.activationPolicy == .regular || isDock,
+              pid != ProcessInfo.processInfo.processIdentifier, !app.isTerminated else { return }
         var created: AXObserver?
         let callback: AXObserverCallback = { _, element, notification, _ in
-            let name = notification as String
-            MainActor.assumeIsolated { WindowEvents.shared.received(name, element) }
+            AXWatcher.shared.received(notification as String, element)
         }
         guard AXObserverCreate(pid, callback, &created) == .success, let observer = created else { return }
         let element = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(element, 0.3)
         var added = 0
-        for name in Self.appNotifications where AXObserverAddNotification(observer, element, name as CFString, nil) == .success { added += 1 }
+        let names = isDock ? Self.missionControlOpened + Self.missionControlClosed : Self.appNotifications
+        for name in names where AXObserverAddNotification(observer, element, name as CFString, nil) == .success { added += 1 }
         guard added > 0 else {
             // An app that has only just launched may not answer yet: try again a few times.
             if attempt < 5 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5 * Double(attempt + 1)) { [weak self] in
-                    guard let self, !self.listeners.isEmpty else { return }
-                    self.observe(app, attempt: attempt + 1)
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5 * Double(attempt + 1)) { [self] in
+                    perform { [self] in observe(app, attempt: attempt + 1, generation: generation) }
                 }
             }
             return
         }
-        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        CFRunLoopAddSource(runLoop, AXObserverGetRunLoopSource(observer), .defaultMode)
         observers[pid] = observer
-        watchAll(pid)
+        if isDock { dockPID = pid } else { watchAll(pid) }
     }
 
     private func watchAll(_ pid: pid_t) {
+        guard pid != dockPID else { return }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.3)
         for window in Windows.value(app, kAXWindowsAttribute) as [AXUIElement]? ?? [] where windowIDs[window] == nil {
@@ -414,42 +652,42 @@ final class WindowEvents {
     private func watch(_ window: AXUIElement, pid: pid_t) {
         guard let observer = observers[pid], let id = Windows.id(of: window) else { return }
         windowIDs[window] = id
-        Windows.remember(window, as: id)
+        DispatchQueue.main.async { MainActor.assumeIsolated { Windows.remember(window, as: id) } }
         for name in Self.windowNotifications { AXObserverAddNotification(observer, window, name as CFString, nil) }
     }
 
-    private func forget(_ pid: pid_t) {
-        if let observer = observers.removeValue(forKey: pid) {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
-        }
-        windowIDs = windowIDs.filter { element, _ in
-            var owner: pid_t = 0
-            return AXUIElementGetPid(element, &owner) == .success && owner != pid
-        }
-        Windows.forget(pid: pid)
-    }
-
     private func received(_ name: String, _ element: AXUIElement) {
+        guard running else { return }
         var pid: pid_t = 0
         AXUIElementGetPid(element, &pid)
+        func send(_ kind: WindowEvents.Kind, window: CGWindowID? = nil, element: AXUIElement? = nil) {
+            let event = WindowEvents.Event(kind: kind, pid: pid, window: window, element: element)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if kind == .closed, let window { Windows.forget(window) }
+                    WindowEvents.shared.send(event)
+                }
+            }
+        }
         switch name {
         case kAXWindowCreatedNotification:
             watch(element, pid: pid)
-            send(.created, pid: pid, window: windowIDs[element], element: element)
+            send(.created, window: windowIDs[element], element: element)
         case kAXUIElementDestroyedNotification:
             // A closed window can't be asked its id any more: it's the one remembered for this element.
             guard let id = windowIDs.removeValue(forKey: element) else { return }
-            Windows.forget(id)
-            send(.closed, pid: pid, window: id)
+            send(.closed, window: id)
         case kAXFocusedWindowChangedNotification:
             if windowIDs[element] == nil { watch(element, pid: pid) }
-            send(.focused, pid: pid, window: windowIDs[element], element: element)
-        case kAXWindowMiniaturizedNotification: send(.minimized, pid: pid, window: windowIDs[element], element: element)
-        case kAXWindowDeminiaturizedNotification: send(.unminimized, pid: pid, window: windowIDs[element], element: element)
-        case kAXMovedNotification: send(.moved, pid: pid, window: windowIDs[element], element: element)
-        case kAXResizedNotification: send(.resized, pid: pid, window: windowIDs[element], element: element)
-        case kAXApplicationHiddenNotification: send(.hidden, pid: pid)
-        case kAXApplicationShownNotification: send(.shown, pid: pid)
+            send(.focused, window: windowIDs[element], element: element)
+        case kAXWindowMiniaturizedNotification: send(.minimized, window: windowIDs[element], element: element)
+        case kAXWindowDeminiaturizedNotification: send(.unminimized, window: windowIDs[element], element: element)
+        case kAXMovedNotification: send(.moved, window: windowIDs[element], element: element)
+        case kAXResizedNotification: send(.resized, window: windowIDs[element], element: element)
+        case kAXApplicationHiddenNotification: send(.hidden)
+        case kAXApplicationShownNotification: send(.shown)
+        case _ where Self.missionControlOpened.contains(name): send(.missionControl)
+        case _ where Self.missionControlClosed.contains(name): send(.missionControlEnded)
         default: break
         }
     }

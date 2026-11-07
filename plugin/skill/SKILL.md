@@ -19,9 +19,20 @@ Use, in this order:
 
 1. Petal's MCP tools, when the `petal` server is connected: `petal_get_state` first, then `petal_set_settings`,
    `petal_set_dock`, `petal_save_mode`, `petal_delete_mode`, `petal_set_default_mode`, `petal_switch_mode`,
-   `petal_list_apps`, `petal_reload`. Changes apply instantly. `petal_export_recipe` / `petal_import_recipe` share
-   a dock as a `.petal` file (modes, apps by name, look; nothing personal) or add one someone shared (`look: true`
-   also takes its look; say what it adds before importing); `petal_suggestions` and `petal_summary` read the
+   `petal_list_apps`, `petal_reload`, `petal_reset_settings` (every setting back to its default: ask first).
+   On macOS also Petal AI's tools, done by the running Petal with its own permissions: `petal_look` (what's in front:
+   app, window, browser tab address, selected text; a screenshot when asked), `petal_apps`, `petal_windows`,
+   `petal_trash` (the Trash, never deleting; quitting, closing and trashing ask the user first), and memory:
+   `petal_remember`, `petal_forget`, `petal_memories` (everywhere or per mode); and routines, what Petal does by
+   itself from the user's own words ("keep my Downloads tidy", "when I open Figma, switch to Design"):
+   `petal_routine_save` (their words, plus the trigger and actions you fill in), `petal_routines`,
+   `petal_routine_run` (`dryRun: true` shows what it would do with the files there now), `petal_routine_undo` (puts
+   moved files back), `petal_routine_delete`. Routines only move files, never delete them.
+   In Petal's own panel each chat is a sticky note (`aiNotes`): stuck to the window it was opened on, so
+   `petal_look` looks at that window even after the user moves on (`front: true` for what's in front now).
+   Changes apply instantly. `petal_export_recipe` / `petal_import_recipe` share a dock as a `.petal` file (modes,
+   apps by name, look; nothing personal) or add one someone shared (`look: true` also takes its look; say what it
+   adds before importing); `petal_suggestions` and `petal_summary` read the
    private activity history.
 2. The `petal` command: `petal get` (everything, with each setting's help), `petal set <key> <json value>`,
    `petal mode <id>`, `petal current`, `petal modes`, `petal dock petal|macos` (macOS), `petal restart`,
@@ -30,7 +41,7 @@ Use, in this order:
    `petal help` lists them all.
 3. The files in `~/.config/petal/`; Petal reloads them within a second:
 
-- `settings.json`: settings; `petal_get_state` (or `petal doctor --json`) lists every key with its default and help.
+- `settings.json`: settings; `petal_get_state` (or `petal get`) lists every key with its default and help.
 - `modes.json`: `{"defaultMode", "workspaces": {"<n>": "<mode id>"}, "modes": [{"id", "name", "icon", "color",
   "about", "apps", "sites", "distracting", "focusDelay", "hold", "allow"}]}`. On Omarchy apps are desktop ids and icons
   Nerd Font glyphs; on macOS apps are bundle ids, icons SF Symbol names, and workspace numbers are Desktop numbers. An
@@ -41,6 +52,8 @@ Use, in this order:
 - `dock.json` (macOS): `position` (bottom, left, right), `autoHide`, `dock` (petal or macos), `keepWindowsClear`.
   On Omarchy, position and auto-hide live in Omarchy's shell config (`omarchy-dock position|autohide`).
 - `instructions.md`: the user's own notes for the AI in Petal's panel.
+- `routines.json` (macOS): the routines; change them with the routine tools rather than by hand. What they did is in
+  `~/Library/Application Support/Petal/routines-log.json`.
 
 Keep the JSON valid: Petal won't overwrite a file it can't read, and won't apply it either.
 
@@ -74,12 +87,15 @@ More that shapes a dock:
    Ask the user before reporting; never paste personal data into an issue.
 
 On macOS `petal` may not be on the PATH: the same commands are `/Applications/Petal.app/Contents/MacOS/Petal doctor`
-and `… report`. Logs: `petal logs` (Omarchy's shell log; on macOS the system log for Petal).
+and `… report`. Logs: `petal logs` (Omarchy's shell log; on macOS Petal's own messages in the system log, the last
+30 minutes, or `petal logs <minutes>`).
 
 ## Things to know
 
 - Petal's AI is optional and uses the user's own Claude Code or Codex (`aiProviders`, `chatProvider`). Its usage
-  counts toward the user's own plan.
+  counts toward the user's own plan, or on macOS toward an API key (`claudeAuth` / `codexAuth`: `subscription` or
+  `api`). The key is pasted in Settings › AI and kept in the Keychain; only Petal's own runs use it. Never ask for a
+  key, put one in a file or the environment, or change `~/.claude`, `~/.codex` or their logins to switch.
 - On macOS, Petal hides macOS's Dock while it runs and gives it back on quit; `petal restore-dock` gives it back by
   hand. Permissions it may need: Accessibility (window lists, badges, focus cards, per-mode windows, tiling), Screen
   Recording (previews), Automation for each browser (reading and closing a tab), and Full Disk Access (reading

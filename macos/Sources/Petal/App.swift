@@ -32,6 +32,8 @@ final class PetalApp {
     let search = AppSearch()
     let updater = Updater()
     let aiSetup = AISetup()
+    /// API keys saved in the Keychain, and checking that one works (APIKeys.swift).
+    let apiKeyCheck = APIKeyCheck()
     let insights = InsightsController()
     @ObservationIgnored let activity = ActivityLog()
     @ObservationIgnored let tooltips = Tooltips()
@@ -53,6 +55,14 @@ final class PetalApp {
     @ObservationIgnored private var arrival: (() -> Void)?
     /// Held notifications, Do Not Disturb while holding, and Petal's own banners (Notifications.swift).
     let notes = Notes()
+    /// Petal AI's powers on the Mac: looking, acting (asked first), the Trash, memory, the day's summary.
+    let assist = Assist()
+    /// Replies drafted for held messages, in the person's own style.
+    let drafts = Drafts()
+    /// "Ask Petal AI" by any selected text.
+    @ObservationIgnored let selection = SelectionAsk()
+    /// Routines in the person's own words: what Petal does by itself when a file lands, an app opens, a mode starts.
+    let routines = Routines()
     /// Reading and closing browser tabs (Browsers.swift).
     @ObservationIgnored let browsers = Browsers()
     /// Where each AI app is installed, when it is.
@@ -87,13 +97,18 @@ final class PetalApp {
     var overlayOpen: Bool { claude.isOpen || popups.card != nil }
 
     func start() {
+        MCP.inPetal = true
         Windows.limitWaiting()
         config.onChange = { [weak self] in
             guard let self else { return }
-            docks.refresh()
-            signals.watch(Stacks.resolve(config.strings("stackFolders")))
-            hotkeys.refresh()
-            menuBar.refresh()
+            // The last look at the windows, at once; a fresh one off the main thread.
+            Perf.span("onChange: docks.refresh") { self.docks.refresh(quick: true) }
+            Perf.span("onChange: look") { self.docks.refreshInBackground() }
+            Perf.span("onChange: signals.watch") { self.signals.watch(Stacks.resolve(self.config.strings("stackFolders"))) }
+            Perf.span("onChange: hotkeys") { self.hotkeys.refresh() }
+            Perf.span("onChange: menuBar") { self.menuBar.refresh() }
+            self.claude.notesSettingChanged()   // sticky notes turned off: no listening, nudges or taking app clicks
+
         }
         registerIPC()
         ipc.start()
@@ -104,7 +119,13 @@ final class PetalApp {
         automation.start()
         menuBar.start()
         aiSetup.refreshAll()
+        Apps.warm()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.search.prepare() }
         notes.start()
+        assist.start()
+        claude.startNotes()
+        selection.start()
+        routines.start()
         Skill.install()
         Windows.startManaging()
         if !config.welcomed {
@@ -115,10 +136,14 @@ final class PetalApp {
     }
 
     func stop() {
+        config.flush()
+        Chats.flush()
+        Assist.flushHistory()
+        Routines.flush()
         Windows.stopManaging()
         notes.stop()
         ipc.stop()
-        claude.agent.stop()
+        claude.stopAll()
         SystemDock.restore()
     }
 
@@ -226,11 +251,11 @@ final class PetalApp {
     private func apply(_ id: String, desktop: Int) {
         let then = arrival
         stay()
-        config.setMode(id, forDesktop: desktop)
-        Parking.modeChanged(desktop: desktop)
-        Tiling.modeChanged(desktop: desktop)
+        Perf.span("apply: config.setMode") { self.config.setMode(id, forDesktop: desktop) }
+        Perf.span("apply: parking") { Parking.modeChanged(desktop: desktop) }
+        Perf.span("apply: tiling") { Tiling.modeChanged(desktop: desktop) }
         if let card = popups.card, card.target?.id == id, card.kind != .note { popups.dismissCard() }
-        docks.refresh()
+        Perf.span("apply: docks.refresh") { self.docks.refresh(quick: true) }
         then?()
     }
 
@@ -256,6 +281,7 @@ final class PetalApp {
 
     var usageTooltip: String {
         (chatProvider?.name ?? "AI") + usage.limits.map { " · \($0.label.replacingOccurrences(of: " (7-day)", with: "")) \(Int(((1 - $0.percent) * 100).rounded()))% left" }.joined()
+            + (usage.spentText.map { " · " + $0 } ?? "")
     }
 
     static func until(_ date: Date) -> String {
@@ -339,14 +365,19 @@ final class PetalApp {
     func currentModel(for provider: Provider) -> String {
         let chosen = config.string(provider.modelSetting)
         guard provider == .codex, chosen.isEmpty else { return chosen }
+        // Read at most every 10 s: the settings window asks on every redraw, and the disk mustn't hold it up.
+        if let known = codexDefault, Date().timeIntervalSince(known.at) < 10 { return known.model ?? codexModels.first?.id ?? "" }
         let path = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".codex/config.toml")
         let top = ((try? String(contentsOf: path, encoding: .utf8)) ?? "").components(separatedBy: "\n[").first ?? ""
+        var found: String?
         for line in top.split(separator: "\n") {
             let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-            if parts.count == 2, parts[0] == "model" { return parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
+            if parts.count == 2, parts[0] == "model" { found = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"")); break }
         }
-        return codexModels.first?.id ?? ""
+        codexDefault = (Date(), found)
+        return found ?? codexModels.first?.id ?? ""
     }
+    @ObservationIgnored private var codexDefault: (at: Date, model: String?)?
 
     /// The newest Codex model of each family (Sol, Astra, Terra, Luna), in Codex's order, named "6.1 Sol"; the model
     /// already chosen stays even when it's older.
@@ -408,6 +439,26 @@ final class PetalApp {
     /// What `bin/petal` and Claude's tools can ask the running Petal (IpcHandler in Dock.qml).
     private func registerIPC() {
         ipc.on("current") { [unowned self] _ in docks.focusedDock?.mode?.id ?? config.defaultMode }
+        // Petal AI's tools (`Petal --mcp` asks here): ["assist", tool, json]; one that changes something waits for the
+        // person to allow it.
+        // Petal's tools changing settings, modes or the dock (`Petal --mcp`, petal-mcp.py): done here, in order.
+        ipc.onLater("mcpCall") { args, reply in
+            let name = args.first ?? "", json = args.dropFirst().first ?? "{}"
+            guard name == "petal_import_recipe" else { return reply(MCP.answer(name, json)) }
+            // Reading the recipe and finding its apps (a scan of the Applications folders, Launch Services) happen
+            // off the main thread; the modes it brings are made here, in order with every other change.
+            DispatchQueue.global(qos: .userInitiated).async {
+                let plan = Result { try MCP.importPlan(json) }
+                DispatchQueue.main.async { MainActor.assumeIsolated { reply(MCP.answer(name, json, plan: plan)) } }
+            }
+        }
+        ipc.onLater("assist") { [unowned self] args, reply in
+            assist.handle(args.first ?? "", args.dropFirst().first ?? "{}", note: args.dropFirst(2).first, reply: reply)
+        }
+        // The kept chats, open in the AI panel.
+        ipc.on("chats") { [unowned self] _ in claude.open(asking: nil); claude.chatsOpen = true; return "ok" }
+        ipc.on("bench") { args in LiveBench.start(quiet: args.first == "quiet") }
+
         ipc.on("mode") { [unowned self] args in
             guard let id = args.first, config.modes.contains(where: { $0.id == id }) else { return "no such mode" }
             guard let desktop = docks.focusedDock?.desktop ?? Spaces.desktop(on: NSScreen.main ?? NSScreen.screens[0]) else {
@@ -491,9 +542,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var signals: [DispatchSourceSignal] = []
     private var opened: [URL] = []
 
+    let services = TextServices()
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         let app = PetalApp()
         app.start()
+        // "Ask Petal AI" and "Add to Petal AI" on selected text, in every app's right-click menu (Services).
+        NSApp.servicesProvider = services
+        NSUpdateDynamicServices()
         for url in opened { app.recipes.show(url) }
         opened = []
         // Being killed (logout, `killall Petal`) gives macOS its Dock back too, not only quitting.

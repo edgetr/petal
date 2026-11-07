@@ -1,4 +1,5 @@
 import AppKit
+import QuickLookUI
 
 /// The right-click menus, as macOS's own menus (Liquid Glass on macOS 26), with Omarchy's entries in Omarchy's order.
 @MainActor
@@ -32,18 +33,44 @@ enum Menus {
         pop(menu)
     }
 
+    /// An app's menu. Its windows (listed as the pointer reached the icon, or else now, off the main thread) and its
+    /// recent files' icons are gathered first, for 150 ms at most: past that, the menu opens without what isn't in.
     static func app(_ item: DockItem, in dock: ScreenDock) {
         if Sites.isWeb(item.id) { return site(item, in: dock) }
+        let known = app.previews.knownWindows(item.id)
+        let wantWindows = config.bool("quickActions") && item.running && known == nil
+        let recent = config.bool("recentFiles") ? Apps.recent(item.id) : []
+        guard wantWindows || !recent.isEmpty else { return appMenu(item, in: dock, windows: known ?? [], icons: [:]) }
+        let once = Once()
+        let open = { (windows: [AppWindow], icons: [URL: NSImage]) in
+            guard once.first() else { return }
+            appMenu(item, in: dock, windows: windows, icons: icons)
+        }
+        let id = item.id
+        openers.async {
+            let windows = wantWindows ? Previews.windows(of: id) : (known ?? [])
+            let icons = Dictionary(recent.map { ($0, NSWorkspace.shared.icon(forFile: $0.path)) }, uniquingKeysWith: { a, _ in a })
+            DispatchQueue.main.async { MainActor.assumeIsolated { open(windows, icons) } }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { open(known ?? [], [:]) }
+    }
+
+    /// The first of several ways something can finish is the one that counts (on the main thread).
+    private final class Once {
+        private var done = false
+        func first() -> Bool { defer { done = true }; return !done }
+    }
+
+    private static func appMenu(_ item: DockItem, in dock: ScreenDock, windows: [AppWindow], icons: [URL: NSImage]) {
         let menu = NSMenu()
         let name = Apps.name(item.id)
         var listed = false
         if config.bool("quickActions"), item.running {
-            let windows = app.previews.windows(of: item.id)
             if !windows.isEmpty {
                 menu.addItem(header("Windows"))
                 for window in windows.prefix(10) {
                     let row = ClosureMenuItem(title: (window.title.isEmpty ? name : window.title) + (window.minimized ? " (minimized)" : "")) {
-                        Windows.focus(window)
+                        Windows.focus(window, onScreen: app.docks.isOnScreen(window))
                     }
                     menu.addItem(row)
                 }
@@ -56,7 +83,7 @@ enum Menus {
                 menu.addItem(header("Recent"))
                 for url in recent {
                     let row = ClosureMenuItem(title: url.lastPathComponent) { app.docks.launch(item.id, files: [url]) }
-                    row.image = icon(NSWorkspace.shared.icon(forFile: url.path))
+                    row.image = icons[url].map(icon) ?? NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
                     menu.addItem(row)
                 }
                 listed = true
@@ -181,8 +208,8 @@ enum Menus {
     static func media(_ playing: NowPlaying) {
         let menu = NSMenu()
         menu.addItem(header(Apps.name(playing.player)))
-        menu.addItem(ClosureMenuItem(title: "Previous") { NowPlaying.send("previous track", to: playing.player) })
-        menu.addItem(ClosureMenuItem(title: "Next") { NowPlaying.send("next track", to: playing.player) })
+        menu.addItem(ClosureMenuItem(title: "Previous") { app.signals.control("previous track") })
+        menu.addItem(ClosureMenuItem(title: "Next") { app.signals.control("next track") })
         menu.addItem(ClosureMenuItem(title: "Show Player") { app.docks.launch(playing.player) })
         pop(menu)
     }
@@ -192,6 +219,61 @@ enum Menus {
         menu.addItem(ClosureMenuItem(title: "Open in Finder") { NSWorkspace.shared.open(Stacks.url(folder)) })
         menu.addItem(ClosureMenuItem(title: "Remove from Dock") {
             config.set("stackFolders", config.strings("stackFolders").filter { $0 != folder && Stacks.resolve([$0]).first != folder })
+        })
+        pop(menu)
+    }
+
+    /// A file in an open stack, with what Finder offers for it. The apps that open it come from Launch Services,
+    /// off the dock's thread; the menu opens once they're known.
+    static func file(_ url: URL, done: @escaping () -> Void) {
+        openers.async {
+            let preferred = NSWorkspace.shared.urlForApplication(toOpen: url)
+            let others = NSWorkspace.shared.urlsForApplications(toOpen: url).filter { $0 != preferred }
+            let apps = ([preferred].compactMap { $0 } + others).map { app in
+                (url: app, name: FileManager.default.displayName(atPath: app.path).replacingOccurrences(of: ".app", with: ""),
+                 icon: NSWorkspace.shared.icon(forFile: app.path))
+            }
+            let sortedOthers = apps.dropFirst(preferred == nil ? 0 : 1).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+            let list = Array(apps.prefix(preferred == nil ? 0 : 1)) + sortedOthers
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { fileMenu(url, apps: list, preferred: preferred != nil, done: done) }
+            }
+        }
+    }
+
+    nonisolated private static let openers = DispatchQueue(label: "petal.openers", qos: .userInitiated)
+
+    private static func fileMenu(_ url: URL, apps: [(url: URL, name: String, icon: NSImage)], preferred: Bool, done: @escaping () -> Void) {
+        let menu = NSMenu()
+        menu.addItem(ClosureMenuItem(title: "Open") { NSWorkspace.shared.open(url); done() })
+        let openWith = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
+        let choices = NSMenu()
+        for (index, app) in apps.enumerated() {
+            let item = ClosureMenuItem(title: app.name + (preferred && index == 0 ? " (default)" : "")) {
+                NSWorkspace.shared.open([url], withApplicationAt: app.url, configuration: NSWorkspace.OpenConfiguration())
+                done()
+            }
+            item.image = icon(app.icon)
+            choices.addItem(item)
+            if preferred && index == 0 && apps.count > 1 { choices.addItem(.separator()) }
+        }
+        openWith.submenu = choices
+        openWith.isEnabled = !apps.isEmpty
+        menu.addItem(openWith)
+        menu.addItem(.separator())
+        menu.addItem(ClosureMenuItem(title: "Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([url]); done() })
+        menu.addItem(ClosureMenuItem(title: "Copy") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects([url as NSURL])
+        })
+        menu.addItem(NSSharingServicePicker(items: [url]).standardShareMenuItem)
+        menu.addItem(ClosureMenuItem(title: "Quick Look") { done(); QuickLook.shared.show(url) })
+        menu.addItem(.separator())
+        // Through the Trash, so Finder can put it back.
+        menu.addItem(ClosureMenuItem(title: "Move to Trash") {
+            NSWorkspace.shared.recycle([url]) { _, _ in
+                DispatchQueue.main.async { MainActor.assumeIsolated { app.signals.lookAtTrash() } }
+            }
         })
         pop(menu)
     }
@@ -236,8 +318,9 @@ enum Menus {
     /// At the pointer, as the dock's own menus open.
     private static func pop(_ menu: NSMenu) {
         app.tooltips.hide()
-        app.previews.close()
+        app.previews.hold(true)   // none behind the menu, nor one that was about to open
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        app.previews.hold(false)
     }
 }
 
@@ -254,4 +337,39 @@ final class ClosureMenuItem: NSMenuItem {
     required init(coder: NSCoder) { fatalError("not used") }
 
     @objc private func run() { handler() }
+}
+
+/// Quick Look for a file in a stack. Petal has no window of its own for the panel to belong to, so Petal answers for
+/// it from the end of the app's responder chain.
+@MainActor
+final class QuickLook: NSResponder, QLPreviewPanelDataSource {
+    static let shared = QuickLook()
+    private var url: URL?
+
+    func show(_ url: URL) {
+        self.url = url
+        if NSApp.nextResponder !== self { NSApp.nextResponder = self }
+        guard let panel = QLPreviewPanel.shared() else { return }
+        NSApp.activate()
+        if panel.isVisible { panel.reloadData() } else { panel.makeKeyAndOrderFront(nil) }
+    }
+
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
+
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.dataSource = self
+        panel.reloadData()
+    }
+
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
+        panel.dataSource = nil
+    }
+
+    nonisolated func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
+        MainActor.assumeIsolated { url == nil ? 0 : 1 }
+    }
+
+    nonisolated func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
+        MainActor.assumeIsolated { url as NSURL? }
+    }
 }

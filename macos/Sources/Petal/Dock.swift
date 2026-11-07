@@ -17,9 +17,17 @@ struct DockItem: Identifiable, Equatable {
 final class ScreenDock {
     var desktop: Int?
     var mode: Mode?
-    var items: [DockItem] = []
+    var items: [DockItem] = [] { didSet { if items.count != appCount { appCount = items.count } } }
+    /// How many apps `items` holds, changing only when that does: "+" over the layer strip goes after them, and
+    /// watching this instead of `items` keeps an app coming forward from updating it.
+    private(set) var appCount = 0
     var minimized: [AppWindow] = []
     var stageSlots = 0
+    /// Finder, for its own button (FinderButton): running, its windows, in front.
+    var finder = DockItem(id: DockController.finder, pinned: true, running: true, windows: 0, here: false, active: false)
+    /// The icons' size here: the setting's, or smaller when that many wouldn't fit along the screen's edge (as
+    /// macOS's Dock does). DockPanel.place works it out.
+    var icon: CGFloat = 36
     var dragging: String?
     var dragOffset: CGFloat = 0
     var revealed = true
@@ -27,6 +35,9 @@ final class ScreenDock {
     @ObservationIgnored var order: [String] = []
     @ObservationIgnored var frames: [String: CGRect] = [:]   // slot frames in the panel, top-left origin
     @ObservationIgnored weak var panel: DockPanel?
+    /// Every mode's apps as this screen would show them, for the layer strip's rows made ahead of time.
+    @ObservationIgnored var rows: [String: [DockItem]] = [:]
+    @ObservationIgnored weak var strip: AppStripView?
     let magnifier = Magnifier()
 
     init() { magnifier.dock = self }
@@ -39,7 +50,6 @@ final class ScreenDock {
 final class DockController {
     private(set) var panels: [CGDirectDisplayID: DockPanel] = [:]
     private var timer: Timer?
-    private var minimizedAt = Date.distantPast
     private var minimizedCache: [AppWindow] = []
     var shown = false
 
@@ -48,66 +58,301 @@ final class DockController {
 
     init() {
         let center = NSWorkspace.shared.notificationCenter
+        // Another app in front changes only which icon is active: the last look at the windows does, at once.
+        center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh(quick: true) }
+        }
+        // Another Desktop, or a full-screen app's Space: the dock steps aside (or comes back) at once.
+        center.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh(quick: true) }
+        }
+        // Apps opening, quitting, hiding, and another Desktop: look at the windows again, off the main thread.
         for name in [NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.didLaunchApplicationNotification,
-                     NSWorkspace.didTerminateApplicationNotification, NSWorkspace.didActivateApplicationNotification,
-                     NSWorkspace.didHideApplicationNotification, NSWorkspace.didUnhideApplicationNotification] {
+                     NSWorkspace.didTerminateApplicationNotification, NSWorkspace.didHideApplicationNotification,
+                     NSWorkspace.didUnhideApplicationNotification] {
             center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refresh() }
+                MainActor.assumeIsolated { self?.refreshInBackground() }
             }
         }
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil,
                                                queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.refresh() } }
-        // Windows opening, closing and minimizing send no notification to other apps, so look again now and then.
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
-        }
     }
 
     func show(_ on: Bool) {
         shown = on
-        if on { refresh() } else {
+        if on {
+            // Windows opening, closing, minimizing and moving, as they happen (with Accessibility).
+            WindowEvents.shared.listen("dock") { [weak self] event in self?.handle(event) }
+            eventsLive = WindowEvents.shared.live
+            readAllMinimized = true   // nothing was heard while hidden
+            refresh()
+            refreshInBackground()   // the minimized windows
+        } else {
+            WindowEvents.shared.stopListening("dock")
+            trailing?.cancel()   // a timed look waiting: none while hidden
+            trailing = nil
+            armedFor = nil
+            setMissionControl(false)
             for panel in panels.values { panel.close() }
             panels = [:]
         }
+        setPolling()
     }
 
-    func refresh() {
+    // MARK: Looking at the windows
+
+    /// Looks at the windows off the main thread, then refreshes with what it found. The window server can take a
+    /// moment to answer (hundreds of milliseconds while apps launch), and the dock never waits for it.
+    func refreshInBackground() { look(.now) }
+
+    private var schedule = LookSchedule()
+    private var trailing: DispatchWorkItem?
+    private var eventsLive = false
+    private var pollInterval: Double = 0
+    nonisolated private static var now: Double { ProcessInfo.processInfo.systemUptime }
+
+    /// A window opened, closed, minimized, came back, moved or resized (WindowEvents, with Accessibility).
+    private func handle(_ event: WindowEvents.Event) {
+        switch event.kind {
+        case .created, .closed, .minimized, .unminimized:
+            minimizedChanged[event.pid] = Self.now
+            look(.window)
+        case .moved, .resized:
+            look(.movement)
+        case .focused:
+            // A window minimizing hands focus to another: the next look reads this app's minimized windows too, in
+            // case the minimize itself went unheard.
+            minimizedChanged[event.pid] = Self.now
+        case .quit:
+            minimizedByApp[event.pid] = nil
+            minimizedChanged[event.pid] = nil
+        case .missionControl:
+            setMissionControl(true)
+        case .missionControlEnded:
+            setMissionControl(false)
+        default:
+            break   // apps launching, quitting, hiding, another Desktop: the NSWorkspace observers above
+        }
+    }
+
+    // MARK: Mission Control
+
+    /// Mission Control (or App Exposé) is open. macOS's Dock always comes out there, whatever its own settings say
+    /// (no setting keeps it away, and it's the Dock that draws Mission Control), so Petal's dock steps aside while
+    /// it's open: one dock on the screen, not two. Comes back the moment it closes.
+    private(set) var missionControl = false
+    private var missionControlCheck: Timer?
+
+    private func setMissionControl(_ on: Bool) {
+        guard on != missionControl else { return }
+        missionControl = on
+        if on {
+            app.popups.closeAll()   // nothing of the dock's left floating over Mission Control
+        }
+        app.previews.hold(on)
+        for panel in panels.values { panel.aside = on }
+        missionControlCheck?.invalidate()
+        missionControlCheck = nil
+        guard on else { return }
+        // A safety net, should the Dock not say Mission Control closed (it was restarted, say): while it's open the
+        // Dock has a window on the screen; once it has none, Petal's dock comes back.
+        missionControlCheck = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Self.lookQueue.async {
+                let open = Self.systemDockOnScreen()
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { if !open { self?.setMissionControl(false) } }
+                }
+            }
+        }
+        missionControlCheck?.tolerance = 0.3
+    }
+
+    /// Whether macOS's Dock has a window on the screen: it does while Mission Control is open, and not while it's
+    /// hidden for Petal. Asks the window server: off the main thread.
+    nonisolated private static func systemDockOnScreen() -> Bool {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first,
+              let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else { return false }
+        return windows.contains { $0[kCGWindowOwnerPID as String] as? pid_t == dock.processIdentifier }
+    }
+
+    private func look(_ cause: LookSchedule.Cause) {
         guard shown else { return }
+        if schedule.note(cause, at: Self.now) { startLook() }
+        armTrailing()
+    }
+
+    /// One timer for the next timed look. While a drag keeps pushing it later, the timer isn't remade for every
+    /// step: it fires, finds the look not due yet, and waits again. A sooner one (after the gap) remakes it.
+    private func armTrailing() {
+        guard let due = schedule.due else { return }
+        if trailing != nil, let armed = armedFor, armed <= due + 0.001 { return }
+        trailing?.cancel()
+        armedFor = due
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.trailing = nil
+                self.armedFor = nil
+                // Hidden (macOS's Dock chosen): no looks, and no timer again for a look that can't happen. Showing
+                // again looks at once.
+                guard self.shown else { return }
+                if self.schedule.fire(at: Self.now) { self.startLook() }
+                self.armTrailing()
+            }
+        }
+        trailing = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, due - Self.now), execute: work)
+    }
+    private var armedFor: Double?
+
+    /// The timer: once a second without Accessibility's events (or while an app is launching, to end its pulse on
+    /// time), every 5 s with them, as a safety net. It also notices Accessibility being allowed or taken away.
+    private func setPolling() {
+        guard shown else {
+            timer?.invalidate()
+            timer = nil
+            pollInterval = 0
+            return
+        }
+        let interval = LookSchedule.interval(events: eventsLive, launching: !app.launching.isEmpty)
+        guard interval != pollInterval else { return }
+        pollInterval = interval
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+        timer?.tolerance = interval / 10
+    }
+
+    private func tick() {
+        WindowEvents.shared.checkPermission()
+        if WindowEvents.shared.live != eventsLive {
+            // Accessibility was just allowed (or taken away): read every app's minimized windows again.
+            eventsLive = WindowEvents.shared.live
+            readAllMinimized = true
+            look(.now)
+            setPolling()
+            return
+        }
+        // Now and then, every app's minimized windows: a minimize whose event never came is caught.
+        polls += 1
+        if polls % 6 == 0 { readAllMinimized = true }
+        look(.poll)
+    }
+
+    private func startLook() {
+        // Which apps' minimized windows to read: every app's, or those with a window event lately. Asking each
+        // process whether it's a regular app costs milliseconds, so the list of apps is made off the main thread.
+        let read = minimizedToRead()
+        Self.lookQueue.async { [weak self] in
+            let snapshot = WindowList.current()
+            let running = Self.runningApps()
+            let pids = running.values.map(\.processIdentifier).sorted()   // by launch, so minimized windows keep their order
+            var minimized: [pid_t: [AppWindow]] = [:]
+            for pid in pids where read.all || read.changed.contains(pid) { minimized[pid] = Windows.windows(of: pid).filter(\.minimized) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    let alive = Set(pids)
+                    for (pid, windows) in minimized { self.minimizedByApp[pid] = windows }
+                    self.minimizedByApp = self.minimizedByApp.filter { alive.contains($0.key) }
+                    self.minimizedCache = pids.flatMap { self.minimizedByApp[$0] ?? [] }
+                    self.lastRunning = running
+                    self.refresh(with: snapshot)
+                    if self.schedule.finished(at: Self.now) { self.startLook() }
+                    self.armTrailing()
+                    self.setPolling()
+                }
+            }
+        }
+    }
+
+    // MARK: Minimized windows
+
+    /// Each app's minimized windows, across Desktops and modes. Read again only for an app whose windows opened,
+    /// closed, minimized or came back (and once for every app when the events start), never by scanning every app.
+    private var minimizedByApp: [pid_t: [AppWindow]] = [:]
+    /// Apps with a window event lately, by when: each look in the second after reads them, so the trailing look
+    /// catches a window the app listed late.
+    private var minimizedChanged: [pid_t: Double] = [:]
+    private var readAllMinimized = true
+    private var polls = 0
+
+    private func minimizedToRead() -> (all: Bool, changed: Set<pid_t>) {
+        guard config.bool("minimized"), eventsLive else {
+            minimizedByApp = [:]
+            minimizedChanged = [:]
+            readAllMinimized = true   // read every app again once the setting or Accessibility is back
+            return (false, [])
+        }
+        let now = Self.now
+        let changed = Set(minimizedChanged.keys)   // every app marked is read at least once
+        minimizedChanged = minimizedChanged.filter { now - $0.value < LookSchedule.followUp + 1 }
+        if readAllMinimized {
+            readAllMinimized = false
+            return (true, [])
+        }
+        return (false, changed)
+    }
+
+    /// The apps with a place in the dock, by bundle id. Asking each running process for this costs several
+    /// milliseconds, so it's done off the main thread with each look at the windows.
+    static let finder = "com.apple.finder"
+
+    nonisolated static func runningApps() -> [String: NSRunningApplication] {
+        var running: [String: NSRunningApplication] = [:]
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            if let id = app.bundleIdentifier, running[id] == nil { running[id] = app }
+        }
+        return running
+    }
+    @ObservationIgnored private var lastRunning: [String: NSRunningApplication]?
+    nonisolated private static let lookQueue = DispatchQueue(label: "petal.windows", qos: .userInitiated)
+    /// The last look at the windows, for refreshes that only change what the dock shows. Windows opening, closing
+    /// and moving keep it current through Accessibility's events (without them, it's at most a second old).
+    @ObservationIgnored private var lastSnapshot: WindowList?
+
+    /// The window is on the Desktop showing (as of the last look at the windows): it can come forward at once.
+    func isOnScreen(_ window: AppWindow) -> Bool {
+        !window.minimized && (lastSnapshot?.onScreenFrames(pid: window.pid) ?? []).contains { $0.equalTo(window.frame, within: 4) }
+    }
+
+    /// `quick`: what changed is the mode or a setting, not the windows, so the last look at them does.
+    func refresh(quick: Bool = false) {
+        refresh(with: quick ? (lastSnapshot ?? WindowList.current()) : Perf.span("refresh: window list") { WindowList.current() })
+    }
+
+    func refresh(with snapshot: WindowList) {
+        guard shown else { return }
+        lastSnapshot = snapshot
         let screens = NSScreen.screens
         let ids = Set(screens.compactMap(\.displayID))
         for (id, panel) in panels where !ids.contains(id) {
             panel.close()
             panels[id] = nil
         }
-        let snapshot = WindowList.current()
         let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-        var running: [String: NSRunningApplication] = [:]
-        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
-            if let id = app.bundleIdentifier, running[id] == nil { running[id] = app }
-        }
-        if config.bool("minimized") {
-            if Date().timeIntervalSince(minimizedAt) > 3 {
-                minimizedAt = Date()
-                minimizedCache = Self.minimizedWindows(Array(running.values))
-            }
-        } else {
-            minimizedCache = []
-        }
+        // The last list of running apps, less any that quit since (a quit app's dot goes at once).
+        let running = Perf.span("refresh: running apps") { (lastRunning ?? Self.runningApps()).filter { !$0.value.isTerminated } }
+        if !config.bool("minimized") { minimizedCache = [] }
         let minimizedAll = minimizedCache
         let modesOn = config.bool("modes")
-        app.updateLaunching(snapshot)
+        Perf.span("refresh: launching") { app.updateLaunching(snapshot) }
 
         for screen in screens {
             guard let id = screen.displayID else { continue }
             let panel = panels[id] ?? DockPanel()
             panels[id] = panel
             let dock = panel.dock
-            let desktop = Spaces.desktop(on: screen)
+            let showing = Perf.span("refresh: desktop") { Spaces.showing(on: screen) }
+            let desktop = showing.desktop
             if desktop != nil || dock.mode == nil {   // a full-screen app keeps the mode of the Desktop before it
                 dock.desktop = desktop
             }
+            panel.fullScreen = showing.fullScreen
+            panel.aside = missionControl   // a screen joining while Mission Control is open
             let mode = modesOn ? config.mode(forDesktop: dock.desktop ?? 1) : config.modes.first
-            if mode != dock.mode { dock.mode = mode }
+            Perf.span("refresh: set mode") { if mode != dock.mode { dock.mode = mode } }
             let here = Set(snapshot.apps(on: screen))
             let otherModes = Set(config.modes.filter { $0.id != mode?.id }.flatMap(\.apps))
 
@@ -116,10 +361,15 @@ final class DockController {
                 DockItem(id: bundleID, pinned: pinned, running: running[bundleID] != nil, windows: snapshot.count[bundleID] ?? 0,
                          here: here.contains(bundleID), active: bundleID == frontmost)
             }
-            for bundleID in mode?.apps ?? [] where Apps.shows(bundleID) && !items.contains(where: { $0.id == bundleID }) {
+            // Finder is its own button by the AI button (FinderButton), the same in every mode: never among the apps.
+            let finder: [DockItem] = []
+            let finderButton = config.bool("finderInDock")
+            for bundleID in mode?.apps ?? [] where Apps.shows(bundleID) && !items.contains(where: { $0.id == bundleID })
+                && !(finderButton && bundleID == Self.finder) {
                 items.append(item(bundleID, pinned: true))
             }
-            for bundleID in snapshot.order where running[bundleID] != nil && !items.contains(where: { $0.id == bundleID }) {
+            for bundleID in snapshot.order where running[bundleID] != nil && !items.contains(where: { $0.id == bundleID })
+                && !(finderButton && bundleID == Self.finder) {
                 if modesOn && otherModes.contains(bundleID) { continue }
                 if config.bool("thisWorkspaceOnly") && !here.contains(bundleID) { continue }
                 items.append(item(bundleID, pinned: false))
@@ -131,66 +381,155 @@ final class DockController {
             dock.order = dock.order.filter { key in others.contains { $0.id == key } }
             for other in others where !dock.order.contains(other.id) { dock.order.append(other.id) }
             let ordered = pinned + dock.order.compactMap { key in others.first { $0.id == key } }
-            if ordered != dock.items { dock.items = ordered }
+            Perf.span("refresh: set items") { if ordered != dock.items { dock.items = ordered } }
+            let finderNow = item(Self.finder, pinned: true)
+            if finderNow != dock.finder { dock.finder = finderNow }
+            // The layer strip keeps every mode's row ready: each mode's apps, then the running apps in no mode.
+            if DockStrip.shared.layers {
+                let loose = ordered.filter { !$0.pinned }
+                var rows: [String: [DockItem]] = [:]
+                for other in modesOn ? config.modes : Array(config.modes.prefix(1)) where other.id != mode?.id {
+                    var seen = Set<String>()
+                    if finderButton { seen.insert(Self.finder) }
+                    rows[other.id] = finder + other.apps.filter { Apps.shows($0) && seen.insert($0).inserted }.map { item($0, pinned: true) } + loose
+                }
+                rows[mode?.id ?? ""] = ordered
+                dock.rows = rows
+            }
             if dock.minimized != minimizedAll { dock.minimized = minimizedAll }
 
             // The stage is as long as the most apps any mode would show here, so switching never moves the rest.
-            let longest = config.modes.map { m in m.apps.filter(Apps.shows).count }.max() ?? 0
-            let slots = max(longest, ordered.count) + 1
+            let longest = Perf.span("refresh: stage") {
+                config.modes.map { m in m.apps.filter { Apps.shows($0) && !(finderButton && $0 == Self.finder) }.count }.max() ?? 0
+            }
+            let slots = max(longest + finder.count, ordered.count) + 1
             if slots != dock.stageSlots { dock.stageSlots = slots }
 
-            panel.place(on: screen)
+            Perf.span("refresh: place panel") { panel.place(on: screen) }
         }
-        if config.keepWindowsClear && !config.autoHide { keepWindowsClear(snapshot) }
-        app.automation.modeShown(dock(for: NSScreen.main)?.mode?.id)
-        app.menuBar.show(mode: dock(for: NSScreen.main)?.mode)
-        app.notes.update()
+        Perf.span("refresh: keep windows clear") { keepWindowsClear(snapshot) }
+        Perf.span("refresh: automation") { app.automation.modeShown(dock(for: NSScreen.main)?.mode?.id) }
+        Perf.span("refresh: menu bar") { app.menuBar.show(mode: dock(for: NSScreen.main)?.mode) }
+        Perf.span("refresh: notes") { app.notes.update() }
     }
 
     /// macOS keeps no room for a dock other than its own, so windows would run under Petal's. While auto-hide is
-    /// off, a window reaching into the dock's strip is shortened to end above it (or narrowed, for a side dock); one
-    /// too small to shorten is moved out instead. Omarchy reserves the same strip for its dock.
+    /// off, a window reaching into the dock's strip is shortened to end where the dock's glass begins (or narrowed,
+    /// for a side dock); one too small to shorten is moved out instead. Omarchy reserves the same strip for its dock.
+    ///
+    /// Petal remembers each window's frame from before it touched it. A new position (or icon size) starts again
+    /// from that frame, so windows never shrink step by step as the dock moves around; turning this off, or
+    /// auto-hide on, or the window's screen going full screen, gives it back. A window moved or resized since is
+    /// the person's, and forgotten.
     private func keepWindowsClear(_ snapshot: WindowList) {
         guard Windows.trusted else { return }
+        let on = config.keepWindowsClear && !config.autoHide
+        guard on || !cleared.isEmpty else { return }
         let top = NSScreen.screens.first?.frame.maxY ?? 0
-        for panel in panels.values {
-            guard let screen = panel.screenRef else { continue }
-            let icon = max(16, config.number("iconSize"))
-            let inset = config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5
-            let reserve = panel.gap * 2 + 2 + icon + inset * 2 + 8
-            let area = screen.frame
-            // The screen in Accessibility's coordinates (top-left origin).
-            let screenAX = CGRect(x: area.minX, y: top - area.maxY, width: area.width, height: area.height)
-            for window in snapshot.onScreenWindows where screenAX.intersects(window.frame) {
-                let f = window.frame
-                var target = f
-                switch config.position {
-                case "left":
-                    let limit = screenAX.minX + reserve
-                    guard f.minX < limit - 2, f.maxX > limit else { continue }
-                    target = f.width - (limit - f.minX) >= 300 ? CGRect(x: limit, y: f.minY, width: f.maxX - limit, height: f.height)
-                        : CGRect(x: limit, y: f.minY, width: f.width, height: f.height)
-                case "right":
-                    let limit = screenAX.maxX - reserve
-                    guard f.maxX > limit + 2, f.minX < limit else { continue }
-                    target = limit - f.minX >= 300 ? CGRect(x: f.minX, y: f.minY, width: limit - f.minX, height: f.height)
-                        : CGRect(x: limit - f.width, y: f.minY, width: f.width, height: f.height)
-                default:
-                    let limit = screenAX.maxY - reserve
-                    guard f.maxY > limit + 2, f.minY < limit else { continue }
-                    target = limit - f.minY >= 200 ? CGRect(x: f.minX, y: f.minY, width: f.width, height: limit - f.minY)
-                        : CGRect(x: f.minX, y: max(screenAX.minY + 30, limit - f.height), width: f.width, height: f.height)
+        let docks = panels.values.compactMap { panel -> (panel: DockPanel, screen: CGRect)? in
+            guard let area = panel.screenRef?.frame else { return nil }
+            return (panel, CGRect(x: area.minX, y: top - area.maxY, width: area.width, height: area.height))   // top-left origin
+        }
+        var moves: [(pid: pid_t, number: CGWindowID, from: CGRect, to: CGRect)] = []
+        for window in snapshot.onScreenWindows {
+            // Parked by its mode (Parking): its frame there is Parking's, not the person's, so its record (and the
+            // frame from before Petal touched it) stays as it is until it comes back.
+            if Parking.parked[window.number] != nil { continue }
+            let now = window.frame
+            var before = now
+            if let record = cleared[window.number] {
+                // A frame Petal gave it, or one it had on the way (the look may be a moment old): still Petal's
+                // doing. Any other frame is the person's.
+                if record.knows(now) { before = record.before } else { cleared[window.number] = nil }
+            }
+            var target = before
+            let center = CGPoint(x: before.midX, y: before.midY)
+            if on, let dock = docks.first(where: { $0.screen.contains(center) }), !dock.panel.fullScreen {
+                target = Self.clear(before, screen: dock.screen, reach: dock.panel.reach, position: config.position)
+            }
+            let moving = !target.equalTo(now, within: 2)
+            guard moving || cleared[window.number] != nil || !target.equalTo(before, within: 1) else { continue }
+            var record = cleared[window.number] ?? Cleared(before: before)
+            record.saw(now)
+            record.saw(target)
+            cleared[window.number] = record
+            if moving { moves.append((window.pid, window.number, now, target)) }
+        }
+        // Windows that closed: nothing to give back.
+        cleared = cleared.filter { snapshot.numbers.contains($0.key) }
+        guard !moves.isEmpty else { return }
+        // Accessibility waits on each app: never on the main thread.
+        Self.clearQueue.async {
+            for move in moves {
+                let app = AXUIElementCreateApplication(move.pid)
+                AXUIElementSetMessagingTimeout(app, 0.3)
+                let list: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
+                guard let element = list.first(where: { Windows.id(of: $0) == move.number }),
+                      // Still where it was when this was decided: moved since (by the person, Parking, a newer
+                      // look), it's left alone.
+                      let there = Windows.frame(of: element), there.equalTo(move.from, within: 4) else { continue }
+                let actual = Windows.place(element, pid: move.pid, move.to)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        // Where the app let it go (an app may keep a minimum size), which is now Petal's frame for it.
+                        guard let controller = PetalApp.shared.docks, let actual else { return }
+                        controller.cleared[move.number]?.saw(actual)
+                    }
                 }
-                guard let ax = Windows.windows(of: window.pid).first(where: { !$0.minimized && $0.frame.equalTo(f, within: 4) }) else { continue }
-                Windows.setFrame(ax, target)
             }
         }
     }
 
-    /// Every minimized window of the running apps, across Desktops and modes.
-    private static func minimizedWindows(_ apps: [NSRunningApplication]) -> [AppWindow] {
-        guard Windows.trusted else { return [] }
-        return apps.flatMap { Windows.windows(of: $0.processIdentifier).filter(\.minimized) }
+    /// A window kept clear of the dock: its own frame from before, and the frames it has had since through Petal
+    /// (the ones Petal gave it, where it was moving from, where the app let it go). Kept until the window closes or
+    /// the person moves it, so a look at the windows from a moment before a move never mistakes Petal's frame for
+    /// theirs.
+    struct Cleared {
+        var before: CGRect
+        private var frames: [CGRect] = []
+
+        init(before: CGRect) { self.before = before }
+
+        func knows(_ frame: CGRect) -> Bool {
+            before.equalTo(frame, within: 4) || frames.contains { $0.equalTo(frame, within: 4) }
+        }
+
+        mutating func saw(_ frame: CGRect) {
+            guard !knows(frame) else { return }
+            frames.append(frame)
+            if frames.count > 12 { frames.removeFirst() }
+        }
+    }
+
+    /// The frame `f` keeps clear of a dock reaching `reach` in from `screen`'s edge (both top-left origin).
+    nonisolated static func clear(_ f: CGRect, screen: CGRect, reach: CGFloat, position: String) -> CGRect {
+        switch position {
+        case "left":
+            let limit = screen.minX + reach
+            guard f.minX < limit - 1, f.maxX > limit else { return f }
+            return f.maxX - limit >= 300 ? CGRect(x: limit, y: f.minY, width: f.maxX - limit, height: f.height)
+                : CGRect(x: limit, y: f.minY, width: f.width, height: f.height)
+        case "right":
+            let limit = screen.maxX - reach
+            guard f.maxX > limit + 1, f.minX < limit else { return f }
+            return limit - f.minX >= 300 ? CGRect(x: f.minX, y: f.minY, width: limit - f.minX, height: f.height)
+                : CGRect(x: limit - f.width, y: f.minY, width: f.width, height: f.height)
+        default:
+            let limit = screen.maxY - reach
+            guard f.maxY > limit + 1, f.minY < limit else { return f }
+            return limit - f.minY >= 200 ? CGRect(x: f.minX, y: f.minY, width: f.width, height: limit - f.minY)
+                : CGRect(x: f.minX, y: max(screen.minY + 30, limit - f.height), width: f.width, height: f.height)
+        }
+    }
+
+    /// Windows kept clear of the dock, by window number: the frame each had before and the one Petal gave it.
+    private var cleared: [CGWindowID: Cleared] = [:]
+    nonisolated private static let clearQueue = DispatchQueue(label: "petal.windows.clear", qos: .userInitiated)
+
+    /// How far the dock on `screen` reaches in from its edge: where windows kept clear of it end.
+    func reach(on screen: NSScreen?) -> CGFloat? {
+        guard shown, let screen, let id = screen.displayID, let panel = panels[id], !panel.fullScreen else { return nil }
+        return panel.reach
     }
 
     func dock(for screen: NSScreen?) -> ScreenDock? {
@@ -199,9 +538,13 @@ final class DockController {
     }
 
     /// The dock on the screen with the window in front: where cards go.
+    /// The dock on the screen of the window in front. One screen has one dock; with more, the last look at the
+    /// windows says where the window in front is, so asking costs nothing.
     var focusedDock: ScreenDock? {
+        if panels.count == 1 { return panels.values.first?.dock }
         guard let front = NSWorkspace.shared.frontmostApplication,
-              let frame = WindowList.current().onScreenFrames(pid: front.processIdentifier).first else { return dock(for: NSScreen.main) }
+              let frame = (lastSnapshot ?? WindowList.current()).onScreenFrames(pid: front.processIdentifier).first
+        else { return dock(for: NSScreen.main) }
         let top = NSScreen.screens.first?.frame.maxY ?? 0
         let center = CGPoint(x: frame.midX, y: top - frame.midY)
         return dock(for: NSScreen.screens.first { $0.frame.contains(center) })
@@ -216,31 +559,50 @@ final class DockController {
     /// No windows: launch it. Windows: bring one forward, cycling through them on repeated clicks: this Desktop's
     /// first, then minimized ones, then the rest. The pointer never moves.
     func activate(_ item: DockItem) {
+        Windows.focusing.cancel()   // first, whatever this click turns out to be: an earlier one's focus stands down
         if Sites.isWeb(item.id) { Sites.open(item.id); return }
+        if app.claude.openReady(app: item.id) { return }   // its note is done: its window, and the note on it
         guard item.running, let running = NSRunningApplication.runningApplications(withBundleIdentifier: item.id).first else {
             launch(item.id)
             return
         }
-        if Parking.activate(item.id) { return }   // each mode keeps its own windows
-        let windows = Windows.windows(of: running.processIdentifier)
-        guard !windows.isEmpty else {
-            if item.windows == 0 { launch(item.id) } else { Windows.bringForward(running) }
-            return
+        if Perf.span("activate: parking", { Parking.activate(item.id) }) { return }   // each mode keeps its own windows
+        // Decided here from what the dock already knows; the app's windows are listed (Accessibility, which waits on
+        // a busy app) on the focus queue, and a newer click makes this one stand down.
+        let pid = running.processIdentifier, active = item.active, known = item.windows, id = item.id
+        let onScreen = (lastSnapshot ?? WindowList.current()).onScreenFrames(pid: pid)
+        let ticket = Windows.focusing.next()
+        Windows.focusQueue.async {
+            guard Windows.focusing.current(ticket) else { return }
+            let windows = Windows.windows(of: pid)
+            func rank(_ w: AppWindow) -> Int { w.minimized ? 1 : (onScreen.contains { $0.equalTo(w.frame, within: 4) } ? 0 : 2) }
+            let sorted = windows.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
+            var pick = sorted.first
+            if active, !sorted.isEmpty {
+                // The window in front now: the next one along comes forward (clicking again cycles through them).
+                let app = AXUIElementCreateApplication(pid)
+                AXUIElementSetMessagingTimeout(app, 0.3)
+                let focused: String = (Windows.value(app, kAXFocusedWindowAttribute) as AXUIElement?).flatMap { Windows.value($0, kAXTitleAttribute) } ?? ""
+                if let index = sorted.firstIndex(where: { $0.title == focused && !$0.minimized }) { pick = sorted[(index + 1) % sorted.count] }
+            }
+            let onIt = pick.map { rank($0) == 0 } ?? false
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard Windows.focusing.current(ticket) else { return }
+                    guard let pick else {
+                        if known == 0 { PetalApp.shared.docks.launch(id) } else { Windows.bringForward(running) }
+                        return
+                    }
+                    Windows.focus(pick, onScreen: onIt)
+                }
+            }
         }
-        let onScreen = WindowList.current().onScreenFrames(pid: running.processIdentifier)
-        func rank(_ w: AppWindow) -> Int { w.minimized ? 1 : (onScreen.contains { $0.equalTo(w.frame, within: 4) } ? 0 : 2) }
-        let sorted = windows.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
-        var pick = sorted[0]
-        if item.active {
-            let focused = Windows.frontTitle()
-            if let index = sorted.firstIndex(where: { $0.title == focused && !$0.minimized }) { pick = sorted[(index + 1) % sorted.count] }
-        }
-        Windows.focus(pick)
     }
 
     func launch(_ id: String, files: [URL] = []) {
         guard let url = Apps.url(id) else { return }
-        app.launching[id] = (Date(), WindowList.current().count[id] ?? 0)
+        app.launching[id] = (Date(), (lastSnapshot ?? WindowList.current()).count[id] ?? 0)
+        setPolling()   // once a second until its window shows
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         if files.isEmpty {
@@ -252,15 +614,22 @@ final class DockController {
 
     /// New window: the app comes forward and gets ⌘N, as its own File menu would.
     func newWindow(_ id: String) {
+        Windows.focusing.cancel()   // an earlier click's focus still on its way would come in front of the new window
         if Sites.isWeb(id) { Sites.open(id); return }
         guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: id).first else { launch(id); return }
         Windows.bringForward(running)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            let source = CGEventSource(stateID: .combinedSessionState)
-            for down in [true, false] {
-                let event = CGEvent(keyboardEventSource: source, virtualKey: 0x2D, keyDown: down)   // N
-                event?.flags = .maskCommand
-                event?.postToPid(running.processIdentifier)
+        let pid = running.processIdentifier
+        // The app's own menu item for ⌘N (File › New Window, in any language), pressed through Accessibility; an
+        // app without one gets the keystroke, once it's in front.
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard !Windows.pressMenuItem(pid: pid, key: "N") else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                let source = CGEventSource(stateID: .combinedSessionState)
+                for down in [true, false] {
+                    let event = CGEvent(keyboardEventSource: source, virtualKey: 0x2D, keyDown: down)   // N
+                    event?.flags = .maskCommand
+                    event?.postToPid(pid)
+                }
             }
         }
     }
@@ -270,8 +639,11 @@ final class DockController {
     }
 
     func minimizeAll(_ id: String) {
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: id) {
-            for window in Windows.windows(of: app.processIdentifier) where !window.minimized { Windows.minimize(window) }
+        let pids = NSRunningApplication.runningApplications(withBundleIdentifier: id).map(\.processIdentifier)
+        DispatchQueue.global(qos: .userInitiated).async {   // listing the windows waits on the app too
+            for pid in pids {
+                for window in Windows.windows(of: pid) where !window.minimized { Windows.minimize(window) }
+            }
         }
     }
 
@@ -284,11 +656,13 @@ final class DockController {
     /// Dropping an app at a new place saves the new order as the mode's apps. Dragging an app that isn't in the
     /// mode into place adds it.
     func move(_ id: String, to index: Int, in dock: ScreenDock) {
-        guard let mode = dock.mode, let from = dock.items.firstIndex(where: { $0.id == id }) else { return }
+        // Finder stays first; nothing goes before it.
+        guard id != Self.finder, let mode = dock.mode, let from = dock.items.firstIndex(where: { $0.id == id }) else { return }
         var keys = dock.items.map(\.id)
         keys.remove(at: from)
-        keys.insert(id, at: min(max(0, index), keys.count))
-        let shown = keys.filter { key in key == id || dock.items.first { $0.id == key }?.pinned == true }
+        let first = keys.first == Self.finder ? 1 : 0
+        keys.insert(id, at: min(max(first, index), keys.count))
+        let shown = keys.filter { key in key != Self.finder && (key == id || dock.items.first { $0.id == key }?.pinned == true) }
         var updated = mode
         updated.apps = shown + mode.apps.filter { !shown.contains($0) }
         config.save(updated)
@@ -300,7 +674,9 @@ final class DockController {
 struct WindowList {
     var count: [String: Int] = [:]
     var order: [String] = []                      // apps by their first window
-    private var onScreen: [(bundleID: String, pid: pid_t, frame: CGRect)] = []
+    /// Every app window's number, on any Desktop or minimized.
+    var numbers: Set<CGWindowID> = []
+    private var onScreen: [(bundleID: String, pid: pid_t, frame: CGRect, number: CGWindowID)] = []
 
     static func current() -> WindowList {
         var list = WindowList()
@@ -325,8 +701,10 @@ struct WindowList {
             }
             guard !bundleID.isEmpty else { continue }
             let isOnScreen = window[kCGWindowIsOnscreen as String] as? Bool ?? false
+            let number = window[kCGWindowNumber as String] as? CGWindowID ?? 0
             list.count[bundleID, default: 0] += 1
-            if isOnScreen { list.onScreen.append((bundleID, pid, bounds)) }
+            list.numbers.insert(number)
+            if isOnScreen { list.onScreen.append((bundleID, pid, bounds, number)) }
             if !list.order.contains(bundleID) { list.order.append(bundleID) }
         }
         return list
@@ -346,7 +724,7 @@ struct WindowList {
     func onScreenFrames(pid: pid_t) -> [CGRect] { onScreen.filter { $0.pid == pid }.map(\.frame) }
 
     /// Every app window on screen, top-left origin as Accessibility counts.
-    var onScreenWindows: [(pid: pid_t, frame: CGRect)] { onScreen.map { ($0.pid, $0.frame) } }
+    var onScreenWindows: [(pid: pid_t, frame: CGRect, number: CGWindowID)] { onScreen.map { ($0.pid, $0.frame, $0.number) } }
 }
 
 extension CGRect {
@@ -367,7 +745,9 @@ extension NSScreen {
 @MainActor
 final class DockPanel: NSPanel {
     let dock = ScreenDock()
-    private var hosting: NSHostingView<AnyView>!
+    private var hosting: DockHostingView!
+    private var measured: CGSize?
+    private var measuredShape = ""
     private var hideAt: Date?
     private var mouseTimer: Timer?
     private(set) weak var screenRef: NSScreen?
@@ -375,8 +755,8 @@ final class DockPanel: NSPanel {
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         dock.panel = self
-        hosting = NSHostingView(rootView: AnyView(DockView(dock: dock).environment(PetalApp.shared)))
-        contentView = hosting
+        hosting = DockHostingView(rootView: AnyView(DockView(dock: dock).environment(PetalApp.shared)))
+        contentView = DockHostingView.container(hosting)
         isFloatingPanel = true
         level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)))
         backgroundColor = .clear
@@ -389,37 +769,126 @@ final class DockPanel: NSPanel {
         mouseTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.followMouse() }
         }
+        // The panel runs the screen's whole edge so it never resizes; only the dock itself takes the mouse, and the
+        // clear rest lets clicks through to the windows below. Pointer moves anywhere set it at once.
+        let follow: (NSEvent) -> Void = { [weak self] _ in MainActor.assumeIsolated { self?.updateMouseThrough() } }
+        mouseMonitors = [
+            NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged], handler: follow) as Any,
+            NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { follow($0); return $0 } as Any,
+        ]
     }
+
+    private var mouseMonitors: [Any] = []
+
+    /// Takes the mouse only over the dock (its glass and the room above it for lifting icons), never over the
+    /// clear rest of the panel, and not at all while tucked away.
+    func updateMouseThrough() {
+        let wanted = tucked || !contentFrame.insetBy(dx: -2, dy: -2).contains(NSEvent.mouseLocation)
+        guard ignoresMouseEvents != wanted else { return }
+        ignoresMouseEvents = wanted
+        if wanted { NotificationCenter.default.post(name: Self.mouseLeft, object: self) }
+    }
+
+    /// Posted as the dock stops taking the mouse: whatever was hovered in it isn't any more.
+    static let mouseLeft = Notification.Name("PetalDockMouseLeft")
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
     override func close() {
         mouseTimer?.invalidate()
+        for monitor in mouseMonitors { NSEvent.removeMonitor(monitor) }
+        mouseMonitors = []
         super.close()
     }
 
     var config: Config { PetalApp.shared.config }
 
+    /// The dock's content (the glass and the clear room around it), centered in the panel. The panel itself is as
+    /// long as the screen's edge, so it never resizes while the dock grows or shrinks: SwiftUI animates the glass
+    /// around its centre instead. Its clear parts let clicks through to the windows below.
+    var contentFrame: CGRect {
+        let size = measured ?? frame.size
+        return CGRect(x: frame.midX - size.width / 2, y: frame.midY - size.height / 2, width: size.width, height: size.height)
+    }
+
+    /// The glass itself, without the clear room around it for lifting and bouncing icons: tooltips, previews and
+    /// stacks sit just above this, as they do over macOS's Dock.
+    var glassFrame: CGRect {
+        let room = DockView.outer(config, icon: dock.icon)
+        let content = contentFrame
+        return CGRect(x: content.minX + room.leading, y: content.minY + room.bottom,
+                      width: content.width - room.leading - room.trailing, height: content.height - room.top - room.bottom)
+    }
+
     /// The gap between the dock and the screen's edge (Omarchy's `gap`).
     var gap: CGFloat { config.number("dockMargin") >= 0 ? config.number("dockMargin") : 4 }
+
+    /// How far the glass reaches in from the screen's edge: windows kept clear of the dock end right there.
+    var reach: CGFloat {
+        let size = measured ?? frame.size
+        let room = DockView.outer(config, icon: dock.icon)
+        switch config.position {
+        case "left": return gap + size.width - room.trailing
+        case "right": return gap + size.width - room.leading
+        default: return gap + size.height - room.top
+        }
+    }
 
     /// Something open over the dock keeps it out while auto-hide is on.
     var busy: Bool { dock.openPopup != nil || dock.dragging != nil || PetalApp.shared.overlayOpen }
 
-    var tucked: Bool { config.autoHide && !dock.revealed && !busy }
+    /// The screen shows a full-screen app: the dock keeps out of its way and comes out at the screen's edge, as
+    /// macOS's does there.
+    var fullScreen = false {
+        didSet {
+            guard fullScreen != oldValue else { return }
+            dock.revealed = !hides
+            hideAt = nil
+        }
+    }
+
+    /// Out of the way until the pointer reaches the edge: auto-hide, or a full-screen app.
+    var hides: Bool { config.autoHide || fullScreen }
+
+    /// Mission Control is open, where macOS's own Dock comes out: this one steps aside until it closes.
+    var aside = false {
+        didSet {
+            guard aside != oldValue, let screenRef else { return }
+            place(on: screenRef)
+        }
+    }
+
+    var tucked: Bool { aside || (hides && !dock.revealed && !busy) }
 
     func place(on screen: NSScreen) {
         screenRef = screen
-        hosting.layoutSubtreeIfNeeded()
-        let size = hosting.fittingSize
+        // Measured again only when the dock's content says its size may have changed: once a second, nothing has.
+        // A new position (or icon size) lays the dock out the other way: the last measure doesn't hold.
+        let shape = "\(config.position)|\(config.number("iconSize"))|\(config.number("iconPadding"))|\(config.number("dockMargin"))|\(screen.frame)"
+        if shape != measuredShape { measured = nil; measuredShape = shape }
         let area = screen.frame
         let visible = screen.visibleFrame
+        let content: CGSize
+        if let measured, !hosting.sizeChanged {
+            content = measured
+        } else {
+            content = fit(along: config.position == "bottom" ? area.width - 16 : visible.height - 16)
+            measured = content
+        }
+        // Only the dock's thickness comes from its content; along the edge the panel is the screen's length.
         var origin: CGPoint
+        let size: CGSize
         switch config.position {
-        case "left": origin = CGPoint(x: area.minX + gap, y: visible.midY - size.height / 2)
-        case "right": origin = CGPoint(x: area.maxX - size.width - gap, y: visible.midY - size.height / 2)
-        default: origin = CGPoint(x: area.midX - size.width / 2, y: area.minY + gap)
+        case "left":
+            size = CGSize(width: content.width, height: visible.height)
+            origin = CGPoint(x: area.minX + gap, y: visible.minY)
+        case "right":
+            size = CGSize(width: content.width, height: visible.height)
+            origin = CGPoint(x: area.maxX - content.width - gap, y: visible.minY)
+        default:
+            size = CGSize(width: area.width, height: content.height)
+            origin = CGPoint(x: area.minX, y: area.minY + gap)
         }
         // Tucked away, it slides a little toward the edge and fades out (sliding off the edge would put it on a
         // display arranged next to this one).
@@ -429,7 +898,7 @@ final class DockPanel: NSPanel {
         case "right": origin.x += shift
         default: origin.y -= shift
         }
-        ignoresMouseEvents = tucked
+        updateMouseThrough()
         let alpha: CGFloat = tucked ? 0 : 1
         if alphaValue != alpha {
             NSAnimationContext.runAnimationGroup { context in
@@ -455,6 +924,47 @@ final class DockPanel: NSPanel {
         if let screenRef { place(on: screenRef) }
     }
 
+    /// Measures the dock with the icons as large as the setting asks, or, when that many wouldn't fit in `room`
+    /// along the screen's edge, as large as fits (not under 16 points), as macOS's Dock does. The dock's length is
+    /// the icons' share, which grows with them, plus a fixed part (padding, the mode's name): two measures tell
+    /// both, so the second guess fits.
+    private func fit(along room: CGFloat) -> CGSize {
+        let wanted = max(16, config.number("iconSize"))
+        func length(_ size: CGSize) -> CGFloat { config.position == "bottom" ? size.width : size.height }
+        func measure(at icon: CGFloat) -> CGSize {
+            if dock.icon != icon {
+                dock.icon = icon
+                hosting.rootView = hosting.rootView   // laid out again now, at the new size
+            }
+            return hosting.measure()
+        }
+        var icon = min(dock.icon, wanted)
+        var size = measure(at: icon)
+        // Grown back to the setting when there's room again (fewer apps): measured there first.
+        if icon < wanted, length(size) < room {
+            let full = measure(at: wanted)
+            if length(full) <= room { return full }
+            let perPoint = (length(full) - length(size)) / (wanted - icon)
+            icon = perPoint > 0 ? min(wanted, floor(icon + (room - length(size)) / perPoint)) : icon
+            size = measure(at: icon)
+        }
+        guard length(size) > room, icon > 16 else { return size }
+        // Too long: a first guess as if all of it grew with the icons, then the line through both measures.
+        let first = (icon, length(size))
+        icon = max(16, floor(icon * room / length(size)))
+        size = measure(at: icon)
+        if length(size) > room, icon > 16, first.0 != icon {
+            let perPoint = (first.1 - length(size)) / (first.0 - icon)
+            if perPoint > 0 { icon = max(16, floor(icon - (length(size) - room) / perPoint)) }
+            size = measure(at: icon)
+        }
+        while length(size) > room, icon > 16 {   // rounding: a point at a time
+            icon -= 1
+            size = measure(at: icon)
+        }
+        return size
+    }
+
     /// The slot `id` in screen coordinates.
     func screenFrame(of id: String) -> CGRect? {
         guard let rect = dock.frames[id] else { return nil }
@@ -463,9 +973,10 @@ final class DockPanel: NSPanel {
 
     /// Auto-hide: the dock comes out when the pointer meets its edge, and goes 150 ms after it leaves.
     private func followMouse() {
-        guard config.autoHide, let screen = screenRef else {
+        updateMouseThrough()
+        guard hides, let screen = screenRef else {
             if !dock.revealed { dock.revealed = true }
-            if frame.contains(NSEvent.mouseLocation) { dock.magnifier.wake() }
+            if !aside && contentFrame.contains(NSEvent.mouseLocation) { dock.magnifier.wake() }
             return
         }
         let mouse = NSEvent.mouseLocation
@@ -477,7 +988,7 @@ final class DockPanel: NSPanel {
         case "right": atEdge = mouse.x >= area.maxX - depth && mouse.y >= area.minY && mouse.y <= area.maxY
         default: atEdge = mouse.y <= area.minY + depth && mouse.x >= area.minX && mouse.x <= area.maxX
         }
-        let over = frame.insetBy(dx: -8, dy: -8).contains(mouse)
+        let over = contentFrame.insetBy(dx: -8, dy: -8).contains(mouse)
         if over && !tucked { dock.magnifier.wake() }
         if !dock.revealed && atEdge {
             dock.revealed = true
@@ -503,9 +1014,11 @@ struct DockView: View {
     let dock: ScreenDock
 
     var config: Config { app.config }
-    var icon: CGFloat { max(16, config.number("iconSize")) }
+    var icon: CGFloat { dock.icon }
     var inset: CGFloat { config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5 }
     var slot: CGFloat { icon + inset * 2 }
+
+    static let finderSlot = "finder"
 
     var body: some View {
         let layout = dock.vertical ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 0))
@@ -520,6 +1033,9 @@ struct DockView: View {
             }
             if !app.providers.isEmpty && (config.bool("ai") || config.bool("claudeUsage")) {
                 ClaudeButton(dock: dock, size: icon * 0.95).frame(width: slot, height: slot).magnified(dock, "claude")
+            }
+            if config.bool("finderInDock") {
+                FinderButton(dock: dock, size: icon * 0.95).frame(width: slot, height: slot).magnified(dock, Self.finderSlot)
             }
             if modesOn { Separator(vertical: dock.vertical, slot: slot).magnified(dock, "separator:modes", scales: false) }
             stage(layout)
@@ -547,13 +1063,24 @@ struct DockView: View {
         }
         .padding(outer)
         .fixedSize()
-        .animation(.easeOut(duration: 0.22), value: dock.items.map(\.id))
+        // Centered in a panel that never resizes, so the glass grows and shrinks around its centre in the same
+        // animation as what changed inside it: the window never moves under it.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // (The layer strip animates its own apps, and its stage never changes size with them.)
+        .animation(.easeOut(duration: 0.22), value: DockStrip.shared.layers && !snapshotting ? [] : dock.items.map(\.id))
         .animation(.easeOut(duration: 0.22), value: dock.minimized.map(\.id))
+        .animation(.easeOut(duration: 0.24), value: dock.mode?.id)
+        .animation(.easeOut(duration: 0.24), value: app.pendingMode?.mode)
+        .animation(.easeOut(duration: 0.22), value: app.signals.nowPlaying == nil)
     }
 
     /// Room around the glass: for its shadow, and inward for icons lifting and bouncing.
     /// With magnification, it's room for the largest icons too, so the panel never resizes while they grow.
-    private var outer: EdgeInsets {
+    private var outer: EdgeInsets { Self.outer(config, icon: icon) }
+
+    /// The room around the glass (see `outer`), for anything placed by the glass rather than by the panel.
+    static func outer(_ config: Config, icon: CGFloat) -> EdgeInsets {
+        let slot = icon + (config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5) * 2
         var room = icon * 0.55
         var along: CGFloat = 10
         if Magnifier.enabled {
@@ -580,6 +1107,17 @@ struct DockView: View {
     /// The mode's apps, the rest, and "+", centered on a stage as long as the fullest mode.
     @ViewBuilder private func stage(_ layout: AnyLayout) -> some View {
         let length = CGFloat(dock.stageSlots) * slot
+        if DockStrip.shared.layers && !snapshotting {
+            AppStrip(dock: dock, length: length, slot: slot)
+                .stripRoom(dock, icon: icon, slot: slot)
+                .frame(width: dock.vertical ? slot : length, height: dock.vertical ? length : slot)
+                .overlay(alignment: dock.vertical ? .top : .leading) { StripAddSlot(dock: dock, icon: icon, slot: slot, length: length) }
+        } else {
+            swiftUIStage(layout, length: length)
+        }
+    }
+
+    @ViewBuilder private func swiftUIStage(_ layout: AnyLayout, length: CGFloat) -> some View {
         layout {
             ForEach(Array(dock.items.enumerated()), id: \.element.id) { index, item in
                 AppSlot(dock: dock, item: item, index: index, icon: icon, slot: slot)
@@ -619,6 +1157,25 @@ struct SlotFrame: ViewModifier {
 extension View {
     func slotFrame(_ dock: ScreenDock, _ id: String) -> some View { modifier(SlotFrame(dock: dock, id: id)) }
 
+    /// Pressed: a little darker and smaller the moment the button goes down, as macOS's Dock does.
+    func pressed(_ on: Bool) -> some View {
+        brightness(on ? -0.22 : 0)
+            .scaleEffect(on ? 0.92 : 1)
+            .animation(.easeOut(duration: on ? 0.06 : 0.14), value: on)
+    }
+
+    /// A control's own surface on the dock's glass (the mode switcher, the AI button, "+"): clear Liquid Glass, so
+    /// the layers read as glass on glass, not shapes stacked on it. `on` false adds no glass at all (another mode's
+    /// button until the pointer is on it), not `.identity` glass, which still costs on every update. Pressed, it
+    /// shrinks as `pressed` does and what's on it darkens; the glass itself stays clear (darkened, it turns into a
+    /// dark disc).
+    func clearGlass<S: Shape>(_ on: Bool = true, in shape: S, pressed: Bool = false) -> some View {
+        brightness(pressed ? -0.22 : 0)
+            .modifier(ClearGlass(on: on, shape: shape))
+            .scaleEffect(pressed ? 0.92 : 1)
+            .animation(.easeOut(duration: pressed ? 0.06 : 0.14), value: pressed)
+    }
+
     /// The icon lifts and grows inward under the pointer.
     func lift(_ hovering: Bool, icon: CGFloat) -> some View {
         let config = PetalApp.shared.config
@@ -632,6 +1189,16 @@ extension View {
     }
 }
 
+/// See `clearGlass`.
+struct ClearGlass<S: Shape>: ViewModifier {
+    let on: Bool
+    let shape: S
+
+    func body(content: Content) -> some View {
+        if on { content.glassEffect(.clear.interactive(), in: shape) } else { content }
+    }
+}
+
 // The mode switcher is in Switcher.swift.
 
 // MARK: - Claude button
@@ -641,22 +1208,165 @@ struct ClaudeButton: View {
     let dock: ScreenDock
     let size: CGFloat
     @State private var hovering = false
+    @State private var pressed = false
+    /// A file is over it: it leans in, wide awake, with rings rippling out to say "give it here".
+    @State private var fileOver = false
+    /// Counts drops: each one plays the "gulp" (a squash and the file's icon falling in).
+    @State private var swallowed = 0
+    @State private var dropped: NSImage?
 
     var body: some View {
         ZStack {
-            Circle().fill(.white.opacity(hovering ? 0.16 : 0.07)).overlay(Circle().strokeBorder(.white.opacity(0.14)))
+            if fileOver { DropRipples(size: size, color: Color(nsColor: app.accent)) }
             ProviderMark(provider: app.chatProvider).foregroundStyle(.white.opacity(0.9))
-                .frame(width: size * 0.56, height: size * 0.56).scaleEffect(hovering ? 1.08 : 1)
+                .frame(width: size * 0.56, height: size * 0.56)
+                .scaleEffect(fileOver ? 1.22 : hovering ? 1.08 : 1)
+                .rotationEffect(.degrees(fileOver ? -10 : 0))
             if app.config.bool("claudeUsage") { UsageRing(usage: app.usage, size: size, line: 2.5, track: false) }
+            if let dropped {
+                Image(nsImage: dropped).resizable().frame(width: size * 0.5, height: size * 0.5)
+                    .keyframeAnimator(initialValue: DropFall(), trigger: swallowed) { content, value in
+                        content.offset(y: value.y).scaleEffect(value.scale).opacity(value.opacity)
+                    } keyframes: { _ in
+                        KeyframeTrack(\.y) { LinearKeyframe(-size * 0.9, duration: 0); CubicKeyframe(0, duration: 0.28) }
+                        KeyframeTrack(\.scale) { LinearKeyframe(1, duration: 0); CubicKeyframe(0.2, duration: 0.3) }
+                        KeyframeTrack(\.opacity) { LinearKeyframe(1, duration: 0.2); LinearKeyframe(0, duration: 0.1) }
+                    }
+            }
         }
         .frame(width: size, height: size)
+        .scaleEffect(fileOver ? 1.12 : 1)
+        .keyframeAnimator(initialValue: 1.0, trigger: swallowed) { content, scale in
+            content.scaleEffect(x: scale, y: 2 - scale)
+        } keyframes: { _ in
+            KeyframeTrack { CubicKeyframe(1, duration: 0.22); SpringKeyframe(0.86, duration: 0.1); SpringKeyframe(1.0, duration: 0.35, spring: .bouncy) }
+        }
+        .clearGlass(in: .circle, pressed: pressed)
         .animation(.easeOut(duration: 0.12), value: hovering)
+        .animation(.spring(response: 0.32, dampingFraction: 0.6), value: fileOver)
         .slotFrame(dock, "claude")
-        .slotMouse(SlotMouse(left: { app.claude.open(asking: nil) }, right: { Menus.settings(for: dock) },
+        // A second click closes what the first opened.
+        .slotMouse(SlotMouse(left: { app.claude.toggle() }, right: { Menus.settings(for: dock) },
                            hover: { on in
                                hovering = on
                                app.tooltips.show(on ? app.usageTooltip : nil, over: "claude", in: dock)
-                           }))
+                           },
+                           // A file dropped on it goes to the AI: "summarize it", "what's in it?".
+                           files: { urls in
+                               dropped = urls.first.map { NSWorkspace.shared.icon(forFile: $0.path) }
+                               swallowed += 1
+                               DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) { app.claude.open(asking: nil, attaching: urls) }
+                           },
+                           fileOver: { over in fileOver = over },
+                           dropOperation: .generic,
+                           press: { pressed = $0 }))
+    }
+}
+
+/// Finder, as its own button by the AI button, the same in every mode (macOS's Dock keeps Finder first too): Petal's
+/// own mark for it on clear glass, a dot while it has windows, Finder's menu on a right-click, and files dropped on it
+/// shown in Finder.
+struct FinderButton: View {
+    @Environment(PetalApp.self) private var app
+    let dock: ScreenDock
+    let size: CGFloat
+    @State private var hovering = false
+    @State private var pressed = false
+    @State private var hop: CGFloat = 0
+
+    var body: some View {
+        let item = dock.finder
+        let noteReady = app.claude.readyApps.contains(item.id)   // a sticky note on a Finder window is done
+        ZStack(alignment: .bottom) {
+            FinderMark().stroke(.white.opacity(0.9), style: StrokeStyle(lineWidth: max(1.4, size * 0.045), lineCap: .round, lineJoin: .round))
+                .frame(width: size * 0.5, height: size * 0.5)
+                .frame(width: size, height: size)
+                .scaleEffect(hovering ? 1.08 : 1)
+            if item.windows > 0 {
+                Circle().fill(.white.opacity(item.active ? 0.95 : 0.6)).frame(width: 4, height: 4).offset(y: size * 0.12)
+            }
+        }
+        .frame(width: size, height: size)
+        .clearGlass(in: .circle, pressed: pressed)
+        .overlay(alignment: .topTrailing) {
+            if noteReady { Badge(text: "✦", icon: size * 0.8).offset(x: size * 0.08, y: -size * 0.08) }
+        }
+        // The hop goes inward, away from the screen's edge.
+        .offset(x: app.config.position == "left" ? hop * size * 0.4 : app.config.position == "right" ? -hop * size * 0.4 : 0,
+                y: app.config.position == "bottom" ? -hop * size * 0.4 : 0)
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .onChange(of: app.signals.bounces[item.id]) { _, _ in
+            guard app.config.bool("bounce") else { return }
+            withAnimation(.easeOut(duration: 0.22)) { hop = 1 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+                withAnimation(.interpolatingSpring(stiffness: 260, damping: 9)) { hop = 0 }
+            }
+        }
+        .slotFrame(dock, DockView.finderSlot)
+        .slotMouse(SlotMouse(left: {
+                                 app.popups.closeAll()
+                                 app.tooltips.hide()
+                                 if app.claude.openReady(app: item.id) { return }
+                                 // Its windows forward; none open, a new one, as macOS's Dock does.
+                                 if item.windows > 0 { app.docks.activate(item) } else { NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory())) }
+                             },
+                             right: { Menus.app(item, in: dock) },
+                             hover: { on in
+                                 hovering = on
+                                 app.tooltips.show(on ? "Finder" : nil, over: DockView.finderSlot, in: dock)
+                             },
+                             files: { urls in NSWorkspace.shared.activateFileViewerSelecting(urls) },
+                             press: { pressed = $0 }))
+    }
+}
+
+/// Petal's mark for Finder: its face in a few lines (the outline, the profile down the middle, the eyes, the smile).
+struct FinderMark: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let w = rect.width, h = rect.height
+        p.addRoundedRect(in: rect, cornerSize: CGSize(width: w * 0.24, height: h * 0.24), style: .continuous)
+        // The profile: down from the top, a nose to the left, back, down to the bottom.
+        p.move(to: CGPoint(x: rect.minX + w * 0.54, y: rect.minY))
+        p.addLine(to: CGPoint(x: rect.minX + w * 0.46, y: rect.minY + h * 0.5))
+        p.addLine(to: CGPoint(x: rect.minX + w * 0.55, y: rect.minY + h * 0.52))
+        p.addLine(to: CGPoint(x: rect.minX + w * 0.52, y: rect.maxY))
+        // The eyes.
+        p.move(to: CGPoint(x: rect.minX + w * 0.27, y: rect.minY + h * 0.28))
+        p.addLine(to: CGPoint(x: rect.minX + w * 0.27, y: rect.minY + h * 0.4))
+        p.move(to: CGPoint(x: rect.minX + w * 0.73, y: rect.minY + h * 0.28))
+        p.addLine(to: CGPoint(x: rect.minX + w * 0.73, y: rect.minY + h * 0.4))
+        // The smile.
+        p.move(to: CGPoint(x: rect.minX + w * 0.22, y: rect.minY + h * 0.66))
+        p.addQuadCurve(to: CGPoint(x: rect.minX + w * 0.78, y: rect.minY + h * 0.66), control: CGPoint(x: rect.midX, y: rect.minY + h * 0.86))
+        return p
+    }
+}
+
+/// Where a dropped file's icon is as it falls into the AI button.
+struct DropFall {
+    var y: CGFloat = 0
+    var scale: CGFloat = 1
+    var opacity: Double = 0
+}
+
+/// Rings rippling out from the AI button while a file is over it.
+struct DropRipples: View {
+    let size: CGFloat
+    let color: Color
+
+    var body: some View {
+        TimelineView(.animation) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            ZStack {
+                ForEach(0..<2) { i in
+                    let phase = (t / 1.1 + Double(i) / 2).truncatingRemainder(dividingBy: 1)
+                    Circle().strokeBorder(color.opacity(0.7 * (1 - phase)), lineWidth: 2)
+                        .frame(width: size * (0.9 + 0.7 * phase), height: size * (0.9 + 0.7 * phase))
+                }
+            }
+        }
+        .allowsHitTesting(false)
     }
 }
 
@@ -714,6 +1424,7 @@ struct AppSlot: View {
     let slot: CGFloat
     @State private var hovering = false
     @State private var fileOver = false
+    @State private var pressed = false
     @State private var hop: CGFloat = 0
 
     var body: some View {
@@ -722,17 +1433,20 @@ struct AppSlot: View {
         let color = Color(nsColor: config.bool("appGlow") ? AppColor.of(item.id) : app.accent)
         let launching = app.launching[item.id] != nil
         ZStack {
+            // Only the app in front glows, softly; a halo around every open app read as a pale haze over the icons.
             if config.bool("appGlow") && item.running {
-                RadialGradient(colors: [color.opacity(0.55), color.opacity(0.18), .clear], center: .center,
-                               startRadius: 0, endRadius: slot * 0.62)
-                    .opacity((item.active ? 0.75 : hovering ? 0.55 : 0.32) * min(1, max(0, config.number("glowStrength"))))
+                RadialGradient(colors: [color.opacity(0.45), color.opacity(0.12), .clear], center: .center,
+                               startRadius: 0, endRadius: slot * 0.6)
+                    .opacity((item.active ? 0.6 : 0) * min(1, max(0, config.number("glowStrength"))))
                     .animation(.easeOut(duration: 0.2), value: item.active)
             }
             DockIcon(id: item.id, size: icon)
+                .pressed(pressed)
                 .opacity((item.running || !item.pinned || Sites.isWeb(item.id) ? 1 : config.number("idleOpacity")) * (fileOver ? 0.6 : 1))
                 .modifier(Pulse(on: launching, floor: config.number("idleOpacity")))
                 .overlay(alignment: .topTrailing) {
-                    if config.bool("badges"), let badge = app.signals.badges[item.id] {
+                    // A sticky note done while away shows over the app's own badge until it's opened.
+                    if let badge = app.claude.readyApps.contains(item.id) ? "✦" : config.bool("badges") ? app.signals.badges[item.id] : nil {
                         Badge(text: badge, icon: icon).offset(x: icon * 0.12, y: -icon * 0.12)
                     }
                 }
@@ -759,13 +1473,14 @@ struct AppSlot: View {
             middle: { app.docks.newWindow(item.id) },
             hover: { on in
                 hovering = on
-                app.tooltips.show(on ? Apps.name(item.id) : nil, over: item.id, in: dock)
                 app.previews.hover(on ? item : nil, in: dock, id: item.id)
+                app.tooltips.show(on ? Apps.name(item.id) : nil, over: item.id, in: dock)
                 if on && app.config.bool("recentFiles") { Apps.prefetchRecent(item.id) }
             },
             drag: { delta, ended in drag(delta, ended: ended) },
             files: config.bool("dropToOpen") ? { urls in app.docks.launch(item.id, files: urls) } : nil,
-            fileOver: { fileOver = $0 }))
+            fileOver: { fileOver = $0 },
+            press: { pressed = $0 }))
         .onChange(of: app.signals.bounces[item.id]) { _, _ in bounce() }
     }
 
@@ -917,29 +1632,47 @@ enum AppColor {
     }
 }
 
-/// "+": add apps or folders to this Desktop's mode.
+/// "+": add apps or folders to this Desktop's mode. A plus in the mode's color on a clear glass tile. The layer strip
+/// leaves its slot empty and the dock puts this over it (see `DockView.stage`), so it's real glass either way.
 struct AddSlot: View {
     @Environment(PetalApp.self) private var app
     let dock: ScreenDock
     let icon: CGFloat
     @State private var hovering = false
+    @State private var pressed = false
 
     var body: some View {
         let color = Color(nsColor: dock.mode?.color ?? PetalApp.shared.accent)
-        ZStack {
-            RoundedRectangle(cornerRadius: icon * 0.8 * 0.28)
-                .fill(.white.opacity(hovering ? 0.14 : 0.07))
-                .overlay(RoundedRectangle(cornerRadius: icon * 0.8 * 0.28).strokeBorder(.white.opacity(0.22)))
-                .frame(width: icon * 0.8, height: icon * 0.8)
-            Image(systemName: "plus").font(.system(size: icon * 0.36, weight: .bold)).foregroundStyle(color)
-        }
-        .lift(hovering, icon: icon)
-        .slotFrame(dock, "add")
-        .slotMouse(SlotMouse(left: { app.popups.closeAll(); app.search.open(in: dock) }, right: { Menus.settings(for: dock) },
-                           hover: { on in
-                               hovering = on
-                               app.tooltips.show(on ? (dock.mode.map { "Add apps to \($0.name)" } ?? "Add apps") : nil, over: "add", in: dock)
-                           }))
+        let side = icon * 0.8
+        Image(systemName: "plus").font(.system(size: icon * 0.36, weight: .bold)).foregroundStyle(color)
+            .scaleEffect(hovering ? 1.08 : 1)
+            .frame(width: side, height: side)
+            .clearGlass(in: .rect(cornerRadius: side * 0.28), pressed: pressed)
+            .animation(.easeOut(duration: 0.12), value: hovering)
+            .lift(hovering, icon: icon)
+            .slotFrame(dock, "add")
+            .slotMouse(SlotMouse(left: { if app.search.isOpen { app.search.close() } else { app.popups.closeAll(); app.search.open(in: dock) } }, right: { Menus.settings(for: dock) },
+                               hover: { on in
+                                   hovering = on
+                                   app.tooltips.show(on ? (dock.mode.map { "Add apps to \($0.name)" } ?? "Add apps") : nil, over: "add", in: dock)
+                               }, press: { pressed = $0 }))
+    }
+}
+
+/// "+" over the layer strip, which draws the apps and keeps the slot after them for it (a layer can't be glass): at
+/// the same place, start + count × slot along the stage, moving there with the strip's apps. Its own view, so the
+/// apps changing updates only this, never the rest of the dock.
+struct StripAddSlot: View {
+    let dock: ScreenDock
+    let icon: CGFloat
+    let slot: CGFloat
+    let length: CGFloat
+
+    var body: some View {
+        let count = CGFloat(dock.appCount)
+        AddSlot(dock: dock, icon: icon).frame(width: slot, height: slot).magnified(dock, "add")
+            .padding(dock.vertical ? .top : .leading, (length + (count - 1) * slot) / 2)
+            .animation(.easeOut(duration: 0.22), value: count)
     }
 }
 
@@ -972,34 +1705,18 @@ struct NowPlayingSlot: View {
         }
         .lift(hovering, icon: icon)
         .slotFrame(dock, "media")
-        .slotMouse(SlotMouse(left: { NowPlaying.send("playpause", to: playing.player) },
+        .slotMouse(SlotMouse(left: { app.signals.control("playpause") },
                            right: { Menus.media(playing) },
-                           middle: { NowPlaying.send("next track", to: playing.player) },
+                           middle: { app.signals.control("next track") },
                            hover: { on in
                                hovering = on
-                               app.tooltips.show(on ? "\(playing.title) — \(playing.artist)" : nil, over: "media", in: dock)
+                               // The song and its controls, in a pop-over that stays while the pointer moves into it.
+                               app.previews.hoverMedia(on, in: dock)
                            }))
     }
 }
 
-struct Equalizer: View {
-    let icon: CGFloat
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 15)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            HStack(alignment: .bottom, spacing: 2) {
-                ForEach(0..<3) { i in
-                    let period = 0.52 + Double(i) * 0.16
-                    let phase = (sin(t * .pi * 2 / period) + 1) / 2
-                    Capsule().fill(Color(nsColor: PetalApp.shared.accent))
-                        .frame(width: 2, height: max(2, max(4, icon * 0.16) * (i == 1 ? 1 : 0.7) * phase))
-                }
-            }
-            .frame(height: max(4, icon * 0.16), alignment: .bottom)
-        }
-    }
-}
+// The equalizer is in Motion.swift.
 
 struct MinimizedSlot: View {
     @Environment(PetalApp.self) private var app
@@ -1053,6 +1770,13 @@ struct StackSlot: View {
                     .rotationEffect(.degrees(-90)).frame(width: icon + 8, height: icon + 8)
             }
         }
+        .overlay(alignment: .topTrailing) {
+            // Something new since the stack was last opened: a dot, not a count. Counts are for unread messages.
+            if app.signals.fresh.contains(folder) && app.signals.progress[folder] == nil && dock.openPopup != key {
+                NewDot(icon: icon).offset(x: icon * 0.04, y: -icon * 0.04).transition(.scale.combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: app.signals.fresh.contains(folder))
         .lift(hovering, icon: icon)
         .overlay(alignment: .bottom) {
             if dock.openPopup == key { Circle().fill(Color(nsColor: app.accent)).frame(width: 4, height: 4).offset(y: 5) }
@@ -1065,6 +1789,18 @@ struct StackSlot: View {
                                hovering = on
                                app.tooltips.show(on ? Stacks.name(folder) : nil, over: key, in: dock)
                            }))
+    }
+}
+
+/// A small dot in Petal's accent: something new is in a stack.
+struct NewDot: View {
+    let icon: CGFloat
+
+    var body: some View {
+        let size = max(7, icon * 0.2)
+        Circle().fill(Color(nsColor: PetalApp.shared.accent))
+            .frame(width: size, height: size)
+            .overlay(Circle().strokeBorder(.white.opacity(0.85), lineWidth: 1.5))
     }
 }
 
@@ -1082,7 +1818,12 @@ struct TrashSlot: View {
             .scaleEffect(fileOver ? 1.2 : 1)
             .lift(hovering, icon: icon)
             .slotFrame(dock, "trash")
-            .slotMouse(SlotMouse(left: { Stacks.openTrash() }, right: { Menus.trash() },
+            .slotMouse(SlotMouse(left: {
+                                   // The tooltip and any preview go with the click, as they do for an app.
+                                   app.popups.closeAll()
+                                   app.previews.hover(nil, in: dock)
+                                   Stacks.openTrash()
+                               }, right: { Menus.trash() },
                                hover: { on in
                                    hovering = on
                                    app.tooltips.show(on ? "Trash" : nil, over: "trash", in: dock)
@@ -1101,6 +1842,11 @@ struct SlotMouse: NSViewRepresentable {
     var drag: ((CGFloat, Bool) -> Void)? = nil
     var files: (([URL]) -> Void)? = nil
     var fileOver: (Bool) -> Void = { _ in }
+    /// What a drag over it shows: a copy ("+") into an app, or nothing extra where the slot has its own animation.
+    var dropOperation: NSDragOperation = .copy
+    /// The button went down (true) or up, or a drag took over (false): for feedback the moment it's pressed. What a
+    /// click does still happens on the way up, so a press can turn into a drag.
+    var press: (Bool) -> Void = { _ in }
 
     func makeNSView(context: Context) -> MouseView { MouseView() }
     func updateNSView(_ view: MouseView, context: Context) { view.handlers = self }
@@ -1130,15 +1876,39 @@ struct SlotMouse: NSViewRepresentable {
             area = new
         }
 
+        private var inside = false
+        private var leftObserver: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let leftObserver { NotificationCenter.default.removeObserver(leftObserver) }
+            leftObserver = nil
+            guard let window else { return }
+            // The dock stops taking the mouse as the pointer leaves it, sometimes before macOS says the pointer left
+            // this slot: a slot would stay hovered (a mode button kept its highlight). The dock says so instead.
+            leftObserver = NotificationCenter.default.addObserver(forName: DockPanel.mouseLeft, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.inside else { return }
+                    self.inside = false
+                    self.handlers?.hover(false)
+                }
+            }
+        }
+
         override func mouseEntered(with event: NSEvent) {
             (window as? DockPanel)?.dock.magnifier.wake()
+            inside = true
             handlers?.hover(true)
         }
-        override func mouseExited(with event: NSEvent) { handlers?.hover(false) }
+        override func mouseExited(with event: NSEvent) {
+            inside = false
+            handlers?.hover(false)
+        }
 
         override func mouseDown(with event: NSEvent) {
             down = NSEvent.mouseLocation
             dragging = false
+            handlers?.press(true)
         }
 
         override func mouseDragged(with event: NSEvent) {
@@ -1146,12 +1916,21 @@ struct SlotMouse: NSViewRepresentable {
             let point = NSEvent.mouseLocation
             let vertical = PetalApp.shared.config.position != "bottom"
             let delta = vertical ? down.y - point.y : point.x - down.x
-            if abs(point.x - down.x) > 4 || abs(point.y - down.y) > 4 { dragging = true }
+            if !dragging && (abs(point.x - down.x) > 4 || abs(point.y - down.y) > 4) {
+                dragging = true
+                handlers?.press(false)
+            }
             if dragging { drag(delta, false) }
         }
 
         override func mouseUp(with event: NSEvent) {
-            if dragging { handlers?.drag?(0, true) } else { handlers?.left() }
+            if !dragging { handlers?.press(false) }
+            if dragging { handlers?.drag?(0, true) } else {
+                // Any click on the dock (an app, a website, Finder, the AI button, "+", a mode): an earlier click
+                // still bringing a window forward stands down, so it can't come up over what this one opens.
+                Windows.focusing.cancel()
+                handlers?.left()
+            }
             down = nil
             dragging = false
         }
@@ -1165,7 +1944,7 @@ struct SlotMouse: NSViewRepresentable {
         override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
             handlers?.fileOver(true)
             PetalApp.shared.docks.revealAll()
-            return .copy
+            return handlers?.dropOperation ?? .copy
         }
 
         override func draggingExited(_ sender: NSDraggingInfo?) { handlers?.fileOver(false) }
@@ -1204,5 +1983,41 @@ struct ModeIcon: View {
         } else {
             Text(icon.isEmpty ? "●" : icon).font(.system(size: size))   // a Nerd Font glyph from an Omarchy modes.json
         }
+    }
+}
+
+/// The dock's hosting view, which notes when SwiftUI says its content's size may have changed, so the dock is
+/// measured only then.
+final class DockHostingView: NSHostingView<AnyView> {
+    var sizeChanged = true
+
+    required init(rootView: AnyView) {
+        super.init(rootView: rootView)
+        // Only its size for measuring: no minimum or maximum that would make the window follow the content.
+        sizingOptions = [.intrinsicContentSize]
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func invalidateIntrinsicContentSize() {
+        super.invalidateIntrinsicContentSize()
+        sizeChanged = true
+    }
+
+    /// The content's own size (the glass and the room around it), laid out now.
+    func measure() -> CGSize {
+        layoutSubtreeIfNeeded()
+        sizeChanged = false
+        return intrinsicContentSize
+    }
+
+    /// A plain view holding the hosting view at its full size, so the window's size is the panel's alone.
+    static func container(_ hosting: DockHostingView) -> NSView {
+        let container = NSView()
+        hosting.translatesAutoresizingMaskIntoConstraints = true
+        hosting.autoresizingMask = [.width, .height]
+        container.addSubview(hosting)
+        return container
     }
 }

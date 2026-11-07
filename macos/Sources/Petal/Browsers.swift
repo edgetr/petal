@@ -100,20 +100,82 @@ final class Browsers {
 
     // MARK: Reading
 
-    /// The front tab's address, or nil (not a browser, not allowed yet, or no answer).
-    func frontURL(of app: NSRunningApplication, done: @escaping (String?) -> Void) {
+    /// One of a browser's windows as Accessibility sees it: the window server's number, title and frame (top left).
+    struct Window: Sendable {
+        let number: CGWindowID?
+        let title: String
+        let frame: CGRect
+    }
+
+    /// The front tab's address, or nil (not a browser, not allowed yet, or no answer). `window`: another of its
+    /// windows (a sticky note's), whose tab is wanted instead; Firefox and Zen answer only for the front one.
+    func frontURL(of app: NSRunningApplication, window: Window? = nil, done: @escaping (String?) -> Void) {
         guard let id = app.bundleIdentifier, let kind = Self.kind(id) else { return done(nil) }
         switch kind {
         case .gecko:
-            done(Self.geckoAddress(pid: app.processIdentifier))
+            // Accessibility, which waits on a busy browser: off the main thread. The front window, or a note's own
+            // (found by id, or frame and title).
+            let pid = app.processIdentifier
+            queue.async {
+                let url = Self.geckoAddress(pid: pid, window: window)
+                DispatchQueue.main.async { done(url) }
+            }
         case .chromium, .safari:
-            let source = "tell application id \"\(id)\" to return URL of \(kind == .safari ? "current tab" : "active tab") of front window"
+            let tab = kind == .safari ? "current tab" : "active tab"
+            let source = window == nil ? "tell application id \"\(id)\" to return URL of \(tab) of front window"
+                : Self.windowsScript(id, tab: tab)
             queue.async {
                 // Never a surprise prompt: only a browser that already said yes is asked.
-                let url = Self.access(id) == .allowed ? Self.run(source) : nil
+                let answer = Self.access(id) == .allowed ? Self.run(source) : nil
+                let url = window.map { Self.url(in: answer ?? "", for: $0) } ?? answer
                 DispatchQueue.main.async { done(url) }
             }
         }
+    }
+
+    /// Every window's id, name, bounds and tab address, one per line (the separators set outside the browser's
+    /// own words, where Safari's `tab` is a tab, not the character).
+    private static func windowsScript(_ id: String, tab: String) -> String {
+        """
+        set out to ""
+        set sep to tab
+        set nl to linefeed
+        tell application id "\(id)"
+        repeat with w in windows
+        try
+        set b to bounds of w
+        set out to out & (id of w) & sep & (name of w) & sep & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b) & sep & (URL of \(tab) of w) & nl
+        end try
+        end repeat
+        end tell
+        return out
+        """
+    }
+
+    /// The tab address of the one window that is `window`: by the window server's number (Safari's window id is
+    /// it), else by the same frame and title. Two windows alike, or none: no address rather than a wrong one.
+    nonisolated static func url(in listing: String, for window: Window) -> String? {
+        struct Row { let id: UInt32?; let name: String; let frame: CGRect; let url: String }
+        let rows: [Row] = listing.split(separator: "\n").compactMap { line in
+            let parts = line.components(separatedBy: "\t")
+            guard parts.count >= 4 else { return nil }
+            let b = parts[2].split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+            guard b.count == 4 else { return nil }
+            return Row(id: UInt32(parts[0]), name: parts[1], frame: CGRect(x: b[0], y: b[1], width: b[2] - b[0], height: b[3] - b[1]),
+                       url: parts[3...].joined(separator: "\t"))
+        }
+        if let number = window.number {
+            let same = rows.filter { $0.id == number }
+            if same.count == 1 { return same[0].url }
+        }
+        func near(_ a: CGRect, _ b: CGRect) -> Bool {
+            abs(a.minX - b.minX) <= 2 && abs(a.minY - b.minY) <= 2 && abs(a.width - b.width) <= 2 && abs(a.height - b.height) <= 2
+        }
+        let title = window.title
+        let matches = rows.filter { row in
+            near(row.frame, window.frame) && !row.name.isEmpty && (row.name == title || title.hasPrefix(row.name))
+        }
+        return matches.count == 1 ? matches[0].url : nil
     }
 
     // MARK: Closing
@@ -151,15 +213,32 @@ final class Browsers {
 
     // MARK: Firefox and Zen
 
-    /// The address field's text in the front window, found through Accessibility (Firefox shows it without
-    /// "https://"; that's fine for the site).
-    static func geckoAddress(pid: pid_t) -> String? {
+    /// The address field's text in the front window (or `window`, one of its windows: by the window server's
+    /// number, else the one with that frame and title; none, or two alike, is no address), found through
+    /// Accessibility (Firefox shows it without "https://"; that's fine for the site).
+    nonisolated static func geckoAddress(pid: pid_t, window wanted: Window? = nil) -> String? {
         guard Windows.trusted else { return nil }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.3)
         // Gecko builds its accessibility tree once something asks for it.
         AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-        guard let window: AXUIElement = Windows.value(app, kAXFocusedWindowAttribute) else { return nil }
+        let found: AXUIElement?
+        if let wanted {
+            let all: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
+            if let number = wanted.number, let match = all.first(where: { Windows.id(of: $0) == number }) {
+                found = match
+            } else {
+                let alike = all.filter { w in
+                    guard let frame = Windows.frame(of: w), let title: String = Windows.value(w, kAXTitleAttribute) else { return false }
+                    return title == wanted.title && abs(frame.minX - wanted.frame.minX) <= 2 && abs(frame.minY - wanted.frame.minY) <= 2
+                        && abs(frame.width - wanted.frame.width) <= 2 && abs(frame.height - wanted.frame.height) <= 2
+                }
+                found = alike.count == 1 ? alike[0] : nil
+            }
+        } else {
+            found = Windows.value(app, kAXFocusedWindowAttribute)
+        }
+        guard let window = found else { return nil }
         var queue: [(AXUIElement, Int)] = [(window, 0)]
         var seen = 0
         let deadline = Date().addingTimeInterval(0.4)   // never long: the dock waits on this

@@ -41,8 +41,9 @@ final class MenuBar: NSObject, NSMenuDelegate {
         let mode = app.docks.shown && app.config.bool("modes") ? self.mode : nil
         if let item, dot != shownDot || mode != shownMode {
             if let mode {
+                // The mode's symbol only: its name is on the dock already.
                 item.button?.image = Self.modeImage(mode.icon, dot: dot)
-                item.button?.title = mode.name
+                item.button?.title = ""
                 item.button?.toolTip = dot ? "Petal: an update is ready" : "Petal: \(mode.name)"
             } else {
                 item.button?.image = Self.mark(dot: dot)
@@ -272,63 +273,5 @@ struct ReleaseNotesView: View {
             notes = await ReleaseNotes.fetch(version)
             failed = notes == nil
         }
-    }
-}
-
-/// Release notes' Markdown: headings, lists and paragraphs, with bold, italics, code and links inside them.
-struct MarkdownView: View {
-    let text: String
-
-    enum Block: Hashable { case heading(Int, String), bullet(String), paragraph(String) }
-
-    var blocks: [Block] {
-        var out: [Block] = []
-        var paragraph: [String] = []
-        func flush() {
-            if !paragraph.isEmpty { out.append(.paragraph(paragraph.joined(separator: " "))) }
-            paragraph = []
-        }
-        for raw in text.replacingOccurrences(of: "\r", with: "").split(separator: "\n", omittingEmptySubsequences: false) {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            if line.isEmpty || line.hasPrefix("<!--") { flush(); continue }
-            if let hashes = line.firstIndex(where: { $0 != "#" }), line.hasPrefix("#"), line[hashes] == " " {
-                flush()
-                out.append(.heading(line.distance(from: line.startIndex, to: hashes), String(line[hashes...]).trimmingCharacters(in: .whitespaces)))
-            } else if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") {
-                flush()
-                out.append(.bullet(String(line.dropFirst(2))))
-            } else if line == "---" || line == "***" {
-                flush()
-            } else {
-                paragraph.append(line)
-            }
-        }
-        flush()
-        return out
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                switch block {
-                case .heading(let level, let text):
-                    Text(Self.inline(text)).font(.system(size: level <= 1 ? 20 : level == 2 ? 16 : 14, weight: .bold))
-                        .padding(.top, 4)
-                case .bullet(let text):
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text("•").foregroundStyle(.secondary)
-                        Text(Self.inline(text)).fixedSize(horizontal: false, vertical: true)
-                    }
-                case .paragraph(let text):
-                    Text(Self.inline(text)).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
-        .font(.system(size: 13))
-        .textSelection(.enabled)
-    }
-
-    static func inline(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
     }
 }

@@ -7,6 +7,8 @@ Claude panel starts it automatically; it can also be added to any Claude
 Code setup:  claude mcp add petal -- python3 /path/to/petal-mcp.py
 """
 
+import contextlib
+import fcntl
 import glob
 import json
 import os
@@ -91,6 +93,17 @@ SETTINGS_SCHEMA = {
     "claudeAccess": ("auto", "Claude panel permissions: auto (safe actions run, risky ones ask) or full."),
     "aiProviders": (["claude"], "The AI apps Petal uses, each the user's own install and account: claude, codex, both, or none ([] = no AI; the dock still works)."),
     "otherAgents": (True, "Let the user's other AI sessions (T3 Code, Claude Code or Codex in a terminal) change Petal: its MCP server, skill and `petal` command are set up for them."),
+    "aiMemory": (True, "Petal AI remembers what helps, everywhere or per mode: what the user asks it to, and what it notices (memory.json). petal_remember / petal_forget / petal_memories."),
+    "aiLearns": (True, "Once a day Petal AI learns from how each mode is used (its apps, how long) and remembers it; a quick call to the chat AI's small model."),
+    "dailySummary": ("", "A card with the day in the user's modes at this time each day (\"HH:MM\"; empty for none), with a line from Petal AI."),
+    "aiNeverLook": (["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"], "Apps Petal AI never looks into (bundle ids): petal_look gives only their name, window lists leave out their titles, and screenshots leave them out."),
+    "selectionAsk": (True, "macOS: selecting text in any app brings up a small \"Ask Petal AI\" button by it; clicking it quotes the text in the chat. (Also in every app's Services menu.) Never in apps kept private or password fields."),
+    "aiNotes": (True, "macOS: AI sticky notes. Each chat sticks to the window it was opened on and looks at that window even after the user moves on; several notes can work at once (up to 4), a note done while away nudges its app's icon (and its mode), and coming back to the window brings its note back. Off: one chat that looks at whatever is in front."),
+    "chatWhileWorking": ("steer", "Writing in the AI chat while it works: steer (it stops where it is and carries on from the new message) or queue (sent once it's done)."),
+    "finderInDock": (True, "macOS: Finder as its own button next to the AI button, the same in every mode (never among the apps, so it never appears at the end and moves the rest)."),
+    "replyDrafts": (True, "Entering a mode with held messages that need an answer, Petal AI drafts replies in the user's own style (learned from the replies they edit), shown on a card; it never sends anything."),
+    "aiAllowed": ([], "What Petal AI may do without asking first (the user chose Always on its card): quit, close, trash, tidy."),
+    "routines": (True, "macOS: run the user's routines (routines.json): what Petal does by itself when a file lands in a folder, an app opens, a mode starts or at a time. Made with petal_routine_save."),
     "shortcuts": (True, "Petal's keyboard shortcuts: switch mode (1-9), open the AI panel, open the + search. Never takes one already in use."),
     "schedule": ([], "Modes by time: [{mode, days: [1-7, 1 = Monday], from: \"HH:MM\", to: \"HH:MM\"}]. When a block starts, the focused workspace switches to that mode."),
     "activityLog": (True, "Keep a private, local history of which app is in front (never titles), for suggestions and the weekly summary."),
@@ -102,6 +115,8 @@ SETTINGS_SCHEMA = {
     "chatProvider": ("claude", "Which of aiProviders the chat panel, the usage ring and sorting use: claude or codex."),
     "codexModel": ("", "Codex chat model; empty = Codex's own default."),
     "codexEffort": ("medium", "Codex chat reasoning effort: low, medium, high or xhigh."),
+    "claudeAuth": ("subscription", "macOS: how Petal's own Claude runs (chat, sorting) pay: subscription (the user's Claude Code sign-in) or api (an Anthropic API key the user pastes in Settings > AI; it stays in the Keychain, and only Petal's runs use it). Never ask for or handle a key yourself."),
+    "codexAuth": ("subscription", "macOS: how Petal's own Codex runs pay: subscription (the user's ChatGPT sign-in) or api (an OpenAI API key the user pastes in Settings > AI; Keychain only, Petal's runs only). Never ask for or handle a key yourself."),
 }
 
 MODE_FIELDS = {
@@ -147,11 +162,12 @@ def run(*cmd):
         return str(e)
 
 
-def petal(*args):
-    """Asks the running Petal for macOS, over its socket, as `omarchy-shell petal` does on Omarchy."""
+def petal(*args, timeout=5):
+    """Asks the running Petal for macOS, over its socket, as `omarchy-shell petal` does on Omarchy. Running out of
+    time (`timeout` seconds) says so; it's never "Petal isn't running"."""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-            conn.settimeout(5)
+            conn.settimeout(timeout)
             conn.connect(SOCKET)
             conn.sendall((json.dumps(list(args)) + "\n").encode())
             reply = b""
@@ -161,6 +177,8 @@ def petal(*args):
                     break
                 reply += chunk
             return reply.decode().strip()
+    except socket.timeout:
+        return "Petal didn't answer in time"
     except OSError as e:
         return "Petal isn't running (%s)" % e
 
@@ -260,6 +278,16 @@ def t_set_settings(args):
     if unknown:
         raise ValueError("Unknown settings: %s. Use petal_get_state to see them all." % ", ".join(unknown))
     settings = read_json(SETTINGS, {})
+    # What Petal AI may do unasked, and what it may look at, are the person's to widen, never the AI's.
+    if "aiAllowed" in changes and not set(changes["aiAllowed"] or []) <= set(settings.get("aiAllowed", [])):
+        raise ValueError("Only the person can allow more, with Always on Petal's card or in its settings.")
+    if changes.get("claudeAccess") == "full" and settings.get("claudeAccess") != "full":
+        raise ValueError("Only the person can turn on Full access, in the chat's options or Petal's settings.")
+    for key in ("aiNeverLook", "aiAllowed"):
+        if key in changes and not (isinstance(changes[key], list) and all(isinstance(v, str) for v in changes[key])):
+            raise ValueError("%s is a list." % key)
+    if "aiNeverLook" in changes and not set(settings.get("aiNeverLook", SETTINGS_SCHEMA["aiNeverLook"][0])) <= set(changes["aiNeverLook"] or []):
+        raise ValueError("Only the person can take an app off the private list, in Petal's settings.")
     settings.update(changes)
     write_json(SETTINGS, settings)
     return {"ok": True, "changed": changes}
@@ -269,7 +297,8 @@ def t_reset_settings(args):
     keys = args.get("keys") or []
     settings = read_json(SETTINGS, {})
     for k in keys or list(SETTINGS_SCHEMA):
-        if k in SETTINGS_SCHEMA and k not in ("claudePath",):
+        # The private list is the person's to shorten: never reset by a tool.
+        if k in SETTINGS_SCHEMA and k not in ("claudePath", "aiNeverLook"):
             settings[k] = SETTINGS_SCHEMA[k][0]
     write_json(SETTINGS, settings)
     return {"ok": True, "reset": keys or "all"}
@@ -555,11 +584,12 @@ def duration(minutes):
     return "%d h" % round(hours) if hours >= 10 else ("%.1f h" % hours).replace(".0 h", " h")
 
 
-def t_summary(_):
-    """The 7 days before today (on a Monday, last week): time in each mode, top apps, focus cards."""
+def t_summary(args):
+    """The `days` (7 by default, up to 30) before today: time in each mode, top apps, focus cards."""
+    days = max(1, min(30, int((args or {}).get("days") or 7)))
     today = time.localtime()
     end = time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, 0, 0, -1))
-    start = end - 7 * DAY
+    start = end - days * DAY
     rows = [r for r in read_activity(start) if r["t"] < end]
     modes = {m.get("id"): m for m in read_json(MODES, {}).get("modes", [])}
     names = app_names()
@@ -746,8 +776,121 @@ def t_import_recipe(args):
             "missing": plan["missing"], "look": plan["look"]}
 
 
+_lock_depth = 0
+
+
+@contextlib.contextmanager
+def locked():
+    """Holds ~/.config/petal/.lock (shared with Petal for macOS), so two processes changing the files take turns:
+    each reads, changes and writes inside it. Nested holds (a tool calling another) don't lock again."""
+    global _lock_depth
+    if _lock_depth:
+        _lock_depth += 1
+        try:
+            yield
+        finally:
+            _lock_depth -= 1
+        return
+    os.makedirs(CONFIG, exist_ok=True)
+    with open(os.path.join(CONFIG, ".lock"), "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        _lock_depth = 1
+        try:
+            yield
+        finally:
+            _lock_depth = 0
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def writes(fn, name):
+    """A tool that changes settings, modes or the dock. On a Mac with Petal running, Petal does it itself, in order
+    with every other change (two sessions changing settings at once never undo each other); otherwise it's done
+    here, under the lock."""
+    def run(args):
+        if MAC and not _lock_depth and not args.get("preview"):
+            reply = petal("mcpCall", name, json.dumps(args), timeout=30)
+            if not reply.startswith("Petal isn't running") and not reply.startswith("unknown function"):
+                try:
+                    out = json.loads(reply)
+                except ValueError:
+                    raise ValueError(reply)
+                if isinstance(out, dict) and out.get("error"):
+                    raise ValueError(out["error"])
+                return out.get("result", {}) if isinstance(out, dict) else out
+        with locked():
+            return fn(args)
+    return run
+
+
+t_set_settings = writes(t_set_settings, "petal_set_settings")
+t_reset_settings = writes(t_reset_settings, "petal_reset_settings")
+t_set_dock = writes(t_set_dock, "petal_set_dock")
+t_save_mode = writes(t_save_mode, "petal_save_mode")
+t_delete_mode = writes(t_delete_mode, "petal_delete_mode")
+t_set_default_mode = writes(t_set_default_mode, "petal_set_default_mode")
+t_import_recipe = writes(t_import_recipe, "petal_import_recipe")
+
+
 def not_yet(_):
     raise ValueError("This needs a newer Petal.")
+
+
+def assist(name):
+    """Petal AI's tools on macOS: the running Petal does them, with its own permissions (and asks first)."""
+    def run(args):
+        # A sticky note's chat (Petal sets PETAL_NOTE for its own) is answered about the note's window.
+        note = os.environ.get("PETAL_NOTE", "")
+        # A card asking the person first waits up to 120 s: this waits longer, so their answer always arrives.
+        reply = petal("assist", name, json.dumps(args), *([note] if note else []), timeout=150)
+        try:
+            out = json.loads(reply)
+        except ValueError:
+            raise ValueError(reply or "Petal isn't running")
+        if isinstance(out, dict) and out.get("error"):
+            raise ValueError(out["error"])
+        return out
+    return run
+
+
+# Petal AI on the Mac: seeing what's in front and acting on the Mac through Petal's permissions. (Omarchy: later.)
+ASSIST_TOOLS = {
+    "petal_look": (assist("petal_look"), "What the user is looking at now: the app and window in front, the browser tab's address and title, selected text, the current mode and which apps are open. In a sticky note's chat it looks at the note's own window, even after the user has moved on (front: true looks at what's in front now instead). screenshot: \"window\" (the front window, or app's) or \"screen\" saves a PNG and returns its path to read. clipboard: true adds the clipboard's text. Use it when the user says this, here, what I'm looking at.",
+                   {"screenshot": {"type": "string", "enum": ["", "window", "screen"]}, "app": {"type": "string", "description": "look at this app instead of the one in front"},
+                    "clipboard": {"type": "boolean"}, "front": {"type": "boolean", "description": "in a sticky note: what's in front now, not the note's window"}}),
+    "petal_apps": (assist("petal_apps"), "Open, quit, hide or bring forward an app (by name or bundle id); open with `open` set opens that address or file (in `app` if given). Quitting asks the user first.",
+                   {"action": {"type": "string", "enum": ["open", "quit", "hide", "focus"]}, "app": {"type": "string"}, "open": {"type": "string", "description": "an https:// address or a file path"}}),
+    "petal_windows": (assist("petal_windows"), "The user's windows: list them (id, app, title, minimized, here = on this Desktop), or focus, minimize, close (asks first) or arrange one (layout: left, right, top, bottom, full, center; the dock's room is kept). Pick a window by its id from list, or a word of its title, within `app`.",
+                      {"action": {"type": "string", "enum": ["list", "focus", "minimize", "close", "arrange"]}, "app": {"type": "string"},
+                       "window": {"type": "string"}, "layout": {"type": "string", "enum": ["left", "right", "top", "bottom", "full", "center"]}}),
+    "petal_trash": (assist("petal_trash"), "Move files or folders to the Trash (asks the user first); never delete files any other way. undo: true puts the last ones back.",
+                    {"paths": {"type": "array", "items": {"type": "string"}}, "undo": {"type": "boolean"}}),
+    "petal_remember": (assist("petal_remember"), "Remember something that will help with this user later: a preference, a habit, how they like things done. mode: a mode id to keep it to that mode (\"\" for everywhere). learned: true when you noticed it yourself rather than being asked. Keep each one short.",
+                       {"text": {"type": "string"}, "mode": {"type": "string"}, "learned": {"type": "boolean"}}),
+    "petal_forget": (assist("petal_forget"), "Forget a memory: by its id, or every one containing `text`. Do it when the user says to, or when one turns out wrong or out of date.",
+                     {"id": {"type": "string"}, "text": {"type": "string"}}),
+    "petal_show": (assist("petal_show"), "Open a page in its own window, kept so it can be opened again: a summary of their month, a report, a table, a chart. markdown, or html (a whole page; charts as inline SVG, no outside scripts or images), or path to an .html file you wrote. Each call makes a new page; to change one you made, pass update: the path it returned. Say in one line what's on it.",
+                   {"title": {"type": "string"}, "markdown": {"type": "string"}, "html": {"type": "string"}, "path": {"type": "string"},
+                    "update": {"type": "string", "description": "the path petal_show returned for a page you made, to change that page in place"}}),
+    "petal_vault": (assist("petal_vault"), "The user's vault of passwords and secrets, kept in their Keychain: you never see a secret. action list: their names. use (name): Petal types it into the field that has the cursor in the app in front, after asking the user. request (name, why): the user types a secret you need into Petal's card. Never ask for a secret in the chat.",
+                    {"action": {"type": "string", "enum": ["list", "use", "request"]}, "name": {"type": "string"}, "why": {"type": "string"}}),
+    "petal_memories": (assist("petal_memories"), "What Petal AI remembers about the user (everywhere, and per mode); mode limits it to one mode's and the everywhere ones.",
+                       {"mode": {"type": "string"}}),
+    "petal_routines": (assist("petal_routines"), "The user's routines (what Petal does by itself: id, their words, trigger, actions, on, last run) and the latest of what they did (history; canPutBack).", {}),
+    "petal_routine_save": (assist("petal_routine_save"),
+                           "Make a routine from what the user asked, or change one (id). words: their own words. You fill trigger and actions from them, once; Petal runs it without AI except for sorting files by what they are. "
+                           "trigger.on: \"file\" (a file lands in folder, e.g. ~/Downloads, ~/Desktop or screenshots; types: kinds pdf, image, video, audio, archive, installer, document, code or extensions; named: words in its name; both optional), "
+                           "\"app\" (app: name or bundle id; when: \"opens\" or \"front\"), \"mode\" (mode: a mode id), \"time\" (at: \"HH:MM\"; days: 1 = Monday … 7, empty = every day). "
+                           "actions, in order: {do: \"sort\", by: \"ai\" (by what each file is; the quick AI picks an existing subfolder or names a new one for similar files) or \"kind\" (Images, PDFs, …), into: where the subfolders go (the files' folder by default)}, "
+                           "{do: \"move\", to: a folder (a name alone is inside the files' folder)}, {do: \"mode\", mode}, {do: \"open\", apps: names, bundle ids or https:// addresses}, {do: \"hide\", apps}, {do: \"shortcut\", name}. "
+                           "sort and move act on the new file; with an app, mode or time trigger they take folder's files. Files are only moved, never deleted. It acts on new files only: when the answer says files are there now, offer petal_routine_run.",
+                           {"id": {"type": "string"}, "name": {"type": "string", "description": "a short name"}, "words": {"type": "string"},
+                            "trigger": {"type": "object"}, "actions": {"type": "array", "items": {"type": "object"}}, "on": {"type": "boolean"}}),
+    "petal_routine_run": (assist("petal_routine_run"), "Run a routine now on the files already in its folder. dryRun: true says what it would move where, moving nothing; without it, it does it (Petal asks the user first when it's 10 files or more). A routine that moves no files just runs its actions.",
+                          {"id": {"type": "string"}, "dryRun": {"type": "boolean"}}),
+    "petal_routine_undo": (assist("petal_routine_undo"), "Put back the files a routine moved: the latest run that can be, or entry (a history id from petal_routines).",
+                           {"entry": {"type": "string"}}),
+    "petal_routine_delete": (assist("petal_routine_delete"), "Delete a routine (what it moved stays where it is, and can still be put back).", {"id": {"type": "string"}}),
+}
 
 
 TOOLS = {
@@ -772,10 +915,15 @@ TOOLS = {
     "petal_import_recipe": (globals().get("t_import_recipe", not_yet), "Add the modes from a recipe file (.petal) someone shared, and optionally its look. Apps are matched to what's installed; the rest are listed as missing.",
                             {"path": {"type": "string"}, "look": {"type": "boolean", "description": "also use its look and features"}}),
     "petal_suggestions": (globals().get("t_suggestions", not_yet), "Modes Petal would suggest from the user's activity (new modes, or apps to add to a mode).", {}),
-    "petal_summary": (globals().get("t_summary", not_yet), "Last week in the user's modes: time in each, top apps, focus cards.", {}),
+    "petal_summary": (globals().get("t_summary", not_yet), "The user's time in each mode (top apps, focus cards) over the last `days` (7 by default; up to 30, the history kept)" + (", or from/to (YYYY-MM-DD), with a day-by-day breakdown (byDay) for charts." if MAC else "."),
+                      {"days": {"type": "integer"}, **({"from": {"type": "string"}, "to": {"type": "string"}} if MAC else {})}),
     "petal_reload": (t_reload, "Restart Petal to load a rebuilt Petal.app (settings and modes don't need this)." if MAC
                      else "Restart Omarchy's shell to load edits to Petal's own source code (settings and modes don't need this).", {}),
 }
+
+
+if MAC:
+    TOOLS.update(ASSIST_TOOLS)
 
 
 def version():

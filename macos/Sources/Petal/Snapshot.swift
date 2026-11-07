@@ -22,6 +22,9 @@ enum Snapshot {
             .init(kind: .claude, text: "Done — icons are now **44 pt**, up from 36. Say *smaller* if it's too much."),
             .init(kind: .ask, text: "defaults write com.apple.finder AppleShowAllFiles -bool true"),
         ])
+        // A sticky note: the window it's stuck to shows under the header.
+        agent.place = NotePlace(pid: 0, app: "com.apple.Safari", appName: "Safari", window: 1, title: "Liquid Glass – Apple Developer",
+                                mode: dock.mode?.id ?? "", desktop: 1)
 
         let installed = Apps.installed().map(\.id)
         let pick = { (wanted: [String]) in wanted.filter(installed.contains) + installed.filter { !wanted.contains($0) } }
@@ -41,7 +44,7 @@ enum Snapshot {
             ("claude-empty", AnyView(ClaudePanelView(panel: ClaudePanel())), nil),
             ("claude-chat", AnyView(ClaudePanelView(panel: app.claude)), nil),
             ("search", AnyView(AppSearchView(search: app.search)), nil),
-            ("stack", AnyView(StackView(folder: "~/Downloads") {}), nil),
+            ("stack", AnyView(StackView(contents: StackContents(folder: "~/Downloads", entries: Stacks.entries("~/Downloads", limit: 12))) {}), nil),
             ("card-suggest", AnyView(CardView(card: FocusCard(kind: .suggestion, suggestion: sampleNew))), nil),
             ("card-add", AnyView(CardView(card: FocusCard(kind: .suggestion, suggestion: sampleAdd))), nil),
             ("card-made", AnyView(CardView(card: FocusCard(kind: .made, target: app.config.modes.last, desktop: 1, suggestion: sampleNew))), nil),
@@ -52,6 +55,11 @@ enum Snapshot {
             if let card = FocusCard.sample(kind, app: app, here: dock.mode, desktop: 1) {
                 views.append(("card-\(kind)", AnyView(CardView(card: card, tail: Tail(edge: .bottom, offset: kind == "peek" ? 0 : -90))), nil))
             }
+        }
+        if let other = app.config.modes.first(where: { $0.id != dock.mode?.id }) {
+            let card = FocusCard(kind: .noteReady, bundleID: "com.apple.Safari", title: "Compare these two plans", target: other,
+                                 reason: "Pricing – Linear", noteID: UUID())
+            views.append(("card-note-ready", AnyView(CardView(card: card, tail: Tail(edge: .bottom, offset: -90))), nil))
         }
         if let card = FocusCard.sample("block", app: app, here: dock.mode, desktop: 1) {
             views.append(("card-block-left", AnyView(CardView(card: card, tail: Tail(edge: .leading, offset: 20))), nil))
@@ -71,6 +79,31 @@ enum Snapshot {
         }
         write(render(AnyView(DockView(dock: dock)), app: app, size: nil), name: "dock-held", folder: folder)
         for mode in app.config.modes { app.notes.clear(mode.id) }
+        // Stacks with something new, a full Trash, and a song playing.
+        let stackFolders = Stacks.resolve(app.config.strings("stackFolders"))
+        app.signals.preview(trashEmpty: false, fresh: Set(stackFolders.prefix(1)),
+                            nowPlaying: NowPlaying(player: "com.spotify.client", title: "Pyramid Song", artist: "Radiohead", playing: true, artwork: nil))
+        write(render(AnyView(DockView(dock: dock)), app: app, size: nil), name: "dock-extras", folder: folder)
+        // Over the now-playing tile: the song and its controls. Over Spotify's icon: the controls above its windows.
+        write(render(AnyView(PreviewView(id: Previews.media) {}), app: app, size: nil), name: "preview-media", folder: folder)
+        let me = AXUIElementCreateApplication(getpid())
+        let sampleWindows = ["Liked Songs", "Radiohead – OK Computer", ""].enumerated().map { index, title in
+            AppWindow(id: "sample-\(index)", pid: getpid(), title: title, minimized: index == 2, frame: .zero, element: me)
+        }
+        let picture = NSImage(size: NSSize(width: 240, height: 150), flipped: false) { rect in
+            NSColor(white: 0.12, alpha: 1).setFill(); rect.fill()
+            NSColor(red: 0.11, green: 0.73, blue: 0.33, alpha: 1).setFill(); NSRect(x: 0, y: 0, width: 56, height: rect.height).fill()
+            NSColor(white: 0.3, alpha: 1).setFill()
+            for row in 0..<5 { NSRect(x: 72, y: 120 - CGFloat(row) * 22, width: 140, height: 10).fill() }
+            return true
+        }
+        app.previews.preview(windows: Array(sampleWindows.prefix(2)), pictures: true, thumbnails: ["sample-0": picture])
+        write(render(AnyView(PreviewView(id: "com.spotify.client") {}), app: app, size: nil), name: "preview-music", folder: folder)
+        app.signals.preview(trashEmpty: true, fresh: [], nowPlaying: nil)
+        // Without Screen Recording: the windows by name.
+        app.previews.preview(windows: sampleWindows, pictures: false)
+        write(render(AnyView(PreviewView(id: "com.apple.Safari") {}), app: app, size: nil), name: "preview-titles", folder: folder)
+        app.previews.preview(windows: [], pictures: false)
         // The sites' own icons, fetched from the sites (up to 10 s).
         let samples = ["https://github.com", "https://www.figma.com"]
         for id in samples { _ = Sites.shared.icon(id) }
@@ -120,6 +153,7 @@ enum Snapshot {
             """, link: nil))), CGSize(width: 560, height: 600)))
         views.append(("describe-day", AnyView(DescribeDaySheet()), nil))
         views.append(("settings-windows", AnyView(VStack { WindowsCard(showTiling: true) }.padding(20)), CGSize(width: 640, height: 420)))
+        views.append(("settings-api-keys", AnyView(VStack(spacing: 14) { ForEach(Provider.allCases) { APIKeyCard(provider: $0) } }.padding(20)), CGSize(width: 640, height: 420)))
         for dot in [false, true] {
             let mark = MenuBar.mark(dot: dot)
             views.append(("menubar\(dot ? "-dot" : "")", AnyView(HStack(spacing: 16) {

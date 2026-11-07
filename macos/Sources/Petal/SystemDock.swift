@@ -1,7 +1,11 @@
 import Foundation
 
 /// Petal replaces macOS's Dock while it runs: the Dock is set to hide, and to wait 1000 seconds before it shows,
-/// which keeps it out of sight. Quitting Petal gives it back exactly as it was.
+/// which keeps it out of sight. A full-screen app shows macOS's Dock whatever its wait, as the pointer pushes on its
+/// edge; that can't be turned off (slowing its showing left its labels stuck on the screen). Mission Control and App
+/// Exposé show it too, and no Dock setting stops that either, so Petal's dock steps aside there instead (Dock.swift).
+/// It stays on its own edge and size, since macOS minimizes windows toward it. Quitting Petal gives it back exactly
+/// as it was.
 ///
 /// The Dock's own settings are saved to ~/.config/petal/macos-dock.json before they change, and that file is the
 /// promise to put them back: if Petal crashes, the next launch keeps the saved settings (it doesn't save the hidden
@@ -9,7 +13,9 @@ import Foundation
 @MainActor
 enum SystemDock {
     private static let backup = Config.folder.appending(path: "macos-dock.json")
-    private static let keys = [("autohide", "-bool"), ("autohide-delay", "-float")]
+    /// What Petal changes, saved first. (`orientation` is only put back: an earlier Petal moved the Dock to a side.)
+    private static let keys = [("autohide", "-bool"), ("autohide-delay", "-float"), ("autohide-time-modifier", "-float"),
+                               ("tilesize", "-float"), ("orientation", "-string")]
 
     static var isReplaced: Bool { FileManager.default.fileExists(atPath: backup.path) }
 
@@ -46,14 +52,26 @@ enum SystemDock {
     /// Hides macOS's Dock, only once its own settings are saved. Returns false, leaving it alone, if they can't be.
     @discardableResult
     static func replace() -> Bool {
-        if !isReplaced {
-            var saved: [String: Any] = [:]
-            for (key, _) in keys { saved[key] = read(key) ?? NSNull() }
+        // Saved once, before the first change. A file from an older Petal lacks the newer settings: theirs now are
+        // still the person's own, so they're added to it.
+        var saved = isReplaced ? Config.readObject(backup) : [:]
+        let missing = keys.filter { saved[$0.0] == nil }
+        if !missing.isEmpty {
+            for (key, _) in missing { saved[key] = read(key) ?? NSNull() }
             Config.writeObject(saved, to: backup)
-            guard isReplaced else { return false }
+            // Read back: every setting Petal changes must be saved before it changes one.
+            let written = Config.readObject(backup)
+            guard isReplaced, keys.allSatisfy({ written[$0.0] != nil }) else { return false }
         }
         write("autohide", "-bool", "true")
         write("autohide-delay", "-float", "1000")
+        // Its own pace (an earlier Petal slowed its showing to a crawl for full screen, which left its labels stuck).
+        if let pace = saved["autohide-time-modifier"] as? Double { write("autohide-time-modifier", "-float", "\(pace)") } else { defaults("delete", "com.apple.dock", "autohide-time-modifier") }
+        // Its own size (an earlier Petal made it smallest): about as wide as Petal's dock, which holds the same apps,
+        // so a window minimizes toward its right end, where Petal keeps minimized windows.
+        if let size = saved["tilesize"] as? Double { write("tilesize", "-float", "\(size)") } else { defaults("delete", "com.apple.dock", "tilesize") }
+        // Its own edge, as the person had it.
+        if let side = saved["orientation"] as? String { write("orientation", "-string", side) } else { defaults("delete", "com.apple.dock", "orientation") }
         restartDock()
         return true
     }
@@ -62,7 +80,8 @@ enum SystemDock {
         guard isReplaced else { return }
         let saved = Config.readObject(backup)
         for (key, type) in keys {
-            if let value = saved[key], !(value is NSNull) {
+            guard let value = saved[key] else { continue }   // never saved: never changed
+            if !(value is NSNull) {
                 write(key, type, type == "-bool" ? ((value as? Bool ?? false) ? "true" : "false") : "\(value)")
             } else {
                 defaults("delete", "com.apple.dock", key)
@@ -75,6 +94,7 @@ enum SystemDock {
     private static func read(_ key: String) -> Any? {
         guard let text = defaults("read", "com.apple.dock", key)?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
         if key == "autohide" { return text == "1" }
+        if key == "orientation" { return text }
         return Double(text)
     }
 

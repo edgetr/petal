@@ -103,7 +103,17 @@ final class AISetup {
             finished.wait()
         }
         pipe.fileHandleForReading.readabilityHandler = nil
-        output.append(String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
+        // What's left in the pipe, then a last line with no newline yet: a long answer (Codex's model list is over
+        // half a megabyte on one line) can still be on its way when the process ends.
+        for text in buffer.lines(adding: pipe.fileHandleForReading.readDataToEndOfFile()) {
+            line?(text)
+            output.append(text + "\n")
+        }
+        let rest = buffer.rest()
+        if !rest.isEmpty {
+            line?(rest)
+            output.append(rest)
+        }
         return Result(status: process.terminationStatus, output: output.text)
     }
 }
@@ -146,6 +156,18 @@ enum DockGuard {
         fi
         delay="$(plutil -extract autohide-delay raw -o - "$backup" 2>/dev/null)"
         case "$delay" in ''|*[!0-9.]*) defaults delete com.apple.dock autohide-delay 2>/dev/null ;; *) defaults write com.apple.dock autohide-delay -float "$delay" ;; esac
+        if grep -q '"autohide-time-modifier"' "$backup"; then
+          pace="$(plutil -extract autohide-time-modifier raw -o - "$backup" 2>/dev/null)"
+          case "$pace" in ''|*[!0-9.]*) defaults delete com.apple.dock autohide-time-modifier 2>/dev/null ;; *) defaults write com.apple.dock autohide-time-modifier -float "$pace" ;; esac
+        fi
+        if grep -q '"orientation"' "$backup"; then
+          side="$(plutil -extract orientation raw -o - "$backup" 2>/dev/null)"
+          case "$side" in left|right|bottom) defaults write com.apple.dock orientation -string "$side" ;; *) defaults delete com.apple.dock orientation 2>/dev/null ;; esac
+        fi
+        if grep -q '"tilesize"' "$backup"; then
+          size="$(plutil -extract tilesize raw -o - "$backup" 2>/dev/null)"
+          case "$size" in ''|*[!0-9.]*) defaults delete com.apple.dock tilesize 2>/dev/null ;; *) defaults write com.apple.dock tilesize -float "$size" ;; esac
+        fi
         rm -f "$backup"
         killall Dock
         """

@@ -67,20 +67,27 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         let tools: String          // Petal itself, with --mcp
         let session: String?
         let allowed: [String]
+        var api = false            // on an API key (APIKeys.swift)
+        var note: String?          // a sticky note's id: Petal's tools answer about its window
     }
 
     /// One turn of the chat; the prompt goes on stdin.
     func chatArguments(_ chat: Chat) -> [String] {
         switch self {
         case .claude:
-            let mcp: [String: Any] = ["mcpServers": ["petal": ["command": chat.tools, "args": ["--mcp"]]]]
+            var server: [String: Any] = ["command": chat.tools, "args": ["--mcp"]]
+            if let note = chat.note { server["env"] = ["PETAL_NOTE": note] }
+            let mcp: [String: Any] = ["mcpServers": ["petal": server]]
             let config = (try? JSONSerialization.data(withJSONObject: mcp, options: [.withoutEscapingSlashes])).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
             var arguments = ["-p", "--model", chat.model.isEmpty ? "sonnet" : chat.model, "--effort", chat.effort,
                              "--output-format", "stream-json", "--verbose",
                              "--permission-mode", chat.fullAccess ? "bypassPermissions" : "auto",
                              "--append-system-prompt", chat.instructions, "--mcp-config", config]
             if let session = chat.session { arguments += ["--resume", session] }
-            return arguments + ["--allowedTools", "mcp__petal"] + chat.allowed
+            // Petal's tools, and looking into Petal itself (its health check and log), need no asking.
+            let petal = chat.tools
+            return arguments + ["--allowedTools", "mcp__petal", "Bash(petal doctor:*)", "Bash(petal logs:*)",
+                                "Bash(\(petal) doctor:*)", "Bash(\(petal) logs:*)"] + chat.allowed
         case .codex:
             var arguments = ["exec", "--json", "--skip-git-repo-check", "-C", NSHomeDirectory()]
             arguments += chat.fullAccess ? ["--dangerously-bypass-approvals-and-sandbox"] : ["--sandbox", "workspace-write"]
@@ -89,7 +96,12 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                           "-c", "developer_instructions=\(Self.toml(chat.instructions))",
                           "-c", "mcp_servers.petal.command=\(Self.toml(chat.tools))",
                           "-c", "mcp_servers.petal.args=[\"--mcp\"]",
-                          "-c", "mcp_servers.petal.default_tools_approval_mode=\"approve\""]
+                          "-c", "mcp_servers.petal.default_tools_approval_mode=\"approve\"",
+                          // A tool that asks the person first may wait for them.
+                          "-c", "mcp_servers.petal.tool_timeout_sec=180"]
+            if let note = chat.note { arguments += ["-c", "mcp_servers.petal.env={PETAL_NOTE=\(Self.toml(note))}"] }
+            // On an API key: the commands Codex runs never see it (names with KEY in them stay out).
+            if chat.api { arguments += ["-c", "shell_environment_policy.ignore_default_excludes=false"] }
             if let session = chat.session { arguments += ["resume", session] }
             return arguments + ["-"]
         }
@@ -108,6 +120,9 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         var out: [Agent.Event] = []
         if let id = event["session_id"] as? String { out.append(.session(id)) }
         switch event["type"] as? String {
+        case "assistant" where event["error"] != nil:
+            // The API refused the call (on an API key: the key); its text is Claude Code's own wording.
+            if APIKeys.isAuthError(event["error"] as? String ?? "") { out.append(.authFailed) }
         case "assistant":
             for part in (event["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? [] {
                 if part["type"] as? String == "text", let text = part["text"] as? String {
@@ -126,7 +141,11 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                 denials.append(Agent.Denial(tool: tool, label: label, rules: tool == "Bash" ? Agent.bashRules(input["command"] as? String ?? "") : [tool]))
             }
             if !denials.isEmpty { out.append(.denials(denials)) }
-            if event["is_error"] as? Bool == true { out.append(.error(event["result"] as? String ?? "Something went wrong")) }
+            if let cost = event["total_cost_usd"] as? Double, cost > 0 { out.append(.cost(cost)) }
+            if event["is_error"] as? Bool == true {
+                let text = event["result"] as? String ?? "Something went wrong"
+                out.append(event["api_error_status"] as? Int == 401 || APIKeys.isAuthError(text) ? .authFailed : .error(text))
+            }
             out.append(.finished)
         default:
             break
@@ -150,10 +169,16 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
             return [.step("Editing  " + path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))]
         case ("item.started", "web_search"):
             return [.step("Searching the web  " + (item["query"] as? String ?? ""))]
+        case ("error", _):
+            // Codex tries a refused key again for a while; the first refusal is enough.
+            return APIKeys.isAuthError(event["message"] as? String ?? "") ? [.authFailed] : []
         case ("turn.failed", _):
-            return [.error(((event["error"] as? [String: Any])?["message"] as? String) ?? "Something went wrong"), .finished]
+            let message = ((event["error"] as? [String: Any])?["message"] as? String) ?? "Something went wrong"
+            return [APIKeys.isAuthError(message) ? .authFailed : .error(message), .finished]
         case ("turn.completed", _):
-            return [.finished]
+            let usage = event["usage"] as? [String: Any] ?? [:]
+            let count = { (key: String) in (usage[key] as? Int) ?? 0 }
+            return [.tokens(input: count("input_tokens"), cached: count("cached_input_tokens"), output: count("output_tokens")), .finished]
         default:
             return []
         }
@@ -166,7 +191,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .claude:
             ["-p", "--model", "haiku", "--effort", "low", "--no-session-persistence", "--setting-sources", "",
-             "--strict-mcp-config", "--tools", ""]
+             "--strict-mcp-config", "--tools", "", "--output-format", "json"]
         case .codex:
             ["exec", "--json", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "-C", NSTemporaryDirectory(),
              "-c", "model_reasoning_effort=\"low\"", "-"]
@@ -174,13 +199,48 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
     }
 
     /// The reply text in a quick call's output.
-    func quickReply(_ output: String) -> String {
-        guard self == .codex else { return output }
-        return output.split(separator: "\n").compactMap { line -> String? in
-            guard let event = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                  let item = event["item"] as? [String: Any], item["type"] as? String == "agent_message" else { return nil }
-            return item["text"] as? String
-        }.last ?? ""
+    func quickReply(_ output: String) -> String { quickResult(output).text }
+
+    /// A quick call's reply, or what went wrong.
+    func quickResult(_ output: String) -> (text: String, error: String?) {
+        var text = "", error: String?
+        for event in Self.jsonLines(output) {
+            switch self {
+            case .claude:
+                guard event["type"] as? String == "result" else { continue }
+                text = event["result"] as? String ?? ""
+                if event["is_error"] as? Bool == true { error = text.isEmpty ? "It didn't answer." : text; text = "" }
+            case .codex:
+                let item = event["item"] as? [String: Any] ?? [:]
+                if item["type"] as? String == "agent_message" { text = item["text"] as? String ?? "" }
+                if event["type"] as? String == "turn.failed" {
+                    error = ((event["error"] as? [String: Any])?["message"] as? String) ?? "It didn't answer."
+                } else if event["type"] as? String == "error", error == nil, let message = event["message"] as? String {
+                    error = message
+                }
+            }
+        }
+        // Codex may say it's reconnecting and still answer: an answer wins.
+        return text.isEmpty ? ("", error) : (text, nil)
+    }
+
+    /// What a quick call cost on an API key: Claude Code's own figure, or Codex's tokens priced by APIPricing.
+    func quickSpend(_ output: String, model: String) -> Double? {
+        for event in Self.jsonLines(output).reversed() {
+            switch self {
+            case .claude:
+                if let cost = event["total_cost_usd"] as? Double { return cost > 0 ? cost : nil }
+            case .codex:
+                guard event["type"] as? String == "turn.completed", let usage = event["usage"] as? [String: Any] else { continue }
+                return APIPricing.codex(model: model, input: usage["input_tokens"] as? Int ?? 0,
+                                        cached: usage["cached_input_tokens"] as? Int ?? 0, output: usage["output_tokens"] as? Int ?? 0)
+            }
+        }
+        return nil
+    }
+
+    private static func jsonLines(_ output: String) -> [[String: Any]] {
+        output.split(separator: "\n").compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
     }
 
     static func toml(_ text: String) -> String {

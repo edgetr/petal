@@ -161,6 +161,17 @@ Item {
       // whole without AI), and which one the chat, usage ring and sorting use.
       property list<string> aiProviders: ["claude"]
       property bool otherAgents: true
+      property bool aiMemory: true
+      property bool aiLearns: true
+      property string dailySummary: ""
+      property var aiAllowed: []
+      property bool replyDrafts: true
+      property bool finderInDock: true
+      property string chatWhileWorking: "steer"
+      property bool selectionAsk: true
+      property bool aiNotes: true
+      property var aiNeverLook: ["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"]
+      property bool routines: true
       // Shortcuts, schedules, the private activity history behind suggestions
       // and the weekly summary; magnification and the menu bar icon are macOS's.
       property bool shortcuts: true
@@ -175,6 +186,10 @@ Item {
       property string codexModel: ""
       property string codexEffort: "medium"
       property string codexPath: ""
+      // How Petal's own runs of each AI pay: "subscription" (the person's
+      // sign-in) or "api" (an API key kept in the Keychain; macOS for now).
+      property string claudeAuth: "subscription"
+      property string codexAuth: "subscription"
     }
   }
 

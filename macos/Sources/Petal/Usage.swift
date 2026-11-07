@@ -16,10 +16,82 @@ struct UsageLimit: Equatable {
 @MainActor @Observable
 final class Usage {
     /// Kept per AI, so switching shows the right one straight away and a slow check can't land on the wrong one.
-    private(set) var limitsBy: [Provider: [UsageLimit]] = [:]
+    private(set) var limitsBy: [Provider: [UsageLimit]] = [:] { didSet { save() } }
     private(set) var helpBy: [Provider: String] = [:]
+    /// Anthropic's usage check answers a few times an hour at most: asked at most every 2 minutes, and not again
+    /// until it says after it refuses (429).
+    @ObservationIgnored private var claudeAsked: Date?
+    @ObservationIgnored private var claudeWait: Date?
 
-    var limits: [UsageLimit] { PetalApp.shared.chatProvider.flatMap { limitsBy[$0] } ?? [] }
+    init() { load(); loadSpend() }
+
+    // MARK: Spent on an API key
+
+    /// What Petal's own runs spent on an API key this calendar month, per AI: Claude Code's own figure for each
+    /// answer, and Codex's tokens at approximate list prices (APIPricing). Kept in state.json beside the activity
+    /// history ("aiSpend"), never in settings.
+    private(set) var spentBy: [Provider: Double] = [:]
+    @ObservationIgnored private var spentMonth = ""
+    @ObservationIgnored private let spendQueue = DispatchQueue(label: "tech.edgetr.petal.spend", qos: .utility)
+
+    private static func month(_ date: Date = Date()) -> String {
+        let parts = Calendar.current.dateComponents([.year, .month], from: date)
+        return String(format: "%04d-%02d", parts.year ?? 0, parts.month ?? 0)
+    }
+
+    private func loadSpend() {
+        let saved = ActivityLog.state()["aiSpend"] as? [String: Any] ?? [:]
+        spentMonth = saved["month"] as? String ?? Self.month()
+        for provider in Provider.allCases { spentBy[provider] = saved[provider.rawValue] as? Double }
+        if spentMonth != Self.month() { spentMonth = Self.month(); spentBy = [:] }
+    }
+
+    func addSpend(_ dollars: Double, for provider: Provider) {
+        guard dollars > 0, dollars.isFinite else { return }
+        if spentMonth != Self.month() { spentMonth = Self.month(); spentBy = [:] }
+        spentBy[provider, default: 0] += dollars
+        var record: [String: Any] = ["month": spentMonth]
+        for (key, value) in spentBy { record[key.rawValue] = value }
+        spendQueue.async { ActivityLog.setState("aiSpend", record) }
+    }
+
+    /// "$1.20 this month" for an AI on an API key; nil on a subscription.
+    func spentText(_ provider: Provider) -> String? {
+        guard PetalApp.shared.usesAPIKey(provider) else { return nil }
+        let spent = spentMonth == Self.month() ? spentBy[provider] ?? 0 : 0
+        return (spent > 0 && spent < 0.01 ? "Under $0.01" : String(format: "$%.2f", spent)) + " this month"
+    }
+
+    /// The chat's AI's.
+    var spentText: String? { PetalApp.shared.chatProvider.flatMap(spentText) }
+
+    /// The last limits seen, kept through a restart (the check may not answer again for minutes).
+    private static let store = "usageLimits"
+
+    private func save() {
+        let plain = limitsBy.mapValues { $0.map { ["label": $0.label, "percent": $0.percent, "resets": $0.resetsAt?.timeIntervalSince1970 ?? 0] } }
+        UserDefaults.standard.set(Dictionary(uniqueKeysWithValues: plain.map { ($0.key.rawValue, $0.value) }), forKey: Self.store)
+    }
+
+    private func load() {
+        let saved = UserDefaults.standard.dictionary(forKey: Self.store) as? [String: [[String: Any]]] ?? [:]
+        for (key, list) in saved {
+            guard let provider = Provider(rawValue: key) else { continue }
+            limitsBy[provider] = list.compactMap { item in
+                guard let label = item["label"] as? String, let percent = item["percent"] as? Double else { return nil }
+                let resets = (item["resets"] as? Double).flatMap { $0 > 0 ? Date(timeIntervalSince1970: $0) : nil }
+                // A window that has reset since is unused again.
+                if let resets, resets < Date() { return UsageLimit(label: label, percent: 0, resetsAt: nil) }
+                return UsageLimit(label: label, percent: percent, resetsAt: resets)
+            }
+        }
+    }
+
+    /// On an API key there are no plan limits (the ring stays empty); what's spent shows instead.
+    var limits: [UsageLimit] {
+        guard let provider = PetalApp.shared.chatProvider, !PetalApp.shared.usesAPIKey(provider) else { return [] }
+        return limitsBy[provider] ?? []
+    }
     var help: String { PetalApp.shared.chatProvider.flatMap { helpBy[$0] } ?? "" }
     @ObservationIgnored private var timer: Timer?
 
@@ -50,6 +122,7 @@ final class Usage {
     }
 
     func refresh(_ provider: Provider) async {
+        guard !PetalApp.shared.usesAPIKey(provider) else { return }
         switch provider {
         case .claude: await refreshClaude()
         case .codex: await refreshCodex()
@@ -64,24 +137,30 @@ final class Usage {
         helpBy[.codex] = found == nil ? "Use Codex once to see your usage." : ""
     }
 
+    /// The newest rate limits with numbers in them, from the newest session logs back. Many sessions carry none
+    /// (one opened and left, a quick `codex exec`), and some log the limits empty: those are passed over.
     nonisolated private static func codexLimits() -> [UsageLimit]? {
         let root = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".codex/sessions")
         let files = (FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey])?
             .compactMap { $0 as? URL }.filter { $0.pathExtension == "jsonl" }) ?? []
         let date = { (url: URL) in (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast }
-        guard let newest = files.max(by: { date($0) < date($1) }), let text = try? String(contentsOf: newest, encoding: .utf8) else { return nil }
-        for line in text.split(separator: "\n").reversed() where line.contains("\"rate_limits\"") {
-            guard let event = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-                  let limits = find("rate_limits", in: event) as? [String: Any] else { continue }
-            var found: [UsageLimit] = []
-            for key in ["primary", "secondary"] {
-                guard let window = limits[key] as? [String: Any], let used = number(window["used_percent"]) else { continue }
-                let minutes = number(window["window_minutes"]) ?? 0
-                let label = minutes >= 10_000 ? "Weekly (7-day)" : minutes >= 300 ? "Session (5-hour)" : "Limit"
-                found.append(UsageLimit(label: label, percent: min(1, max(0, used / 100)),
-                                        resetsAt: number(window["resets_at"]).map { Date(timeIntervalSince1970: $0) }))
+        for file in files.sorted(by: { date($0) > date($1) }).prefix(40) {
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            for line in text.split(separator: "\n").reversed() where line.contains("\"rate_limits\"") {
+                guard let event = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                      let limits = find("rate_limits", in: event) as? [String: Any] else { continue }
+                var found: [UsageLimit] = []
+                for key in ["primary", "secondary"] {
+                    guard let window = limits[key] as? [String: Any], let used = number(window["used_percent"]) else { continue }
+                    let minutes = number(window["window_minutes"]) ?? 0
+                    let label = minutes >= 10_000 ? "Weekly (7-day)" : minutes >= 300 ? "Session (5-hour)" : "Limit"
+                    let resets = number(window["resets_at"]).map { Date(timeIntervalSince1970: $0) }
+                    // A window that has reset since is unused again.
+                    let percent = resets.map { $0 < Date() } == true ? 0 : min(1, max(0, used / 100))
+                    found.append(UsageLimit(label: label, percent: percent, resetsAt: resets.flatMap { $0 < Date() ? nil : $0 }))
+                }
+                if !found.isEmpty { return found }
             }
-            return found
         }
         return nil
     }
@@ -97,6 +176,10 @@ final class Usage {
     }
 
     private func refreshClaude() async {
+        let now = Date()
+        if let claudeWait, now < claudeWait { return }
+        if let claudeAsked, now.timeIntervalSince(claudeAsked) < 120, limitsBy[.claude]?.isEmpty == false { return }
+        claudeAsked = now
         guard let token = await Self.accessToken() else {
             helpBy[.claude] = "Sign in to Claude Code to see your usage."
             return
@@ -108,6 +191,13 @@ final class Usage {
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let status = (response as? HTTPURLResponse)?.statusCode else {
             helpBy[.claude] = "Couldn't reach Anthropic. Trying again shortly."
+            return
+        }
+        if status == 429 {
+            // Asked too often: wait as long as it says (5 minutes if it doesn't), and keep showing the last numbers.
+            let after = ((response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Retry-After")).flatMap(Double.init) ?? 300
+            claudeWait = Date().addingTimeInterval(max(60, after))
+            if limitsBy[.claude]?.isEmpty != false { helpBy[.claude] = "Anthropic's usage check is busy; trying again in a few minutes." }
             return
         }
         guard status == 200, let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
