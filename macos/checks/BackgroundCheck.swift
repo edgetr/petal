@@ -16,9 +16,9 @@ struct BackgroundCheck {
     }
 
     static func plan(_ action: String, text: Bool = false, web: Bool = false, clipboard: Bool = false, menuItem: Bool = false,
-                     element: Bool = true, front: Bool = false, main: Bool = true) -> Background.Step {
+                     opens: Bool = false, element: Bool = true, front: Bool = false, main: Bool = true) -> Background.Step {
         Background.plan(Background.Target(action: action, text: text, web: web, clipboard: clipboard, menuItem: menuItem,
-                                          element: element, appFront: front, windowMain: main))
+                                          opens: opens, element: element, appFront: front, windowMain: main))
     }
 
     static func main() {
@@ -127,33 +127,70 @@ struct BackgroundCheck {
         expect(Background.recheck(situation(front: true, focused: false, idle: 0.2)) == .background,
                "another window of its app came forward: the background way")
         expect(Background.recheck(situation(front: true, focused: true, idle: 0.3)) == .refuse, "the person typing there now: refused")
+        expect(Background.recheck(nil) == .unsure, "couldn't tell: refused, never the background way")
+
+        // MARK: Unknown is never behind
+
+        expect(Background.situation(appFront: .unknown, windowFocused: .no, idle: 30) == nil, "the app in front unknown: no situation")
+        expect(Background.situation(appFront: .yes, windowFocused: .unknown, idle: 30) == nil,
+               "its app in front, its window unknown: no situation")
+        expect(Background.situation(appFront: .no, windowFocused: .unknown, idle: 30) == situation(front: false, focused: false),
+               "its app behind for certain: which window it focuses doesn't matter")
+        expect(Background.situation(appFront: .yes, windowFocused: .no, idle: 30) == situation(front: true, focused: false),
+               "the person in another window of its app, for certain")
+        expect(Background.check(stopped: { false }, read: { nil }, plannedFront: false, changed: false) == .unsure,
+               "the background gate: unknown refuses the change")
+        expect(Background.check(stopped: { false }, read: { nil }, plannedFront: true, changed: true) == .unsure,
+               "even after a change, as planned in front")
+        expect(Background.check(stopped: { true }, read: { nil }, plannedFront: false, changed: false) == nil, "a Stop is still a Stop")
+        expect(Background.check(stopped: { false }, note: { nil }) == .interrupted(.unsure), "a note in front: unknown stops it")
+        expect(Background.check(stopped: { false }, note: { situation(front: true, focused: true, idle: 30) }) == .go,
+               "a note in front, the person idle there: it goes")
+        let unsureGate = Background.Gate { Background.check(stopped: { false }, note: { nil }) }
+        expect(unsureGate.mutate({ 1 }) == nil && unsureGate.refused && unsureGate.interruption == .unsure, "the gate refuses on unknown")
+        expect(Background.stopped(.unsure, app: "Mail", changed: false).contains("couldn't tell"), "and says Petal couldn't tell")
+        expect(Background.interrupted(.unsure, app: "Mail", typed: "", of: "Hi").contains("couldn't tell"), "for typing too")
 
         // MARK: Putting back what jumped forward
 
         let base = Background.Baseline(front: 100, at: 50)
-        expect(Background.restore(base, note: 200, frontNow: 200, lastInput: 40) == .app(100),
+        expect(Background.restore(base, note: 200, frontNow: 200, lastInput: 40, changed: true, windowMoved: true) == .app(100),
                "the note's app jumped forward with no input since: the person's app goes back")
-        expect(Background.restore(base, note: 200, frontNow: 200, lastInput: 55) == .none,
+        expect(Background.restore(base, note: 200, frontNow: 200, lastInput: 55, changed: true, windowMoved: true) == .none,
                "the person pressed a key or clicked after the baseline: theirs to decide")
-        expect(Background.restore(base, note: 200, frontNow: 200, lastInput: 50) == .none, "input at the baseline itself counts")
-        expect(Background.restore(base, note: 200, frontNow: 100, lastInput: 40) == .none, "nothing jumped forward")
-        expect(Background.restore(base, note: 200, frontNow: nil, lastInput: 40) == .none, "the app in front unknown: nothing done")
-        expect(Background.restore(Background.Baseline(front: 200, at: 50), note: 200, frontNow: 200, lastInput: 40) == .window,
+        expect(Background.restore(base, note: 200, frontNow: 200, lastInput: 50, changed: true, windowMoved: true) == .none, "input at the baseline itself counts")
+        expect(Background.restore(base, note: 200, frontNow: 100, lastInput: 40, changed: true, windowMoved: true) == .none, "nothing jumped forward")
+        expect(Background.restore(base, note: 200, frontNow: nil, lastInput: 40, changed: true, windowMoved: true) == .none, "the app in front unknown: nothing done")
+        expect(Background.restore(Background.Baseline(front: 200, at: 50), note: 200, frontNow: 200, lastInput: 40, changed: true, windowMoved: true) == .window,
                "the person was using the note's app: only their window goes back")
-        expect(Background.restore(Background.Baseline(front: nil, at: 50), note: 200, frontNow: 200, lastInput: 40) == .none,
+        expect(Background.restore(Background.Baseline(front: nil, at: 50), note: 200, frontNow: 200, lastInput: 40, changed: true, windowMoved: true) == .none,
                "no app known in front then: nothing to put back")
         // A press that opened another app (a link in Safari, a file in Preview) is put back too, and the AI told.
-        expect(Background.restore(base, note: 200, frontNow: 300, lastInput: 40) == .app(100),
+        expect(Background.restore(base, note: 200, frontNow: 300, lastInput: 40, changed: true, windowMoved: true) == .app(100),
                "a press opened Safari over the person's app: their app goes back")
-        expect(Background.opened(base, note: 200, frontNow: 300, lastInput: 40), "and the AI hears something opened elsewhere")
-        expect(Background.restore(Background.Baseline(front: 200, at: 50), note: 200, frontNow: 300, lastInput: 40) == .app(200),
+        expect(Background.opened(base, note: 200, frontNow: 300, lastInput: 40, changed: true), "and the AI hears something opened elsewhere")
+        expect(Background.restore(Background.Baseline(front: 200, at: 50), note: 200, frontNow: 300, lastInput: 40, changed: true, windowMoved: true) == .app(200),
                "the person in the note's app, another app came forward: the note's app goes back")
-        expect(Background.restore(base, note: 200, frontNow: 300, lastInput: 60) == .none
-               && !Background.opened(base, note: 200, frontNow: 300, lastInput: 60),
+        expect(Background.restore(base, note: 200, frontNow: 300, lastInput: 60, changed: true, windowMoved: true) == .none
+               && !Background.opened(base, note: 200, frontNow: 300, lastInput: 60, changed: true),
                "the person switched apps themselves: nothing put back, nothing said opened")
-        expect(!Background.opened(base, note: 200, frontNow: 200, lastInput: 40), "the note's own app isn't another app")
-        expect(!Background.opened(base, note: 200, frontNow: 100, lastInput: 40), "the person's own app still in front")
-        expect(!Background.opened(base, note: 200, frontNow: nil, lastInput: 40), "unknown isn't opened")
+        expect(!Background.opened(base, note: 200, frontNow: 200, lastInput: 40, changed: true), "the note's own app isn't another app")
+        expect(!Background.opened(base, note: 200, frontNow: 100, lastInput: 40, changed: true), "the person's own app still in front")
+        expect(!Background.opened(base, note: 200, frontNow: nil, lastInput: 40, changed: true), "unknown isn't opened")
+        // Nothing changed (refused, or needed the window): nothing is put back, nor said opened, whatever moved.
+        expect(Background.restore(base, note: 200, frontNow: 300, lastInput: 40, changed: false, windowMoved: true) == .none,
+               "no change went through: an app the person launched before isn't undone")
+        expect(Background.restore(Background.Baseline(front: 200, at: 50), note: 200, frontNow: 200, lastInput: 40, changed: false,
+                                  windowMoved: true) == .none, "no change went through: no window put back")
+        expect(!Background.opened(base, note: 200, frontNow: 300, lastInput: 40, changed: false), "and nothing said opened")
+        // The person in the note's app: any other window that came over theirs (Mail's New Message opened from the
+        // note's window) gives theirs back; their own window still focused, nothing.
+        expect(Background.restore(Background.Baseline(front: 200, at: 50), note: 200, frontNow: 200, lastInput: 40, changed: true,
+                                  windowMoved: true) == .window, "a new window of the same app over theirs: their window goes back")
+        expect(Background.restore(Background.Baseline(front: 200, at: 50), note: 200, frontNow: 200, lastInput: 40, changed: true,
+                                  windowMoved: false) == .none, "their window still focused: nothing put back")
+        expect(Background.restore(Background.Baseline(front: 200, at: 50), note: 200, frontNow: 200, lastInput: 55, changed: true,
+                                  windowMoved: true) == .none, "the person clicked since: theirs to decide")
 
         // Each change that puts something back has its own gate, read again right before it.
         func seen(stopped: Bool = false, input: TimeInterval = 40, front: pid_t? = 200, window: Bool = true) -> Background.PutBack {
@@ -328,6 +365,47 @@ struct BackgroundCheck {
         expect(Background.typed(before: "Hi ", after: "Hi there", text: "there", replace: false) == .done, "cursor unknown: grew by just it")
         expect(Background.typed(before: "Hi ", after: "Hi the", text: "there", replace: false) == .uncertain, "cut short")
         expect(Background.typed(before: "abc", after: "xyzabc", text: "xyz", replace: false, at: 10) == .uncertain, "a cursor past the end")
+        expect(Background.typed(before: "Hello world", after: "Hello brave EARTH", text: "brave ", replace: false, at: 6) == .uncertain,
+               "inserted, but what followed changed: not done")
+        expect(Background.typed(before: "Hello world", after: "Hello brave world", text: "brave ", replace: false, at: 6) == .done,
+               "inserted, with what followed as it was")
+        expect(Background.typed(before: "Hello big world", after: "Hello brave EARTH", text: "brave", replace: false, at: 6, replaced: 3)
+               == .uncertain, "over a selection, what followed it changed")
+        expect(Background.typed(before: "Hello big world", after: "Hello brave world", text: "brave", replace: false, at: 6, replaced: 3)
+               == .done, "over a selection, what followed it kept")
+        expect(Background.typed(before: "ab", after: "abxy", text: "xy", replace: false, at: 1, replaced: 2) == .uncertain,
+               "a selection past the end")
+
+        // MARK: Menu items and keys that open things
+
+        for title in ["Open…", "Open...", "File > Open", "Open With", "Open in Terminal", "Open Recent", "Open Link in New Tab",
+                      "Show in Finder", "Reveal in Finder", "Reveal", "New Window", "New Tab", "New Private Window",
+                      "Aç…", "Birlikte Aç", "Bağlantıyı Yeni Sekmede Aç", "Finder'da Göster", "Yeni Pencere", "Yeni Sekme", "YENİ SEKME"] {
+            expect(Background.menuOpens(title: title), "“\(title)” opens something: refused in the background")
+        }
+        for title in ["Save", "Reopen Closed Tab", "Show Sidebar", "New Folder", "Close Window", "Kaydet", "Kenar Çubuğunu Göster",
+                      "Openness", "Format › Font › Bold"] {
+            expect(!Background.menuOpens(title: title), "“\(title)” goes ahead")
+        }
+        expect(Background.menuOpens(title: "Ouvrir…", character: "O", modifiers: 0), "⌘O in any language")
+        expect(Background.menuOpens(title: "Ouvrir…", character: "o", modifiers: 1), "⇧⌘O too")
+        expect(!Background.menuOpens(title: "Ouvrir…", character: "O", modifiers: 8), "O with no ⌘ isn't")
+        expect(!Background.menuOpens(title: nil, character: "S", modifiers: 0), "⌘S isn't")
+        if let cmdO = UIMap.parseKey("cmd-o"), let cmdDown = UIMap.parseKey("cmd-down"), let down = UIMap.parseKey("down"),
+           let cmdS = UIMap.parseKey("cmd-s") {
+            expect(Background.keyOpens(cmdO, finder: false), "⌘O anywhere")
+            expect(Background.keyOpens(cmdDown, finder: true), "⌘↓ in Finder")
+            expect(!Background.keyOpens(cmdDown, finder: false), "⌘↓ elsewhere moves to the end")
+            expect(!Background.keyOpens(down, finder: true), "↓ alone in Finder only moves the selection")
+            expect(!Background.keyOpens(cmdS, finder: true), "⌘S isn't")
+        } else {
+            expect(false, "keys parse")
+        }
+        expect(plan("menu", opens: true) == .needs(.opens), "a menu item that opens: the window in front")
+        expect(plan("key", menuItem: true, opens: true) == .needs(.opens), "its key too")
+        expect(plan("key", opens: true) == .needs(.opens), "a key that opens, with no menu item")
+        expect(plan("menu", clipboard: true, opens: true) == .needs(.clipboard), "the clipboard still said first")
+        expect(plan("menu") == .menu && plan("key") == .key, "others still go")
 
         // MARK: The preview's pictures
 

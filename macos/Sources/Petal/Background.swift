@@ -18,6 +18,27 @@ enum Background {
         var idle: TimeInterval
     }
 
+    /// A fact read through Accessibility: an error or a timeout is `unknown`, never taken for `no`.
+    enum Known: Equatable { case yes, no, unknown }
+
+    /// A note's situation from what was read: `appFront`, then (only when it's in front) whether the note's window is
+    /// its focused one. Nil when either couldn't be told: then nothing changes there (`unsure`), never assumed behind.
+    static func situation(appFront: Known, windowFocused: Known, idle: TimeInterval) -> Situation? {
+        switch appFront {
+        case .unknown: return nil
+        case .no: return Situation(note: true, appFront: false, windowFocused: false, idle: idle)
+        case .yes:
+            guard windowFocused != .unknown else { return nil }
+            return Situation(note: true, appFront: true, windowFocused: windowFocused == .yes, idle: idle)
+        }
+    }
+
+    /// What the AI is told when Petal couldn't tell whether the person is using the note's window.
+    static func unsure(_ app: String, changed: Bool) -> String {
+        "Petal couldn't tell whether the person is using \(app)'s window (it didn't answer in time), so "
+            + (changed ? "it stopped part way. Call petal_ui to see what was done." : "nothing was done there. Call petal_ui and try again.")
+    }
+
     enum Way: Equatable {
         /// As Petal AI always does: its pink pointer, the window brought forward when keys need it.
         case foreground
@@ -44,13 +65,15 @@ enum Background {
     /// decided), read again: the window still in front and the person idle goes ahead; the person gone elsewhere
     /// meanwhile sends it the background way (which never brings anything forward, and says what needs the window);
     /// the person now typing there refuses it.
-    enum Recheck: Equatable { case go, background, refuse }
+    /// `unsure`: it couldn't be told (an Accessibility read failed): refused.
+    enum Recheck: Equatable { case go, background, refuse, unsure }
 
-    static func recheck(_ situation: Situation) -> Recheck {
+    static func recheck(_ situation: Situation?) -> Recheck {
+        guard let situation else { return .unsure }
         switch way(situation) {
-        case .foreground: .go
-        case .background: .background
-        case .wait: .refuse
+        case .foreground: return .go
+        case .background: return .background
+        case .wait: return .refuse
         }
     }
 
@@ -63,6 +86,8 @@ enum Background {
         case again
         /// Something already changed: stop there, never the person's window.
         case stop
+        /// Couldn't tell whether the person is there: nothing more changes.
+        case unsure
     }
 
     /// `plannedFront`: its app was in front when the background step was planned (keys and focus are planned only for
@@ -85,7 +110,17 @@ enum Background {
     /// again before every batch of keys, a focus change and Return: the person typing or clicking there again
     /// (`typing`), or that window no longer the one in front (`left`). Nil: carry on. Petal AI's plain chat never
     /// asks (it has its guard and Escape).
-    enum Interrupt: Equatable { case typing, left }
+    /// `unsure`: Petal couldn't tell (an Accessibility read failed), so it stops as if they had come back.
+    enum Interrupt: Equatable { case typing, left, unsure }
+
+    /// Who stopped it, for what the AI is told.
+    private static func who(_ why: Interrupt, _ app: String) -> String {
+        switch why {
+        case .typing: "The person started typing in \(app)'s window"
+        case .left: "The person moved away from \(app)'s window"
+        case .unsure: "Petal couldn't tell whether the person is using \(app)'s window"
+        }
+    }
 
     static func interrupt(_ situation: Situation) -> Interrupt? {
         switch way(situation) {
@@ -98,7 +133,7 @@ enum Background {
     /// What the AI is told when its typing was interrupted: how much of `text` went (`typed`, its start), and that
     /// Return wasn't pressed.
     static func interrupted(_ why: Interrupt, app: String, typed: String, of text: String) -> String {
-        let who = why == .typing ? "The person started typing in \(app)'s window" : "The person moved away from \(app)'s window"
+        let who = who(why, app)
         let what: String
         if typed.isEmpty { what = "before typing anything" }
         else if typed == text { what = "after typing all of it, and Return wasn't pressed" }
@@ -113,6 +148,7 @@ enum Background {
         case (.typing, true): return "The person started typing in \(app)'s window, so Petal stopped part way. Don't do it again: wait until they're done, then petal_ui to see what was done."
         case (.left, false): return "The person moved away from \(app)'s window, so nothing was done there. Call petal_ui and try again."
         case (.left, true): return "The person moved away from \(app)'s window, so Petal stopped part way. Call petal_ui to see what was done."
+        case (.unsure, _): return unsure(app, changed: changed)
         }
     }
 
@@ -124,7 +160,7 @@ enum Background {
     /// A vault fill interrupted the same way: never what went in (it's a secret), only whether any of it did, and
     /// never Return after it.
     static func fillInterrupted(_ why: Interrupt, app: String, typed: Bool) -> String {
-        let who = why == .typing ? "The person started typing in \(app)'s window" : "The person moved away from \(app)'s window"
+        let who = who(why, app)
         let what = typed ? "part way: what went in may need clearing, and Return wasn't pressed" : "before filling anything"
         return "\(who), so Petal stopped \(what). Don't fill it again until they're done; then petal_ui to see the field."
     }
@@ -159,11 +195,23 @@ enum Background {
         return verdict(stopped: stoppedNow, note: note)
     }
 
-    /// The same for a change made in the background: the situation read, then the Stop last. Nil: stopped.
-    static func check(stopped: () -> Bool, read: () -> Situation, plannedFront: Bool, changed: Bool) -> Behind? {
+    /// A note's check in its window in front: the same, but its situation unreadable (nil) is never taken for the
+    /// person idle there or gone: it stops (`unsure`).
+    static func check(stopped: () -> Bool, note read: () -> Situation?) -> Verdict {
+        if stopped() { return .no }
+        let note = read()
+        if stopped() { return .no }
+        guard let note else { return .interrupted(.unsure) }
+        return verdict(stopped: false, note: note)
+    }
+
+    /// The same for a change made in the background: the situation read, then the Stop last. Nil: stopped. A
+    /// situation that couldn't be read is `unsure`: never assumed behind.
+    static func check(stopped: () -> Bool, read: () -> Situation?, plannedFront: Bool, changed: Bool) -> Behind? {
         if stopped() { return nil }
         let now = read()
         if stopped() { return nil }
+        guard let now else { return .unsure }
         return behind(now, plannedFront: plannedFront, changed: changed)
     }
 
@@ -244,7 +292,7 @@ enum Background {
             case .ignored: "needs the window in front: the app ignores typing in the background"
             case .didntStick: "needs the window in front: the text didn't stay in the field"
             case .tab: "needs its tab showing"
-            case .opens: "needs the window in front: that opens another app"
+            case .opens: "needs the window in front: that opens something"
             }
         }
 
@@ -259,7 +307,7 @@ enum Background {
             case .vault: why = "Filling from the vault needs that window in front."
             case .ignored: why = "\(app) ignored the typing while it was in the background."
             case .didntStick: why = "The text didn't stay in that field in the background."
-            case .opens: why = "That opens something in another app (a link or a file), which would come to the front over what the person is using."
+            case .opens: why = "That opens something (a link, a file, a window, or another app), which would come to the front over what the person is using."
             case .tab:
                 return "This note's tab isn't the one showing in its window, and a browser doesn't let anything use a tab in the background. Nothing was done. Ask the person to show that tab (clicking this note in the AI button's preview does), then petal_ui again."
             }
@@ -278,6 +326,8 @@ enum Background {
         var clipboard = false
         /// A key its app's menus have (chosen there instead).
         var menuItem = false
+        /// A menu item or key that opens something (`menuOpens`, `keyOpens`).
+        var opens = false
         /// A control was named (a key goes to it first).
         var element = false
         /// The note's app is the one in front.
@@ -328,9 +378,11 @@ enum Background {
             return .setValue(keysAfter: keysGo)
         case "menu":
             if target.clipboard { return .needs(.clipboard) }
+            if target.opens { return .needs(.opens) }
             return keysGo && target.windowMain ? .menu : .needs(.menu)
         case "key":
             if target.clipboard { return .needs(.clipboard) }
+            if target.opens { return .needs(.opens) }
             guard keysGo else { return .needs(.keys) }
             if target.menuItem { return target.windowMain ? .menu : .needs(.menu) }
             // With no control named, the key goes to the app's focused window: only when that's the note's.
@@ -355,6 +407,34 @@ enum Background {
         return !(browser && (scheme == "http" || scheme == "https"))
     }
 
+    /// Words of a menu item that opens something, maybe in another app (folded, so Turkish's "Aç" is "ac"): Open,
+    /// Open With, Open in…, Open Recent, Reveal in Finder; Aç, Birlikte Aç, Yeni Sekmede Aç.
+    static let openWords: Set<String> = ["open", "reveal", "ac"]
+    /// Phrases that do: Show in Finder, and the same in Turkish.
+    static let openPhrases = ["show in finder", "finder da goster"]
+    /// A new window or tab (New Window, New Private Window, Yeni Sekme), which may open elsewhere: both words.
+    static let newWords: Set<String> = ["new", "yeni"]
+    static let windowWords: Set<String> = ["window", "tab", "pencere", "sekme", "sekmede", "pencerede"]
+
+    /// A menu item that opens something, by its shortcut (⌘O, any other modifiers) or its title (the last part of
+    /// a path). In the background it needs the window in front: what it opens could come forward.
+    static func menuOpens(title: String?, character: String? = nil, modifiers: Int = 0) -> Bool {
+        if modifiers & 8 == 0, character?.lowercased() == "o" { return true }
+        guard let last = title.flatMap({ UIMap.menuPath($0).last }) else { return false }
+        let words = UIMap.words(UIMap.fold(last))
+        if words.contains(where: openWords.contains) { return true }
+        if words.contains(where: newWords.contains), words.contains(where: windowWords.contains) { return true }
+        let joined = " " + words.joined(separator: " ") + " "
+        return openPhrases.contains { joined.contains(" " + $0 + " ") }
+    }
+
+    /// A key that opens what's selected: ⌘O anywhere, and ⌘↓ in Finder.
+    static func keyOpens(_ key: UIMap.Key, finder: Bool) -> Bool {
+        guard key.command else { return false }
+        if key.character?.lowercased() == "o" || key.code == 31 { return true }
+        return finder && key.code == 125
+    }
+
     /// Typed in the background, read back: `done` only when the field says exactly what was asked; `ignored` when
     /// nothing changed (the app ignored the keys); anything else is `uncertain`, never counted as done.
     enum Typed: Equatable { case done, ignored, uncertain }
@@ -372,9 +452,10 @@ enum Background {
         let now = Array(after.utf16), was = Array(before.utf16), new = Array(text.utf16)
         guard now.count == was.count - replaced + new.count else { return .uncertain }
         if let at {
-            guard at >= 0, at + new.count <= now.count, at <= was.count else { return .uncertain }
-            let fits = Array(now[at..<(at + new.count)]) == new && Array(now[..<at]) == Array(was[..<at])
-            return fits ? .done : .uncertain
+            // The whole value as it must be now: what was before the cursor, the text, and what followed the
+            // selection it replaced.
+            guard at >= 0, replaced >= 0, at + replaced <= was.count else { return .uncertain }
+            return now == Array(was[..<at]) + new + Array(was[(at + replaced)...]) ? .done : .uncertain
         }
         return replaced == 0 && after.contains(text) ? .done : .uncertain
     }
@@ -400,14 +481,17 @@ enum Background {
         case window
     }
 
-    /// After a background act, read right before anything is put back: the app in front now (`frontNow`: the
-    /// note's, or any other a press opened, such as Safari for a link), and when the person last pressed a key,
-    /// clicked or scrolled (uptime). Only an app that came forward with no input from the person since the baseline
-    /// is undone, and only back to what was in front then; the note's app still in front, as it was, may have raised
-    /// the note's window over the person's.
-    static func restore(_ baseline: Baseline, note: pid_t, frontNow: pid_t?, lastInput: TimeInterval) -> Restore {
-        guard let now = frontNow, lastInput < baseline.at, let before = baseline.front else { return .none }
-        if now == before { return before == note ? .window : .none }
+    /// After a background act, read right before anything is put back: whether any change of it went through
+    /// (`changed`: else nothing is put back, so an app the person launched before isn't undone), the app in front now
+    /// (`frontNow`: the note's, or any other it opened, such as Safari for a link), and when the person last pressed
+    /// a key, clicked or scrolled (uptime). Only an app that came forward with no input from the person since the
+    /// baseline is undone, and only back to what was in front then. The note's app still in front, as it was: its
+    /// focused window now another than the person's (`windowMoved`: the note's, or a new one it opened, such as Mail's
+    /// New Message) gives them their window back.
+    static func restore(_ baseline: Baseline, note: pid_t, frontNow: pid_t?, lastInput: TimeInterval, changed: Bool,
+                        windowMoved: Bool) -> Restore {
+        guard changed, let now = frontNow, lastInput < baseline.at, let before = baseline.front else { return .none }
+        if now == before { return before == note && windowMoved ? .window : .none }
         return .app(before)
     }
 
@@ -445,8 +529,8 @@ enum Background {
                        baseline: baseline, jumped: jumped)
     }
 
-    static func opened(_ baseline: Baseline, note: pid_t, frontNow: pid_t?, lastInput: TimeInterval) -> Bool {
-        guard let now = frontNow, lastInput < baseline.at else { return false }
+    static func opened(_ baseline: Baseline, note: pid_t, frontNow: pid_t?, lastInput: TimeInterval, changed: Bool) -> Bool {
+        guard changed, let now = frontNow, lastInput < baseline.at else { return false }
         return now != note && now != baseline.front
     }
 }

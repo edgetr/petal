@@ -736,10 +736,15 @@ final class ComputerUse {
     private func decide(_ job: Job, _ map: Map, since: Date) {
         let front = NSWorkspace.shared.frontmostApplication?.processIdentifier == map.pid
         Self.actQueue.async {
-            let way = Background.way(Acting.situation(map, front: front))
+            // Unknown (an Accessibility read failed): never assumed behind; nothing is done.
+            let way = Acting.situation(map, front: front).map(Background.way)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     if let error = self.stale(job) { job.fail(error); return self.finished() }
+                    guard let way else {
+                        job.fail(Background.unsure(map.appName, changed: false))
+                        return self.finished()
+                    }
                     switch way {
                     case .foreground:
                         self.acting = job
@@ -859,6 +864,8 @@ final class ComputerUse {
                                         }
                                     } else if again == .refuse {
                                         outcome.error = Self.typingThere(map.appName)
+                                    } else if again == .unsure {
+                                        outcome.error = Background.unsure(map.appName, changed: false)
                                     } else if !cancel.stopped {
                                         if ["press", "menu"].contains(job.action) || (job.action == "key" && checked.menuItem != nil) {
                                             DispatchQueue.main.async { MainActor.assumeIsolated { self.cursor.press() } }
@@ -2120,6 +2127,16 @@ enum Acting {
             case .uncertain: return .unsure
             }
         }
+        // The whole value known before and after: it must be exactly what was before the selection, the text, and
+        // what followed it (Background.typed), never only the text somewhere in it.
+        if let before, let after, let selection {
+            switch Background.typed(before: before, after: after, text: text, replace: false,
+                                    at: selection.location, replaced: selection.length) {
+            case .done: return .done
+            case .ignored: return .no
+            case .uncertain: return .unsure
+            }
+        }
         let length = text.utf16.count
         if let selection, let there = string(element, CFRange(location: selection.location, length: length)) {
             if there == text { return .done }
@@ -2154,12 +2171,22 @@ enum Acting {
         return raw as? String
     }
 
-    /// The app is in front (through Accessibility, off the main thread).
-    static func isFront(_ pid: pid_t) -> Bool {
+    /// Whether the app is in front (through Accessibility, off the main thread): an error or a timeout is
+    /// `unknown`, never "behind".
+    static func frontState(_ pid: pid_t) -> Background.Known {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.5)
-        return (Windows.value(app, kAXFrontmostAttribute) as Bool?) ?? false
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFrontmostAttribute as CFString, &raw) == .success,
+              let front = raw as? Bool else { return .unknown }
+        return front ? .yes : .no
     }
+
+    /// The app is in front, for certain.
+    static func isFront(_ pid: pid_t) -> Bool { frontState(pid) == .yes }
+
+    /// The app is behind, for certain (unknown is neither).
+    static func isBehind(_ pid: pid_t) -> Bool { frontState(pid) == .no }
 
     // MARK: Focus
 
@@ -2205,11 +2232,40 @@ enum Acting {
     }
 
     /// The window petal_ui looked at is its app's front window: menus and keys act there, never on another.
-    static func windowInFront(_ map: ComputerUse.Map) -> Bool {
+    static func windowInFront(_ map: ComputerUse.Map) -> Bool { windowState(map) == .yes }
+
+    /// Whether the window petal_ui looked at is its app's front window: its focused window, else (none focused) its
+    /// main one. A read that failed or timed out is `unknown`, never "another window".
+    static func windowState(_ map: ComputerUse.Map) -> Background.Known {
         let app = AXUIElementCreateApplication(map.pid)
         AXUIElementSetMessagingTimeout(app, 0.5)
-        if let focused: AXUIElement = Windows.value(app, kAXFocusedWindowAttribute) { return isWindow(focused, of: map) }
-        return isWindow(Windows.value(app, kAXMainWindowAttribute), of: map)
+        switch focusedWindow(app) {
+        case .window(let focused): return isWindow(focused, of: map) ? .yes : .no
+        case .unknown: return .unknown
+        case .none:
+            var raw: CFTypeRef?
+            switch AXUIElementCopyAttributeValue(app, kAXMainWindowAttribute as CFString, &raw) {
+            case .success:
+                guard let raw, CFGetTypeID(raw) == AXUIElementGetTypeID() else { return .unknown }
+                return isWindow((raw as! AXUIElement), of: map) ? .yes : .no
+            case .noValue, .attributeUnsupported: return .no
+            default: return .unknown
+            }
+        }
+    }
+
+    enum FocusedWindow { case window(AXUIElement), none, unknown }
+
+    /// The app's focused window: none when it says it has none, unknown when the read failed or timed out.
+    static func focusedWindow(_ app: AXUIElement) -> FocusedWindow {
+        var raw: CFTypeRef?
+        switch AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &raw) {
+        case .success:
+            guard let raw, CFGetTypeID(raw) == AXUIElementGetTypeID() else { return .unknown }
+            return .window(raw as! AXUIElement)
+        case .noValue, .attributeUnsupported: return .none
+        default: return .unknown
+        }
     }
 
     /// `other` is the window petal_ui looked at.
@@ -2335,7 +2391,8 @@ enum Acting {
     /// (Background.check).
     static func changeGate(_ map: ComputerUse.Map, cancel: Cancel, note: Bool) -> Background.Gate {
         Background.Gate {
-            Background.check(stopped: { cancel.stopped }, read: { note ? situation(map) : nil })
+            note ? Background.check(stopped: { cancel.stopped }, note: { situation(map) })
+                : Background.check(stopped: { cancel.stopped }, read: { nil })
         }
     }
 
