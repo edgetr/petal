@@ -303,7 +303,7 @@ extension ClaudePanel {
     /// The note in the panel stays when the person clicks elsewhere in its place: they stuck it there.
     var stuckHere: Bool {
         guard notesOn, current.attached, let place = current.place, place.spot != nil, let front = lastFront else { return false }
-        return NoteRules.sameWindow(place, front)
+        return NoteRules.sameWindow(place, front, orUnknown: true)
     }
 
     /// The person let go of the note after dragging it: it sticks there, on its window (its nearest corner).
@@ -823,6 +823,9 @@ extension ClaudePanel {
         let quiet = PetalApp.shared.assist.neverLook(front.app)
         for note in here { adopt(note, front, title: quiet ? "" : title) }
         if isOpen, current.attached, !here.contains(where: { $0 === current }) {
+            // Its app is in front but not yet which window (a new one still opening): it stays as it is, and nothing
+            // takes its place, until the window is known.
+            if let place = current.place, NoteRules.windowUnknown(place, front) { return }
             stepAway()
         }
         // The loose chat open stays: a note never takes its place by itself.
@@ -840,13 +843,15 @@ extension ClaudePanel {
         present(best, key: false, fromIcon: true)
     }
 
-    /// The note's window (any of its app's, for an app's note) is the one in front, as far as Petal has heard.
-    private func inFront(_ place: NotePlace) -> Bool {
+    /// The note's window (any of its app's, for an app's note) is the one in front, as far as Petal has heard: for
+    /// showing it, only once that window is known. `orUnknown`: also its app in front with its window not known yet,
+    /// for putting a note away (never for showing one).
+    private func inFront(_ place: NotePlace, orUnknown: Bool = false) -> Bool {
         guard let app = NSWorkspace.shared.frontmostApplication else { return false }
         if place.kind == .app { return !place.app.isEmpty && app.bundleIdentifier == place.app }
         guard app.processIdentifier == place.pid else { return false }
-        guard let front = lastFront else { return true }
-        return NoteRules.sameWindow(place, front)
+        guard let front = lastFront else { return orUnknown }
+        return NoteRules.sameWindow(place, front, orUnknown: orUnknown)
     }
 
     /// A note waiting for its window to come forward isn't opened after all (nor its window brought forward again).
@@ -897,7 +902,7 @@ extension ClaudePanel {
             note.away = true
             let ticket = pendingTicket
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                guard !self.isOpen || self.current !== note, let place = note.place, self.inFront(place) else { return }
+                guard !self.isOpen || self.current !== note, let place = note.place, self.inFront(place, orUnknown: true) else { return }
                 guard place.kind == .tab, let running = NSWorkspace.shared.frontmostApplication else { note.away = false; return }
                 // A tab's note only when its own tab still shows, read again now: the click may have been on another
                 // tab, and then the note comes back with its tab. Anything opened or closed meanwhile wins.
@@ -974,8 +979,7 @@ extension ClaudePanel {
         let bring = {
             guard ticket == self.pendingTicket, self.notesOn else { return }
             // Its window is in front already (and, for a tab's note, its tab): nothing to wait for.
-            if self.inFront(place), place.kind == .app || self.lastFront?.window == place.window,
-               place.kind != .tab || self.lastFront.map({ NoteRules.fits(place, $0) }) == true {
+            if self.inFront(place), place.kind != .tab || self.lastFront.map({ NoteRules.fits(place, $0) }) == true {
                 return self.present(note, key: true, fromIcon: true)
             }
             self.pendingOpen = note

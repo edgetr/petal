@@ -30,6 +30,27 @@ struct NoteLayoutCheck {
         expect(!NoteRules.fits(place(.app, app: ""), FrontPlace(pid: 1, app: "", window: nil, tab: nil)), "never an app with no id")
         expect(NoteRules.sameWindow(place(.tab, tab: NoteTab(index: 1, url: "a", title: "")), front), "a tab's window is in front, whichever tab")
 
+        // MARK: Windows Petal can't read (Finder opening a window from a stack, a note asked on the desktop)
+
+        let finder = "com.apple.finder"
+        let opening = FrontPlace(pid: 10, app: finder, window: nil, tab: nil)
+        let finderWindow = FrontPlace(pid: 10, app: finder, window: 7, tab: nil)
+        let onDesktop = place(.window, app: finder, window: nil)
+        let onWindow = place(.window, app: finder, window: 5)
+        expect(!NoteRules.fits(onDesktop, finderWindow), "a note asked with no window never shows on a real window")
+        expect(!NoteRules.fitting([onDesktop], finderWindow).contains(0), "nor is it taken there")
+        expect(!NoteRules.sameWindow(onDesktop, finderWindow, orUnknown: true), "and it steps away from one")
+        expect(!NoteRules.windowUnknown(onDesktop, finderWindow), "a known window isn't unknown")
+        expect(!NoteRules.fits(onWindow, opening), "a window not read yet shows no window's note")
+        expect(!NoteRules.sameWindow(onWindow, opening), "nor brings one up")
+        expect(NoteRules.windowUnknown(onWindow, opening), "but an open note doesn't step away from it")
+        expect(NoteRules.sameWindow(onWindow, opening, orUnknown: true), "and stays put on a click there")
+        expect(!NoteRules.windowUnknown(onWindow, FrontPlace(pid: 11, app: finder, window: nil, tab: nil)), "another app's unknown window isn't its")
+        expect(NoteRules.fits(onDesktop, opening), "no window in front and none kept, same app: it shows")
+        expect(!NoteRules.fits(onDesktop, FrontPlace(pid: 11, app: finder, window: nil, tab: nil)), "but not on another process")
+        expect(!NoteRules.fits(place(.tab, app: finder, window: nil), finderWindow), "a tab's note that knows no tab is as strict")
+        expect(NoteRules.fits(place(.app, app: finder, window: 5), opening), "an app's note fits its app, whatever window")
+
         // MARK: Chromium tabs (ids)
 
         let chrome = "com.google.Chrome"

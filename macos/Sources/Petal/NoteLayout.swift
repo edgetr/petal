@@ -104,8 +104,10 @@ struct NotePlace: Codable, Equatable, Sendable {
 
     var kind: NoteScope { scope ?? .window }
 
-    func matches(pid other: pid_t, window number: CGWindowID?) -> Bool {
-        pid == other && (window == nil || number == nil || window == number)
+    /// On that window of its app: its own window, or, kept with no window (its app showed none), only while its app
+    /// shows none. A window Petal couldn't read (nil) is no window of its: a note never shows on one by a guess.
+    func on(pid other: pid_t, window number: CGWindowID?) -> Bool {
+        pid == other && window == number
     }
 
     /// Without anything a private app's window or tab said: its title, and its tab's address and title (the tab's
@@ -190,15 +192,16 @@ enum NoteRules {
         return tab.index == nil
     }
 
-    /// Whether a note stuck to `place` belongs on what's in front.
+    /// Whether a note stuck to `place` belongs on what's in front: for showing it there, or taking it there. A
+    /// window's note only on its own window (`NotePlace.on`).
     static func fits(_ place: NotePlace, _ front: FrontPlace, previous: NoteTab? = nil) -> Bool {
         switch place.kind {
         case .app:
             return !place.app.isEmpty && place.app == front.app
         case .window:
-            return place.matches(pid: front.pid, window: front.window)
+            return place.on(pid: front.pid, window: front.window)
         case .tab:
-            guard let tab = place.tab else { return place.matches(pid: front.pid, window: front.window) }
+            guard let tab = place.tab else { return place.on(pid: front.pid, window: front.window) }
             guard let now = front.tab, place.app == front.app else { return false }
             return sameTab(tab, pid: place.pid, window: place.window, now, pid: front.pid, window: front.window, previous: previous)
         }
@@ -273,9 +276,17 @@ enum NoteRules {
     }
 
     /// Whether `place`'s window (or, for an app's note, any of its windows) is the one in front, whichever tab shows:
-    /// for bringing a note's window forward.
-    static func sameWindow(_ place: NotePlace, _ front: FrontPlace) -> Bool {
-        place.kind == .app ? !place.app.isEmpty && place.app == front.app : place.matches(pid: front.pid, window: front.window)
+    /// for bringing a note's window forward. `orUnknown`: also while its app is in front and which of its windows
+    /// isn't known yet (one still opening): for keeping a note that shows where it is, never for showing one.
+    static func sameWindow(_ place: NotePlace, _ front: FrontPlace, orUnknown: Bool = false) -> Bool {
+        if place.kind == .app { return !place.app.isEmpty && place.app == front.app }
+        return place.on(pid: front.pid, window: front.window) || orUnknown && place.pid == front.pid && front.window == nil
+    }
+
+    /// A window's note (or a tab's that knows no tab) whose app is in front, when Petal couldn't tell which window
+    /// is: it neither shows nor steps away until the window is known (the window's focus event looks again).
+    static func windowUnknown(_ place: NotePlace, _ front: FrontPlace) -> Bool {
+        (place.kind == .window || place.tab == nil) && place.kind != .app && place.pid == front.pid && front.window == nil
     }
 
     /// Of the notes that fit what's in front, the one shown: the most specific; between equals, the one showing.
