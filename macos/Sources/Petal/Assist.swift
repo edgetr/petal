@@ -250,9 +250,8 @@ final class Assist {
         // A note stuck to one tab looks only while that tab is the one its window shows: never at another tab.
         // Checked before reading and again once everything is read, right before it's told (`deliver`).
         let tabPlace = place.flatMap { $0.kind == .tab && $0.tab != nil ? $0 : nil }
-        let previous = tabPlace.flatMap { app.claude.lastTab($0) }
         Self.queue.async {
-            let before = tabPlace.flatMap { ClaudePanel.tabShowing($0, previous: previous) }
+            let before = tabPlace.flatMap { ClaudePanel.tabShowing($0) }
             if tabPlace != nil, before == nil {
                 return DispatchQueue.main.async { send(["note": ClaudePanel.tabNotShowing]) }
             }
@@ -290,9 +289,14 @@ final class Assist {
                     // meanwhile, and a tab note's tab still the one showing in the same window. Else none of it goes
                     // (the picture is deleted): another tab's text, address or picture is never told as the note's.
                     let deliver = { (picture: String?) in
+                        // The picture is deleted off the main thread (the disk may wait), before the refusal is told.
                         let refuse = { (answer: [String: Any]) in
-                            if let picture { try? FileManager.default.removeItem(atPath: picture) }
-                            send(answer)
+                            guard let picture else { return send(answer) }
+                            nonisolated(unsafe) let answer = answer
+                            Self.queue.async {
+                                try? FileManager.default.removeItem(atPath: picture)
+                                DispatchQueue.main.async { MainActor.assumeIsolated { send(answer) } }
+                            }
                         }
                         let privately: [String: Any] = ["app": ["name": front.localizedName ?? "", "id": front.bundleIdentifier ?? ""],
                                                         "private": "The user keeps this app private: Petal doesn't look at what's in it."]
@@ -303,12 +307,12 @@ final class Assist {
                         }
                         guard let tabPlace, let before else { return tell() }
                         Self.queue.async {
-                            let after = ClaudePanel.tabShowing(tabPlace, previous: previous)
-                            // The same tab of the same window it read: its id or place and its address unchanged.
+                            let after = ClaudePanel.tabShowing(tabPlace)
+                            // The same tab of the same window it read: its id or button, place and address unchanged.
                             let same = after.map { now in
                                 now.window == before.window && before.window == number && now.tab.id == before.tab.id
-                                    && now.tab.index == before.tab.index && now.tab.count == before.tab.count
-                                    && now.tab.url == before.tab.url
+                                    && now.tab.element == before.tab.element && now.tab.index == before.tab.index
+                                    && now.tab.count == before.tab.count && now.tab.url == before.tab.url
                             } ?? false
                             DispatchQueue.main.async {
                                 MainActor.assumeIsolated { same ? tell() : refuse(["note": ClaudePanel.tabNotShowing]) }

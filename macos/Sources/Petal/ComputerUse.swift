@@ -168,13 +168,12 @@ final class ComputerUse {
         let find = args["find"] as? String ?? ""
         // A note stuck to one tab reads its window only while that tab is the one showing, checked before and after.
         let tabPlace = place.flatMap { $0.kind == .tab && $0.tab != nil ? $0 : nil }
-        let previous = tabPlace.flatMap { app.claude.lastTab($0) }
         Self.readQueue.async {
-            if let tabPlace, ClaudePanel.tabShowing(tabPlace, previous: previous) == nil {
+            if let tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
                 return DispatchQueue.main.async { fail(ClaudePanel.tabNotShowing) }
             }
             let reading = Reader.read(pid: pid, window: wanted, budget: 1.5)
-            let seen = tabPlace.flatMap { ClaudePanel.tabShowing($0, previous: previous) }
+            let seen = tabPlace.flatMap { ClaudePanel.tabShowing($0) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Turned off, or the app made private, while it read: nothing it read goes back.
@@ -456,7 +455,7 @@ final class ComputerUse {
         cursor.preparing(job.caption, near: Self.screenPoint(near))
         Self.actQueue.async {
             // A tab note's tab must still be the one its window shows.
-            if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace, previous: tabPlace.tab) == nil {
+            if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
                 return DispatchQueue.main.async {
                     MainActor.assumeIsolated { self.cursor.rest(); job.fail(ClaudePanel.tabNotShowing); self.finished() }
                 }
@@ -474,7 +473,7 @@ final class ComputerUse {
                             if !cancel.stopped {
                                 // Right before the change: a tab note's tab still showing, then the window (its title
                                 // is the tab's), what's selected in it, what has the keyboard and the control, again.
-                                if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace, previous: tabPlace.tab) == nil {
+                                if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
                                     outcome.error = ClaudePanel.tabNotShowing
                                 } else {
                                     let checked = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options, known: prepared)
