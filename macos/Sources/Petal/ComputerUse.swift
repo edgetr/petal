@@ -146,8 +146,11 @@ final class ComputerUse {
         let place = named.isEmpty && args["front"] as? Bool != true && app.claude.notesOn ? app.claude.note(withID: caller)?.place : nil
         let target: NSRunningApplication?
         if let place {
-            target = NSRunningApplication(processIdentifier: place.pid).flatMap { $0.bundleIdentifier == place.app && !$0.isTerminated ? $0 : nil }
-            guard target != nil else { return fail("This note's window is closed: \(place.appName) has quit. front: true uses what's in front now.") }
+            target = place.running
+            guard target != nil else {
+                return fail(place.kind == .app ? "This note is stuck to \(place.appName), which isn't open. front: true uses what's in front now."
+                                               : "This note's window is closed: \(place.appName) has quit. front: true uses what's in front now.")
+            }
         } else {
             target = assist.frontApp(named: named)
         }
@@ -158,7 +161,7 @@ final class ComputerUse {
             return send(["app": name, "private": "The user keeps this app private: Petal doesn't look into it or use it."])
         }
         let pid = target.processIdentifier
-        let wanted = place?.window
+        let wanted = place?.lookWindow
         let find = args["find"] as? String ?? ""
         Self.readQueue.async {
             let reading = Reader.read(pid: pid, window: wanted, budget: 1.5)

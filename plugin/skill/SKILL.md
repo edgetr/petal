@@ -36,8 +36,10 @@ Use, in this order:
    act on a window that changed since (another row selected, another title) is refused: call `petal_ui` again.
    Never private apps or password fields (`petal_vault` types secrets); what only a real click could do, ask the
    user to do. Only the user turns `computerUse` on.
-   In Petal's own panel each chat is a sticky note (`aiNotes`): stuck to the window it was opened on, so
-   `petal_look` looks at that window even after the user moves on (`front: true` for what's in front now).
+   In Petal's own panel each chat is a sticky note (`aiNotes`): stuck to the browser tab, window, or all of the
+   app it was opened on (a chip on the note changes which), so `petal_look` looks there even after the user moves
+   on (`front: true` for what's in front now; a tab's note says its tab under `noteTab`). The user can drag a
+   note anywhere on its window; it comes back there whenever that tab, window or app is in front again.
    Changes apply instantly. `petal_export_recipe` / `petal_import_recipe` share a dock as a `.petal` file (modes,
    apps by name, look; nothing personal) or add one someone shared (`look: true` also takes its look; say what it
    adds before importing); `petal_suggestions` and `petal_summary` read the

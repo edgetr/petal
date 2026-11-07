@@ -194,18 +194,21 @@ final class Assist {
     private func look(_ args: [String: Any], place: NotePlace? = nil, _ send: @escaping (Any) -> Void) {
         let named = args["app"] as? String ?? ""
         let place = named.isEmpty && args["front"] as? Bool != true ? place : nil
-        let stuck = place.flatMap { p in NSRunningApplication(processIdentifier: p.pid).flatMap { $0.bundleIdentifier == p.app && !$0.isTerminated ? $0 : nil } }
+        let stuck = place?.running
         let front = place == nil ? frontApp(named: named) : stuck
-        let wanted = place?.window
+        let wanted = place?.lookWindow
         var result: [String: Any] = [:]
         if let place, let mode = config.modes.first(where: { $0.id == place.mode }) { result["mode"] = ["id": mode.id, "name": mode.name] }
         else if let mode = app.docks.focusedDock?.mode { result["mode"] = ["id": mode.id, "name": mode.name] }
         if let place {
             // A note's window that's gone is said so, and nothing else is looked at in its place.
             guard stuck != nil else {
-                return send(["note": "This note's window is closed: \(place.appName) has quit. front: true looks at what's in front now."])
+                return send(["note": place.kind == .app ? "This note is stuck to \(place.appName), which isn't open. front: true looks at what's in front now."
+                                                      : "This note's window is closed: \(place.appName) has quit. front: true looks at what's in front now."])
             }
-            result["note"] = "This is the window the note is stuck to; the user may be looking at something else now (front: true shows that)."
+            result["note"] = place.kind == .app
+                ? "This note is stuck to all of \(place.appName): this is its window in front; the user may be looking at something else now (front: true shows that)."
+                : "This is the window the note is stuck to; the user may be looking at something else now (front: true shows that)."
         }
         result["onScreen"] = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !$0.isHidden }
             .compactMap(\.localizedName)).sorted()
@@ -292,14 +295,21 @@ final class Assist {
                     // A note's tab is always its own window's (by id, or frame and title), never whichever window is
                     // in front by the time the browser answers.
                     let other = place == nil ? nil : Browsers.Window(number: number, title: realTitle, frame: frame)
+                    // A note stuck to one tab: which, as it was last seen (the window may show another now).
+                    let noteTab = place?.kind == .tab ? place?.tab : nil
                     self.app.browsers.frontURL(of: front, window: other) { url in
-                        guard let url else { return finish() }
+                        guard url != nil || noteTab != nil else { return finish() }
                         // An address can carry a key too (?token=…).
                         Self.queue.async {
-                            let shown = Self.withoutSecrets(url)
+                            let shown = url.map(Self.withoutSecrets)
+                            let stuckTab = noteTab.map { ["url": Self.withoutSecrets($0.url), "title": Self.withoutSecrets($0.title)] }
                             DispatchQueue.main.async {
                                 MainActor.assumeIsolated {
-                                    result["tab"] = ["url": shown, "title": title]
+                                    if let shown { result["tab"] = ["url": shown, "title": title] }
+                                    if let stuckTab {
+                                        result["noteTab"] = stuckTab
+                                        result["note"] = "This note is stuck to one tab of this window (noteTab); tab is the one the window shows now. The user may be looking at something else (front: true shows that)."
+                                    }
                                     finish()
                                 }
                             }

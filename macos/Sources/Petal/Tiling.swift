@@ -190,7 +190,7 @@ enum Tiling {
                   let now = Windows.frame(of: element), !now.equalTo(done.actual, within: 2), layout(of: id) != nil else { return }
             // Someone is dragging or resizing a tiled window: wait for the mouse to let go.
             settle(id, attempts: 0)
-        case .missionControl, .missionControlEnded:
+        case .missionControl, .missionControlEnded, .titleChanged:
             break
         }
     }

@@ -14,16 +14,16 @@ import Observation
 final class Browsers {
     enum Kind { case chromium, safari, gecko }
 
-    static let chromium: [String: String] = [
+    nonisolated static let chromium: [String: String] = [
         "net.imput.helium": "Helium", "com.google.Chrome": "Chrome", "com.google.Chrome.beta": "Chrome Beta",
         "com.google.Chrome.dev": "Chrome Dev", "com.google.Chrome.canary": "Chrome Canary", "company.thebrowser.Browser": "Arc",
         "com.brave.Browser": "Brave", "com.brave.Browser.beta": "Brave Beta", "com.microsoft.edgemac": "Edge",
         "com.vivaldi.Vivaldi": "Vivaldi", "com.operasoftware.Opera": "Opera", "org.chromium.Chromium": "Chromium",
     ]
-    static let safari: Set<String> = ["com.apple.Safari", "com.apple.SafariTechnologyPreview"]
-    static let gecko: Set<String> = ["org.mozilla.firefox", "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly", "app.zen-browser.zen"]
+    nonisolated static let safari: Set<String> = ["com.apple.Safari", "com.apple.SafariTechnologyPreview"]
+    nonisolated static let gecko: Set<String> = ["org.mozilla.firefox", "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly", "app.zen-browser.zen"]
 
-    static func kind(_ bundleID: String) -> Kind? {
+    nonisolated static func kind(_ bundleID: String) -> Kind? {
         if chromium[bundleID] != nil { return .chromium }
         if safari.contains(bundleID) { return .safari }
         if gecko.contains(bundleID) { return .gecko }
@@ -176,6 +176,158 @@ final class Browsers {
             near(row.frame, window.frame) && !row.name.isEmpty && (row.name == title || title.hasPrefix(row.name))
         }
         return matches.count == 1 ? matches[0].url : nil
+    }
+
+    // MARK: Tabs, for sticky notes
+
+    /// The front window's active tab, for a sticky note to stick to (NoteTab says how each browser's tabs are told
+    /// apart), or nil: not a browser, not allowed to ask it yet, or no answer. Called off the main thread.
+    nonisolated static func activeTab(pid: pid_t, bundleID: String) -> NoteTab? {
+        switch kind(bundleID) {
+        case .chromium?:
+            guard access(bundleID) == .allowed else { return nil }
+            let fields = run("""
+                set sep to tab
+                tell application id "\(bundleID)"
+                set w to front window
+                set t to active tab of w
+                set u to ""
+                set n to ""
+                try
+                set u to URL of t
+                end try
+                try
+                set n to title of t
+                end try
+                return ((id of t) as text) & sep & ((active tab index of w) as text) & sep & ((count of tabs of w) as text) & sep & u & sep & n
+                end tell
+                """).map { Self.fields($0, 5) } ?? []
+            guard fields.count >= 5, !fields[0].isEmpty else { return nil }
+            return NoteTab(id: fields[0], index: Int(fields[1]), count: Int(fields[2]), url: fields[3], title: fields[4])
+        case .safari?:
+            guard access(bundleID) == .allowed else { return nil }
+            let fields = run("""
+                set sep to tab
+                tell application id "\(bundleID)"
+                set w to front window
+                set t to current tab of w
+                set u to ""
+                set n to ""
+                try
+                set u to URL of t
+                end try
+                try
+                set n to name of t
+                end try
+                return ((index of t) as text) & sep & ((count of tabs of w) as text) & sep & u & sep & n
+                end tell
+                """).map { Self.fields($0, 4) } ?? []
+            guard fields.count >= 4, let index = Int(fields[0]) else { return nil }
+            return NoteTab(index: index, count: Int(fields[1]), url: fields[2], title: fields[3])
+        case .gecko?:
+            return geckoTab(pid: pid)
+        case nil:
+            return nil
+        }
+    }
+
+    /// A script's answer split at tabs into `count` fields; the last (a title) keeps any tab of its own.
+    nonisolated private static func fields(_ text: String, _ count: Int) -> [String] {
+        let parts = text.trimmingCharacters(in: .newlines).components(separatedBy: "\t")
+        guard parts.count > count else { return parts }
+        return Array(parts.prefix(count - 1)) + [parts.dropFirst(count - 1).joined(separator: "\t")]
+    }
+
+    /// Shows a note's tab in its window (bringing the note back from its app's icon): a Chromium browser's by its id,
+    /// Safari's by its address, else its place. Firefox and Zen can't be asked. Off the main thread.
+    nonisolated static func select(_ tab: NoteTab, bundleID: String, window: CGWindowID?) {
+        func quoted(_ text: String) -> String {
+            "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        }
+        switch kind(bundleID) {
+        case .chromium?:
+            guard let id = tab.id, access(bundleID) == .allowed else { return }
+            _ = run("""
+                tell application id "\(bundleID)"
+                repeat with w in windows
+                set i to 0
+                repeat with t in tabs of w
+                set i to i + 1
+                if ((id of t) as text) is \(quoted(id)) then
+                set active tab index of w to i
+                return "ok"
+                end if
+                end repeat
+                end repeat
+                end tell
+                return ""
+                """)
+        case .safari?:
+            guard let window, access(bundleID) == .allowed else { return }
+            let byPlace = tab.index.map { "if (count of tabs of w) ≥ \($0) then set current tab of w to tab \($0) of w" } ?? ""
+            _ = run("""
+                tell application id "\(bundleID)"
+                set w to (first window whose id is \(window))
+                repeat with t in tabs of w
+                try
+                if URL of t is \(quoted(tab.url)) then
+                set current tab of w to t
+                return "ok"
+                end if
+                end try
+                end repeat
+                \(byPlace)
+                end tell
+                return ""
+                """)
+        default:
+            return
+        }
+    }
+
+    /// Firefox's and Zen's front window: the selected tab in its tab strip (its place, how many, its title) and the
+    /// address field, through Accessibility. Best effort: what each version shows differs, and a tab's place only
+    /// counts within its window.
+    nonisolated static func geckoTab(pid: pid_t) -> NoteTab? {
+        guard Windows.trusted else { return nil }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.3)
+        AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+        guard let window: AXUIElement = Windows.value(app, kAXFocusedWindowAttribute) else { return nil }
+        let windowTitle: String = Windows.value(window, kAXTitleAttribute) ?? ""
+        var address: String?
+        var strip: (index: Int, count: Int, title: String)?
+        var queue: [(AXUIElement, Int)] = [(window, 0)]
+        var seen = 0
+        let deadline = Date().addingTimeInterval(0.4)
+        while !queue.isEmpty, seen < 800, Date() < deadline, address == nil || strip == nil {
+            let (element, depth) = queue.removeFirst()
+            seen += 1
+            let role: String = Windows.value(element, kAXRoleAttribute) ?? ""
+            let children: [AXUIElement] = Windows.value(element, kAXChildrenAttribute) ?? []
+            if address == nil, role == kAXTextFieldRole as String || role == kAXComboBoxRole as String {
+                let identifier: String = Windows.value(element, "AXIdentifier") ?? ""
+                let description: String = Windows.value(element, kAXDescriptionAttribute) ?? ""
+                let value: String = Windows.value(element, kAXValueAttribute) ?? ""
+                if !value.isEmpty, identifier.contains("urlbar") || description.localizedCaseInsensitiveContains("address")
+                    || description.localizedCaseInsensitiveContains("search or enter") || Sites.address(value) != nil {
+                    address = value
+                }
+            }
+            if strip == nil, role == kAXTabGroupRole as String {
+                let tabs = children.filter { (Windows.value($0, kAXRoleAttribute) as String?) == kAXRadioButtonRole as String }
+                if let selected = tabs.firstIndex(where: { tab in
+                    let value: Any? = Windows.value(tab, kAXValueAttribute)
+                    return (value as? NSNumber)?.boolValue == true
+                }) {
+                    strip = (selected + 1, tabs.count, Windows.value(tabs[selected], kAXTitleAttribute) ?? "")
+                }
+            }
+            guard depth < 14, role != kAXWebAreaRole else { continue }   // a page's own fields and tabs aren't the browser's
+            queue += children.map { ($0, depth + 1) }
+        }
+        guard address != nil || strip != nil else { return nil }
+        return NoteTab(index: strip?.index, count: strip?.count, url: address ?? "", title: strip?.title.isEmpty == false ? strip?.title ?? "" : windowTitle)
     }
 
     // MARK: Closing

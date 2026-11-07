@@ -1,0 +1,136 @@
+import CoreGraphics
+import Foundation
+
+// Checks NoteLayout.swift: which sticky notes fit what's in front, telling browser tabs apart, and where a note the
+// person moved sits on its window. Run with macos/checks/run.sh.
+@main
+struct NoteLayoutCheck {
+    nonisolated(unsafe) static var failures = 0
+    nonisolated(unsafe) static var passed = 0
+
+    static func expect(_ ok: Bool, _ what: String, _ detail: @autoclosure () -> String = "") {
+        if ok { passed += 1 } else { failures += 1; print("FAIL \(what) \(detail())") }
+    }
+
+    static func place(_ scope: NoteScope?, pid: Int32 = 10, app: String = "com.apple.Safari", window: UInt32? = 5, tab: NoteTab? = nil) -> NotePlace {
+        NotePlace(pid: pid, app: app, appName: "Safari", window: window, title: "", mode: "", desktop: 1, scope: scope, tab: tab)
+    }
+
+    static func main() {
+        // MARK: Scopes
+
+        let front = FrontPlace(pid: 10, app: "com.apple.Safari", window: 5, tab: nil)
+        expect(NoteRules.fits(place(nil), front), "a kept chat with no scope is a window's")
+        expect(NoteRules.fits(place(.window), front), "a window's note fits its window")
+        expect(!NoteRules.fits(place(.window, window: 6), front), "not another window of its app")
+        expect(!NoteRules.fits(place(.window, pid: 11), front), "not another app's window")
+        expect(NoteRules.fits(place(.app, window: 6), front), "an app's note fits any of its windows")
+        expect(NoteRules.fits(place(.app, pid: 99, window: nil), front), "and after the app restarted")
+        expect(!NoteRules.fits(place(.app, app: "com.tinyspeck.slackmacgap"), front), "not another app")
+        expect(!NoteRules.fits(place(.app, app: ""), FrontPlace(pid: 1, app: "", window: nil, tab: nil)), "never an app with no id")
+        expect(NoteRules.sameWindow(place(.tab, tab: NoteTab(index: 1, url: "a", title: "")), front), "a tab's window is in front, whichever tab")
+
+        // MARK: Chromium tabs (ids)
+
+        let chrome = "com.google.Chrome"
+        let a = NoteTab(id: "41", index: 2, count: 3, url: "https://github.com/edgetr/petal", title: "Petal")
+        let chromeNote = place(.tab, app: chrome, tab: a)
+        func chromeFront(_ tab: NoteTab, pid: Int32 = 10, window: UInt32? = 5) -> FrontPlace {
+            FrontPlace(pid: pid, app: chrome, window: window, tab: tab)
+        }
+        expect(NoteRules.fits(chromeNote, chromeFront(a)), "its tab in front")
+        expect(!NoteRules.fits(chromeNote, chromeFront(NoteTab(id: "42", index: 3, count: 3, url: a.url, title: "Petal"))),
+               "another tab on the same page has its own note")
+        expect(NoteRules.fits(chromeNote, chromeFront(NoteTab(id: "41", index: 2, count: 3, url: "https://github.com/edgetr/petal/pulls", title: "Pulls"))),
+               "the tab went to another page: still its note")
+        expect(NoteRules.fits(chromeNote, chromeFront(NoteTab(id: "41", index: 1, count: 1, url: a.url, title: ""), window: 9)),
+               "a Chromium tab dragged to another window keeps its note")
+        expect(!NoteRules.fits(chromeNote, FrontPlace(pid: 10, app: chrome, window: 5, tab: nil)), "no tab read: a tab's note doesn't show")
+        expect(NoteRules.fits(chromeNote, chromeFront(NoteTab(id: "3", index: 1, count: 1, url: a.url + "/", title: ""), pid: 77, window: 1)),
+               "after the browser restarted, the same address finds it")
+        expect(!NoteRules.fits(chromeNote, chromeFront(NoteTab(id: "41", index: 2, count: 3, url: "https://x.com", title: ""), pid: 77)),
+               "after a restart a reused id doesn't")
+
+        // MARK: Safari tabs (place and address)
+
+        let s1 = NoteTab(index: 2, count: 4, url: "https://apple.com/mac", title: "Mac")
+        let safariNote = place(.tab, tab: s1)
+        func safariFront(_ tab: NoteTab, window: UInt32? = 5) -> FrontPlace { FrontPlace(pid: 10, app: "com.apple.Safari", window: window, tab: tab) }
+        expect(NoteRules.fits(safariNote, safariFront(s1)), "its tab in front")
+        expect(!NoteRules.fits(safariNote, safariFront(NoteTab(index: 3, count: 4, url: "https://apple.com/iphone", title: ""))), "another tab")
+        expect(!NoteRules.fits(safariNote, safariFront(NoteTab(index: 3, count: 4, url: "https://apple.com/", title: ""))),
+               "another tab on the same site")
+        expect(NoteRules.fits(safariNote, safariFront(NoteTab(index: 1, count: 3, url: s1.url, title: ""))),
+               "a tab before it closed: found by its address")
+        expect(!NoteRules.fits(safariNote, safariFront(s1, window: 6)), "a Safari tab belongs to its window")
+        let navigated = NoteTab(index: 2, count: 4, url: "https://apple.com/mac/compare", title: "Compare")
+        expect(NoteRules.fits(safariNote, safariFront(navigated), previous: s1), "went to another page while showing: still its note")
+        expect(!NoteRules.fits(safariNote, safariFront(navigated)), "with nothing seen before, a new address is another tab")
+        expect(!NoteRules.fits(safariNote, safariFront(NoteTab(index: 2, count: 3, url: "https://apple.com/ipad", title: "")), previous: s1),
+               "its tab closed and the next took its place: not its note")
+        expect(!NoteRules.fits(safariNote, safariFront(navigated), previous: NoteTab(index: 3, count: 4, url: "https://apple.com/iphone", title: "")),
+               "switched from another tab to a new address: not its note")
+        let followed = NoteRules.follow(s1, to: navigated, keepWords: true)
+        expect(followed.url == navigated.url && followed.title == "Compare" && followed.index == 2, "the note follows its tab's address")
+        let quiet = NoteRules.follow(NoteTab(index: 2, count: 4, url: "", title: ""), to: navigated, keepWords: false)
+        expect(quiet.url.isEmpty && quiet.title.isEmpty && quiet.index == 2, "a private app's address and title are never kept")
+        expect(NoteRules.sameURL("https://a.com/x#top", "https://a.com/x/"), "a fragment and trailing slash don't count")
+        expect(!NoteRules.sameURL("", ""), "no address is never the same address")
+
+        // MARK: Which note shows
+
+        struct N { let scope: NoteScope; let showing: Bool; let name: String }
+        let pick = { (notes: [N]) in NoteRules.pick(notes, scope: \.scope, showing: \.showing)?.name }
+        expect(pick([N(scope: .app, showing: false, name: "app"), N(scope: .window, showing: false, name: "window"),
+                     N(scope: .tab, showing: false, name: "tab")]) == "tab", "a tab's note beats its window's and its app's")
+        expect(pick([N(scope: .app, showing: true, name: "app"), N(scope: .window, showing: false, name: "window")]) == "window",
+               "a window's note beats its app's, even the one showing")
+        expect(pick([N(scope: .window, showing: false, name: "first"), N(scope: .window, showing: true, name: "showing")]) == "showing",
+               "between equals, the one showing stays")
+        expect(pick([]) == nil, "nothing fits, nothing shows")
+
+        // MARK: Keys
+
+        expect(NoteRules.key(place(nil)) == "10-5", "a window's key is the one kept chats had")
+        expect(NoteRules.key(place(.app)) == "app|com.apple.Safari", "an app's key is its app")
+        expect(NoteRules.key(chromeNote) == "tab|10|41", "a Chromium tab's key is its id")
+
+        // MARK: Where it sits
+
+        let window = CGRect(x: 100, y: 100, width: 800, height: 600)   // y up: top at 700
+        let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        let size = CGSize(width: 544, height: 300)
+        let topRight = NoteSpot.stick(panel: CGRect(x: 340, y: 380, width: 544, height: 300), window: window)
+        expect(topRight.corner == .topRight, "nearest corner", "\(topRight)")
+        expect(topRight.frame(size: size, window: window, screen: screen) == CGRect(x: 340, y: 380, width: 544, height: 300),
+               "stuck where it was left", "\(topRight.frame(size: size, window: window, screen: screen))")
+        let moved = window.offsetBy(dx: 200, dy: -50)
+        expect(topRight.frame(size: size, window: moved, screen: screen).origin == CGPoint(x: 540, y: 330), "moves with its window")
+        let wider = CGRect(x: 100, y: 100, width: 900, height: 500)   // grown right, shrunk from the top
+        expect(topRight.frame(size: size, window: wider, screen: screen).origin == CGPoint(x: 440, y: 280),
+               "keeps its spot from its corner when the window resizes")
+        let taller = CGSize(width: 544, height: 400)
+        expect(topRight.frame(size: taller, window: window, screen: screen).maxY == 680, "stuck by a top corner, it grows down")
+        let bottomLeft = NoteSpot.stick(panel: CGRect(x: 120, y: 110, width: 544, height: 200), window: window)
+        expect(bottomLeft.corner == .bottomLeft && bottomLeft.dx == 20 && bottomLeft.dy == 10, "bottom left", "\(bottomLeft)")
+        expect(bottomLeft.frame(size: CGSize(width: 544, height: 260), window: window, screen: screen).minY == 110, "stuck by a bottom corner, it grows up")
+        let off = window.offsetBy(dx: 1000, dy: 400)
+        let kept = topRight.frame(size: size, window: off, screen: screen)
+        expect(screen.contains(kept), "kept whole on the window's screen", "\(kept)")
+        let huge = topRight.frame(size: CGSize(width: 544, height: 1200), window: window, screen: screen)
+        expect(huge.maxY == screen.maxY, "taller than the screen: its top stays on it", "\(huge)")
+        let outside = NoteSpot.stick(panel: CGRect(x: 950, y: 500, width: 300, height: 200), window: window)
+        expect(outside.corner == .topRight && outside.dx > 0, "left beside its window, it stays beside it", "\(outside)")
+
+        // MARK: Coordinates and screens
+
+        expect(NoteRules.appKitFrame(CGRect(x: 10, y: 25, width: 100, height: 50), primaryHeight: 900) == CGRect(x: 10, y: 825, width: 100, height: 50),
+               "Accessibility's frame in AppKit's coordinates")
+        let left = CGRect(x: -1920, y: 0, width: 1920, height: 1080)
+        expect(NoteRules.screen(for: CGRect(x: -500, y: 100, width: 800, height: 600), in: [screen, left]) == left, "the screen it covers most")
+        expect(NoteRules.screen(for: CGRect(x: 5000, y: 5000, width: 10, height: 10), in: [screen, left]) == screen, "on none: the first")
+
+        print(failures == 0 ? "ok: \(passed) checks" : "\(failures) of \(passed + failures) checks failed")
+        exit(failures == 0 ? 0 : 1)
+    }
+}

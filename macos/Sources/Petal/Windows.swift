@@ -411,9 +411,10 @@ final class WindowEvents {
     static let shared = WindowEvents()
 
     /// `missionControl`: Mission Control (or App Exposé) opened; `missionControlEnded`: it closed. macOS's Dock says
-    /// so through Accessibility.
+    /// so through Accessibility. `titleChanged`: a window's title changed (a browser showing another tab), only
+    /// while someone asked for titles (`titles`): they change often.
     enum Kind { case created, closed, focused, minimized, unminimized, moved, resized, activated, launched, quit, hidden, shown, space, screens,
-                     missionControl, missionControlEnded }
+                     missionControl, missionControlEnded, titleChanged }
     struct Event {
         let kind: Kind
         let pid: pid_t
@@ -433,7 +434,19 @@ final class WindowEvents {
 
     func stopListening(_ key: String) {
         listeners[key] = nil
+        titleListeners.remove(key)
+        AXWatcher.shared.titles(!titleListeners.isEmpty)
         checkPermission()
+    }
+
+    private var titleListeners: Set<String> = []
+
+    /// Whether `key` wants to hear windows' titles changing (sticky notes on browser tabs). Off, they're dropped on
+    /// the observers' own thread.
+    func titles(_ key: String, _ on: Bool) {
+        guard on != titleListeners.contains(key) else { return }
+        if on { titleListeners.insert(key) } else { titleListeners.remove(key) }
+        AXWatcher.shared.titles(!titleListeners.isEmpty)
     }
 
     /// Starts the observers once Accessibility is allowed and someone listens, and stops them when it's taken away or
@@ -512,6 +525,8 @@ final class AXWatcher: @unchecked Sendable {
     private var windowIDs: [AXUIElement: CGWindowID] = [:]
     private var running = false
     private var generation = 0   // retries from before a stop are dropped
+    /// Someone wants windows' title changes (WindowEvents.titles).
+    private var wantsTitles = false
 
     /// On the app itself: windows opening, focus, hiding, and (as well as on each window, for one not watched yet)
     /// minimizing, so a minimized window reaches the dock even if its own observer was never added.
@@ -519,7 +534,8 @@ final class AXWatcher: @unchecked Sendable {
                                            kAXApplicationHiddenNotification, kAXApplicationShownNotification,
                                            kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
     private static let windowNotifications = [kAXUIElementDestroyedNotification, kAXMovedNotification, kAXResizedNotification,
-                                              kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification]
+                                              kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification,
+                                              kAXTitleChangedNotification]
     /// On macOS's Dock, which draws Mission Control: it opening (all windows, or one app's), and closing. Showing the
     /// desktop counts as closing, since the Dock doesn't come out for it. (yabai watches the same four.)
     private static let dockID = "com.apple.dock"
@@ -570,6 +586,10 @@ final class AXWatcher: @unchecked Sendable {
 
     func observe(_ app: NSRunningApplication) {
         perform { [self] in observe(app, attempt: 0, generation: generation) }
+    }
+
+    func titles(_ on: Bool) {
+        perform { [self] in wantsTitles = on }
     }
 
     /// Watches macOS's Dock again if it isn't watched: Petal restarts it when it hides it, and macOS may not say
@@ -684,6 +704,9 @@ final class AXWatcher: @unchecked Sendable {
         case kAXWindowDeminiaturizedNotification: send(.unminimized, window: windowIDs[element], element: element)
         case kAXMovedNotification: send(.moved, window: windowIDs[element], element: element)
         case kAXResizedNotification: send(.resized, window: windowIDs[element], element: element)
+        case kAXTitleChangedNotification:
+            guard wantsTitles else { return }
+            send(.titleChanged, window: windowIDs[element], element: element)
         case kAXApplicationHiddenNotification: send(.hidden)
         case kAXApplicationShownNotification: send(.shown)
         case _ where Self.missionControlOpened.contains(name): send(.missionControl)
