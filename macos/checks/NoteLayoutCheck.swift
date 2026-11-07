@@ -101,6 +101,31 @@ struct NoteLayoutCheck {
         expect(!NoteRules.fits(chromeNote, chromeFront(NoteTab(index: 2, count: 3, shared: 1, url: a.url, title: ""))),
                "a tab read with no id isn't its tab by the address while the browser runs")
 
+        // Accessibility couldn't read the window, AppleScript still named the active tab: unreadable never matches.
+        let tabUnread = chromeFront(a, window: nil)
+        expect(tabUnread.unread && !NoteRules.fits(chromeNote, tabUnread), "a tab read with its window unread isn't its tab, even by its id")
+        expect(NoteRules.fitting([chromeNote], tabUnread).isEmpty, "nor is it taken there (no note before the plain chat)")
+        expect(!NoteRules.fits(chromeNote, FrontPlace(pid: 10, app: chrome, window: nil, tab: a, none: true)), "nor with no window said")
+        let onlyOne = NoteTab(id: "3", index: 1, count: 1, shared: 1, url: a.url, title: "")
+        expect(NoteRules.fits(chromeNote, chromeFront(onlyOne, pid: 77)) && !NoteRules.fits(chromeNote, chromeFront(onlyOne, pid: 77, window: nil)),
+               "nor after a restart by its address")
+        expect(NoteRules.windowUnknown(chromeNote, tabUnread), "a tab's note is kept to come back once its window is read")
+        expect(!NoteRules.sameWindow(chromeNote, tabUnread) && NoteRules.sameWindow(chromeNote, tabUnread, orUnknown: true),
+               "never brought up there; an open one waits for the read")
+        let adoptedTab = NoteRules.adopt(chromeNote, tabUnread, title: "", keepWords: true)
+        expect(adoptedTab.window == 5, "a window Petal couldn't read never replaces the one a tab's note knows", "\(String(describing: adoptedTab.window))")
+        let appNote = place(.app, app: chrome, window: 5)
+        expect(NoteRules.fits(appNote, tabUnread), "an app's note still fits its app (the app is known without Accessibility)")
+        let adoptedApp = NoteRules.adopt(appNote, tabUnread, title: "", keepWords: true)
+        expect(adoptedApp.window == 5, "nor the one an app's note knows")
+        expect(NoteRules.adopt(appNote, chromeFront(a, window: 9), title: "Petal", keepWords: true).window == 9,
+               "a window read: an app's note follows it")
+        expect(NoteRules.adopt(appNote, FrontPlace(pid: 10, app: chrome, window: nil, tab: nil, none: true), title: "", keepWords: true).window == nil,
+               "and no window, said so, is none")
+        let movedTab = NoteRules.adopt(chromeNote, chromeFront(NoteTab(id: "41", index: 1, count: 1, url: a.url, title: "Petal 2"), window: 9), title: "Petal 2", keepWords: false)
+        expect(movedTab.window == 9 && movedTab.tab?.index == 1 && movedTab.title.isEmpty && movedTab.tab?.title == "Petal",
+               "a tab's note follows its tab's window and place; a private app's words aren't kept")
+
         // MARK: After the browser restarted: only an address no other tab of the browser has
 
         let restartedOnly = NoteTab(id: "3", index: 1, count: 1, shared: 1, url: a.url + "/", title: "")
@@ -325,6 +350,22 @@ struct NoteLayoutCheck {
         expect(NoteRules.letGo([place(.app, window: 5), place(.app, pid: 99, window: 8)]) == [1], "two notes made all of one app: one keeps it")
         // Kept chats, newest first, after a restart: the newest keeps the place.
         expect(NoteRules.letGo([widenedA, widenedB, widenedA, tabB]) == [1, 2], "read newest first, each place keeps its newest chat")
+
+        // Two tabs on one address, each with a note; tab B moved into A's old place while A wasn't selected: B's place
+        // is updated, A's isn't, so their keys match. B made "This tab" again never makes A let go: different buttons.
+        let twinA = place(.tab, tab: NoteTab(element: 1, index: 1, count: 2, shared: 2, url: s1.url, title: ""))
+        let twinB = place(.tab, tab: NoteTab(element: 2, index: 1, count: 2, shared: 2, url: s1.url, title: ""))
+        expect(NoteRules.key(twinA) == NoteRules.key(twinB), "their keys match", NoteRules.key(twinA))
+        expect(!NoteRules.samePlace(twinB, twinA) && NoteRules.letGo([twinB, twinA]).isEmpty, "but two buttons are two tabs")
+        expect(NoteRules.letGo([twinB, place(.tab, tab: NoteTab(element: 2, index: 2, count: 2, url: "https://other.com", title: ""))]) == [1],
+               "one button is one tab, whatever its place and address")
+        let chromeTwinA = place(.tab, app: chrome, tab: NoteTab(id: "1", index: 1, count: 2, url: a.url, title: ""))
+        let chromeTwinB = place(.tab, app: chrome, tab: NoteTab(id: "2", index: 1, count: 2, url: a.url, title: ""))
+        expect(NoteRules.letGo([chromeTwinB, chromeTwinA]).isEmpty && NoteRules.letGo([chromeTwinA, chromeTwinA]) == [1], "Chromium tabs by their ids")
+        expect(NoteRules.letGo([place(.tab, pid: 11, app: chrome, tab: chromeTwinA.tab), chromeTwinA]).isEmpty, "never across two runs of the browser")
+        let keptTwin = place(.tab, tab: NoteTab(index: 1, count: 2, shared: 2, url: s1.url, title: ""))
+        expect(!NoteRules.samePlace(keptTwin, twinA) && !NoteRules.samePlace(twinA, keptTwin), "a tab known by its button isn't a kept chat's by its key")
+        expect(NoteRules.letGo([keptTwin, keptTwin]) == [1], "kept chats (no button): by their keys, as after a restart")
 
         // MARK: Keys
 

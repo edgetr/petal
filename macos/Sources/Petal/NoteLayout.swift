@@ -233,9 +233,30 @@ enum NoteRules {
             return place.on(pid: front.pid, window: front.window, none: front.none)
         case .tab:
             guard let tab = place.tab else { return place.on(pid: front.pid, window: front.window, none: front.none) }
-            guard let now = front.tab, place.app == front.app else { return false }
+            // A tab read while its window couldn't be (the browser answered, Accessibility didn't): never a match.
+            guard let now = front.tab, front.window != nil, place.app == front.app else { return false }
             return sameTab(tab, pid: place.pid, now, pid: front.pid)
         }
+    }
+
+    /// A note found on what's in front (`fits`) follows it: an app's note to the window in front (and the app's new
+    /// process after it restarted), a tab's to its tab's new address, window and place. A window Petal couldn't read
+    /// never replaces the one it knows. `keepWords` false (a private app): no title or address is kept.
+    static func adopt(_ place: NotePlace, _ front: FrontPlace, title: String, keepWords: Bool) -> NotePlace {
+        var next = place
+        switch place.kind {
+        case .app:
+            next.pid = front.pid
+            if !front.unread { next.window = front.window }
+        case .tab:
+            next.pid = front.pid
+            if let window = front.window { next.window = window }
+            if let tab = place.tab, let now = front.tab { next.tab = follow(tab, to: now, keepWords: keepWords) }
+        case .window:
+            break
+        }
+        if !title.isEmpty, keepWords { next.title = title }
+        return next
     }
 
     /// Whether counting the browser's tabs on the address of the tab showing (`front`, read without a count) could
@@ -248,11 +269,27 @@ enum NoteRules {
     /// Of the notes stuck to `places` (nil: stuck to none), the ones that let go of their place (their indices): a
     /// place holds one note, the first to have it, so which note comes back there is never a guess.
     static func letGo(_ places: [NotePlace?]) -> [Int] {
-        var taken = Set<String>()
+        var taken: [NotePlace] = []
         return places.indices.filter { index in
             guard let place = places[index] else { return false }
-            return !taken.insert(key(place)).inserted
+            if taken.contains(where: { samePlace($0, place) }) { return true }
+            taken.append(place)
+            return false
         }
+    }
+
+    /// Two notes stuck to the same place, for one letting go of it. Tabs Petal tells apart (a Chromium id, a tab
+    /// strip's button) are the same only by that, in the same run of the browser: two tabs on one address that
+    /// swapped places are never one because their keys (window, place, address) say so. Tabs known by neither (chats
+    /// kept from before Petal restarted), and windows and apps, by their keys.
+    static func samePlace(_ a: NotePlace, _ b: NotePlace) -> Bool {
+        if a.kind == .tab, b.kind == .tab, let x = a.tab, let y = b.tab, x.known || y.known {
+            guard a.pid == b.pid, a.app == b.app else { return false }
+            if let i = x.id, let j = y.id { return i == j }
+            if let i = x.element, let j = y.element { return i == j }
+            return false
+        }
+        return key(a) == key(b)
     }
 
     /// A tab note that fits by the tab's own id or element in the same run of the browser: certain.
@@ -306,11 +343,20 @@ enum NoteRules {
         return place.on(pid: front.pid, window: front.window, none: front.none) || orUnknown && place.pid == front.pid && front.unread
     }
 
-    /// A window's note (or a tab's that knows no tab) whose app is in front, when Petal couldn't tell which window
-    /// is: the window may be another of the app's, so it doesn't show, but it's kept to come back once its own
-    /// window is seen in front (the window's focus event looks again).
+    /// A window's or a tab's note whose app is in front, when Petal couldn't tell which window is: the window may be
+    /// another of the app's (a tab read then is no tab of its), so it doesn't show, but it's kept to come back once
+    /// its own window is seen in front (the window's focus event looks again).
     static func windowUnknown(_ place: NotePlace, _ front: FrontPlace) -> Bool {
-        (place.kind == .window || place.tab == nil) && place.kind != .app && place.pid == front.pid && front.unread
+        place.kind != .app && place.pid == front.pid && front.unread
+    }
+
+    /// Whether a note stuck to `place` goes with a window closing (`closed`) or its app quitting (`quit`): a window's
+    /// and a tab's do (a tab's may come back with its tab); an app's waits for its app.
+    static func gone(_ place: NotePlace, closed window: UInt32? = nil, quit pid: Int32? = nil) -> Bool {
+        guard place.kind != .app else { return false }
+        if let window, place.window == window { return true }
+        if let pid, place.pid == pid { return true }
+        return false
     }
 
     /// Of the notes that fit what's in front, the one shown: the most specific; between equals, the one showing.
