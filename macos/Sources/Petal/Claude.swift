@@ -737,6 +737,8 @@ final class ClaudePanel {
     /// What was in front when Petal last looked (its tab too, in a browser), and where its window was.
     @ObservationIgnored var lastFront: FrontPlace?
     @ObservationIgnored var lastFrontFrame: CGRect?
+    /// The tab in front can be told apart (a Safari window's tab strip showed up, say): the chip offers "This tab".
+    var frontTabKnown = false
     /// A look at the front window waiting to happen (its title changed: maybe another tab) or under way.
     @ObservationIgnored var lookAgain: DispatchWorkItem?
     /// The open note's window moved or resized: its frame is being read, and read once more if it moves again meanwhile.

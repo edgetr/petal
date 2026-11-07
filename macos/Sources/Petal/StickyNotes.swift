@@ -93,6 +93,8 @@ extension ClaudePanel {
     func saw(_ running: NSRunningApplication, _ read: FrontRead) -> FrontPlace {
         let front = read.place(running.processIdentifier, app: running.bundleIdentifier ?? "")
         lastFront = front
+        let known = front.tab?.known == true
+        if frontTabKnown != known { frontTabKnown = known }
         let primary = NSScreen.screens.first?.frame.height ?? 0
         lastFrontFrame = read.frame.map { NoteRules.appKitFrame($0, primaryHeight: primary) }
         return front
@@ -722,7 +724,12 @@ extension ClaudePanel {
             guard let self else { return }
             var kept: [SavedChat] = []
             for var chat in chats {
-                chat.place = chat.place?.sanitized
+                // A private app's titles and addresses (made private while Petal was closed) go from the file too.
+                let sanitized = chat.place?.sanitized
+                if sanitized != chat.place {
+                    chat.place = sanitized
+                    Chats.save(chat)
+                }
                 guard let place = chat.place else { continue }
                 switch place.kind {
                 case .window:
@@ -906,6 +913,14 @@ extension ClaudePanel {
     private func ownWindowCameForward(_ window: NSWindow) {
         guard !window.styleMask.contains(.nonactivatingPanel), notesOn, isOpen, current.attached else { return }
         stepAway()
+    }
+
+    /// The pointer is on the note's chip: what's in front is read again, so a tab that can be told apart only now (a
+    /// Safari window that just got its second tab and its tab strip) is offered.
+    func refreshFront() {
+        guard notesOn, let running = current.place?.running,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == running.processIdentifier else { return }
+        look(at: running)
     }
 
     /// Reads what's in front in `running` (its window, and its tab) and shows its notes. Only the newest look counts.
@@ -1381,6 +1396,7 @@ struct NoteScopeChip: View {
     }
 
     var body: some View {
+        let _ = panel.frontTabKnown   // drawn again when the tab in front can (or can no longer) be told apart
         let scopes = NoteScope.allCases.filter { $0 != .tab || place.kind == .tab || panel.tabForCurrent != nil }
         Menu {
             Picker("Stick to", selection: Binding(get: { place.kind }, set: { panel.stick(to: $0) })) {
@@ -1404,6 +1420,7 @@ struct NoteScopeChip: View {
         .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
+        .onHover { if $0 { panel.refreshFront() } }
         .help("What this note is stuck to")
     }
 }
