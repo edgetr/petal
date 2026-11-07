@@ -941,6 +941,10 @@ enum Reader {
         var joinedTexts: [String] = []
         var aroundJoined: Set<Int> = []
         var joinedWhole = true
+        /// Controls showing a secret whole in their own text (a card number in one span of a page), and everything
+        /// that holds one, with the secret's parts (`UIMap.guardedSecrets`): selecting it a little at a time would
+        /// show it whole.
+        var guarded: [Int: [String]] = [:]
     }
 
     static let attributes = [kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute,
@@ -987,6 +991,7 @@ enum Reader {
         // still finds the rest beside it.
         var whole: [UINode] = []
         var told: [Int] = []
+        var own: [Int: [String]] = [:]
         while let (element, depth, clip, web, parent, sibling) = stack.popLast() {
             if visited >= 5000 || Date() > deadline { reading.timedOut = true; break }
             visited += 1
@@ -1036,6 +1041,8 @@ enum Reader {
             // after an edit is still part of it).
             let filled = Sensitive.isFilled(element, pid: pid)
             whole.append(node)
+            let parts = UIMap.ownSecrets(node, secret: secret, parts: vault.parts)
+            if !parts.isEmpty { own[order] = parts }
             let holds = UIMap.holdsSecret(node, filled: filled, secret: secret)
             node = UIMap.redact(node, filled: filled, secret: secret)
             if holds {
@@ -1073,7 +1080,7 @@ enum Reader {
         }
         // Bounded as the picture's check is; out of time, only a text that holds a secret by itself is hidden.
         let joinBy = Date().addingTimeInterval(0.5)
-        (reading.joined, reading.joinedWhole) = UIMap.joinedHidden(whole, matches: vault.matches, going: { Date() < joinBy })
+        (reading.joined, reading.joinedWhole) = UIMap.joinedHidden(whole, matches: vault.matches, spans: vault.spans, going: { Date() < joinBy })
         if !reading.joined.isEmpty { reading.holdsSecret = true }
         for index in reading.joined.sorted() {
             if let path = UIMap.pieceText(whole[index]) { reading.joinedTexts.append(whole[index][keyPath: path]) }
@@ -1081,14 +1088,15 @@ enum Reader {
             while at >= 0, at < walked.count, reading.aroundJoined.insert(at).inserted { at = walked[at].parent }
         }
         for index in reading.joined { UIMap.hideAll(&walked[index]) }
+        reading.guarded = UIMap.guardedSecrets(whole, own: own)
         reading.nodes = told.map { walked[$0] }
         reading.fingerprint = fingerprint(app: app, window: window, lists: reading.lists)
         return reading
     }
 
     /// One of `controls` (what has the keyboard in window `window` of `pid`) is a piece of a secret its window shows
-    /// only in pieces (`UIMap.focusInJoined`), or the window couldn't be checked: then nothing of it is selected out
-    /// or copied. Reads the whole window (within a second), so never on the main thread.
+    /// only in pieces, or holds one shown whole and what's selected is part of it (`UIMap.focusInJoined`), or the
+    /// window couldn't be checked: then nothing of it is selected out or copied. Reads the whole window (within a second), so never on the main thread.
     static func inJoinedSecret(pid: pid_t, window: UInt32?, controls: [AXUIElement]) -> Bool {
         guard !controls.isEmpty else { return false }
         guard let reading = VaultIndex.settled({ _ in read(pid: pid, window: window, budget: 1.0, focus: controls) }),
@@ -1100,7 +1108,7 @@ enum Reader {
         }
         // The pieces count only when they were checked whole; else what's selected counts by the vault's own rules.
         return UIMap.focusInJoined(focus: reading.focusOrders, hidden: reading.joined, around: reading.aroundJoined,
-                                   pieces: reading.joinedWhole ? reading.joinedTexts : [],
+                                   pieces: reading.joinedWhole ? reading.joinedTexts : [], guarded: reading.guarded,
                                    complete: !reading.timedOut && reading.joinedWhole,
                                    selected: selected, matches: VaultIndex.current().matches)
     }

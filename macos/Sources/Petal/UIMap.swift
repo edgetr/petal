@@ -252,8 +252,8 @@ enum UIMap {
 
         /// The ids of the elements whose pieces show a secret only together (`joinedSecrets`), or nil when they
         /// couldn't be checked whole.
-        func joined(matches: (String) -> Bool, going: () -> Bool = { true }) -> [Int]? {
-            UIMap.joinedSecrets(pieces, matches: matches, going: going).map { $0.sorted().map { pieceAt[$0] } }
+        func joined(matches: (String) -> Bool, spans: ((String) -> [Range<Int>])? = nil, going: () -> Bool = { true }) -> [Int]? {
+            UIMap.joinedSecrets(pieces, matches: matches, spans: spans, going: going).map { $0.sorted().map { pieceAt[$0] } }
         }
     }
 
@@ -491,6 +491,40 @@ enum UIMap {
         static func numberEdge(_ characters: [Character], _ at: Int) -> Bool {
             guard at > 0, at < characters.count else { return true }
             return digit(characters[at - 1]) == nil || digit(characters[at]) == nil
+        }
+
+        /// The parts of `text` that `redacted` would hide, each as it's shown (runs that touch joined, so a card
+        /// number shown whole is one part with its spaces): only the secret, never the words around it. All of
+        /// `text` when it is a secret, is too long to check, or the vault can't be read; none when it holds none.
+        func parts(_ text: String) -> [String] {
+            let characters = Array(text)
+            return spans(text).map { String(characters[$0]) }
+        }
+
+        /// Where `parts` are in `text`, in characters.
+        func spans(_ text: String) -> [Range<Int>] {
+            guard !text.isEmpty else { return [] }
+            let characters = Array(text)
+            if unreadable { return [0..<characters.count] }
+            guard !wholes.isEmpty else { return [] }
+            guard text.utf8.count <= Self.limit else { return [0..<characters.count] }
+            if wholes.contains(text.hashValue) || wholes.contains(text.trimmingCharacters(in: .whitespacesAndNewlines).hashValue) {
+                return [0..<characters.count]
+            }
+            var marked = [Bool](repeating: false, count: characters.count)
+            scan(characters) { start, length in
+                for at in start..<start + length { marked[at] = true }
+                return true
+            }
+            var out: [Range<Int>] = []
+            var at = 0
+            while at < characters.count {
+                guard marked[at] else { at += 1; continue }
+                let start = at
+                while at < characters.count, marked[at] { at += 1 }
+                out.append(start..<at)
+            }
+            return out
         }
 
         /// `text` with every part that `matches` would catch replaced by "(hidden)": a whole secret, every run of
@@ -806,8 +840,12 @@ enum UIMap {
     /// Which pieces show a secret only together (a card number as four "4111"s): runs of up to `joinRun` neighbours,
     /// joined with spaces, that `matches` catches when no shorter run inside them does (a single piece is checked on
     /// its own already). Neighbours are a parent's children in order, and pieces on one line with little room
-    /// between them. nil when there are too many pieces, or `going` says time's up first.
-    static func joinedSecrets(_ pieces: [TextPiece], matches: (String) -> Bool, going: () -> Bool = { true }) -> Set<Int>? {
+    /// between them. nil when there are too many pieces, or `going` says time's up first. `spans` (where the secrets are
+    /// in a text, `SecretIndex.spans`): a piece holding a secret by itself (a card number in one span) takes its
+    /// neighbours along only when a secret runs on into them, so the order number beside it isn't a piece; without
+    /// it, any run starting there does.
+    static func joinedSecrets(_ pieces: [TextPiece], matches: (String) -> Bool, spans: ((String) -> [Range<Int>])? = nil,
+                              going: () -> Bool = { true }) -> Set<Int>? {
         let usable = pieces.indices.filter { !pieces[$0].text.isEmpty && pieces[$0].text.count <= joinLength }
         guard usable.count <= joinPieces else { return nil }
         guard usable.count >= 2 else { return [] }
@@ -852,12 +890,20 @@ enum UIMap {
         for group in groups {
             guard going() else { return nil }
             for start in group.indices {
-                var length = pieces[group[start]].text.count
+                let first = pieces[group[start]].text
+                var length = first.count
+                let alone = spans != nil && matches(first)
                 var end = start + 1
                 while end < group.count, end - start < joinRun {
                     length += 1 + pieces[group[end]].text.count
                     if length > joinLength { break }
-                    if matches(joined(group, start, end)) {
+                    let text = joined(group, start, end)
+                    if matches(text) {
+                        // Caught already by the first piece alone: only a secret reaching past it joins the rest.
+                        if alone, let spans, !spans(text).contains(where: { $0.upperBound > first.count }) {
+                            end += 1
+                            continue
+                        }
                         // Only the shortest run: one starting further in that's caught too (or a piece caught on
                         // its own, already covered) is marked from there.
                         if !matches(joined(group, start + 1, end)) { for at in start...end { found.insert(group[at]) } }
@@ -896,16 +942,16 @@ enum UIMap {
     /// together can't be told apart from ordinary short texts then. A control hidden this way has every
     /// text of its hidden (`hideAll`), not only its piece: the digits may be in its title as well as its value.
     /// A control with a text already hidden still counts by what else it shows. `hid`: something was.
-    static func hideJoined(_ nodes: [UINode], matches: (String) -> Bool,
+    static func hideJoined(_ nodes: [UINode], matches: (String) -> Bool, spans: ((String) -> [Range<Int>])? = nil,
                            going: () -> Bool = { true }) -> (nodes: [UINode], hid: Bool) {
         var out = nodes
-        let which = joinedHidden(nodes, matches: matches, going: going).hidden
+        let which = joinedHidden(nodes, matches: matches, spans: spans, going: going).hidden
         for index in which { hideAll(&out[index]) }
         return (out, !which.isEmpty)
     }
 
     /// Which of `nodes` (by index) `hideJoined` hides, and whether they were checked whole (else the fallback hid them).
-    static func joinedHidden(_ nodes: [UINode], matches: (String) -> Bool,
+    static func joinedHidden(_ nodes: [UINode], matches: (String) -> Bool, spans: ((String) -> [Range<Int>])? = nil,
                              going: () -> Bool = { true }) -> (hidden: Set<Int>, whole: Bool) {
         var pieces: [TextPiece] = []
         var owners: [Int] = []
@@ -915,13 +961,36 @@ enum UIMap {
             owners.append(index)
         }
         let found: Set<Int>
-        let joined = joinedSecrets(pieces, matches: matches, going: going)
+        let joined = joinedSecrets(pieces, matches: matches, spans: spans, going: going)
         if let joined {
             found = joined
         } else {
             found = Set(pieces.indices.filter { matches(pieces[$0].text) })
         }
         return (Set(found.map { owners[$0] }), joined != nil)
+    }
+
+    /// The secrets a control shows whole in its own text (its value, title or description, never a password
+    /// field's), each only the secret's part of the text (`SecretIndex.parts`), not the words around it.
+    static func ownSecrets(_ node: UINode, secret: (String) -> Bool, parts: (String) -> [String]) -> [String] {
+        guard !isSecure(node) else { return [] }
+        return [node.value, node.title, node.label].filter { !$0.isEmpty && $0 != hidden && secret($0) }.flatMap(parts)
+    }
+
+    /// `own` (each control's `ownSecrets`, by order) given to it and to everything that holds it in `nodes` (by
+    /// `parent`): a page's web area has the keyboard while a span of it is selected, so it's checked against the
+    /// secrets it shows.
+    static func guardedSecrets(_ nodes: [UINode], own: [Int: [String]]) -> [Int: [String]] {
+        var out: [Int: [String]] = [:]
+        for (order, parts) in own where !parts.isEmpty {
+            var at = order
+            var seen = Set<Int>()
+            while at >= 0, at < nodes.count, seen.insert(at).inserted {
+                out[at, default: []].append(contentsOf: parts)
+                at = nodes[at].parent
+            }
+        }
+        return out
     }
 
     /// Nothing of what has the keyboard (`focus`, the orders it was found at in its window's read) is told selected
@@ -934,11 +1003,20 @@ enum UIMap {
     /// what's selected is refused only when it holds a secret by itself (`matches`, the redaction's own rules: a
     /// whole secret, a run of one, a code standing alone, a card number across separators): an ordinary word or
     /// digit isn't refused because some secret happens to contain it.
-    static func focusInJoined(focus: Set<Int>, hidden: Set<Int>, around: Set<Int> = [], pieces: [String] = [], complete: Bool,
+    /// `guarded` (from `guardedSecrets`): a control showing a secret whole by itself (a card number in one span of a
+    /// page) and everything holding it, with the secret's parts. The same rule as the pieces: when what has the
+    /// keyboard is one of them, or wasn't found, what's selected in it is refused when it's in a part (selecting a
+    /// card number four digits at a time would show it whole); what isn't in the secret is selected as usual.
+    static func focusInJoined(focus: Set<Int>, hidden: Set<Int>, around: Set<Int> = [], pieces: [String] = [],
+                              guarded: [Int: [String]] = [:], complete: Bool,
                               selected: [String], matches: (String) -> Bool) -> Bool {
         if !focus.isDisjoint(with: hidden) { return true }
         let found = complete && !focus.isEmpty
         if !pieces.isEmpty, !found || !focus.isDisjoint(with: around), selected.contains(where: { inPieces($0, pieces) }) { return true }
+        if !guarded.isEmpty {
+            let parts = found ? Set(focus.flatMap { guarded[$0] ?? [] }) : Set(guarded.values.joined())
+            if selected.contains(where: { text in parts.contains { inPieces(text, [$0]) } }) { return true }
+        }
         if found { return false }
         return selected.contains(where: matches)
     }

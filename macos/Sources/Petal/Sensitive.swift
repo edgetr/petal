@@ -155,7 +155,7 @@ enum Sensitive {
             for (index, child) in children.enumerated().reversed() { stack.append((child, depth + 1, me, index)) }
         }
         // A secret only the pieces show together: every piece of it is covered.
-        guard let joined = parts.joined(matches: vault.matches, going: { Date() < deadline }) else {
+        guard let joined = parts.joined(matches: vault.matches, spans: vault.spans, going: { Date() < deadline }) else {
             scan.complete = false
             return scan
         }
