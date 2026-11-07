@@ -736,9 +736,7 @@ final class ComputerUse {
     private func decide(_ job: Job, _ map: Map, since: Date) {
         let front = NSWorkspace.shared.frontmostApplication?.processIdentifier == map.pid
         Self.actQueue.async {
-            let situation = Background.Situation(note: true, appFront: front, windowFocused: front && Acting.windowInFront(map),
-                                                 idle: Acting.idle())
-            let way = Background.way(situation)
+            let way = Background.way(Acting.situation(map, front: front))
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     if let error = self.stale(job) { job.fail(error); return self.finished() }
@@ -753,7 +751,7 @@ final class ComputerUse {
                         self.quietly(job, map)
                     case .wait:
                         guard Date().timeIntervalSince(since) < Background.patience else {
-                            job.fail("The person is typing in \(map.appName)'s window right now, so nothing was done there. Wait a little, then petal_ui and try again.")
+                            job.fail(Self.typingThere(map.appName))
                             return self.finished()
                         }
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.decide(job, map, since: since) }
@@ -761,6 +759,10 @@ final class ComputerUse {
                 }
             }
         }
+    }
+
+    nonisolated static func typingThere(_ app: String) -> String {
+        "The person is typing in \(app)'s window right now, so nothing was done there. Wait a little, then petal_ui and try again."
     }
 
     /// In the background: no pointer, nothing brought forward. The window, what's selected in it, what has its
@@ -773,8 +775,10 @@ final class ComputerUse {
         standGuard()
         agent(job.caller)?.quietly = true
         let cancel = job.cancel
-        // The app the person is using, to give back should the note's app jump forward by itself.
-        let person = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        // The app the person is using and the time, together, before anything is prepared: given back should the
+        // note's app jump forward by itself, unless the person does something from here on.
+        let baseline = Background.Baseline(front: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                                           at: ProcessInfo.processInfo.systemUptime)
         Self.actQueue.async {
             var outcome = Acting.Outcome()
             if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
@@ -785,7 +789,7 @@ final class ComputerUse {
                     outcome.error = error
                 } else if !cancel.stopped {
                     outcome = Acting.quietly(job.action, entry: job.entry, map: map, prepared: checked, options: job.options,
-                                             cancel: cancel, person: person)
+                                             cancel: cancel, baseline: baseline)
                 }
             }
             DispatchQueue.main.async {
@@ -825,14 +829,28 @@ final class ComputerUse {
                                     outcome.error = ClaudePanel.tabNotShowing
                                 } else {
                                     let checked = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options, known: prepared)
+                                    // A note's act, decided while its window was in front: still so, and the person
+                                    // still not typing there? Gone elsewhere meanwhile, it goes the background way
+                                    // instead, which never brings anything forward.
+                                    let again = map.ownPlace ? Background.recheck(Acting.situation(map)) : .go
                                     if let error = checked.error {
                                         outcome.error = error
+                                    } else if again == .background {
+                                        return DispatchQueue.main.async {
+                                            MainActor.assumeIsolated {
+                                                self.cursor.rest()
+                                                if let error = self.stale(job) { job.fail(error); return self.finished() }
+                                                self.quietly(job, map)
+                                            }
+                                        }
+                                    } else if again == .refuse {
+                                        outcome.error = Self.typingThere(map.appName)
                                     } else if !cancel.stopped {
                                         if ["press", "menu"].contains(job.action) || (job.action == "key" && checked.menuItem != nil) {
                                             DispatchQueue.main.async { MainActor.assumeIsolated { self.cursor.press() } }
                                         }
                                         outcome = Acting.perform(job.action, entry: job.entry, map: map, prepared: checked,
-                                                                 options: job.options, cancel: cancel)
+                                                                 options: job.options, cancel: cancel, stayBehind: map.ownPlace)
                                     }
                                 }
                             }
@@ -1775,13 +1793,16 @@ enum Acting {
     }
 
     static func perform(_ action: String, entry: ComputerUse.Entry?, map: ComputerUse.Map, prepared: Prepared, options: Options,
-                        cancel: Cancel) -> Outcome {
+                        cancel: Cancel, stayBehind: Bool = false) -> Outcome {
         var outcome = Outcome()
         let pid = map.pid
         let element = entry?.element
         let name = entry.map { UIMap.name($0.node) }.flatMap { $0.isEmpty ? nil : "“\($0)”" } ?? "That control"
         let cameForward = "\(map.appName) came to the front to take the keys."
         func say(_ note: String) { outcome.note = outcome.note.map { $0 + " " + note } ?? note }
+        // `stayBehind`: a sticky note's act, decided while its window was in front. Should the person leave it while
+        // this runs, nothing is brought forward for the note: it stops there and says the window must be in front.
+        func behind() -> Bool { stayBehind && !(isFront(pid) && windowInFront(map)) }
         // On a Stop the outcome goes back as it is: ComputerUse.done tells the chat it was stopped.
         switch action {
         case "press":
@@ -1790,6 +1811,7 @@ enum Acting {
             let fresh = Reader.node(element)
             let clip = UIMap.clip(control: fresh) ?? entry.flatMap({ UIMap.clip(control: $0.node) })
             if let clip {
+                if behind() { outcome.needs = .clipboard; return outcome }
                 if let error = bringWindow(map, cancel: cancel) {
                     if cancel.stopped { return outcome }
                     outcome.error = error
@@ -1865,11 +1887,18 @@ enum Acting {
                 }
             }
             // Keys (the text, or Return) go wherever the keyboard is: only once it's this field, never a password field.
-            if !typed || options.submit {
-                if !isFront(pid) {
+            var submit = options.submit
+            if !typed || submit {
+                if behind() {
+                    guard typed else { outcome.needs = .keys; return outcome }
+                    say("It was typed, not sent: \(map.appName)'s window went behind before Return, and Petal doesn't bring it forward for a note. Press its send button with petal_act instead.")
+                    submit = false
+                } else if !isFront(pid) {
                     guard bringForward(pid, cancel: cancel) else { return outcome }
                     say(cameForward)
                 }
+            }
+            if !typed || submit {
                 guard !cancel.stopped else { return outcome }
                 if let error = focus(element, pid: pid, name: name, cancel: cancel) {
                     if cancel.stopped { return outcome }
@@ -1889,18 +1918,19 @@ enum Acting {
                     break
                 }
             }
-            if options.submit, let enter = UIMap.parseKey("return") {
+            if submit, let enter = UIMap.parseKey("return") {
                 guard keysGoTo(element, pid: pid) else { outcome.error = "The cursor left \(name) before Return: it was typed, not sent."; break }
                 guard post(enter, to: pid, cancel: cancel) else { return outcome }
             }
             usleep(120_000)
             let now = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
-            if !now.isEmpty, !options.submit {
+            if !now.isEmpty, !submit {
                 outcome.value = UIMap.typedValue(now, node: node, filled: Sensitive.isFilled(element, pid: pid), secret: Assist.isVaultSecret)
             }
         case "fill":
             guard let element, let plan = options.fill else { break }
-            if let error = VaultFiller.fill(plan, into: element, map: map, cancel: cancel) {
+            if behind() { outcome.needs = .vault; return outcome }
+            if let error = VaultFiller.fill(plan, into: element, map: map, cancel: cancel, stayBehind: stayBehind) {
                 if cancel.stopped { return outcome }
                 outcome.error = error
             }
@@ -1917,6 +1947,7 @@ enum Acting {
         case "menu":
             guard let item = prepared.menuItem else { break }
             // A menu command acts on its app's front window: that must be the one petal_ui looked at.
+            if behind() { outcome.needs = .menu; return outcome }
             if let error = bringWindow(map, cancel: cancel) {
                 if cancel.stopped { return outcome }
                 outcome.error = error
@@ -1935,6 +1966,7 @@ enum Acting {
             outcome.chose = prepared.menuTitle
         case "key":
             guard let key = options.key else { break }
+            if behind() { outcome.needs = .keys; return outcome }
             if let error = bringWindow(map, cancel: cancel) {
                 if cancel.stopped { return outcome }
                 outcome.error = error
@@ -1962,6 +1994,7 @@ enum Acting {
                     break
                 }
             }
+            if behind() { outcome.needs = .keys; return outcome }
             if !isFront(pid) {
                 guard bringForward(pid, cancel: cancel) else { return outcome }
                 say(cameForward)

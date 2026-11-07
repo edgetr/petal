@@ -141,6 +141,19 @@ final class Agent {
         run(prompt)
     }
 
+    /// Stop on a note still waiting for room (not steering, which only happens while it runs): it never starts.
+    /// Its waiting messages come out of the chat and back as text for the note's draft; nil when nothing waited.
+    func withdrawWaiting() -> String? {
+        guard !running, !waiting.isEmpty else { return nil }
+        let unsent = waiting.filter { $0 != Self.approved }.joined(separator: "\n\n")
+        if let from = waitingFrom, from < messages.count { messages.removeSubrange(from...) }
+        waiting = []
+        waitingFrom = nil
+        messages.append(Message(kind: .step, text: "Stopped before it started"))
+        keep()
+        return unsent
+    }
+
     /// The chat's first words, as the chats list shows it.
     var title: String {
         guard let first = messages.first(where: { $0.kind == .user }) else { return "" }

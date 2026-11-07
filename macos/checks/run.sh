@@ -16,7 +16,7 @@ swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIM
 "$out/uimap"
 swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift checks/NoteLayoutCheck.swift
 "$out/notes"
-swiftc -parse-as-library -O -o "$out/background" Sources/Petal/Background.swift checks/BackgroundCheck.swift
+swiftc -parse-as-library -O -o "$out/background" Sources/Petal/Background.swift Sources/Petal/UIMap.swift checks/BackgroundCheck.swift
 "$out/background"
 swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Petal/UIMap.swift checks/VaultCheck.swift
 "$out/vault"

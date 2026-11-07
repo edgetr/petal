@@ -587,6 +587,9 @@ final class Previews {
                 noteCount = items.count
                 PetalApp.shared.popups.refit()
             }
+            // No picture kept of a window that's gone, or of an app now kept private.
+            let pictured = Set(items.filter(\.pictured).map(\.id))
+            noteThumbs = noteThumbs.filter { pictured.contains($0.key) }
             return captureNotes()
         }
         if id == Self.media {
@@ -655,15 +658,20 @@ final class Previews {
     /// private app's.
     private func captureNotes() {
         guard sampleNotes == nil, Capture.allowed, !capturingNotes else { return }
-        let targets = noteItems.prefix(4).filter { $0.attached && !$0.hidden }.map { (id: $0.id, pid: $0.pid, window: $0.window) }
-        guard !targets.isEmpty else { return }
+        let items = noteItems.prefix(4).filter(\.pictured)
+        guard !items.isEmpty else { return }
+        let taken = Dictionary(items.map { ($0.id, $0.seen) }, uniquingKeysWith: { first, _ in first })
         capturingNotes = true
         Task {
-            let pictures = await Capture.notes(targets)
+            let pictures = await Capture.notes(items.map { (id: $0.id, pid: $0.pid, window: $0.window) })
             capturingNotes = false
-            // A note's app made private while it was taken: its picture isn't kept.
-            let hidden = Set(noteItems.filter(\.hidden).map(\.id))
-            for (id, image) in pictures where !hidden.contains(id) && showing == Self.notes { noteThumbs[id] = image }
+            guard showing == Self.notes else { return }
+            // Kept only if its note still has that very window, and its app wasn't made private meanwhile.
+            let now = Dictionary(noteItems.map { ($0.id, $0.seen) }, uniquingKeysWith: { first, _ in first })
+            for (id, image) in pictures {
+                if let seen = taken[id], NotePicture.keeps(taken: seen, now: now[id]) { noteThumbs[id] = image }
+                else { noteThumbs[id] = nil }
+            }
         }
     }
 

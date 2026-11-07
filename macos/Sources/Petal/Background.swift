@@ -40,6 +40,20 @@ enum Background {
         return .background
     }
 
+    /// Right before a change it was going to make with the pointer (the note's window was in front when it
+    /// decided), read again: the window still in front and the person idle goes ahead; the person gone elsewhere
+    /// meanwhile sends it the background way (which never brings anything forward, and says what needs the window);
+    /// the person now typing there refuses it.
+    enum Recheck: Equatable { case go, background, refuse }
+
+    static func recheck(_ situation: Situation) -> Recheck {
+        switch way(situation) {
+        case .foreground: .go
+        case .background: .background
+        case .wait: .refuse
+        }
+    }
+
     /// The person is working in the note's window right now: it's in front and they pressed a key, clicked or
     /// scrolled within the last two seconds.
     static func typingThere(_ situation: Situation) -> Bool {
@@ -137,6 +151,12 @@ enum Background {
         case needs(Reason)
     }
 
+    /// A button that copies or pastes (by its app's own name for it, or any copy or paste word in its names:
+    /// "Quick paste", "Click to copy API key") uses the person's clipboard: in the background it needs the window.
+    static func pressUsesClipboard(_ nodes: [UINode]) -> Bool {
+        nodes.contains { UIMap.clip(control: $0) != nil || UIMap.mightCopy($0) || UIMap.mightPaste($0) }
+    }
+
     /// What a note does in the background for each action. Keys and focus only while its app isn't the one in front:
     /// keys go to an app's focused window, and focus moves its cursor, so in the app the person is using they'd
     /// reach the person's window. A web page's field hears keys (its page reacts to them), a native one takes its
@@ -168,9 +188,63 @@ enum Background {
     /// Return after typing goes only where keys may.
     static func returnGoes(appFront: Bool) -> Bool { !appFront }
 
-    /// After an act in the background, the note's app came to the front by itself: the app the person was using goes
-    /// back in front, unless they did something meanwhile (then it's theirs to decide).
-    static func giveBack(cameForward: Bool, personActed: Bool) -> Bool { cameForward && !personActed }
+    /// The app in front and the time, taken together before a background act is prepared: what's given back after
+    /// it, and since when the person's own keys and clicks count.
+    struct Baseline: Equatable {
+        /// The app in front (its process).
+        var front: pid_t?
+        /// The system's uptime then.
+        var at: TimeInterval
+    }
+
+    enum Restore: Equatable {
+        /// Leave it: nothing jumped forward, or the person did something since (then it's theirs to decide).
+        case none
+        /// The note's app jumped to the front by itself: the person's app (this process) goes back in front.
+        case app(pid_t)
+        /// The person was using the note's app: their own window goes back over the note's, if the act raised it.
+        case window
+    }
+
+    /// After a background act, read right before anything is put back: the note's app (`note`) in front now, and
+    /// when the person last pressed a key, clicked or scrolled (uptime). Only an app that jumped forward with no
+    /// input from the person since the baseline is undone, and only back to what was in front then.
+    static func restore(_ baseline: Baseline, note: pid_t, noteFrontNow: Bool, lastInput: TimeInterval) -> Restore {
+        guard noteFrontNow, lastInput < baseline.at, let before = baseline.front else { return .none }
+        return before == note ? .window : .app(before)
+    }
+}
+
+/// The AI button's preview of a note's window: never a private app's (whether or not its window is still there),
+/// and never a stale one.
+enum NotePicture {
+    /// A note as the preview sees it.
+    struct Seen: Equatable {
+        /// Its app's bundle id ("" for none).
+        var app: String
+        /// Stuck to a window that's still there.
+        var attached: Bool
+        var pid: pid_t
+        var window: UInt32?
+        /// Its app is kept private.
+        var hidden: Bool
+    }
+
+    /// Kept private by its app, even once its window closed or its app quit: the app it was stuck to decides.
+    static func hidden(app: String?, private isPrivate: (String) -> Bool) -> Bool {
+        guard let app, !app.isEmpty else { return false }
+        return isPrivate(app)
+    }
+
+    /// A picture shows (and is kept) only for a note stuck to a window still there, of an app not kept private.
+    static func shows(_ seen: Seen) -> Bool { seen.attached && !seen.hidden }
+
+    /// A picture taken of `taken` is kept only if the note, read again once it's done, still shows one, of the
+    /// very same window of the same app.
+    static func keeps(taken: Seen, now: Seen?) -> Bool {
+        guard let now, shows(now), shows(taken) else { return false }
+        return now.app == taken.app && now.pid == taken.pid && now.window == taken.window
+    }
 }
 
 /// Each note's line in the AI button's preview and on the note: what it's doing, done, or waiting for the person.

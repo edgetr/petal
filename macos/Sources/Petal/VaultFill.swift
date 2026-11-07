@@ -9,7 +9,10 @@ import Security
 /// a few at a time (UIMap.batches), or an item picked from a pop-up menu; never the clipboard. A password field's
 /// value is never read back.
 enum VaultFiller {
-    static func fill(_ plan: VaultFillPlan, into element: AXUIElement, map: ComputerUse.Map, cancel: Acting.Cancel) -> String? {
+    static func fill(_ plan: VaultFillPlan, into element: AXUIElement, map: ComputerUse.Map, cancel: Acting.Cancel,
+                     stayBehind: Bool = false) -> String? {
+        // A sticky note's fill (`stayBehind`): its window must still be in front; nothing comes forward for a note.
+        let behind = { stayBehind && !(Acting.isFront(map.pid) && Acting.windowInFront(map)) ? Background.Reason.vault.words(map.appName) : nil }
         let pid = map.pid
         // The same page or app as when Petal decided: a page that moved on meanwhile never gets it.
         // Payment info also stays on the very page Buy was said on.
@@ -48,6 +51,7 @@ enum VaultFiller {
             VaultIndex.remember(Vault.secrets(plan.field, text))
             Sensitive.filled(element, pid: pid)
         }
+        if let why = behind() { return why }
         if let error = Acting.bringWindow(map, cancel: cancel) { return error }
         if plan.target.popup {
             let year = plan.field == .year ? saved.map { $0[.expiry] } : nil
@@ -63,6 +67,7 @@ enum VaultFiller {
                 return year.flatMap { Vault.pickYear($0, from: titles) } ?? Vault.pick(text, from: titles)
             })
         }
+        if let why = behind() { return why }
         if !Acting.isFront(pid) {
             guard Acting.bringForward(pid, cancel: cancel) else { return ComputerUse.stoppedText }
         }

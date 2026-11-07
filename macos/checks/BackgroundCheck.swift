@@ -1,7 +1,7 @@
 import Foundation
 
 // Checks Background.swift: when a sticky note acts in the background, what it does there for each action, what needs
-// its window in front, and each note's line in the AI button's preview. Run with macos/checks/run.sh.
+// its window in front, what it puts back after, its preview's pictures, and each note's line in the AI button's preview. Run with macos/checks/run.sh.
 @main
 struct BackgroundCheck {
     nonisolated(unsafe) static var failures = 0
@@ -78,9 +78,59 @@ struct BackgroundCheck {
         expect(plan("swipe") == .needs(.keys), "an unknown action never goes quietly")
         expect(Background.returnGoes(appFront: false), "Return goes to a background app")
         expect(!Background.returnGoes(appFront: true), "but never to the app the person uses")
-        expect(Background.giveBack(cameForward: true, personActed: false), "an app that jumped forward gives the person's back")
-        expect(!Background.giveBack(cameForward: true, personActed: true), "not once the person did something")
-        expect(!Background.giveBack(cameForward: false, personActed: false), "nothing to give back")
+        expect(Background.pressUsesClipboard([UINode(role: "AXButton", title: "Quick paste")]),
+               "a paste word in a button's name, with no clipboard identifier, uses the clipboard")
+        expect(Background.pressUsesClipboard([UINode(role: "AXButton", label: "Click to copy API key")]), "so does a copy word")
+        expect(Background.pressUsesClipboard([UINode(role: "AXButton", identifier: "paste:")]), "and the app's own name for Paste")
+        expect(!Background.pressUsesClipboard([UINode(role: "AXButton", title: "Send")]), "an ordinary button doesn't")
+        expect(plan("press", clipboard: Background.pressUsesClipboard([UINode(role: "AXButton", title: "Quick paste")])) == .needs(.clipboard),
+               "so “Quick paste” needs the window in front")
+
+        // MARK: Read again right before the pointer's change
+
+        expect(Background.recheck(situation(front: true, focused: true, idle: 30)) == .go, "still in front, the person idle: it goes")
+        expect(Background.recheck(situation(front: false, focused: false, idle: 0.2)) == .background,
+               "the person switched apps during the glide: the background way, never brought forward")
+        expect(Background.recheck(situation(front: true, focused: false, idle: 0.2)) == .background,
+               "another window of its app came forward: the background way")
+        expect(Background.recheck(situation(front: true, focused: true, idle: 0.3)) == .refuse, "the person typing there now: refused")
+
+        // MARK: Putting back what jumped forward
+
+        let base = Background.Baseline(front: 100, at: 50)
+        expect(Background.restore(base, note: 200, noteFrontNow: true, lastInput: 40) == .app(100),
+               "the note's app jumped forward with no input since: the person's app goes back")
+        expect(Background.restore(base, note: 200, noteFrontNow: true, lastInput: 55) == .none,
+               "the person pressed a key or clicked after the baseline: theirs to decide")
+        expect(Background.restore(base, note: 200, noteFrontNow: true, lastInput: 50) == .none, "input at the baseline itself counts")
+        expect(Background.restore(base, note: 200, noteFrontNow: false, lastInput: 40) == .none, "nothing jumped forward")
+        expect(Background.restore(Background.Baseline(front: 200, at: 50), note: 200, noteFrontNow: true, lastInput: 40) == .window,
+               "the person was using the note's app: only their window goes back")
+        expect(Background.restore(Background.Baseline(front: nil, at: 50), note: 200, noteFrontNow: true, lastInput: 40) == .none,
+               "no app known in front then: nothing to put back")
+
+        // MARK: The preview's pictures
+
+        let isPrivate = { (app: String) in app == "com.secret.app" }
+        expect(NotePicture.hidden(app: "com.secret.app", private: isPrivate), "a private app's note")
+        expect(!NotePicture.hidden(app: "com.apple.Safari", private: isPrivate), "an ordinary app's")
+        expect(!NotePicture.hidden(app: nil, private: isPrivate) && !NotePicture.hidden(app: "", private: isPrivate), "a chat stuck to nothing")
+        let shown = NotePicture.Seen(app: "com.apple.Safari", attached: true, pid: 7, window: 42, hidden: false)
+        var closed = shown; closed.attached = false
+        var secret = NotePicture.Seen(app: "com.secret.app", attached: false, pid: 0, window: nil,
+                                      hidden: NotePicture.hidden(app: "com.secret.app", private: isPrivate))
+        expect(secret.hidden, "a private app's note stays private after its window closed")
+        expect(!NotePicture.shows(secret), "and has no picture")
+        secret.attached = true
+        expect(!NotePicture.shows(secret), "nor while attached")
+        expect(NotePicture.shows(shown) && !NotePicture.shows(closed), "a picture only while its window is there")
+        expect(NotePicture.keeps(taken: shown, now: shown), "a capture of the same window is kept")
+        var moved = shown; moved.window = 43
+        expect(!NotePicture.keeps(taken: shown, now: moved), "not once the note has another window")
+        expect(!NotePicture.keeps(taken: shown, now: closed), "nor once its window closed")
+        var madePrivate = shown; madePrivate.hidden = true
+        expect(!NotePicture.keeps(taken: shown, now: madePrivate), "nor once its app was made private")
+        expect(!NotePicture.keeps(taken: shown, now: nil), "nor once the note is gone")
 
         // MARK: What's said
 

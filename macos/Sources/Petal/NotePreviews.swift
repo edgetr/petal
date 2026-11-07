@@ -23,6 +23,10 @@ struct NotePreviewItem: Identifiable, Equatable {
     let window: CGWindowID?
     /// Stuck to a window that's still there: it has a picture, and clicking it brings that window forward.
     let attached: Bool
+
+    var seen: NotePicture.Seen { NotePicture.Seen(app: app, attached: attached, pid: pid, window: window, hidden: hidden) }
+    /// Its picture may show: stuck to a window still there, of an app not kept private.
+    var pictured: Bool { NotePicture.shows(seen) }
 }
 
 extension ClaudePanel {
@@ -43,10 +47,11 @@ extension ClaudePanel {
             let (note, facts) = all[index]
             let place = note.attached ? note.place : nil
             let window = place.flatMap { $0.kind == .app ? assist.computer.maps[note.id.uuidString]?.windowID : $0.window }
+            // Private by the app it was stuck to, even once that window is gone (or the chat kept it from before).
+            let hidden = NotePicture.hidden(app: note.place?.app ?? note.agent.keptPlace?.app, private: assist.neverLook)
             return NotePreviewItem(id: note.id, app: place?.app ?? "", appName: place?.appName ?? "", title: note.agent.title,
                                    line: NoteStatus.line(facts), working: facts.running, needsYou: NoteStatus.needsYou(facts),
-                                   hidden: place.map { assist.neverLook($0.app) } ?? false, pid: place?.pid ?? 0,
-                                   window: window, attached: place != nil)
+                                   hidden: hidden, pid: place?.pid ?? 0, window: window, attached: place != nil)
         }
     }
 
@@ -63,9 +68,15 @@ extension ClaudePanel {
         if notesOn, note.attached, let place = note.place { go(to: note, place: place) } else { present(note) }
     }
 
-    /// Stop on a note in the preview: its reply ends where it is, and what it was doing in the app with it.
+    /// Stop on a note in the preview: its reply ends where it is, and what it was doing in the app with it. One
+    /// still waiting for room never starts: what it was to send goes back into the note, unsent.
     func stopFromPreview(_ id: UUID) {
-        notes.first { $0.id == id }?.agent.stop()
+        guard let note = notes.first(where: { $0.id == id }) else { return }
+        if let unsent = note.agent.withdrawWaiting() {
+            note.draft = [unsent, note.draft].filter { !$0.isEmpty }.joined(separator: "\n\n")
+            return
+        }
+        note.agent.stop()
     }
 }
 
@@ -121,7 +132,7 @@ struct NoteTile: View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.25))
-                if let image, !item.hidden {
+                if let image, item.pictured {
                     Image(nsImage: image).resizable().scaledToFit().padding(3)
                 } else if item.attached {
                     VStack(spacing: 6) {
