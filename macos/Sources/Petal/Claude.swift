@@ -229,7 +229,7 @@ final class Agent {
         chatProvider = provider
         let title = first.components(separatedBy: "\n").first { !$0.hasPrefix(">") && !$0.hasPrefix("From ") && !$0.isEmpty } ?? first
         return SavedChat(id: chatID, title: String(title.prefix(80)), provider: provider?.rawValue ?? "", session: sessionID,
-                         updated: Date(), lines: lines, place: place ?? keptPlace, pending: pending.isEmpty ? nil : pending)
+                         updated: Date(), lines: lines, place: (place ?? keptPlace)?.sanitized, pending: pending.isEmpty ? nil : pending)
     }
 
     private static func name(_ kind: Kind) -> String {
@@ -244,7 +244,7 @@ final class Agent {
         endRun()
         app.assist.computer.end(noteID.uuidString, forget: true)
         askedWith = nil
-        keptPlace = chat.place
+        keptPlace = chat.place?.sanitized
         onDisk = true
         pendingAsk = []
         allowed = []

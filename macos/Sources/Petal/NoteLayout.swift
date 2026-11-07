@@ -107,6 +107,16 @@ struct NotePlace: Codable, Equatable, Sendable {
     func matches(pid other: pid_t, window number: CGWindowID?) -> Bool {
         pid == other && (window == nil || number == nil || window == number)
     }
+
+    /// Without anything a private app's window or tab said: its title, and its tab's address and title (the tab's
+    /// place stays, so the note still knows its tab while the browser runs).
+    var scrubbed: NotePlace {
+        var place = self
+        place.title = ""
+        place.tab?.url = ""
+        place.tab?.title = ""
+        return place
+    }
 }
 
 /// What's in front, as notes see it: the app, its focused window, and the browser's active tab (nil when it isn't
@@ -184,6 +194,53 @@ enum NoteRules {
             guard let now = front.tab, place.app == front.app else { return false }
             return sameTab(tab, pid: place.pid, window: place.window, now, pid: front.pid, window: front.window, previous: previous)
         }
+    }
+
+    /// Of the notes stuck to `places`, the ones that belong on what's in front (their indices in `places`). Tab notes
+    /// that fit only by the address (one tab with it closed or went elsewhere, and the one left has it alone, or a
+    /// restarted browser restored it in several windows) can't be told apart: when more than one does, only the one
+    /// still in its place among as many tabs counts, and if that isn't exactly one, none; and none when a note has
+    /// the tab by its own id. A note is never moved onto another note's tab by a guess.
+    static func fitting(_ places: [NotePlace], _ front: FrontPlace, previous: NoteTab? = nil) -> [Int] {
+        let fit = places.indices.filter { fits(places[$0], front, previous: previous) }
+        // A Chromium tab's own id, in the same run of the browser, is certain.
+        let tabs = fit.filter { places[$0].kind == .tab && places[$0].tab != nil }
+        let sure = tabs.filter { places[$0].pid == front.pid && places[$0].tab?.id != nil && places[$0].tab?.id == front.tab?.id }
+        let weak = tabs.filter { !sure.contains($0) }
+        if !sure.isEmpty { return fit.filter { !weak.contains($0) } }
+        guard weak.count > 1 else { return fit }
+        let inPlace = weak.filter { i in
+            guard let tab = places[i].tab, let now = front.tab, let index = tab.index else { return false }
+            return index == now.index && tab.count != nil && tab.count == now.count
+        }
+        let kept = inPlace.count == 1 ? inPlace : []
+        return fit.filter { !weak.contains($0) || kept.contains($0) }
+    }
+
+    /// Which of a window's tabs (`urls`, in order) to show for a note's tab, when the browser knows tabs only by
+    /// place and address (Safari): the one tab with its address; of several, the one in its place; with none, its
+    /// place only when the window still has as many tabs. `missing`: no tab there could be it.
+    enum TabChoice: Equatable { case at(Int), missing, unsure }
+
+    static func choose(_ tab: NoteTab, urls: [String]) -> TabChoice {
+        guard !urls.isEmpty else { return .unsure }
+        let same = urls.indices.filter { sameURL(urls[$0], tab.url) }.map { $0 + 1 }
+        if same.count == 1 { return .at(same[0]) }
+        if same.count > 1 {
+            guard let index = tab.index, same.contains(index) else { return .unsure }
+            return .at(index)
+        }
+        if let index = tab.index, let count = tab.count, count == urls.count, urls.indices.contains(index - 1) {
+            // Gone to another address in its place (nothing opened or closed around it): it's the tab there.
+            return .at(index)
+        }
+        // No address kept (a private app's): nothing to say it's gone.
+        return tab.url.isEmpty ? .unsure : .missing
+    }
+
+    /// Two frames the same, give or take the 2 points browsers and Accessibility round differently.
+    static func sameFrame(_ a: CGRect, _ b: CGRect) -> Bool {
+        abs(a.minX - b.minX) <= 2 && abs(a.minY - b.minY) <= 2 && abs(a.width - b.width) <= 2 && abs(a.height - b.height) <= 2
     }
 
     /// Whether `place`'s window (or, for an app's note, any of its windows) is the one in front, whichever tab shows:

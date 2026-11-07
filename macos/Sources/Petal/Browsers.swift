@@ -255,17 +255,20 @@ final class Browsers {
         return Array(parts.prefix(count - 1)) + [parts.dropFirst(count - 1).joined(separator: "\t")]
     }
 
-    /// Shows a note's tab in its window (bringing the note back from its app's icon): a Chromium browser's by its id,
-    /// Safari's by its address, else its place. Firefox and Zen can't be asked. Off the main thread. `still`: asked
-    /// right before the browser is told, so a bringing cancelled meanwhile switches no tab.
-    nonisolated static func select(_ tab: NoteTab, bundleID: String, window: CGWindowID?, still: () -> Bool) {
-        func quoted(_ text: String) -> String {
-            "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
-        }
+    /// What came of showing a note's tab: shown, not there (its tab closed while its window stayed open), or unsure
+    /// (no answer, not allowed, cancelled, a browser that can't be asked, or tabs too alike to pick one).
+    enum TabShown: Sendable { case shown, missing, unsure }
+
+    /// Shows a note's tab in its window (bringing the note back from its app's icon): a Chromium browser's by its id
+    /// (in whichever window it is now; with no window known, that window comes to the browser's front), Safari's by
+    /// its address and place (NoteRules.choose), checked again right before it's switched to. Firefox and Zen can't
+    /// be asked. Off the main thread. `still`: asked right before the browser is told, so a bringing cancelled
+    /// meanwhile switches no tab.
+    nonisolated static func select(_ tab: NoteTab, bundleID: String, window: CGWindowID?, still: () -> Bool) -> TabShown {
         switch kind(bundleID) {
         case .chromium?:
-            guard let id = tab.id, access(bundleID) == .allowed, still() else { return }
-            _ = run("""
+            guard let id = tab.id, access(bundleID) == .allowed, still() else { return .unsure }
+            let answer = run("""
                 tell application id "\(bundleID)"
                 repeat with w in windows
                 set i to 0
@@ -273,34 +276,93 @@ final class Browsers {
                 set i to i + 1
                 if ((id of t) as text) is \(quoted(id)) then
                 set active tab index of w to i
+                \(window == nil ? "set index of w to 1" : "")
                 return "ok"
                 end if
                 end repeat
                 end repeat
                 end tell
-                return ""
+                return "none"
                 """)
+            return answer == "ok" ? .shown : answer == "none" ? .missing : .unsure
         case .safari?:
-            guard let window, access(bundleID) == .allowed, still() else { return }
-            let byPlace = tab.index.map { "if (count of tabs of w) ≥ \($0) then set current tab of w to tab \($0) of w" } ?? ""
-            _ = run("""
+            guard let window, access(bundleID) == .allowed else { return .unsure }
+            // Every tab's address, in order (a line each; "tabs" first, so a window with none still answers).
+            guard let listing = run("""
+                set out to "tabs" & linefeed
                 tell application id "\(bundleID)"
                 set w to (first window whose id is \(window))
                 repeat with t in tabs of w
+                set u to ""
                 try
-                if URL of t is \(quoted(tab.url)) then
+                set u to URL of t
+                end try
+                if u is missing value then set u to ""
+                set out to out & u & linefeed
+                end repeat
+                end tell
+                return out
+                """) else { return .unsure }
+            var urls = listing.components(separatedBy: "\n")
+            guard urls.first == "tabs" else { return .unsure }
+            urls.removeFirst()
+            if urls.last == "" { urls.removeLast() }
+            let choice = NoteRules.choose(tab, urls: urls)
+            guard case .at(let index) = choice else { return choice == .missing ? .missing : .unsure }
+            guard still() else { return .unsure }
+            // Only if the window still has as many tabs and that tab still has the address it had a moment ago.
+            let answer = run("""
+                tell application id "\(bundleID)"
+                set w to (first window whose id is \(window))
+                if (count of tabs of w) is \(urls.count) then
+                set t to tab \(index) of w
+                set u to ""
+                try
+                set u to URL of t
+                end try
+                if u is missing value then set u to ""
+                if u is \(quoted(urls[index - 1])) then
                 set current tab of w to t
                 return "ok"
                 end if
-                end try
-                end repeat
-                \(byPlace)
+                end if
                 end tell
-                return ""
+                return "changed"
                 """)
+            return answer == "ok" ? .shown : .unsure
         default:
-            return
+            return .unsure
         }
+    }
+
+    /// Where a Chromium browser's tab is, by its id: its window's bounds (top-left origin, as Accessibility's), or
+    /// `nil` bounds when no tab has that id. nil: no answer (not allowed, or the browser didn't say). Off the main thread.
+    nonisolated static func tabWindow(id: String, bundleID: String) -> (found: Bool, bounds: CGRect?)? {
+        guard kind(bundleID) == .chromium, access(bundleID) == .allowed else { return nil }
+        guard let answer = run("""
+            set sep to tab
+            tell application id "\(bundleID)"
+            repeat with w in windows
+            repeat with t in tabs of w
+            if ((id of t) as text) is \(quoted(id)) then
+            set b to bounds of w
+            return "found" & sep & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b)
+            end if
+            end repeat
+            end repeat
+            end tell
+            return "none"
+            """) else { return nil }
+        if answer == "none" { return (false, nil) }
+        let parts = answer.components(separatedBy: "\t")
+        guard parts.first == "found" else { return nil }
+        let b = (parts.count > 1 ? parts[1] : "").split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        return (true, b.count == 4 ? CGRect(x: b[0], y: b[1], width: b[2] - b[0], height: b[3] - b[1]) : nil)
+    }
+
+    /// Text as an AppleScript string.
+    nonisolated private static func quoted(_ text: String) -> String {
+        "\"" + text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
     }
 
     /// Firefox's and Zen's front window: the selected tab in its tab strip (its place, how many, its title) and the
