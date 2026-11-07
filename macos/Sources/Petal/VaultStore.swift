@@ -100,6 +100,30 @@ enum VaultStore {
 
     static func item(_ id: String) throws -> VaultItem? { try items().first { $0.id == id } }
 
+    /// What became of an editor's save.
+    enum SaveOutcome {
+        case saved
+        /// The Keychain refused it, or couldn't be read to check it.
+        case failed
+        /// The item changed since the editor opened (`Vault.editConflict`): nothing was saved; the item as it is now
+        /// (nil: deleted).
+        case changed(VaultItem?)
+    }
+
+    /// Saves `item` only while the vault still has the version its editor opened on (`revision`, from
+    /// `Vault.openedRevision`; nil for a new item), checked and saved in one go on `queue`, so nothing saved in between
+    /// (an import) is written over with the editor's older copy.
+    static func save(_ item: VaultItem, ifStill revision: Int?) -> SaveOutcome {
+        serially {
+            if revision != nil {
+                let stored: VaultItem?
+                do { stored = try self.item(item.id) } catch { return .failed }
+                if Vault.editConflict(opened: revision, stored: stored) { return .changed(stored) }
+            }
+            return save([item]) ? .saved : .failed
+        }
+    }
+
     /// The items (or why they couldn't be read), read on `queue`, handed back on the main thread.
     static func load(_ done: @escaping @MainActor (Result<[VaultItem], Unreadable>) -> Void) {
         queue.async {
@@ -254,6 +278,24 @@ final class VaultModel {
         VaultStore.queue.async {
             let ok = VaultStore.save([item])
             DispatchQueue.main.async { MainActor.assumeIsolated { done?(ok); self.load() } }
+        }
+    }
+
+    /// The editor's save: only over the version it opened on (`revision`), else `.changed` and nothing saved.
+    func save(_ item: VaultItem, ifStill revision: Int?, done: @escaping (VaultStore.SaveOutcome) -> Void) {
+        var item = item
+        item.updated = Date()
+        VaultStore.queue.async {
+            let outcome = VaultStore.save(item, ifStill: revision)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if case .saved = outcome {
+                        if let index = self.items.firstIndex(where: { $0.id == item.id }) { self.items[index] = item } else { self.items.insert(item, at: 0) }
+                    }
+                    done(outcome)
+                    self.load()
+                }
+            }
         }
     }
 

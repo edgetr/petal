@@ -188,15 +188,23 @@ enum UIMap {
     /// a field called "Value". Not even what isn't a secret by itself: a key or card number selected a few characters
     /// at a time would be told whole over a few looks.
     static func selectionHidden(in node: UINode, filled: Bool, secret: (String) -> Bool) -> Bool {
-        filled || holdsSecret(node, secret: secret)
+        holdsSecret(node, filled: filled, secret: secret)
     }
 
     /// A control read for petal_ui holds a secret, so Copy and Cut stay away from its window: a password field, a
-    /// field one types into named for a secret, or any of its text holding a vault secret (`secret`, given the text
-    /// as read, before it's redacted). A heading or label named "Card number" isn't one by its name alone.
-    static func holdsSecret(_ node: UINode, secret: (String) -> Bool) -> Bool {
-        isSecure(node) || looksSecretField(node)
+    /// field one types into named for a secret, a field Petal filled with a secret (`filled`, whatever it shows now:
+    /// what's left of a cut or edited card number is still part of it), or any of its text holding a vault secret
+    /// (`secret`, given the text as read, before it's redacted). A heading or label named "Card number" isn't one by
+    /// its name alone.
+    static func holdsSecret(_ node: UINode, filled: Bool = false, secret: (String) -> Bool) -> Bool {
+        filled || isSecure(node) || looksSecretField(node)
             || [node.title, node.label, node.help, node.placeholder, node.value].contains { !$0.isEmpty && $0 != hidden && secret($0) }
+    }
+
+    /// What the AI is told a field reads after typing into it (`now`, read back): "(hidden)" for a field named for a
+    /// secret, one Petal filled with a secret (`filled`), or text holding a vault secret; else the text, tidied and short.
+    static func typedValue(_ now: String, node: UINode, filled: Bool, secret: (String) -> Bool) -> String {
+        filled || looksSecret(node) || secret(now) ? hidden : truncate(tidy(now), 200)
     }
 
     /// Which part covers the one read `at` in a picture: itself when it has bounds (`frames`, by when each was read),
@@ -281,9 +289,6 @@ enum UIMap {
         /// Every `piece` digits of a card number (a secret that is 12 to 19 digits and separators), as `window`
         /// hashes ASCII digits: found in text whatever separates the digits.
         private var cards = Set<UInt64>()
-        /// Every run of 1 to `piece - 1` characters of each secret with its separators left out (a card's digits
-        /// alone), as `window` hashes them, by length: what `holdsPart` looks up.
-        private var parts: [Int: Set<UInt64>] = [:]
         /// The vault couldn't be read (Keychain locked or refusing): every text counts as possibly secret.
         private(set) var unreadable = false
 
@@ -311,10 +316,6 @@ enum UIMap {
                     numbers[codes.count, default: []].insert(Self.window(codes[...]))
                 } else if codes.count >= Self.short, codes.count < Self.piece {
                     shorts[codes.count, default: []].insert(Self.window(codes[...]))
-                }
-                let compact = Self.codes(characters.filter { !Self.separator($0) })
-                for length in 1..<min(Self.piece, compact.count + 1) {
-                    Self.roll(compact, length) { _, hash in parts[length, default: []].insert(hash); return true }
                 }
                 guard codes.count >= Self.piece else { continue }
                 Self.roll(codes, Self.piece) { _, hash in pieces.insert(hash); return true }
@@ -443,19 +444,6 @@ enum UIMap {
         /// isn't shown or moved.
         func matches(_ text: String) -> Bool { check(text) != .clean }
 
-        /// `text`, its separators left out, is part of one of the vault's secrets (a card's "4111", one of four pieces
-        /// a page may show it in), or `matches` catches it. An empty vault holds no part of anything; one that can't be
-        /// read may hold any.
-        func holdsPart(_ text: String) -> Bool {
-            if unreadable { return true }
-            guard !wholes.isEmpty, !text.isEmpty else { return false }
-            if matches(text) { return true }
-            let compact = Array(text).filter { !Self.separator($0) }
-            guard !compact.isEmpty else { return false }
-            if compact.count >= Self.piece { return matches(String(compact)) }
-            return parts[compact.count]?.contains(Self.window(Self.codes(compact)[...])) == true
-        }
-
         /// Between `at - 1` and `at` is the end of a word: not a letter or digit running on into another.
         static func edge(_ characters: [Character], _ at: Int) -> Bool {
             guard at > 0, at < characters.count else { return true }
@@ -504,11 +492,12 @@ enum UIMap {
     }
 
     /// What the AI may be told of a control: a password field's value never, a field that looks like it holds a
-    /// secret as "(hidden)", and any text holding a vault secret as "(hidden)".
-    static func redact(_ node: UINode, secret: (String) -> Bool) -> UINode {
+    /// secret or that Petal filled with one (`filled`, however its text was cut or edited since) as "(hidden)", and
+    /// any text holding a vault secret as "(hidden)".
+    static func redact(_ node: UINode, filled: Bool = false, secret: (String) -> Bool) -> UINode {
         var out = node
         if isSecure(node) { out.value = "" }
-        else if looksSecret(node), !node.value.isEmpty { out.value = hidden }
+        else if filled || looksSecret(node), !node.value.isEmpty { out.value = hidden }
         for path in [\UINode.title, \.label, \.help, \.placeholder, \.value] where out[keyPath: path] != hidden && secret(out[keyPath: path]) {
             out[keyPath: path] = hidden
         }
@@ -863,20 +852,20 @@ enum UIMap {
     /// `nodes` (every control read, by `order`, already redacted one by one) with a secret only several show
     /// together (a card number as four fields of four digits) hidden in every piece of it, as `joinedSecrets` finds
     /// them: neighbours within a parent, or on one line. When the pieces can't be checked whole (too many, or `going`
-    /// says time's up), every short piece with a digit in it that `part` says is part of a secret is hidden instead
-    /// (none when the vault is empty). A control hidden this way has every
+    /// says time's up), only a piece that `matches` catches by itself is hidden: pieces that are a secret only
+    /// together can't be told apart from ordinary short texts then. A control hidden this way has every
     /// text of its hidden (`hideAll`), not only its piece: the digits may be in its title as well as its value.
     /// A control with a text already hidden still counts by what else it shows. `hid`: something was.
-    static func hideJoined(_ nodes: [UINode], matches: (String) -> Bool, part: (String) -> Bool = { _ in true },
+    static func hideJoined(_ nodes: [UINode], matches: (String) -> Bool,
                            going: () -> Bool = { true }) -> (nodes: [UINode], hid: Bool) {
         var out = nodes
-        let which = joinedHidden(nodes, matches: matches, part: part, going: going).hidden
+        let which = joinedHidden(nodes, matches: matches, going: going).hidden
         for index in which { hideAll(&out[index]) }
         return (out, !which.isEmpty)
     }
 
     /// Which of `nodes` (by index) `hideJoined` hides, and whether they were checked whole (else the fallback hid them).
-    static func joinedHidden(_ nodes: [UINode], matches: (String) -> Bool, part: (String) -> Bool = { _ in true },
+    static func joinedHidden(_ nodes: [UINode], matches: (String) -> Bool,
                              going: () -> Bool = { true }) -> (hidden: Set<Int>, whole: Bool) {
         var pieces: [TextPiece] = []
         var owners: [Int] = []
@@ -890,14 +879,9 @@ enum UIMap {
         if let joined {
             found = joined
         } else {
-            found = Set(pieces.indices.filter { isShortPiece(pieces[$0].text) && part(pieces[$0].text) })
+            found = Set(pieces.indices.filter { matches(pieces[$0].text) })
         }
         return (Set(found.map { owners[$0] }), joined != nil)
-    }
-
-    /// A text short enough to be a piece and with a digit in it: what's hidden when the pieces can't be checked whole.
-    static func isShortPiece(_ text: String) -> Bool {
-        text.count <= joinLength && text.contains(where: \.isNumber)
     }
 
     /// Nothing of what has the keyboard (`focus`, the orders it was found at in its window's read) is told selected
@@ -905,16 +889,18 @@ enum UIMap {
     /// `pieces`, their texts, in reading order): a card number in four fields of four digits, or four spans of a page,
     /// copied or selected a piece at a time, would be whole again. So: the control is one of the pieces; or it holds
     /// some (`around`: the pieces' ancestors, a page's web area) or wasn't found in the read, and what's selected in
-    /// it (`selected`) is in them (`inPieces`); or the window wasn't read whole (`complete` false) or the control
-    /// wasn't found, and what's selected is part of one of the vault's secrets (`part`: `SecretIndex.holdsPart`,
-    /// never with an empty vault).
+    /// it (`selected`) is in them (`inPieces`). `pieces` are given only when the window's pieces were checked whole
+    /// (`joinedHidden`'s `whole`). When the window wasn't read whole (`complete` false) or the control wasn't found,
+    /// what's selected is refused only when it holds a secret by itself (`matches`, the redaction's own rules: a
+    /// whole secret, a run of one, a code standing alone, a card number across separators): an ordinary word or
+    /// digit isn't refused because some secret happens to contain it.
     static func focusInJoined(focus: Set<Int>, hidden: Set<Int>, around: Set<Int> = [], pieces: [String] = [], complete: Bool,
-                              selected: [String], part: (String) -> Bool) -> Bool {
+                              selected: [String], matches: (String) -> Bool) -> Bool {
         if !focus.isDisjoint(with: hidden) { return true }
         let found = complete && !focus.isEmpty
         if !pieces.isEmpty, !found || !focus.isDisjoint(with: around), selected.contains(where: { inPieces($0, pieces) }) { return true }
         if found { return false }
-        return selected.contains(where: part)
+        return selected.contains(where: matches)
     }
 
     /// `text` (its separators left out) is in what `pieces` show one after another, or any word of it is in one of

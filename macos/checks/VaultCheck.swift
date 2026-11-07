@@ -63,6 +63,9 @@ struct VaultCheck {
         joinedFocus()
         missingFrames()
         buyRevision()
+        filledFields()
+        protonSites()
+        editorRevision()
         if failures > 0 { print("vault: \(failures) failed"); exit(1) }
         print("vault: ok")
     }
@@ -1096,10 +1099,9 @@ struct VaultCheck {
         let plain = ["Order", "1234", "5678"].enumerated().map { field($1, parent: 0, sibling: $0, x: CGFloat($0) * 60, order: $0) }
         let (same, none) = UIMap.hideJoined(plain, matches: index.matches)
         expect(!none && same == plain, "ordinary pieces stay")
-        // Out of time: every short piece with a digit hidden, words kept.
+        // Out of time: only what holds a secret by itself is hidden; ordinary digits stay.
         let (late, lateAny) = UIMap.hideJoined(plain, matches: index.matches, going: { false })
-        expect(lateAny && late[0].value == "Order" && late[1].value == UIMap.hidden && late[2].value == UIMap.hidden,
-               "not checked whole: pieces with digits hidden")
+        expect(!lateAny && late == plain, "not checked whole: ordinary pieces with digits stay")
         // A password field's value is never a piece (and never read).
         var secure = field("4111", parent: 0, sibling: 0, x: 0, order: 0)
         secure.subrole = "AXSecureTextField"
@@ -1118,8 +1120,8 @@ struct VaultCheck {
     }
 
     /// Copying, or petal_look's selection, in one of four fields that show a card number together is refused: each
-    /// field alone holds no secret. A field of a window that couldn't be read whole counts when it's a short text
-    /// with a digit.
+    /// field alone holds no secret. In a window that couldn't be read whole, what's selected counts only when it holds
+    /// a secret by itself.
     static func joinedFocus() {
         let index = UIMap.SecretIndex(sample().flatMap(Vault.secrets))
         let nodes = ["Card", "4111", "1111", "1111", "1111", "Order 1234"].enumerated().map { pair -> UINode in
@@ -1131,13 +1133,13 @@ struct VaultCheck {
             node.frame = CGRect(x: CGFloat(pair.offset) * 60, y: pair.offset == 5 ? 400 : 200, width: 50, height: 20)
             return node
         }
-        let (hidden, whole) = UIMap.joinedHidden(nodes, matches: index.matches, part: index.holdsPart)
+        let (hidden, whole) = UIMap.joinedHidden(nodes, matches: index.matches)
         expect(whole && hidden == [1, 2, 3, 4], "the four groups are the joined secret's pieces")
         let pieces = hidden.sorted().map { nodes[$0].value }
         func copied(_ focus: Set<Int>, around: Set<Int> = [0], complete: Bool = true, _ selected: String, in vault: UIMap.SecretIndex? = nil) -> Bool {
             let vault = vault ?? index
             return UIMap.focusInJoined(focus: focus, hidden: hidden, around: around, pieces: pieces, complete: complete,
-                                       selected: [selected], part: vault.holdsPart)
+                                       selected: [selected], matches: vault.matches)
         }
         for at in 1...4 {
             expect(copied([at], nodes[at].value), "piece \(at) isn't copied or told selected")
@@ -1153,21 +1155,23 @@ struct VaultCheck {
         expect(!copied([0], "Total"), "words that aren't in the pieces are fine")
         expect(!copied([0], "Order 2026"), "nor digits that aren't")
         expect(!copied([0], around: [], "4111"), "a control that doesn't hold the pieces isn't checked against them")
-        // Not read whole, or the field not found: what's selected counts only when it's part of a vault secret.
-        expect(copied([5], around: [], complete: false, "4111"), "out of time: a piece of the vault's card counts")
-        expect(copied([], around: [], "1111 1"), "not found in the read: a piece of the vault's card counts")
-        expect(!copied([5], around: [], complete: false, "Hello there"), "not read whole: words without digits are fine")
-        expect(!copied([5], around: [], complete: false, "9058"), "not read whole: digits that aren't part of a secret are fine")
+        // With the pieces found whole, a control not found in the read is still checked against them.
+        expect(copied([], around: [], "1111 1"), "not found in the read: a piece the window shows counts")
         expect(!copied([], around: [], "Order 2026"), "not found: an order number is fine")
-        expect(!UIMap.focusInJoined(focus: [5], hidden: [], complete: false, selected: ["4111"], part: UIMap.SecretIndex([]).holdsPart),
-               "an empty vault never refuses on this ground")
-        expect(UIMap.focusInJoined(focus: [5], hidden: [], complete: false, selected: ["4111"], part: UIMap.SecretIndex.unavailable.holdsPart),
-               "a vault that can't be read may hold anything")
-        // holdsPart: parts of secrets, separators aside; nothing of an empty vault.
-        expect(index.holdsPart("4111") && index.holdsPart("1 1 1 1") && index.holdsPart("4111 1111 1111 1111"), "a card's pieces are parts of it")
-        expect(index.holdsPart("abcd") && index.holdsPart("sk-a"), "a key's pieces are parts of it")
-        expect(!index.holdsPart("9058") && !index.holdsPart("Order 2026") && !index.holdsPart(""), "other digits aren't")
-        expect(!UIMap.SecretIndex([]).holdsPart("4111"), "an empty vault holds no part")
+        // Not read whole (no pieces to compare with: they're given only when checked whole): what's selected counts
+        // only when it holds a secret by the redaction's own rules, never because a saved secret contains it.
+        func late(_ selected: String, focus: Set<Int> = [5], in vault: UIMap.SecretIndex? = nil) -> Bool {
+            UIMap.focusInJoined(focus: focus, hidden: [], complete: false, selected: [selected], matches: (vault ?? index).matches)
+        }
+        for ordinary in ["the", "1", "11", "a", "Hello there", "9058", "4111", "1111", "sk-a", "Order 2026", "73"] {
+            expect(!late(ordinary) && !late(ordinary, focus: []), "not read whole: \"\(ordinary)\" is selected and copied as usual")
+        }
+        expect(late("4111 1111 1111 1111") && late("4111111111111111") && late("card: 4111-1111-1111-1111 exp"),
+               "not read whole: the saved card number is still refused, across separators")
+        expect(late("737") && late("CVV: 737") && !late("17370"), "a saved security code standing alone is, not inside a longer number")
+        expect(late("sk-abcdefghijklmnop") && late("key sk-abcdefgh"), "a saved key, or a run of one, is")
+        expect(!late("4111", in: UIMap.SecretIndex([])), "an empty vault never refuses on this ground")
+        expect(late("4111", in: UIMap.SecretIndex.unavailable), "a vault that can't be read may hold anything")
         // Static text (a web page's span) shows its text only as its value: it counts as a piece.
         let spans = ["4111", "1111", "1111", "1111"].enumerated().map { pair -> UINode in
             var node = UINode(role: "AXStaticText")
@@ -1190,10 +1194,18 @@ struct VaultCheck {
             return node
         }
         let empty = UIMap.SecretIndex([])
-        let late = UIMap.joinedHidden(plain, matches: empty.matches, part: empty.holdsPart, going: { false })
-        expect(!late.whole && late.hidden.isEmpty, "not checked whole, empty vault: nothing hidden")
-        let lateCard = UIMap.joinedHidden(plain, matches: index.matches, part: index.holdsPart, going: { false })
-        expect(lateCard.hidden == [2], "not checked whole: only a part of the vault's card is hidden")
+        let lateEmpty = UIMap.joinedHidden(plain, matches: empty.matches, going: { false })
+        expect(!lateEmpty.whole && lateEmpty.hidden.isEmpty, "not checked whole, empty vault: nothing hidden")
+        let lateCard = UIMap.joinedHidden(plain, matches: index.matches, going: { false })
+        expect(lateCard.hidden.isEmpty, "not checked whole: a few digits a saved card also has aren't hidden")
+        var withCode = plain
+        var code = UINode(role: "AXTextField")
+        code.value = "CVV 737"
+        code.order = 3
+        code.sibling = 3
+        withCode.append(code)
+        expect(UIMap.joinedHidden(withCode, matches: index.matches, going: { false }).hidden == [3],
+               "not checked whole: a text holding a secret by itself is")
         // hideJoined hides exactly what joinedHidden finds.
         let (shown, any) = UIMap.hideJoined(nodes, matches: index.matches)
         expect(any && (1...4).allSatisfy { shown[$0].value == UIMap.hidden } && shown[5].value == "Order 1234", "hideJoined agrees")
@@ -1531,5 +1543,86 @@ struct VaultCheck {
         expect(Vault.text(card, .year) == "27" && Vault.text(card, .year, fourDigitYear: true) == "2027", "the year typed")
         expect(Vault.text(card, .expiry) == "04/27" && Vault.text(card, .expiry, fourDigitYear: true) == "04/2027"
                && Vault.text(card, .expiry, fourDigitYear: false) == "04/27", "the expiry typed")
+    }
+
+    /// A field Petal filled with a secret is hidden whatever it shows now (part of a card number left after the person
+    /// cut or edited it): its value in petal_ui, what typing into it reads back, and Copy or a selection in it.
+    static func filledFields() {
+        let index = UIMap.SecretIndex(sample().flatMap(Vault.secrets))
+        var field = UINode(role: "AXTextField")
+        field.title = "Billing reference"
+        for left in ["4111 11", "1111", "x", "4111 1111 1111 1111"] {
+            field.value = left
+            expect(UIMap.redact(field, filled: true, secret: index.matches).value == UIMap.hidden, "a filled field's \"\(left)\" is hidden")
+            expect(UIMap.holdsSecret(field, filled: true, secret: index.matches), "a filled field holds a secret (Copy stays away)")
+            expect(UIMap.selectionHidden(in: field, filled: true, secret: index.matches), "nothing selected in it is told")
+            expect(UIMap.typedValue(left, node: field, filled: true, secret: index.matches) == UIMap.hidden, "typing into it reads back hidden")
+        }
+        field.value = "4111 11"
+        expect(UIMap.redact(field, secret: index.matches).value == "4111 11" && !UIMap.holdsSecret(field, secret: index.matches)
+               && UIMap.typedValue("4111 11", node: field, filled: false, secret: index.matches) == "4111 11",
+               "the same text in a field Petal didn't fill is told as usual")
+        field.value = ""
+        expect(UIMap.redact(field, filled: true, secret: index.matches).value == "", "an empty filled field shows nothing to hide")
+    }
+
+    /// Proton Pass's logins: every site with its rule (autofillUrls) and the older list (urls), in its JSON and its
+    /// CSV's structured column; a rule never to fill isn't a site; a pattern Petal can't read is said so.
+    static func protonSites() {
+        let json = #"""
+        {"version":"1.30","encrypted":false,"vaults":{"s1":{"name":"Personal","items":[
+          {"state":1,"data":{"type":"login","metadata":{"name":"New","note":""},"content":{"itemUsername":"ada","password":"p1","autofillUrls":[{"url":"https://github.com/login","mode":0},{"url":"https://gist.github.com","mode":1},{"url":"https://evil.example","mode":2},{"url":"https://docs.example/a","mode":6}]}}},
+          {"state":1,"data":{"type":"login","metadata":{"name":"Both","note":""},"content":{"itemUsername":"ada","password":"p2","urls":["https://old.example"],"autofillUrls":[{"url":"https://old.example","mode":0},{"url":"https://new.example","mode":3}]}}},
+          {"state":1,"data":{"type":"login","metadata":{"name":"Legacy","note":""},"content":{"itemUsername":"ada","password":"p3","urls":["https://legacy.example/"]}}},
+          {"state":1,"data":{"type":"login","metadata":{"name":"Pattern","note":""},"content":{"itemUsername":"ada","password":"p4","autofillUrls":[{"url":"*.corp.example","mode":4}]}}},
+          {"state":1,"data":{"type":"login","metadata":{"name":"Some","note":""},"content":{"itemUsername":"ada","password":"p5","autofillUrls":[{"url":"https://some.example","mode":0},{"url":"^https://.*","mode":5}]}}},
+          {"state":1,"data":{"type":"login","metadata":{"name":"Nowhere","note":""},"content":{"itemUsername":"ada","password":"p6","autofillUrls":[]}}}
+        ]}}}
+        """#
+        guard let parsed = Vault.importData(Data(json.utf8)) else { return expect(false, "Proton Pass JSON with autofillUrls") }
+        func sites(_ title: String) -> [String]? { parsed.items.first { $0.title == title }?.sites }
+        expect(sites("New") == ["github.com", "gist.github.com", "docs.example"], "autofillUrls read, Never left out (got \(sites("New") ?? []))")
+        expect(sites("Both") == ["old.example", "new.example"], "autofillUrls and urls both read, each site once (got \(sites("Both") ?? []))")
+        expect(sites("Legacy") == ["legacy.example"], "an older item's urls still read")
+        expect(sites("Pattern") == nil, "a login with only sites Petal can't read isn't imported for nowhere")
+        expect(sites("Some") == ["some.example"], "one with some readable sites is imported with those")
+        expect(sites("Nowhere") == [], "a login saved for no site at all is imported as before")
+        expect(parsed.unreadable == ["Pattern (couldn't read its sites)", "Some (couldn't read some of its sites; added with the rest)"],
+               "both said in the summary (got \(parsed.unreadable))")
+        // Named modes, plain strings and anything else.
+        expect(Vault.protonSites([["url": "a.example", "mode": "Exact"], ["url": "b.example", "mode": "Never"], "c.example"] as [Any]) == (["a.example", "c.example"], false),
+               "modes by name and plain addresses")
+        expect(Vault.protonSites([["url": "a.example", "mode": 9]] as [Any]).unread && Vault.protonSites("[not json").unread, "an unknown mode or broken JSON is unread")
+        // Proton's CSV: url holds the default rule's sites, autofillUrls all of them as JSON (or, by hand, addresses).
+        let autofill = #"[{""url"":""https://github.com"",""mode"":0},{""url"":""https://api.github.com"",""mode"":1}]"#
+        let csv = """
+        type,name,url,autofillUrls,email,username,password,note,totp,createTime,modifyTime,vault
+        login,GitHub,https://github.com,"\(autofill)",,ada,gh-pass,,,1,2,Personal
+        login,Listed,,"https://a.example, https://b.example",,ada,pw2,,,1,2,Personal
+        login,Regex,,"[{""url"":""^x$"",""mode"":5}]",,ada,pw3,,,1,2,Personal
+        """
+        guard let rows = Vault.importCSV(csv) else { return expect(false, "Proton Pass CSV with autofillUrls") }
+        func csvSites(_ title: String) -> [String]? { rows.items.first { $0.title == title }?.sites }
+        expect(csvSites("GitHub") == ["github.com", "api.github.com"], "the CSV's autofillUrls JSON read with url (got \(csvSites("GitHub") ?? []))")
+        expect(csvSites("Listed") == ["a.example", "b.example"], "comma-separated addresses in it read")
+        expect(csvSites("Regex") == nil && rows.unreadable == ["Regex (couldn't read its sites)"], "a regular expression alone is said so (got \(rows.unreadable))")
+    }
+
+    /// An editor opened before an import (or any other save) doesn't save its older copy over the item.
+    static func editorRevision() {
+        var item = sample()[5]
+        let opened = Vault.openedRevision(item)
+        expect(!Vault.editConflict(opened: opened, stored: item), "unchanged: saves")
+        expect(!Vault.editConflict(opened: nil, stored: item) && !Vault.editConflict(opened: nil, stored: nil), "a new item never conflicts")
+        var stored = item
+        stored[.securityCode] = "999"
+        stored.updated = Date(timeIntervalSince1970: 1_800_000_000)
+        expect(Vault.editConflict(opened: opened, stored: stored), "changed since it opened (an import): refused")
+        expect(Vault.editConflict(opened: opened, stored: nil), "deleted since: refused")
+        // The editor's copy as the window had it (a card number with spaces) and the stored one (its digits) agree.
+        item[.number] = "4111111111111111"
+        var spaced = item
+        spaced[.number] = "4111 1111 1111 1111"
+        expect(!Vault.editConflict(opened: Vault.openedRevision(spaced), stored: Vault.normalized(item)), "the same card written another way isn't a change")
     }
 }

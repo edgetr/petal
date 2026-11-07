@@ -249,6 +249,22 @@ enum Vault {
         return hasher.finalize()
     }
 
+    /// The version an editor opened on (`saved`: the item as the vault had it then; nil for a new one), as
+    /// `editConflict` compares it with what's stored when Save is pressed.
+    static func openedRevision(_ saved: VaultItem?) -> Int? {
+        saved.map { revision(normalized($0)) }
+    }
+
+    /// An editor opened on version `opened` of an item may not save over it: the vault has another version now
+    /// (`stored`: changed by an import, Petal AI or another window), or none (deleted). Saving would write back what
+    /// the editor showed when it opened, a password the import changed among it. A new item (`opened` nil) never
+    /// conflicts.
+    static func editConflict(opened: Int?, stored: VaultItem?) -> Bool {
+        guard let opened else { return false }
+        guard let stored else { return true }
+        return opened != revision(normalized(stored))
+    }
+
     /// `item` is still the version `revision` was taken of; a plan with none (what the person typed) matches any.
     static func sameRevision(_ revision: Int?, _ item: VaultItem) -> Bool {
         revision.map { $0 == Vault.revision(item) } ?? true
@@ -1080,8 +1096,8 @@ enum Vault {
     }
 
     /// A password export as CSV, by its header's names in any order: Apple Passwords (Title, URL, Username, Password,
-    /// Notes), Chrome (name, url, username, password, note), Proton Pass (type, name, url, email, username, password,
-    /// note; logins, credit cards and identities), Firefox and Bitwarden. 2FA columns are left out. nil when the first
+    /// Notes), Chrome (name, url, username, password, note), Proton Pass (type, name, url, autofillUrls, email, username,
+    /// password, note; logins, credit cards and identities), Firefox and Bitwarden. 2FA columns are left out. nil when the first
     /// row isn't a header Petal knows.
     static func importCSV(_ text: String) -> Imported? {
         let rows = csv(text)
@@ -1096,6 +1112,8 @@ enum Vault {
         let notes = column(["notes", "note", "extra", "comment", "comments"])
         let holder = column(["cardholdername", "cardholder", "nameoncard"]), expiry = column(["expirationdate", "expiry", "expiration", "exp"])
         let code = column(["verificationcode", "cvv", "cvc", "securitycode", "csc"])
+        // Proton Pass's every site with its rule ("autofillUrls", JSON); its "url" holds only the default-rule ones.
+        let autofill = column(["autofillurls"])
         let full = column(["fullname"]), phone = column(["phone", "phonenumber", "mobile"])
         let street = column(["streetaddress", "street", "address", "address1"]), street2 = column(["address2", "floor", "street2"])
         let city = column(["city"]), region = column(["stateorprovince", "state", "region", "province"])
@@ -1107,7 +1125,14 @@ enum Vault {
             switch kind {
             case .login?:
                 guard !value(password).isEmpty else { result.skipped += 1; continue }
-                let hosts = VaultSite.hosts(value(url))
+                var hosts = VaultSite.hosts(value(url))
+                var lost = false
+                if autofill != nil, !value(autofill).isEmpty {
+                    let more = protonSites(value(autofill))
+                    for host in more.hosts where !hosts.contains(host) { hosts.append(host) }
+                    lost = more.unread
+                }
+                if lost, !noteLostSites(value(title), found: hosts, in: &result) { continue }
                 var item = VaultItem(kind: .login, title: value(title).trimmingCharacters(in: .whitespaces))
                 if item.title.isEmpty { item.title = hosts.first ?? "Login" }
                 item.sites = hosts
@@ -1154,6 +1179,85 @@ enum Vault {
         let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("{") else { return nil }
         return (try? JSONSerialization.jsonObject(with: Data(trimmed.utf8))) as? [String: Any]
+    }
+
+    /// A Proton Pass login's sites: `autofillUrls` (each a site and its rule: what its apps write now) and `urls`
+    /// (the older list, only the default rule's sites), as an export's JSON gives them, or a CSV's column (JSON, or
+    /// addresses split by commas). A rule never to fill a site isn't one of its sites; a site Petal can't make a
+    /// host of (a wildcard pattern, a regular expression, something unknown) is `unread`.
+    static func protonSites(_ autofill: Any?, urls: Any? = nil) -> (hosts: [String], unread: Bool) {
+        var hosts: [String] = []
+        var unread = false
+        func add(_ text: String) {
+            if let host = VaultSite.host(text) { if !hosts.contains(host) { hosts.append(host) } } else { unread = true }
+        }
+        func read(_ value: Any?) {
+            switch value {
+            case let text as String:
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
+                if trimmed.hasPrefix("[") || trimmed.hasPrefix("{") {
+                    guard let parsed = try? JSONSerialization.jsonObject(with: Data(trimmed.utf8)) else { unread = true; return }
+                    read(parsed)
+                } else {
+                    trimmed.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }.forEach(add)
+                }
+            case let list as [Any]:
+                for entry in list {
+                    if let text = entry as? String { add(text); continue }
+                    guard let site = entry as? [String: Any], let text = site["url"] as? String else { unread = true; continue }
+                    switch protonRule(site["mode"]) {
+                    case .site: add(text)
+                    case .never: continue
+                    case .unknown: unread = true
+                    }
+                }
+            case let site as [String: Any]:
+                read([site])
+            case nil, is NSNull:
+                return
+            default:
+                unread = true
+            }
+        }
+        read(autofill)
+        read(urls)
+        return (hosts, unread)
+    }
+
+    enum ProtonRule { case site, never, unknown }
+
+    /// A Proton Pass site's rule (`AutofillUrl.Mode`), by number or name: Default (0), Exact (1), Starts with (3)
+    /// and Exact path (6) are sites; Never (2) is a site not to fill; Pattern (4), Regular expression (5) and
+    /// anything newer can't be made a host.
+    static func protonRule(_ mode: Any?) -> ProtonRule {
+        if mode == nil || mode is NSNull { return .site }
+        if let number = mode as? Int {
+            switch number {
+            case 0, 1, 3, 6: return .site
+            case 2: return .never
+            default: return .unknown
+            }
+        }
+        guard let name = (mode as? String).map(key) else { return .unknown }
+        switch name {
+        case "default", "exact", "startwith", "startswith", "exactpath": return .site
+        case "never": return .never
+        default: return .unknown
+        }
+    }
+
+    /// A login with sites Petal couldn't read goes in the summary: with none it could, it isn't imported (a login
+    /// for nowhere would never fill); with some, it's imported with those, and said so. Whether to import it.
+    static func noteLostSites(_ title: String, found: [String], in result: inout Imported) -> Bool {
+        let name = title.trimmingCharacters(in: .whitespaces)
+        let shown = name.isEmpty ? found.first ?? "A login" : name
+        if found.isEmpty {
+            result.unreadable.append("\(shown) (couldn't read its sites)")
+            return false
+        }
+        result.unreadable.append("\(shown) (couldn't read some of its sites; added with the rest)")
+        return true
     }
 
     /// "Visa (couldn't read the card's details)", for the import's summary.
@@ -1244,8 +1348,9 @@ enum Vault {
                 case .login?:
                     let password = protonText(content, "password")
                     guard !password.isEmpty else { result.skipped += 1; continue }
-                    var hosts: [String] = []
-                    for host in (content["urls"] as? [String] ?? []).compactMap(VaultSite.host) where !hosts.contains(host) { hosts.append(host) }
+                    let sites = protonSites(content["autofillUrls"], urls: content["urls"])
+                    let hosts = sites.hosts
+                    if sites.unread, !noteLostSites(title, found: hosts, in: &result) { continue }
                     var item = VaultItem(kind: .login, title: title.isEmpty ? hosts.first ?? "Login" : title, sites: hosts)
                     item[.username] = protonText(content, "itemUsername", "username", "itemEmail", "email")
                     item[.password] = password

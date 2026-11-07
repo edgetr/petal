@@ -478,10 +478,16 @@ struct VaultEditor: View {
     @State private var problem: String?
     /// A save on its way to the Keychain: the editor stays open, with what was typed, until it's there.
     @State private var saving = false
+    /// The version of the item this editor opened on (`Vault.openedRevision`): Save writes only over that one.
+    @State private var opened: Int?
+    /// The item changed in the vault since this editor opened (an import, Petal AI): nothing was saved, and Reload
+    /// shows it as it is now. What was typed stays until then.
+    @State private var stale = false
 
     init(item: VaultItem, isNew: Bool, close: @escaping () -> Void) {
         _item = State(initialValue: item)
         _sites = State(initialValue: item.sites.joined(separator: ", "))
+        _opened = State(initialValue: isNew ? nil : Vault.openedRevision(VaultModel.shared.items.first { $0.id == item.id } ?? item))
         self.isNew = isNew
         self.close = close
     }
@@ -519,7 +525,12 @@ struct VaultEditor: View {
                 }
             }
             row("Notes") { entry(.notes) }
-            if let problem { Text(problem).font(.system(size: 12)).foregroundStyle(.secondary) }
+            if let problem {
+                HStack(spacing: 8) {
+                    Text(problem).font(.system(size: 12)).foregroundStyle(.secondary)
+                    if stale { Button("Reload") { reload() }.buttonStyle(.glass) }
+                }
+            }
             HStack(spacing: 8) {
                 if !isNew {
                     Button("Delete", role: .destructive) { model.remove(item.id); close() }.buttonStyle(.glass).disabled(saving)
@@ -527,7 +538,7 @@ struct VaultEditor: View {
                 Spacer()
                 Button("Cancel") { close() }.buttonStyle(.glass).disabled(saving)
                 Button(saving ? "Saving…" : "Save") { save() }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
-                    .disabled(saving)
+                    .disabled(saving || stale)
             }
         }
     }
@@ -639,6 +650,21 @@ struct VaultEditor: View {
         model.unlock("show your \(field.words)") { ok in if ok { showing.insert(field) } }
     }
 
+    /// The item as the vault has it now, from the save that found it changed.
+    @State private var reloaded: VaultItem?
+
+    /// Shows the item as it is now (what was typed is let go), and Save writes over that version. A deleted item closes.
+    private func reload() {
+        guard let now = reloaded else { return close() }
+        item = now
+        sites = now.sites.joined(separator: ", ")
+        showing = []
+        opened = Vault.openedRevision(now)
+        reloaded = nil
+        stale = false
+        problem = nil
+    }
+
     private func save() {
         var item = item
         item.title = item.title.trimmingCharacters(in: .whitespaces)
@@ -651,10 +677,22 @@ struct VaultEditor: View {
         }
         problem = nil
         saving = true
-        model.save(item) { ok in
+        model.save(item, ifStill: opened) { outcome in
             saving = false
-            // The Keychain refused it: nothing typed is lost, and Save tries again.
-            guard ok else { problem = "Petal couldn't save this to your Keychain. Your changes are still here: try Save again."; return }
+            switch outcome {
+            case .saved: break
+            case .failed:
+                // The Keychain refused it: nothing typed is lost, and Save tries again.
+                problem = "Petal couldn't save this to your Keychain. Your changes are still here: try Save again."
+                return
+            case .changed(let now):
+                // Saved meanwhile (an import): saving would write this editor's older copy over it. What was typed
+                // stays on screen until Reload.
+                reloaded = now
+                stale = true
+                problem = now == nil ? "This item was deleted since you opened it." : "This item changed since you opened it."
+                return
+            }
             // One contact is the person themselves (only once this one is saved as them).
             if item.isMe {
                 for var other in model.items where other.isMe && other.id != item.id {

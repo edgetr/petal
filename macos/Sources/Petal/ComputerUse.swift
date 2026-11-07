@@ -1028,8 +1028,11 @@ enum Reader {
             }
             // Named for a secret counts only for a field one types into: a heading "Card number" doesn't keep Copy
             // away from the page (what it shows is still matched against the vault).
-            let holds = UIMap.holdsSecret(node, secret: secret)
-            node = UIMap.redact(node, secret: secret)
+            // A field Petal filled with a secret stays hidden whatever it shows now (part of a card number left
+            // after an edit is still part of it).
+            let filled = Sensitive.isFilled(element, pid: pid)
+            let holds = UIMap.holdsSecret(node, filled: filled, secret: secret)
+            node = UIMap.redact(node, filled: filled, secret: secret)
             if holds {
                 reading.holdsSecret = true
             } else if deep, !UIMap.valueRoles.contains(role), vault.matches(text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)) {
@@ -1063,11 +1066,9 @@ enum Reader {
                 stack.append((child, depth + 1, inner, web || role == "AXWebArea", me, index))
             }
         }
-        // Bounded as the picture's check is; out of time, every short text with a digit that's part of a vault secret
-        // is hidden instead.
+        // Bounded as the picture's check is; out of time, only a text that holds a secret by itself is hidden.
         let joinBy = Date().addingTimeInterval(0.5)
-        (reading.joined, reading.joinedWhole) = UIMap.joinedHidden(walked, matches: vault.matches, part: vault.holdsPart,
-                                                                   going: { Date() < joinBy })
+        (reading.joined, reading.joinedWhole) = UIMap.joinedHidden(walked, matches: vault.matches, going: { Date() < joinBy })
         if !reading.joined.isEmpty { reading.holdsSecret = true }
         for index in reading.joined.sorted() {
             if let path = UIMap.pieceText(walked[index]) { reading.joinedTexts.append(walked[index][keyPath: path]) }
@@ -1092,9 +1093,11 @@ enum Reader {
             let found = values(control, [kAXSelectedTextAttribute, kAXValueAttribute])
             return found[kAXSelectedTextAttribute] as? String ?? found[kAXValueAttribute] as? String
         }
+        // The pieces count only when they were checked whole; else what's selected counts by the vault's own rules.
         return UIMap.focusInJoined(focus: reading.focusOrders, hidden: reading.joined, around: reading.aroundJoined,
-                                   pieces: reading.joinedTexts, complete: !reading.timedOut && reading.joinedWhole,
-                                   selected: selected, part: VaultIndex.current().holdsPart)
+                                   pieces: reading.joinedWhole ? reading.joinedTexts : [],
+                                   complete: !reading.timedOut && reading.joinedWhole,
+                                   selected: selected, matches: VaultIndex.current().matches)
     }
 
     /// What the window shows now that an act depends on (UIMap.Fingerprint): its title, the control with the
@@ -1477,6 +1480,10 @@ enum Acting {
             return "The keyboard is in another window of \(map.appName); nothing was copied."
         }
         for control in [element, focused].compactMap({ $0 }) {
+            // A field Petal filled with a secret, whatever it shows now (part of a card number left after an edit).
+            if Sensitive.isFilled(control, pid: map.pid) {
+                return "That field holds a secret Petal filled in: Petal doesn't copy it. petal_vault fills a saved one where it's needed (action: fill)."
+            }
             let found = Reader.values(control, [kAXSelectedTextAttribute, kAXValueAttribute])
             for name in [kAXSelectedTextAttribute, kAXValueAttribute] {
                 guard let text = found[name] as? String else { continue }
@@ -1752,7 +1759,7 @@ enum Acting {
             usleep(120_000)
             let now = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
             if !now.isEmpty, !options.submit {
-                outcome.value = UIMap.looksSecret(node) || Assist.isVaultSecret(now) ? UIMap.hidden : UIMap.truncate(UIMap.tidy(now), 200)
+                outcome.value = UIMap.typedValue(now, node: node, filled: Sensitive.isFilled(element, pid: pid), secret: Assist.isVaultSecret)
             }
         case "fill":
             guard let element, let plan = options.fill else { break }
