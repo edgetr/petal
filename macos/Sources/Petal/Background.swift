@@ -54,6 +54,25 @@ enum Background {
         }
     }
 
+    /// Right before each change it makes in the background, read again: the person may have come back to that
+    /// window (or its app) during the reads since it decided. Only `go` changes anything.
+    enum Behind: Equatable {
+        /// Still the background way, as planned.
+        case go
+        /// Nothing changed yet: decide again (the foreground rules, with their pause, if the window is in front now).
+        case again
+        /// Something already changed: stop there, never the person's window.
+        case stop
+    }
+
+    /// `plannedFront`: its app was in front when the background step was planned (keys and focus are planned only for
+    /// an app behind). `changed`: an earlier change of this act was already made.
+    static func behind(_ situation: Situation, plannedFront: Bool, changed: Bool) -> Behind {
+        let still = way(situation) == .background && (plannedFront || !situation.appFront)
+        if still { return .go }
+        return changed ? .stop : .again
+    }
+
     /// The person is working in the note's window right now: it's in front and they pressed a key, clicked or
     /// scrolled within the last two seconds.
     static func typingThere(_ situation: Situation) -> Bool {
@@ -228,6 +247,32 @@ enum NotePicture {
         var window: UInt32?
         /// Its app is kept private.
         var hidden: Bool
+        /// Stuck to all of its app, not one window: any of that app's ordinary windows may stand for it.
+        var appWide = false
+    }
+
+    /// The window ScreenCaptureKit gave back for a picture.
+    struct Shot: Equatable {
+        var pid: pid_t
+        var window: UInt32
+    }
+
+    /// Which window a picture may be of. A note stuck to one window: that very window, by its number and process,
+    /// or none. A note on all of an app: the window it names, else (that one gone, or none named) any window of its
+    /// app. Nil: no picture.
+    static func pick(_ seen: Seen, from windows: [Shot], ordinary: (Shot) -> Bool = { _ in true }) -> Shot? {
+        guard shows(seen) else { return nil }
+        if let wanted = seen.window, let exact = windows.first(where: { $0.window == wanted && $0.pid == seen.pid }) { return exact }
+        guard seen.appWide else { return nil }
+        return windows.first { $0.pid == seen.pid && ordinary($0) }
+    }
+
+    /// A picture is kept only when the window it shows is one `pick` allows for the note as it was asked for, and
+    /// the note, read again once it's done, still shows one of the very same window (`keeps`).
+    static func accepts(_ shot: Shot, taken: Seen, now: Seen?) -> Bool {
+        guard keeps(taken: taken, now: now), shot.pid == taken.pid else { return false }
+        if let wanted = taken.window, shot.window == wanted { return true }
+        return taken.appWide
     }
 
     /// Kept private by its app, even once its window closed or its app quit: the app it was stuck to decides.
@@ -243,7 +288,7 @@ enum NotePicture {
     /// very same window of the same app.
     static func keeps(taken: Seen, now: Seen?) -> Bool {
         guard let now, shows(now), shows(taken) else { return false }
-        return now.app == taken.app && now.pid == taken.pid && now.window == taken.window
+        return now.app == taken.app && now.pid == taken.pid && now.window == taken.window && now.appWide == taken.appWide
     }
 }
 
@@ -261,7 +306,11 @@ enum NoteStatus {
         var activity = ""
     }
 
-    /// Shown in the preview: working, waiting for the person, or done and not seen.
+    /// The preview shows this many tiles side by side; more scroll sideways, none left out.
+    static let tilesInView = 4
+    static func previewScrolls(_ count: Int) -> Bool { count > tilesInView }
+
+    /// Shown in the preview: working (or queued for room: `running`), waiting for the person, or done and not seen.
     static func shows(_ facts: Facts) -> Bool { facts.running || facts.ready || needsYou(facts) }
 
     /// Waiting for the person: the AI button gets a small ✦.

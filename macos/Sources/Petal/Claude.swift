@@ -1167,10 +1167,12 @@ struct ClaudePanelView: View {
                 .font(.system(size: 14))
                 .focused($focused)
                 .onSubmit(submit)
-            // While it works: stop, or (with something written) steer or queue it.
-            let stops = agent.running && panel.draft.isEmpty
+            // While it works, or waits for room: stop (one waiting never starts, and its message comes back here),
+            // or (with something written) steer or queue it.
+            let queued = !agent.running && !agent.waiting.isEmpty
+            let stops = (agent.running || queued) && panel.draft.isEmpty
             Button {
-                if stops { agent.stop() } else { submit() }
+                if stops { panel.stop(panel.current) } else { submit() }
             } label: {
                 Image(systemName: stops ? "stop.fill" : "arrow.up")
                     .font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
@@ -1178,6 +1180,7 @@ struct ClaudePanelView: View {
                     .background(Color(nsColor: app.accent), in: .circle)
             }
             .buttonStyle(.plain)
+            .help(stops ? (queued ? "Don't start it" : "Stop") : "")
         }
         .padding(.leading, 16)
         .padding(.trailing, 6)

@@ -52,7 +52,9 @@ enum VaultFiller {
             Sensitive.filled(element, pid: pid)
         }
         if let why = behind() { return why }
-        if let error = Acting.bringWindow(map, cancel: cancel) { return error }
+        if let error = Acting.bringWindow(map, cancel: cancel, stayBehind: stayBehind) {
+            return stayBehind && !cancel.stopped ? Background.Reason.vault.words(map.appName) : error
+        }
         if plan.target.popup {
             let year = plan.field == .year ? saved.map { $0[.expiry] } : nil
             let month = plan.field == .month
@@ -69,7 +71,9 @@ enum VaultFiller {
         }
         if let why = behind() { return why }
         if !Acting.isFront(pid) {
-            guard Acting.bringForward(pid, cancel: cancel) else { return ComputerUse.stoppedText }
+            guard Acting.bringForward(pid, cancel: cancel, stayBehind: stayBehind) else {
+                return stayBehind && !cancel.stopped ? Background.Reason.vault.words(map.appName) : ComputerUse.stoppedText
+            }
         }
         guard !cancel.stopped else { return ComputerUse.stoppedText }
         AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)

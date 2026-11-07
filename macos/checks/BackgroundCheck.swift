@@ -47,6 +47,39 @@ struct BackgroundCheck {
         expect(!Background.typingThere(situation(front: true, focused: true, idle: 5)), "not after a pause")
         expect(Background.patience > Background.pause, "it waits longer than a pause")
 
+        // MARK: Right before each background change
+
+        let away = situation(front: false)
+        expect(Background.behind(away, plannedFront: false, changed: false) == .go, "still behind: it goes ahead")
+        expect(Background.behind(situation(front: true, focused: false), plannedFront: true, changed: true) == .go,
+               "the person still in another window of its app, as planned")
+        let back = situation(front: true, focused: true, idle: 30)
+        expect(Background.behind(back, plannedFront: false, changed: false) == .again,
+               "the person came back to that window during the reads: decided again, by the foreground rules")
+        expect(Background.behind(situation(front: true, focused: true, idle: 0.3), plannedFront: false, changed: false) == .again,
+               "typing there now: decided again, which waits for a pause")
+        expect(Background.behind(back, plannedFront: false, changed: true) == .stop,
+               "after a change already made, it stops: never a change in the window they're now using")
+        expect(Background.behind(back, plannedFront: true, changed: false) == .again,
+               "from another window of its app to the note's: decided again")
+        expect(Background.behind(situation(front: true, focused: false), plannedFront: false, changed: false) == .again,
+               "its app came to the front (another window): keys and focus were planned for an app behind")
+        expect(Background.behind(situation(front: true, focused: false), plannedFront: false, changed: true) == .stop,
+               "and after a change, it stops there")
+        for front in [false, true] {
+            for focused in [false, true] {
+                for idle in [0.1, 30.0] {
+                    for changed in [false, true] {
+                        let now = situation(front: front, focused: focused, idle: idle)
+                        let behind = Background.behind(now, plannedFront: false, changed: changed)
+                        expect(behind != .go || Background.way(now) == .background, "it only goes ahead the background way",
+                               "\(now) \(behind)")
+                        expect(behind != .go || !(front && focused), "never in the window in front", "\(now)")
+                    }
+                }
+            }
+        }
+
         // MARK: Each action in the background
 
         expect(plan("press") == .press, "a button is pressed through Accessibility")
@@ -132,6 +165,33 @@ struct BackgroundCheck {
         expect(!NotePicture.keeps(taken: shown, now: madePrivate), "nor once its app was made private")
         expect(!NotePicture.keeps(taken: shown, now: nil), "nor once the note is gone")
 
+        // Which window a picture is of, and which pictures are kept.
+        let windows = [NotePicture.Shot(pid: 7, window: 40), NotePicture.Shot(pid: 7, window: 42), NotePicture.Shot(pid: 9, window: 44)]
+        expect(NotePicture.pick(shown, from: windows) == NotePicture.Shot(pid: 7, window: 42), "a window's note: that very window")
+        expect(NotePicture.pick(shown, from: windows.filter { $0.window != 42 }) == nil,
+               "its window gone from the list: no picture, never another of its app's")
+        expect(NotePicture.pick(shown, from: [NotePicture.Shot(pid: 9, window: 42)]) == nil, "the same number in another process isn't it")
+        var appWide = shown; appWide.appWide = true
+        expect(NotePicture.pick(appWide, from: windows) == NotePicture.Shot(pid: 7, window: 42), "an app's note: the window it names first")
+        expect(NotePicture.pick(appWide, from: windows.filter { $0.window != 42 }) == NotePicture.Shot(pid: 7, window: 40),
+               "else any of its app's windows")
+        expect(NotePicture.pick(appWide, from: windows.filter { $0.window != 42 }, ordinary: { $0.window != 40 }) == nil,
+               "the fallback is only an ordinary window of its own app")
+        var unnamed = appWide; unnamed.window = nil
+        expect(NotePicture.pick(unnamed, from: windows) == NotePicture.Shot(pid: 7, window: 40), "an app's note naming no window")
+        expect(NotePicture.pick(closed, from: windows) == nil && NotePicture.pick(madePrivate, from: windows) == nil,
+               "no picture of a closed or private note's window")
+        expect(NotePicture.accepts(NotePicture.Shot(pid: 7, window: 42), taken: shown, now: shown), "its own window's picture is kept")
+        expect(!NotePicture.accepts(NotePicture.Shot(pid: 7, window: 40), taken: shown, now: shown),
+               "another window of its app, for a window's note, never is")
+        expect(!NotePicture.accepts(NotePicture.Shot(pid: 9, window: 42), taken: shown, now: shown), "nor its number in another process")
+        expect(NotePicture.accepts(NotePicture.Shot(pid: 7, window: 40), taken: appWide, now: appWide),
+               "an app's note: another of its app's windows is")
+        expect(!NotePicture.accepts(NotePicture.Shot(pid: 9, window: 44), taken: appWide, now: appWide), "never another app's")
+        expect(!NotePicture.accepts(NotePicture.Shot(pid: 7, window: 42), taken: shown, now: appWide),
+               "nor once the note was stuck to all of its app instead")
+        expect(!NotePicture.accepts(NotePicture.Shot(pid: 7, window: 42), taken: shown, now: madePrivate), "nor once made private")
+
         // MARK: What's said
 
         for reason in Background.Reason.allCases {
@@ -163,6 +223,16 @@ struct BackgroundCheck {
         expect(NoteStatus.needsYou(asking) && NoteStatus.needsYou(needs) && !NoteStatus.needsYou(working), "who badges the AI button")
         let order = NoteStatus.order([NoteStatus.Facts(ready: true), working, NoteStatus.Facts(), needs, NoteStatus.Facts(running: true)])
         expect(order == [3, 1, 4, 0], "waiting first, then working, then done; the idle one left out", "\(order)")
+
+        // Four working and two waiting for room (queued: `running`), one done: every one shows, none dropped, and
+        // the preview scrolls sideways for them; each that works or waits has its Stop (`running`).
+        let queued = NoteStatus.Facts(running: true, activity: "Waiting for another note to finish")
+        let crowd = Array(repeating: working, count: 4) + [queued, queued, NoteStatus.Facts(ready: true), NoteStatus.Facts()]
+        let shownNotes = NoteStatus.order(crowd)
+        expect(shownNotes.count == 7 && Set(shownNotes) == Set(0..<7), "every note at work, queued or done shows", "\(shownNotes)")
+        expect(shownNotes.filter { crowd[$0].running }.count == 6, "both queued notes keep a Stop in the preview")
+        expect(NoteStatus.previewScrolls(shownNotes.count), "more than fit: the preview scrolls")
+        expect(!NoteStatus.previewScrolls(NoteStatus.tilesInView), "as many as fit: side by side")
 
         print("Background: \(passed) passed, \(failures) failed")
         if failures > 0 { exit(1) }

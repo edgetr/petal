@@ -658,18 +658,19 @@ final class Previews {
     /// private app's.
     private func captureNotes() {
         guard sampleNotes == nil, Capture.allowed, !capturingNotes else { return }
-        let items = noteItems.prefix(4).filter(\.pictured)
+        let items = noteItems.filter(\.pictured)
         guard !items.isEmpty else { return }
         let taken = Dictionary(items.map { ($0.id, $0.seen) }, uniquingKeysWith: { first, _ in first })
         capturingNotes = true
         Task {
-            let pictures = await Capture.notes(items.map { (id: $0.id, pid: $0.pid, window: $0.window) })
+            let pictures = await Capture.notes(items.map { (id: $0.id, seen: $0.seen) })
             capturingNotes = false
             guard showing == Self.notes else { return }
-            // Kept only if its note still has that very window, and its app wasn't made private meanwhile.
+            // Kept only if it shows the window asked for (any of its app's only for a note on all of an app), its
+            // note still has that very window, and its app wasn't made private meanwhile.
             let now = Dictionary(noteItems.map { ($0.id, $0.seen) }, uniquingKeysWith: { first, _ in first })
-            for (id, image) in pictures {
-                if let seen = taken[id], NotePicture.keeps(taken: seen, now: now[id]) { noteThumbs[id] = image }
+            for (id, picture) in pictures {
+                if let seen = taken[id], NotePicture.accepts(picture.shot, taken: seen, now: now[id]) { noteThumbs[id] = picture.image }
                 else { noteThumbs[id] = nil }
             }
         }

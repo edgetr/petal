@@ -23,8 +23,12 @@ struct NotePreviewItem: Identifiable, Equatable {
     let window: CGWindowID?
     /// Stuck to a window that's still there: it has a picture, and clicking it brings that window forward.
     let attached: Bool
+    /// Stuck to all of its app: its picture may be any of that app's windows.
+    var appWide = false
 
-    var seen: NotePicture.Seen { NotePicture.Seen(app: app, attached: attached, pid: pid, window: window, hidden: hidden) }
+    var seen: NotePicture.Seen {
+        NotePicture.Seen(app: app, attached: attached, pid: pid, window: window, hidden: hidden, appWide: appWide)
+    }
     /// Its picture may show: stuck to a window still there, of an app not kept private.
     var pictured: Bool { NotePicture.shows(seen) }
 }
@@ -51,7 +55,8 @@ extension ClaudePanel {
             let hidden = NotePicture.hidden(app: note.place?.app ?? note.agent.keptPlace?.app, private: assist.neverLook)
             return NotePreviewItem(id: note.id, app: place?.app ?? "", appName: place?.appName ?? "", title: note.agent.title,
                                    line: NoteStatus.line(facts), working: facts.running, needsYou: NoteStatus.needsYou(facts),
-                                   hidden: hidden, pid: place?.pid ?? 0, window: window, attached: place != nil)
+                                   hidden: hidden, pid: place?.pid ?? 0, window: window, attached: place != nil,
+                                   appWide: place?.kind == .app)
         }
     }
 
@@ -72,6 +77,11 @@ extension ClaudePanel {
     /// still waiting for room never starts: what it was to send goes back into the note, unsent.
     func stopFromPreview(_ id: UUID) {
         guard let note = notes.first(where: { $0.id == id }) else { return }
+        stop(note)
+    }
+
+    /// Stop, from the preview or the note's own panel.
+    func stop(_ note: StickyNote) {
         if let unsent = note.agent.withdrawWaiting() {
             note.draft = [unsent, note.draft].filter { !$0.isEmpty }.joined(separator: "\n\n")
             return
@@ -81,17 +91,24 @@ extension ClaudePanel {
 }
 
 extension Capture {
-    /// One picture of each note's window, by its window server number (covered windows too, and windows on another
-    /// Desktop), else its app's first ordinary window. Never a private app's.
-    static func notes(_ targets: [(id: UUID, pid: pid_t, window: CGWindowID?)], height: CGFloat = 150) async -> [UUID: NSImage] {
+    /// One picture of each note's window, by its window server number and process (covered windows too, and windows
+    /// on another Desktop); only a note on all of an app falls back to that app's first ordinary window
+    /// (NotePicture.pick). Each comes with the window it actually shows. Never a private app's.
+    static func notes(_ targets: [(id: UUID, seen: NotePicture.Seen)], height: CGFloat = 150) async
+        -> [UUID: (image: NSImage, shot: NotePicture.Shot)] {
         guard allowed, !targets.isEmpty, let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         else { return [:] }
-        var result: [UUID: NSImage] = [:]
+        let windows = content.windows.compactMap { window in
+            window.owningApplication.map { (shot: NotePicture.Shot(pid: $0.processID, window: window.windowID), window: window) }
+        }
+        let byShot = Dictionary(windows.map { ($0.shot.window, $0.window) }, uniquingKeysWith: { first, _ in first })
+        var result: [UUID: (image: NSImage, shot: NotePicture.Shot)] = [:]
         for target in targets {
-            let byNumber = target.window.flatMap { number in content.windows.first { $0.windowID == number } }
-            guard let match = byNumber ?? content.windows.first(where: {
-                $0.owningApplication?.processID == target.pid && $0.windowLayer == 0 && $0.frame.width > 80 && $0.frame.height > 60
-            }) else { continue }
+            let ordinary = { (shot: NotePicture.Shot) in
+                byShot[shot.window].map { $0.windowLayer == 0 && $0.frame.width > 80 && $0.frame.height > 60 } ?? false
+            }
+            guard let shot = NotePicture.pick(target.seen, from: windows.map(\.shot), ordinary: ordinary),
+                  let match = byShot[shot.window] else { continue }
             let configuration = SCStreamConfiguration()
             let scale = height * 2 / max(1, match.frame.height)
             configuration.width = Int(match.frame.width * scale)
@@ -100,23 +117,35 @@ extension Capture {
             configuration.ignoreShadowsSingleWindow = true
             let filter = SCContentFilter(desktopIndependentWindow: match)
             if let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) {
-                result[target.id] = NSImage(cgImage: image, size: NSSize(width: image.width / 2, height: image.height / 2))
+                result[target.id] = (NSImage(cgImage: image, size: NSSize(width: image.width / 2, height: image.height / 2)), shot)
             }
         }
         return result
     }
 }
 
-/// The notes over the AI button: a tile each, side by side.
+/// The notes over the AI button: a tile each, side by side; more than fit scroll sideways, so every note at work
+/// (and every one waiting for room) keeps its Stop.
 struct NotesPreview: View {
     @Environment(PetalApp.self) private var app
     let done: () -> Void
+    static let tile: CGFloat = 200
+    static let gap: CGFloat = 12
 
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            ForEach(app.previews.noteItems.prefix(4)) { item in
+        let items = app.previews.noteItems
+        let row = HStack(alignment: .top, spacing: Self.gap) {
+            ForEach(items) { item in
                 NoteTile(item: item, image: app.previews.noteThumbs[item.id], done: done)
             }
+        }
+        if NoteStatus.previewScrolls(items.count) {
+            let fits = CGFloat(NoteStatus.tilesInView)
+            ScrollView(.horizontal) { row.padding(.bottom, 10) }
+                .scrollIndicators(.visible)
+                .frame(width: fits * Self.tile + (fits - 1) * Self.gap)
+        } else {
+            row
         }
     }
 }

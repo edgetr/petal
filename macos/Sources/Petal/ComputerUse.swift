@@ -746,9 +746,9 @@ final class ComputerUse {
                         self.sessions[job.caller]?.shown = true
                         self.standGuard()
                         self.agent(job.caller)?.quietly = false
-                        self.show(job, map)
+                        self.show(job, map, since: since)
                     case .background:
-                        self.quietly(job, map)
+                        self.quietly(job, map, since: since)
                     case .wait:
                         guard Date().timeIntervalSince(since) < Background.patience else {
                             job.fail(Self.typingThere(map.appName))
@@ -768,7 +768,7 @@ final class ComputerUse {
     /// In the background: no pointer, nothing brought forward. The window, what's selected in it, what has its
     /// keyboard and the control are checked right before the change, with nothing in between, and a tab's note acts
     /// only while its tab is the one showing.
-    private func quietly(_ job: Job, _ map: Map) {
+    private func quietly(_ job: Job, _ map: Map, since: Date) {
         var job = job
         job.quiet = true
         acting = job
@@ -793,13 +793,23 @@ final class ComputerUse {
                 }
             }
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self.done(job, outcome) }
+                MainActor.assumeIsolated {
+                    // The person came back to that window before anything changed: decided again, by the same
+                    // rules (the pointer and its pause if it's in front now), within the same patience.
+                    guard outcome.again else { return self.done(job, outcome) }
+                    if let error = self.stale(job) { job.fail(error); return self.finished() }
+                    guard Date().timeIntervalSince(since) < Background.patience else {
+                        job.fail(Self.typingThere(map.appName))
+                        return self.finished()
+                    }
+                    self.decide(job, map, since: since)
+                }
             }
         }
     }
 
-    /// With the pointer, where the person sees it.
-    private func show(_ job: Job, _ map: Map) {
+    /// With the pointer, where the person sees it. `since`: when a note's act first decided which way (its patience).
+    private func show(_ job: Job, _ map: Map, since: Date = Date()) {
         let cancel = job.cancel
         // Stop shows at once, before Petal reads the window (a slow app can take a while to answer).
         let near = job.entry.map { CGPoint(x: $0.node.frame.midX, y: $0.node.frame.midY) }
@@ -840,7 +850,7 @@ final class ComputerUse {
                                             MainActor.assumeIsolated {
                                                 self.cursor.rest()
                                                 if let error = self.stale(job) { job.fail(error); return self.finished() }
-                                                self.quietly(job, map)
+                                                self.quietly(job, map, since: since)
                                             }
                                         }
                                     } else if again == .refuse {
@@ -1438,6 +1448,9 @@ enum Acting {
         var copied: CopyMark?
         /// In the background, it can't be done without the window in front: nothing was done.
         var needs: Background.Reason?
+        /// In the background, the person came back to the note's window before anything changed: nothing was done,
+        /// and it's decided again (Background.behind).
+        var again = false
     }
 
     /// Stop, seen at once from any thread. A job's is under its turn's: stopping the turn stops every job in it.
@@ -1812,8 +1825,9 @@ enum Acting {
             let clip = UIMap.clip(control: fresh) ?? entry.flatMap({ UIMap.clip(control: $0.node) })
             if let clip {
                 if behind() { outcome.needs = .clipboard; return outcome }
-                if let error = bringWindow(map, cancel: cancel) {
+                if let error = bringWindow(map, cancel: cancel, stayBehind: stayBehind) {
                     if cancel.stopped { return outcome }
+                    if stayBehind { outcome.needs = .clipboard; return outcome }
                     outcome.error = error
                     break
                 }
@@ -1889,13 +1903,22 @@ enum Acting {
             // Keys (the text, or Return) go wherever the keyboard is: only once it's this field, never a password field.
             var submit = options.submit
             if !typed || submit {
+                let unsent = "It was typed, not sent: \(map.appName)'s window went behind before Return, and Petal doesn't bring it forward for a note. Press its send button with petal_act instead."
                 if behind() {
                     guard typed else { outcome.needs = .keys; return outcome }
-                    say("It was typed, not sent: \(map.appName)'s window went behind before Return, and Petal doesn't bring it forward for a note. Press its send button with petal_act instead.")
+                    say(unsent)
                     submit = false
                 } else if !isFront(pid) {
-                    guard bringForward(pid, cancel: cancel) else { return outcome }
-                    say(cameForward)
+                    if bringForward(pid, cancel: cancel, stayBehind: stayBehind) {
+                        if !stayBehind { say(cameForward) }
+                    } else if cancel.stopped || !stayBehind {
+                        return outcome
+                    } else {
+                        // A note's window went behind between the reads: bringForward refused, nothing came forward.
+                        guard typed else { outcome.needs = .keys; return outcome }
+                        say(unsent)
+                        submit = false
+                    }
                 }
             }
             if !typed || submit {
@@ -1948,8 +1971,9 @@ enum Acting {
             guard let item = prepared.menuItem else { break }
             // A menu command acts on its app's front window: that must be the one petal_ui looked at.
             if behind() { outcome.needs = .menu; return outcome }
-            if let error = bringWindow(map, cancel: cancel) {
+            if let error = bringWindow(map, cancel: cancel, stayBehind: stayBehind) {
                 if cancel.stopped { return outcome }
+                if stayBehind { outcome.needs = .menu; return outcome }
                 outcome.error = error
                 break
             }
@@ -1967,8 +1991,9 @@ enum Acting {
         case "key":
             guard let key = options.key else { break }
             if behind() { outcome.needs = .keys; return outcome }
-            if let error = bringWindow(map, cancel: cancel) {
+            if let error = bringWindow(map, cancel: cancel, stayBehind: stayBehind) {
                 if cancel.stopped { return outcome }
+                if stayBehind { outcome.needs = .keys; return outcome }
                 outcome.error = error
                 break
             }
@@ -1996,7 +2021,10 @@ enum Acting {
             }
             if behind() { outcome.needs = .keys; return outcome }
             if !isFront(pid) {
-                guard bringForward(pid, cancel: cancel) else { return outcome }
+                guard bringForward(pid, cancel: cancel, stayBehind: stayBehind) else {
+                    if !cancel.stopped, stayBehind { outcome.needs = .keys }
+                    return outcome
+                }
                 say(cameForward)
             }
             // Right before the key: still that control (or still that window, and no password field), or it isn't sent.
@@ -2145,8 +2173,12 @@ enum Acting {
     }
 
     /// Brings the window petal_ui looked at to the front of its app if it isn't (the pointer stays), and checks
-    /// again: nil once it's there, else why not.
-    static func bringWindow(_ map: ComputerUse.Map, cancel: Cancel) -> String? {
+    /// again: nil once it's there, else why not. `stayBehind` (a sticky note's act): never raises anything; nil only
+    /// while its app is in front with that window its focused one, else it refuses with nothing done.
+    static func bringWindow(_ map: ComputerUse.Map, cancel: Cancel, stayBehind: Bool = false) -> String? {
+        if stayBehind {
+            return isFront(map.pid) && windowInFront(map) ? nil : Background.Reason.menu.words(map.appName)
+        }
         if windowInFront(map) { return nil }
         guard !cancel.stopped else { return ComputerUse.stoppedText }
         AXUIElementPerformAction(map.window, kAXRaiseAction as CFString)
@@ -2249,9 +2281,11 @@ enum Acting {
     }
 
     /// Keys only reach the app in front: this one comes forward first (through Accessibility; the pointer stays).
-    /// False, and nothing done, once stopped.
-    static func bringForward(_ pid: pid_t, cancel: Cancel) -> Bool {
+    /// False, and nothing done, once stopped. `stayBehind` (a sticky note's act): never activates anything; true
+    /// only while the app is already in front, else false with nothing done.
+    static func bringForward(_ pid: pid_t, cancel: Cancel, stayBehind: Bool = false) -> Bool {
         guard !cancel.stopped else { return false }
+        if stayBehind { return isFront(pid) }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.5)
         AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
