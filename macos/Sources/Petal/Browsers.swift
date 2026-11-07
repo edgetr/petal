@@ -243,6 +243,67 @@ final class Browsers {
         }
     }
 
+    /// The tab one of the browser's windows (`window`, a sticky note's) shows now, or nil when Petal can't tell: the
+    /// window found by the window server's number (Safari's window id is it), else by the same frame and title; none,
+    /// or two alike, is no tab rather than another window's. Firefox and Zen through Accessibility. Off the main thread.
+    nonisolated static func shownTab(pid: pid_t, bundleID: String, window: Window) -> NoteTab? {
+        let kind = kind(bundleID)
+        if kind == .gecko { return geckoTab(pid: pid, window: window.number) }
+        guard let kind, access(bundleID) == .allowed else { return nil }
+        let chromium = kind == .chromium
+        // Fields apart by character 31, windows by character 30: titles may hold tabs and line breaks.
+        guard let listing = run("""
+            set out to ""
+            set sep to character id 31
+            set nl to character id 30
+            tell application id "\(bundleID)"
+            repeat with w in windows
+            try
+            set b to bounds of w
+            set t to \(chromium ? "active tab" : "current tab") of w
+            set u to ""
+            set n to ""
+            try
+            set u to URL of t
+            end try
+            if u is missing value then set u to ""
+            try
+            set n to \(chromium ? "title" : "name") of t
+            end try
+            if n is missing value then set n to ""
+            set k to 0
+            if u is not "" then
+            try
+            set k to count of (tabs of w whose URL is u)
+            end try
+            end if
+            set out to out & (id of w) & sep & (name of w) & sep & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b) & sep & \(chromium ? "((id of t) as text)" : "\"\"") & sep & \(chromium ? "((active tab index of w) as text)" : "((index of t) as text)") & sep & ((count of tabs of w) as text) & sep & (k as text) & sep & u & sep & n & nl
+            end try
+            end repeat
+            end tell
+            return out
+            """) else { return nil }
+        struct Row { let id: UInt32?; let name: String; let frame: CGRect; let tab: NoteTab }
+        let rows: [Row] = listing.components(separatedBy: "\u{1E}").compactMap { line in
+            let parts = line.components(separatedBy: "\u{1F}")
+            guard parts.count >= 9 else { return nil }
+            let b = parts[2].split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+            guard b.count == 4 else { return nil }
+            let tab = NoteTab(id: parts[3].isEmpty ? nil : parts[3], index: Int(parts[4]), count: Int(parts[5]), twins: twins(parts[6]),
+                              url: parts[7], title: parts[8...].joined(separator: "\u{1F}"))
+            return Row(id: UInt32(parts[0]), name: parts[1], frame: CGRect(x: b[0], y: b[1], width: b[2] - b[0], height: b[3] - b[1]), tab: tab)
+        }
+        if kind == .safari, let number = window.number {
+            let same = rows.filter { $0.id == number }
+            return same.count == 1 ? same[0].tab : nil
+        }
+        let title = window.title
+        let matches = rows.filter { row in
+            NoteRules.sameFrame(row.frame, window.frame) && !row.name.isEmpty && (row.name == title || title.hasPrefix(row.name))
+        }
+        return matches.count == 1 ? matches[0].tab : nil
+    }
+
     /// How many tabs share the address, as a script counted them: nil when it couldn't (0).
     nonisolated private static func twins(_ field: String) -> Int? {
         Int(field).flatMap { $0 > 0 ? $0 : nil }
@@ -368,12 +429,20 @@ final class Browsers {
     /// Firefox's and Zen's front window: the selected tab in its tab strip (its place, how many, its title) and the
     /// address field, through Accessibility. Best effort: what each version shows differs, and a tab's place only
     /// counts within its window.
-    nonisolated static func geckoTab(pid: pid_t) -> NoteTab? {
+    /// `wanted`: one of its windows instead (by the window server's number), none if it isn't there.
+    nonisolated static func geckoTab(pid: pid_t, window wanted: CGWindowID? = nil) -> NoteTab? {
         guard Windows.trusted else { return nil }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.3)
         AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
-        guard let window: AXUIElement = Windows.value(app, kAXFocusedWindowAttribute) else { return nil }
+        let found: AXUIElement?
+        if let wanted {
+            let all: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
+            found = all.first { Windows.id(of: $0) == wanted }
+        } else {
+            found = Windows.value(app, kAXFocusedWindowAttribute)
+        }
+        guard let window = found else { return nil }
         let windowTitle: String = Windows.value(window, kAXTitleAttribute) ?? ""
         var address: String?
         var strip: (index: Int, count: Int, twins: Int, title: String)?

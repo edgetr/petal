@@ -47,6 +47,9 @@ final class ComputerUse {
         let entries: [String: Entry]
         let count: Int
         let made: Date
+        /// A note stuck to one tab: where, with the tab as seen showing when it was read. Every act checks that tab
+        /// is still the one its window shows, never acting on another.
+        var tabPlace: NotePlace? = nil
     }
 
     /// One chat's reply (its turn; one task of an AI session outside Petal): the apps it may use, whether the person
@@ -163,14 +166,31 @@ final class ComputerUse {
         let pid = target.processIdentifier
         let wanted = place?.lookWindow
         let find = args["find"] as? String ?? ""
+        // A note stuck to one tab reads its window only while that tab is the one showing, checked before and after.
+        let tabPlace = place.flatMap { $0.kind == .tab && $0.tab != nil ? $0 : nil }
+        let previous = tabPlace.flatMap { app.claude.lastTab($0) }
         Self.readQueue.async {
+            if let tabPlace, ClaudePanel.tabShowing(tabPlace, previous: previous) == nil {
+                return DispatchQueue.main.async { fail(ClaudePanel.tabNotShowing) }
+            }
             let reading = Reader.read(pid: pid, window: wanted, budget: 1.5)
+            let seen = tabPlace.flatMap { ClaudePanel.tabShowing($0, previous: previous) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Turned off, or the app made private, while it read: nothing it read goes back.
                     if let refusal = self.refusal(for: bundle, name: name) { return fail(refusal) }
                     if reading.gone { return fail("This note's window is closed (it was in \(name)). front: true uses what's in front now.") }
                     guard let window = reading.window else { return fail("\(name) has no window open.") }
+                    // Another tab came forward while it read (or Petal can't tell any more): nothing it read goes back.
+                    var stuckTab: NotePlace?
+                    if let tabPlace {
+                        guard let seen, seen.window == reading.windowID else { return fail(ClaudePanel.tabNotShowing) }
+                        self.app.claude.tabSeen(note: caller, was: tabPlace, tab: seen.tab, window: seen.window)
+                        var now = tabPlace
+                        if let tab = now.tab { now.tab = NoteRules.follow(tab, to: seen.tab, keepWords: true) }
+                        now.window = seen.window
+                        stuckTab = now
+                    }
                     let picked = UIMap.select(reading.nodes, window: reading.windowFrame, find: find)
                     var entries: [String: Entry] = [:]
                     var list: [[String: Any]] = []
@@ -188,7 +208,7 @@ final class ComputerUse {
                     }
                     self.maps[caller] = Map(pid: pid, bundle: bundle, appName: name, window: window, windowID: reading.windowID,
                                             windowFrame: reading.windowFrame, lists: reading.lists, fingerprint: reading.fingerprint,
-                                            entries: entries, count: entries.count, made: Date())
+                                            entries: entries, count: entries.count, made: Date(), tabPlace: stuckTab)
                     self.keepSweeping()
                     var result: [String: Any] = ["app": name, "window": reading.title, "elements": list,
                                                  "note": "Act with petal_act by id. These ids last until the next petal_ui, or 5 minutes; call petal_ui again once the window changes."]
@@ -435,6 +455,12 @@ final class ComputerUse {
             ?? CGPoint(x: map.windowFrame.midX, y: map.windowFrame.minY + 14)
         cursor.preparing(job.caption, near: Self.screenPoint(near))
         Self.actQueue.async {
+            // A tab note's tab must still be the one its window shows.
+            if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace, previous: tabPlace.tab) == nil {
+                return DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self.cursor.rest(); job.fail(ClaudePanel.tabNotShowing); self.finished() }
+                }
+            }
             let prepared = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -446,17 +472,21 @@ final class ComputerUse {
                         Self.actQueue.async {
                             var outcome = Acting.Outcome()
                             if !cancel.stopped {
-                                // Right before the change: the window, what's selected in it, what has the keyboard
-                                // and the control, again.
-                                let checked = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options, known: prepared)
-                                if let error = checked.error {
-                                    outcome.error = error
-                                } else if !cancel.stopped {
-                                    if ["press", "menu"].contains(job.action) || (job.action == "key" && checked.menuItem != nil) {
-                                        DispatchQueue.main.async { MainActor.assumeIsolated { self.cursor.press() } }
+                                // Right before the change: a tab note's tab still showing, then the window (its title
+                                // is the tab's), what's selected in it, what has the keyboard and the control, again.
+                                if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace, previous: tabPlace.tab) == nil {
+                                    outcome.error = ClaudePanel.tabNotShowing
+                                } else {
+                                    let checked = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options, known: prepared)
+                                    if let error = checked.error {
+                                        outcome.error = error
+                                    } else if !cancel.stopped {
+                                        if ["press", "menu"].contains(job.action) || (job.action == "key" && checked.menuItem != nil) {
+                                            DispatchQueue.main.async { MainActor.assumeIsolated { self.cursor.press() } }
+                                        }
+                                        outcome = Acting.perform(job.action, entry: job.entry, map: map, prepared: checked,
+                                                                 options: job.options, cancel: cancel)
                                     }
-                                    outcome = Acting.perform(job.action, entry: job.entry, map: map, prepared: checked,
-                                                             options: job.options, cancel: cancel)
                                 }
                             }
                             DispatchQueue.main.async {

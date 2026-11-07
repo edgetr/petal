@@ -119,6 +119,14 @@ struct NotePlace: Codable, Equatable, Sendable {
     }
 }
 
+/// A note here (`live`) or a chat kept from before Petal (or the browser) last started, as it may fit what's in
+/// front: where it's stuck and its chat.
+struct NoteCandidate: Sendable {
+    var place: NotePlace
+    var chat: UUID?
+    var live: Bool
+}
+
 /// What's in front, as notes see it: the app, its focused window, and the browser's active tab (nil when it isn't
 /// a browser, Petal may not ask it, or it's kept private).
 struct FrontPlace: Equatable, Sendable {
@@ -217,9 +225,29 @@ enum NoteRules {
         return fit.filter { !weak.contains($0) || kept.contains($0) }
     }
 
+    /// Of the notes here and the chats kept from before together, the ones that belong on what's in front (their
+    /// indices in `candidates`), told apart together (`fitting`): a note here and a kept chat that fit the same tab
+    /// only by a guess are neither taken. A chat is one note: a kept copy of a chat a note here holds is that note.
+    static func fitting(_ candidates: [NoteCandidate], _ front: FrontPlace, previous: NoteTab? = nil) -> [Int] {
+        let kept = unique(candidates)
+        return fitting(kept.map { candidates[$0].place }, front, previous: previous).map { kept[$0] }
+    }
+
+    /// One candidate per chat (their indices, in order): a note here over a kept copy of its chat, else the first.
+    static func unique(_ candidates: [NoteCandidate]) -> [Int] {
+        let held = Set(candidates.filter(\.live).compactMap(\.chat))
+        var seen = Set<UUID>()
+        return candidates.indices.filter { i in
+            guard let chat = candidates[i].chat else { return true }
+            if !candidates[i].live, held.contains(chat) { return false }
+            return seen.insert(chat).inserted
+        }
+    }
+
     /// Which of a window's tabs (`urls`, in order) to show for a note's tab, when the browser knows tabs only by
     /// place and address (Safari): the one tab with its address; of several, the one in its place; with none, its
-    /// place only when the window still has as many tabs. `missing`: no tab there could be it.
+    /// place only when the window still has as many tabs and that tab is on its page (only its #fragment changed).
+    /// `missing`: no tab there could be it.
     enum TabChoice: Equatable { case at(Int), missing, unsure }
 
     static func choose(_ tab: NoteTab, urls: [String]) -> TabChoice {
@@ -231,8 +259,9 @@ enum NoteRules {
             return .at(index)
         }
         if let index = tab.index, let count = tab.count, count == urls.count, urls.indices.contains(index - 1) {
-            // Gone to another address in its place (nothing opened or closed around it): it's the tab there.
-            return .at(index)
+            // Only its #fragment changed, in its place among as many tabs: it's the tab there. Another address there
+            // may be it gone elsewhere, or another tab (it closed and one opened): no guess.
+            return samePage(urls[index - 1], tab.url) ? .at(index) : .unsure
         }
         // No address kept (a private app's): nothing to say it's gone.
         return tab.url.isEmpty ? .unsure : .missing

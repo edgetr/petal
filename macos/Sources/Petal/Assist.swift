@@ -247,7 +247,13 @@ final class Assist {
         addClipboard()
         let pid = front.processIdentifier
         let shot = args["screenshot"] as? String ?? ((args["screenshot"] as? Bool) == true ? "window" : "")
+        // A note stuck to one tab looks only while that tab is the one its window shows: never at another tab.
+        let tabPlace = place.flatMap { $0.kind == .tab && $0.tab != nil ? $0 : nil }
+        let previous = tabPlace.flatMap { app.claude.lastTab($0) }
         Self.queue.async {
+            if let tabPlace, ClaudePanel.tabShowing(tabPlace, previous: previous) == nil {
+                return DispatchQueue.main.async { send(["note": ClaudePanel.tabNotShowing]) }
+            }
             let element = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(element, 0.3)
             var window: AXUIElement? = Windows.value(element, kAXFocusedWindowAttribute)

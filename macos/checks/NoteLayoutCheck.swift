@@ -136,6 +136,26 @@ struct NoteLayoutCheck {
         expect(NoteRules.fitting([place(.window), place(.app), twinA, twinB], survivor) == [0, 1],
                "window and app notes are never held back by tabs alike")
 
+        // MARK: Notes here and chats kept from before, together
+
+        let chatA = UUID(), chatB = UUID()
+        let liveA = NoteCandidate(place: twinA, chat: chatA, live: true)
+        let keptB = NoteCandidate(place: twinB, chat: chatB, live: false)
+        // Live A and kept B were twins on one page; B's twin closed: only A's place is left with the address.
+        expect(NoteRules.fitting([liveA, keptB], survivor).isEmpty,
+               "a note here isn't moved onto a tab a kept chat fits as well (union, not the live notes alone)")
+        expect(NoteRules.fitting([liveA], survivor) == [0], "with no kept chat alike, the note here follows its tab")
+        // The same chat as a note here and its kept copy (picked from the list after a restart): one candidate.
+        let keptA = NoteCandidate(place: twinA, chat: chatA, live: false)
+        expect(NoteRules.unique([keptA, liveA]) == [1], "a kept copy of a chat a note here holds is that note")
+        expect(NoteRules.fitting([liveA, keptA], survivor) == [0], "so the chat's two copies never make its tab unsure")
+        expect(NoteRules.fitting([keptA, liveA], survivor) == [1], "whichever order they're gathered in")
+        expect(NoteRules.unique([keptA, keptA, NoteCandidate(place: twinB, chat: nil, live: true)]) == [0, 2],
+               "two kept copies of one chat are one; a note with no chat is its own")
+        let keptAlone = NoteCandidate(place: twinA, chat: chatA, live: false)
+        expect(NoteRules.fitting([keptAlone, NoteCandidate(place: place(.window), chat: chatB, live: true)], survivor) == [0, 1],
+               "a kept chat and a window's note both fit")
+
         // MARK: Showing a Safari tab (by address and place)
 
         let urls = ["https://a.com", "https://apple.com/mac", "https://b.com", "https://apple.com/mac/"]
@@ -146,8 +166,12 @@ struct NoteLayoutCheck {
                "its place no longer has its address: no guess between the two")
         expect(NoteRules.choose(NoteTab(index: 9, count: 9, twins: 1, url: "https://b.com", title: ""), urls: urls) == .at(3),
                "the only tab with its address, wherever it is now")
-        expect(NoteRules.choose(NoteTab(index: 3, count: 4, url: "https://gone.com", title: ""), urls: urls) == .at(3),
-               "gone to another address in its place among as many tabs")
+        expect(NoteRules.choose(NoteTab(index: 3, count: 4, url: "https://gone.com", title: ""), urls: urls) == .unsure,
+               "its address nowhere, another in its place among as many tabs: gone elsewhere, or closed and another opened: no guess")
+        expect(NoteRules.choose(NoteTab(index: 3, count: 4, url: "https://b.com/#top", title: ""), urls: ["https://a.com", "https://x.com", "https://b.com/#end", "https://y.com"]) == .at(3),
+               "only its #fragment changed, in its place among as many tabs: its tab")
+        expect(NoteRules.choose(NoteTab(index: 2, count: 3, url: "https://closed.com", title: ""), urls: ["https://a.com", "https://new.com", "https://c.com"]) == .unsure,
+               "its tab closed and a new one opened, as many tabs again: never the new one by its place")
         expect(NoteRules.choose(NoteTab(index: 3, count: 5, url: "https://gone.com", title: ""), urls: urls) == .missing,
                "its address nowhere and the tabs around it changed: its tab closed")
         expect(NoteRules.choose(NoteTab(index: 3, count: 5, url: "", title: ""), urls: urls) == .unsure, "no address kept: never called closed")
