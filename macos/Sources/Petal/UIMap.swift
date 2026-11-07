@@ -182,6 +182,21 @@ enum UIMap {
         (isText(node) || isSecure(node)) && looksSecret(node)
     }
 
+    /// petal_look tells nothing of what's selected in a field holding a secret: a password field, one named for a
+    /// password, key, card number or security code, or one Petal filled with a secret (`filled`). Not even what
+    /// isn't a secret by itself: a card number selected four digits at a time would be told whole over four looks.
+    static func selectionHidden(in node: UINode, filled: Bool) -> Bool {
+        filled || isSecure(node) || looksSecretField(node)
+    }
+
+    /// A control read for petal_ui holds a secret, so Copy and Cut stay away from its window: a password field, a
+    /// field one types into named for a secret, or any of its text holding a vault secret (`secret`, given the text
+    /// as read, before it's redacted). A heading or label named "Card number" isn't one by its name alone.
+    static func holdsSecret(_ node: UINode, secret: (String) -> Bool) -> Bool {
+        isSecure(node) || looksSecretField(node)
+            || [node.title, node.label, node.help, node.placeholder, node.value].contains { !$0.isEmpty && $0 != hidden && secret($0) }
+    }
+
     /// What to black out of a picture taken between two reads of a window (`before`, `after`: where each part that
     /// may show a secret was, by an id for the element, the same id in both for the same element), so wherever it
     /// was while the picture was taken, it's covered: the bounding box of where it was in each, which takes in the
@@ -793,27 +808,36 @@ enum UIMap {
     }
 
     /// The text of a control's that counts as its piece: its value when it's told (never a password field's), else
-    /// its title, else its description.
+    /// its title, else its description; one already hidden is passed over.
     static func pieceText(_ node: UINode) -> WritableKeyPath<UINode, String>? {
-        if valueRoles.contains(node.role), !isSecure(node), !node.value.isEmpty { return \.value }
-        if !node.title.isEmpty { return \.title }
-        if !node.label.isEmpty { return \.label }
+        if valueRoles.contains(node.role), !isSecure(node), !node.value.isEmpty, node.value != hidden { return \.value }
+        if !node.title.isEmpty, node.title != hidden { return \.title }
+        if !node.label.isEmpty, node.label != hidden { return \.label }
         return nil
+    }
+
+    /// Every text of a control's that goes out (its value, title, description, help and placeholder, and so its
+    /// name), hidden.
+    static func hideAll(_ node: inout UINode) {
+        for path in [\UINode.value, \.title, \.label, \.help, \.placeholder] where !node[keyPath: path].isEmpty {
+            node[keyPath: path] = hidden
+        }
     }
 
     /// `nodes` (every control read, by `order`, already redacted one by one) with a secret only several show
     /// together (a card number as four fields of four digits) hidden in every piece of it, as `joinedSecrets` finds
     /// them: neighbours within a parent, or on one line. When the pieces can't be checked whole (too many, or `going`
-    /// says time's up), every short piece with a digit in it is hidden instead. `hid`: something was.
+    /// says time's up), every short piece with a digit in it is hidden instead. A control hidden this way has every
+    /// text of its hidden (`hideAll`), not only its piece: the digits may be in its title as well as its value.
+    /// A control with a text already hidden still counts by what else it shows. `hid`: something was.
     static func hideJoined(_ nodes: [UINode], matches: (String) -> Bool, going: () -> Bool = { true }) -> (nodes: [UINode], hid: Bool) {
         var out = nodes
         var pieces: [TextPiece] = []
-        var owners: [(node: Int, path: WritableKeyPath<UINode, String>)] = []
+        var owners: [Int] = []
         for (index, node) in nodes.enumerated() {
-            guard !isSecure(node), ![node.title, node.label, node.help, node.placeholder, node.value].contains(hidden),
-                  let path = pieceText(node) else { continue }
+            guard !isSecure(node), let path = pieceText(node) else { continue }
             pieces.append(TextPiece(text: node[keyPath: path], parent: node.parent, order: node.sibling, frame: node.frame))
-            owners.append((index, path))
+            owners.append(index)
         }
         let found: Set<Int>
         if let joined = joinedSecrets(pieces, matches: matches, going: going) {
@@ -821,7 +845,7 @@ enum UIMap {
         } else {
             found = Set(pieces.indices.filter { pieces[$0].text.count <= joinLength && pieces[$0].text.contains(where: \.isNumber) })
         }
-        for piece in found { out[owners[piece].node][keyPath: owners[piece].path] = hidden }
+        for piece in found { hideAll(&out[owners[piece]]) }
         return (out, !found.isEmpty)
     }
 

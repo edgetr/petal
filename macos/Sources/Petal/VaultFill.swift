@@ -84,13 +84,25 @@ enum VaultFiller {
             if attempt < 3 { usleep(70_000) }
         }
         guard there else { return "Couldn't put the cursor in that field through Accessibility. Ask the person to click into it, then try again." }
+        // Focusing may have moved the page on (its own code going to another address): read again before any key.
+        if let why = stillOnPage(plan, element: element, map: map, cancel: cancel, typed: false) { return why }
         // Over what's there already, only once the keyboard is in this field.
         if let all = UIMap.parseKey("cmd-a") {
             guard keysGo(to: element, pid: pid), Acting.post(all, to: pid, cancel: cancel) else {
                 return cancel.stopped ? ComputerUse.stoppedText : "The cursor left the field; nothing was filled."
             }
         }
-        guard Acting.type(text, to: pid, cancel: cancel, still: { keysGo(to: element, pid: pid) }) else {
+        // And before each batch of keys.
+        var moved: String?
+        var typed = false
+        let still = {
+            guard keysGo(to: element, pid: pid) else { return false }
+            moved = stillOnPage(plan, element: element, map: map, cancel: cancel, typed: typed)
+            typed = true
+            return moved == nil
+        }
+        guard Acting.type(text, to: pid, cancel: cancel, still: still) else {
+            if let moved { return moved }
             return cancel.stopped ? ComputerUse.stoppedText : "The cursor left the field while Petal was filling it, so it stopped there. Call petal_ui to see the page."
         }
         // A card number or code a field cut short (a 16-character field given more) isn't a fill: counted here,
@@ -108,6 +120,23 @@ enum VaultFiller {
             guard Acting.post(enter, to: pid, cancel: cancel) else { return ComputerUse.stoppedText }
         }
         return nil
+    }
+
+    /// Why `element`'s page, read live as the check before filling reads it, isn't the one Petal decided on any more
+    /// (another site, or for payment info another page of the shop: the checkout Buy was said on), or nil. A page's
+    /// own code can move it on once the field is focused. A payment fill's Buy ends there: nothing more of the card
+    /// goes in, on that page or after. `typed`: some of it went in already.
+    static func stillOnPage(_ plan: VaultFillPlan, element: AXUIElement, map: ComputerUse.Map, cancel: Acting.Cancel, typed: Bool) -> String? {
+        guard plan.place.web || plan.place.unverified else { return nil }
+        let card: Set<VaultField> = [.number, .securityCode, .expiry, .month, .year]
+        let now = VaultReader.place(of: element, pid: map.pid, bundle: map.bundle, appName: map.appName)
+        guard Vault.moved(from: plan.place, to: now, samePage: plan.payment || card.contains(plan.field)) != nil else { return nil }
+        let host = now.host ?? now.claimedURL.flatMap(VaultSite.host) ?? "another page"
+        let stopped = typed ? "Petal stopped partway; what went in may need clearing." : "Nothing was filled."
+        guard plan.payment else { return "The page moved on to \(host) while Petal was filling. \(stopped) Call petal_ui again." }
+        cancel.endBuy()
+        return "The page moved on to \(host) while Petal was filling payment info. \(stopped) The Buy is over: "
+            + "don't try another way; if the person still wants it, fill again on the checkout page and Petal asks them again."
     }
 
     /// The app's keyboard is in `element` (or inside it), a password field or not.

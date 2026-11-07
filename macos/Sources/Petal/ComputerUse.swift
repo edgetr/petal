@@ -895,9 +895,19 @@ enum Reader {
             let meaning = UIMap.meaning(role: role, subrole: node.subrole, title: node.title, label: node.label,
                                         value: !toggle ? "" : UIMap.valueRoles.contains(role) ? node.value
                                             : text(Windows.value(element, kAXValueAttribute) as CFTypeRef?))
-            node = UIMap.redact(node) { vault.matches($0) }
-            if UIMap.isSecure(node) || UIMap.looksSecret(node)
-                || [node.title, node.label, node.help, node.placeholder, node.value].contains(UIMap.hidden) {
+            // Each text matched against the vault once, for both what's told and whether Copy may go.
+            var matched: [String: Bool] = [:]
+            let secret = { (text: String) -> Bool in
+                if let known = matched[text] { return known }
+                let found = vault.matches(text)
+                matched[text] = found
+                return found
+            }
+            // Named for a secret counts only for a field one types into: a heading "Card number" doesn't keep Copy
+            // away from the page (what it shows is still matched against the vault).
+            let holds = UIMap.holdsSecret(node, secret: secret)
+            node = UIMap.redact(node, secret: secret)
+            if holds {
                 reading.holdsSecret = true
             } else if deep, !UIMap.valueRoles.contains(role), vault.matches(text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)) {
                 reading.holdsSecret = true
@@ -1146,6 +1156,8 @@ enum Acting {
         /// The Buy this fill was made under is over.
         var buyEnded: Bool { (buy?.revoked ?? false) || (parent?.buyEnded ?? false) }
         func stop() { lock.lock(); flag = true; lock.unlock() }
+        /// Ends the Buy this fill was made under, for good: its page moved on while it filled.
+        func endBuy() { buy?.revoke() }
     }
 
     static let buyEndedText = "The Buy is over (the tab moved on, the window closed, or the reply ended): no more payment info was filled. Don't try another way; if the person still wants it, fill again on the checkout page and Petal asks them again."

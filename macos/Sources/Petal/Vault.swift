@@ -1250,15 +1250,17 @@ enum Vault {
         var conflicts: [VaultItem] = []
         /// In Petal's own export but older than what's saved: kept as they are.
         var older = 0
+        /// Saved logins the import added sites or apps to (the same login, also kept for somewhere else).
+        var widened = 0
     }
 
     /// An import against what's saved. Something already there changes nothing unless it differs. Matched by its id
     /// (Petal's own export, which keeps ids and dates): a newer entry is the whole item again (every field, its
     /// title, sites and apps), restored as it was backed up. Matched by what it holds (the same site and username,
-    /// card number, …): a login takes only the import's password (and its notes where none are saved, or Petal's newer
-    /// ones; another app's other title or notes are offered as a conflict, never dropped); anything else takes the
-    /// import's fields. Either way a secret (a password, security code or key) is
-    /// replaced only when Petal's own export says it's newer: from any other export, a different secret is a
+    /// card number, …): a login takes only the import's password, the sites and apps the saved one doesn't have yet
+    /// (and its notes where none are saved, or Petal's newer ones; another app's other title or notes are offered as a
+    /// conflict, never dropped); anything else takes the import's fields. Either way a secret (a password, security
+    /// code or key) is replaced only when Petal's own export says it's newer: from any other export, a different secret is a
     /// conflict, kept as it is and said. Petal's export older than what's saved changes nothing. An entry repeated
     /// with the same id (Petal's export) lands on one item, the later winning.
     /// Matching is one to one, whatever the export: each entry is the saved item with its id, else one alike that no
@@ -1314,6 +1316,8 @@ enum Vault {
                 // Another app's login whose title or notes differ from what's kept: the import's as well, offered as
                 // a conflict, so its details are never dropped without a word.
                 var detailed: VaultItem?
+                // A login the import only adds sites or apps to: said as such, not as something newer.
+                var onlyPlaces = false
                 if byID {
                     // Petal's own backup of this very item: all of it, as backed up.
                     next = item
@@ -1321,6 +1325,9 @@ enum Vault {
                     if !item[.password].isEmpty { next[.password] = item[.password] }
                     let newer = petal && item.updated > saved.updated
                     if next[.notes].isEmpty || (newer && !item[.notes].isEmpty) { next[.notes] = item[.notes] }
+                    let before = next
+                    next = withPlaces(next, from: item)
+                    onlyPlaces = identical(before, saved) && !identical(next, saved)
                     if !petal { detailed = withDetails(next, from: item) }
                 } else {
                     next.fields = saved.fields.merging(item.fields) { _, new in new }
@@ -1351,8 +1358,9 @@ enum Vault {
                 // A later entry with the same id that's taken wins over its earlier conflict.
                 result.conflicts.removeAll { $0.id == next.id }
                 if !identical(next, saved) {
+                    if saved.kind == .login, !byID, !identical(withPlaces(saved, from: item), saved) { result.widened += 1 }
                     current[index] = next
-                    if !result.updated.contains(next.title) { result.updated.append(next.title) }
+                    if !onlyPlaces, !result.updated.contains(next.title) { result.updated.append(next.title) }
                     if let at = touched[next.id] { result.save[at] = next } else { touched[next.id] = result.save.count; result.save.append(next) }
                 }
                 if var detailed {
@@ -1369,6 +1377,16 @@ enum Vault {
             }
         }
         return result
+    }
+
+    /// `saved` with the sites and apps `item` has that it doesn't (a site compared without its scheme or "www.", an
+    /// app case aside). An app added this way has no signer saved, so it asks before it fills there.
+    static func withPlaces(_ saved: VaultItem, from item: VaultItem) -> VaultItem {
+        var out = saved
+        var sites = Set(saved.sites.map(VaultSite.plain)), apps = Set(saved.apps.map { $0.lowercased() })
+        for site in item.sites where sites.insert(VaultSite.plain(site)).inserted { out.sites.append(site) }
+        for app in item.apps where apps.insert(app.lowercased()).inserted { out.apps.append(app) }
+        return out
     }
 
     /// `merged` with `item`'s title and notes where `item` has them, or nil when that changes nothing.

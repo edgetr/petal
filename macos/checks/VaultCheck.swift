@@ -31,6 +31,7 @@ struct VaultCheck {
         decisions()
         picking()
         redaction()
+        selections()
         records()
         places()
         checkouts()
@@ -251,6 +252,29 @@ struct VaultCheck {
         expect(merged.added == 0 && merged.same == 1 && merged.updated.isEmpty && merged.save.isEmpty, "merge: one different password kept, one the same")
         expect(merged.conflicts.count == 1 && merged.conflicts[0].id == saved.id && merged.conflicts[0][.password] == "pa55-word"
                && merged.conflicts[0].username == "ADA", "the conflict offers the import's password on the saved login's id")
+        // The same login with another site too: the site is added to the saved one, not dropped as already here.
+        var wider = saved
+        wider.id = "imported"
+        wider.sites = ["github.com", "gist.github.com"]
+        wider.apps = ["com.github.GitHubClient"]
+        let widened = Vault.merge(existing: [saved], incoming: [wider])
+        expect(widened.same == 0 && widened.widened == 1 && widened.updated.isEmpty && widened.conflicts.isEmpty
+               && widened.save.count == 1 && widened.save[0].id == saved.id
+               && widened.save[0].sites == ["github.com", "gist.github.com"] && widened.save[0].apps == ["com.github.GitHubClient"]
+               && widened.save[0].appSigners.isEmpty, "an imported login's extra site and app are added to the saved one")
+        let again = Vault.merge(existing: widened.save, incoming: [wider])
+        expect(again.same == 1 && again.save.isEmpty && again.widened == 0, "and then it's already here")
+        var www = wider
+        www.sites = ["https://www.github.com/login"]
+        www.apps = []
+        let noMore = Vault.merge(existing: [saved], incoming: [www])
+        expect(noMore.same == 1 && noMore.widened == 0, "the same site written another way adds nothing")
+        var renamed = wider
+        renamed.title = "GitHub work"
+        let both = Vault.merge(existing: [saved], incoming: [renamed])
+        expect(both.widened == 1 && both.save.first?.sites.count == 2 && both.conflicts.count == 1
+               && both.conflicts[0].title == "GitHub work" && both.conflicts[0].sites.count == 2,
+               "another title is still offered as a conflict, the sites added")
         let twice = Vault.merge(existing: [], incoming: parsed.items + parsed.items)
         expect(twice.added == 2 && twice.same == 2, "the same row twice in a file is one login")
         var deniz = VaultItem(kind: .contact, title: "Deniz")
@@ -1053,6 +1077,45 @@ struct VaultCheck {
         secure.subrole = "AXSecureTextField"
         let mixed = [secure, field("1111", parent: 0, sibling: 1, x: 60, order: 1)]
         expect(!UIMap.hideJoined(mixed, matches: index.matches).hid, "a password field isn't a piece")
+        // The digits in a control's title as well as its value: every text of a matched piece is hidden, and so is
+        // its name; a control whose value was already hidden still counts by its title.
+        var both = nodes
+        for at in 2...5 { both[at].title = both[at].value; both[at].help = "Group " + both[at].value }
+        both[3].value = UIMap.hidden
+        let (all, allAny) = UIMap.hideJoined(both, matches: index.matches)
+        expect(allAny && all[2...5].allSatisfy { node in
+            [node.value, node.title, node.help].allSatisfy { $0 == UIMap.hidden } && UIMap.name(node) == UIMap.hidden
+        }, "a joined piece hides its value, title, help and name")
+        expect(all[1].title == "Card", "its label stays")
+    }
+
+    /// petal_look's selection in a field holding a secret isn't told, whatever is selected; elsewhere it is.
+    static func selections() {
+        var number = UINode(role: "AXTextField")
+        number.label = "Card number"
+        var code = UINode(role: "AXTextField")
+        code.placeholder = "CVC"
+        let password = UINode(role: "AXTextField", subrole: "AXSecureTextField")
+        var plain = UINode(role: "AXTextField")
+        plain.title = "Notes"
+        var heading = UINode(role: "AXStaticText")
+        heading.title = "Card number"
+        expect(UIMap.selectionHidden(in: number, filled: false) && UIMap.selectionHidden(in: code, filled: false)
+               && UIMap.selectionHidden(in: password, filled: false), "a card number, code or password field's selection isn't told")
+        expect(UIMap.selectionHidden(in: plain, filled: true), "nor one in a field Petal filled with a secret")
+        expect(!UIMap.selectionHidden(in: plain, filled: false) && !UIMap.selectionHidden(in: heading, filled: false),
+               "an ordinary field's or a heading's is")
+        // Copy stays away from a window holding a secret, not from one with a heading named for one.
+        let index = UIMap.SecretIndex(["4111111111111111"])
+        var text = UINode(role: "AXStaticText")
+        text.value = "Card number"
+        text.title = "Card number"
+        expect(!UIMap.holdsSecret(text, secret: index.matches), "a heading named Card number holds no secret")
+        expect(UIMap.holdsSecret(number, secret: index.matches) && UIMap.holdsSecret(password, secret: index.matches),
+               "a card number or password field does")
+        var shown = UINode(role: "AXStaticText")
+        shown.value = "Your card 4111 1111 1111 1111"
+        expect(UIMap.holdsSecret(shown, secret: index.matches), "text showing a vault secret does, wherever it is")
     }
 
     /// A secret from before kinds is unsorted: the AI sees its title and "unsorted"; filling it asks everywhere, a
@@ -1147,7 +1210,7 @@ struct VaultCheck {
 
     /// Petal's own backup of an item (the same id), newer than what's saved: all of it comes back (username,
     /// password, title, sites, notes), not just its password. A login only alike (another id) still changes only
-    /// its password (and notes).
+    /// its password (and notes), and gains the sites it didn't have.
     static func petalRestoresWhole() {
         let then = Date(timeIntervalSince1970: 1_700_000_000), now = Date(timeIntervalSince1970: 1_800_000_000)
         var saved = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"], updated: then)
@@ -1166,8 +1229,9 @@ struct VaultCheck {
         // Matched only by site and username (another id): the narrower rule.
         var alike = backup; alike.id = Vault.newID(); alike[.username] = "ada"
         let inferred = Vault.merge(existing: [saved], incoming: [alike], petal: true, at: now)
-        expect(inferred.save.count == 1 && inferred.save[0].id == saved.id && inferred.save[0].title == "GitHub" && inferred.save[0].sites == ["github.com"]
-               && inferred.save[0][.password] == "new" && inferred.save[0][.notes] == "n2", "alike by site and username: its password and newer notes")
+        expect(inferred.save.count == 1 && inferred.save[0].id == saved.id && inferred.save[0].title == "GitHub"
+               && inferred.save[0].sites == ["github.com", "gist.github.com"] && inferred.save[0][.password] == "new"
+               && inferred.save[0][.notes] == "n2" && inferred.widened == 1, "alike by site and username: its password, newer notes and added site")
     }
 
     /// A 3- or 4-digit secret in any script's digits is found in any script's digits, and what's hidden is the

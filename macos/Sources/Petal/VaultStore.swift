@@ -283,6 +283,7 @@ final class VaultModel {
         var conflicts: [VaultItem] = []
         var usedImported = false
         var older = 0
+        var widened = 0
         var skipped = 0
         var file: URL
         var failed: String?
@@ -305,6 +306,7 @@ final class VaultModel {
                     result.updated = merge.updated
                     result.conflicts = merge.conflicts
                     result.older = merge.older
+                    result.widened = merge.widened
                     result.skipped = parsed.skipped
                     } else {
                         result.failed = "The Keychain didn't take them. Nothing was added."

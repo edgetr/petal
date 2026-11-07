@@ -276,7 +276,11 @@ final class Assist {
             let selected: String = focused.flatMap { Windows.value($0, kAXSelectedTextAttribute) } ?? ""
             // Nothing of the vault's secrets goes to the AI: not in the title, the selection, nor the clipboard.
             let title = Self.withoutSecrets(realTitle)
-            let shownSelection = selected.isEmpty ? "" : Self.shownText(selected, limit: 8000) ?? Self.tooMuchSelected
+            // Nothing selected in a field holding a secret, not even part of one: a card number selected four
+            // digits at a time would otherwise be told whole over four looks.
+            let inSecret = !selected.isEmpty && focused.map { UIMap.selectionHidden(in: Reader.node($0), filled: Sensitive.isFilled($0, pid: pid)) } == true
+            let shownSelection = selected.isEmpty ? "" : inSecret ? Self.selectionInSecret
+                : Self.shownText(selected, limit: 8000) ?? Self.tooMuchSelected
             let shownClipboard = clipboard.map { Self.shownText($0, limit: 4000) ?? Self.tooMuchClipboard }
             let looked = window
             DispatchQueue.main.async {
@@ -333,6 +337,7 @@ final class Assist {
     }
 
     nonisolated static let tooMuchClipboard = "The clipboard holds too much to check for saved secrets: Petal doesn't read it."
+    nonisolated static let selectionInSecret = "The selection is in a field holding a secret (a password, key, card number or security code): Petal doesn't read it."
     nonisolated static let tooMuchSelected = "What's selected is too much to check for saved secrets: Petal doesn't read it."
 
     /// What password managers mark what they copy with (nspasteboard.org's markers, and 1Password's own): the

@@ -24,6 +24,13 @@ enum Sensitive {
         if fields.count > 500 { fields.removeFirst(fields.count - 500) }
     }
 
+    /// Petal filled `element` with a secret this run.
+    static func isFilled(_ element: AXUIElement, pid: pid_t) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return fields.contains { $0.pid == pid && CFEqual($0.element, element) }
+    }
+
     private static func filled(of pid: pid_t) -> [AXUIElement] {
         lock.lock()
         defer { lock.unlock() }

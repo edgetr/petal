@@ -349,6 +349,7 @@ struct VaultSettings: View {
             let names = result.updated.prefix(5).joined(separator: ", ") + (result.updated.count > 5 ? ", …" : "")
             parts.append("\(result.updated.count) had something newer, which Petal kept: \(names).")
         }
+        if result.widened > 0 { parts.append("Added sites to \(result.widened) login\(result.widened == 1 ? "" : "s").") }
         if result.older > 0 { parts.append("\(result.older) \(result.older == 1 ? "was" : "were") older in the file than here: Petal kept yours.") }
         if result.skipped > 0 { parts.append("\(result.skipped) had nothing to keep (notes and the like).") }
         return parts.joined(separator: " ")
