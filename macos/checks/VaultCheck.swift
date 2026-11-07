@@ -47,6 +47,9 @@ struct VaultCheck {
         buyTokens()
         joinedControls()
         oneToOne()
+        oneToOneEverywhere()
+        nameHeuristics()
+        securityCodes()
         years()
         if failures > 0 { print("vault: \(failures) failed"); exit(1) }
         print("vault: ok")
@@ -825,12 +828,14 @@ struct VaultCheck {
         tie[.password] = "tie-password"
         let tied = Vault.merge(existing: [saved], incoming: [tie], petal: true)
         expect(tied.save.isEmpty && tied.conflicts.count == 1, "the same date: a conflict")
-        // Another app's export: no reliable date, so a different secret is a conflict; the last row for it wins.
+        // Another app's export: no reliable date, so a different secret is a conflict. Two rows for one login: the
+        // first meets the saved one (a conflict), the second is a login of its own (nothing in the file is lost).
         var csv1 = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"]); csv1[.username] = "ada"; csv1[.password] = "csv-one"
         var csv2 = csv1; csv2.id = Vault.newID(); csv2[.password] = "csv-two"
         let other = Vault.merge(existing: [saved], incoming: [csv1, csv2])
-        expect(other.save.isEmpty && other.conflicts.count == 1 && other.conflicts[0].id == saved.id && other.conflicts[0][.password] == "csv-two",
-               "another app's export: kept yours, the file's last offered")
+        expect(other.conflicts.count == 1 && other.conflicts[0].id == saved.id && other.conflicts[0][.password] == "csv-one"
+               && other.added == 1 && other.save.map { $0[.password] } == ["csv-two"],
+               "another app's export: kept yours, the first row offered, the second added")
         // A card's other security code and an API key's other value are conflicts too; details without a secret merge.
         var card = VaultItem(kind: .card, title: "Visa"); card[.number] = "4111111111111111"; card[.securityCode] = "737"
         var card2 = card; card2.id = Vault.newID(); card2[.securityCode] = "999"
@@ -982,6 +987,80 @@ struct VaultCheck {
         var csv2 = csv1; csv2.id = Vault.newID()
         let csv = Vault.merge(existing: [saved], incoming: [csv1, csv2])
         expect(csv.added == 0 && csv.same == 2, "another app's rows still match the saved login")
+    }
+
+    /// Every export is matched one to one: three CSV rows for one site and username, with three passwords, keep all
+    /// three (one a conflict on the saved login, two added); the very same row again is already there.
+    static func oneToOneEverywhere() {
+        var saved = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"])
+        saved[.username] = "ada"; saved[.password] = "saved"
+        func row(_ password: String) -> VaultItem {
+            var item = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"]); item[.username] = "ada"; item[.password] = password
+            return item
+        }
+        let three = Vault.merge(existing: [saved], incoming: [row("one"), row("two"), row("three")])
+        let kept = Set(three.conflicts.map { $0[.password] } + three.save.map { $0[.password] })
+        expect(kept == ["one", "two", "three"], "every password in the file is kept (\(kept))")
+        expect(three.conflicts.count == 1 && three.conflicts[0].id == saved.id && three.conflicts[0][.password] == "one",
+               "the first row is the saved login's conflict")
+        expect(three.added == 2 && three.save.count == 2 && !three.save.contains { $0.id == saved.id }, "the other two are added")
+        // Into an empty vault: three logins.
+        let fresh = Vault.merge(existing: [], incoming: [row("one"), row("two"), row("three")])
+        expect(fresh.added == 3 && fresh.same == 0, "three rows, three logins, into an empty vault")
+        // The same row twice (another id) is already there; so is a row the vault has, and a repeat of a conflict.
+        let dup = Vault.merge(existing: [], incoming: [row("one"), row("one")])
+        expect(dup.added == 1 && dup.same == 1, "the very same row twice is one login")
+        let again = Vault.merge(existing: [saved], incoming: [row("saved"), row("x"), row("x")])
+        expect(again.same == 2 && again.added == 1 && again.conflicts.isEmpty,
+               "a row the vault has is already there, the other added once (\(again.same), \(again.added), \(again.conflicts.count))")
+        let repeated = Vault.merge(existing: [saved], incoming: [row("x"), row("x")])
+        expect(repeated.same == 1 && repeated.added == 0 && repeated.conflicts.count == 1 && repeated.conflicts[0][.password] == "x",
+               "a repeat of a conflict is already there")
+        // Two saved logins alike: each row takes one of them, never the same one twice.
+        var saved2 = saved; saved2.id = Vault.newID(); saved2[.password] = "saved-2"
+        let pair = Vault.merge(existing: [saved, saved2], incoming: [row("a"), row("b")])
+        expect(Set(pair.conflicts.map(\.id)) == [saved.id, saved2.id] && pair.added == 0, "two rows meet two saved logins, one each")
+        // Cards and API keys too.
+        var card = VaultItem(kind: .card, title: "Visa"); card[.number] = "4111111111111111"; card[.securityCode] = "737"
+        func cardRow(_ code: String) -> VaultItem { var c = card; c.id = Vault.newID(); c[.securityCode] = code; return c }
+        let cards = Vault.merge(existing: [card], incoming: [cardRow("111"), cardRow("222")])
+        expect(cards.conflicts.count == 1 && cards.added == 1, "two cards with other codes: one conflict, one added")
+        // Petal's own export keeps its old behaviour: two alike, one updates, the other is added.
+        let petal = Vault.merge(existing: [], incoming: [row("p1"), row("p2")], petal: true)
+        expect(petal.added == 2, "Petal's export: two ids, two items")
+    }
+
+    /// Only a field one types into is blacked out for its name; a window or page named for passwords isn't.
+    static func nameHeuristics() {
+        var window = UINode(role: "AXWindow"); window.title = "API keys - OpenAI API"
+        expect(UIMap.looksSecret(window) && !UIMap.looksSecretField(window), "a window called API keys isn't covered whole")
+        var page = UINode(role: "AXWebArea"); page.title = "Reset your password"
+        expect(!UIMap.looksSecretField(page), "nor a page about passwords")
+        var heading = UINode(role: "AXHeading"); heading.title = "Password"
+        expect(!UIMap.looksSecretField(heading), "nor a heading")
+        var field = UINode(role: "AXTextField"); field.placeholder = "API key"
+        expect(UIMap.looksSecretField(field), "a text field named for a key is")
+        var area = UINode(role: "AXTextArea"); area.label = "Private key"
+        expect(UIMap.looksSecretField(area), "a text area")
+        var combo = UINode(role: "AXComboBox"); combo.identifier = "cc-csc"
+        expect(UIMap.looksSecretField(combo), "a combo box")
+        var secure = UINode(role: "AXTextField"); secure.subrole = "AXSecureTextField"; secure.title = "Password"
+        expect(UIMap.looksSecretField(secure), "a password field")
+        var name = UINode(role: "AXTextField"); name.label = "Name"
+        expect(!UIMap.looksSecretField(name), "a name field isn't")
+    }
+
+    /// A security code of 3 or 4 digits is caught wherever it isn't part of a longer number.
+    static func securityCodes() {
+        let index = UIMap.SecretIndex(["1234", "737"])
+        expect(index.matches("CVV1234") && index.matches("cvc: 1234") && index.matches("CVV:1234;"), "a 4-digit code run into its label")
+        expect(!index.matches("12345") && !index.matches("01234") && !index.matches("Order 112340"), "not inside a longer number")
+        expect(index.redacted("CVV1234") == "CVV\(UIMap.hidden)", "only the code is hidden")
+        expect(index.matches("cvv737") && !index.matches("17370"), "3 digits as before")
+        // Short secrets that aren't 3 or 4 digits keep word boundaries.
+        let words = UIMap.SecretIndex(["ab12", "73925"])
+        expect(words.matches("PIN ab12") && !words.matches("xab12"), "a short word secret as a word only")
+        expect(words.matches("PIN 73925") && !words.matches("A73925"), "a 5-digit secret as a word only")
     }
 
     /// A card's year as the field wants it: a menu's own items, or what a text field says of itself.

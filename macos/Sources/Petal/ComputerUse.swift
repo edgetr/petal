@@ -201,19 +201,19 @@ final class ComputerUse {
                                    windowFrame: reading.windowFrame, lists: reading.lists, fingerprint: reading.fingerprint,
                                    entries: entries, count: entries.count, made: Date())
                     self.maps[caller] = made
-                    // A Buy said in this window (by any chat) ends if what was just read is another tab or page.
-                    if let id = reading.windowID, self.hasBuy(in: id) {
-                        self.assist.vaultShown(made, page: reading.page, url: reading.pageURL, title: reading.title) { place in
-                            self.seen(place, window: id)
-                        }
-                    }
                     self.keepSweeping()
                     var result: [String: Any] = ["app": name, "window": reading.title, "elements": list,
                                                  "note": "Act with petal_act by id. These ids last until the next petal_ui, or 5 minutes; call petal_ui again once the window changes."]
                     if picked.left > 0 { result["more"] = "\(picked.left) more not listed: pass find (a word in its name) to narrow." }
                     if reading.timedOut { result["partial"] = "The window is big: this is what Petal read in time." }
                     if list.isEmpty { result["empty"] = "No controls found\(find.isEmpty ? "" : " matching “\(find)”"). The app may not support Accessibility well; petal_look with a screenshot shows it." }
-                    send(result)
+                    // A Buy said in this window (by any chat) ends if what was just read is another tab or page,
+                    // before the AI hears what it read.
+                    guard let id = reading.windowID, self.hasBuy(in: id) else { return send(result) }
+                    self.assist.vaultShown(made, page: reading.page, url: reading.pageURL, title: reading.title) { place in
+                        self.seen(place, window: id)
+                        send(result)
+                    }
                 }
             }
         }

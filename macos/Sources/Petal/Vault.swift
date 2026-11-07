@@ -1172,43 +1172,52 @@ enum Vault {
     /// its password does; anything else takes the import's fields. A secret (a password, security code or key) is
     /// replaced only when Petal's own export (`petal`, which keeps ids and dates) says it's newer: from any other
     /// export, a different secret is a conflict, kept as it is and said. Petal's export older than what's saved
-    /// changes nothing. A later entry of the same file wins over an earlier one. Petal's export's items with
-    /// different ids stay apart however alike; an imported address whose contact turned out to be one already saved
-    /// is linked to that one.
+    /// changes nothing. An entry repeated with the same id (Petal's export) lands on one item, the later winning.
+    /// Matching is one to one, whatever the export: each entry is the saved item with its id, else one alike that no
+    /// other entry took; when every one alike is taken, it's added as an item of its own. So nothing in a file is
+    /// lost: only the very same thing again (in the vault, or earlier in a file from another app) counts as already
+    /// there, and each conflict is its own entry's. Petal's export's items with different ids stay apart however
+    /// alike; an imported address whose contact turned out to be one already saved is linked to that one.
     static func merge(existing: [VaultItem], incoming: [VaultItem], petal: Bool = false, at date: Date = Date()) -> Merge {
         var result = Merge()
         var current = existing
         let fromFile = Set(incoming.map(\.id))
         var touched: [String: Int] = [:]   // item id → index in result.save
         var renamed: [String: String] = [:]   // an imported contact's id → the saved one's
-        // A saved item matched by what it holds (not its id) → the Petal id in the file that matched it: one each, so two
-        // of the file's items alike (the same site and username) never fold into one.
+        // A saved item matched by what it holds (not its id) → the entry in the file that took it: one each, so two
+        // of the file's entries alike (the same site and username) never fold into one or fight over one conflict.
         var claimed: [String: String] = [:]
         // Contacts first, so addresses can follow their contact.
         let ordered = incoming.filter { $0.kind != .address } + incoming.filter { $0.kind == .address }
         for var item in ordered {
             if item.kind == .address, let link = renamed[item[.contact]] { item[.contact] = link }
-            let index = current.firstIndex { saved in
-                if saved.id == item.id { return true }
-                if petal, fromFile.contains(saved.id) { return false }
-                if petal, let by = claimed[saved.id], by != item.id { return false }
-                return same(saved, item)
+            var index = current.firstIndex { $0.id == item.id }
+            if index == nil {
+                // The very same thing again: already there. In Petal's export, its other entries are never this one.
+                let pool = petal ? current.filter { !fromFile.contains($0.id) } : current + result.conflicts
+                if let saved = pool.first(where: { same($0, item) && holds($0, item) }) {
+                    if claimed[saved.id] == nil, !fromFile.contains(saved.id) { claimed[saved.id] = item.id }
+                    if saved.kind == .contact { renamed[item.id] = saved.id }
+                    result.same += 1
+                    continue
+                }
+                // One alike that no other entry took; one an entry of the file has by its id is that entry's.
+                index = current.firstIndex { saved in
+                    !fromFile.contains(saved.id) && (claimed[saved.id] ?? item.id) == item.id && same(saved, item)
+                }
             }
             if let index {
                 let saved = current[index]
-                if petal, saved.id != item.id { claimed[saved.id] = item.id }
+                if saved.id != item.id { claimed[saved.id] = item.id }
                 if saved.kind == .contact { renamed[item.id] = saved.id }
+                guard !holds(saved, item) else { result.same += 1; continue }
                 var next = saved
                 if saved.kind == .login {
-                    guard saved[.password] != item[.password], !item[.password].isEmpty else { result.same += 1; continue }
                     next[.password] = item[.password]
                     if next[.notes].isEmpty { next[.notes] = item[.notes] }
                 } else {
-                    let fields = saved.fields.merging(item.fields) { _, new in new }
-                    let sites = saved.sites + item.sites.filter { !saved.sites.contains($0) }
-                    guard fields != saved.fields || sites != saved.sites || saved.title != item.title else { result.same += 1; continue }
-                    next.fields = fields
-                    next.sites = sites
+                    next.fields = saved.fields.merging(item.fields) { _, new in new }
+                    next.sites = saved.sites + item.sites.filter { !saved.sites.contains($0) }
                     next.title = item.title.isEmpty ? saved.title : item.title
                 }
                 let replaces = replacesSecret(saved, with: next)
@@ -1222,6 +1231,7 @@ enum Vault {
                     }
                     next.updated = item.updated
                 } else if replaces {
+                    // Only this entry has this saved item, so the conflict is its own (a repeat of it replaces it).
                     result.conflicts.removeAll { $0.id == next.id }
                     next.updated = date
                     result.conflicts.append(next)
@@ -1230,7 +1240,7 @@ enum Vault {
                     next.updated = date
                 }
                 current[index] = next
-                // A later entry that's taken wins over an earlier conflict about the same item.
+                // A later entry with the same id that's taken wins over its earlier conflict.
                 result.conflicts.removeAll { $0.id == next.id }
                 if !result.updated.contains(next.title) { result.updated.append(next.title) }
                 if let at = touched[next.id] { result.save[at] = next } else { touched[next.id] = result.save.count; result.save.append(next) }
@@ -1243,6 +1253,15 @@ enum Vault {
             }
         }
         return result
+    }
+
+    /// `saved` already holds all `item` would give it: a login its password (or the item has none); anything else
+    /// every field, site and its title.
+    static func holds(_ saved: VaultItem, _ item: VaultItem) -> Bool {
+        if saved.kind == .login { return item[.password].isEmpty || saved[.password] == item[.password] }
+        let fields = saved.fields.merging(item.fields) { _, new in new }
+        let sites = saved.sites + item.sites.filter { !saved.sites.contains($0) }
+        return fields == saved.fields && sites == saved.sites && saved.title == item.title
     }
 
     /// `next` has a secret `saved` holds, different (not one `saved` didn't have yet).

@@ -278,14 +278,25 @@ final class Assist {
             let title = Self.withoutSecrets(realTitle)
             let shownSelection = selected.isEmpty ? "" : Self.shownText(selected, limit: 8000) ?? Self.tooMuchSelected
             let shownClipboard = clipboard.map { Self.shownText($0, limit: 4000) ?? Self.tooMuchClipboard }
+            let looked = window
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     result["window"] = title
                     if !shownSelection.isEmpty { result["selectedText"] = shownSelection }
                     if let shownClipboard { result["clipboard"] = shownClipboard }
                     let hidden = self.privatePIDs
+                    let report = {
+                        // A Buy said in this window (by any chat) ends if it now shows another tab or page, before the
+                        // AI hears (or sees) what's in it: the same check petal_ui, fills and acts make.
+                        guard let looked, let number, self.computer.hasBuy(in: number) else { return send(result) }
+                        self.vaultTab(window: looked, pid: pid, bundle: front.bundleIdentifier ?? "", appName: front.localizedName ?? "",
+                                      windowID: number, frame: frame) { place in
+                            self.computer.seen(place, window: number)
+                            send(result)
+                        }
+                    }
                     let finish = {
-                        guard !shot.isEmpty else { return send(result) }
+                        guard !shot.isEmpty else { return report() }
                         Task {
                             let picture = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", hiding: hidden)
                             if let path = picture.path {
@@ -296,7 +307,7 @@ final class Assist {
                             } else {
                                 result["screenshotNote"] = picture.note ?? (Capture.allowed ? "Couldn't take the picture." : "Petal needs Screen Recording for pictures (Petal's settings, Permissions).")
                             }
-                            send(result)
+                            report()
                         }
                     }
                     guard Browsers.kind(front.bundleIdentifier ?? "") != nil else { return finish() }
@@ -362,15 +373,20 @@ final class Assist {
     /// instead. What may show a secret is blacked out first (Sensitive), in memory: no picture is written before.
     /// A window Petal can't read whole through Accessibility is no picture (or, on the screen, isn't in it).
     /// The window server keeps where each window is; what Accessibility finds is placed by where it is now, so a window
-    /// that moved or changed size between the list and the picture would have its blackouts in the wrong place: then
-    /// it's taken again once, and after that there's no picture.
+    /// that moved or changed size between the list and the picture would have its blackouts in the wrong place, as
+    /// would a field that scrolled far, appeared or went while it was taken: then it's taken again once, and after
+    /// that there's no picture.
     nonisolated private static func screenshot(_ window: CGWindowID?, screen: Bool = false, hiding: Set<pid_t> = []) async -> (path: String?, note: String?) {
+        var why: String?
         for _ in 0..<2 {
             let taken = await capture(window, screen: screen, hiding: hiding)
             if !taken.moved { return (taken.path, taken.note) }
+            why = taken.note
         }
-        return (nil, "A window moved or changed size while Petal took the picture, so it couldn't be sure what it hid: no picture. Try again once it's still.")
+        return (nil, why ?? "A window moved or changed size while Petal took the picture, so it couldn't be sure what it hid: no picture. Try again once it's still.")
     }
+
+    nonisolated static let scrolledText = "Something that may be secret scrolled, appeared or went while Petal took the picture, so it couldn't be sure what it hid: no picture. Try again once the window is still."
 
     /// Where the window server has a window now (top-left origin, as Accessibility and ScreenCaptureKit count), or
     /// nil when it's gone.
@@ -401,7 +417,7 @@ final class Assist {
         let area: CGRect
         var note: String?
         // Each window in the picture, with its Accessibility window, read again once the picture is taken.
-        var watched: [(window: SCWindow, element: AXUIElement, pid: pid_t, visible: CGRect)] = []
+        var watched: [(window: SCWindow, element: AXUIElement, pid: pid_t, visible: CGRect, before: Sensitive.Scan)] = []
         var rects: [CGRect] = []
         if !screen {
             guard let window, let match = content.windows.first(where: { $0.windowID == window }), let pid = match.owningApplication?.processID else { return (nil, nil, false) }
@@ -414,8 +430,7 @@ final class Assist {
             }
             // Moved while it was read: its blackouts may be in the wrong place.
             guard still(match) else { return (nil, nil, true) }
-            rects = before.rects
-            watched = [(match, element, pid, match.frame)]
+            watched = [(match, element, pid, match.frame, before)]
             filter = SCContentFilter(desktopIndependentWindow: match)
             area = match.frame
         } else if let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first {
@@ -436,9 +451,8 @@ final class Assist {
                     let found = Sensitive.scan(window: element, pid: owner.processID, visible: candidate.frame.intersection(area),
                                                deadline: min(deadline, Date().addingTimeInterval(2)))
                     if found.complete {
-                        rects += found.rects
                         included.append(candidate)
-                        watched.append((candidate, element, owner.processID, candidate.frame.intersection(area)))
+                        watched.append((candidate, element, owner.processID, candidate.frame.intersection(area), found))
                         continue
                     }
                 } else if candidate.windowLayer != 0 {
@@ -465,12 +479,21 @@ final class Assist {
         configuration.showsCursor = false
         configuration.ignoreShadowsSingleWindow = true
         guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) else { return (nil, note, false) }
-        // Read again now: a field revealed or moved while the picture was taken is covered where it is now too. A
-        // window that can't be read whole again is covered completely.
+        // Read again now, each part matched to itself in the read before: one that moved while the picture was taken
+        // is covered from where it was to where it is. On the screen, a window that can't be read whole again, or
+        // where something secret appeared, went or scrolled far meanwhile, is covered completely; a window alone is
+        // taken again (once).
         for item in watched {
             let after = Sensitive.scan(window: item.element, pid: item.pid, visible: item.visible, deadline: Date().addingTimeInterval(2))
-            if after.complete { rects += after.rects } else if screen { rects.append(item.window.frame) } else {
+            if !after.complete, !screen {
                 return (nil, "Petal couldn't check all of that window for passwords and card numbers in time: no picture.", false)
+            }
+            if after.complete, let covered = Sensitive.blackouts(item.before, after, window: item.window.frame) {
+                rects += covered
+            } else if screen {
+                rects.append(item.window.frame)
+            } else {
+                return (nil, scrolledText, true)
             }
             // The picture placed it where it was listed; what was found is where it is now. Moved meanwhile: taken
             // again (nothing is written).

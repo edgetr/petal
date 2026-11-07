@@ -5,8 +5,10 @@ import ScreenCaptureKit
 /// What a picture for Petal AI (petal_look's screenshot) must not show: password fields, fields named for a password,
 /// token, key, card number or security code, any text holding one of the vault's secrets (or one Petal typed this
 /// run), and every field Petal filled with a secret, however it looks now (a revealed password, a card number a
-/// page shows unmasked). Found through Accessibility right before and right after the picture is taken, and blacked
-/// out in memory before anything is written; a window that can't be read whole in time isn't in the picture at all.
+/// page shows unmasked). Found through Accessibility right before and right after the picture is taken, matched
+/// element by element (one that moved is covered all the way between; one that appeared, went or moved far means no
+/// picture), and blacked out in memory before anything is written; a window that can't be read whole in time isn't
+/// in the picture at all.
 /// Never on the main thread.
 enum Sensitive {
     private static let lock = NSLock()
@@ -29,10 +31,26 @@ enum Sensitive {
     }
 
     struct Scan {
-        /// Where secrets may show, in screen points (top-left origin, as Accessibility gives them).
-        var rects: [CGRect] = []
+        /// Each part that may show a secret and where, in screen points (top-left origin, as Accessibility gives
+        /// them): the element, so a read before the picture and one after can be matched up (`blackouts`).
+        var found: [(element: AXUIElement, rect: CGRect)] = []
         /// Read whole in time: only then may the window be in a picture.
         var complete = true
+    }
+
+    /// What to black out of a picture taken between `before` and `after` (two reads of one window, `window` its
+    /// frame), each part matched to itself by its Accessibility element: covered wherever it was meanwhile, or nil
+    /// (no picture) when a part appeared, went or moved too far while the picture was taken (UIMap.blackouts).
+    static func blackouts(_ before: Scan, _ after: Scan, window: CGRect) -> [CGRect]? {
+        var elements: [AXUIElement] = []
+        func id(_ element: AXUIElement) -> Int {
+            if let at = elements.firstIndex(where: { CFEqual($0, element) }) { return at }
+            elements.append(element)
+            return elements.count - 1
+        }
+        let then = before.found.map { (id: id($0.element), rect: $0.rect) }
+        let now = after.found.map { (id: id($0.element), rect: $0.rect) }
+        return UIMap.blackouts(before: then, after: now, window: window)
     }
 
     private static let attributes = [kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute,
@@ -53,6 +71,7 @@ enum Sensitive {
         var visited = 0
         // Text shown in the picture, to look for a secret split over several pieces (a card number in fours).
         var pieces: [UIMap.TextPiece] = []
+        var pieceElements: [AXUIElement] = []
         while let (element, depth, parent, order) = stack.popLast() {
             guard visited < 40_000, Date() < deadline else { scan.complete = false; return scan }
             let me = visited
@@ -79,7 +98,9 @@ enum Sensitive {
             node.placeholder = values[kAXPlaceholderValueAttribute] as? String ?? ""
             node.identifier = values[kAXIdentifierAttribute] as? String ?? ""
             let frame = Reader.frame(values[kAXPositionAttribute], values[kAXSizeAttribute])
-            var secret = UIMap.isSecure(node) || UIMap.looksSecret(node) || mine.contains { CFEqual($0, element) }
+            // Named for a secret only counts for a field one types into: a window or page called "API keys" isn't
+            // blacked out whole (its text is still searched below).
+            var secret = UIMap.isSecure(node) || UIMap.looksSecretField(node) || mine.contains { CFEqual($0, element) }
             if !secret {
                 // A password field's value is never read; anything else's is searched whole.
                 let value = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
@@ -87,9 +108,10 @@ enum Sensitive {
                 let shown = [value, node.title, node.label].first { !$0.isEmpty } ?? ""
                 if !secret, !shown.isEmpty, frame.width > 0, frame.height > 0, frame.intersects(around) {
                     pieces.append(UIMap.TextPiece(text: shown, parent: parent, order: order, frame: frame))
+                    pieceElements.append(element)
                 }
             }
-            if secret, frame.width > 0, frame.height > 0 { scan.rects.append(frame.insetBy(dx: -4, dy: -4)) }
+            if secret, frame.width > 0, frame.height > 0 { scan.found.append((element, frame.insetBy(dx: -4, dy: -4))) }
             // Far down a page or scrolled away: not in the picture.
             if depth > 0, frame.width > 0, frame.height > 0, !frame.intersects(around) { continue }
             // A list's rows showing (what's scrolled away isn't in the picture), else every child. Children that
@@ -106,7 +128,7 @@ enum Sensitive {
             scan.complete = false
             return scan
         }
-        for index in joined { scan.rects.append(pieces[index].frame.insetBy(dx: -4, dy: -4)) }
+        for index in joined { scan.found.append((pieceElements[index], pieces[index].frame.insetBy(dx: -4, dy: -4))) }
         return scan
     }
 

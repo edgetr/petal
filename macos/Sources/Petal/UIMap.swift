@@ -176,17 +176,46 @@ enum UIMap {
         return secretWords.contains { words.contains($0) } || paymentWords.contains { words.contains($0) }
     }
 
+    /// A field one types into whose name says it holds a secret. A window, page or heading named "API keys" or
+    /// "Reset your password" isn't one: what they show is still searched for the vault's own secrets.
+    static func looksSecretField(_ node: UINode) -> Bool {
+        (isText(node) || isSecure(node)) && looksSecret(node)
+    }
+
+    /// What to black out of a picture taken between two reads of a window (`before`, `after`: where each part that
+    /// may show a secret was, by an id for the element, the same id in both for the same element), so wherever it
+    /// was while the picture was taken, it's covered: the bounding box of where it was in each, which takes in the
+    /// way between. Nil (no picture): a part found in only one of the reads (it appeared, or went, meanwhile), or
+    /// one that moved more than a quarter of the window's width or height (scrolling or animating: where it was in
+    /// the picture can't be told).
+    static func blackouts(before: [(id: Int, rect: CGRect)], after: [(id: Int, rect: CGRect)], window: CGRect) -> [CGRect]? {
+        func grouped(_ list: [(id: Int, rect: CGRect)]) -> [Int: CGRect] {
+            list.reduce(into: [:]) { out, part in out[part.id] = out[part.id].map { $0.union(part.rect) } ?? part.rect }
+        }
+        let then = grouped(before), now = grouped(after)
+        guard Set(then.keys) == Set(now.keys) else { return nil }
+        var out: [CGRect] = []
+        for (id, a) in then.sorted(by: { $0.key < $1.key }) {
+            guard let b = now[id] else { return nil }
+            let dx = max(abs(a.minX - b.minX), abs(a.maxX - b.maxX)), dy = max(abs(a.minY - b.minY), abs(a.maxY - b.maxY))
+            if dx > window.width / 4 || dy > window.height / 4 { return nil }
+            out.append(a.union(b))
+        }
+        return out
+    }
+
     /// The vault's secrets as hashes (Swift's, seeded afresh in each process): a whole secret, every run of `piece`
     /// characters of a longer one, and a short one (`short` to `piece` - 1 characters, a PIN) as a word of its own
     /// inside text, so text holding a secret, or part of a long one, is caught without keeping the secrets. A card's
-    /// 3-digit security code is caught wherever it isn't part of a longer number ("CVV: 737", "cvc737", not 737 in
-    /// 17370). A card number is also caught across whatever separates its digits ("4242\u{00A0}4242", "4242.4242",
+    /// security code (any secret of 3 or 4 digits) is caught wherever it isn't part of a longer number ("CVV: 737",
+    /// "cvc737", "CVV1234", not 737 in 17370). A card number is also caught across whatever separates its digits ("4242\u{00A0}4242", "4242.4242",
     /// full-width digits), and digits are digits in any script.
     struct SecretIndex {
         static let piece = 8
         static let short = 4
-        /// A security code: the shortest secret looked for inside text, digits only.
-        static let code = 3
+        /// A security code's length: digits only, caught inside text by numeric boundaries. The shortest secret
+        /// looked for inside text.
+        static let code = 3...4
         /// Text longer than this (in UTF-8 bytes, about 1 MB) isn't searched: it counts as holding a secret, and
         /// Petal doesn't move or show it.
         static let limit = 1_000_000
@@ -202,7 +231,7 @@ enum UIMap {
         private var pieces = Set<UInt64>()
         /// Short secrets by their length, as `window` hashes them.
         private var shorts: [Int: Set<UInt64>] = [:]
-        /// 3-digit secrets (security codes), as `window` hashes them.
+        /// 3- and 4-digit secrets (security codes), by their length, as `window` hashes them.
         private var numbers: [Int: Set<UInt64>] = [:]
         /// Every `piece` digits of a card number (a secret that is 12 to 19 digits and separators), as `window`
         /// hashes ASCII digits: found in text whatever separates the digits.
@@ -228,7 +257,7 @@ enum UIMap {
                 }
                 let codes = Self.codes(characters)
                 let digits = characters.allSatisfy { $0.isASCII && $0.isNumber }
-                if digits, codes.count == Self.code {
+                if digits, Self.code.contains(codes.count) {
                     numbers[codes.count, default: []].insert(Self.window(codes[...]))
                 } else if codes.count >= Self.short, codes.count < Self.piece {
                     shorts[codes.count, default: []].insert(Self.window(codes[...]))

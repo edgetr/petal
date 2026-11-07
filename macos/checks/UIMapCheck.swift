@@ -100,7 +100,8 @@ struct UIMapCheck {
         expect(!vault.matches("4f9a2b7"), "7 characters aren't enough")
         expect(vault.matches("1234") && vault.matches(" 1234\n"), "a short secret, whole")
         expect(vault.matches("Room 1234") && vault.matches("PIN: 1234.") && vault.matches("(1234)"), "a short secret, as a word inside text")
-        expect(!vault.matches("12345") && !vault.matches("A1234B") && !vault.matches("01234"), "not run into other letters or digits")
+        expect(!vault.matches("12345") && !vault.matches("01234"), "not run into other digits")
+        expect(vault.matches("A1234B"), "4 digits may be a security code: caught next to letters too")
         expect(!vault.matches("123") && !vault.matches("Year 2024"), "nor a part of it, nor other numbers")
         let pins = UIMap.SecretIndex(["739251", "abc"])
         expect(pins.matches("Door PIN: 739251"), "a six-digit PIN inside text")
@@ -344,6 +345,29 @@ struct UIMapCheck {
         expect(wide.check("-👩‍💻-ñandú") == .secret && wide.check("clé-👩‍💻-ñan") == .secret, "8 characters of it, either end")
         expect(wide.check("clé-👩-ñandú") == .clean, "not with another character in it")
         expect(wide.redacted("x clé-👩‍💻-ñandú y") == "x \(UIMap.hidden) y", "redacted by characters")
+
+        // A picture between two reads of a window: each secret part covered from where it was to where it is.
+        let frame = CGRect(x: 0, y: 0, width: 800, height: 600)
+        let field = CGRect(x: 100, y: 200, width: 200, height: 24)
+        let still = UIMap.blackouts(before: [(1, field)], after: [(1, field)], window: frame)
+        expect(still == [field], "a field that stayed is covered where it is", "\(String(describing: still))")
+        let scrolled = field.offsetBy(dx: 0, dy: -80)
+        let between = UIMap.blackouts(before: [(1, field)], after: [(1, scrolled)], window: frame)
+        expect(between == [field.union(scrolled)] && between?[0].contains(CGRect(x: 100, y: 150, width: 200, height: 24)) == true,
+               "scrolled a little: covered all the way between", "\(String(describing: between))")
+        expect(UIMap.blackouts(before: [(1, field)], after: [(1, field.offsetBy(dx: 0, dy: -200))], window: frame) == nil,
+               "scrolled more than a quarter of the window: no picture")
+        expect(UIMap.blackouts(before: [(1, field)], after: [(1, field.offsetBy(dx: 250, dy: 0))], window: frame) == nil,
+               "moved sideways more than a quarter: no picture")
+        expect(UIMap.blackouts(before: [(1, field)], after: [], window: frame) == nil, "gone meanwhile: no picture")
+        expect(UIMap.blackouts(before: [], after: [(2, field)], window: frame) == nil, "appeared meanwhile: no picture")
+        expect(UIMap.blackouts(before: [(1, field)], after: [(2, field)], window: frame) == nil, "another element where it was: no picture")
+        let two = UIMap.blackouts(before: [(1, field), (2, field.offsetBy(dx: 0, dy: 40))],
+                                  after: [(2, field.offsetBy(dx: 0, dy: 30)), (1, field.offsetBy(dx: 0, dy: -10))], window: frame)
+        expect(two?.count == 2 && two?[0] == field.union(field.offsetBy(dx: 0, dy: -10)), "matched by element, not by order", "\(String(describing: two))")
+        let pieces = UIMap.blackouts(before: [(3, field), (3, field.offsetBy(dx: 210, dy: 0))], after: [(3, field), (3, field.offsetBy(dx: 210, dy: 0))], window: frame)
+        expect(pieces?.count == 1, "an element found twice in a read is one part")
+        expect(UIMap.blackouts(before: [], after: [], window: frame) == [], "nothing secret: nothing covered")
 
         print("UIMap: \(passed) passed, \(failures) failed")
         if failures > 0 { exit(1) }

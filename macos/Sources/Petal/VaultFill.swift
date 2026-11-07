@@ -372,21 +372,33 @@ extension Assist {
     /// The browser's own answer for the tab of `map`'s window (its address and its id for the tab), where it gives
     /// one (Automation allowed).
     private func withTab(_ map: ComputerUse.Map, title: String, done: @escaping @MainActor (_ url: String?, _ id: String?) -> Void) {
-        guard let running = NSRunningApplication(processIdentifier: map.pid) else { return done(nil, nil) }
-        let window = Browsers.Window(number: map.windowID, title: title, frame: map.windowFrame)
+        withTab(pid: map.pid, windowID: map.windowID, frame: map.windowFrame, title: title, done: done)
+    }
+
+    private func withTab(pid: pid_t, windowID: CGWindowID?, frame: CGRect, title: String, done: @escaping @MainActor (_ url: String?, _ id: String?) -> Void) {
+        guard let running = NSRunningApplication(processIdentifier: pid) else { return done(nil, nil) }
+        let window = Browsers.Window(number: windowID, title: title, frame: frame)
         app.browsers.tab(of: running, window: window) { url, id in MainActor.assumeIsolated { done(url, id) } }
     }
 
     /// What `map`'s window shows now (its tab's page, with the browser's own answer for the tab), read off the main
     /// thread: a Buy in that window is checked against it before every act there (ComputerUse).
     func vaultTab(_ map: ComputerUse.Map, done: @escaping @MainActor (Vault.Place) -> Void) {
+        vaultTab(window: map.window, pid: map.pid, bundle: map.bundle, appName: map.appName, windowID: map.windowID, frame: map.windowFrame, done: done)
+    }
+
+    /// What `window` shows now, as above, for a read that has no map (petal_look).
+    func vaultTab(window: AXUIElement, pid: pid_t, bundle: String, appName: String, windowID: CGWindowID?, frame: CGRect,
+                  done: @escaping @MainActor (Vault.Place) -> Void) {
+        // Read only on the read queue, as Map's window is.
+        nonisolated(unsafe) let window = window
         ComputerUse.readQueue.async {
-            let place = VaultReader.page(in: map.window, pid: map.pid, bundle: map.bundle, appName: map.appName)
-            let title: String = Windows.value(map.window, kAXTitleAttribute) ?? ""
+            let place = VaultReader.page(in: window, pid: pid, bundle: bundle, appName: appName)
+            let title: String = Windows.value(window, kAXTitleAttribute) ?? ""
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard place.web else { return done(place) }
-                    self.withTab(map, title: title) { url, id in
+                    self.withTab(pid: pid, windowID: windowID, frame: frame, title: title) { url, id in
                         var place = place
                         place.tabURL = url
                         place.tab.id = id
