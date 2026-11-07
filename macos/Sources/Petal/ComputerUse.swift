@@ -921,25 +921,56 @@ enum Acting {
             prepared.error = why
             return prepared
         }
-        // Never a vault secret onto the clipboard, where petal_look could read it.
-        if UIMap.copies(menu: prepared.menuTitle) || key.map(UIMap.copies(key:)) == true,
-           holdsSecret(app, entry?.element) {
-            prepared.error = "What's selected holds one of the vault's secrets: Petal doesn't copy it. petal_vault types a saved secret where it's needed."
+        // A secret on the clipboard is never pasted (early here; again right before the paste). What a copy takes is
+        // checked only in perform, once the window is in front: the keyboard may be in another window until then.
+        if UIMap.pastes(menu: prepared.menuTitle) || key.map(UIMap.pastes(key:)) == true, let why = pasteRefusal() {
+            prepared.error = why
         }
         return prepared
     }
 
-    /// The control with the keyboard (and `element`, which a key focuses first): its selected text or its value
-    /// holds a vault secret.
-    static func holdsSecret(_ app: AXUIElement, _ element: AXUIElement?) -> Bool {
+    // MARK: The clipboard and the vault
+
+    /// Never a vault secret onto the clipboard, where petal_look could read it, nor off it into a window: the vault
+    /// types its own, asking the person every time. Both are checked right before the key or the menu item, in the
+    /// window it acts on (`perform`).
+    static func clipboardRefusal(_ map: ComputerUse.Map, _ element: AXUIElement?, menu: String?, key: UIMap.Key?) -> String? {
+        if UIMap.copies(menu: menu) || key.map(UIMap.copies(key:)) == true, let why = copyRefusal(map, element) { return why }
+        if UIMap.pastes(menu: menu) || key.map(UIMap.pastes(key:)) == true, let why = pasteRefusal() { return why }
+        return nil
+    }
+
+    /// The window petal_ui looked at is in front, and what has its keyboard (and `element`, which a key focuses
+    /// first) holds no vault secret in what's selected or in its value; else why nothing is copied.
+    static func copyRefusal(_ map: ComputerUse.Map, _ element: AXUIElement?) -> String? {
+        guard windowInFront(map) else { return "That window isn't in front anymore; nothing was copied." }
+        let app = AXUIElementCreateApplication(map.pid)
+        AXUIElementSetMessagingTimeout(app, 0.5)
         let focused: AXUIElement? = Windows.value(app, kAXFocusedUIElementAttribute)
+        if let focused, let home: AXUIElement = Windows.value(focused, kAXWindowAttribute), !isWindow(home, of: map) {
+            return "The keyboard is in another window of \(map.appName); nothing was copied."
+        }
         for control in [element, focused].compactMap({ $0 }) {
             let found = Reader.values(control, [kAXSelectedTextAttribute, kAXValueAttribute])
             for name in [kAXSelectedTextAttribute, kAXValueAttribute] {
-                if let text = found[name] as? String, Assist.isVaultSecret(String(text.prefix(20_000))) { return true }
+                if let text = found[name] as? String, Assist.isVaultSecret(String(text.prefix(20_000))) {
+                    return "What's selected holds one of the vault's secrets: Petal doesn't copy it. petal_vault types a saved secret where it's needed, asking the person every time."
+                }
             }
         }
-        return false
+        return nil
+    }
+
+    /// The clipboard holds a vault secret (the redaction's matching), or something a password manager marked
+    /// private (what petal_look won't read): then why nothing is pasted. Off the main thread: the Keychain and an
+    /// app's promised clipboard data may take a while.
+    nonisolated static func pasteRefusal(_ pasteboard: NSPasteboard = .general) -> String? {
+        let refusal = "The clipboard holds a secret (one of the vault's, or a password manager's): Petal doesn't paste it. petal_vault types a saved secret, asking the person every time."
+        if Assist.isConcealed(pasteboard) { return refusal }
+        for type in [NSPasteboard.PasteboardType.string, .html, .rtf, .URL] {
+            if let text = pasteboard.string(forType: type), Assist.isVaultSecret(String(text.prefix(20_000))) { return refusal }
+        }
+        return nil
     }
 
     static func perform(_ action: String, entry: ComputerUse.Entry?, map: ComputerUse.Map, prepared: Prepared, options: Options,
@@ -1044,6 +1075,11 @@ enum Acting {
                 outcome.error = error
                 break
             }
+            // Right before it: what a copy takes, in this window now, and what a paste puts in.
+            if let why = clipboardRefusal(map, nil, menu: prepared.menuTitle, key: nil) {
+                outcome.error = why
+                break
+            }
             guard !cancel.stopped else { return outcome }
             if AXUIElementPerformAction(item, kAXPressAction as CFString) != .success {
                 outcome.error = "Couldn't choose \(prepared.menuTitle ?? "that item"); its app didn't answer."
@@ -1064,8 +1100,13 @@ enum Acting {
                     break
                 }
             }
-            // A shortcut its menus have is chosen there (any app, in front or not); otherwise the key itself.
+            // A shortcut its menus have is chosen there (any app, in front or not); otherwise the key itself. Either
+            // way, right before it: what a copy takes, in this window now, and what a paste puts in.
             if let item = prepared.menuItem {
+                if let why = clipboardRefusal(map, element, menu: prepared.menuTitle, key: key) {
+                    outcome.error = why
+                    break
+                }
                 guard !cancel.stopped else { return outcome }
                 if AXUIElementPerformAction(item, kAXPressAction as CFString) == .success {
                     outcome.chose = prepared.menuTitle
@@ -1084,6 +1125,10 @@ enum Acting {
                 let app = AXUIElementCreateApplication(pid)
                 AXUIElementSetMessagingTimeout(app, 0.5)
                 guard !focusedIsSecure(app) else { outcome.error = "A password field has the cursor: Petal doesn't type there."; break }
+            }
+            if let why = clipboardRefusal(map, element, menu: prepared.menuTitle, key: key) {
+                outcome.error = why
+                break
             }
             guard post(key, to: pid, cancel: cancel) else { return outcome }
         default: break
@@ -1205,14 +1250,16 @@ enum Acting {
     static func windowInFront(_ map: ComputerUse.Map) -> Bool {
         let app = AXUIElementCreateApplication(map.pid)
         AXUIElementSetMessagingTimeout(app, 0.5)
-        let same = { (other: AXUIElement?) -> Bool in
-            guard let other else { return false }
-            if CFEqual(other, map.window) { return true }
-            if let id = map.windowID, let otherID = Windows.id(of: other) { return id == otherID }
-            return false
-        }
-        if let focused: AXUIElement = Windows.value(app, kAXFocusedWindowAttribute) { return same(focused) }
-        return same(Windows.value(app, kAXMainWindowAttribute))
+        if let focused: AXUIElement = Windows.value(app, kAXFocusedWindowAttribute) { return isWindow(focused, of: map) }
+        return isWindow(Windows.value(app, kAXMainWindowAttribute), of: map)
+    }
+
+    /// `other` is the window petal_ui looked at.
+    static func isWindow(_ other: AXUIElement?, of map: ComputerUse.Map) -> Bool {
+        guard let other else { return false }
+        if CFEqual(other, map.window) { return true }
+        if let id = map.windowID, let otherID = Windows.id(of: other) { return id == otherID }
+        return false
     }
 
     /// Brings the window petal_ui looked at to the front of its app if it isn't (the pointer stays), and checks
@@ -1405,11 +1452,11 @@ final class FakeCursor {
     func stand(_ on: Bool) {
         standing = on
         if on {
-            listen()
             if !pillShown, !showing, let place = pillPlace { showPill(nil, at: place.point, on: place.screen) }
         } else if !showing {
             hidePill()
         }
+        listening()
     }
 
     /// An action was let go ahead: Stop shows straight away, before Petal reads the window, where it was or by
@@ -1452,7 +1499,6 @@ final class FakeCursor {
         if !showing {
             showing = true
             panel.orderFrontRegardless()
-            listen()
         }
         // The chip follows once the cursor is there.
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.glide) { [weak self] in
@@ -1510,6 +1556,7 @@ final class FakeCursor {
         fade?.cancel()
         fade = nil
         hidePill()
+        listening()
         guard showing else { return }
         showing = false
         CATransaction.begin()
@@ -1531,7 +1578,9 @@ final class FakeCursor {
         CATransaction.begin()
         CATransaction.setCompletionBlock { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, !self.showing else { return }
+                guard let self else { return }
+                self.listening()
+                guard !self.showing else { return }
                 self.panel?.orderOut(nil)
             }
         }
@@ -1555,22 +1604,32 @@ final class FakeCursor {
         pill.show(ActingPill(caption: caption) { [weak self] in self?.onStop?() }, near: point, on: screen)
         pillShown = true
         pillPlace = (point, screen)
-        listen()
+        listening()
     }
 
     private func hidePill() {
         if pillShown { pill?.hide() }
         pillShown = false
-        if !standing && !showing { unlisten() }
+        listening()
     }
 
-    /// Escape stops it, wherever the keyboard is (Petal's own windows included).
+    /// Escape listens only while a reply may act (`standing`), whatever the pointer is doing: told at every change of
+    /// it, when the pointer is hidden and when its fade ends, so Escape in Petal's own chat is never kept after.
+    private func listening() {
+        if standing { listen() } else { unlisten() }
+    }
+
+    /// Escape stops it, wherever the keyboard is. Another app's Escape still reaches it (a global monitor only
+    /// hears); in Petal's own windows Escape is taken only while a reply may act, and goes on as usual otherwise.
     private func listen() {
         guard monitors.isEmpty else { return }
         let escape: (NSEvent) -> Bool = { [weak self] event in
             guard event.keyCode == 53 else { return false }
-            MainActor.assumeIsolated { self?.onStop?() }
-            return true
+            return MainActor.assumeIsolated {
+                guard let self, self.standing else { return false }
+                self.onStop?()
+                return true
+            }
         }
         if let global = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: { _ = escape($0) }) { monitors.append(global) }
         if let local = NSEvent.addLocalMonitorForEvents(matching: .keyDown, handler: { escape($0) ? nil : $0 }) { monitors.append(local) }

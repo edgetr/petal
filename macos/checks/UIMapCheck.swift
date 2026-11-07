@@ -173,7 +173,15 @@ struct UIMapCheck {
         let unread = UIMap.selection([UIMap.Selected(count: nil)])
         expect(!unread.known, "a count that couldn't be read isn't known")
         expect(!UIMap.selection([UIMap.Selected(count: 40, rows: Array(manyRows.prefix(12)), complete: false)]).known, "out of time isn't known")
-        expect(UIMap.selection([UIMap.Selected(count: 900, rows: (1...UIMap.rowCap).map { "#\($0)" })]).known, "past the cap, the count still counts")
+        let rowsAtCap = (1...UIMap.rowCap).map { "#\($0)" }
+        expect(!UIMap.selection([UIMap.Selected(count: 600, rows: rowsAtCap)]).known, "past the cap isn't known")
+        expect(UIMap.selection([UIMap.Selected(count: 600, rows: rowsAtCap)]).text == UIMap.selection([UIMap.Selected(count: 600, rows: Array(rowsAtCap.prefix(5)) + ["changed"])]).text,
+               "past the cap, a change beyond the first rows can't be seen: so it isn't known")
+        expect(UIMap.selection([UIMap.Selected(count: UIMap.rowCap, rows: rowsAtCap)]).known, "up to the cap, read whole, is known")
+        expect(!UIMap.selection([UIMap.Selected(count: 40, rows: Array(manyRows.prefix(39)))]).known, "rows short of the count aren't known")
+        expect(UIMap.unsure(UIMap.fingerprint(title: "t", focusRole: "", focusSubrole: "", focusValue: "", selection: UIMap.selection([UIMap.Selected(count: 600, rows: rowsAtCap)])),
+                            UIMap.fingerprint(title: "t", focusRole: "", focusSubrole: "", focusValue: "", selection: UIMap.selection([UIMap.Selected(count: 600, rows: rowsAtCap)])),
+                            destructive: true, age: 60) != nil, "Delete on 600 selected rows only straight after a look")
         expect(UIMap.selection([]).known && UIMap.selection([UIMap.Selected(count: 0)]).known, "nothing selected is known")
 
         // Destructive menu items and keys need a fresh look while the selection isn't known.
@@ -198,6 +206,9 @@ struct UIMapCheck {
         expect(!UIMap.copies(menu: "Edit › Paste") && !UIMap.copies(menu: "File › Duplicate") && !UIMap.copies(menu: nil), "not copying")
         expect(["cmd-c", "cmd-x", "cmd-shift-c", "⌘C"].allSatisfy { UIMap.parseKey($0).map(UIMap.copies(key:)) == true }, "copy keys")
         expect(["c", "cmd-v", "ctrl-c"].allSatisfy { UIMap.parseKey($0).map(UIMap.copies(key:)) == false }, "not copy keys")
+        expect(UIMap.pastes(menu: "Edit › Paste") && UIMap.pastes(menu: "Edit › Paste and Match Style") && !UIMap.pastes(menu: "Edit › Copy") && !UIMap.pastes(menu: nil), "paste menu items")
+        expect(["cmd-v", "cmd-shift-alt-v", "⌘V"].allSatisfy { UIMap.parseKey($0).map(UIMap.pastes(key:)) == true }, "paste keys")
+        expect(["v", "cmd-c", "ctrl-v"].allSatisfy { UIMap.parseKey($0).map(UIMap.pastes(key:)) == false }, "not paste keys")
 
         // The clipboard, a window's title or a selection: the secrets go, the rest stays.
         expect(vault.redacted("sk-live-4f9a2b7c1d") == UIMap.hidden, "a whole secret, hidden")

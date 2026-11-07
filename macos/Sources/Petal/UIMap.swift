@@ -304,13 +304,13 @@ enum UIMap {
 
     /// Which rows are selected, as the fingerprint keeps it: for each list, how many in all and a hash of every row
     /// read (so a sixth file selected while the person is asked is a change, wherever it is). Not known when a count
-    /// couldn't be read or the rows weren't all read in time; then only the count and the first few rows count,
-    /// so a slow app's big selection isn't a change at every look.
+    /// couldn't be read, more rows are selected than `rowCap`, or the rows weren't all read in time; then only the
+    /// count and the first few rows count, so a slow app's big selection isn't a change at every look.
     static func selection(_ lists: [Selected]) -> (text: String, known: Bool) {
         var known = true
         let parts = lists.map { list -> String in
             guard let count = list.count else { known = false; return "?" }
-            let whole = list.complete && list.rows.count >= min(count, rowCap)
+            let whole = list.complete && count <= rowCap && list.rows.count >= count
             if !whole { known = false }
             var hasher = Hasher()
             for row in whole ? list.rows : Array(list.rows.prefix(5)) { hasher.combine(truncate(tidy(row), 120)) }
@@ -366,6 +366,17 @@ enum UIMap {
     /// ⌘C or ⌘X, with any other modifiers.
     static func copies(key: Key) -> Bool {
         key.command && ["c", "x"].contains(key.character ?? "")
+    }
+
+    /// The menu item pastes ("Edit › Paste", "Paste and Match Style", "Paste Item").
+    static func pastes(menu title: String?) -> Bool {
+        guard let last = title.flatMap({ menuPath($0).last }) else { return false }
+        return words(last).first == "paste"
+    }
+
+    /// ⌘V, with any other modifiers (⌥⇧⌘V pastes and matches style).
+    static func pastes(key: Key) -> Bool {
+        key.command && key.character == "v"
     }
 
     static func words(_ text: String) -> [String] {
