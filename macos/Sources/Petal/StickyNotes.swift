@@ -113,14 +113,14 @@ extension ClaudePanel {
     /// A note here, or a chat kept from before Petal (or the browser) last started.
     enum Found { case live(StickyNote), kept(SavedChat) }
 
-    /// The notes here that can fit what's in front (stuck to a window that's there, or a tab's, whose tab may come
-    /// back), then the chats kept from before, with their places for NoteRules (which keeps one per chat: a note here
-    /// over a kept copy of its chat).
+    /// The notes here that can fit what's in front (stuck to a window that's there, or a Chromium tab's, whose tab
+    /// may come back), then the chats kept from before, with their places for NoteRules (which keeps one per chat: a
+    /// note here over a kept copy of its chat).
     private var gathered: (found: [Found], candidates: [NoteCandidate]) {
         var found: [Found] = []
         var candidates: [NoteCandidate] = []
         for note in notes {
-            guard let place = note.place, note.attached || place.kind == .tab else { continue }
+            guard let place = note.place, note.attached || place.tabComesBack else { continue }
             found.append(.live(note))
             candidates.append(NoteCandidate(place: place, chat: note.agent.chatID, live: true))
         }
@@ -132,10 +132,11 @@ extension ClaudePanel {
         return (found, candidates)
     }
 
-    /// Tab notes whose window closed or browser quit, and chats kept for tabs, of `bundle` (nil: any browser): their
-    /// tabs may come back (another window, or the browser restarted), so Petal keeps looking when it comes forward.
+    /// Chromium tab notes whose window closed or browser quit, and chats kept for tabs, of `bundle` (nil: any
+    /// browser): their tabs may come back (another window, or the browser restarted), so Petal keeps looking when it
+    /// comes forward.
     func recoverableTabs(_ bundle: String?) -> Bool {
-        notes.contains { $0.windowGone && $0.place?.kind == .tab && (bundle == nil || $0.place?.app == bundle) }
+        notes.contains { $0.windowGone && $0.place?.tabComesBack == true && (bundle == nil || $0.place?.app == bundle) }
             || savedPlaces.values.contains { $0.place?.kind == .tab && (bundle == nil || $0.place?.app == bundle) }
     }
 
@@ -408,12 +409,12 @@ extension ClaudePanel {
         // A Chromium tab's chat: its tab, by its id, may be in another window by now (dragged out, or its window
         // closed with the tab moved first); only the browser can say, so it's asked (AppleScript) before Accessibility.
         let tabID = place.kind == .tab && Browsers.kind(place.app) == .chromium ? place.tab?.id : nil
+        // A Safari, Firefox or Zen tab's chat (its tab's button meant something only to the Petal that saw it), and a
+        // Chromium tab's after its browser restarted, are plain chats: never stuck again by address from here. A link
+        // kept from the tab waits for it to come forward, where notes and kept chats are told apart together.
+        if place.kind == .tab, place.tab != nil, tabID == nil { present(note); return prune() }
         guard place.window != nil || tabID != nil, NSRunningApplication(processIdentifier: place.pid)?.bundleIdentifier == place.app
         else { present(note); return prune() }
-        // A tab known only by its address (a Safari chat kept from before Petal restarted): the tab its window shows
-        // is its own only when it's the browser's only tab there, and then the note takes that tab's button.
-        let byAddress = place.kind == .tab && place.tab?.known == false && Browsers.kind(place.app) != nil
-            && !PetalApp.shared.assist.neverLook(place.app)
         let window = place.window ?? 0
         let ticket = pendingTicket
         restoreTicket += 1
@@ -421,28 +422,17 @@ extension ClaudePanel {
         // Apps made private while its window is looked up: it doesn't stick with what was read before.
         let privacy = Self.privacy.now
         let chatID = chat.id
-        (tabID == nil && !byAddress ? Self.windowQueue : Self.tabQueue).async {
+        (tabID == nil ? Self.windowQueue : Self.tabQueue).async {
             let tab = tabID.flatMap { Browsers.tabWindow(id: $0, bundleID: place.app) }
-            let seen = byAddress ? Self.tabShowing(place) : nil
             Self.windowQueue.async {
-                let windows = Windows.windows(of: place.pid)
                 var found = place
                 let there: Bool?
                 if let tab {
                     there = tab.found
-                    // Its window now: the one with its bounds (its old one if that's it); when that's unsure, none,
-                    // learned once its tab is in front.
-                    let old = windows.first { $0.id == "\(place.pid)-w\(window)" }
-                    if let bounds = tab.bounds {
-                        let alike = windows.filter { NoteRules.sameFrame($0.frame, bounds) }
-                        if old.map({ o in alike.contains { $0.id == o.id } }) != true {
-                            found.window = alike.count == 1 ? Windows.id(of: alike[0].element) : nil
-                        }
-                    } else if old == nil {
-                        found.window = nil
-                    }
+                    // Its window now (learned once its tab is in front when that's unsure).
+                    found.window = Self.windowHolding(pid: place.pid, old: place.window, bounds: tab.bounds)
                 } else {
-                    let open = windows.contains { $0.id == "\(place.pid)-w\(window)" }
+                    let open = Windows.windows(of: place.pid).contains { $0.id == "\(place.pid)-w\(window)" }
                     // The browser couldn't be asked about a Chromium tab: its window gone says nothing of its tab.
                     there = open || tabID == nil ? open : nil
                 }
@@ -452,11 +442,7 @@ extension ClaudePanel {
                         // window's link to it).
                         guard mine == self.restoreTicket else { return self.prune() }
                         if there == true && self.notesOn && Self.privacy.current(privacy) {
-                            var stuck = found
-                            if let seen, let tab = stuck.tab {
-                                stuck.tab = NoteRules.follow(tab, to: seen.tab, keepWords: true)
-                                stuck.window = seen.window
-                            }
+                            let stuck = found
                             // Its window or tab is there: it's the note for it from now on, so the copy kept for it goes
                             // (two copies of one chat would make its tab unsure). As it may be kept: sanitized now. Not
                             // when another note here has that tab (by its id or button) or place since: it opens as a
@@ -486,7 +472,7 @@ extension ClaudePanel {
 
     /// Notes nobody can come back to (their window gone, or stuck to none: chats read from the list) are let go,
     /// and past 30 idle ones the oldest too. All are kept in Chats; one whose window is still open is found again
-    /// when that window opens the AI, and a tab's after its browser restarts, by its address.
+    /// when that window opens the AI, and a Chromium tab's in another window, or after its browser restarts.
     func prune(sparing spared: StickyNote? = nil) {
         let keep = { (note: StickyNote) in
             note === spared || note === self.current || note === self.loose || note.agent.running || note.ready || !note.agent.waiting.isEmpty
@@ -498,8 +484,9 @@ extension ClaudePanel {
         }
         var gone = notes.filter { !keep($0) && ($0.windowGone || $0.place == nil) }
         notes.removeAll { !keep($0) && ($0.windowGone || $0.place == nil) }
-        // A tab's note whose browser quit (or window closed) can be found again by its tab's address.
-        for note in gone where note.place?.kind == .tab {
+        // A Chromium tab's note whose browser quit (or window closed) can be found again: by its tab's id, or its
+        // address. A Safari, Firefox or Zen tab's button went with its window: its chat waits in Chats.
+        for note in gone where note.place?.tabComesBack == true {
             if let place = note.place, let chat = note.agent.saved { savedPlaces[NoteRules.key(place)] = chat }
         }
         let idle = notes.filter { !keep($0) && $0.attached }
@@ -583,8 +570,9 @@ extension ClaudePanel {
 
     /// For a note stuck to a tab: the tab its window shows now, when that's the note's own tab (with the window's
     /// number), else nil: another tab shows, or Petal can't tell (no answer, no window, not allowed to ask). A tab
-    /// note's AI reads and acts only on its own tab (NoteRules.sameTab: its id, or its button in the tab strip),
-    /// never on whichever tab its window shows by then. Asks Accessibility and the browser: never on the main thread.
+    /// note's AI reads and acts only on its own tab (`NoteRules.surely`: its id, or its button in the tab strip, in
+    /// the same run of the browser), never on whichever tab its window shows by then, nor one on its address.
+    /// Asks Accessibility and the browser: never on the main thread.
     nonisolated static func tabShowing(_ place: NotePlace) -> (tab: NoteTab, window: CGWindowID)? {
         guard place.kind == .tab, place.tab != nil, Windows.trusted else { return nil }
         let app = AXUIElementCreateApplication(place.pid)
@@ -598,16 +586,9 @@ extension ClaudePanel {
         }
         guard let element, let number = Windows.id(of: element), let frame = Windows.frame(of: element) else { return nil }
         let window = Browsers.Window(number: number, title: Windows.value(element, kAXTitleAttribute) ?? "", frame: frame)
-        guard var now = Browsers.shownTab(pid: place.pid, bundleID: place.app, window: window, element: element) else { return nil }
-        var front = FrontPlace(pid: place.pid, app: place.app, window: number, tab: now)
-        // A tab known only by its address (its chat kept from before Petal restarted): the browser's tabs on that
-        // address are counted, and the one showing is its tab only when no other has it (the note then takes its
-        // button: `tabSeen`).
-        if !NoteRules.fits(place, front), let tab = place.tab, NoteRules.worthCounting(tab, pid: place.pid, now, pid: place.pid) {
-            now.shared = Browsers.tabsSharing(now.url, bundleID: place.app)
-            front.tab = now
-        }
-        return NoteRules.fits(place, front) ? (now, number) : nil
+        guard let now = Browsers.shownTab(pid: place.pid, bundleID: place.app, window: window, element: element) else { return nil }
+        let front = FrontPlace(pid: place.pid, app: place.app, window: number, tab: now)
+        return NoteRules.surely(place, front) ? (now, number) : nil
     }
 
     /// What a note's AI hears when it was asked where its app showed no window (Finder's desktop): it has none.
@@ -668,6 +649,18 @@ extension ClaudePanel {
         }
     }
 
+    /// The window of `pid` a Chromium tab is in now, from that window's bounds (the browser's answer, top-left
+    /// origin): `old` while it's still that one, else the one window with those bounds; nil when that's unsure (none,
+    /// or two alike). Off the main thread.
+    nonisolated static func windowHolding(pid: pid_t, old: CGWindowID?, bounds: CGRect?) -> CGWindowID? {
+        let windows = Windows.windows(of: pid)
+        let was = old.flatMap { number in windows.first { $0.id == "\(pid)-w\(number)" } }
+        guard let bounds else { return was == nil ? nil : old }
+        let alike = windows.filter { NoteRules.sameFrame($0.frame, bounds) }
+        if let was, alike.contains(where: { $0.id == was.id }) { return old }
+        return alike.count == 1 ? Windows.id(of: alike[0].element) : nil
+    }
+
     // MARK: Following the windows
 
     /// Starts watching which app is in front (only while notes are stuck to windows does it look further), and reads
@@ -698,8 +691,10 @@ extension ClaudePanel {
                     // A window lasts only as long as its app.
                     guard place.window != nil, NSRunningApplication(processIdentifier: place.pid)?.bundleIdentifier == place.app else { continue }
                 case .tab:
-                    // A tab is found again by its address after its browser restarts.
-                    guard place.tab != nil else { continue }
+                    // A Chromium tab is found again by its id while its browser runs, by its address after it
+                    // restarted. A Safari, Firefox or Zen tab's button meant something only to the Petal that saw it:
+                    // its chat waits in Chats, holding no place, so it never makes another chat let go of one.
+                    guard place.tabComesBack else { continue }
                 case .app:
                     guard !place.app.isEmpty else { continue }
                 }
@@ -903,9 +898,11 @@ extension ClaudePanel {
     /// app), where they left it. When several fit (a tab's, its window's, its app's), the most specific shows.
     private func frontChanged(_ front: FrontPlace, title: String) {
         if let pending = pendingOpen, let place = pending.place {
-            // A tab's note: its own tab in front (a browser that couldn't be asked to show it waits for the person to).
-            let there = place.kind == .tab ? NoteRules.fits(place, front) : NoteRules.sameWindow(place, front)
+            // A tab's note: its own tab in front (a browser that couldn't be asked to show it waits for the person to),
+            // which it follows (another window, a new address).
+            let there = place.kind == .tab ? holds(pending, front) : NoteRules.sameWindow(place, front)
             if pending.windowGone ? place.pid == front.pid : there {
+                if place.kind == .tab, there { adopt(pending, front, title: PetalApp.shared.assist.neverLook(front.app) ? "" : title) }
                 pendingOpen = nil
                 // Its window is in front: no more retries (they'd fight a switch the person makes next).
                 bringing = nil
@@ -914,7 +911,8 @@ extension ClaudePanel {
                 // only if nothing else was opened meanwhile and the window is still in front.
                 let ticket = pendingTicket
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    guard ticket == self.pendingTicket, self.inFront(place), place.kind != .tab || self.lastFront == front else { return }
+                    let now = pending.place ?? place
+                    guard ticket == self.pendingTicket, self.inFront(now), now.kind != .tab || self.lastFront == front else { return }
                     self.present(pending, key: true, fromIcon: true)
                 }
                 return
@@ -952,6 +950,12 @@ extension ClaudePanel {
         // A more specific note takes the panel; the one showing comes back where it fits.
         shown?.away = true
         present(best, key: false, fromIcon: true)
+    }
+
+    /// `note` belongs on what's in front, told apart from the other notes and the chats kept from before together
+    /// (`fitting`): a tab's note never shows on a tab another note or kept chat fits as well by its address.
+    private func holds(_ note: StickyNote, _ front: FrontPlace) -> Bool {
+        fitting(front).contains { $0 === note }
     }
 
     /// The note's window (any of its app's, for an app's note) is the one in front, as far as Petal has heard: for
@@ -1022,7 +1026,7 @@ extension ClaudePanel {
                     guard ticket == self.pendingTicket, !self.isOpen || self.current !== note,
                           NSWorkspace.shared.frontmostApplication?.processIdentifier == pid, let place = note.place, place.kind == .tab
                     else { return }
-                    if NoteRules.fits(place, read.place(pid, app: running.bundleIdentifier ?? "")) { note.away = false }
+                    if self.holds(note, read.place(pid, app: running.bundleIdentifier ?? "")) { note.away = false }
                 }
             }
         }
@@ -1089,7 +1093,7 @@ extension ClaudePanel {
         let bring = {
             guard ticket == self.pendingTicket, self.notesOn else { return }
             // Its window is in front already (and, for a tab's note, its tab): nothing to wait for.
-            if self.inFront(place), place.kind != .tab || self.lastFront.map({ NoteRules.fits(place, $0) }) == true {
+            if self.inFront(place), place.kind != .tab || self.lastFront.map({ self.holds(note, $0) }) == true {
                 return self.present(note, key: true, fromIcon: true)
             }
             self.pendingOpen = note
@@ -1105,7 +1109,7 @@ extension ClaudePanel {
                     // A tab's note only on its tab: the browser may not have shown it (or couldn't tell which it is);
                     // it stays done (its nudge too) until its tab shows.
                     let now = note.place ?? place
-                    guard now.kind == .tab ? NoteRules.fits(now, seen) : NoteRules.sameWindow(now, seen)
+                    guard now.kind == .tab ? self.holds(note, seen) : NoteRules.sameWindow(now, seen)
                     else { return }
                     self.present(note, key: true, fromIcon: true)
                 }
@@ -1114,26 +1118,49 @@ extension ClaudePanel {
             // Numbered now: closing, another app coming forward or another bringing stops both the tab's switch and
             // the window's.
             let request = NoteFocus.next()
+            let url = running.bundleURL
             // A tab's note: its tab shows first (Chromium browsers by its id; Safari, Firefox and Zen by its button).
             if place.kind == .tab, let tab = place.tab {
                 let app = place.app, window = place.window
+                let chromium = Browsers.kind(app) == .chromium && tab.id != nil
                 Self.tabQueue.async {
+                    let shown = Browsers.select(tab, bundleID: app, still: { NoteFocus.current(request) })
                     // Its tab closed while its window stayed open (only a closed window says so by itself): the
                     // note opens as a plain chat, and its nudge goes, instead of waiting for a tab that won't show.
-                    guard Browsers.select(tab, bundleID: app, window: window, still: { NoteFocus.current(request) }) == .missing
-                    else { return }
-                    DispatchQueue.main.async {
-                        MainActor.assumeIsolated {
-                            guard ticket == self.pendingTicket, NoteFocus.current(request), !(self.isOpen && self.current === note) else { return }
-                            self.cancelPending()
-                            note.windowGone = true
-                            self.present(note, key: true)
-                            self.listenIfNeeded()
+                    if shown.shown == .missing {
+                        DispatchQueue.main.async {
+                            MainActor.assumeIsolated {
+                                guard ticket == self.pendingTicket, NoteFocus.current(request), !(self.isOpen && self.current === note) else { return }
+                                self.cancelPending()
+                                note.windowGone = true
+                                self.present(note, key: true)
+                                self.listenIfNeeded()
+                            }
+                        }
+                        return
+                    }
+                    guard chromium else { return }
+                    // A Chromium tab may be in another window by now (dragged there before Petal looked): the window
+                    // that holds it is the one brought forward, and the note's window from now on.
+                    Self.windowQueue.async {
+                        guard NoteFocus.current(request) else { return }
+                        let number = shown.shown == .shown ? Self.windowHolding(pid: pid, old: window, bounds: shown.bounds) : window
+                        Self.bringForward(pid: pid, window: number, app: url, request: request)
+                        guard let number, number != window else { return }
+                        DispatchQueue.main.async {
+                            MainActor.assumeIsolated {
+                                guard ticket == self.pendingTicket, NoteFocus.current(request), var now = note.place, now.kind == .tab,
+                                      now.pid == pid, now.tab?.id == tab.id else { return }
+                                now.window = number
+                                note.place = now
+                            }
                         }
                     }
                 }
+                // A Chromium tab's window is brought forward once the browser says which it is.
+                if chromium { return }
             }
-            Self.bringForward(pid: pid, window: place.kind == .app ? nil : place.window, app: running.bundleURL, request: request)
+            Self.bringForward(pid: pid, window: place.kind == .app ? nil : place.window, app: url, request: request)
         }
         let desktop = place.desktop ?? app.docks.focusedDock?.desktop
         if let desktop, !place.mode.isEmpty, app.config.modes.contains(where: { $0.id == place.mode }),

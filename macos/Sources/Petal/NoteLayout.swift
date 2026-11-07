@@ -21,16 +21,17 @@ enum NoteScope: String, Codable, Sendable, CaseIterable {
 
 /// One browser tab, as far as Petal can tell it apart from the others.
 /// - Chromium browsers: `id`, the tab's own id, which lasts as long as the browser runs (a tab dragged to another
-///   window keeps it).
+///   window keeps it, and so does a Petal restart). `shared`: how many tabs of the whole browser (every window) have
+///   its address (`NoteRules.sameURL`), itself included; nil when unknown. After the browser restarted (new ids), a
+///   tab is found again by its address only when no other tab of the browser has it, now and when the note last saw
+///   it, and no other note or kept chat fits it as well (`NoteRules.fitting`).
 /// - Safari, Firefox and Zen give tabs no id: `element` stands for the tab's own button in its window's tab strip
 ///   (an Accessibility element, the same for as long as the tab lives, wherever it moves in its strip and whatever
-///   page it shows). It means something only while this Petal runs, so it's never saved. A tab dragged to another
-///   window gets another button and loses its note. No strip (Safari hides it for a window's only tab): no element.
-/// - `shared`: how many tabs of the whole browser (every window) have its address (`NoteRules.sameURL`), itself
-///   included; nil when unknown (Firefox and Zen always: their tab strips show titles, never addresses). Only after
-///   the browser (or Petal) restarted, with no id or element that still means anything, is a tab found again by its
-///   address, and only when no other tab of the browser has it, now and when the note last saw it.
-/// - `index`, `count`: its place in its window (1 is the first) and how many tabs the window had: for its key only.
+///   page it shows). It means something only while this Petal runs, so it's never saved, and it's the only way such
+///   a tab is found: after Petal or the browser restarts, its chat waits in Chats and opens as a plain chat. A tab
+///   dragged to another window gets another button and loses its note. No strip (Safari hides it for a window's only
+///   tab): no element. Their `shared` is always nil.
+/// - `index`, `count`: its place in its window (1 is the first) and how many tabs the window had.
 struct NoteTab: Codable, Equatable, Sendable {
     var id: String?
     var element: Int?
@@ -116,6 +117,11 @@ struct NotePlace: Codable, Equatable, Sendable {
     var spot: NoteSpot? = nil
 
     var kind: NoteScope { scope ?? .window }
+
+    /// A tab's note that can be found again once its window closed, its browser quit or Petal restarted: only a
+    /// Chromium tab's, by its id (or, after the browser restarted, its address). A Safari, Firefox or Zen tab's
+    /// button goes with its window and means nothing to another run of Petal: such a note's chat waits in Chats.
+    var tabComesBack: Bool { kind == .tab && tab?.id != nil }
 
     /// On that window of its app: its own window, or, kept with no window (its app showed none, as Finder on the
     /// desktop), only while its app is known to show none (`none`). A window Petal couldn't read (nil, not `none`) is
@@ -204,9 +210,8 @@ enum NoteRules {
 
     /// Whether `front` is the note's tab. While the browser runs, only its own id (Chromium) or its own button in
     /// the tab strip (Safari, Firefox, Zen) says so: wherever it moved, whatever page it shows, never another tab on
-    /// the same address. Once that means nothing any more (the browser restarted, or Petal did and its elements were
-    /// let go), only an address no other tab of the browser has, now and when the note last saw its tab, and only
-    /// onto a tab Petal can tell apart from then on.
+    /// the same address. A Chromium tab after its browser restarted: only an address no other tab of the browser
+    /// has, now and when the note last saw its tab (`byAddress`). Safari, Firefox and Zen tabs never by address.
     static func sameTab(_ note: NoteTab, pid notePID: Int32, _ front: NoteTab, pid frontPID: Int32) -> Bool {
         if notePID == frontPID {
             if let a = note.id, let b = front.id { return a == b }
@@ -217,10 +222,10 @@ enum NoteRules {
         return byAddress(note, front)
     }
 
-    /// The tab found again by its address alone: the only tab of the whole browser with it, as it was when the note
-    /// last saw its tab.
+    /// A Chromium tab found again by its address alone, after its browser restarted: the only tab of the whole
+    /// browser with it, as it was when the note last saw its tab, onto a tab with an id of its own.
     static func byAddress(_ note: NoteTab, _ front: NoteTab) -> Bool {
-        sameURL(note.url, front.url) && note.shared == 1 && front.shared == 1 && front.known
+        note.id != nil && front.id != nil && note.shared == 1 && front.shared == 1 && sameURL(note.url, front.url)
     }
 
     /// Whether a note stuck to `place` belongs on what's in front: for showing it there, or taking it there. A
@@ -259,13 +264,6 @@ enum NoteRules {
         return next
     }
 
-    /// Whether counting the browser's tabs on the address of the tab showing (`front`, read without a count) could
-    /// make it the note's tab: a note that knows its tab only by its address (its chat kept from before Petal
-    /// restarted), the browser's only tab on it when last seen, and a tab showing that Petal can tell apart.
-    static func worthCounting(_ note: NoteTab, pid notePID: Int32, _ front: NoteTab, pid frontPID: Int32) -> Bool {
-        front.shared == nil && front.known && note.shared == 1 && sameURL(note.url, front.url) && !(notePID == frontPID && note.known)
-    }
-
     /// Of the notes stuck to `places` (nil: stuck to none), the ones that let go of their place (their indices): a
     /// place holds one note, the first to have it, so which note comes back there is never a guess.
     static func letGo(_ places: [NotePlace?]) -> [Int] {
@@ -278,12 +276,12 @@ enum NoteRules {
         }
     }
 
-    /// Two notes stuck to the same place, for one letting go of it. Tabs Petal tells apart (a Chromium id, a tab
-    /// strip's button) are the same only by that, in the same run of the browser: two tabs on one address that
-    /// swapped places are never one because their keys (window, place, address) say so. Tabs known by neither (chats
-    /// kept from before Petal restarted), and windows and apps, by their keys.
+    /// Two notes stuck to the same place, for one letting go of it. Tabs are the same only by their own id
+    /// (Chromium) or tab strip's button, in the same run of the browser: two tabs on one address that swapped places
+    /// are never one because their window, place and address say so, and a tab known by neither (a Safari chat read
+    /// back after Petal restarted) holds no place at all. Windows and apps by their keys.
     static func samePlace(_ a: NotePlace, _ b: NotePlace) -> Bool {
-        if a.kind == .tab, b.kind == .tab, let x = a.tab, let y = b.tab, x.known || y.known {
+        if a.kind == .tab, b.kind == .tab, let x = a.tab, let y = b.tab {
             guard a.pid == b.pid, a.app == b.app else { return false }
             if let i = x.id, let j = y.id { return i == j }
             if let i = x.element, let j = y.element { return i == j }
@@ -301,8 +299,9 @@ enum NoteRules {
     }
 
     /// Of the notes stuck to `places`, the ones that belong on what's in front (their indices in `places`). Tab notes
-    /// that fit only by the address (`byAddress`: after a restart) are taken only when exactly one does and no note
-    /// has the tab by its own id or element. A note is never moved onto another note's tab by a guess.
+    /// that fit only by the address (`byAddress`: a Chromium tab after its browser restarted) are taken only when
+    /// exactly one does and no note has the tab by its own id or element. A note is never moved onto another note's
+    /// tab by a guess.
     static func fitting(_ places: [NotePlace], _ front: FrontPlace) -> [Int] {
         let fit = places.indices.filter { fits(places[$0], front) }
         let tabs = fit.filter { places[$0].kind == .tab && places[$0].tab != nil }
@@ -370,14 +369,17 @@ enum NoteRules {
         }?.element
     }
 
-    /// A kept chat's place, as a key: a window's chat by its window, a tab's by its tab, an app's by its app.
+    /// A kept chat's place, as a key: a window's chat by its window, a tab's by its tab (its id, else its button,
+    /// else its window, place and address), an app's by its app.
     static func key(_ place: NotePlace) -> String {
         switch place.kind {
         case .app: return "app|\(place.app)"
         case .window: return "\(place.pid)-\(place.window ?? 0)"
         case .tab:
             let tab = place.tab
-            return "tab|\(place.pid)|" + (tab?.id ?? "\(place.window ?? 0)/\(tab?.index ?? 0)|\(tab?.url ?? "")")
+            if let id = tab?.id { return "tab|\(place.pid)|\(id)" }
+            if let element = tab?.element { return "tab|\(place.pid)|e\(element)" }
+            return "tab|\(place.pid)|\(place.window ?? 0)/\(tab?.index ?? 0)|\(tab?.url ?? "")"
         }
     }
 

@@ -225,15 +225,14 @@ final class Browsers {
                 try
                 set n to name of t
                 end try
-                \(sharedScript)
-                return ((index of t) as text) & sep & ((count of tabs of w) as text) & sep & (k as text) & sep & u & sep & n
+                return ((index of t) as text) & sep & ((count of tabs of w) as text) & sep & u & sep & n
                 end tell
-                """).map { Self.fields($0, 5) } ?? []
-            guard fields.count >= 5, let index = Int(fields[0]) else { return nil }
+                """).map { Self.fields($0, 4) } ?? []
+            guard fields.count >= 4, let index = Int(fields[0]) else { return nil }
             let count = Int(fields[1])
             let after = window.flatMap { strip(of: $0) }
             let element = tabElement(before, after, index: index, count: count, pid: pid, window: window.flatMap { Windows.id(of: $0) })
-            return NoteTab(element: element, index: index, count: count, shared: shared(fields[3], among: fields[2]), url: fields[3], title: fields[4])
+            return NoteTab(element: element, index: index, count: count, url: fields[2], title: fields[3])
         case .gecko?:
             return geckoTab(pid: pid)
         case nil:
@@ -241,9 +240,9 @@ final class Browsers {
         }
     }
 
-    /// AppleScript that lists the address of every tab of every window of the browser into `k`, apart by character
-    /// 30, for Petal to count the ones that are `u`'s (`shared`) with the same rule matching uses; empty when it
-    /// can't (a list half done would say a tab is the only one when it isn't).
+    /// AppleScript that lists the address of every tab of every window of a Chromium browser into `k`, apart by
+    /// character 30, for Petal to count the ones that are `u`'s (`shared`) with the same rule matching uses; empty
+    /// when it can't (a list half done would say a tab is the only one when it isn't).
     nonisolated private static let sharedScript = """
         set k to ""
         if u is not "" then
@@ -323,24 +322,6 @@ final class Browsers {
         return matches.count == 1 ? matches[0].tab : nil
     }
 
-    /// How many tabs of the whole browser (every window) have the address `url`, counted as `NoteRules.sameURL`
-    /// matches; nil when the browser can't be asked or couldn't list them (Firefox and Zen: never). Off the main thread.
-    nonisolated static func tabsSharing(_ url: String, bundleID: String) -> Int? {
-        guard let kind = kind(bundleID), kind != .gecko, access(bundleID) == .allowed, let listing = run("""
-            set k to ""
-            tell application id "\(bundleID)"
-            repeat with x in windows
-            repeat with v in (get URL of tabs of x)
-            set s to contents of v
-            if s is not missing value then set k to k & s & (character id 30)
-            end repeat
-            end repeat
-            end tell
-            return k
-            """) else { return nil }
-        return shared(url, among: listing)
-    }
-
     /// How many tabs of the browser have the address `url`, from `sharedScript`'s list: nil when it couldn't list them.
     nonisolated private static func shared(_ url: String, among listing: String) -> Int? {
         NoteRules.shared(url, among: listing.components(separatedBy: "\u{1E}"))
@@ -407,15 +388,17 @@ final class Browsers {
     /// tell apart).
     enum TabShown: Sendable { case shown, missing, unsure }
 
-    /// Shows a note's tab in its window (bringing the note back from its app's icon): a Chromium browser's by its id
-    /// (in whichever window it is now; with no window known, that window comes to the browser's front), Safari's,
-    /// Firefox's and Zen's by pressing its own button in the tab strip. Off the main thread. `still`: asked right
-    /// before the browser is told, so a bringing cancelled meanwhile switches no tab.
-    nonisolated static func select(_ tab: NoteTab, bundleID: String, window: CGWindowID?, still: () -> Bool) -> TabShown {
+    /// Shows a note's tab in its window (bringing the note back from its app's icon): a Chromium browser's by its id,
+    /// in whichever window it is now, that window coming to the browser's front (`bounds`: that window's, top-left
+    /// origin as Accessibility's, so Petal raises that one); Safari's, Firefox's and Zen's by pressing its own button
+    /// in the tab strip (no bounds: the button is in its window). Off the main thread. `still`: asked right before
+    /// the browser is told, so a bringing cancelled meanwhile switches no tab.
+    nonisolated static func select(_ tab: NoteTab, bundleID: String, still: () -> Bool) -> (shown: TabShown, bounds: CGRect?) {
         switch kind(bundleID) {
         case .chromium?:
-            guard let id = tab.id, access(bundleID) == .allowed, still() else { return .unsure }
-            let answer = run("""
+            guard let id = tab.id, access(bundleID) == .allowed, still() else { return (.unsure, nil) }
+            guard let answer = run("""
+                set sep to tab
                 tell application id "\(bundleID)"
                 repeat with w in windows
                 set i to 0
@@ -423,28 +406,38 @@ final class Browsers {
                 set i to i + 1
                 if ((id of t) as text) is \(quoted(id)) then
                 set active tab index of w to i
-                \(window == nil ? "set index of w to 1" : "")
-                return "ok"
+                set index of w to 1
+                set b to bounds of w
+                return "ok" & sep & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b)
                 end if
                 end repeat
                 end repeat
                 end tell
                 return "none"
-                """)
-            return answer == "ok" ? .shown : answer == "none" ? .missing : .unsure
+                """) else { return (.unsure, nil) }
+            if answer == "none" { return (.missing, nil) }
+            let parts = answer.components(separatedBy: "\t")
+            guard parts.first == "ok" else { return (.unsure, nil) }
+            return (.shown, parts.count > 1 ? bounds(parts[1]) : nil)
         case .safari?, .gecko?:
-            guard let number = tab.element, Windows.trusted else { return .unsure }
-            if TabElements.shared.gone(number) { return .missing }
-            guard let element = TabElements.shared.element(number) else { return .unsure }
+            guard let number = tab.element, Windows.trusted else { return (.unsure, nil) }
+            if TabElements.shared.gone(number) { return (.missing, nil) }
+            guard let element = TabElements.shared.element(number) else { return (.unsure, nil) }
             AXUIElementSetMessagingTimeout(element, 0.3)
             var role: CFTypeRef?
             let alive = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
-            if alive == .invalidUIElement { return .missing }
-            guard alive == .success, still() else { return .unsure }
-            return AXUIElementPerformAction(element, kAXPressAction as CFString) == .success ? .shown : .unsure
+            if alive == .invalidUIElement { return (.missing, nil) }
+            guard alive == .success, still() else { return (.unsure, nil) }
+            return (AXUIElementPerformAction(element, kAXPressAction as CFString) == .success ? .shown : .unsure, nil)
         case nil:
-            return .unsure
+            return (.unsure, nil)
         }
+    }
+
+    /// AppleScript's window bounds ("left,top,right,bottom") as a frame, top-left origin; nil when they don't read.
+    nonisolated private static func bounds(_ text: String) -> CGRect? {
+        let b = text.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        return b.count == 4 ? CGRect(x: b[0], y: b[1], width: b[2] - b[0], height: b[3] - b[1]) : nil
     }
     /// Where a Chromium browser's tab is, by its id: its window's bounds (top-left origin, as Accessibility's), or
     /// `nil` bounds when no tab has that id. nil: no answer (not allowed, or the browser didn't say). Off the main thread.
@@ -467,8 +460,7 @@ final class Browsers {
         if answer == "none" { return (false, nil) }
         let parts = answer.components(separatedBy: "\t")
         guard parts.first == "found" else { return nil }
-        let b = (parts.count > 1 ? parts[1] : "").split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
-        return (true, b.count == 4 ? CGRect(x: b[0], y: b[1], width: b[2] - b[0], height: b[3] - b[1]) : nil)
+        return (true, parts.count > 1 ? bounds(parts[1]) : nil)
     }
 
     /// Text as an AppleScript string.
@@ -479,8 +471,7 @@ final class Browsers {
     /// Firefox's and Zen's front window (or `wanted`, one of its windows by the window server's number, none if it
     /// isn't there): the selected tab in its tab strip (its button, place, how many, its title) and the address
     /// field, through Accessibility, both read again at the end so they're the same tab's. Best effort: what each
-    /// version shows differs. Its `shared` is unknown: the strips show titles, not addresses, so after a restart a
-    /// Firefox or Zen tab is never found again by its address.
+    /// version shows differs. As Safari's, a Firefox or Zen tab is found only by its button, never by its address.
     nonisolated static func geckoTab(pid: pid_t, window wanted: CGWindowID? = nil) -> NoteTab? {
         guard Windows.trusted else { return nil }
         let app = AXUIElementCreateApplication(pid)
