@@ -2,29 +2,6 @@ import AppKit
 import ApplicationServices
 import Security
 
-/// One field to fill from the vault, as Petal decided it (Vault.decide): the item, the field, where the field was
-/// (read by Petal itself, never from the AI), and what kind of field it was. Checked again right before the keys go
-/// (VaultFiller), and filled through ComputerUse's line, with its pointer, Stop and window checks.
-struct VaultFillPlan {
-    var itemID = ""
-    /// The item as Petal planned with it (`Vault.revision`); edited since, nothing fills. nil: what the person typed
-    /// into Petal's card (`given`), not an item.
-    var revision: Int?
-    /// The item's title, for the history ("Filled your GitHub password on github.com").
-    var title = ""
-    var field: VaultField
-    /// What the person just typed into Petal's card for this page, filled without saving it first.
-    var given: String?
-    var place: Vault.Place
-    var target: Vault.Target
-    var submit = false
-    var task = ""
-    /// Payment info: fills only under a Buy that still covers its page (ComputerUse.fill), and stops when it ends.
-    var payment = false
-    /// How the AI said a year goes in ("YYYY" or "YY"); else the field's own placeholder, label or room decides.
-    var yearFormat: String?
-}
-
 // MARK: - Filling
 
 /// Puts a vault value into one field, off the main thread: only once the field is still on the page (or in the app)
@@ -74,8 +51,10 @@ enum VaultFiller {
         if let error = Acting.bringWindow(map, cancel: cancel) { return error }
         if plan.target.popup {
             let year = plan.field == .year ? saved.map { $0[.expiry] } : nil
+            let month = plan.field == .month
             return choose(text, in: element, pid: pid, cancel: cancel, pick: { titles in
-                year.flatMap { Vault.pickYear($0, from: titles) } ?? Vault.pick(text, from: titles)
+                if month { return Vault.pickMonth(text, from: titles) }
+                return year.flatMap { Vault.pickYear($0, from: titles) } ?? Vault.pick(text, from: titles)
             })
         }
         if !Acting.isFront(pid) {
@@ -235,8 +214,9 @@ enum VaultReader {
         "org.torproject.torbrowser", "com.mullvad.mullvadbrowser", "com.openai.atlas", "ai.perplexity.comet",
     ])
 
-    /// The addresses of the web areas around `element`: the nearest (a login or payment frame's own) and the
-    /// outermost (the tab's page), in a browser Petal trusts whose signature checks out. A page anywhere else (a
+    /// The addresses of the web areas around `element`: the nearest (a login or payment frame's own) and the tab's
+    /// page (the outermost before an app's own page: T3 Code's sites sit inside its t3code://app/ page, which is
+    /// never the page; Vault.pageTop), in a browser Petal trusts whose signature checks out. A page anywhere else (a
     /// browser Petal doesn't trust, another app's web view), or a browser's own controls: unverified, with the address
     /// the page gives for itself. Otherwise the app, and who signed it.
     static func place(of element: AXUIElement, pid: pid_t, bundle: String, appName: String) -> Vault.Place {
@@ -252,7 +232,8 @@ enum VaultReader {
         }
         let surface = Vault.surface(webArea: !areas.isEmpty, trusted: !areas.isEmpty && isBrowser(pid: pid, bundle: bundle),
                                     browser: known.contains(bundle))
-        if surface == .web, let top = areas.last {
+        if surface == .web, !areas.isEmpty {
+            let top = areas[Vault.pageTop(areas.map(\.url))]
             place.web = true
             place.frameURL = areas.first?.url
             place.topURL = top.url
@@ -266,8 +247,10 @@ enum VaultReader {
         return place
     }
 
-    /// The page a browser window shows (its tab's outermost web area), as a place: what a Buy is checked against
-    /// before each act in that window. Not a web page (another app, or none found in time): `web` false.
+    /// The page a browser window shows (its tab's outermost web area that isn't an app's own page: inside T3 Code's
+    /// t3code://app/ page, the site's page it shows), as a place: what a Buy is checked against before each act in
+    /// that window, the same page `place(of:)` gives a field in it. Not a web page (another app, or none found in
+    /// time): `web` false.
     static func page(in window: AXUIElement, pid: pid_t, bundle: String, appName: String) -> Vault.Place {
         var place = Vault.Place(bundle: bundle, appName: appName)
         guard isBrowser(pid: pid, bundle: bundle) else { return place }
@@ -278,11 +261,14 @@ enum VaultReader {
             let (element, depth) = queue.removeFirst()
             seen += 1
             if (Windows.value(element, kAXRoleAttribute) as String?) == "AXWebArea" {
-                place.web = true
-                place.frameURL = url(element)
-                place.topURL = place.frameURL
-                place.tab.page = element
-                return place
+                let address = url(element)
+                if Vault.isTabPage(address) {
+                    place.web = true
+                    place.frameURL = address
+                    place.topURL = address
+                    place.tab.page = element
+                    return place
+                }
             }
             guard depth < 30 else { continue }
             let children: [AXUIElement] = Windows.value(element, kAXChildrenAttribute) ?? []
@@ -580,8 +566,11 @@ extension Assist {
                 }
                 plans.append(plan)
             }
-            // Return goes once, after the last field.
-            if args["submit"] as? Bool == true, !plans.isEmpty { plans[plans.count - 1].submit = true }
+            // Return goes once, after the last field; never after payment info (it could place the order).
+            if args["submit"] as? Bool == true, !plans.isEmpty {
+                if let refusal = Vault.submitRefusal(item.kind) { return fail(refusal) }
+                plans[plans.count - 1].submit = true
+            }
             let go: (Bool) -> Void = { allowed in
                 guard self.computer.live(caller, token) else { return fail(Self.over) }
                 self.vaultFillAll(plans, entries: entries, map: map, caller: caller, token: token, allowed: allowed, send: send)
@@ -743,14 +732,15 @@ extension Assist {
         }
         let live = { token.map { self.computer.live(caller ?? "", $0) } ?? true }
         var reply: [String: Any] = ["note": Self.hidden]
-        let fillAll = {
+        // `stored`: the item as the vault saved it, which the fill then takes from the vault at that version (edited
+        // or deleted in Settings while the fill waits, nothing fills); nil when it wasn't saved.
+        let fillAll = { (stored: VaultItem?) in
             guard let window, let caller, let token, !mapped.isEmpty else { return send(reply) }
             guard live() else { reply["error"] = Self.over; return send(reply) }
             // Each field on the page Petal read for it when the card showed, checked again right before.
             let used = mapped.indices.filter { answer.values[mapped[$0].0].map { !$0.isEmpty } ?? false }
-            let plans = used.map { index in
-                VaultFillPlan(title: item.title, field: mapped[index].0, given: answer.values[mapped[index].0], place: places[index], target: targets[index])
-            }
+            let plans = Vault.answeredPlans(title: item.title, fields: used.map { mapped[$0].0 }, values: answer.values,
+                                            places: used.map { places[$0] }, targets: used.map { targets[$0] }, saved: stored)
             let go = {
                 self.vaultFillAll(plans, entries: used.map { window.entries[$0] }, map: window.map, caller: caller, token: token, allowed: true) { result in
                     if let filled = result as? [String: Any] { reply.merge(filled) { _, new in new } }
@@ -775,7 +765,7 @@ extension Assist {
                 }
             }
         }
-        guard answer.save else { return fillAll() }
+        guard answer.save else { return fillAll(nil) }
         guard live() else { return send(["declined": Self.over]) }
         let saving = item
         VaultStore.queue.async {
@@ -798,7 +788,7 @@ extension Assist {
                         reply["saved"] = false
                         reply["error"] = "The Keychain didn't take it, so it isn't saved."
                     }
-                    fillAll()
+                    fillAll(ok ? saving : nil)
                 }
             }
         }

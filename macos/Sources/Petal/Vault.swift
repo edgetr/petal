@@ -179,6 +179,29 @@ struct VaultItem: Codable, Equatable, Identifiable {
     var isMe: Bool { kind == .contact && self[.relationship].lowercased() == "me" }
 }
 
+/// One field to fill from the vault, as Petal decided it (Vault.decide): the item, the field, where the field was
+/// (read by Petal itself, never from the AI), and what kind of field it was. Checked again right before the keys go
+/// (VaultFiller), and filled through ComputerUse's line, with its pointer, Stop and window checks.
+struct VaultFillPlan {
+    var itemID = ""
+    /// The item as Petal planned with it (`Vault.revision`); edited since, nothing fills. nil: what the person typed
+    /// into Petal's card (`given`), not an item.
+    var revision: Int?
+    /// The item's title, for the history ("Filled your GitHub password on github.com").
+    var title = ""
+    var field: VaultField
+    /// What the person just typed into Petal's card for this page, filled without saving it first.
+    var given: String?
+    var place: Vault.Place
+    var target: Vault.Target
+    var submit = false
+    var task = ""
+    /// Payment info: fills only under a Buy that still covers its page (ComputerUse.fill), and stops when it ends.
+    var payment = false
+    /// How the AI said a year goes in ("YYYY" or "YY"); else the field's own placeholder, label or room decides.
+    var yearFormat: String?
+}
+
 enum Vault {
     /// A short id, the same for the item's life: the AI names items by it.
     static func newID() -> String {
@@ -272,6 +295,51 @@ enum Vault {
 
     /// Why nothing was filled when the item changed in the vault after Petal planned the fill or the person said Buy.
     static let changedText = "That item changed in the vault since Petal asked (it was edited meanwhile): nothing was filled. Call fill again, so the person is asked about it as it is now."
+
+    /// Why a fill of `kind` can't press Return after its last field (`submit`), or nil. Payment info's Return could
+    /// place the order: Buy lets the card fill, never the order go, so the order button is pressed with petal_act.
+    static func submitRefusal(_ kind: VaultKind) -> String? {
+        kind == .card ? "Petal doesn't press Return after payment info: it could place the order. Nothing was filled. Fill without submit, then press the order button with petal_act." : nil
+    }
+
+    /// A fill goes ahead without asking to use the app: the reply may use it already (`appAllowed`), or the person
+    /// just allowed this very fill on its card (`allowed`: a login that didn't match, a Buy, a request card), which
+    /// lets it type only. Return after it (`submit`) presses as petal_act does: only once the reply may use the app.
+    static func fillAdmitted(allowed: Bool, submit: Bool, appAllowed: Bool) -> Bool {
+        appAllowed || (allowed && !submit)
+    }
+
+    /// The fills for what the person typed into a request card (`values`), into `fields` at `places`. Saved
+    /// (`saved`: the item as the vault kept it), each fills from the vault as any fill does: that item at that
+    /// version, so an edit or delete in Settings while the fill waits fills nothing. Not saved, what was typed.
+    static func answeredPlans(title: String, fields: [VaultField], values: [VaultField: String], places: [Place], targets: [Target],
+                              saved: VaultItem?) -> [VaultFillPlan] {
+        let revision = saved.map { Vault.revision(normalized($0)) }
+        return fields.indices.map { index in
+            var plan = VaultFillPlan(title: saved?.title ?? title, field: fields[index], place: places[index], target: targets[index])
+            if let saved, let revision {
+                plan.itemID = saved.id
+                plan.revision = revision
+            } else {
+                plan.given = values[fields[index]]
+            }
+            return plan
+        }
+    }
+
+    /// Of an import's conflicts the person chose (each the saved item's id with the file's secret), those still on
+    /// the version of the saved item the import compared them with (`compared`: its revision then, by id), to save;
+    /// one edited or deleted since is skipped, never written back over the change or brought back.
+    static func stillConflicting(_ conflicts: [VaultItem], compared: [String: Int], stored: [VaultItem]) -> (use: [VaultItem], skipped: Int) {
+        var use: [VaultItem] = []
+        var skipped = 0
+        for item in conflicts {
+            guard let then = compared[item.id], let now = stored.first(where: { $0.id == item.id }),
+                  !editConflict(opened: then, stored: now) else { skipped += 1; continue }
+            use.append(item)
+        }
+        return (use, skipped)
+    }
 
     /// "Visa •••• 4242".
     static func cardName(_ item: VaultItem) -> String {
@@ -451,12 +519,43 @@ enum Vault {
         /// The address that page gives for itself, unverified: said on the card, never trusted.
         var claimedURL: String?
 
-        /// The host shown to the person: the page's (or frame's).
-        var host: String? { frameURL.flatMap(VaultSite.host) }
+        /// The host shown to the person: the page's (or frame's). Only a web address (http or https) names a site:
+        /// an app's or browser's own page (t3code://, chrome://, about:, file:) never does.
+        var host: String? { frameURL.flatMap(Vault.siteHost) }
         /// Where a purchase is made: the tab's whole page (a card form often sits in a payment company's frame).
-        var shop: String? { (topURL ?? frameURL).flatMap(VaultSite.host) }
+        var shop: String? { (topURL ?? frameURL).flatMap(Vault.siteHost) }
         var where_: String { web ? host ?? appName : appName }
     }
+
+    /// The site an address names: its host, only for a web address (http or https). An app's own page
+    /// (t3code://app/, chrome://settings, about:blank, file:) is no site, whatever its address holds.
+    static func siteHost(_ url: String) -> String? {
+        guard ["http", "https"].contains(VaultSite.scheme(url) ?? "") else { return nil }
+        return VaultSite.host(url)
+    }
+
+    /// A page that only an app or browser itself shows (t3code://app/, chrome://, edge://): no web page can be one,
+    /// or make one. A page's own content (http, https, about:, data:, blob:, file:, or an address not read) isn't.
+    static func appPage(_ url: String?) -> Bool {
+        guard let url, let scheme = VaultSite.scheme(url) else { return false }
+        return !["http", "https", "about", "data", "blob", "file", "javascript", "ftp", "ws", "wss"].contains(scheme)
+    }
+
+    /// Of the web areas around a field (`urls`, the nearest first), which is the tab's whole page: the outermost one
+    /// before an app's own page (T3 Code shows a site's page inside its t3code://app/ page, as its own tab; a
+    /// browser's chrome:// page is the browser's). The nearest is always the field's own. 0 for none.
+    static func pageTop(_ urls: [String?]) -> Int {
+        var top = 0
+        for index in urls.indices.dropFirst() {
+            if appPage(urls[index]) { break }
+            top = index
+        }
+        return top
+    }
+
+    /// Which of a window's web areas, met from the outside in, is a tab's page: not an app's own (whose inner
+    /// pages are looked in instead).
+    static func isTabPage(_ url: String?) -> Bool { !appPage(url) }
 
     /// What a field is in, from what Petal read around it: a page of a browser it trusts (`web`), a page it can't
     /// verify or a browser's own controls (`unverified`), or an app.
@@ -713,14 +812,53 @@ enum Vault {
         if let number = Int(want) {
             let same = folded.indices.filter { Int(folded[$0]) == number || folded[$0].hasPrefix(String(format: "%02d", number) + " ") }
             if same.count == 1 { return same[0] }
-            if (1...12).contains(number) {
-                let month = DateFormatter().monthSymbols[number - 1].lowercased()
-                let named = folded.indices.filter { folded[$0] == month || folded[$0].hasPrefix(month) || folded[$0].contains("- " + month) }
-                if named.count == 1 { return named[0] }
-            }
+            if (1...12).contains(number), let month = pickMonth(number, from: options) { return month }
         }
         let starts = folded.indices.filter { folded[$0].hasPrefix(want) }
         return starts.count == 1 ? starts[0] : nil
+    }
+
+    /// Each month's names (index 0 is January), folded: English, Turkish, and this Mac's language, full and short.
+    static let monthNames: [Set<String>] = {
+        let english = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]
+        let englishShort = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+        let turkish = ["ocak", "şubat", "mart", "nisan", "mayıs", "haziran", "temmuz", "ağustos", "eylül", "ekim", "kasım", "aralık"]
+        let turkishShort = ["oca", "şub", "mar", "nis", "may", "haz", "tem", "ağu", "eyl", "eki", "kas", "ara"]
+        let local = DateFormatter()
+        let lists = [english, englishShort, turkish, turkishShort, local.monthSymbols ?? [], local.shortMonthSymbols ?? [],
+                     local.standaloneMonthSymbols ?? [], local.shortStandaloneMonthSymbols ?? []]
+        return (0..<12).map { month in
+            var names: Set<String> = month == 8 ? ["sept"] : []
+            for list in lists where list.count == 12 {
+                let name = fold(list[month]).trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                if !name.isEmpty { names.insert(name) }
+            }
+            return names
+        }
+    }()
+
+    /// Which of a month menu's items is month `number` (1 to 12): "4", "04", "April", "Apr", "Nisan", "04 - Apr",
+    /// any case. Only the one item that says it (and says no other month); nil when none or more than one does.
+    static func pickMonth(_ number: Int, from options: [String]) -> Int? {
+        guard (1...12).contains(number) else { return nil }
+        func months(_ option: String) -> Set<Int> {
+            var found: Set<Int> = []
+            for word in fold(option).split(whereSeparator: { !($0.isLetter || $0.isNumber) }).map(String.init) {
+                if word.allSatisfy(\.isNumber) {
+                    if word.count <= 2, let value = Int(word), (1...12).contains(value) { found.insert(value) }
+                } else if let index = monthNames.firstIndex(where: { $0.contains(word) }) {
+                    found.insert(index + 1)
+                }
+            }
+            return found
+        }
+        let matching = options.indices.filter { months(options[$0]) == [number] }
+        return matching.count == 1 ? matching[0] : nil
+    }
+
+    /// Which of a month menu's items is the month `wanted` gives ("04", "4").
+    static func pickMonth(_ wanted: String, from options: [String]) -> Int? {
+        Int(wanted.trimmingCharacters(in: .whitespaces)).flatMap { pickMonth($0, from: options) }
     }
 
     /// The field the AI names, in its own words ("cvv", "zip", "line1"); a login's email is its username.

@@ -315,12 +315,14 @@ struct VaultSettings: View {
                 Text(Self.summary(result)).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
                 if !result.conflicts.isEmpty {
                     HStack(spacing: 8) {
-                        Text(result.usedImported ? "Petal now uses the file's." : Self.conflictText(result.conflicts))
+                        Text(result.usedImported ? Self.usedText(result.usedSkipped, of: result.conflicts.count) : Self.conflictText(result.conflicts))
                             .font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
                         Spacer()
                         if !result.usedImported {
                             Button("Use the imported ones") {
-                                model.useImported(result.conflicts) { ok in if ok { imported?.usedImported = true } }
+                                model.useImported(result.conflicts, compared: result.compared) { ok, skipped in
+                                    if ok { imported?.usedImported = true; imported?.usedSkipped = skipped }
+                                }
                             }
                             .buttonStyle(.glass).controlSize(.small)
                         }
@@ -360,6 +362,15 @@ struct VaultSettings: View {
     }
 
     /// "2 logins differ, kept yours: GitHub, Figma."
+    /// After "Use the imported ones" (`of` of them): what changed, and what was left because it was changed or
+    /// deleted since the import.
+    static func usedText(_ skipped: Int, of count: Int) -> String {
+        guard skipped > 0 else { return "Petal now uses the file's." }
+        let left = skipped == 1 ? "1 was changed or deleted since the import, so it stays as it is"
+            : "\(skipped) were changed or deleted since the import, so they stay as they are"
+        return skipped >= count ? "Nothing was replaced: \(left)." : "Petal now uses the file's, except: \(left)."
+    }
+
     static func conflictText(_ items: [VaultItem]) -> String {
         let kinds = Set(items.map(\.kind))
         let noun = kinds == [.login] ? (items.count == 1 ? "login differs" : "logins differ")

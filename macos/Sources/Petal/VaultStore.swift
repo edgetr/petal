@@ -323,7 +323,12 @@ final class VaultModel {
         /// Saved items the file would give another password, code or key, kept as they are (Vault.Merge), as the
         /// file has them: saved instead only if the person says so.
         var conflicts: [VaultItem] = []
+        /// Each conflict's saved item as the import compared it (`Vault.openedRevision`, by id): one changed or
+        /// deleted since isn't written over when the person says to use the imported ones.
+        var compared: [String: Int] = [:]
         var usedImported = false
+        /// Conflicts left as they are when the imported ones were used: changed or deleted since the import.
+        var usedSkipped = 0
         var older = 0
         var widened = 0
         var skipped = 0
@@ -349,6 +354,13 @@ final class VaultModel {
                     result.same = merge.same
                     result.updated = merge.updated
                     result.conflicts = merge.conflicts
+                    // The saved items as they are now, after the import's own save, on this same queue.
+                    let now = (try? VaultStore.items()) ?? []
+                    for conflict in merge.conflicts {
+                        if let stored = now.first(where: { $0.id == conflict.id }), let revision = Vault.openedRevision(stored) {
+                            result.compared[conflict.id] = revision
+                        }
+                    }
                     result.older = merge.older
                     result.widened = merge.widened
                     result.skipped = parsed.skipped
@@ -366,12 +378,22 @@ final class VaultModel {
         }
     }
 
-    /// The person chose the import's passwords, codes and keys over the ones saved (Vault.Merge's conflicts).
-    func useImported(_ items: [VaultItem], done: @escaping (Bool) -> Void) {
-        let stamped = items.map { item -> VaultItem in var item = item; item.updated = Date(); return item }
+    /// The person chose the import's passwords, codes and keys over the ones saved (Vault.Merge's conflicts). Each
+    /// only while its saved item is still the version the import compared it with (`compared`), checked and saved in
+    /// one go on the vault's queue: one edited or deleted since stays as it is now. `done`: saved, and how many were
+    /// skipped so.
+    func useImported(_ items: [VaultItem], compared: [String: Int], done: @escaping (_ ok: Bool, _ skipped: Int) -> Void) {
         VaultStore.queue.async {
-            let ok = VaultStore.save(stamped)
-            DispatchQueue.main.async { MainActor.assumeIsolated { self.load(); done(ok) } }
+            let ok: Bool, skipped: Int
+            if let stored = try? VaultStore.items() {
+                let still = Vault.stillConflicting(items, compared: compared, stored: stored)
+                let stamped = still.use.map { item -> VaultItem in var item = item; item.updated = Date(); return item }
+                ok = stamped.isEmpty || VaultStore.save(stamped)
+                skipped = still.skipped
+            } else {
+                (ok, skipped) = (false, 0)
+            }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.load(); done(ok, skipped) } }
         }
     }
 

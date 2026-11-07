@@ -68,6 +68,11 @@ struct VaultCheck {
         editorRevision()
         scanSkipsGone()
         piecesBeforeRedaction()
+        nestedPages()
+        importChoiceStale()
+        answeredFromVault()
+        paymentNoSubmit()
+        monthMenus()
         if failures > 0 { print("vault: \(failures) failed"); exit(1) }
         print("vault: ok")
     }
@@ -1751,5 +1756,116 @@ struct VaultCheck {
         let fours = fields(["4111", "1111", "1111", "1111", "Order 1234"])
         let (four, fourWhole) = UIMap.joinedHidden(fours, matches: index.matches)
         expect(fourWhole && four == [0, 1, 2, 3], "a card in fours, as read: the four groups, not the order (\(four.sorted()))")
+    }
+
+    /// T3 Code shows a site's page inside its own t3code://app/ page: the site's page is the tab's page, and no
+    /// app's own page (t3code://, chrome://, about:) is ever a site.
+    static func nestedPages() {
+        // Nearest first.
+        expect(Vault.pageTop(["https://shop.example/checkout", "t3code://app/"]) == 0, "T3 Code: the site's page, not its shell")
+        expect(Vault.pageTop(["https://js.stripe.com/frame", "https://shop.example/checkout", "t3code://app/"]) == 1,
+               "T3 Code: a payment frame's page is the shop's, inside the shell")
+        expect(Vault.pageTop(["https://js.stripe.com/frame", "https://shop.example/checkout"]) == 1, "a browser: the outermost page")
+        expect(Vault.pageTop(["about:blank", "https://shop.example/checkout", "t3code://app/"]) == 1, "an about:blank frame stays in its page")
+        expect(Vault.pageTop(["https://evil.example/", "data:text/html,frame"]) == 1, "a data: page around a frame is still the page (not secure)")
+        expect(Vault.pageTop(["https://evil.example/", nil]) == 1, "an unread address around a frame is still the page")
+        expect(Vault.pageTop(["t3code://app/"]) == 0 && Vault.pageTop([]) == 0, "a field in the app's own page")
+        expect(Vault.pageTop(["https://a.example/", "chrome://new-tab-page/"]) == 0, "a browser's own page is never the page")
+        for url in ["t3code://app/", "t3code://app.example.com/", "chrome://settings", "about:blank", "file:///Users/x/a.html",
+                    "data:text/html,x", "edge://wallet.example.com/"] {
+            expect(Vault.siteHost(url) == nil, "\(url) is no site")
+        }
+        expect(Vault.appPage("t3code://app/") && Vault.appPage("chrome://settings") && !Vault.appPage("about:blank")
+               && !Vault.appPage("https://a.example/") && !Vault.appPage(nil), "which pages are an app's own")
+        expect(Vault.siteHost("https://shop.example/x") == "shop.example" && Vault.siteHost("http://localhost:3000/") == "localhost", "web addresses are sites")
+
+        // As a field in T3 Code reads: the site's page as the tab's page.
+        func t3(_ frame: String, top: String) -> Vault.Place {
+            Vault.Place(web: true, frameURL: frame, topURL: top, bundle: "com.t3tools.t3code", appName: "T3 Code", signed: true)
+        }
+        let checkout = t3("https://shop.example/checkout", top: "https://shop.example/checkout")
+        var card = VaultItem(kind: .card, title: "Visa"); card[.number] = "4111111111111111"; card[.expiry] = "04/27"
+        let text = Vault.Target(secure: false, text: true), secure = Vault.Target(secure: true, text: true)
+        expect(Vault.decide(card, .number, target: text, place: checkout) == .buy(shop: "shop.example"), "T3 Code checkout: the Buy card")
+        expect(Vault.decide(card, .number, target: text, place: checkout, checkout: true) == .fill, "T3 Code checkout: fills under Buy")
+        var login = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"]); login[.username] = "ada"; login[.password] = "x"
+        expect(Vault.decide(login, .password, target: secure, place: t3("https://github.com/login", top: "https://github.com/login")) == .fill,
+               "T3 Code login: fills by itself on its site")
+        // The shell itself is never a site: nothing fills by itself there.
+        let shell = t3("t3code://app.github.com/", top: "t3code://app.github.com/")
+        if case .fill = Vault.decide(login, .password, target: secure, place: shell) { expect(false, "the app's own page isn't github.com") }
+        if case .refuse = Vault.decide(card, .number, target: text, place: shell) {} else { expect(false, "no payment info in the app's own page") }
+        expect(shell.host == nil && shell.shop == nil, "the app's own page names no host")
+    }
+
+    /// "Use the imported ones" saves only conflicts whose saved item is still as the import compared it.
+    static func importChoiceStale() {
+        var a = VaultItem(kind: .login, title: "A", sites: ["a.example"]); a[.password] = "saved-a"
+        var b = VaultItem(kind: .login, title: "B", sites: ["b.example"]); b[.password] = "saved-b"
+        var c = VaultItem(kind: .login, title: "C", sites: ["c.example"]); c[.password] = "saved-c"
+        var fa = a; fa[.password] = "file-a"
+        var fb = b; fb[.password] = "file-b"
+        var fc = c; fc[.password] = "file-c"
+        let compared = [a.id: Vault.openedRevision(a)!, b.id: Vault.openedRevision(b)!, c.id: Vault.openedRevision(c)!]
+        // B edited in Settings since the import, C deleted.
+        var edited = b; edited[.password] = "edited-b"; edited.updated = Date().addingTimeInterval(5)
+        let still = Vault.stillConflicting([fa, fb, fc], compared: compared, stored: [a, edited])
+        expect(still.use.map(\.id) == [a.id] && still.skipped == 2, "an edited or deleted item isn't written over or brought back")
+        let none = Vault.stillConflicting([fa], compared: [:], stored: [a])
+        expect(none.use.isEmpty && none.skipped == 1, "a conflict with no compared version is skipped")
+        let all = Vault.stillConflicting([fa, fb], compared: compared, stored: [a, b])
+        expect(all.use.count == 2 && all.skipped == 0, "unchanged ones are used")
+    }
+
+    /// A request card's answer that was saved fills from the vault at that version; one not saved, as typed.
+    static func answeredFromVault() {
+        let place = Vault.Place(web: true, frameURL: "https://github.com/login", topURL: "https://github.com/login", bundle: "com.apple.Safari", appName: "Safari", signed: true)
+        let secure = Vault.Target(secure: true, text: true), text = Vault.Target(secure: false, text: true)
+        var saved = VaultItem(kind: .login, title: "github.com", sites: ["github.com"]); saved[.username] = "ada"; saved[.password] = "typed-secret"
+        let values: [VaultField: String] = [.username: "ada", .password: "typed-secret"]
+        let plans = Vault.answeredPlans(title: "github.com", fields: [.username, .password], values: values, places: [place, place],
+                                        targets: [text, secure], saved: saved)
+        expect(plans.count == 2 && plans.allSatisfy { $0.given == nil && $0.itemID == saved.id && $0.revision == Vault.revision(Vault.normalized(saved)) },
+               "saved: each plan names the item and its version, never what was typed")
+        var later = saved; later[.password] = "edited"
+        expect(!Vault.sameRevision(plans[1].revision, later), "an edit while the fill waits doesn't match the plan")
+        let unsaved = Vault.answeredPlans(title: "github.com", fields: [.username, .password], values: values, places: [place, place],
+                                          targets: [text, secure], saved: nil)
+        expect(unsaved.map(\.given) == ["ada", "typed-secret"] && unsaved.allSatisfy { $0.itemID.isEmpty && $0.revision == nil },
+               "not saved: what was typed")
+    }
+
+    /// Return after payment info could place the order: refused. A login's Return asks to use the app unless the
+    /// reply may use it already.
+    static func paymentNoSubmit() {
+        expect(Vault.submitRefusal(.card) != nil, "no Return after payment info")
+        expect(Vault.submitRefusal(.login) == nil && Vault.submitRefusal(.contact) == nil, "Return after a login or a form")
+        expect(Vault.fillAdmitted(allowed: true, submit: false, appAllowed: false), "a fill the person allowed types")
+        expect(!Vault.fillAdmitted(allowed: true, submit: true, appAllowed: false), "Return after it asks to use the app")
+        expect(Vault.fillAdmitted(allowed: false, submit: true, appAllowed: true), "the reply may use the app already")
+        expect(!Vault.fillAdmitted(allowed: false, submit: false, appAllowed: false), "nothing allowed: asks")
+    }
+
+    /// An expiry month "04" picks April however the menu says it.
+    static func monthMenus() {
+        let short = ["Month", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        expect(Vault.pickMonth("04", from: short) == 4, "Apr from 04")
+        expect(Vault.pickMonth("4", from: short) == 4, "Apr from 4")
+        expect(Vault.pickMonth("09", from: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sept", "Oct", "Nov", "Dec"]) == 8, "Sept")
+        let full = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        expect(Vault.pickMonth("04", from: full) == 3 && Vault.pickMonth("12", from: full) == 11, "full names")
+        expect(Vault.pickMonth("04", from: full.map { $0.uppercased() }) == 3, "any case")
+        let numbers = ["MM"] + (1...12).map { String(format: "%02d", $0) }
+        expect(Vault.pickMonth("4", from: numbers) == 4 && Vault.pickMonth("04", from: (1...12).map(String.init)) == 3, "numbers")
+        let both = (1...12).map { String(format: "%02d", $0) + " - " + short[$0] }
+        expect(Vault.pickMonth("04", from: both) == 3, "04 - Apr")
+        expect(Vault.pickMonth("05", from: (1...12).map { "\($0) (\(full[$0 - 1]))" }) == 4, "5 (May)")
+        let turkish = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
+        expect(Vault.pickMonth("04", from: turkish) == 3 && Vault.pickMonth("11", from: turkish) == 10 && Vault.pickMonth("02", from: turkish) == 1, "Turkish")
+        expect(Vault.pickMonth("08", from: ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]) == 7, "Turkish short")
+        expect(Vault.pickMonth("04", from: ["Month", "Year"]) == nil, "no month: nothing picked")
+        expect(Vault.pickMonth("13", from: short) == nil && Vault.pickMonth("x", from: short) == nil, "not a month")
+        expect(Vault.pick("04", from: short) == 4, "pick finds a month's short name too")
+        expect(Vault.pickMonth("04", from: ["2024", "2025", "2026"]) == nil, "a year menu has no month")
     }
 }

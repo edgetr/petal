@@ -365,8 +365,8 @@ final class ComputerUse {
 
     /// A field filled from the vault (VaultFill.swift): the same line, pointer, Stop and checks as petal_act, on a
     /// control of the window petal_ui looked at, in the reply `token` came from. `allowed`: the person just said yes
-    /// to this very fill on its card, which lets it into the app for that fill alone; otherwise the app is asked
-    /// about as petal_act asks.
+    /// to this very fill on its card, which lets it into the app for that fill alone (typing only: Return after it
+    /// asks as petal_act does); otherwise the app is asked about as petal_act asks.
     func fill(_ plan: VaultFillPlan, entry: Entry, map: Map, caller: String, token: Acting.Cancel, allowed: Bool,
               send: @escaping (Any) -> Void, fail: @escaping (String) -> Void) {
         sessions[caller]?.last = Date()
@@ -391,7 +391,8 @@ final class ComputerUse {
         }
         let job = Job(caller: caller, action: "fill", entry: entry, map: map, bundle: bundle, caption: "Filling your \(plan.field.words)",
                       options: options, cancel: Acting.Cancel(under: token, buy: buy), send: send, fail: fail)
-        if allowed || session.apps.contains(bundle) { return enqueue(job) }
+        // Return after the fill presses as petal_act does: it asks to use the app, whatever card allowed the fill.
+        if Vault.fillAdmitted(allowed: allowed, submit: plan.submit, appAllowed: session.apps.contains(bundle)) { return enqueue(job) }
         admit(job, session: session)
     }
 
@@ -1014,9 +1015,13 @@ enum Reader {
             node.parent = parent
             node.sibling = sibling
             if focus.contains(where: { CFEqual($0, element) }) { reading.focusOrders.insert(order) }
+            // The tab's page: never an app's own (T3 Code's t3code://app/ page holds its sites' pages).
             if role == "AXWebArea", reading.page == nil {
-                reading.page = element
-                reading.pageURL = VaultReader.url(element)
+                let address = VaultReader.url(element)
+                if Vault.isTabPage(address) {
+                    reading.page = element
+                    reading.pageURL = address
+                }
             }
             // A password field's value is never read. A static text's is, for secrets shown in pieces (a web page's
             // spans show their text only there); it's never told.
