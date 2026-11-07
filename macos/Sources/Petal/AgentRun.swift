@@ -93,10 +93,11 @@ enum AgentRun {
         }
         let secrets = keys.map { (secret: $0.secret, label: $0.title) }
         let streams = DispatchGroup()
+        let stop = Stop()
         for (from, to) in [(out.read, Int32(1)), (err.read, Int32(2))] {
             streams.enter()
             Thread.detachNewThread {
-                relay(from: from, to: to, secrets: secrets)
+                relay(from: from, to: to, secrets: secrets, stop: stop)
                 streams.leave()
             }
         }
@@ -111,23 +112,52 @@ enum AgentRun {
         var status: Int32 = 0
         while waitpid(child, &status, 0) < 0 && errno == EINTR {}
         // What it printed last, still on its way; something it left running in the background with the same output
-        // isn't waited for.
-        _ = streams.wait(timeout: .now() + 2)
+        // isn't waited for: after 2 seconds each stream passes on what's left to read and everything its redactor
+        // held back, and ends. (The wait's own limit is only for an agent that stopped reading what's passed on.)
+        stop.at(.now() + 2)
+        _ = streams.wait(timeout: .now() + 5)
         sources.forEach { $0.cancel() }
         let signalled = status & 0x7f
         if signalled == 0 { return (status >> 8) & 0xff }
         return 128 + signalled
     }
 
-    /// Passes what the command prints on `from` to this process's `to`, with the keys taken out.
-    private static func relay(from: Int32, to: Int32, secrets: [(secret: String, label: String)]) {
+    /// When the streams stop waiting for more: set once the command has ended.
+    private final class Stop: @unchecked Sendable {
+        private let lock = NSLock()
+        private var deadline: DispatchTime?
+
+        func at(_ time: DispatchTime) { lock.withLock { deadline = time } }
+        var passed: Bool { lock.withLock { deadline.map { DispatchTime.now() >= $0 } ?? false } }
+    }
+
+    /// Passes what the command prints on `from` to this process's `to`, with the keys taken out, until the end of its
+    /// output or `stop` (something the command left running keeps the output open). Either way, what's left to read
+    /// right then and everything the redactor held back (masked) are passed on before it ends.
+    private static func relay(from: Int32, to: Int32, secrets: [(secret: String, label: String)], stop: Stop) {
         var redactor = AgentAccess.Redactor(secrets)
         var buffer = [UInt8](repeating: 0, count: 65536)
-        while true {
+        var ended = false
+        while !stop.passed {
+            var ready = pollfd(fd: from, events: Int16(POLLIN), revents: 0)
+            let polled = poll(&ready, 1, 100)
+            if polled < 0, errno == EINTR { continue }
+            if polled < 0 { ended = true; break }
+            if polled == 0 { continue }
             let count = read(from, &buffer, buffer.count)
             if count < 0, errno == EINTR { continue }
-            if count <= 0 { break }
+            if count <= 0 { ended = true; break }
             writeAll(to, redactor.feed(Array(buffer[..<count])))
+        }
+        if !ended {
+            // Only what's already there: a background writer never keeps this going (at most 16 reads).
+            _ = fcntl(from, F_SETFL, fcntl(from, F_GETFL) | O_NONBLOCK)
+            for _ in 0..<16 {
+                let count = read(from, &buffer, buffer.count)
+                if count < 0, errno == EINTR { continue }
+                if count <= 0 { break }
+                writeAll(to, redactor.feed(Array(buffer[..<count])))
+            }
         }
         writeAll(to, redactor.finish())
         close(from)

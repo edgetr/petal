@@ -18,10 +18,13 @@ struct AgentAccessCheck {
         variables()
         redaction()
         percentForms()
+        ambiguousPercent()
         splitReads()
+        heldTail()
         wrapped()
         running()
         callers()
+        helpers()
         projects()
         worktrees()
         linkedGit()
@@ -143,6 +146,56 @@ struct AgentAccessCheck {
         expect(redact([(key, "K")], plain) == plain, "other percent-encoded text untouched", redact([(key, "K")], plain))
         let near = encode(String(key.dropLast()) + "X", keeping: quote)
         expect(redact([(key, "K")], near) == near, "a different key encoded isn't this one")
+    }
+
+    /// A "%" in the key makes "%25" in the output fit two ways (the key's own "%25", or its "%" encoded): every
+    /// reading is tried, so neither hides the key.
+    static func ambiguousPercent() {
+        let secret = "%25-test-0123456789/="
+        let forms = ["%25-test-0123456789%2F=", "%25-test-0123456789/=", "%2525-test-0123456789/=", "%2525-test-0123456789%2F%3D",
+                     "%%32%35-test-0123456789/=", "%25%32%35-test-0123456789/=", "%2525%2Dtest-0123456789%2f%3d",
+                     Array(secret.utf8).map { String(format: "%%%02X", $0) }.joined()]
+        for form in forms {
+            let text = "GET /v1?key=\(form)&x=1"
+            let out = redact([(secret, "K")], text)
+            expect(out == "GET /v1?key=[K key]&x=1", "\(form) for \(secret)", out)
+            let bytes = Array(text.utf8)
+            for cut in 1..<bytes.count {
+                var redactor = AgentAccess.Redactor([(secret: secret, label: "K")])
+                let split = String(decoding: redactor.feed(Array(bytes[..<cut])) + redactor.feed(Array(bytes[cut...])) + redactor.finish(), as: UTF8.self)
+                if split != out { expect(false, "\(form) split at \(cut)", split); break }
+            }
+        }
+        let near = "%25-test-0123456789%2F%3E"
+        expect(redact([(secret, "K")], near) == near, "a near miss stays")
+        // A key ending in "%": the longest reading is taken out, and one cut off at the very end still is.
+        let ends = "0123456789abcdef%"
+        expect(redact([(ends, "K")], "a 0123456789abcdef%25 b") == "a [K key] b", "a final % encoded", redact([(ends, "K")], "a 0123456789abcdef%25 b"))
+        expect(redact([(ends, "K")], "a 0123456789abcdef% b") == "a [K key] b", "a final % as itself")
+        expect(redact([(ends, "K")], "0123456789abcdef%2") == "[K key]2", "a final % before the end of the output", redact([(ends, "K")], "0123456789abcdef%2"))
+        expect(redact([(ends, "K")], "0123456789abcdef%") == "[K key]", "a final % at the end of the output")
+        // Two in a row, and a "%25" right after one.
+        let double = "ab%%cd-0123456789"
+        for form in ["ab%%cd-0123456789", "ab%25%cd-0123456789", "ab%%25cd-0123456789", "ab%25%25cd-0123456789"] {
+            expect(redact([(double, "K")], "<\(form)>") == "<[K key]>", "\(form) for \(double)", redact([(double, "K")], "<\(form)>"))
+        }
+        let pct = "%2525252525-0123456789"
+        expect(redact([(pct, "K")], "<%252525252525-0123456789>") == "<[K key]>", "the key's own %25s, its first % encoded")
+    }
+
+    /// What the redactor holds back at the end of a read (it could start a key) comes out whole when the output is
+    /// over, as `petal run` passes it on when it stops listening.
+    static func heldTail() {
+        let secret = "q0123456789abcdefg"
+        expect(AgentAccess.Redactor.base64Forms(of: secret).first?.first == "c", "the key's base64 starts with c")
+        var redactor = AgentAccess.Redactor([(secret: secret, label: "K")])
+        let fed = redactor.feed(Array("public\n".utf8))
+        let rest = redactor.finish()
+        expect(String(decoding: fed, as: UTF8.self) == "publi", "a possible key's start is held", String(decoding: fed, as: UTF8.self))
+        expect(String(decoding: fed + rest, as: UTF8.self) == "public\n", "finish passes the held tail on", String(decoding: fed + rest, as: UTF8.self))
+        var masked = AgentAccess.Redactor([(secret: secret, label: "K")])
+        let half = masked.feed(Array("x \(secret)".utf8))
+        expect(String(decoding: half + masked.finish(), as: UTF8.self) == "x [K key]", "a key at the very end is masked by finish")
     }
 
     /// The command's output arrives a read at a time: a key split anywhere across reads, or arriving a byte at a
@@ -309,6 +362,50 @@ struct AgentAccessCheck {
     }
 
     /// A made-up disk: `marks` by folder, every path real as written, `files` by path.
+    /// Codex runs commands through its own helpers (`codex-exec-server`), signed by OpenAI under their own
+    /// identifiers: the walk passes through them to the signed Codex above, never taking a helper for the agent.
+    static func helpers() {
+        typealias P = AgentAccess.Process
+        let t3 = "/Applications/T3 Code (Nightly).app/Contents/MacOS/T3 Code (Nightly)"
+        let host = [P(pid: 10, path: t3), P(pid: 9, path: t3)]
+        let run = P(pid: 40, path: "/Applications/Petal.app/Contents/MacOS/Petal")
+        let zsh = P(pid: 30, path: "/bin/zsh")
+        let bin = "/Users/me/.codex/packages/standalone/releases/0.167.0-aarch64-apple-darwin/bin/"
+        let codex = P(pid: 21, path: bin + "codex", team: "2DC432GLL2", identifier: "codex")
+        let claude = P(pid: 20, path: "/Users/me/.local/share/claude/versions/2.1.144", team: "Q6L2SF6YDW", identifier: "com.anthropic.claude-code")
+        func helper(_ identifier: String?, team: String? = "2DC432GLL2", file: String = "codex-exec-server") -> P {
+            P(pid: 31, path: bin + file, team: team, identifier: identifier)
+        }
+        let server = helper("codex-exec-server")
+        expect(server.role == .helper(.codex) && server.agent == nil, "codex-exec-server is Codex's helper, not Codex")
+        let through = AgentAccess.caller(chain: [run, zsh, server, codex] + host, petalPID: 5, peerIsPetal: true, project: "/p")
+        expect(through.agent == .codex && through.label == "Codex in T3 Code" && through.grantable && through.program == "codex",
+               "a command run through codex-exec-server is Codex's", through.label)
+        for identifier in AgentAccess.makers[.codex]!.helpers {
+            let found = AgentAccess.caller(chain: [run, helper(identifier, file: identifier), zsh, codex], petalPID: 5, peerIsPetal: true, project: "/p")
+            expect(found.agent == .codex, "through Codex's \(identifier)", found.label)
+        }
+        let newer = AgentAccess.caller(chain: [run, helper("codex-sandbox-runner", file: "codex-sandbox-runner"), codex], petalPID: 5, peerIsPetal: true, project: "/p")
+        expect(newer.agent == .codex, "a helper OpenAI signs that Petal doesn't know yet passes through too", newer.label)
+        let twice = AgentAccess.caller(chain: [run, helper("com.openai.codex.rg", file: "rg"), zsh, server, codex], petalPID: 5, peerIsPetal: true, project: "/p")
+        expect(twice.agent == .codex, "through two of Codex's helpers", twice.label)
+        // Signed by anyone else, or not at all: it stops the walk, whatever is above it.
+        let forged = AgentAccess.caller(chain: [run, helper("codex-exec-server", team: "ABCDE12345"), codex] + host, petalPID: 5, peerIsPetal: true, project: "/p")
+        expect(forged.agent == .unknown && forged.program == "codex-exec-server" && !forged.grantable, "another team's codex-exec-server stops it", forged.label)
+        let unsigned = AgentAccess.caller(chain: [run, helper(nil, team: nil), codex], petalPID: 5, peerIsPetal: true, project: "/p")
+        expect(unsigned.agent == .unknown, "an unsigned codex-exec-server stops it", unsigned.label)
+        // A helper is never the agent: with no Codex above, a command.
+        let alone = AgentAccess.caller(chain: [run, zsh, server] + host, petalPID: 5, peerIsPetal: true, project: "/p")
+        expect(alone.agent == .command && !alone.grantable, "codex-exec-server with no Codex above isn't Codex", alone.label)
+        // One maker's helper never leads to another maker's agent.
+        let crossed = AgentAccess.caller(chain: [run, server, zsh, claude] + host, petalPID: 5, peerIsPetal: true, project: "/p")
+        expect(crossed.agent == .unknown && !crossed.grantable, "OpenAI's helper under Claude Code", crossed.label)
+        // Claude Code's own helper-like program from Anthropic, under Claude Code.
+        let desktop = P(pid: 32, path: "/Applications/Claude.app/Contents/Helpers/chrome-native-host", team: "Q6L2SF6YDW", identifier: "chrome-native-host")
+        let anthropic = AgentAccess.caller(chain: [run, desktop, claude], petalPID: 5, peerIsPetal: true, project: "/p")
+        expect(anthropic.agent == .claude, "another Anthropic program passes through to Claude Code", anthropic.label)
+    }
+
     static func fake(_ marks: [String: AgentAccess.GitMark], files: [String: String] = [:], real: Set<String> = []) -> AgentAccess.GitFiles {
         AgentAccess.GitFiles(mark: { marks[$0] }, real: { path in
             let path = AgentAccess.standard(path)

@@ -189,19 +189,37 @@ enum AgentAccess {
         private func held(_ buffer: [UInt8]) -> Int {
             let count = buffer.count
             for start in max(0, count - longest + 1)..<count {
-                if byFirst[Int(buffer[start])].contains(where: { Self.compare($0, buffer, at: start) == .partial }) { return start }
+                if byFirst[Int(buffer[start])].contains(where: { Self.compare($0, buffer, at: start).cut }) { return start }
             }
             return count
         }
 
+        /// The longest of the patterns found at `index` (the key as itself and percent-encoded both fit "…%25" for a
+        /// key ending in "%": the encoded one takes the "25" too).
         private func match(_ buffer: [UInt8], at index: Int) -> (Pattern, Int)? {
+            var best: (Pattern, Int)?
             for pattern in byFirst[Int(buffer[index])] {
-                if case .match(let length) = Self.compare(pattern, buffer, at: index) { return (pattern, length) }
+                switch Self.compare(pattern, buffer, at: index) {
+                case .match(let length), .longer(let length): if length > best?.1 ?? 0 { best = (pattern, length) }
+                case .partial, .none: continue
+                }
             }
-            return nil
+            return best
         }
 
-        private enum Outcome: Equatable { case match(Int), partial, none }
+        private enum Outcome: Equatable {
+            case match(Int), partial, none
+            /// Found (this many bytes), and another reading of it, longer, is cut off by the end of what's read so far
+            /// (a key ending in "%" before "%25"): held back while more may come, and taken out as found at the end.
+            case longer(Int)
+            /// What's read so far ends inside a reading that may still be the key.
+            var cut: Bool {
+                switch self {
+                case .partial, .longer: true
+                case .match, .none: false
+                }
+            }
+        }
 
         private static func blank(_ byte: UInt8) -> Bool { byte == 0x20 || byte == 0x09 }
 
@@ -218,6 +236,7 @@ enum AgentAccess {
         /// there. A wrapping pattern skips bounded gaps between its characters; a percent pattern takes each byte as
         /// itself or encoded.
         private static func compare(_ pattern: Pattern, _ buffer: [UInt8], at index: Int) -> Outcome {
+            if pattern.kind == .percent { return percent(pattern, buffer, at: index) }
             let count = buffer.count
             var position = index
             var runs = 0
@@ -247,23 +266,42 @@ enum AgentAccess {
                     }
                 }
                 guard position < count else { return .partial }
-                let found = buffer[position]
-                if pattern.kind == .percent {
-                    if found == UInt8(ascii: "%") {
-                        guard position + 2 < count else { return .partial }
-                        if let high = hex(buffer[position + 1]), let low = hex(buffer[position + 2]), high << 4 | low == byte {
-                            position += 3
-                            continue
-                        }
-                    }
-                    guard found == byte || (byte == 0x20 && found == UInt8(ascii: "+")) else { return .none }
-                    position += 1
-                    continue
-                }
-                guard found == byte else { return .none }
+                guard buffer[position] == byte else { return .none }
                 position += 1
             }
             return .match(position - index)
+        }
+
+        /// A percent pattern: each byte of the key as itself, as %XX, or a space as "+". A "%" in the key read as
+        /// itself or as "%25" can both fit ("%25" in the output is the key's own "%25", or its "%" encoded), so every
+        /// reading is followed at once: the places the next byte of the key may start, at most one more for each "%"
+        /// of the key, so it stays bounded by the key's length. The longest reading found wins.
+        private static func percent(_ pattern: Pattern, _ buffer: [UInt8], at index: Int) -> Outcome {
+            let count = buffer.count
+            let sign = UInt8(ascii: "%")
+            var positions = [index]
+            var cut = false
+            for byte in pattern.bytes {
+                var next: [Int] = []
+                func add(_ position: Int) { if !next.contains(position) { next.append(position) } }
+                for position in positions {
+                    guard position < count else { cut = true; continue }
+                    let found = buffer[position]
+                    if found == sign {
+                        if position + 2 < count {
+                            if let high = hex(buffer[position + 1]), let low = hex(buffer[position + 2]), high << 4 | low == byte { add(position + 3) }
+                        } else if position + 1 == count || hex(buffer[position + 1]) == byte >> 4 {
+                            // "%" or "%X" at the end: may still be this byte encoded.
+                            cut = true
+                        }
+                    }
+                    if found == byte || (byte == 0x20 && found == UInt8(ascii: "+")) { add(position + 1) }
+                }
+                positions = next
+                if positions.isEmpty { return cut ? .partial : .none }
+            }
+            let length = (positions.max() ?? index) - index
+            return cut ? .longer(length) : .match(length)
         }
     }
 
@@ -302,11 +340,12 @@ enum AgentAccess {
         static let grantable: [Agent] = [.claude, .codex, .any]
     }
 
-    /// Who signed each agent: its maker's Team ID and the identifier its maker gives it. A program that only looks
-    /// like one of these (its name) and isn't signed so is an unknown program.
-    static let makers: [Agent: (team: String, identifiers: [String])] = [
-        .claude: ("Q6L2SF6YDW", ["com.anthropic.claude-code"]),   // Anthropic
-        .codex: ("2DC432GLL2", ["codex"]),                        // OpenAI
+    /// Who signed each agent: its maker's Team ID, the identifier its maker gives the agent, and the identifiers of
+    /// the helpers it runs commands through (Codex's `codex-exec-server`), as the installed ones are signed. A program
+    /// that only looks like one of these (its name) and isn't signed so is an unknown program.
+    static let makers: [Agent: (team: String, identifiers: [String], helpers: [String])] = [
+        .claude: ("Q6L2SF6YDW", ["com.anthropic.claude-code"], []),                                               // Anthropic
+        .codex: ("2DC432GLL2", ["codex"], ["codex-exec-server", "codex-code-mode-host", "com.openai.codex.rg"]),  // OpenAI
     ]
 
     /// One process of the chain, as Petal read it: what it runs, and who signed it (its Team ID and identifier, nil
@@ -336,13 +375,30 @@ enum AgentAccess {
             return nil
         }
 
-        /// The agent it is: one with a maker only when signed by that maker.
-        var agent: Agent? {
+        /// What it is in the chain: an agent (one with a maker only when signed by that maker), a program of an
+        /// agent's maker that isn't the agent (its helper, or another of its programs), or neither.
+        enum Role: Equatable {
+            case agent(Agent)
+            /// Signed by this agent's maker, under another identifier: never the agent itself, and the walk goes on
+            /// to its parent (Codex runs commands through `codex-exec-server`, signed by OpenAI).
+            case helper(Agent)
+            case other
+        }
+
+        var role: Role {
             for (agent, maker) in makers where team == maker.team {
-                if let identifier, maker.identifiers.contains(identifier) { return agent }
+                if let identifier, maker.identifiers.contains(identifier) { return .agent(agent) }
+                // A known helper (`helpers`) or another program its maker signed: passed through either way.
+                return .helper(agent)
             }
-            guard let named = looksLike else { return nil }
-            return makers[named] == nil ? named : .unknown
+            guard let named = looksLike else { return .other }
+            return .agent(makers[named] == nil ? named : .unknown)
+        }
+
+        /// The agent it is, when it is one.
+        var agent: Agent? {
+            if case .agent(let agent) = role { return agent }
+            return nil
         }
     }
 
@@ -385,10 +441,19 @@ enum AgentAccess {
         if chain.dropFirst().contains(where: { $0.pid == petalPID }) {
             return Caller(agent: .petal, host: nil, project: project, program: peer.file, pid: pid)
         }
+        // The maker whose helpers the walk passed through: only that maker's agent may be above them.
+        var through: (agent: Agent, file: String)?
         for process in chain.dropFirst() {
-            guard let agent = process.agent else { continue }
-            if agent == .unknown { return Caller(agent: .unknown, host: host, project: project, program: process.file, pid: pid) }
-            return Caller(agent: agent, host: host, project: project, program: process.file, pid: pid)
+            switch process.role {
+            case .other: continue
+            case .helper(let maker):
+                if let seen = through, seen.agent != maker { return Caller(agent: .unknown, host: host, project: project, program: process.file, pid: pid) }
+                through = (maker, process.file)
+            case .agent(let agent):
+                if agent == .unknown { return Caller(agent: .unknown, host: host, project: project, program: process.file, pid: pid) }
+                if let seen = through, seen.agent != agent { return Caller(agent: .unknown, host: host, project: project, program: seen.file, pid: pid) }
+                return Caller(agent: agent, host: host, project: project, program: process.file, pid: pid)
+            }
         }
         return Caller(agent: .command, host: host, project: project, program: peer.file, pid: pid)
     }
