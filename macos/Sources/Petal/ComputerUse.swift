@@ -312,6 +312,8 @@ final class ComputerUse {
         assist.ask("computer:\(bundle)", "Let Petal AI use \(name)?",
                    detail: "First, \(first). \(lasting) it can press, type and choose menus in \(name) with its own pointer; yours stays where it is. Esc stops it.",
                    owner: caller) { allowed in
+            // The note was stuck somewhere else while the person was asked (its card was taken away): look again.
+            if job.map.place != self.places[caller, default: 0] { return fail(Self.moved) }
             // Its turn ended, the person stopped it, or turned it off, while they were asked.
             if job.cancel.stopped { return fail(self.whyStopped(job)) }
             guard allowed else {
@@ -602,8 +604,8 @@ final class ComputerUse {
     }
 
     /// A note was stuck to something else (its tab, its window or all of its app; Agent.place): its ids, a petal_ui
-    /// under way and its actions waiting or under way were for the old place, so they go, and its AI must look again.
-    /// What the person allowed this reply stays.
+    /// under way, its actions waiting or under way and its question waiting (its card goes) were for the old place,
+    /// so they go, and its AI is told at once to look again. What the person allowed this reply stays.
     func placeChanged(_ caller: String) {
         places[caller, default: 0] += 1
         maps[caller] = nil
@@ -617,6 +619,7 @@ final class ComputerUse {
             job.cancel.stop()
             job.fail(Self.moved)
         }
+        assist.decline(owner: caller)
     }
 
     private func cancelWork(of caller: String) {

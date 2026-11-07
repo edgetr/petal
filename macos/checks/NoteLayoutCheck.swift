@@ -399,6 +399,18 @@ struct NoteLayoutCheck {
         let outside = NoteSpot.stick(panel: CGRect(x: 950, y: 500, width: 300, height: 200), window: window)
         expect(outside.corner == .topRight && outside.dx > 0, "left beside its window, it stays beside it", "\(outside)")
 
+        // MARK: A chat picked from the list
+
+        expect(NoteRules.restoredThere(tabAsked: true, tabFound: nil, windowOpen: { true }) == nil,
+               "a Chromium tab's browser couldn't be asked: unknown, even with its old window open")
+        expect(NoteRules.restoredThere(tabAsked: true, tabFound: false, windowOpen: { true }) == false, "its tab is gone: not there")
+        expect(NoteRules.restoredThere(tabAsked: true, tabFound: true, windowOpen: { false }) == true, "its tab found, in any window: there")
+        var looked = false
+        _ = NoteRules.restoredThere(tabAsked: true, tabFound: nil, windowOpen: { looked = true; return true })
+        expect(!looked, "a tab's window isn't looked up")
+        expect(NoteRules.restoredThere(tabAsked: false, tabFound: nil, windowOpen: { true }) == true, "a window's: its window open")
+        expect(NoteRules.restoredThere(tabAsked: false, tabFound: nil, windowOpen: { false }) == false, "its window closed")
+
         // MARK: Coordinates and screens
 
         expect(NoteRules.appKitFrame(CGRect(x: 10, y: 25, width: 100, height: 50), primaryHeight: 900) == CGRect(x: 10, y: 825, width: 100, height: 50),

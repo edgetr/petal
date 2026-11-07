@@ -426,16 +426,13 @@ extension ClaudePanel {
             let tab = tabID.flatMap { Browsers.tabWindow(id: $0, bundleID: place.app) }
             Self.windowQueue.async {
                 var found = place
-                let there: Bool?
-                if let tab {
-                    there = tab.found
-                    // Its window now (learned once its tab is in front when that's unsure).
-                    found.window = Self.windowHolding(pid: place.pid, old: place.window, bounds: tab.bounds)
-                } else {
-                    let open = Windows.windows(of: place.pid).contains { $0.id == "\(place.pid)-w\(window)" }
-                    // The browser couldn't be asked about a Chromium tab: its window gone says nothing of its tab.
-                    there = open || tabID == nil ? open : nil
+                // A Chromium tab's only once the browser found it by its id: asked and unanswered (Automation turned
+                // off, the browser busy), its old window still open says nothing of the tab, so it stays unknown.
+                let there = NoteRules.restoredThere(tabAsked: tabID != nil, tabFound: tab?.found) {
+                    Windows.windows(of: place.pid).contains { $0.id == "\(place.pid)-w\(window)" }
                 }
+                // Its window now (learned once its tab is in front when that's unsure).
+                if let tab { found.window = Self.windowHolding(pid: place.pid, old: place.window, bounds: tab.bounds) }
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         // Another chat picked since: this one doesn't stick (it keeps its window in its saves and the
@@ -672,6 +669,12 @@ extension ClaudePanel {
             let running = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             MainActor.assumeIsolated { if let running { self?.appCameForward(running) } }
         }
+        // One of Petal's own windows (Settings, the welcome, a page, a recipe) in front: the app in front is Petal,
+        // which appCameForward leaves alone.
+        NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] note in
+            let window = note.object as? NSWindow
+            MainActor.assumeIsolated { if let window { self?.ownWindowCameForward(window) } }
+        }
         center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             let running = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             MainActor.assumeIsolated {
@@ -851,6 +854,15 @@ extension ClaudePanel {
         // Also a browser whose tabs may take back a note (it quit with them, or they're kept from before).
         guard notes.contains(where: { $0.attached }) || running.bundleIdentifier.map(recoverableTabs) == true else { return }
         look(at: running)
+    }
+
+    /// One of Petal's own windows took the keyboard (Settings, the welcome, a page, a recipe, an alert): an open note
+    /// steps away as when another app comes forward (one the person moved would otherwise stay over it), and comes
+    /// back with its place (that app coming forward again). Petal's panels that never bring Petal forward (the note
+    /// itself, cards, popups, the dock, the overview) don't count.
+    private func ownWindowCameForward(_ window: NSWindow) {
+        guard !window.styleMask.contains(.nonactivatingPanel), notesOn, isOpen, current.attached else { return }
+        stepAway()
     }
 
     /// Reads what's in front in `running` (its window, and its tab) and shows its notes. Only the newest look counts.

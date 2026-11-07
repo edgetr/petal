@@ -358,6 +358,13 @@ enum NoteRules {
         return false
     }
 
+    /// A chat picked from the list: whether its place is still there. A Chromium tab's by its id, as the browser
+    /// answered (nil, unknown, when it couldn't be asked: its old window still open says nothing of the tab); any
+    /// other place by its window still being open.
+    static func restoredThere(tabAsked: Bool, tabFound: Bool?, windowOpen: () -> Bool) -> Bool? {
+        tabAsked ? tabFound : windowOpen()
+    }
+
     /// Of the notes that fit what's in front, the one shown: the most specific; between equals, the one showing.
     static func pick<T>(_ notes: [T], scope: (T) -> NoteScope, showing: (T) -> Bool) -> T? {
         notes.enumerated().min { a, b in
