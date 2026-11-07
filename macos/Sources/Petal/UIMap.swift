@@ -366,11 +366,15 @@ enum UIMap {
     /// `selected`: the selected rows, in a few words each, all of one list read whole; `selection` (Reader's)
     /// instead, when given.
     static func fingerprint(title: String, focusRole: String, focusSubrole: String, focusValue: String, focusIdentifier: String = "",
-                            focusFrame: CGRect = .zero, focused: AnyObject? = nil, selected: [String] = [],
+                            focusFrame: CGRect = .zero, focusRange: String = "", focused: AnyObject? = nil, selected: [String] = [],
                             selection: (text: String, known: Bool)? = nil) -> Fingerprint {
         let secure = focusSubrole == "AXSecureTextField"
         let place = [focusFrame.minX, focusFrame.minY, focusFrame.width, focusFrame.height].map { String(Int($0.rounded())) }.joined(separator: ",")
-        let focus = focusRole.isEmpty ? "" : "\(focusRole)/\(focusSubrole)#\(focusIdentifier)@\(place)=" + (secure ? "" : truncate(tidy(focusValue), 200))
+        // The whole value by its hash (an edit anywhere in a long draft counts), and the caret or selection.
+        var whole = Hasher()
+        whole.combine(focusValue)
+        let value = secure ? "" : "\(focusValue.count):\(whole.finalize())"
+        let focus = focusRole.isEmpty ? "" : "\(focusRole)/\(focusSubrole)#\(focusIdentifier)@\(place)[\(focusRange)]=" + value
         let rows = selection ?? Self.selection(selected.isEmpty ? [] : [Selected(count: selected.count, rows: selected)])
         return Fingerprint(title: tidy(title), focus: focus, selection: rows.text, selectionKnown: rows.known,
                            focused: focusRole.isEmpty ? nil : focused)

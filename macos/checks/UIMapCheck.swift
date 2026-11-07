@@ -135,6 +135,15 @@ struct UIMapCheck {
         expect(UIMap.changed(then, renamed)?.contains("title") == true, "another title")
         let typing = UIMap.fingerprint(title: "Inbox", focusRole: "AXTextField", focusSubrole: "", focusValue: "a", selected: ["#3 Lunch on Friday"])
         expect(UIMap.changed(then, typing)?.contains("keyboard") == true, "another control has the keyboard")
+        // A long draft: an edit past the first 200 characters, or the caret moving, is a change.
+        let draft = String(repeating: "Dear team, ", count: 40)
+        let before = UIMap.fingerprint(title: "Draft", focusRole: "AXTextArea", focusSubrole: "", focusValue: draft, focusRange: "10,0")
+        let edited = UIMap.fingerprint(title: "Draft", focusRole: "AXTextArea", focusSubrole: "", focusValue: draft + "PS", focusRange: "10,0")
+        expect(UIMap.changed(before, edited) != nil, "an edit at the end of a long draft")
+        let moved = UIMap.fingerprint(title: "Draft", focusRole: "AXTextArea", focusSubrole: "", focusValue: draft, focusRange: "300,5")
+        expect(UIMap.changed(before, moved) != nil, "the caret or selection moved")
+        expect(UIMap.changed(before, UIMap.fingerprint(title: "Draft", focusRole: "AXTextArea", focusSubrole: "", focusValue: draft, focusRange: "10,0")) == nil,
+               "the same draft, caret and all")
         let spaced = UIMap.fingerprint(title: "  Inbox ", focusRole: "AXTable", focusSubrole: "", focusValue: "", selected: ["#3  Lunch on\nFriday"])
         expect(UIMap.changed(then, spaced) == nil, "whitespace isn't a change")
         let secret1 = UIMap.fingerprint(title: "Log in", focusRole: "AXTextField", focusSubrole: "AXSecureTextField", focusValue: "a", selected: [])

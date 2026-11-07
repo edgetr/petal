@@ -718,7 +718,7 @@ enum Reader {
     /// keyboard when it's in this window, and its lists' selected rows. Kept by Petal, never told to the AI.
     static func fingerprint(app: AXUIElement, window: AXUIElement, lists: [AXUIElement]) -> UIMap.Fingerprint {
         let title: String = Windows.value(window, kAXTitleAttribute) ?? ""
-        var role = "", subrole = "", value = "", identifier = ""
+        var role = "", subrole = "", value = "", identifier = "", caret = ""
         var place = CGRect.zero
         var element: AXUIElement?
         if let focused: AXUIElement = Windows.value(app, kAXFocusedUIElementAttribute),
@@ -729,7 +729,14 @@ enum Reader {
             identifier = found[kAXIdentifierAttribute] as? String ?? ""
             place = frame(found[kAXPositionAttribute], found[kAXSizeAttribute])
             element = focused
-            if subrole != "AXSecureTextField" { value = text(Windows.value(focused, kAXValueAttribute) as CFTypeRef?) }
+            if subrole != "AXSecureTextField" {
+                // The whole value (an edit at the end of a long draft counts) and where the caret or selection is.
+                value = text(Windows.value(focused, kAXValueAttribute) as CFTypeRef?, whole: true)
+                var range = CFRange()
+                if let raw: AXValue = Windows.value(focused, kAXSelectedTextRangeAttribute), AXValueGetValue(raw, .cfRange, &range) {
+                    caret = "\(range.location),\(range.length)"
+                }
+            }
         }
         // Every selected row counts (up to UIMap.rowCap), not only the first few: a sixth file selected while the
         // person is asked changes it. The first few in words, the rest by their index and own texts (one message each).
@@ -745,7 +752,7 @@ enum Reader {
             selected.append(read)
         }
         return UIMap.fingerprint(title: title, focusRole: role, focusSubrole: subrole, focusValue: value, focusIdentifier: identifier,
-                                 focusFrame: place, focused: element, selection: UIMap.selection(selected))
+                                 focusFrame: place, focusRange: caret, focused: element, selection: UIMap.selection(selected))
     }
 
     /// A list's selected rows: none when it can't select anything, nil when its app didn't say (busy, or no answer).
@@ -1142,7 +1149,7 @@ enum Acting {
     /// alone for good. `then` gets why it was cleared, or nil, on the main thread.
     final class CopyWatch: @unchecked Sendable {
         nonisolated static let queue = DispatchQueue(label: "petal.computer.clipboard", qos: .userInitiated)
-        static let cleared = "That button copied a saved secret; Petal cleared the clipboard. petal_vault types a saved secret where it's needed, asking the person every time."
+        static let cleared = "That button copied a saved secret (or more text than Petal can check for one); Petal cleared the clipboard. petal_vault types a saved secret where it's needed, asking the person every time."
 
         private let mark: CopyMark
         private let until: TimeInterval
@@ -1188,8 +1195,9 @@ enum Acting {
                 let types = pasteboard.types ?? []
                 // Counted but not written yet: the copy's contents are still coming.
                 if types.isEmpty { return late ? finish(nil) : again() }
+                // Too long to check counts as unsafe too: a "Copy all" of a big log may hold a saved secret.
                 let secret = Assist.isConcealed(pasteboard)
-                    || pasteboard.string(forType: .string).map { Assist.vaultCheck($0) == .secret } == true
+                    || pasteboard.string(forType: .string).map { Assist.vaultCheck($0) != .clean } == true
                 if UIMap.clearsCopy(start: mark.count, seen: now, now: pasteboard.changeCount, input: input(), secret: secret) {
                     pasteboard.clearContents()
                     return finish(Self.cleared)
@@ -1412,7 +1420,9 @@ enum Acting {
             guard post(key, to: pid, cancel: cancel) else { return outcome }
         default: break
         }
-        if outcome.error == nil, !cancel.stopped, ["type", "focus", "scroll"].contains(action) {
+        // Petal's own change (text, caret, focus, scroll) becomes what's expected next, so its next step isn't taken
+        // for someone else's.
+        if outcome.error == nil, !cancel.stopped, ["type", "focus", "scroll", "key"].contains(action) {
             let app = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(app, 0.5)
             outcome.fingerprint = Reader.fingerprint(app: app, window: map.window, lists: map.lists)
