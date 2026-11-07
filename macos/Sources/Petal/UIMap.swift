@@ -177,44 +177,92 @@ enum UIMap {
     struct SecretIndex {
         static let piece = 8
         static let short = 4
+        /// Text longer than this (in UTF-8 bytes, about 1 MB) isn't searched: it counts as holding a secret, and
+        /// Petal doesn't move or show it.
+        static let limit = 1_000_000
+        /// What a check of some text found.
+        enum Check: Equatable { case clean, secret, tooLong }
+
         private var wholes = Set<Int>()
-        private var pieces = Set<Int>()
-        /// Short secrets by their length.
-        private var shorts: [Int: Set<Int>] = [:]
+        /// Every `piece` characters of a longer secret, as `window` hashes them.
+        private var pieces = Set<UInt64>()
+        /// Short secrets by their length, as `window` hashes them.
+        private var shorts: [Int: Set<UInt64>] = [:]
 
         init(_ secrets: [String]) {
             for secret in secrets where !secret.isEmpty {
                 wholes.insert(secret.hashValue)
-                let characters = Array(secret)
-                if characters.count >= Self.short, characters.count < Self.piece {
-                    shorts[characters.count, default: []].insert(secret.hashValue)
+                let codes = Self.codes(Array(secret))
+                if codes.count >= Self.short, codes.count < Self.piece {
+                    shorts[codes.count, default: []].insert(Self.window(codes[...]))
                 }
-                guard characters.count >= Self.piece else { continue }
-                for start in 0...(characters.count - Self.piece) { pieces.insert(String(characters[start..<start + Self.piece]).hashValue) }
+                guard codes.count >= Self.piece else { continue }
+                Self.roll(codes, Self.piece) { _, hash in pieces.insert(hash); return true }
             }
         }
 
         var isEmpty: Bool { wholes.isEmpty }
 
-        /// `text` is a secret, holds `piece` characters or more of one, or holds a short one whole, not run into the
-        /// letters or digits around it ("Door PIN: 739251", but not 1234 in 12345).
-        func matches(_ text: String) -> Bool {
-            guard !wholes.isEmpty, !text.isEmpty else { return false }
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            if wholes.contains(text.hashValue) || wholes.contains(trimmed.hashValue) { return true }
-            let characters = Array(text)
-            for (length, hashes) in shorts where characters.count >= length {
-                for start in 0...(characters.count - length) where Self.edge(characters, start) && Self.edge(characters, start + length)
-                    && hashes.contains(String(characters[start..<start + length]).hashValue) {
-                    return true
+        /// Each character's own hash (Swift's, seeded afresh in each process), once, so every window after the first
+        /// costs a multiply and an add: a 1 MB log is searched in a few milliseconds.
+        private static func codes(_ characters: [Character]) -> [UInt64] {
+            characters.map { UInt64(bitPattern: Int64($0.hashValue)) }
+        }
+
+        private static let base: UInt64 = 1_099_511_628_211
+
+        /// A run of characters' hash: the same as `roll` gives for the same run anywhere in a text.
+        private static func window(_ codes: ArraySlice<UInt64>) -> UInt64 {
+            codes.reduce(0) { $0 &* base &+ $1 }
+        }
+
+        /// Hands every run of `length` codes' hash to `each` (with where it starts), until `each` says stop.
+        private static func roll(_ codes: [UInt64], _ length: Int, _ each: (Int, UInt64) -> Bool) {
+            guard length > 0, codes.count >= length else { return }
+            var top: UInt64 = 1
+            for _ in 1..<length { top = top &* base }
+            var hash = window(codes[0..<length])
+            var start = 0
+            while each(start, hash) {
+                let next = start + length
+                guard next < codes.count else { return }
+                hash = (hash &- codes[start] &* top) &* base &+ codes[next]
+                start += 1
+            }
+        }
+
+        /// Every part of `characters` that holds a secret (a short one only as a word of its own), by where it starts
+        /// and how long it is, to `found`, until it says stop.
+        private func scan(_ characters: [Character], _ found: (Int, Int) -> Bool) {
+            let codes = Self.codes(characters)
+            var going = true
+            for (length, hashes) in shorts where going {
+                Self.roll(codes, length) { start, hash in
+                    if hashes.contains(hash), Self.edge(characters, start), Self.edge(characters, start + length) { going = found(start, length) }
+                    return going
                 }
             }
-            guard !pieces.isEmpty, characters.count >= Self.piece else { return false }
-            for start in 0...(characters.count - Self.piece) where pieces.contains(String(characters[start..<start + Self.piece]).hashValue) {
-                return true
+            guard going, !pieces.isEmpty else { return }
+            Self.roll(codes, Self.piece) { start, hash in
+                if pieces.contains(hash) { going = found(start, Self.piece) }
+                return going
             }
-            return false
         }
+
+        /// `text` is a secret, holds `piece` characters or more of one, or holds a short one whole, not run into the
+        /// letters or digits around it ("Door PIN: 739251", but not 1234 in 12345); or it's too long to check. All of
+        /// it is searched, however long, up to `limit`.
+        func check(_ text: String) -> Check {
+            guard !wholes.isEmpty, !text.isEmpty else { return .clean }
+            guard text.utf8.count <= Self.limit else { return .tooLong }
+            if wholes.contains(text.hashValue) || wholes.contains(text.trimmingCharacters(in: .whitespacesAndNewlines).hashValue) { return .secret }
+            var hit = false
+            scan(Array(text)) { _, _ in hit = true; return false }
+            return hit ? .secret : .clean
+        }
+
+        /// `check` found a secret, or the text was too long to look through: either way it isn't shown or moved.
+        func matches(_ text: String) -> Bool { check(text) != .clean }
 
         /// Between `at - 1` and `at` is the end of a word: not a letter or digit running on into another.
         static func edge(_ characters: [Character], _ at: Int) -> Bool {
@@ -225,24 +273,20 @@ enum UIMap {
         /// `text` with every part that `matches` would catch replaced by "(hidden)": a whole secret, every run of
         /// `piece` characters of a longer one (runs that touch join, so a long secret goes as one), and a short one
         /// as a word of its own. The rest of the text stays, so a clipboard holding a key among other lines still
-        /// says what else is there.
+        /// says what else is there. Text too long to check is "(hidden)" whole.
         func redacted(_ text: String) -> String {
             guard !wholes.isEmpty, !text.isEmpty else { return text }
+            guard text.utf8.count <= Self.limit else { return UIMap.hidden }
             if wholes.contains(text.hashValue) || wholes.contains(text.trimmingCharacters(in: .whitespacesAndNewlines).hashValue) { return UIMap.hidden }
             let characters = Array(text)
             var marked = [Bool](repeating: false, count: characters.count)
-            for (length, hashes) in shorts where characters.count >= length {
-                for start in 0...(characters.count - length) where Self.edge(characters, start) && Self.edge(characters, start + length)
-                    && hashes.contains(String(characters[start..<start + length]).hashValue) {
-                    for at in start..<start + length { marked[at] = true }
-                }
+            var any = false
+            scan(characters) { start, length in
+                for at in start..<start + length { marked[at] = true }
+                any = true
+                return true
             }
-            if !pieces.isEmpty, characters.count >= Self.piece {
-                for start in 0...(characters.count - Self.piece) where pieces.contains(String(characters[start..<start + Self.piece]).hashValue) {
-                    for at in start..<start + Self.piece { marked[at] = true }
-                }
-            }
-            guard marked.contains(true) else { return text }
+            guard any else { return text }
             var out = ""
             var at = 0
             while at < characters.count {

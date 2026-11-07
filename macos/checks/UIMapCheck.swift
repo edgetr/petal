@@ -254,6 +254,31 @@ struct UIMapCheck {
         expect(vault.redacted("Inbox") == "Inbox" && UIMap.SecretIndex([]).redacted("1234") == "1234", "nothing else changes")
         expect(!vault.matches(vault.redacted("a sk-live-4f9a2b7c1d b 1234 c")), "what's left never matches")
 
+        // All of a long text is searched, not its first part: a big log with a key near its end.
+        let line = "2026-11-07 12:00:01 INFO request handled in 12ms path=/api/v1/things user=abc\n"
+        let log = String(repeating: line, count: 900_000 / line.count)
+        expect(vault.check(log) == .clean && !vault.matches(log), "a long log without secrets")
+        expect(vault.check(log + "KEY=sk-live-4f9a2b7c1d") == .secret, "a secret past 20,000 characters, at the end")
+        expect(vault.check(log + "part 4f9a2b7c") == .secret, "8 characters of a secret, at the end")
+        expect(vault.check(log + "PIN 1234") == .secret && vault.check(log + "PIN 12345") == .clean, "a short secret as a word, at the end")
+        expect(vault.check(String(log.prefix(20_000 - 5)) + "sk-live-4f9a2b7c1d" + log) == .secret, "a secret across character 20,000")
+        expect(vault.redacted(log + "KEY=sk-live-4f9a2b7c1d") == log + "KEY=\(UIMap.hidden)", "redacted at the end of a long log")
+        let started = Date()
+        _ = vault.check(log + "x")
+        _ = vault.redacted(log + "x")
+        let took = Date().timeIntervalSince(started)
+        expect(took < 0.5, "a 900 KB log is searched and redacted quickly", "\(took) s")
+        // Past about 1 MB nothing is searched: it counts as a secret, is too long to move, and is hidden whole.
+        let huge = String(repeating: line, count: (UIMap.SecretIndex.limit / line.utf8.count) + 1)
+        expect(vault.check(huge) == .tooLong && vault.matches(huge) && vault.redacted(huge) == UIMap.hidden, "too long to check")
+        expect(UIMap.SecretIndex([]).check(huge) == .clean, "an empty vault has nothing to find")
+        // Characters, not bytes: a secret among emoji and accents, and one with them in it.
+        let wide = UIMap.SecretIndex(["clé-👩‍💻-ñandú"])
+        expect(wide.check("🎉🎉 note: clé-👩‍💻-ñandú 🎉") == .secret, "a secret with emoji and accents, inside text")
+        expect(wide.check("-👩‍💻-ñandú") == .secret && wide.check("clé-👩‍💻-ñan") == .secret, "8 characters of it, either end")
+        expect(wide.check("clé-👩-ñandú") == .clean, "not with another character in it")
+        expect(wide.redacted("x clé-👩‍💻-ñandú y") == "x \(UIMap.hidden) y", "redacted by characters")
+
         print("UIMap: \(passed) passed, \(failures) failed")
         if failures > 0 { exit(1) }
     }

@@ -131,11 +131,25 @@ extension Assist {
     }
 
     /// Whether `text` is one of the vault's secrets, holds 8 characters or more of one, or holds a short one (a PIN)
-    /// as a word of its own: petal_act never types one
+    /// as a word of its own, anywhere in it; or is too long to look through (about 1 MB): petal_act never types one
     /// (the vault types its own, after asking), and petal_ui never shows one. The first call after the vault changes
     /// reads the Keychain: off the main thread.
     nonisolated static func isVaultSecret(_ text: String) -> Bool {
-        !text.isEmpty && VaultIndex.current().matches(text)
+        vaultCheck(text) != .clean
+    }
+
+    /// The same, saying which: a secret, or too long to check.
+    nonisolated static func vaultCheck(_ text: String) -> UIMap.SecretIndex.Check {
+        text.isEmpty ? .clean : VaultIndex.current().check(text)
+    }
+
+    /// What may be told of `text`: the vault's secrets in it as "(hidden)", all of it searched, then cut to `limit`
+    /// characters; nil when it's too long to search. Off the main thread.
+    nonisolated static func shownText(_ text: String, limit: Int) -> String? {
+        let index = VaultIndex.current()
+        guard index.isEmpty || text.utf8.count <= UIMap.SecretIndex.limit else { return nil }
+        let clean = index.redacted(text)
+        return clean.count > limit ? String(clean.prefix(limit)) : clean
     }
 
     /// The vault tool: list the names, use one (typed into the field in front, after asking every time, even with

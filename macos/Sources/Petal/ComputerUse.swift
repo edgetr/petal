@@ -591,6 +591,9 @@ enum Reader {
         var fingerprint = UIMap.Fingerprint()
         var gone = false
         var timedOut = false
+        /// Somewhere in the window (any control, not only those told): a vault secret, a password field, or a control
+        /// whose names say it holds a password, token or API key. A Copy button there may copy it.
+        var holdsSecret = false
     }
 
     static let attributes = [kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute,
@@ -601,7 +604,8 @@ enum Reader {
                                       "AXPopUpButton", "AXMenuButton", "AXComboBox", "AXIncrementor", "AXColorWell", "AXSearchField", "AXImage"]
     static let listRoles: Set<String> = ["AXTable", "AXOutline", "AXList", "AXBrowser"]
 
-    static func read(pid: pid_t, window wanted: UInt32?, budget: TimeInterval) -> Reading {
+    /// `deep`: also read every other control's text, for `holdsSecret` (a dashboard's key shown as plain text).
+    static func read(pid: pid_t, window wanted: UInt32?, budget: TimeInterval, deep: Bool = false) -> Reading {
         var reading = Reading()
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
@@ -618,6 +622,7 @@ enum Reader {
         reading.windowID = Windows.id(of: window)
         let title: String = Windows.value(window, kAXTitleAttribute) ?? ""
         reading.title = vault.matches(title) ? UIMap.hidden : title
+        if reading.title == UIMap.hidden { reading.holdsSecret = true }
         reading.windowFrame = Windows.frame(of: window) ?? .zero
 
         let deadline = Date().addingTimeInterval(budget)
@@ -631,10 +636,11 @@ enum Reader {
             let role = values[kAXRoleAttribute] as? String ?? ""
             var node = UINode(role: role)
             node.subrole = values[kAXSubroleAttribute] as? String ?? ""
-            node.title = String((values[kAXTitleAttribute] as? String ?? "").prefix(200))
-            node.label = String((values[kAXDescriptionAttribute] as? String ?? "").prefix(200))
-            node.help = String((values[kAXHelpAttribute] as? String ?? "").prefix(200))
-            node.placeholder = String((values[kAXPlaceholderValueAttribute] as? String ?? "").prefix(200))
+            // Whole until the vault's secrets are taken out (a secret cut at the end would leave its start), then short.
+            node.title = values[kAXTitleAttribute] as? String ?? ""
+            node.label = values[kAXDescriptionAttribute] as? String ?? ""
+            node.help = values[kAXHelpAttribute] as? String ?? ""
+            node.placeholder = values[kAXPlaceholderValueAttribute] as? String ?? ""
             node.identifier = String((values[kAXIdentifierAttribute] as? String ?? "").prefix(200))
             node.frame = frame(values[kAXPositionAttribute], values[kAXSizeAttribute])
             node.enabled = (values[kAXEnabledAttribute] as? Bool) ?? true
@@ -644,9 +650,17 @@ enum Reader {
             node.order = order
             // A password field's value is never read.
             if UIMap.valueRoles.contains(role), !UIMap.isSecure(node) {
-                node.value = text(Windows.value(element, kAXValueAttribute) as CFTypeRef?)
+                node.value = text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
             }
             node = UIMap.redact(node) { vault.matches($0) }
+            if UIMap.isSecure(node) || UIMap.looksSecret(node)
+                || [node.title, node.label, node.help, node.placeholder, node.value].contains(UIMap.hidden) {
+                reading.holdsSecret = true
+            } else if deep, !UIMap.valueRoles.contains(role), vault.matches(text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)) {
+                reading.holdsSecret = true
+            }
+            for path in [\UINode.title, \.label, \.help, \.placeholder] { node[keyPath: path] = String(node[keyPath: path].prefix(200)) }
+            node.value = String(node.value.prefix(400))
             if UIMap.pressableRoles.contains(role), depth > 0, !UIMap.name(node).isEmpty {
                 node.pressable = actions(element).contains(kAXPressAction as String)
             }
@@ -790,9 +804,10 @@ enum Reader {
         return CGRect(origin: point, size: extent)
     }
 
-    static func text(_ value: CFTypeRef?) -> String {
+    /// A control's value as words, cut to 400 characters unless `whole` (then the vault's secrets are taken out first).
+    static func text(_ value: CFTypeRef?, whole: Bool = false) -> String {
         switch value {
-        case let string as String: return String(string.prefix(400))
+        case let string as String: return whole ? string : String(string.prefix(400))
         case let number as NSNumber: return number.stringValue
         default: return ""
         }
@@ -933,8 +948,7 @@ enum Acting {
             // before the press).
             if let entry {
                 let pastes = UIMap.clip(control: entry.node) == .paste
-                if pastes || UIMap.mightPaste(entry.node),
-                   let why = pasteRefusal() ?? (pastes ? secretFieldRefusal(map, nil, pasting: true) : nil) {
+                if pastes || UIMap.mightPaste(entry.node), let why = pasteRefusal() ?? secretFieldRefusal(map, nil, pasting: true) {
                     prepared.error = why
                     return prepared
                 }
@@ -1018,8 +1032,12 @@ enum Acting {
         for control in [element, focused].compactMap({ $0 }) {
             let found = Reader.values(control, [kAXSelectedTextAttribute, kAXValueAttribute])
             for name in [kAXSelectedTextAttribute, kAXValueAttribute] {
-                if let text = found[name] as? String, Assist.isVaultSecret(String(text.prefix(20_000))) {
+                guard let text = found[name] as? String else { continue }
+                switch Assist.vaultCheck(text) {
+                case .secret:
                     return "What's selected holds one of the vault's secrets: Petal doesn't copy it. petal_vault types a saved secret where it's needed, asking the person every time."
+                case .tooLong: return tooMuch("copy")
+                case .clean: break
                 }
             }
         }
@@ -1033,9 +1051,66 @@ enum Acting {
         let refusal = "The clipboard holds a secret (one of the vault's, or a password manager's): Petal doesn't paste it. petal_vault types a saved secret, asking the person every time."
         if Assist.isConcealed(pasteboard) { return refusal }
         for type in [NSPasteboard.PasteboardType.string, .html, .rtf, .URL] {
-            if let text = pasteboard.string(forType: type), Assist.isVaultSecret(String(text.prefix(20_000))) { return refusal }
+            guard let text = pasteboard.string(forType: type) else { continue }
+            switch Assist.vaultCheck(text) {
+            case .secret: return refusal
+            case .tooLong: return tooMuch("paste")
+            case .clean: break
+            }
         }
         return nil
+    }
+
+    /// Text past `UIMap.SecretIndex.limit` (about 1 MB) isn't searched for the vault's secrets, so it isn't moved.
+    nonisolated static func tooMuch(_ verb: String) -> String {
+        "That's too much to check for saved secrets; \(verb) it yourself."
+    }
+
+    /// Before a Copy or Cut button: the window, read again now (every control, and every text in it), shows no vault
+    /// secret and no password, token or API key field, since a button like "Copy API key" copies its own key
+    /// whatever has the keyboard. Off the main thread.
+    static func copyButtonRefusal(_ map: ComputerUse.Map) -> String? {
+        let reading = Reader.read(pid: map.pid, window: map.windowID, budget: 1.5, deep: true)
+        if reading.gone || reading.window == nil { return "That window is gone; nothing was copied. " + changed }
+        if reading.holdsSecret {
+            return "This window shows a secret (one of the vault's, or a password, token or API key): Petal doesn't press its Copy buttons. petal_vault types a saved secret where it's needed, asking the person every time."
+        }
+        if reading.timedOut { return "Petal couldn't read all of this window in time to check it for secrets, so nothing was copied: ask the person to copy it." }
+        return nil
+    }
+
+    /// What the clipboard held, every item and every kind of data, to put back.
+    struct Clipboard {
+        let count: Int
+        let items: [[NSPasteboard.PasteboardType: Data]]
+
+        static func save(_ pasteboard: NSPasteboard = .general) -> Clipboard {
+            let items = (pasteboard.pasteboardItems ?? []).map { item in
+                Dictionary(item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }, uniquingKeysWith: { a, _ in a })
+            }
+            return Clipboard(count: pasteboard.changeCount, items: items)
+        }
+
+        func restore(_ pasteboard: NSPasteboard = .general) {
+            pasteboard.clearContents()
+            let rebuilt = items.map { kinds -> NSPasteboardItem in
+                let item = NSPasteboardItem()
+                for (type, data) in kinds { item.setData(data, forType: type) }
+                return item
+            }
+            if !rebuilt.isEmpty { pasteboard.writeObjects(rebuilt) }
+        }
+    }
+
+    /// After a Copy or Cut button: if the clipboard changed (within `wait`) and now holds a vault secret, something a
+    /// password manager marks private, or too much to check, what it held before goes back at once; then why.
+    static func copiedSecret(since saved: Clipboard, wait: TimeInterval = 0.6, _ pasteboard: NSPasteboard = .general) -> String? {
+        let until = Date().addingTimeInterval(wait)
+        while pasteboard.changeCount == saved.count, Date() < until { usleep(30_000) }
+        guard pasteboard.changeCount != saved.count else { return nil }
+        guard pasteRefusal(pasteboard) != nil else { return nil }
+        saved.restore(pasteboard)
+        return "That button put a secret on the clipboard (one of the vault's, a password manager's, or too much to check): Petal refused it and put back what the clipboard held before. petal_vault types a saved secret where it's needed, asking the person every time."
     }
 
     static func perform(_ action: String, entry: ComputerUse.Entry?, map: ComputerUse.Map, prepared: Prepared, options: Options,
@@ -1052,7 +1127,8 @@ enum Acting {
             guard let element else { break }
             // A Copy, Cut or Paste button gets the same checks as the keys and menu items, in its window, in front.
             let fresh = Reader.node(element)
-            if let clip = UIMap.clip(control: fresh) ?? entry.flatMap({ UIMap.clip(control: $0.node) }) {
+            let clip = UIMap.clip(control: fresh) ?? entry.flatMap({ UIMap.clip(control: $0.node) })
+            if let clip {
                 if let error = bringWindow(map, cancel: cancel) {
                     if cancel.stopped { return outcome }
                     outcome.error = error
@@ -1063,15 +1139,29 @@ enum Acting {
                     break
                 }
             }
-            // And whatever might paste, never while a secret is on the clipboard.
-            if UIMap.mightPaste(fresh) || entry.map({ UIMap.mightPaste($0.node) }) == true, let why = pasteRefusal() {
+            // And whatever might paste, never while a secret is on the clipboard, nor into a password field.
+            if UIMap.mightPaste(fresh) || entry.map({ UIMap.mightPaste($0.node) }) == true,
+               let why = pasteRefusal() ?? secretFieldRefusal(map, nil, pasting: true) {
                 outcome.error = why
                 break
+            }
+            // A Copy or Cut button copies what it's for, not what has the keyboard: never in a window showing a
+            // secret, and should one reach the clipboard anyway, what was there goes back at once.
+            var saved: Clipboard?
+            if clip == .copy {
+                if let why = copyButtonRefusal(map) {
+                    outcome.error = why
+                    break
+                }
+                saved = Clipboard.save()
             }
             let actions = Reader.actions(element)
             if let done = ["AXPress", "AXPick", "AXConfirm", "AXOpen"].first(where: actions.contains) {
                 guard !cancel.stopped else { return outcome }
-                if AXUIElementPerformAction(element, done as CFString) == .success { break }
+                if AXUIElementPerformAction(element, done as CFString) == .success {
+                    if let saved, let why = copiedSecret(since: saved) { outcome.error = why }
+                    break
+                }
             }
             if ["AXRow", "AXCell", "AXTab", "AXRadioButton"].contains(entry?.node.role ?? "") {
                 guard !cancel.stopped else { return outcome }
@@ -1089,10 +1179,12 @@ enum Acting {
             }
         case "type":
             guard let element, let node = entry?.node else { break }
-            if Assist.isVaultSecret(options.text) {
-                outcome.error = "That's one of the vault's secrets: petal_vault types it, after asking."
-                break
+            switch Assist.vaultCheck(options.text) {
+            case .secret: outcome.error = "That's one of the vault's secrets: petal_vault types it, after asking."
+            case .tooLong: outcome.error = tooMuch("type")
+            case .clean: break
             }
+            if outcome.error != nil { break }
             var typed = false
             // A native field takes its new value directly; a web page's needs keys, so its page hears them.
             if !node.web, UIMap.isText(node) {
@@ -1136,7 +1228,7 @@ enum Acting {
                 guard post(enter, to: pid, cancel: cancel) else { return outcome }
             }
             usleep(120_000)
-            let now = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?)
+            let now = Reader.text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)
             if !now.isEmpty, !options.submit {
                 outcome.value = UIMap.looksSecret(node) || Assist.isVaultSecret(now) ? UIMap.hidden : UIMap.truncate(UIMap.tidy(now), 200)
             }

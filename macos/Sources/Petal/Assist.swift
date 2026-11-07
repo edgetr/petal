@@ -218,14 +218,15 @@ final class Assist {
             if Self.clipboardIsPrivate || self.neverLook(NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
                 result["clipboard"] = "The clipboard holds something private (a password manager's, or one kept private): Petal doesn't read it."
             } else {
-                clipboard = NSPasteboard.general.string(forType: .string).map { String($0.prefix(4000)) } ?? ""
+                // Read whole: the vault's secrets are taken out of all of it before it's cut short.
+                clipboard = NSPasteboard.general.string(forType: .string) ?? ""
             }
         }
         guard let front else {
             addClipboard()
             guard let raw = clipboard else { return send(result) }
             return Self.queue.async {
-                let clean = Self.withoutSecrets(raw)
+                let clean = Self.shownText(raw, limit: 4000) ?? Self.tooMuchClipboard
                 DispatchQueue.main.async {
                     result["clipboard"] = clean
                     send(result)
@@ -266,8 +267,8 @@ final class Assist {
             let selected: String = focused.flatMap { Windows.value($0, kAXSelectedTextAttribute) } ?? ""
             // Nothing of the vault's secrets goes to the AI: not in the title, the selection, nor the clipboard.
             let title = Self.withoutSecrets(realTitle)
-            let shownSelection = Self.withoutSecrets(String(selected.prefix(8000)))
-            let shownClipboard = clipboard.map(Self.withoutSecrets)
+            let shownSelection = selected.isEmpty ? "" : Self.shownText(selected, limit: 8000) ?? Self.tooMuchSelected
+            let shownClipboard = clipboard.map { Self.shownText($0, limit: 4000) ?? Self.tooMuchClipboard }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     result["window"] = title
@@ -308,6 +309,9 @@ final class Assist {
             }
         }
     }
+
+    nonisolated static let tooMuchClipboard = "The clipboard holds too much to check for saved secrets: Petal doesn't read it."
+    nonisolated static let tooMuchSelected = "What's selected is too much to check for saved secrets: Petal doesn't read it."
 
     /// What password managers mark what they copy with (nspasteboard.org's markers, and 1Password's own): the
     /// clipboard then holds a secret, never read.
