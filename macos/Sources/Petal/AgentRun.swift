@@ -33,6 +33,8 @@ enum AgentRun {
             return (title, secret, entry["env"] as? String)
         }
         guard keys.count == request.keys.count else { CLI.fail("Petal didn't give every key asked for.") }
+        // An older Petal may still hand over a key too short to find in all its forms: it never reaches the command.
+        if let short = keys.first(where: { AgentAccess.Redactor.tooShort($0.secret) }) { CLI.fail("“\(short.title)”: " + AgentAccess.Redactor.tooShortText) }
         exit(spawn(request.command, keys: keys, stdin: request.stdin))
     }
 

@@ -37,15 +37,49 @@ final class AgentGrants {
         }
     }
 
-    func add(_ grant: AgentAccess.Grant) {
-        guard grant.storable, !grants.contains(where: { $0.item == grant.item && $0.project == grant.project && $0.agent == grant.agent }) else { return }
+    /// Adds a grant, or finds the same one already there: its id (nil: a grant that's never kept).
+    @discardableResult
+    func add(_ grant: AgentAccess.Grant) -> String? {
+        guard grant.storable else { return nil }
+        if let same = grants.first(where: { $0.item == grant.item && $0.project == grant.project && $0.agent == grant.agent }) { return same.id }
         grants.append(grant)
+        save()
+        return grant.id
+    }
+
+    /// Removes a grant, and ends every operation relying on it, even one waiting on a card.
+    func remove(_ id: String) {
+        grants.removeAll { $0.id == id }
+        for pass in passes.allObjects where AgentAccess.revokedBy(pass.authorization, removing: id) { pass.revoke() }
         save()
     }
 
-    func remove(_ id: String) {
-        grants.removeAll { $0.id == id }
-        save()
+    // MARK: Operations under way
+
+    /// Every pass not yet done with (held weakly: an operation that ended lets go of its own).
+    @ObservationIgnored private let passes = NSHashTable<AgentPass>.weakObjects()
+    /// The Allow once cards whose operation is done: never good again.
+    @ObservationIgnored private var spent: Set<String> = []
+
+    /// A pass for one operation, under `authorization`.
+    func pass(_ authorization: AgentAccess.Authorization, caller: AgentAccess.Caller) -> AgentPass {
+        let pass = AgentPass(authorization, caller: caller)
+        passes.add(pass)
+        return pass
+    }
+
+    /// Right before a field is filled or a key handed over: the pass is still good for `item` in its operation,
+    /// by the grants as they are now.
+    func still(_ pass: AgentPass, item: String) -> Bool {
+        !pass.revoked && AgentAccess.stillAllowed(pass.authorization, item: item, caller: pass.caller, operation: pass.operation,
+                                                  grants: grants, spent: spent)
+    }
+
+    /// The operation is done: its Allow once is spent, and the pass is good for nothing more.
+    func finish(_ pass: AgentPass) {
+        if case .allowOnce(let card) = pass.authorization.kind { spent.insert(card) }
+        pass.revoke()
+        passes.remove(pass)
     }
 
     /// Made-up grants, for `Petal --snapshot`: nothing is read or written.
@@ -87,30 +121,37 @@ extension Assist {
     /// project goes on; any other asks the person with a card: Always for this project (only for Claude Code or
     /// Codex signed by its maker, never the home folder), Allow once, or Don't (the default). Every use is kept in
     /// What Petal AI did.
+    /// `go` gets the operation's pass (nil for Petal's own chats): the fill checks it again right before each field
+    /// (`AgentGrants.still`), and it ends the moment the grant it relies on is removed. The caller finishes it
+    /// (`AgentGrants.finish`) once the operation is done.
     func agentGate(_ caller: String, who identity: AgentAccess.Caller?, grant item: String, title: String, what: String, task: String, did done: String,
-                   fail: @escaping (String) -> Void, go: @escaping () -> Void) {
+                   fail: @escaping (String) -> Void, go: @escaping (AgentPass?) -> Void) {
         let who: AgentAccess.Caller
         switch AgentAccess.gate(identity) {
-        case .petal: return go()
+        case .petal: return go(nil)
         case .refuse: return fail("Petal couldn't tell who's asking, so it used nothing from the vault. Try again.")
         case .check(let caller): who = caller
         }
         let grants = AgentGrants.shared
+        let operation = UUID().uuidString
         grants.whenLoaded { [self] in
             let place = AgentAccess.shown(who.project, home: home)
             let said = AgentAccess.clipped(task, 120)
             let record = "\(who.label) \(done) in \(place)" + (said.isEmpty ? "" : ": “\(said)”")
-            if AgentAccess.granted(grants.grants, item: item, caller: who) != nil {
+            if let grant = AgentAccess.granted(grants.grants, item: item, caller: who) {
                 did(record)
-                return go()
+                return go(grants.pass(.init(kind: .grant(grant.id), operation: operation, item: item), caller: who))
             }
             let keep = who.grantable && !AgentAccess.tooBroad(who.project, home: home)
+            let card = UUID().uuidString
+            var kept: String?
             ask("agent-vault", AgentAccess.fillQuestion(who, what: what, home: home), detail: agentDetail(who, said: said, how: "It never sees the secret: Petal fills it in itself."), always: true, warn: true,
                 allow: "Allow once", owner: caller, keep: keep ? "Always for this project" : nil, mark: who.agent,
-                kept: { grants.add(AgentAccess.Grant(item: item, title: title, project: who.project, agent: who.agent)) }) { allowed in
+                kept: { kept = grants.add(AgentAccess.Grant(item: item, title: title, project: who.project, agent: who.agent)) }) { allowed in
                 guard allowed else { return fail("The person didn't let \(who.label) use “\(title)”. Don't find another way; ask them.") }
                 self.did(record)
-                go()
+                // Always: the grant just made, which the person may remove again before the fill; else this card.
+                go(grants.pass(.init(kind: kept.map { .grant($0) } ?? .allowOnce(card: card), operation: operation, item: item), caller: who))
             }
         }
     }
@@ -163,6 +204,8 @@ extension Assist {
                         : " Its API keys: " + titles.joined(separator: ", ") + "."))
                 }
                 guard !item[.value].isEmpty else { return fail("“\(item.title)” has no key saved.") }
+                // A key too short to find in every form it can be printed in is never handed to a command.
+                if AgentAccess.Redactor.tooShort(item[.value]) { return fail("“\(item.title)”: " + AgentAccess.Redactor.tooShortText) }
                 if let variable = want.variable, !AgentAccess.validVariable(variable) { return fail("\(variable) can't hold a key.") }
                 let variable = want.variable ?? (stdin ? nil : AgentAccess.variable(sites: item.sites, title: item.title))
                 if variable == nil, !stdin {
@@ -177,10 +220,15 @@ extension Assist {
             let record = "\(who.label) used your \(titles.joined(separator: ", ")) key\(titles.count == 1 ? "" : "s")"
                 + (command.isEmpty ? "" : " for “\(AgentAccess.clipped(command, 60))”") + " in \(place)"
             // Read again right before the keys go (the card may have waited): each item still there as it was when
-            // Petal asked (its revision), and still allowed, by the card just answered (`approved`) or by a grant that
-            // still covers it. Edited, replaced, deleted or no longer granted: no key is given at all.
-            let give = { (approved: Set<String>) in
+            // Petal asked (its revision), and still allowed by what let it go on (`passes`, by item): the grant must
+            // still be there and cover it, and an Allow once is good for this run only. Edited, replaced, deleted or no
+            // longer granted: no key is given at all.
+            let grants = AgentGrants.shared
+            let operation = UUID().uuidString
+            let give = { (passes: [String: AgentPass]) in
+                let done = { passes.values.forEach(grants.finish) }
                 VaultStore.load { read in
+                    defer { done() }
                     guard case .success(let now) = read else { return fail(VaultStore.unreadableText + " No key was given; try again in a moment.") }
                     var keys: [[String: Any]] = []
                     for pair in found {
@@ -188,8 +236,8 @@ extension Assist {
                               Vault.sameRevision(Vault.revision(pair.item), item), !item[.value].isEmpty else {
                             return fail("“\(pair.item.title)” changed in the vault while Petal asked (edited, replaced or deleted): no key was given. Run the command again, so the person is asked about it as it is now.")
                         }
-                        guard who.agent == .petal || approved.contains(item.id)
-                            || AgentAccess.granted(AgentGrants.shared.grants, item: item.id, caller: who) != nil else {
+                        if AgentAccess.Redactor.tooShort(item[.value]) { return fail("“\(item.title)”: " + AgentAccess.Redactor.tooShortText) }
+                        guard let pass = passes[item.id], grants.still(pass, item: item.id) else {
                             return fail("The person no longer lets \(who.label) use “\(item.title)” here: no key was given. Don't find another way; ask them.")
                         }
                         var key: [String: Any] = ["title": item.title, "secret": item[.value]]
@@ -200,26 +248,65 @@ extension Assist {
                     send(["keys": keys])
                 }
             }
-            if who.agent == .petal { return give([]) }
-            AgentGrants.shared.whenLoaded {
-                let missing = found.filter { AgentAccess.granted(AgentGrants.shared.grants, item: $0.item.id, caller: who) == nil }
-                guard !missing.isEmpty else { return give([]) }
+            @MainActor func pass(_ kind: AgentAccess.Authorization.Kind, _ item: String) -> AgentPass {
+                grants.pass(.init(kind: kind, operation: operation, item: item), caller: who)
+            }
+            if who.agent == .petal {
+                return give(Dictionary(found.map { ($0.item.id, pass(.petal, $0.item.id)) }, uniquingKeysWith: { a, _ in a }))
+            }
+            grants.whenLoaded {
+                var passes: [String: AgentPass] = [:]
+                for pair in found {
+                    if let grant = AgentAccess.granted(grants.grants, item: pair.item.id, caller: who) { passes[pair.item.id] = pass(.grant(grant.id), pair.item.id) }
+                }
+                let missing = found.filter { passes[$0.item.id] == nil }
+                guard !missing.isEmpty else { return give(passes) }
                 let keep = who.grantable && !AgentAccess.tooBroad(who.project, home: self.home)
                 let it = missing.count == 1 ? "it" : "them"
+                let card = UUID().uuidString
+                var kept: [String: String] = [:]
                 let detail = self.agentDetail(who, said: "", how: "It never sees \(it): Petal gives \(it) to the command and takes \(it) out of what the command prints.")
                 self.ask("agent-key", AgentAccess.keyQuestion(who, titles: missing.map(\.item.title), command: command, home: self.home), detail: detail,
                          always: true, warn: true, allow: "Allow once", owner: "mcp-\(who.pid)", keep: keep ? "Always for this project" : nil, mark: who.agent,
                          kept: {
                              for pair in missing {
-                                 AgentGrants.shared.add(AgentAccess.Grant(item: pair.item.id, title: pair.item.title, project: who.project, agent: who.agent))
+                                 kept[pair.item.id] = grants.add(AgentAccess.Grant(item: pair.item.id, title: pair.item.title, project: who.project, agent: who.agent))
                              }
                          }) { allowed in
-                    guard allowed else { return fail("The person didn't let \(who.label) use \(missing.count == 1 ? "that key" : "those keys"). Don't find another way; ask them.") }
-                    give(Set(missing.map(\.item.id)))
+                    guard allowed else {
+                        passes.values.forEach(grants.finish)
+                        return fail("The person didn't let \(who.label) use \(missing.count == 1 ? "that key" : "those keys"). Don't find another way; ask them.")
+                    }
+                    // Always: the grants just made, which the person may remove again before the keys go; else this card.
+                    for pair in missing { passes[pair.item.id] = pass(kept[pair.item.id].map { .grant($0) } ?? .allowOnce(card: card), pair.item.id) }
+                    give(passes)
                 }
             }
         }
     }
+}
+
+/// One agent's vault operation (a fill, a `petal run`), from the card or grant that let it go on to the moment the
+/// secret is used: checked again then (`AgentGrants.still`), and revoked (stopping a fill as a Stop would) when the
+/// grant it relies on is removed or the operation is done.
+final class AgentPass: @unchecked Sendable {
+    let authorization: AgentAccess.Authorization
+    let caller: AgentAccess.Caller
+    /// The operation this pass is for (a fill, a `petal run`); a use in any other is never covered by it.
+    let operation: String
+    private let lock = NSLock()
+    private var ended = false
+
+    init(_ authorization: AgentAccess.Authorization, caller: AgentAccess.Caller) {
+        self.authorization = authorization
+        self.caller = caller
+        operation = authorization.operation
+    }
+
+    var revoked: Bool { lock.lock(); defer { lock.unlock() }; return ended }
+    func revoke() { lock.lock(); ended = true; lock.unlock() }
+
+    static let revokedText = "The person no longer lets this agent use that item here (its grant was removed): nothing more was filled. Don't find another way; ask them."
 }
 
 // MARK: - Settings › Vault › Agents

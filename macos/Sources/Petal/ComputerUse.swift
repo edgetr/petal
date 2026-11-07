@@ -383,13 +383,16 @@ final class ComputerUse {
     /// control of the window petal_ui looked at, in the reply `token` came from. `allowed`: the person just said yes
     /// to this very fill on its card, which lets it into the app for that fill alone (typing only: Return after it
     /// asks as petal_act does); otherwise the app is asked about as petal_act asks.
+    /// `agent`: an agent outside Petal's pass for this operation and what it's checked for (the item, or new logins),
+    /// checked again here, and stopping the fill if its grant is removed while it waits on a card or fills.
     func fill(_ plan: VaultFillPlan, entry: Entry, map: Map, caller: String, token: Acting.Cancel, allowed: Bool,
-              send: @escaping (Any) -> Void, fail: @escaping (String) -> Void) {
+              agent: (pass: AgentPass, item: String)? = nil, send: @escaping (Any) -> Void, fail: @escaping (String) -> Void) {
         sessions[caller]?.last = Date()
         keepSweeping()
         guard live(caller, token), let session = sessions[caller] else {
             return fail(Self.stoppedText + " Don't carry on in this reply: say what's left and wait for them.")
         }
+        if let agent, !AgentGrants.shared.still(agent.pass, item: agent.item) { return fail(AgentPass.revokedText) }
         guard maps[caller]?.id == map.id else { return fail("The window was looked at again (or 5 minutes passed) since these ids. " + Acting.changed) }
         guard let target = NSRunningApplication(processIdentifier: map.pid), !target.isTerminated else { return fail("\(map.appName) isn't open.") }
         let bundle = target.bundleIdentifier ?? "\(target.processIdentifier)"
@@ -406,7 +409,7 @@ final class ComputerUse {
             buy = covering
         }
         let job = Job(caller: caller, action: "fill", entry: entry, map: map, bundle: bundle, caption: "Filling your \(plan.field.words)",
-                      options: options, cancel: Acting.Cancel(under: token, buy: buy), send: send, fail: fail)
+                      options: options, cancel: Acting.Cancel(under: token, buy: buy, pass: agent?.pass), send: send, fail: fail)
         // Return after the fill presses as petal_act does: it asks to use the app, whatever card allowed the fill.
         if Vault.fillAdmitted(allowed: allowed, submit: plan.submit, appAllowed: session.apps.contains(bundle)) { return enqueue(job) }
         admit(job, session: session)
@@ -1477,15 +1480,18 @@ enum Acting {
         private let parent: Cancel?
         /// A payment fill's Buy: revoking it stops the fill as a Stop would.
         private let buy: Vault.BuyToken?
-        init(under parent: Cancel? = nil, buy: Vault.BuyToken? = nil) {
+        /// An agent's fill: removing the grant it relies on stops it as a Stop would.
+        private let pass: AgentPass?
+        init(under parent: Cancel? = nil, buy: Vault.BuyToken? = nil, pass: AgentPass? = nil) {
             self.parent = parent
             self.buy = buy
+            self.pass = pass
         }
         var stopped: Bool {
             lock.lock()
             let own = flag
             lock.unlock()
-            return own || buyEnded || (parent?.stopped ?? false)
+            return own || buyEnded || (pass?.revoked ?? false) || (parent?.stopped ?? false)
         }
         /// The Buy this fill was made under is over.
         var buyEnded: Bool { (buy?.revoked ?? false) || (parent?.buyEnded ?? false) }

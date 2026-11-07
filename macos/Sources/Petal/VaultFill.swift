@@ -626,7 +626,10 @@ extension Assist {
             // An agent outside Petal asks first, unless the person granted it this item in this project.
             let noun = Self.agentNoun(item)
             let at = "\(places[0].web ? "on" : "in") \(places[0].where_)"
-            self.agentGate(caller, who: who, grant: item.id, title: item.title, what: "fill \(noun) \(at)", task: task, did: "used \(noun) \(at)", fail: fail) {
+            self.agentGate(caller, who: who, grant: item.id, title: item.title, what: "fill \(noun) \(at)", task: task, did: "used \(noun) \(at)", fail: fail) { pass in
+                // Whatever answer ends the fill ends the agent's pass: an Allow once is never good again.
+                let send = { (reply: Any) in pass.map(AgentGrants.shared.finish); send(reply) }
+                let fail = { (why: String) in pass.map(AgentGrants.shared.finish); fail(why) }
                 guard self.computer.live(caller, token) else { return fail(Self.over) }
                 var plans: [VaultFillPlan] = []
                 var asked: [VaultField] = []
@@ -662,7 +665,8 @@ extension Assist {
                 }
                 let go: (Bool) -> Void = { allowed in
                     guard self.computer.live(caller, token) else { return fail(Self.over) }
-                    self.vaultFillAll(plans, entries: entries, map: map, caller: caller, token: token, allowed: allowed, send: send)
+                    self.vaultFillAll(plans, entries: entries, map: map, caller: caller, token: token, allowed: allowed,
+                                      agent: pass.map { ($0, item.id) }, send: send)
                 }
                 if let buyPlace {
                     return self.vaultBuy(item, place: buyPlace, args: args, map: map, caller: caller, who: who, token: token, send: send, fail: fail) { go(true) }
@@ -679,9 +683,10 @@ extension Assist {
         }
     }
 
-    /// Fills the fields one after another; the AI hears which were filled, and the first error if any.
+    /// Fills the fields one after another; the AI hears which were filled, and the first error if any. `agent`: an
+    /// agent outside Petal's pass and what it's for, checked again before each field.
     private func vaultFillAll(_ plans: [VaultFillPlan], entries: [ComputerUse.Entry], map: ComputerUse.Map, caller: String,
-                              token: Acting.Cancel, allowed: Bool, send: @escaping (Any) -> Void) {
+                              token: Acting.Cancel, allowed: Bool, agent: (pass: AgentPass, item: String)? = nil, send: @escaping (Any) -> Void) {
         var steps = Array(plans.indices)
         var filled: [String] = []
         func next() {
@@ -691,12 +696,13 @@ extension Assist {
                 return send(reply)
             }
             let index = steps.removeFirst()
-            computer.fill(plans[index], entry: entries[index], map: map, caller: caller, token: token, allowed: allowed, send: { reply in
+            computer.fill(plans[index], entry: entries[index], map: map, caller: caller, token: token, allowed: allowed, agent: agent, send: { reply in
                 if let declined = (reply as? [String: Any])?["declined"] { return send(["filled": filled, "declined": declined]) }
                 filled.append(plans[index].field.rawValue)
                 next()
             }, fail: { why in
-                send(["filled": filled, "error": why])
+                // Stopped because the grant it relied on was removed: said so, not as a Stop.
+                send(["filled": filled, "error": agent?.pass.revoked == true ? AgentPass.revokedText : why])
             })
         }
         next()
@@ -927,8 +933,15 @@ extension Assist {
             // An agent outside Petal asks first, unless the person granted it new logins in this project.
             let at = "\(place.web ? "on" : "in") \(place.where_)"
             self.agentGate(caller, who: who, grant: AgentAccess.Grant.newLogins, title: "New logins", what: "make a new login \(at)", task: task,
-                           did: "started a new login \(at)", fail: fail) {
+                           did: "started a new login \(at)", fail: fail) { pass in
+                // Whatever answer ends it ends the agent's pass: an Allow once is never good again.
+                let send = { (reply: Any) in pass.map(AgentGrants.shared.finish); send(reply) }
+                let fail = { (why: String) in pass.map(AgentGrants.shared.finish); fail(why) }
+                let agent = pass.map { (pass: $0, item: AgentAccess.Grant.newLogins) }
+                // Still allowed (the grant not removed meanwhile): checked before the password is made and saved.
+                let stillGranted = { agent.map { AgentGrants.shared.still($0.pass, item: $0.item) } ?? true }
                 guard self.computer.live(caller, token) else { return fail(Self.over) }
+                guard stillGranted() else { return fail(AgentPass.revokedText) }
                 VaultStore.queue.async {
                     item[.password] = Vault.password(length: length, symbols: symbols, allowed: allowed, random: VaultStore.random)
                     VaultIndex.remember(Vault.secrets(item))
@@ -936,11 +949,12 @@ extension Assist {
                         MainActor.assumeIsolated {
                             // The reply ended while the password was made: nothing is saved or filled.
                             guard self.computer.live(caller, token) else { return fail(Self.over) }
+                            guard stillGranted() else { return fail(AgentPass.revokedText) }
                             let saving = item
                             VaultStore.queue.async {
                                 // Stopped, or the reply ended, while the save waited its turn: nothing is saved.
-                                guard !token.stopped else {
-                                    return DispatchQueue.main.async { MainActor.assumeIsolated { fail(Self.over) } }
+                                guard !token.stopped, agent?.pass.revoked != true else {
+                                    return DispatchQueue.main.async { MainActor.assumeIsolated { fail(agent?.pass.revoked == true ? AgentPass.revokedText : Self.over) } }
                                 }
                                 let ok = VaultStore.save([saving])
                                 DispatchQueue.main.async {
@@ -958,7 +972,8 @@ extension Assist {
                                             plan.task = task
                                             return plan
                                         }
-                                        self.vaultFillAll(plans, entries: Array(entries.prefix(roles.count)), map: map, caller: caller, token: token, allowed: false) { result in
+                                        self.vaultFillAll(plans, entries: Array(entries.prefix(roles.count)), map: map, caller: caller, token: token, allowed: false,
+                                                          agent: agent) { result in
                                             var reply = (result as? [String: Any]) ?? [:]
                                             reply["saved"] = Vault.shown(saving)
                                             reply["note"] = "Petal made a strong password and saved it as \(saving.title); you never see it."

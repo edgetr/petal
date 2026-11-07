@@ -89,6 +89,12 @@ enum AgentAccess {
         static let maxBlanks = 8
         static let maxIndent = 64
         static let maxGap = maxBlanks + 2 + maxIndent
+        /// The shortest key `petal run` hands over: from 16 characters every form (itself, hex, percent-encoded and
+        /// base64 at each of its three places) is long enough to be found without taking out ordinary text. Real API
+        /// keys are far longer; a shorter one is filled into a field instead.
+        static let minimumKey = 16
+        static func tooShort(_ secret: String) -> Bool { secret.count < minimumKey || secret.utf8.count < minimumKey }
+        static let tooShortText = "This key is too short for Petal to keep out of the command's output; use it by filling it into a field instead (petal_vault, action fill)."
         /// Patterns by the bytes they can start with, longest first.
         private var byFirst = [[Pattern]](repeating: [], count: 256)
         private var longest = 0
@@ -118,7 +124,8 @@ enum AgentAccess {
 
         /// The ways a key is commonly printed, byte for byte (percent-encoding is matched character by character,
         /// in `compare`). Short keys (under 8 characters) only as themselves, and base64 only where at least 12
-        /// characters of it come from the key alone: shorter pieces would take out ordinary text.
+        /// characters of it come from the key alone: shorter pieces would take out ordinary text. `petal run` hands
+        /// over no key under `minimumKey`, so every key it gives is found in all of these forms.
         static func forms(of secret: String) -> [String] {
             let bytes = Array(secret.utf8)
             guard bytes.count >= 4 else { return [] }
@@ -542,6 +549,45 @@ enum AgentAccess {
     static func gate(_ who: Caller?) -> Gate {
         guard let who else { return .refuse }
         return who.agent == .petal ? .petal : .check(who)
+    }
+
+    // MARK: Authorization
+
+    /// What let one vault use go on, carried with it to the moment the secret is used (a field filled, a key handed
+    /// to `petal run`), where it's checked again (`stillAllowed`): a card or a grant may have waited minutes on
+    /// another card meanwhile.
+    struct Authorization: Equatable {
+        enum Kind: Equatable {
+            /// Petal's own chats: the vault's own rules.
+            case petal
+            /// The person's Allow once on the card `card`: this one operation only, and never again once it's done.
+            case allowOnce(card: String)
+            /// A grant (its id): only while the person keeps it, and only while it still covers this use.
+            case grant(String)
+        }
+        var kind: Kind
+        /// The one operation (a fill, a `petal run`) it was given for.
+        var operation: String
+        /// What it lets the agent use: a vault item's id, or `Grant.newLogins`.
+        var item: String
+    }
+
+    /// Right before a field is filled or a key is handed over: does `authorization` still let `caller` use `item` in
+    /// `operation`? A grant must still be among `grants` and cover the item, project and agent; an Allow once only in
+    /// the operation it was said for, and not once that operation is done (`spent`: its card).
+    static func stillAllowed(_ authorization: Authorization, item: String, caller: Caller, operation: String, grants: [Grant], spent: Set<String>) -> Bool {
+        guard authorization.operation == operation, authorization.item == item else { return false }
+        switch authorization.kind {
+        case .petal: return caller.agent == .petal
+        case .allowOnce(let card): return caller.agent != .petal && !spent.contains(card)
+        case .grant(let id):
+            return grants.first { $0.id == id }?.covers(item: item, project: caller.project, agent: caller.agent) ?? false
+        }
+    }
+
+    /// The person removed the grant `id`: whether an operation under `authorization`, perhaps waiting on a card, ends.
+    static func revokedBy(_ authorization: Authorization, removing id: String) -> Bool {
+        authorization.kind == .grant(id)
     }
 
     // MARK: petal run

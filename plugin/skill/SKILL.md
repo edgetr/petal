@@ -111,7 +111,8 @@ When the user says "get the Anthropic key from Petal to test this" or "use the l
   `--stdin`. Several `--key`s are fine; two that would go in the same variable (two OpenAI keys) each need their own
   `--env`. What the command prints comes back with the key replaced by
   `[Anthropic key]`, and its exit code is the command's. `petal_vault` `action: list` (`kind: apiKey`) shows the
-  titles.
+  titles. A key under 16 characters is refused (too short to keep out of the output): fill it into a field
+  instead. Removing a grant stops a use still waiting on it, and an Allow once covers that one run or fill.
 - A server you start to test (a bring-your-own-key app): start it with `petal run` so it has the key, or fill the
   key into its settings page with `petal_vault` `fill` (an API key fills by itself on `http://localhost` and in apps).
 - Never ask for the key, print it, write it to a file, or put it on a command line, and don't try to get it out of

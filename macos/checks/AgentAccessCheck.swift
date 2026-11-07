@@ -27,6 +27,8 @@ struct AgentAccessCheck {
         linkedGit()
         systemPrograms()
         grants()
+        authorizations()
+        shortKeys()
         gates()
         words()
         sameVariable()
@@ -486,6 +488,87 @@ struct AgentAccessCheck {
         let saved = try? JSONDecoder().decode([AgentAccess.Grant].self, from: JSONEncoder().encode([grant, any]))
         expect(saved == [grant, any], "grants survive being saved")
         expect(!(String(data: (try? JSONEncoder().encode(grant)) ?? Data(), encoding: .utf8) ?? "").contains("sk-"), "a grant holds no secret")
+    }
+
+    /// What let a vault use go on is checked again right before the secret goes: a grant removed meanwhile (or no
+    /// longer covering the use), an Allow once from another operation or one already used, and nothing goes.
+    static func authorizations() {
+        let codex = AgentAccess.Caller(agent: .codex, host: "T3 Code", project: "/Users/me/petal")
+        let grant = AgentAccess.Grant(item: "anthropic", title: "Anthropic", project: "/Users/me/petal", agent: .codex)
+        let byGrant = AgentAccess.Authorization(kind: .grant(grant.id), operation: "op1", item: "anthropic")
+        func still(_ auth: AgentAccess.Authorization, item: String = "anthropic", caller: AgentAccess.Caller = codex, operation: String = "op1",
+                   grants: [AgentAccess.Grant], spent: Set<String> = []) -> Bool {
+            AgentAccess.stillAllowed(auth, item: item, caller: caller, operation: operation, grants: grants, spent: spent)
+        }
+        expect(still(byGrant, grants: [grant]), "a grant still there goes on")
+        expect(!still(byGrant, grants: []), "the grant removed while it waited: refused")
+        let other = AgentAccess.Grant(item: "anthropic", title: "Anthropic", project: "/Users/me/petal", agent: .codex)
+        expect(!still(byGrant, grants: [other]), "removed and a new one made: the operation's own grant is gone, refused")
+        expect(AgentAccess.revokedBy(byGrant, removing: grant.id) && !AgentAccess.revokedBy(byGrant, removing: other.id),
+               "removing a grant ends the operations relying on it, and only those")
+        expect(!still(byGrant, caller: AgentAccess.Caller(agent: .codex, host: nil, project: "/Users/me/other"), grants: [grant]),
+               "a grant that no longer covers the project: refused")
+        expect(!still(byGrant, caller: AgentAccess.Caller(agent: .claude, host: nil, project: "/Users/me/petal"), grants: [grant]),
+               "nor another agent")
+        expect(!still(byGrant, item: "openai", grants: [grant]), "nor another item")
+        expect(!still(byGrant, operation: "op2", grants: [grant]), "an authorization from another operation: refused")
+        let once = AgentAccess.Authorization(kind: .allowOnce(card: "card1"), operation: "op1", item: "anthropic")
+        expect(still(once, grants: []), "Allow once, in its own operation")
+        expect(!still(once, grants: [], spent: ["card1"]), "Allow once used again after its operation: refused")
+        expect(!still(once, operation: "op2", grants: []), "Allow once reused for another operation: refused")
+        expect(!AgentAccess.revokedBy(once, removing: grant.id), "removing a grant doesn't touch an Allow once")
+        let own = AgentAccess.Authorization(kind: .petal, operation: "op1", item: "anthropic")
+        expect(still(own, caller: AgentAccess.Caller(agent: .petal, host: nil, project: "/p"), grants: []), "Petal's own chats keep the vault's rules")
+        expect(!still(own, grants: []), "Petal's own authorization never lets an agent through")
+        let newLogins = AgentAccess.Grant(item: AgentAccess.Grant.newLogins, title: "New logins", project: "/Users/me/petal", agent: .any)
+        let make = AgentAccess.Authorization(kind: .grant(newLogins.id), operation: "op1", item: AgentAccess.Grant.newLogins)
+        expect(still(make, item: AgentAccess.Grant.newLogins, grants: [newLogins]), "new logins by an any-agent grant")
+        expect(!still(make, item: AgentAccess.Grant.newLogins, grants: []), "new logins, the grant removed: refused")
+    }
+
+    /// `petal run` hands over no key under 16 characters; from 16 on, every form of it is taken out of what's printed.
+    static func shortKeys() {
+        expect(AgentAccess.Redactor.tooShort("12345678"), "an 8-character key is too short")
+        expect(AgentAccess.Redactor.tooShort("0123456789abcde"), "15 characters are too short")
+        expect(!AgentAccess.Redactor.tooShort("0123456789abcdef"), "16 characters are enough")
+        expect(AgentAccess.Redactor.tooShort("ключ-🔑"), "short in any script")
+        expect(AgentAccess.Redactor.tooShortText.contains("filling it into a field"), "the refusal says how to use it instead")
+        for secret in ["Abc_def+ghi/JK01", "0123456789abcdef", "s3cr3t-k3y_ABCD=", "ÿ~?>xyz/+=-_.!*q"] {
+            expect(!AgentAccess.Redactor.tooShort(secret), "\(secret) is accepted")
+            let label = [(secret, "K")]
+            func gone(_ text: String, _ what: String) {
+                let out = redact(label, text)
+                expect(out.contains("[K key]"), "\(what) of a 16-character key", out)
+            }
+            gone("v=\(secret);", "itself")
+            let hex = Array(secret.utf8).map { String(format: "%02x", $0) }.joined()
+            gone("h=\(hex)", "hex")
+            gone("H=\(hex.uppercased())", "uppercase hex")
+            gone("?k=\(secret.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!)&", "percent-encoded")
+            let all = Array(secret.utf8).map { String(format: "%%%02X", $0) }.joined()
+            gone("?k=\(all)", "every byte percent-encoded")
+            // Base64 at each of the three places it can start, as HTTP Basic writes "user:key" (only the key known).
+            for prefix in ["", "a", "ab", "u:", "me:", "user:", "Bearer "] {
+                let encoded = Data((prefix + secret).utf8).base64EncodedString()
+                let out = redact(label, "Authorization: Basic \(encoded)\n")
+                expect(out.contains("[K key]"), "base64 of \"\(prefix)\" + a 16-character key", out)
+                let safe = encoded.replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+                expect(redact(label, safe).contains("[K key]"), "URL-safe base64 of \"\(prefix)\" + a 16-character key")
+                // No long run left that comes from the key's bits alone.
+                let core = AgentAccess.Redactor.base64Forms(of: secret)
+                expect(!core.contains { out.contains($0) }, "nothing of the key's base64 left after \"\(prefix)\"", out)
+            }
+            let forms = AgentAccess.Redactor.base64Forms(of: secret)
+            // Standard base64 has no "-" or "_": those are the URL-safe copies.
+            expect(Set(forms.filter { !$0.contains("-") && !$0.contains("_") }).count == 3,
+                   "a 16-character key has its base64 at all three alignments", "\(forms)")
+        }
+        // Each alignment found on its own.
+        let secret = "0123456789abcdef"
+        for offset in 0..<3 {
+            let encoded = Data((String(repeating: "x", count: offset) + secret).utf8).base64EncodedString()
+            expect(redact([(secret, "K")], encoded).contains("[K key]"), "base64 at alignment \(offset)")
+        }
     }
 
     /// A request is decided by the identity it came with: none, and it's refused, never let through.
