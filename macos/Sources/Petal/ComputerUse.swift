@@ -78,11 +78,21 @@ final class ComputerUse {
     static let outsideGrant: TimeInterval = 120
     static let oldTools = "This AI session's Petal tools are from an older Petal: start a new chat or session to use apps."
 
+    /// A reply that was stopped or ended (Stop, Escape, steering, another chat picked, using apps turned off): it
+    /// never acts again. A Petal chat's turn stays closed until its next turn starts; an outside session's task
+    /// until it has been quiet for `outsideGrant`.
+    struct Closed {
+        var turn: String
+        var task = ""
+        var at = Date()
+    }
+
     /// By caller. Never shared between two chats.
     private var maps: [String: Map] = [:]
-    private var sessions: [String: Session] = [:]
-    private var line: [Job] = []
-    private var busy = false
+    private var sessions: [String: Session] = [:] { didSet { standGuard() } }
+    private var closed: [String: Closed] = [:]
+    private var line: [Job] = [] { didSet { standGuard() } }
+    private var busy = false { didSet { standGuard() } }
     private var acting: Job?
     /// Whose actions the cursor showing is for: Stop stops that reply, even between its actions.
     private var lastCaller: String?
@@ -273,21 +283,47 @@ final class ComputerUse {
 
     static let outside = "outside"
 
-    /// The chat's reply this is part of: a Petal chat's turn (stopped, it stays stopped until the next reply). An AI
-    /// session outside Petal has no turns Petal can see: its acts are one task while they name the same `task` and
-    /// come within two minutes of each other, and a Stop ends it; the next act starts afresh and asks again.
+    /// The chat's reply this is part of: a Petal chat's turn (stopped or ended, it never acts again: only its next
+    /// turn can, asking again). An AI session outside Petal has no turns Petal can see: its acts are one task while
+    /// they name the same `task` and come within two minutes of each other, and a Stop ends it; that task stays
+    /// stopped while it keeps trying, and another starts afresh and asks again.
     /// A new one stops whatever the last one still had going.
     private func session(_ caller: String, task: String) -> Session {
         if let agent = app.claude.note(withID: caller)?.agent {
             let turn = "\(agent.turn)"
+            // Its turn was stopped or ended, or it isn't running (a late call from a run that's over).
+            if closed[caller]?.turn == turn || !agent.running { return Self.over(turn) }
             if let session = sessions[caller], session.turn == turn { return session }
             return fresh(caller, turn: turn)
+        }
+        // A Petal chat's id with no chat behind it anymore (its note let go): nothing it asks goes ahead.
+        guard caller.hasPrefix("mcp-") else { return Self.over(Self.outside) }
+        if let mark = closed[caller], mark.task == task, Date().timeIntervalSince(mark.at) < Self.outsideGrant {
+            closed[caller]?.at = Date()
+            return Self.over(Self.outside)
         }
         if let session = sessions[caller], session.turn == Self.outside, !session.stopped, session.task == task,
            Date().timeIntervalSince(session.last) < Self.outsideGrant {
             return session
         }
         return fresh(caller, turn: Self.outside, task: task)
+    }
+
+    /// A reply that can't act: stopped from the start, kept nowhere.
+    private static func over(_ turn: String) -> Session {
+        var session = Session(turn: turn)
+        session.stopped = true
+        session.cancel.stop()
+        return session
+    }
+
+    /// Marks the caller's reply as over for good: its Petal chat's turn now, or its outside task.
+    private func close(_ caller: String) {
+        if let agent = app.claude.note(withID: caller)?.agent {
+            closed[caller] = Closed(turn: "\(agent.turn)")
+        } else if let session = sessions[caller], session.turn == Self.outside {
+            closed[caller] = Closed(turn: Self.outside, task: session.task)
+        }
     }
 
     private func fresh(_ caller: String, turn: String, task: String = "") -> Session {
@@ -312,17 +348,31 @@ final class ComputerUse {
                 sessions[caller] = nil
             }
         }
-        if maps.isEmpty && sessions.isEmpty {
+        // A closed turn is let go once its chat has moved on to another turn (or is gone); an outside task once
+        // it has been quiet for its two minutes.
+        closed = closed.filter { caller, mark in
+            if let agent = app.claude.note(withID: caller)?.agent { return "\(agent.turn)" == mark.turn }
+            return mark.turn == Self.outside && now.timeIntervalSince(mark.at) < Self.outsideGrant
+        }
+        if maps.isEmpty && sessions.isEmpty && closed.isEmpty {
             sweeper?.invalidate()
             sweeper = nil
         }
     }
 
+    /// Every 15 seconds: an outside session's Stop and Escape go soon after it may no longer act.
     private func keepSweeping() {
         guard sweeper == nil else { return }
-        sweeper = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+        sweeper = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.sweep() }
         }
+    }
+
+    /// While any reply may act (a session the person allowed, not stopped, or an action waiting or under way),
+    /// Escape stops it and a small Stop stays on the screen, between actions too.
+    private func standGuard() {
+        let live = busy || !line.isEmpty || sessions.values.contains { !$0.stopped && !$0.apps.isEmpty && !$0.cancel.stopped }
+        cursor.stand(live)
     }
 
     private func enqueue(_ job: Job) {
@@ -372,12 +422,16 @@ final class ComputerUse {
         if let error = stale(job) { job.fail(error); return finished() }
         let map = maps[job.caller] ?? job.map
         let cancel = job.cancel
+        // Stop shows at once, before Petal reads the window (a slow app can take a while to answer).
+        let near = job.entry.map { CGPoint(x: $0.node.frame.midX, y: $0.node.frame.midY) }
+            ?? CGPoint(x: map.windowFrame.midX, y: map.windowFrame.minY + 14)
+        cursor.preparing(job.caption, near: Self.screenPoint(near))
         Self.actQueue.async {
             let prepared = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if cancel.stopped { job.fail(self.whyStopped(job)); return self.finished() }
-                    if let error = prepared.error { job.fail(error); return self.finished() }
+                    if cancel.stopped { self.cursor.rest(); job.fail(self.whyStopped(job)); return self.finished() }
+                    if let error = prepared.error { self.cursor.rest(); job.fail(error); return self.finished() }
                     self.cursor.glide(to: Self.screenPoint(prepared.spot), caption: job.caption)
                     DispatchQueue.main.asyncAfter(deadline: .now() + FakeCursor.glide + 0.03) {
                         if let error = self.stale(job) { self.cursor.rest(); job.fail(error); return self.finished() }
@@ -442,25 +496,36 @@ final class ComputerUse {
 
     // MARK: Stopping
 
-    /// The person pressed Stop or Escape: the action under way and the rest of that reply's are cancelled. A Petal
-    /// chat's reply can't use apps again; an AI session outside Petal asks again at its next act.
+    /// The person pressed Stop or Escape: the action under way and the rest of that reply's are cancelled, and so is
+    /// every other reply that may use apps now (Stop means Petal AI stops using them). A Petal chat's reply can't use
+    /// apps again; an AI session outside Petal asks again at its next task.
     func stop() {
-        let caller = acting?.caller ?? lastCaller
+        var callers = Set(sessions.filter { !$0.value.stopped && !$0.value.apps.isEmpty }.keys).union(line.map(\.caller))
+        if let caller = acting?.caller ?? lastCaller { callers.insert(caller) }
+        // All marked stopped first, so Stop never comes back for one still to be stopped.
+        for caller in callers {
+            close(caller)
+            sessions[caller]?.stopped = true
+        }
         cursor.hide()
-        guard let caller else { return }
-        sessions[caller]?.stopped = true
-        cancelWork(of: caller)
-        if let agent = app.claude.note(withID: caller)?.agent, agent.running { agent.personStopped() }
+        for caller in callers {
+            cancelWork(of: caller)
+            if let agent = app.claude.note(withID: caller)?.agent, agent.running { agent.personStopped() }
+        }
+        keepSweeping()
     }
 
-    /// A chat stopped, was steered, ended its turn or started another, or moved to another chat (Agent): what it
-    /// was doing in apps ends there, its question waiting is answered Don't, and what it was allowed goes.
-    /// `forget`: its window's ids go too (a new chat, or another one picked).
+    /// A chat stopped, was steered, ended its turn or is about to start another, or moved to another chat (Agent):
+    /// what it was doing in apps ends there, its question waiting is answered Don't, what it was allowed goes, and
+    /// that turn never acts again (its next turn may, asking again). `forget`: its window's ids go too (a new chat,
+    /// or another one picked).
     func end(_ caller: String, forget: Bool = false) {
         if acting?.caller == caller { cursor.hide() }
+        close(caller)
         cancelWork(of: caller)
         sessions[caller] = nil
         if forget { maps[caller] = nil }
+        if !closed.isEmpty { keepSweeping() }
     }
 
     private func cancelWork(of caller: String) {
@@ -482,7 +547,11 @@ final class ComputerUse {
             let callers = Set(sessions.keys).union(line.map(\.caller)).union(acting.map { [$0.caller] } ?? [])
             guard !callers.isEmpty || !maps.isEmpty else { return }
             cursor.hide()
-            for caller in callers { cancelWork(of: caller) }
+            for caller in callers {
+                close(caller)
+                cancelWork(of: caller)
+            }
+            if !closed.isEmpty { keepSweeping() }
             sessions = [:]
             maps = [:]
             return
@@ -620,13 +689,48 @@ enum Reader {
             element = focused
             if subrole != "AXSecureTextField" { value = text(Windows.value(focused, kAXValueAttribute) as CFTypeRef?) }
         }
-        var selected: [String] = []
+        // Every selected row counts (up to UIMap.rowCap), not only the first few: a sixth file selected while the
+        // person is asked changes it. The first few in words, the rest by their index and own texts (one message each).
+        let deadline = Date().addingTimeInterval(0.5)
+        var selected: [UIMap.Selected] = []
         for list in lists {
-            let rows: [AXUIElement] = Windows.value(list, kAXSelectedRowsAttribute) ?? Windows.value(list, kAXSelectedChildrenAttribute) ?? []
-            for row in rows.prefix(5) { selected.append(describe(row)) }
+            guard let rows = selectedRows(list) else { selected.append(UIMap.Selected(count: nil)); continue }
+            var read = UIMap.Selected(count: rows.count)
+            for (index, row) in rows.prefix(UIMap.rowCap).enumerated() {
+                if Date() > deadline { read.complete = false; break }
+                read.rows.append(index < 5 ? describe(row) : identity(row))
+            }
+            selected.append(read)
         }
         return UIMap.fingerprint(title: title, focusRole: role, focusSubrole: subrole, focusValue: value, focusIdentifier: identifier,
-                                 focusFrame: place, focused: element, selected: selected)
+                                 focusFrame: place, focused: element, selection: UIMap.selection(selected))
+    }
+
+    /// A list's selected rows: none when it can't select anything, nil when its app didn't say (busy, or no answer).
+    static func selectedRows(_ list: AXUIElement) -> [AXUIElement]? {
+        for name in [kAXSelectedRowsAttribute, kAXSelectedChildrenAttribute] {
+            var raw: CFTypeRef?
+            switch AXUIElementCopyAttributeValue(list, name as CFString, &raw) {
+            case .success: return raw as? [AXUIElement]
+            case .noValue: return []
+            case .attributeUnsupported: continue
+            default: return nil
+            }
+        }
+        return []
+    }
+
+    /// A selected row by its index and its own texts, in one message to the app.
+    static func identity(_ row: AXUIElement) -> String {
+        let names = [kAXIndexAttribute, kAXTitleAttribute, kAXValueAttribute, kAXDescriptionAttribute, kAXIdentifierAttribute]
+        let found = values(row, names)
+        return names.map { name in
+            switch found[name] {
+            case let text as String: return String(text.prefix(80))
+            case let number as NSNumber: return number.stringValue
+            default: return ""
+            }
+        }.joined(separator: "|")
     }
 
     /// A selected row in a few words: its index and the first texts in it.
@@ -751,7 +855,8 @@ enum Acting {
         prepared.spot = CGPoint(x: now.midX, y: now.minY + 14)
         let app = AXUIElementCreateApplication(map.pid)
         AXUIElementSetMessagingTimeout(app, 0.5)
-        if let why = UIMap.changed(map.fingerprint, Reader.fingerprint(app: app, window: map.window, lists: map.lists)) {
+        let current = Reader.fingerprint(app: app, window: map.window, lists: map.lists)
+        if let why = UIMap.changed(map.fingerprint, current) {
             prepared.error = why
             return prepared
         }
@@ -808,7 +913,33 @@ enum Acting {
             }
         default: break
         }
+        guard action == "menu" || action == "key" else { return prepared }
+        let key = action == "key" ? options.key : nil
+        // Delete, Trash, Close or Quit on rows Petal couldn't count: only straight after a look.
+        let destructive = UIMap.destructive(menu: prepared.menuTitle) || key.map(UIMap.destructive(key:)) == true
+        if let why = UIMap.unsure(map.fingerprint, current, destructive: destructive, age: Date().timeIntervalSince(map.made)) {
+            prepared.error = why
+            return prepared
+        }
+        // Never a vault secret onto the clipboard, where petal_look could read it.
+        if UIMap.copies(menu: prepared.menuTitle) || key.map(UIMap.copies(key:)) == true,
+           holdsSecret(app, entry?.element) {
+            prepared.error = "What's selected holds one of the vault's secrets: Petal doesn't copy it. petal_vault types a saved secret where it's needed."
+        }
         return prepared
+    }
+
+    /// The control with the keyboard (and `element`, which a key focuses first): its selected text or its value
+    /// holds a vault secret.
+    static func holdsSecret(_ app: AXUIElement, _ element: AXUIElement?) -> Bool {
+        let focused: AXUIElement? = Windows.value(app, kAXFocusedUIElementAttribute)
+        for control in [element, focused].compactMap({ $0 }) {
+            let found = Reader.values(control, [kAXSelectedTextAttribute, kAXValueAttribute])
+            for name in [kAXSelectedTextAttribute, kAXValueAttribute] {
+                if let text = found[name] as? String, Assist.isVaultSecret(String(text.prefix(20_000))) { return true }
+            }
+        }
+        return false
     }
 
     static func perform(_ action: String, entry: ComputerUse.Entry?, map: ComputerUse.Map, prepared: Prepared, options: Options,
@@ -1245,8 +1376,9 @@ enum Acting {
 // MARK: - The fake cursor
 
 /// Petal AI's own pointer: a soft pink arrow over everything, letting every click through, on every Space. It
-/// glides to each control before the action, with a small ripple on a press, a glass chip saying what it's doing
-/// with Stop beside it, and fades a few seconds after the last action. Core Animation moves it; the main thread
+/// glides to each control before the action, with a small ripple on a press, and a glass chip saying what it's
+/// doing with Stop beside it. The pointer fades a few seconds after the last action; while the AI may still act
+/// (`stand`), the chip stays as a small Stop and Escape keeps stopping it. Core Animation moves it; the main thread
 /// only sets where it goes.
 @MainActor
 final class FakeCursor {
@@ -1260,12 +1392,37 @@ final class FakeCursor {
     private let pointer = CALayer()
     private var fade: DispatchWorkItem?
     private var monitors: [Any] = []
+    /// The pointer is on the screen.
     private(set) var showing = false
+    /// The AI may act now (ComputerUse.standGuard): Stop and Escape stay, between actions too.
+    private(set) var standing = false
+    /// The chip (with Stop) is on the screen, and where it was put last.
+    private var pillShown = false
+    private var pillPlace: (point: CGPoint, screen: NSScreen)?
+
+    /// The AI may act (or no longer may): Escape listens and the small Stop stays only while it may. Told again
+    /// at every change, so Stop comes back after another reply's ended while this one may still act.
+    func stand(_ on: Bool) {
+        standing = on
+        if on {
+            listen()
+            if !pillShown, !showing, let place = pillPlace { showPill(nil, at: place.point, on: place.screen) }
+        } else if !showing {
+            hidePill()
+        }
+    }
+
+    /// An action was let go ahead: Stop shows straight away, before Petal reads the window, where it was or by
+    /// `point` (AppKit's screen coordinates).
+    func preparing(_ caption: String, near point: CGPoint) {
+        fade?.cancel()
+        showPill(caption, at: point, on: Self.screen(at: point))
+    }
 
     /// Glides to `point` (AppKit's screen coordinates) and says what it's doing.
     func glide(to point: CGPoint, caption: String) {
         fade?.cancel()
-        let screen = NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main ?? NSScreen.screens[0]
+        let screen = Self.screen(at: point)
         let panel = self.panel ?? make()
         var fresh = !showing
         if panel.frame != screen.frame {
@@ -1304,6 +1461,10 @@ final class FakeCursor {
         }
     }
 
+    private static func screen(at point: CGPoint) -> NSScreen {
+        NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main ?? NSScreen.screens[0]
+    }
+
     /// A small ripple at the tip: a press.
     func press() {
         guard showing else { return }
@@ -1336,7 +1497,7 @@ final class FakeCursor {
         pointer.add(dip, forKey: "dip")
     }
 
-    /// The last action is done: it fades a few seconds later, unless another comes.
+    /// The last action is done (or didn't go ahead): the pointer fades a few seconds later, unless another comes.
     func rest() {
         fade?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.fadeOut() }
@@ -1344,14 +1505,13 @@ final class FakeCursor {
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.5, execute: work)
     }
 
-    /// Gone at once (Stop).
+    /// Gone at once (Stop). Another reply that may still act brings Stop back (`stand`).
     func hide() {
         fade?.cancel()
         fade = nil
+        hidePill()
         guard showing else { return }
         showing = false
-        pill?.hide()
-        unlisten()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         pointer.opacity = 0
@@ -1359,10 +1519,14 @@ final class FakeCursor {
         panel?.orderOut(nil)
     }
 
+    /// The pointer fades; Stop stays, small, while the AI may still act.
     private func fadeOut() {
+        if standing {
+            if let place = pillPlace { showPill(nil, at: place.point, on: place.screen) }
+        } else {
+            hidePill()
+        }
         guard showing else { return }
-        pill?.hide()
-        unlisten()
         showing = false
         CATransaction.begin()
         CATransaction.setCompletionBlock { [weak self] in
@@ -1380,7 +1544,8 @@ final class FakeCursor {
         CATransaction.commit()
     }
 
-    private func showPill(_ caption: String, at point: CGPoint, on screen: NSScreen) {
+    /// `caption` nil: the small Stop between actions.
+    private func showPill(_ caption: String?, at point: CGPoint, on screen: NSScreen) {
         let pill = self.pill ?? {
             let made = GlassPanel(level: NSWindow.Level(rawValue: Self.level.rawValue + 1))
             made.collectionBehavior.insert(.fullScreenAuxiliary)
@@ -1388,6 +1553,15 @@ final class FakeCursor {
             return made
         }()
         pill.show(ActingPill(caption: caption) { [weak self] in self?.onStop?() }, near: point, on: screen)
+        pillShown = true
+        pillPlace = (point, screen)
+        listen()
+    }
+
+    private func hidePill() {
+        if pillShown { pill?.hide() }
+        pillShown = false
+        if !standing && !showing { unlisten() }
     }
 
     /// Escape stops it, wherever the keyboard is (Petal's own windows included).
@@ -1477,17 +1651,20 @@ final class FakeCursor {
     }
 }
 
-/// The glass chip by the fake cursor: what Petal AI is doing, and Stop (or Escape).
+/// The glass chip by the fake cursor: what Petal AI is doing, and Stop (or Escape). Between actions (no caption)
+/// it's only the dot and Stop, for as long as Petal AI may still use the person's apps.
 struct ActingPill: View {
-    let caption: String
+    let caption: String?
     let stop: () -> Void
     @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 9) {
             Circle().fill(Color(nsColor: FakeCursor.pink)).frame(width: 7, height: 7)
-            Text(caption).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
-                .frame(maxWidth: 260, alignment: .leading).fixedSize()
+            if let caption {
+                Text(caption).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                    .frame(maxWidth: 260, alignment: .leading).fixedSize()
+            }
             Button(action: stop) {
                 HStack(spacing: 5) {
                     Text("Stop").font(.system(size: 12, weight: .semibold))

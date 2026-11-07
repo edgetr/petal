@@ -221,6 +221,41 @@ enum UIMap {
             guard at > 0, at < characters.count else { return true }
             return !(characters[at - 1].isLetter || characters[at - 1].isNumber) || !(characters[at].isLetter || characters[at].isNumber)
         }
+
+        /// `text` with every part that `matches` would catch replaced by "(hidden)": a whole secret, every run of
+        /// `piece` characters of a longer one (runs that touch join, so a long secret goes as one), and a short one
+        /// as a word of its own. The rest of the text stays, so a clipboard holding a key among other lines still
+        /// says what else is there.
+        func redacted(_ text: String) -> String {
+            guard !wholes.isEmpty, !text.isEmpty else { return text }
+            if wholes.contains(text.hashValue) || wholes.contains(text.trimmingCharacters(in: .whitespacesAndNewlines).hashValue) { return UIMap.hidden }
+            let characters = Array(text)
+            var marked = [Bool](repeating: false, count: characters.count)
+            for (length, hashes) in shorts where characters.count >= length {
+                for start in 0...(characters.count - length) where Self.edge(characters, start) && Self.edge(characters, start + length)
+                    && hashes.contains(String(characters[start..<start + length]).hashValue) {
+                    for at in start..<start + length { marked[at] = true }
+                }
+            }
+            if !pieces.isEmpty, characters.count >= Self.piece {
+                for start in 0...(characters.count - Self.piece) where pieces.contains(String(characters[start..<start + Self.piece]).hashValue) {
+                    for at in start..<start + Self.piece { marked[at] = true }
+                }
+            }
+            guard marked.contains(true) else { return text }
+            var out = ""
+            var at = 0
+            while at < characters.count {
+                if marked[at] {
+                    out += UIMap.hidden
+                    while at < characters.count, marked[at] { at += 1 }
+                } else {
+                    out.append(characters[at])
+                    at += 1
+                }
+            }
+            return out
+        }
     }
 
     /// What the AI may be told of a control: a password field's value never, a field that looks like it holds a
@@ -245,21 +280,96 @@ enum UIMap {
         /// What has the keyboard: its kind, the app's name for it, where it is, and what's in it.
         var focus = ""
         var selection = ""
+        /// Petal could read how many rows are selected, and every one of them (up to `rowCap`), in time.
+        var selectionKnown = true
         /// The control with the keyboard itself (an AXUIElement): two empty fields alike are still two fields.
         var focused: AnyObject?
 
         static func == (a: Fingerprint, b: Fingerprint) -> Bool {
-            a.title == b.title && a.focus == b.focus && a.selection == b.selection && UIMap.same(a.focused, b.focused)
+            a.title == b.title && a.focus == b.focus && a.selection == b.selection && a.selectionKnown == b.selectionKnown
+                && UIMap.same(a.focused, b.focused)
         }
     }
 
+    /// One list's selected rows as read: how many in all (nil when that couldn't be read), and each row read in a few
+    /// words (its index and texts), at most `rowCap`; `complete` false when the reading ran out of time first.
+    struct Selected {
+        var count: Int?
+        var rows: [String] = []
+        var complete = true
+    }
+
+    /// How many selected rows of a list are read for the fingerprint.
+    static let rowCap = 500
+
+    /// Which rows are selected, as the fingerprint keeps it: for each list, how many in all and a hash of every row
+    /// read (so a sixth file selected while the person is asked is a change, wherever it is). Not known when a count
+    /// couldn't be read or the rows weren't all read in time; then only the count and the first few rows count,
+    /// so a slow app's big selection isn't a change at every look.
+    static func selection(_ lists: [Selected]) -> (text: String, known: Bool) {
+        var known = true
+        let parts = lists.map { list -> String in
+            guard let count = list.count else { known = false; return "?" }
+            let whole = list.complete && list.rows.count >= min(count, rowCap)
+            if !whole { known = false }
+            var hasher = Hasher()
+            for row in whole ? list.rows : Array(list.rows.prefix(5)) { hasher.combine(truncate(tidy(row), 120)) }
+            return "\(count):\(whole ? "" : "part"):\(hasher.finalize())"
+        }
+        return (parts.joined(separator: "\n"), known)
+    }
+
+    /// `selected`: the selected rows, in a few words each, all of one list read whole; `selection` (Reader's)
+    /// instead, when given.
     static func fingerprint(title: String, focusRole: String, focusSubrole: String, focusValue: String, focusIdentifier: String = "",
-                            focusFrame: CGRect = .zero, focused: AnyObject? = nil, selected: [String]) -> Fingerprint {
+                            focusFrame: CGRect = .zero, focused: AnyObject? = nil, selected: [String] = [],
+                            selection: (text: String, known: Bool)? = nil) -> Fingerprint {
         let secure = focusSubrole == "AXSecureTextField"
         let place = [focusFrame.minX, focusFrame.minY, focusFrame.width, focusFrame.height].map { String(Int($0.rounded())) }.joined(separator: ",")
         let focus = focusRole.isEmpty ? "" : "\(focusRole)/\(focusSubrole)#\(focusIdentifier)@\(place)=" + (secure ? "" : truncate(tidy(focusValue), 200))
-        return Fingerprint(title: tidy(title), focus: focus, selection: selected.map { truncate(tidy($0), 120) }.joined(separator: "\n"),
+        let rows = selection ?? Self.selection(selected.isEmpty ? [] : [Selected(count: selected.count, rows: selected)])
+        return Fingerprint(title: tidy(title), focus: focus, selection: rows.text, selectionKnown: rows.known,
                            focused: focusRole.isEmpty ? nil : focused)
+    }
+
+    /// How soon after `petal_ui` a destructive menu item or key may go when Petal couldn't tell which rows are selected.
+    static let freshLook: TimeInterval = 20
+
+    /// Why a destructive act (Delete, Trash, Close, Quit) can't go ahead now, or nil: when Petal couldn't tell which
+    /// rows are selected (then, or now), it goes only straight after a `petal_ui` (`age`: seconds since it).
+    static func unsure(_ then: Fingerprint, _ now: Fingerprint, destructive: Bool, age: TimeInterval) -> String? {
+        guard destructive, !then.selectionKnown || !now.selectionKnown, age > freshLook else { return nil }
+        return "Petal couldn't tell what's selected in this window, so it only deletes, trashes, closes or quits right after a look. Call petal_ui again, then act straight away."
+    }
+
+    /// Words of a menu item that removes or closes something.
+    static let destructiveWords: Set<String> = ["delete", "trash", "bin", "close", "quit", "erase", "remove", "discard", "empty"]
+
+    /// The last part of a menu path ("File › Move to Trash") deletes, trashes, closes or quits.
+    static func destructive(menu title: String?) -> Bool {
+        guard let last = title.flatMap({ menuPath($0).last }) else { return false }
+        return words(last).contains { destructiveWords.contains($0) }
+    }
+
+    /// Delete or Forward Delete (any modifiers: ⌘⌫ moves to the Trash), ⌘W, ⌘Q.
+    static func destructive(key: Key) -> Bool {
+        if key.code == 51 || key.code == 117 { return true }
+        return key.command && ["w", "q"].contains(key.character ?? "")
+    }
+
+    /// The menu item copies or cuts ("Edit › Copy", "Cut", "Copy Link").
+    static func copies(menu title: String?) -> Bool {
+        guard let last = title.flatMap({ menuPath($0).last }), let first = words(last).first else { return false }
+        return first == "copy" || first == "cut"
+    }
+
+    /// ⌘C or ⌘X, with any other modifiers.
+    static func copies(key: Key) -> Bool {
+        key.command && ["c", "x"].contains(key.character ?? "")
+    }
+
+    static func words(_ text: String) -> [String] {
+        text.lowercased().split(whereSeparator: { !$0.isLetter }).map(String.init)
     }
 
     /// The same element (CFEqual: for Accessibility, the same control of the same app), or neither.

@@ -209,17 +209,29 @@ final class Assist {
         }
         result["onScreen"] = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !$0.isHidden }
             .compactMap(\.localizedName)).sorted()
-        // The clipboard only once the privacy checks below have passed, and never something private.
+        // The clipboard only once the privacy checks below have passed, and never something private. Read here,
+        // and told only with the vault's secrets taken out (off the main thread: that may read the Keychain).
         let wantsClipboard = args["clipboard"] as? Bool == true
+        var clipboard: String?
         let addClipboard = {
             guard wantsClipboard else { return }
             if Self.clipboardIsPrivate || self.neverLook(NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
                 result["clipboard"] = "The clipboard holds something private (a password manager's, or one kept private): Petal doesn't read it."
             } else {
-                result["clipboard"] = NSPasteboard.general.string(forType: .string).map { String($0.prefix(4000)) } ?? ""
+                clipboard = NSPasteboard.general.string(forType: .string).map { String($0.prefix(4000)) } ?? ""
             }
         }
-        guard let front else { addClipboard(); return send(result) }
+        guard let front else {
+            addClipboard()
+            guard let raw = clipboard else { return send(result) }
+            return Self.queue.async {
+                let clean = Self.withoutSecrets(raw)
+                DispatchQueue.main.async {
+                    result["clipboard"] = clean
+                    send(result)
+                }
+            }
+        }
         result["app"] = ["name": front.localizedName ?? "", "id": front.bundleIdentifier ?? ""]
         // An app the person keeps private (passwords, a bank): only its name, nothing of what's in it (its window,
         // selection, tab, picture, nor the clipboard).
@@ -248,14 +260,19 @@ final class Assist {
                 window = match
             }
             let number = window.flatMap { Windows.id(of: $0) }
-            let title: String = window.flatMap { Windows.value($0, kAXTitleAttribute) } ?? ""
+            let realTitle: String = window.flatMap { Windows.value($0, kAXTitleAttribute) } ?? ""
             let frame = window.flatMap { Windows.frame(of: $0) } ?? .zero
             let focused: AXUIElement? = number == focusedID ? Windows.value(element, kAXFocusedUIElementAttribute) : nil
             let selected: String = focused.flatMap { Windows.value($0, kAXSelectedTextAttribute) } ?? ""
+            // Nothing of the vault's secrets goes to the AI: not in the title, the selection, nor the clipboard.
+            let title = Self.withoutSecrets(realTitle)
+            let shownSelection = Self.withoutSecrets(String(selected.prefix(8000)))
+            let shownClipboard = clipboard.map(Self.withoutSecrets)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     result["window"] = title
-                    if !selected.isEmpty { result["selectedText"] = String(selected.prefix(8000)) }
+                    if !shownSelection.isEmpty { result["selectedText"] = shownSelection }
+                    if let shownClipboard { result["clipboard"] = shownClipboard }
                     let hidden = self.privatePIDs
                     let finish = {
                         guard !shot.isEmpty else { return send(result) }
@@ -273,11 +290,18 @@ final class Assist {
                     guard Browsers.kind(front.bundleIdentifier ?? "") != nil else { return finish() }
                     // A note's tab is always its own window's (by id, or frame and title), never whichever window is
                     // in front by the time the browser answers.
-                    let other = place == nil ? nil : Browsers.Window(number: number, title: title, frame: frame)
+                    let other = place == nil ? nil : Browsers.Window(number: number, title: realTitle, frame: frame)
                     self.app.browsers.frontURL(of: front, window: other) { url in
-                        MainActor.assumeIsolated {
-                            if let url { result["tab"] = ["url": url, "title": title] }
-                            finish()
+                        guard let url else { return finish() }
+                        // An address can carry a key too (?token=…).
+                        Self.queue.async {
+                            let shown = Self.withoutSecrets(url)
+                            DispatchQueue.main.async {
+                                MainActor.assumeIsolated {
+                                    result["tab"] = ["url": shown, "title": title]
+                                    finish()
+                                }
+                            }
                         }
                     }
                 }
@@ -295,6 +319,12 @@ final class Assist {
     }
 
     static var clipboardIsPrivate: Bool { isConcealed(NSPasteboard.general) }
+
+    /// `text` with the vault's secrets in it (whole, 8 characters or more of one, or a short one as a word) as
+    /// "(hidden)", the same matching petal_ui uses. May read the Keychain: never on the main thread.
+    nonisolated static func withoutSecrets(_ text: String) -> String {
+        text.isEmpty ? text : VaultIndex.current().redacted(text)
+    }
 
     /// The app in front (never Petal itself), or the running app called `name`.
     func frontApp(named name: String?) -> NSRunningApplication? {

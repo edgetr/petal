@@ -156,6 +156,60 @@ struct UIMapCheck {
         expect(UIMap.changed(here, UIMap.fingerprint(title: "T", focusRole: "AXTextField", focusSubrole: "", focusValue: "", focused: first, selected: [])) == nil,
                "the same element")
 
+        // Every selected row counts, not only the first five; a count that can't be read isn't known.
+        let fiveRows = (1...5).map { "#\($0) File \($0).pdf" }
+        let five = UIMap.fingerprint(title: "Downloads", focusRole: "", focusSubrole: "", focusValue: "",
+                                     selection: UIMap.selection([UIMap.Selected(count: 5, rows: fiveRows)]))
+        let six = UIMap.fingerprint(title: "Downloads", focusRole: "", focusSubrole: "", focusValue: "",
+                                    selection: UIMap.selection([UIMap.Selected(count: 6, rows: fiveRows + ["#6||||"])]))
+        expect(UIMap.changed(five, six)?.contains("selected") == true, "a sixth row selected is a change")
+        let manyRows = (1...40).map { "#\($0)" }
+        var swapped = manyRows
+        swapped[30] = "#99"
+        let a = UIMap.selection([UIMap.Selected(count: 40, rows: manyRows)])
+        let b = UIMap.selection([UIMap.Selected(count: 40, rows: swapped)])
+        expect(a.text != b.text && a.known && b.known, "another row deep in a big selection is a change")
+        expect(UIMap.selection([UIMap.Selected(count: 40, rows: manyRows)]).text == a.text, "the same rows, the same print")
+        let unread = UIMap.selection([UIMap.Selected(count: nil)])
+        expect(!unread.known, "a count that couldn't be read isn't known")
+        expect(!UIMap.selection([UIMap.Selected(count: 40, rows: Array(manyRows.prefix(12)), complete: false)]).known, "out of time isn't known")
+        expect(UIMap.selection([UIMap.Selected(count: 900, rows: (1...UIMap.rowCap).map { "#\($0)" })]).known, "past the cap, the count still counts")
+        expect(UIMap.selection([]).known && UIMap.selection([UIMap.Selected(count: 0)]).known, "nothing selected is known")
+
+        // Destructive menu items and keys need a fresh look while the selection isn't known.
+        expect(UIMap.destructive(menu: "File › Move to Trash") && UIMap.destructive(menu: "Edit › Delete")
+               && UIMap.destructive(menu: "File › Close Window") && UIMap.destructive(menu: "Mail › Quit Mail"), "destructive menu items")
+        expect(!UIMap.destructive(menu: "File › Export…") && !UIMap.destructive(menu: "Edit › Copy") && !UIMap.destructive(menu: nil),
+               "other menu items aren't")
+        for text in ["delete", "cmd-delete", "cmd-backspace", "forwarddelete", "cmd-w", "cmd-q", "cmd-shift-w", "cmd-option-w"] {
+            expect(UIMap.parseKey(text).map(UIMap.destructive(key:)) == true, "destructive key \(text)")
+        }
+        for text in ["cmd-s", "return", "w", "cmd-c", "down"] {
+            expect(UIMap.parseKey(text).map(UIMap.destructive(key:)) == false, "not destructive: \(text)")
+        }
+        let unknownNow = UIMap.fingerprint(title: "Downloads", focusRole: "", focusSubrole: "", focusValue: "", selection: unread)
+        expect(UIMap.unsure(five, unknownNow, destructive: true, age: 60) != nil, "unknown selection, old look: refused")
+        expect(UIMap.unsure(unknownNow, unknownNow, destructive: true, age: 3) == nil, "unknown selection, fresh look: goes")
+        expect(UIMap.unsure(unknownNow, unknownNow, destructive: false, age: 60) == nil, "not destructive: goes")
+        expect(UIMap.unsure(five, five, destructive: true, age: 600) == nil, "known selection: goes")
+
+        // Copy and Cut, by menu or key.
+        expect(UIMap.copies(menu: "Edit › Copy") && UIMap.copies(menu: "Edit › Cut") && UIMap.copies(menu: "Edit › Copy Link"), "copy menu items")
+        expect(!UIMap.copies(menu: "Edit › Paste") && !UIMap.copies(menu: "File › Duplicate") && !UIMap.copies(menu: nil), "not copying")
+        expect(["cmd-c", "cmd-x", "cmd-shift-c", "⌘C"].allSatisfy { UIMap.parseKey($0).map(UIMap.copies(key:)) == true }, "copy keys")
+        expect(["c", "cmd-v", "ctrl-c"].allSatisfy { UIMap.parseKey($0).map(UIMap.copies(key:)) == false }, "not copy keys")
+
+        // The clipboard, a window's title or a selection: the secrets go, the rest stays.
+        expect(vault.redacted("sk-live-4f9a2b7c1d") == UIMap.hidden, "a whole secret, hidden")
+        expect(vault.redacted("KEY=sk-live-4f9a2b7c1d\nNAME=petal") == "KEY=\(UIMap.hidden)\nNAME=petal", "a secret among lines",
+               vault.redacted("KEY=sk-live-4f9a2b7c1d\nNAME=petal"))
+        expect(vault.redacted("part 4f9a2b7c1d end") == "part \(UIMap.hidden) end", "part of a long secret")
+        expect(vault.redacted("Room 1234, floor 2") == "Room \(UIMap.hidden), floor 2", "a short secret as a word")
+        expect(vault.redacted("12345 and 2024") == "12345 and 2024", "not run into other digits")
+        expect(pins.redacted("Door PIN: 739251") == "Door PIN: \(UIMap.hidden)", "a PIN inside text")
+        expect(vault.redacted("Inbox") == "Inbox" && UIMap.SecretIndex([]).redacted("1234") == "1234", "nothing else changes")
+        expect(!vault.matches(vault.redacted("a sk-live-4f9a2b7c1d b 1234 c")), "what's left never matches")
+
         print("UIMap: \(passed) passed, \(failures) failed")
         if failures > 0 { exit(1) }
     }

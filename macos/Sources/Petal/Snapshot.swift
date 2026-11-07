@@ -160,6 +160,7 @@ enum Snapshot {
         write(render(AnyView(CardView(card: FocusCard(kind: .ask))), app: app, size: nil), name: "card-ask-computer", folder: folder)
         app.assist.preview(nil)
         views.append(("computer-pill", AnyView(ActingPill(caption: "Pressing Export") {}), nil))
+        views.append(("computer-pill-idle", AnyView(ActingPill(caption: nil) {}), nil))
         views.append(("computer-pill-long", AnyView(ActingPill(caption: "Typing in Search or enter website name, a long field name") {}), nil))
         if let pointer = FakeCursor.picture() { views.append(("computer-cursor", AnyView(Image(nsImage: pointer)), nil)) }
         for dot in [false, true] {

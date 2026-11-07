@@ -293,9 +293,10 @@ final class Agent {
         chat.note = noteID.uuidString
         authFailed = false
 
-        turn += 1
-        // A new turn: nothing the last one started in the person's apps carries on, and it asks again.
+        // A new turn: nothing the last one started in the person's apps carries on (that turn is closed for good,
+        // before the count moves on), and this one asks again.
         app.assist.computer.end(noteID.uuidString)
+        turn += 1
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = provider.chatArguments(chat)
