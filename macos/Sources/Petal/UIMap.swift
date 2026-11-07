@@ -380,6 +380,23 @@ enum UIMap {
                            focused: focusRole.isEmpty ? nil : focused)
     }
 
+    /// Text as keystroke batches of up to 16 UTF-16 units, split only between whole characters: an emoji (a
+    /// surrogate pair, or a family joined by ZWJ) is never cut in two. A single character longer than 16 goes alone.
+    static func batches(_ text: String, size: Int = 16) -> [[UInt16]] {
+        var batches: [[UInt16]] = []
+        var current: [UInt16] = []
+        for character in text {
+            let units = Array(String(character).utf16)
+            if !current.isEmpty, current.count + units.count > size {
+                batches.append(current)
+                current = []
+            }
+            current += units
+        }
+        if !current.isEmpty { batches.append(current) }
+        return batches
+    }
+
     /// How soon after `petal_ui` a destructive menu item or key may go when Petal couldn't tell which rows are selected.
     static let freshLook: TimeInterval = 20
 

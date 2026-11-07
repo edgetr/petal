@@ -1642,12 +1642,9 @@ enum Acting {
     /// (the keyboard is still in the field); false when stopped or moved part way.
     static func type(_ text: String, to pid: pid_t, cancel: Cancel, still: () -> Bool) -> Bool {
         let source = CGEventSource(stateID: .privateState)
-        var rest = Array(text.utf16)
-        while !rest.isEmpty {
+        for chunk in UIMap.batches(text) {
             // `still` asks the app, which takes a moment: a Stop meanwhile is heard before the next characters go.
             if cancel.stopped || !still() || cancel.stopped { return false }
-            let chunk = Array(rest.prefix(16))
-            rest.removeFirst(chunk.count)
             for down in [true, false] {
                 let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)
                 chunk.withUnsafeBufferPointer { event?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: $0.baseAddress) }

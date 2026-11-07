@@ -135,6 +135,14 @@ struct UIMapCheck {
         expect(UIMap.changed(then, renamed)?.contains("title") == true, "another title")
         let typing = UIMap.fingerprint(title: "Inbox", focusRole: "AXTextField", focusSubrole: "", focusValue: "a", selected: ["#3 Lunch on Friday"])
         expect(UIMap.changed(then, typing)?.contains("keyboard") == true, "another control has the keyboard")
+        // Typing in batches never cuts a character in two.
+        for text in ["Thanks so much 😀", "Aile: 👨‍👩‍👧‍👦👨‍👩‍👧‍👦 ve 🇹🇷", String(repeating: "é😀", count: 20), "plain ascii text that is long enough"] {
+            let parts = UIMap.batches(text)
+            expect(parts.allSatisfy { String(utf16CodeUnits: $0, count: $0.count).utf16.count == $0.count && String(decoding: $0, as: UTF16.self).unicodeScalars.allSatisfy { $0 != "\u{FFFD}" } },
+                   "no batch holds half a character", text)
+            expect(parts.map { String(decoding: $0, as: UTF16.self) }.joined() == text, "the batches make the text again", text)
+            expect(parts.allSatisfy { $0.count <= 16 || String(decoding: $0, as: UTF16.self).count == 1 }, "16 units at most, or one long character", text)
+        }
         // A long draft: an edit past the first 200 characters, or the caret moving, is a change.
         let draft = String(repeating: "Dear team, ", count: 40)
         let before = UIMap.fingerprint(title: "Draft", focusRole: "AXTextArea", focusSubrole: "", focusValue: draft, focusRange: "10,0")

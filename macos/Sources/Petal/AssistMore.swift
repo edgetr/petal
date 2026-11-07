@@ -190,10 +190,7 @@ extension Assist {
     /// Types text into an app as keystrokes, to the field that has the cursor (needs Accessibility).
     private static func type(_ text: String, into pid: pid_t) {
         let source = CGEventSource(stateID: .combinedSessionState)
-        var rest = Array(text.utf16)
-        while !rest.isEmpty {
-            let chunk = Array(rest.prefix(16))
-            rest.removeFirst(chunk.count)
+        for chunk in UIMap.batches(text) {
             for down in [true, false] {
                 let event = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)
                 chunk.withUnsafeBufferPointer { event?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: $0.baseAddress) }
