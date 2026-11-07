@@ -5,7 +5,7 @@ import Observation
 
 /// The browser's front tab: its real address, and closing it.
 ///
-/// - Chromium browsers (Helium, Chrome, Arc, Brave, Edge, Vivaldi, Opera) and Safari answer AppleScript. Each asks
+/// - Chromium browsers (Helium, Chrome, Arc, Brave, Edge, Vivaldi, Opera, Aside) and Safari answer AppleScript. Each asks
 ///   once for Automation permission; Petal only asks from a button (the welcome window or settings), never by
 ///   surprise, and until then reads the tab's title instead.
 /// - Firefox and Zen don't script tabs: Petal reads the address field through Accessibility, and closes a tab with
@@ -19,6 +19,7 @@ final class Browsers {
         "com.google.Chrome.dev": "Chrome Dev", "com.google.Chrome.canary": "Chrome Canary", "company.thebrowser.Browser": "Arc",
         "com.brave.Browser": "Brave", "com.brave.Browser.beta": "Brave Beta", "com.microsoft.edgemac": "Edge",
         "com.vivaldi.Vivaldi": "Vivaldi", "com.operasoftware.Opera": "Opera", "org.chromium.Chromium": "Chromium",
+        "at.studio.AsideBrowser": "Aside",
     ]
     nonisolated static let safari: Set<String> = ["com.apple.Safari", "com.apple.SafariTechnologyPreview"]
     nonisolated static let gecko: Set<String> = ["org.mozilla.firefox", "org.mozilla.firefoxdeveloperedition", "org.mozilla.nightly", "app.zen-browser.zen"]
@@ -131,6 +132,46 @@ final class Browsers {
                 DispatchQueue.main.async { done(url) }
             }
         }
+    }
+
+    /// `window`'s tab: its address and the browser's own id for it (Chromium's tab id, Safari's tab index), either nil
+    /// when the browser doesn't say (not allowed yet, Firefox and Zen have no id). `done` runs on the main thread.
+    func tab(of app: NSRunningApplication, window: Window, done: @escaping (_ url: String?, _ id: String?) -> Void) {
+        guard let id = app.bundleIdentifier, let kind = Self.kind(id) else { return done(nil, nil) }
+        guard kind != .gecko else { return frontURL(of: app, window: window) { done($0, nil) } }
+        let source = Self.tabsScript(id, tab: kind == .safari ? "current tab" : "active tab",
+                                     tabID: kind == .safari ? "index of current tab of w" : "id of active tab of w")
+        queue.async {
+            let answer = Self.access(id) == .allowed ? Self.run(source) : nil
+            // The tab's id comes first, then its address (which may hold a tab character).
+            let row = Self.url(in: answer ?? "", for: window).map { $0.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false).map(String.init) }
+            let url = row.flatMap { $0.count == 2 && !$0[1].isEmpty ? $0[1] : nil }
+            let tabID = row.flatMap { $0.first.flatMap { $0.isEmpty ? nil : $0 } }
+            DispatchQueue.main.async { done(url, url == nil ? nil : tabID) }
+        }
+    }
+
+    /// As windowsScript, with the browser's id for each window's tab (`tabID`, "" when it doesn't say) before the
+    /// address.
+    private static func tabsScript(_ id: String, tab: String, tabID: String) -> String {
+        """
+        set out to ""
+        set sep to tab
+        set nl to linefeed
+        tell application id "\(id)"
+        repeat with w in windows
+        try
+        set b to bounds of w
+        set t to ""
+        try
+        set t to (\(tabID)) as text
+        end try
+        set out to out & (id of w) & sep & (name of w) & sep & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b) & sep & t & sep & (URL of \(tab) of w) & nl
+        end try
+        end repeat
+        end tell
+        return out
+        """
     }
 
     /// Every window's id, name, bounds and tab address, one per line (the separators set outside the browser's

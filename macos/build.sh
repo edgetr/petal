@@ -37,6 +37,8 @@ cp "$BIN" "$APP/Contents/MacOS/Petal"
 cp "$ROOT/brand/macos/Assets.car" "$ROOT/brand/macos/Petal.icns" "$APP/Contents/Resources/"
 cp "$ROOT/defaults/modes-macos.json" "$APP/Contents/Resources/modes.json"
 cp "$ROOT/plugin/assets/claude.svg" "$ROOT/plugin/assets/openai.svg" "$APP/Contents/Resources/"
+# Which names anyone can register under (co.uk, github.io): the vault fills a login only on its own site (VaultSite).
+cp "$ROOT/macos/Resources/public_suffix_list.dat" "$APP/Contents/Resources/"
 # Claude's Petal tools run inside Petal (`Petal --mcp`); their names, descriptions and settings come from
 # petal-mcp.py, so Omarchy and the Mac describe them the same way.
 mkdir -p "$APP/Contents/Resources/mcp"

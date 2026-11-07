@@ -18,6 +18,74 @@ struct UIMapCheck {
                enabled: enabled, pressable: pressable, order: order, clip: clip)
     }
 
+    /// A saved card number a page shows whole in one static text: the page's web area has the keyboard while a bit
+    /// of it is selected, so selecting it four digits at a time (or copying them) is refused; what else the page
+    /// shows is selected as usual.
+    static func wholeSpan() {
+        let vault = UIMap.SecretIndex(["4532015112830366"])
+        expect(vault.parts("Card: 4532 0151 1283 0366 · Order 1234") == ["4532 0151 1283 0366"], "only the secret's part of a text",
+               "\(vault.parts("Card: 4532 0151 1283 0366 · Order 1234"))")
+        expect(vault.parts("Order 1234").isEmpty && UIMap.SecretIndex([]).parts("4532015112830366").isEmpty, "no part where there's no secret")
+        expect(UIMap.SecretIndex.unavailable.parts("Hello") == ["Hello"], "a vault that can't be read: all of it")
+        let texts = ["", "Your card", "4532 0151 1283 0366", "Order 1234", "Total 45.32"]
+        let page = texts.enumerated().map { pair -> UINode in
+            var node = UINode(role: pair.offset == 0 ? "AXWebArea" : "AXStaticText", value: pair.element)
+            node.order = pair.offset
+            node.parent = pair.offset == 0 ? -1 : 0
+            node.sibling = max(0, pair.offset - 1)
+            node.frame = CGRect(x: 10, y: CGFloat(pair.offset) * 40, width: 200, height: 20)
+            return node
+        }
+        var own: [Int: [String]] = [:]
+        for node in page {
+            let parts = UIMap.ownSecrets(node, secret: vault.matches, parts: vault.parts)
+            if !parts.isEmpty { own[node.order] = parts }
+        }
+        expect(own == [2: ["4532 0151 1283 0366"]], "the span showing the card holds it", "\(own)")
+        let guarded = UIMap.guardedSecrets(page, own: own)
+        expect(guarded.keys.sorted() == [0, 2], "the span and the web area holding it are guarded", "\(guarded)")
+        // Not shown in pieces: nothing is joined, not even the order number beside it (without where the secret
+        // lies, any run starting at the card's span would take its neighbour along).
+        let joined = UIMap.joinedHidden(page, matches: vault.matches, spans: vault.spans)
+        expect(joined.whole && joined.hidden.isEmpty, "one span holding the whole number isn't a joined piece", "\(joined)")
+        expect(UIMap.joinedHidden(page, matches: vault.matches).hidden.contains(3), "without spans the neighbour is taken along")
+        // As the reader does: the joined pieces' texts and what holds them, and what holds a secret whole.
+        var around = Set<Int>()
+        for index in joined.hidden { var at = page[index].parent; while at >= 0, around.insert(at).inserted { at = page[at].parent } }
+        let pieces = joined.hidden.sorted().compactMap { index in UIMap.pieceText(page[index]).map { page[index][keyPath: $0] } }
+        func refused(_ selected: String, focus: Set<Int> = [0], complete: Bool = true) -> Bool {
+            UIMap.focusInJoined(focus: focus, hidden: joined.hidden, around: around, pieces: pieces, guarded: guarded, complete: complete,
+                                selected: [selected], matches: vault.matches)
+        }
+        for group in ["4532", "0151", "1283", "0366"] {
+            expect(refused(group), "the web area: \(group) selected out of the card is hidden")
+            expect(refused(group, focus: [2]), "the span itself: \(group) is hidden")
+        }
+        expect(refused("0151 1283") && refused("4532 0151 1283 0366"), "across groups, and all of it")
+        expect(refused("4532", focus: [], complete: false), "not found in the read: still hidden")
+        expect(!refused("Order 1234"), "an order number elsewhere on the page is selected as usual")
+        expect(!refused("Your card") && !refused("Total"), "so are the page's words")
+        expect(!refused("4532", focus: [3]), "a span that doesn't hold the card isn't checked against it")
+        expect(!refused("Order 1234", focus: [], complete: false), "not found: an order number is still fine")
+        // A piece holding part of a secret by itself still joins the rest beside it (an Amex number as 8 and 7 digits).
+        let amexVault = UIMap.SecretIndex(["378282246310005"])
+        let amex = ["37828224", "6310005", "Order 1234"].enumerated().map { pair -> UINode in
+            var node = UINode(role: "AXStaticText", value: pair.element)
+            node.order = pair.offset + 1
+            node.parent = 0
+            node.sibling = pair.offset
+            node.frame = CGRect(x: CGFloat(pair.offset) * 90, y: 100, width: 80, height: 20)
+            return node
+        }
+        let amexJoined = UIMap.joinedHidden([UINode(role: "AXWebArea")] + amex, matches: amexVault.matches, spans: amexVault.spans)
+        expect(amexJoined.whole && amexJoined.hidden == [1, 2], "Amex as 8 and 7 digits: both pieces, not the order", "\(amexJoined)")
+        // When the order number's digits are in the secret, it counts as part of it.
+        let other = UIMap.SecretIndex(["4532012340366123"])
+        let parts = UIMap.ownSecrets(UINode(role: "AXStaticText", value: "4532 0123 4036 6123"), secret: other.matches, parts: other.parts)
+        expect(UIMap.focusInJoined(focus: [0], hidden: [], guarded: [0: parts], complete: true, selected: ["Order 1234"], matches: other.matches),
+               "\"Order 1234\" is refused when 1234 is in the secret")
+    }
+
     static func main() {
         let window = CGRect(x: 0, y: 0, width: 800, height: 600)
 
@@ -100,7 +168,8 @@ struct UIMapCheck {
         expect(!vault.matches("4f9a2b7"), "7 characters aren't enough")
         expect(vault.matches("1234") && vault.matches(" 1234\n"), "a short secret, whole")
         expect(vault.matches("Room 1234") && vault.matches("PIN: 1234.") && vault.matches("(1234)"), "a short secret, as a word inside text")
-        expect(!vault.matches("12345") && !vault.matches("A1234B") && !vault.matches("01234"), "not run into other letters or digits")
+        expect(!vault.matches("12345") && !vault.matches("01234"), "not run into other digits")
+        expect(vault.matches("A1234B"), "4 digits may be a security code: caught next to letters too")
         expect(!vault.matches("123") && !vault.matches("Year 2024"), "nor a part of it, nor other numbers")
         let pins = UIMap.SecretIndex(["739251", "abc"])
         expect(pins.matches("Door PIN: 739251"), "a six-digit PIN inside text")
@@ -344,6 +413,31 @@ struct UIMapCheck {
         expect(wide.check("-👩‍💻-ñandú") == .secret && wide.check("clé-👩‍💻-ñan") == .secret, "8 characters of it, either end")
         expect(wide.check("clé-👩-ñandú") == .clean, "not with another character in it")
         expect(wide.redacted("x clé-👩‍💻-ñandú y") == "x \(UIMap.hidden) y", "redacted by characters")
+
+        // A picture between two reads of a window: each secret part covered from where it was to where it is.
+        let frame = CGRect(x: 0, y: 0, width: 800, height: 600)
+        let field = CGRect(x: 100, y: 200, width: 200, height: 24)
+        let still = UIMap.blackouts(before: [(1, field)], after: [(1, field)], window: frame)
+        expect(still == [field], "a field that stayed is covered where it is", "\(String(describing: still))")
+        let scrolled = field.offsetBy(dx: 0, dy: -80)
+        let between = UIMap.blackouts(before: [(1, field)], after: [(1, scrolled)], window: frame)
+        expect(between == [field.union(scrolled)] && between?[0].contains(CGRect(x: 100, y: 150, width: 200, height: 24)) == true,
+               "scrolled a little: covered all the way between", "\(String(describing: between))")
+        expect(UIMap.blackouts(before: [(1, field)], after: [(1, field.offsetBy(dx: 0, dy: -200))], window: frame) == nil,
+               "scrolled more than a quarter of the window: no picture")
+        expect(UIMap.blackouts(before: [(1, field)], after: [(1, field.offsetBy(dx: 250, dy: 0))], window: frame) == nil,
+               "moved sideways more than a quarter: no picture")
+        expect(UIMap.blackouts(before: [(1, field)], after: [], window: frame) == nil, "gone meanwhile: no picture")
+        expect(UIMap.blackouts(before: [], after: [(2, field)], window: frame) == nil, "appeared meanwhile: no picture")
+        expect(UIMap.blackouts(before: [(1, field)], after: [(2, field)], window: frame) == nil, "another element where it was: no picture")
+        let two = UIMap.blackouts(before: [(1, field), (2, field.offsetBy(dx: 0, dy: 40))],
+                                  after: [(2, field.offsetBy(dx: 0, dy: 30)), (1, field.offsetBy(dx: 0, dy: -10))], window: frame)
+        expect(two?.count == 2 && two?[0] == field.union(field.offsetBy(dx: 0, dy: -10)), "matched by element, not by order", "\(String(describing: two))")
+        let pieces = UIMap.blackouts(before: [(3, field), (3, field.offsetBy(dx: 210, dy: 0))], after: [(3, field), (3, field.offsetBy(dx: 210, dy: 0))], window: frame)
+        expect(pieces?.count == 1, "an element found twice in a read is one part")
+        expect(UIMap.blackouts(before: [], after: [], window: frame) == [], "nothing secret: nothing covered")
+
+        wholeSpan()
 
         print("UIMap: \(passed) passed, \(failures) failed")
         if failures > 0 { exit(1) }
