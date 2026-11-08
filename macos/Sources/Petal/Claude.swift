@@ -958,8 +958,7 @@ struct ClaudePanelView: View {
     /// With a passage quoted from another app.
     static let quoteSuggestions = ["Explain this", "Rewrite it more clearly", "Find more on this"]
 
-    var body: some View {
-        @Bindable var panel = panel
+    private var card: some View {
         // The bottom (and the text box) never moves. The suggestions and the options share one minimum height, so
         // switching between them moves nothing; a conversation grows the panel upward only once it needs more room,
         // up to half the screen, then scrolls. The options open over what's below the header.
@@ -992,6 +991,11 @@ struct ClaudePanelView: View {
         .background { NoteDragArea(panel: panel) }
         .glassEffect(.regular, in: .rect(cornerRadius: 22))
         .padding(10)
+    }
+
+    /// The card, with what it watches to fit itself.
+    private var watched: some View {
+        card
         .onAppear { focused = true }
         .onChange(of: agent.messages.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: agent.running) { _, _ in DispatchQueue.main.async { panel.fit() } }
@@ -1005,6 +1009,11 @@ struct ClaudePanelView: View {
         }
         .onChange(of: panel.quotes.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: app.assist.pending?.id) { _, _ in DispatchQueue.main.async { panel.fit() } }
+    }
+
+    var body: some View {
+        // Split in parts: one expression this long takes the compiler too long to check on a slower Mac.
+        watched
         .dropDestination(for: URL.self) { urls, _ in
             for url in urls where url.isFileURL && !panel.attachments.contains(url) { panel.attachments.append(url) }
             return !urls.isEmpty
