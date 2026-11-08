@@ -1252,8 +1252,9 @@ final class InstructionsStore: @unchecked Sendable {
 
     private func read() -> NotesDisk { NotesDisk(stamp: Self.modified(file), text: Self.contents(file)) }
 
+    /// The date of the file the notes are in (through a link, its target's: the link's own never changes).
     private static func modified(_ file: URL) -> Date? {
-        (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date
+        (try? FileManager.default.attributesOfItem(atPath: linked(file).path))?[.modificationDate] as? Date
     }
 
     private static func contents(_ file: URL) -> String {
