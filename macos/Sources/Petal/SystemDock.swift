@@ -20,7 +20,10 @@ enum SystemDock {
     static var isReplaced: Bool { FileManager.default.fileExists(atPath: backup.path) }
 
     /// The apps in macOS's Dock, in its order, as bundle ids: "Import Dock" makes them a mode.
-    static func apps() -> [String] {
+    static func apps() -> [String] { readApps() }
+
+    /// The same, from any thread (the settings window shows `PetalApp.systemDockApps`, read off the main thread).
+    nonisolated static func readApps() -> [String] {
         let items = CFPreferencesCopyAppValue("persistent-apps" as CFString, "com.apple.dock" as CFString) as? [[String: Any]] ?? []
         var ids: [String] = []
         for item in items {

@@ -13,6 +13,7 @@ final class Overview {
         let app = PetalApp.shared
         app.tooltips.hide()
         app.popups.closeAll()
+        app.refreshSystemFacts()
         let panel = self.panel ?? OverviewPanel()
         self.panel = panel
         panel.show(OverviewView { [weak panel] in panel?.close() })
@@ -66,7 +67,7 @@ struct OverviewView: View {
 
     var body: some View {
         let config = app.config
-        let count = max(Spaces.count(), config.workspaces.keys.compactMap(Int.init).max() ?? 0, 1)
+        let count = max(app.desktopCount, config.workspaces.keys.compactMap(Int.init).max() ?? 0, 1)
         let here = app.docks.focusedDock?.desktop
         let columns = Array(repeating: GridItem(.fixed(168), spacing: 12), count: min(4, count))
         VStack(alignment: .leading, spacing: 16) {

@@ -151,33 +151,64 @@ enum Markdown {
     }
 }
 
+/// A text's markdown, parsed once: its blocks with their inline markdown made into attributed text. Kept per text
+/// (a reply is drawn again and again as the chat changes and scrolls; parsing it every time cost the most there).
+@MainActor
+final class ParsedMarkdown {
+    let blocks: [MarkdownBlock]
+    private var inline: [String: AttributedString] = [:]
+
+    private init(_ text: String) { blocks = Markdown.blocks(text) }
+
+    /// `Markdown.inline`, kept.
+    func text(_ source: String) -> AttributedString {
+        if let known = inline[source] { return known }
+        let made = Markdown.inline(source)
+        inline[source] = made
+        return made
+    }
+
+    private static var kept: [String: ParsedMarkdown] = [:]
+    private static var order: [String] = []
+
+    static func of(_ text: String) -> ParsedMarkdown {
+        if let known = kept[text] { return known }
+        let parsed = ParsedMarkdown(text)
+        kept[text] = parsed
+        order.append(text)
+        if order.count > 400 { kept[order.removeFirst()] = nil }   // a reply streaming in passes through many texts
+        return parsed
+    }
+}
+
 /// Markdown drawn natively in the chat: headings, lists, code, quotes and tables, not raw symbols.
 struct MarkdownView: View {
     let text: String
 
     var body: some View {
+        let parsed = ParsedMarkdown.of(text)
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(Markdown.blocks(text).enumerated()), id: \.offset) { _, block in
-                view(block)
+            ForEach(Array(parsed.blocks.enumerated()), id: \.offset) { _, block in
+                view(block, parsed)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder private func view(_ block: MarkdownBlock) -> some View {
+    @ViewBuilder private func view(_ block: MarkdownBlock, _ parsed: ParsedMarkdown) -> some View {
         switch block {
         case .heading(let level, let text):
-            Text(Markdown.inline(text)).font(.system(size: level <= 1 ? 16 : level == 2 ? 14.5 : 13.5, weight: .semibold))
+            Text(parsed.text(text)).font(.system(size: level <= 1 ? 16 : level == 2 ? 14.5 : 13.5, weight: .semibold))
                 .padding(.top, 2)
         case .paragraph(let text):
-            Text(Markdown.inline(text)).font(.system(size: 13.5)).lineSpacing(2)
+            Text(parsed.text(text)).font(.system(size: 13.5)).lineSpacing(2)
         case .list(let ordered, let items):
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(Array(items.enumerated()), id: \.offset) { index, item in
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(ordered ? "\(index + 1)." : "•").font(.system(size: 13.5)).foregroundStyle(.secondary)
                             .frame(minWidth: ordered ? 16 : 8, alignment: .trailing)
-                        Text(Markdown.inline(item)).font(.system(size: 13.5)).lineSpacing(2)
+                        Text(parsed.text(item)).font(.system(size: 13.5)).lineSpacing(2)
                     }
                 }
             }
@@ -190,15 +221,15 @@ struct MarkdownView: View {
         case .quote(let text):
             HStack(spacing: 8) {
                 Capsule().fill(.secondary.opacity(0.5)).frame(width: 3)
-                Text(Markdown.inline(text)).font(.system(size: 13.5)).foregroundStyle(.secondary)
+                Text(parsed.text(text)).font(.system(size: 13.5)).foregroundStyle(.secondary)
             }
             .fixedSize(horizontal: false, vertical: true)
         case .table(let header, let rows):
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 5) {
-                GridRow { ForEach(Array(header.enumerated()), id: \.offset) { Text(Markdown.inline($0.element)).font(.system(size: 12.5, weight: .semibold)) } }
+                GridRow { ForEach(Array(header.enumerated()), id: \.offset) { Text(parsed.text($0.element)).font(.system(size: 12.5, weight: .semibold)) } }
                 Divider()
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    GridRow { ForEach(Array(row.enumerated()), id: \.offset) { Text(Markdown.inline($0.element)).font(.system(size: 12.5)) } }
+                    GridRow { ForEach(Array(row.enumerated()), id: \.offset) { Text(parsed.text($0.element)).font(.system(size: 12.5)) } }
                 }
             }
             .padding(10)

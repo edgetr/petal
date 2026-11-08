@@ -77,7 +77,35 @@ final class Config {
     private(set) var modes: [Mode] = []
     private(set) var defaultMode = ""
     private(set) var workspaces: [String: String] = [:]
-    private(set) var settings: [String: Any] = [:]
+    /// settings.json as Petal has it. Reading it whole watches every setting; `bool`, `string` and the rest watch
+    /// only their own, so a switch changing draws again only what shows that setting.
+    private(set) var settings: [String: Any] {
+        get {
+            access(keyPath: \.settings)
+            return values
+        }
+        set {
+            let changed = Set(values.keys).union(newValue.keys).filter { !Self.same(values[$0], newValue[$0]) }
+            values = newValue
+            guard !changed.isEmpty else { return }
+            withMutation(keyPath: \.settings) {}
+            for key in changed { withMutation(keyPath: \.[setting: key]) {} }
+        }
+    }
+    @ObservationIgnored private var values: [String: Any] = [:]
+
+    /// What watching one setting is keyed by (Observation's key path); never read.
+    nonisolated subscript(setting key: String) -> Int { 0 }
+
+    private func watch(_ key: String) { access(keyPath: \.[setting: key]) }
+
+    nonisolated private static func same(_ a: Any?, _ b: Any?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): true
+        case let (a?, b?): (a as AnyObject).isEqual(b as AnyObject)
+        default: false
+        }
+    }
     private(set) var dock: [String: Any] = [:]
 
     @ObservationIgnored var onChange: (() -> Void)?
@@ -96,13 +124,14 @@ final class Config {
 
     // MARK: Settings
 
-    func bool(_ key: String) -> Bool { settings[key] as? Bool ?? Self.defaults[key] as? Bool ?? false }
+    func bool(_ key: String) -> Bool { watch(key); return values[key] as? Bool ?? Self.defaults[key] as? Bool ?? false }
     func number(_ key: String) -> Double {
-        (settings[key] as? NSNumber)?.doubleValue ?? (Self.defaults[key] as? NSNumber)?.doubleValue ?? 0
+        watch(key)
+        return (values[key] as? NSNumber)?.doubleValue ?? (Self.defaults[key] as? NSNumber)?.doubleValue ?? 0
     }
-    func string(_ key: String) -> String { settings[key] as? String ?? Self.defaults[key] as? String ?? "" }
-    func strings(_ key: String) -> [String] { settings[key] as? [String] ?? Self.defaults[key] as? [String] ?? [] }
-    func value(_ key: String) -> Any? { settings[key] ?? Self.defaults[key] }
+    func string(_ key: String) -> String { watch(key); return values[key] as? String ?? Self.defaults[key] as? String ?? "" }
+    func strings(_ key: String) -> [String] { watch(key); return values[key] as? [String] ?? Self.defaults[key] as? [String] ?? [] }
+    func value(_ key: String) -> Any? { watch(key); return values[key] ?? Self.defaults[key] }
 
     /// Changes one setting; everything else in settings.json stays as it was.
     func set(_ key: String, _ value: Any) {

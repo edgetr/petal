@@ -22,8 +22,9 @@ enum BodyCount {
 /// The settings window's part of the bench, and the hook its clicks go through.
 @MainActor
 enum SettingsBench {
-    enum Command { case select(SettingsSection), type(String) }
-    /// The bench's clicks: the same state changes the sidebar's buttons and the ask field make.
+    enum Command { case select(SettingsSection), type(String), open(SettingsSection) }
+    /// The bench's clicks: the same state changes the sidebar's buttons and the ask field make; and `open`, the
+    /// window's own: a view made ahead opening on another page.
     static let commands = PassthroughSubject<Command, Never>()
 
     /// Before anything reads the settings: a copy of them in a temporary folder, unless `PETAL_CONFIG_DIR` already
@@ -354,6 +355,7 @@ enum WindowBench {
         let vault = Snapshot.sampleVault()
         VaultStore.standIn(vault)
         let app = PetalApp()
+        app.refreshSystemFacts(wait: true)   // as long after launch: read ahead
         let home = NSHomeDirectory()
         AgentGrants.shared.preview([
             AgentAccess.Grant(item: vault.first { $0.kind == .apiKey }?.id ?? "", title: "OpenAI", project: home + "/petal", agent: .codex),
@@ -363,6 +365,7 @@ enum WindowBench {
         let until = Date().addingTimeInterval(10)
         while Apps.cachedIcon("com.apple.finder") == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         app.search.prepare()
+        app.settings.makeAhead()
         return app
     }
 
@@ -569,6 +572,14 @@ enum WindowBench {
         result.rows.append(("open, cold (first in a process)", stat(colds.compactMap { $0.opens["Settings"] })))
         result.rows.append(("open, warm (again)", stat(opens)))
         result.rows.append(("open on Modes (again)", stat(others)))
+        // What opening costs before it: a fresh view made while the window is closed (nobody waits for it).
+        var ahead: [Sample] = []
+        for _ in 0..<runs {
+            closeAsAPerson(app.settings.window)
+            ahead.append(measure(window) { app.settings.makeAhead() })
+            _ = measure(window) { _ = app.settings.prepare(.dock) }
+        }
+        result.rows.append(("made ahead while closed (not waited on)", stat(ahead)))
 
         step("settings: switching pages")
         var visits: [SettingsSection: [Sample]] = [:]

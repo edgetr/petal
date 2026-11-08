@@ -10,6 +10,7 @@ enum Snapshot {
         let vault = sampleVault()
         VaultStore.standIn(vault)
         let app = PetalApp()
+        app.refreshSystemFacts(wait: true)
         VaultModel.shared.preview(vault)
         // Made-up grants for Settings › Vault › Agents: nothing is read or written.
         let home = NSHomeDirectory()

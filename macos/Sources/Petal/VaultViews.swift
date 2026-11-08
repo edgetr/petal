@@ -218,6 +218,8 @@ struct VaultSettings: View {
                     Text(model.items.isEmpty ? "Nothing yet. Add an item, import an export, or let Petal AI ask for what it needs." : "Nothing matches.")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
+                // Every row, not lazily: a lazy list on this page sets AppKit's constraint updates looping as the
+                // page comes in (the window stops updating, or AppKit throws).
                 ForEach(shown) { item in
                     Button { isNew = false; editing = item } label: { VaultRow(item: item, showKind: tab == nil) }
                         .buttonStyle(.plain)
@@ -438,6 +440,7 @@ struct VaultRow: View {
     var showKind = false
 
     var body: some View {
+        let _ = BodyCount.hit("VaultRow")
         HStack(spacing: 10) {
             Image(systemName: item.kind.symbol).font(.system(size: 12, weight: .semibold))
                 .frame(width: 28, height: 28).glassEffect(.clear, in: .circle)

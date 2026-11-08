@@ -8,6 +8,8 @@ import SwiftUI
 @MainActor
 final class SettingsWindow {
     private(set) var window: NSWindow?
+    /// The page a fresh view, made ahead in the closed window and never shown, opens on.
+    private var madeAhead: SettingsSection?
 
     func show(_ section: SettingsSection = .dock) {
         let window = prepare(section)
@@ -15,23 +17,51 @@ final class SettingsWindow {
         window.makeKeyAndOrderFront(nil)
     }
 
-    /// The window with its content, ready to show (`Petal --bench-settings` times this without showing it).
+    /// The window with its content, ready to show (`Petal --bench-settings` times this without showing it). Each
+    /// opening shows a view nobody has seen yet: the one made ahead while the window was closed (on the page asked
+    /// for), else one made now, as it always was.
     func prepare(_ section: SettingsSection = .dock) -> NSWindow {
-        if window == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 640),
-                                  styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                                  backing: .buffered, defer: false)
-            window.titlebarAppearsTransparent = true
-            window.titleVisibility = .hidden
-            window.isMovableByWindowBackground = true
-            window.isReleasedWhenClosed = false
-            window.minSize = NSSize(width: 780, height: 540)
-            window.title = "Petal Settings"
-            window.center()
-            self.window = window
+        PetalApp.shared.refreshSystemFacts()
+        let window = self.window ?? makeWindow()
+        if let ahead = madeAhead, !window.isVisible {
+            madeAhead = nil
+            if ahead != section { SettingsBench.commands.send(.open(section)) }
+        } else {
+            madeAhead = nil
+            window.setGlassContent(SettingsView(selection: section).environment(PetalApp.shared))
         }
-        window!.setGlassContent(SettingsView(selection: section).environment(PetalApp.shared))
-        return window!
+        return window
+    }
+
+    /// Makes a fresh view in the closed window while nobody waits for it (a while after launch, and a moment after
+    /// the window closes, which also lets the last one go: its views and timers stop), so the next opening only
+    /// has to show it. Nothing of the last opening is kept: what was typed, picked or shown in it.
+    func makeAhead() {
+        let window = self.window ?? makeWindow()
+        guard !window.isVisible, madeAhead == nil else { return }
+        window.setGlassContent(SettingsView(selection: .dock).environment(PetalApp.shared))
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        madeAhead = .dock
+    }
+
+    private func makeWindow() -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 640),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isMovableByWindowBackground = true
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 780, height: 540)
+        window.title = "Petal Settings"
+        window.center()
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+            // A moment after it's gone, so its closing is drawn as it was.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { self?.makeAhead() } }
+        }
+        self.window = window
+        return window
     }
 }
 
@@ -135,6 +165,11 @@ struct SettingsView: View {
             switch command {
             case .select(let section): selection = section
             case .type(let text): ask = text
+            case .open(let section):
+                // A view made ahead, opening on another page: as if made on it, without the page's animation.
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) { selection = section }
             }
         }
     }
@@ -252,6 +287,20 @@ struct Backdrop: View {
 }
 
 extension NSWindow {
+    /// Once closed, the window lets its content go, so its views, timers and observers stop instead of running on
+    /// out of sight; `setGlassContent` makes it anew the next time it's shown. A moment after it's gone, so its
+    /// closing is drawn as it was.
+    func letContentGoWhenClosed() {
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: self, queue: .main) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                MainActor.assumeIsolated {
+                    guard let self, !self.isVisible, let glass = self.contentView as? NSGlassEffectView else { return }
+                    glass.contentView = nil
+                }
+            }
+        }
+    }
+
     /// The window itself becomes Liquid Glass (AppKit's own `NSGlassEffectView`): what's behind it shows through,
     /// blurred, and the content sits in the glass.
     func setGlassContent<Content: View>(_ view: Content) {
@@ -372,7 +421,7 @@ struct DockSettings: View {
 
         Card(title: "Bring your Dock along", footer: "Copies macOS's Dock into a mode called My Dock, which every Desktop starts in, and its folders into stacks. Your Dock itself doesn't change.") {
             HStack(spacing: -6) {
-                ForEach(SystemDock.apps().prefix(9), id: \.self) { id in
+                ForEach(app.systemDockApps.prefix(9), id: \.self) { id in
                     Image(nsImage: Apps.icon(id)).resizable().frame(width: 34, height: 34)
                 }
             }
@@ -443,9 +492,11 @@ struct PetalDockSketch: View {
 
 /// A small drawing of macOS's Dock, with its own apps.
 struct MacDockSketch: View {
+    @Environment(PetalApp.self) private var app
+
     var body: some View {
         HStack(spacing: 4) {
-            ForEach(SystemDock.apps().prefix(7), id: \.self) { id in
+            ForEach(app.systemDockApps.prefix(7), id: \.self) { id in
                 Image(nsImage: Apps.icon(id)).resizable().frame(width: 22, height: 22)
             }
             Rectangle().fill(.white.opacity(0.3)).frame(width: 1, height: 18)
@@ -494,7 +545,7 @@ struct ModesSettings: View {
         }
 
         Card(title: "Desktops", footer: "Switching Desktop swaps the dock to that Desktop's mode. Clicking the mode button in the dock changes it too.") {
-            let count = max(Spaces.count(), app.config.workspaces.keys.compactMap(Int.init).max() ?? 0, 1)
+            let count = max(app.desktopCount, app.config.workspaces.keys.compactMap(Int.init).max() ?? 0, 1)
             ForEach(1...count, id: \.self) { number in
                 HStack {
                     Text("Desktop \(number)")
@@ -944,14 +995,43 @@ struct InstructionsEditor: View {
     @State private var text = ""
 
     var body: some View {
+        let notes = app.instructions
         TextEditor(text: $text)
             .font(.system(size: 12))
             .scrollContentBackground(.hidden)
             .frame(minHeight: 110)
             .padding(8)
             .background(.black.opacity(0.12), in: .rect(cornerRadius: 12))
-            .onAppear { text = (try? String(contentsOf: app.config.instructionsFile, encoding: .utf8)) ?? "" }
-            .onChange(of: text) { _, new in try? new.write(to: app.config.instructionsFile, atomically: true, encoding: .utf8) }
+            // As last read (off the main thread, at launch and as the window opened); a change on disk since then
+            // comes in as it's read.
+            .onAppear { text = notes.text }
+            .onChange(of: notes.version) { _, _ in if text != notes.text { text = notes.text } }
+            .onChange(of: text) { _, new in notes.save(new, to: app.config.instructionsFile) }
+    }
+}
+
+/// The notes for the AI, kept in memory for the settings window: read off the main thread, and written off it, in
+/// order, only when they change.
+@MainActor @Observable
+final class InstructionsText {
+    @ObservationIgnored private(set) var text = ""
+    /// Counts reads that changed `text`, so the editor follows a change made elsewhere.
+    private(set) var version = 0
+    /// Counts saves: a read begun before one is older than what's typed, and is dropped.
+    @ObservationIgnored private(set) var saves = 0
+    nonisolated private static let writer = DispatchQueue(label: "petal.instructions.write", qos: .userInitiated)
+
+    func read(_ disk: String, asOf: Int) {
+        guard asOf == saves, disk != text else { return }
+        text = disk
+        version += 1
+    }
+
+    func save(_ new: String, to file: URL) {
+        guard new != text else { return }
+        text = new
+        saves += 1
+        Self.writer.async { try? new.write(to: file, atomically: true, encoding: .utf8) }
     }
 }
 
@@ -1053,23 +1133,29 @@ struct ColorSetting: View {
 
 struct PermissionsSettings: View {
     @Environment(PetalApp.self) private var app
-    @State private var tick = 0
+    /// Checked every 1.5 s; the page draws again only when one changes.
+    @State private var trusted = Windows.trusted
+    @State private var capture = Capture.allowed
     let timer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
         let _ = BodyCount.hit("PermissionsSettings")
-        let _ = tick
         Permission(symbol: "accessibility", title: "Accessibility", detail: "Window previews, minimized windows, badges, and focus cards.",
-                   granted: Windows.trusted) { Windows.askForPermission() }
+                   granted: trusted) { Windows.askForPermission() }
         Permission(symbol: "rectangle.dashed.badge.record", title: "Screen Recording", detail: "A picture of each window in previews; without it, they list windows by name. Petal never records: it takes a still while you hover an app.",
-                   granted: Capture.allowed) { Capture.askForPermission() }
+                   granted: capture) { Capture.askForPermission() }
         Permission(symbol: "bell.badge", title: "Full Disk Access", detail: "Seeing notifications, to hold them in modes that hold them. Petal only reads Notification Center's list.",
                    granted: app.notes.canRead) { NotificationAccessRow.openSettings() }
         Permission(symbol: "safari", title: "Browsers", detail: "Which site a tab is on, and closing a distracting one. Each browser asks once.",
                    granted: Browsers.installed().isEmpty ? nil : app.browsers.allAllowed) { app.browsers.askAll {} }
         Permission(symbol: "music.note", title: "Music and Spotify", detail: "Now playing. macOS asks the first time a player is open.",
                    granted: nil) {}
-            .onReceive(timer) { _ in tick += 1; app.browsers.refresh() }
+            .onReceive(timer) { _ in
+                let nowTrusted = Windows.trusted, nowCapture = Capture.allowed
+                if nowTrusted != trusted { trusted = nowTrusted }
+                if nowCapture != capture { capture = nowCapture }
+                app.browsers.refresh()
+            }
     }
 }
 

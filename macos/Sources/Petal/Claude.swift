@@ -970,7 +970,7 @@ struct ClaudePanelView: View {
             if NoteActivityLine.shows(agent) { NoteActivityLine(panel: panel, note: panel.current).padding(.top, -8) }
             ZStack(alignment: .top) {
                 // A chat with only messages still to send (kept from before Petal quit) shows them, with Send now.
-        Group { if agent.messages.isEmpty && agent.queued.isEmpty { empty } else { conversation } }
+        Group { if agent.messages.isEmpty && agent.queued.isEmpty { empty } else { ConversationView(agent: agent) } }
                     .frame(maxWidth: .infinity, alignment: .top)
                     .opacity(panel.optionsOpen || panel.chatsOpen ? 0 : 1)
                 if panel.optionsOpen { options.transition(.opacity.combined(with: .offset(y: -6))) }
@@ -981,7 +981,7 @@ struct ClaudePanelView: View {
                 AskRequestView(request: request).id(request.id).padding(12).background(.white.opacity(0.06), in: .rect(cornerRadius: 14))
             }
             if !panel.attachments.isEmpty || !panel.quotes.isEmpty { attachmentsRow }
-            input
+            ChatInput(panel: panel, focused: $focused, submit: submit)
         }
         // Exactly this wide whatever it shows: content a little too wide for it (Claude's rows and Codex's differ)
         // stays put on the left instead of spilling out on both sides, which made switching jump sideways.
@@ -1003,15 +1003,12 @@ struct ClaudePanelView: View {
         .onChange(of: panel.optionsOpen) { _, open in if open { panel.chatsOpen = false }; DispatchQueue.main.async { panel.fit() } }
         .onChange(of: panel.chatsOpen) { _, open in if open { panel.optionsOpen = false }; DispatchQueue.main.async { panel.fit() } }
         .onChange(of: panel.attachments.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
-        // Typing a message: the options (or the chats list) step aside for the conversation, no click needed.
-        .onChange(of: panel.draft) { _, text in
-            if !text.isEmpty && (panel.optionsOpen || panel.chatsOpen) { panel.optionsOpen = false; panel.chatsOpen = false }
-        }
         .onChange(of: panel.quotes.count) { _, _ in DispatchQueue.main.async { panel.fit() } }
         .onChange(of: app.assist.pending?.id) { _, _ in DispatchQueue.main.async { panel.fit() } }
     }
 
     var body: some View {
+        let _ = BodyCount.hit("ClaudePanelView")
         // Split in parts: one expression this long takes the compiler too long to check on a slower Mac.
         watched
         .dropDestination(for: URL.self) { urls, _ in
@@ -1127,77 +1124,6 @@ struct ClaudePanelView: View {
         }
     }
 
-    private var conversation: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    ForEach(agent.messages) { message in
-                        MessageView(message: message, last: message.id == agent.messages.last?.id).id(message.id)
-                    }
-                    if agent.running { TypingDots().id("typing") }
-                    ForEach(Array(agent.queued.enumerated()), id: \.offset) { index, text in
-                        HStack(spacing: 6) {
-                            Spacer(minLength: 100)
-                            Text(text).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
-                                .padding(.horizontal, 12).padding(.vertical, 6)
-                                .background(.white.opacity(0.06), in: .rect(cornerRadius: 12))
-                            RoundButton(symbol: "xmark", size: 18) { agent.unqueue(index) }.help("Don't send it")
-                        }
-                    }
-                    // Left from before (Petal quit while it worked): sent with the next message, or now.
-                    if !agent.running && !agent.queued.isEmpty {
-                        HStack {
-                            Spacer()
-                            Button(agent.queued.count == 1 ? "Send it now" : "Send them now") { agent.sendQueued() }
-                                .buttonStyle(.glass).controlSize(.small)
-                        }
-                    }
-                }
-                .padding(.vertical, 2)
-            }
-            .scrollIndicators(.never)
-            .frame(maxHeight: (NSScreen.main?.frame.height ?? 900) * 0.5)
-            .fixedSize(horizontal: false, vertical: true)
-            .onChange(of: agent.messages.count) { _, _ in
-                withAnimation {
-                    if agent.running { proxy.scrollTo("typing", anchor: .bottom) } else if let last = agent.messages.last?.id { proxy.scrollTo(last, anchor: .bottom) }
-                }
-            }
-        }
-    }
-
-    private var input: some View {
-        @Bindable var panel = panel
-        return HStack(spacing: 8) {
-            TextField(agent.messages.isEmpty ? "Ask \(provider?.name ?? "AI")…"
-                      : agent.running ? (app.config.string("chatWhileWorking") == "queue" ? "Add to what's next…" : "Steer it…") : "Reply…",
-                      text: $panel.draft)
-                .textFieldStyle(.plain)
-                .font(.system(size: 14))
-                .focused($focused)
-                .onSubmit(submit)
-            // While it works, or waits for room: stop (one waiting never starts, and its message comes back here),
-            // or (with something written) steer or queue it.
-            let queued = !agent.running && !agent.waiting.isEmpty
-            let stops = (agent.running || queued) && panel.draft.isEmpty
-            Button {
-                if stops { panel.stop(panel.current) } else { submit() }
-            } label: {
-                Image(systemName: stops ? "stop.fill" : "arrow.up")
-                    .font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
-                    .frame(width: 30, height: 30)
-                    .background(Color(nsColor: app.accent), in: .circle)
-            }
-            .buttonStyle(.plain)
-            .help(stops ? (queued ? "Don't start it" : "Stop") : "")
-        }
-        .padding(.leading, 16)
-        .padding(.trailing, 6)
-        .frame(height: 42)
-        .background(.white.opacity(0.06), in: .capsule)
-        .overlay(Capsule().strokeBorder(focused ? Color(nsColor: app.accent).opacity(0.6) : .white.opacity(0.1)))
-    }
-
     private var attachmentsRow: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 6) {
@@ -1254,6 +1180,101 @@ struct ClaudePanelView: View {
         panel.chatsOpen = false
         // Messages left to send go first, in the same turn.
         if !agent.running && !agent.queued.isEmpty { agent.sendQueued(with: text) } else { agent.send(text) }
+    }
+}
+
+/// The messages, in a scroll view that grows with them up to half the screen. Its own view, so typing in the field
+/// below never makes the conversation again; lazy, so a long chat makes only the messages in sight.
+struct ConversationView: View {
+    let agent: Agent
+
+    var body: some View {
+        let _ = BodyCount.hit("ConversationView")
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 10) {
+                    ForEach(agent.messages) { message in
+                        MessageView(message: message, last: message.id == agent.messages.last?.id).id(message.id)
+                    }
+                    if agent.running { TypingDots().id("typing") }
+                    ForEach(Array(agent.queued.enumerated()), id: \.offset) { index, text in
+                        HStack(spacing: 6) {
+                            Spacer(minLength: 100)
+                            Text(text).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
+                                .padding(.horizontal, 12).padding(.vertical, 6)
+                                .background(.white.opacity(0.06), in: .rect(cornerRadius: 12))
+                            RoundButton(symbol: "xmark", size: 18) { agent.unqueue(index) }.help("Don't send it")
+                        }
+                    }
+                    // Left from before (Petal quit while it worked): sent with the next message, or now.
+                    if !agent.running && !agent.queued.isEmpty {
+                        HStack {
+                            Spacer()
+                            Button(agent.queued.count == 1 ? "Send it now" : "Send them now") { agent.sendQueued() }
+                                .buttonStyle(.glass).controlSize(.small)
+                        }
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .scrollIndicators(.never)
+            .frame(maxHeight: (NSScreen.main?.frame.height ?? 900) * 0.5)
+            .fixedSize(horizontal: false, vertical: true)
+            .onChange(of: agent.messages.count) { _, _ in
+                withAnimation {
+                    if agent.running { proxy.scrollTo("typing", anchor: .bottom) } else if let last = agent.messages.last?.id { proxy.scrollTo(last, anchor: .bottom) }
+                }
+            }
+        }
+    }
+
+}
+
+/// The field the person writes in, with Send or Stop. Its own view: a keystroke changes only this.
+struct ChatInput: View {
+    @Environment(PetalApp.self) private var app
+    let panel: ClaudePanel
+    var focused: FocusState<Bool>.Binding
+    let submit: () -> Void
+
+    var agent: Agent { panel.agent }
+    private var provider: Provider? { app.chatProvider }
+
+    var body: some View {
+        let _ = BodyCount.hit("ChatInput")
+        @Bindable var panel = panel
+        HStack(spacing: 8) {
+            TextField(agent.messages.isEmpty ? "Ask \(provider?.name ?? "AI")…"
+                      : agent.running ? (app.config.string("chatWhileWorking") == "queue" ? "Add to what's next…" : "Steer it…") : "Reply…",
+                      text: $panel.draft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 14))
+                .focused(focused)
+                .onSubmit(submit)
+            // While it works, or waits for room: stop (one waiting never starts, and its message comes back here),
+            // or (with something written) steer or queue it.
+            let queued = !agent.running && !agent.waiting.isEmpty
+            let stops = (agent.running || queued) && panel.draft.isEmpty
+            Button {
+                if stops { panel.stop(panel.current) } else { submit() }
+            } label: {
+                Image(systemName: stops ? "stop.fill" : "arrow.up")
+                    .font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+                    .frame(width: 30, height: 30)
+                    .background(Color(nsColor: app.accent), in: .circle)
+            }
+            .buttonStyle(.plain)
+            .help(stops ? (queued ? "Don't start it" : "Stop") : "")
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 6)
+        .frame(height: 42)
+        .background(.white.opacity(0.06), in: .capsule)
+        .overlay(Capsule().strokeBorder(focused.wrappedValue ? Color(nsColor: app.accent).opacity(0.6) : .white.opacity(0.1)))
+        // Typing a message: the options (or the chats list) step aside for the conversation, no click needed.
+        .onChange(of: panel.draft) { _, text in
+            if !text.isEmpty && (panel.optionsOpen || panel.chatsOpen) { panel.optionsOpen = false; panel.chatsOpen = false }
+        }
     }
 }
 
@@ -1330,6 +1351,7 @@ struct MessageView: View {
     let last: Bool
 
     var body: some View {
+        let _ = BodyCount.hit("MessageView")
         let accent = Color(nsColor: app.accent)
         switch message.kind {
         case .user:
