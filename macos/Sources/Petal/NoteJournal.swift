@@ -22,6 +22,8 @@ enum NoteJournal {
         var pictures: [Picture] = []
         /// An edit kept beside a paper that turned read only: always a conflict copy.
         var aside = false
+        /// Its text landed, but pictures it references weren't saved: kept for their bytes until they are.
+        var landed: Bool? = nil
     }
 
     /// A picture's bytes, as the editor accepted them (from memory, never read from its source here).
@@ -50,11 +52,28 @@ enum NoteJournal {
         try? data.write(to: file(entry.noteID, aside: entry.aside, in: folder), options: .atomic)
     }
 
-    /// A text landed (in the note, or in its conflict copy): the snapshot holding exactly it goes; a newer one stays.
-    nonisolated static func landed(noteID: String, text: String, aside: Bool = false, in folder: URL = folder) {
+    /// A text landed (in the note, or in its conflict copy): the snapshot holding exactly it goes once every picture
+    /// it references is saved (`NoteShelf.journalClears`; `unsaved`: pictures whose bytes aren't in the note's folder
+    /// yet, a failed one too). Until then it stays, keeping only those pictures; a newer snapshot stays as it is.
+    nonisolated static func landed(noteID: String, text: String, aside: Bool = false, unsaved: Set<String> = [], in folder: URL = folder) {
         let url = file(noteID, aside: aside, in: folder)
-        guard let entry = read(url), entry.text == text else { return }
-        try? FileManager.default.removeItem(at: url)
+        guard var entry = read(url), entry.text == text else { return }
+        if NoteShelf.journalClears(snapshot: entry.text, landed: text, referenced: entry.pictures.map(\.name), unsaved: unsaved) {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        entry.landed = true
+        entry.pictures = entry.pictures.filter { unsaved.contains($0.name) }
+        snapshot(entry, in: folder)
+    }
+
+    /// Pictures saved into the note's folder (or removed by the person): out of its snapshot; a snapshot whose text
+    /// landed goes once none of its pictures is left.
+    nonisolated static func picturesSaved(noteID: String, names: Set<String>, in folder: URL = folder) {
+        let url = file(noteID, in: folder)
+        guard var entry = read(url) else { return }
+        entry.pictures.removeAll { names.contains($0.name) }
+        if entry.landed == true && entry.pictures.isEmpty { try? FileManager.default.removeItem(at: url) } else { snapshot(entry, in: folder) }
     }
 
     /// At launch, on the journal's queue: the journal as it is moves aside into a "recovering" folder of its own

@@ -120,6 +120,9 @@ final class NoteSession {
     let id: Int
     var key: String
     var noteID = ""
+    /// The provisional path (lowercased) a new note was shown with: reserved until its file is made, or its making
+    /// ends (a failed one stays reserved while it's tried again).
+    var reservation: String?
     var pending: [Item] = []
     var running = false
     /// The first piece of work couldn't be done: it's tried again in a few seconds.
@@ -174,7 +177,11 @@ final class NoteStore {
     @ObservationIgnored private var clock = 0
     @ObservationIgnored private var changedAt: [String: Int] = [:]
     @ObservationIgnored private var removedAt: [String: Int] = [:]
-    @ObservationIgnored private var sessions: [String: NoteSession] = [:]
+    /// Each note's session by its own id, never by its path: a new note's file may land under another name than the
+    /// one it was shown with, and a move renames it. `keys` finds a paper's session; it changes only through
+    /// `NoteShelf.rekey`, which never takes a name another session holds.
+    @ObservationIgnored private var sessions: [Int: NoteSession] = [:]
+    @ObservationIgnored private var keys: [String: Int] = [:]
     @ObservationIgnored private var nextID = 0
     @ObservationIgnored private var retrying = false
     /// Switching to another notes folder: the old one's work is drained and nothing new starts there.
@@ -230,14 +237,16 @@ final class NoteStore {
         switching = true
         stopWatching()
         let jobs = drainJobs()
+        let unsaved = drainUnsaved()
         let oldRoot = root
         Self.io.async {
-            Self.drain(jobs, root: oldRoot)
+            Self.drain(jobs, unsaved: unsaved, root: oldRoot)
             NoteDisk.states = [:]
             NoteDisk.results = [:]
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.sessions = [:]
+                    self.keys = [:]
                     self.failed = []
                     self.notes = []
                     self.notebooks = []
@@ -453,23 +462,25 @@ final class NoteStore {
             switch NoteShelf.save(disk: disk, text: text, base: base) {
             case .already: outcome = .written
             case .write: outcome = (try? Data(text.utf8).write(to: url, options: .atomic)) != nil ? .written : .failed
-            case .keepBoth: outcome = keepBeside(text, original: url, root: root)
+            case .keepBoth: outcome = keepBeside(text, original: url, root: root, live: live)
             }
         }
         return outcome
     }
 
     /// An edit kept beside a file: always a new conflict copy, never over one (a copy may hold words typed after
-    /// it was made, or by another Mac).
-    nonisolated static func keepBeside(_ text: String, original: URL, root: URL) -> Outcome {
+    /// it was made, or by another Mac). A tool's asker (`live`) is checked inside each copy's coordinated create:
+    /// gone, nothing is made.
+    nonisolated static func keepBeside(_ text: String, original: URL, root: URL, live: (@Sendable () -> Bool)? = nil) -> Outcome {
         let folder = original.deletingLastPathComponent()
         let stem = original.deletingPathExtension().lastPathComponent
         for _ in 0..<20 {
+            if let live, !live() { return .cancelled }
             let taken = Set(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).map { $0.lowercased() })
             let copy = folder.appending(path: NoteShelf.conflictName(stem, taken: taken))
-            if create(text, at: copy, root: root) { return .keptBoth(copy) }
+            if create(text, at: copy, root: root, live: live) { return .keptBoth(copy) }
         }
-        return .failed
+        return live.map { $0() } == false ? .cancelled : .failed
     }
 
     /// Makes a file where none is: never over another (created exclusively, coordinated). Off the main thread.
@@ -486,14 +497,17 @@ final class NoteStore {
         return ok
     }
 
-    /// A new file in `folder` named for `stem`: the first free name on disk, made exclusively, tried again when
-    /// another file takes that name first. Off the main thread.
-    nonisolated static func createNamed(_ text: String, stem: String, in folder: URL, root: URL, live: (@Sendable () -> Bool)? = nil) -> URL? {
+    /// A new file in `folder` named for `stem`: the first name free on disk and not reserved by another note being
+    /// made (`NoteReservations`; `own`: this note's own provisional path), made exclusively, tried again when another
+    /// file takes that name first. Off the main thread.
+    nonisolated static func createNamed(_ text: String, stem: String, in folder: URL, root: URL, live: (@Sendable () -> Bool)? = nil,
+                                        own: String? = nil) -> URL? {
         guard safe(folder, root: root) else { return nil }
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         var tried: Set<String> = []
         for _ in 0..<20 {
             let taken = Set(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).map { $0.lowercased() }).union(tried)
+                .union(NoteReservations.names(in: folder.path.lowercased(), except: own))
             let name = NoteShelf.freeName(stem, taken: taken)
             let url = folder.appending(path: name)
             if let live, !live() { return nil }
@@ -527,7 +541,7 @@ final class NoteStore {
                 state.revision = coordinatedRead(exact)
                 return NoteWorkResult(outcome: .written, url: exact)
             }
-            guard let made = createNamed(text, stem: stem, in: folder, root: root, live: live) else {
+            guard let made = createNamed(text, stem: stem, in: folder, root: root, live: live, own: state.url.path.lowercased()) else {
                 return NoteWorkResult(outcome: live.map { $0() } == false ? .cancelled : .failed)
             }
             state.url = made
@@ -538,7 +552,7 @@ final class NoteStore {
             if outcome == .written { state.revision = text }
             return NoteWorkResult(outcome: outcome, url: state.url)
         case .keepAside(let text):
-            return NoteWorkResult(outcome: keepBeside(text, original: state.url, root: root), url: state.url)
+            return NoteWorkResult(outcome: keepBeside(text, original: state.url, root: root, live: live), url: state.url)
         case .move(let folder):
             guard let target = move(state.url, noteID: state.noteID, into: folder, root: root, live: live) else {
                 return NoteWorkResult(outcome: live.map { $0() } == false ? .cancelled : .failed, url: state.url)
@@ -687,16 +701,19 @@ final class NoteStore {
     // MARK: Sessions
 
     private func session(for key: String) -> NoteSession? {
-        if let session = sessions[key] { return session }
+        if let session = sessionAt(key) { return session }
         guard let paper = paper(key), paper.version == nil else { return nil }
         return makeSession(key: key, url: paper.url, noteID: paper.noteID, revision: paper.revision)
     }
+
+    private func sessionAt(_ key: String) -> NoteSession? { keys[key].flatMap { sessions[$0] } }
 
     private func makeSession(key: String, url: URL, noteID: String, revision: String?) -> NoteSession {
         nextID += 1
         let session = NoteSession(id: nextID, key: key)
         session.noteID = noteID
-        sessions[key] = session
+        sessions[session.id] = session
+        keys[key] = session.id
         let state = NoteDisk.State(url: url, noteID: noteID, revision: revision)
         let id = session.id
         Self.io.async { NoteDisk.states[id] = state }
@@ -733,7 +750,7 @@ final class NoteStore {
 
     private func finished(_ session: NoteSession, _ item: NoteSession.Item, _ result: NoteWorkResult) {
         session.running = false
-        guard !switching, sessions[session.key] === session else { return }
+        guard !switching, sessions[session.id] === session else { return }
         if result.outcome == .failed && item.work.keeps {
             // Kept (in the journal too), said on the paper, tried again: never dropped.
             session.failing = true
@@ -745,16 +762,25 @@ final class NoteStore {
             return
         }
         session.pending.removeFirst()
+        // A new note's making is over (made, or its asker went): its provisional name is free again, after its key
+        // moved to the name it landed under (below).
+        defer {
+            if case .create(_, _, _, nil) = item.work, let reservation = session.reservation {
+                session.reservation = nil
+                reserved.remove(reservation)
+                NoteReservations.remove(reservation)
+            }
+        }
         let itemID = item.id
         Self.io.async { NoteDisk.results[itemID] = nil }
         failed.remove(session.key)
         let noteID = session.noteID
         // Where the file is now: a new note's name on disk, a move.
-        if let url = result.url, url.path != session.key {
+        // A name another session holds is never taken (its paper and answer stay its own): this one keeps its key.
+        if let url = result.url, url.path != session.key, let next = NoteShelf.rekey(keys, session: session.id, from: session.key, to: url.path) {
             let old = session.key
-            sessions[old] = nil
+            keys = next
             session.key = url.path
-            sessions[url.path] = session
             if let index = notes.firstIndex(where: { $0.key == old }) {
                 var paper = notes[index]
                 gone(old)
@@ -768,9 +794,12 @@ final class NoteStore {
         // What landed (in the note, or in a conflict copy beside it) is safe: out of the journal.
         switch (item.work, result.outcome) {
         case (.write(let text, _), .written), (.write(let text, _), .keptBoth), (.create(let text, _, _, _), .written):
-            NoteJournal.queue.async { NoteJournal.landed(noteID: noteID, text: text) }
+            // Pictures not saved yet (still on their way, or failed and set aside) keep the snapshot.
+            let unsaved = Set(pendingPictures[noteID]?.keys.map { $0 } ?? [])
+            NoteJournal.queue.async { NoteJournal.landed(noteID: noteID, text: text, unsaved: unsaved) }
         case (.keepAside(let text), .keptBoth):
-            NoteJournal.queue.async { NoteJournal.landed(noteID: noteID, text: text, aside: true) }
+            let unsaved = Set(pendingPictures[noteID]?.keys.map { $0 } ?? [])
+            NoteJournal.queue.async { NoteJournal.landed(noteID: noteID, text: text, aside: true, unsaved: unsaved) }
         default: break
         }
         // A tool's write shows only once it landed (and nothing of the person's is waiting behind it).
@@ -788,6 +817,8 @@ final class NoteStore {
         if case .pictureBytes(let pictures, _) = item.work {
             if result.outcome == .written {
                 for picture in pictures { pendingPictures[noteID]?[picture.name] = nil }
+                let names = Set(pictures.map(\.name))
+                NoteJournal.queue.async { NoteJournal.picturesSaved(noteID: noteID, names: names) }
             } else {
                 pictureTrouble[session.key, default: []] += pictures
             }
@@ -814,6 +845,8 @@ final class NoteStore {
         guard let pictures = pictureTrouble.removeValue(forKey: key), let paper = paper(key) else { return }
         let names = Set(pictures.map(\.name))
         for name in names { pendingPictures[paper.noteID]?[name] = nil }
+        let noteID = paper.noteID
+        NoteJournal.queue.async { NoteJournal.picturesSaved(noteID: noteID, names: names) }
         change(key) { file in
             file.body = NoteBlock.blocks(file.body).filter { block in
                 if case .image(let path, _) = block { return !names.contains((path as NSString).lastPathComponent) }
@@ -867,8 +900,26 @@ final class NoteStore {
     }
 
     /// Every session's work, as a drain sees it.
+    /// Pictures set aside on a paper (Try again) are tried once more.
     private func drainJobs() -> [(session: Int, items: [NoteSession.Item])] {
-        sessions.values.filter { !$0.pending.isEmpty }.map { ($0.id, $0.pending) }
+        sessions.values.compactMap { session in
+            var items = session.pending
+            if let trouble = pictureTrouble[session.key], !trouble.isEmpty, let paper = paper(session.key) {
+                nextID += 1
+                items.append(NoteSession.Item(id: nextID, work: .pictureBytes(trouble, noteID: paper.noteID), done: []))
+            }
+            return items.isEmpty ? nil : (session.id, items)
+        }
+    }
+
+    /// Picture bytes not in their folders yet, by session: a snapshot whose text lands keeps them until they are.
+    private func drainUnsaved() -> [Int: Set<String>] {
+        var unsaved: [Int: Set<String>] = [:]
+        for session in sessions.values {
+            guard let paper = paper(session.key), let pending = pendingPictures[paper.noteID], !pending.isEmpty else { continue }
+            unsaved[session.id] = Set(pending.keys)
+        }
+        return unsaved
     }
 
     /// Petal quits: every session's work is done on the file queue, in order, after whatever is under way there;
@@ -876,9 +927,10 @@ final class NoteStore {
     /// thread) once it's finished.
     func drain(then done: @escaping @Sendable () -> Void) {
         let jobs = drainJobs()
+        let unsaved = drainUnsaved()
         let root = self.root
         Self.io.async {
-            Self.drain(jobs, root: root)
+            Self.drain(jobs, unsaved: unsaved, root: root)
             done()
         }
     }
@@ -888,11 +940,18 @@ final class NoteStore {
     /// taken as it was. Pictures whose bytes are in get their references, at the end of the note, in one based write
     /// after the rest; bytes that can't be written, and writing that fails once more, go to "Unsaved notes". Only on
     /// `io`.
-    nonisolated static func drain(_ jobs: [(session: Int, items: [NoteSession.Item])], root: URL) {
+    ///
+    /// The journal hears of it only once every piece is done, so a text that landed while a picture it references
+    /// didn't (`unsaved`, from memory, and any picture that fails here) keeps its snapshot, with those pictures' bytes,
+    /// for the next launch's recovery (`NoteShelf.journalClears`).
+    nonisolated static func drain(_ jobs: [(session: Int, items: [NoteSession.Item])], unsaved: [Int: Set<String>] = [:], root: URL) {
         for job in jobs {
             let noteID = NoteDisk.states[job.session]?.noteID ?? ""
             // The bytes of pictures this session was writing: a rescued text keeps the ones it references.
             let pictures = job.items.flatMap { item -> [NotePictureBytes] in if case .pictureBytes(let p, _) = item.work { p } else { [] } }
+            var stillUnsaved = unsaved[job.session] ?? []
+            var saved = Set<String>()
+            var landed: [(text: String, aside: Bool)] = []
             for item in job.items {
                 var result = NoteDisk.results[item.id]
                 if result == nil || result?.outcome == .failed { result = perform(item.work, session: job.session, root: root, live: item.live) }
@@ -900,17 +959,27 @@ final class NoteStore {
                 guard let result else { continue }
                 switch (item.work, result.outcome) {
                 case (.write(let text, _), .written), (.write(let text, _), .keptBoth), (.create(let text, _, _, _), .written):
-                    NoteJournal.queue.async { NoteJournal.landed(noteID: noteID, text: text) }
+                    landed.append((text, false))
                 case (.keepAside(let text), .keptBoth):
-                    NoteJournal.queue.async { NoteJournal.landed(noteID: noteID, text: text, aside: true) }
+                    landed.append((text, true))
+                case (.pictureBytes(let written, _), .written):
+                    for picture in written { stillUnsaved.remove(picture.name); saved.insert(picture.name) }
+                case (.pictureBytes(let failed, _), _):
+                    for picture in failed { stillUnsaved.insert(picture.name) }
                 case (_, .failed) where item.work.keeps:
                     // Still can't land: "Unsaved notes", with the pictures it references (the journal keeps it too).
                     if let text = item.work.text {
                         let referenced = pictures.filter { text.contains($0.name) }
-                        if rescue(text, noteID: noteID, pictures: referenced) { NoteJournal.queue.async { NoteJournal.landed(noteID: noteID, text: text) } }
+                        if rescue(text, noteID: noteID, pictures: referenced) { landed.append((text, false)) }
                     }
                 default: break
                 }
+            }
+            let unsavedNow = stillUnsaved.subtracting(saved)
+            let texts = landed, written = saved
+            NoteJournal.queue.async {
+                for (text, aside) in texts { NoteJournal.landed(noteID: noteID, text: text, aside: aside, unsaved: unsavedNow) }
+                if !written.isEmpty { NoteJournal.picturesSaved(noteID: noteID, names: written) }
             }
         }
     }
@@ -1048,13 +1117,14 @@ final class NoteStore {
         let paper = PaperNote(file: file, url: folder.appending(path: NoteShelf.freeName(stem, taken: taken)), notebook: name, revision: text)
         let provisional = paper.url.path.lowercased()
         reserved.insert(provisional)
+        NoteReservations.add(provisional)
         if live == nil {
             notes.insert(paper, at: 0)
             touch(paper.key)
         }
         let session = makeSession(key: paper.key, url: paper.url, noteID: paper.noteID, revision: nil)
+        session.reservation = provisional
         enqueue(session, .create(text: text, stem: stem, folder: folder), live: live) { outcome in
-            self.reserved.remove(provisional)
             // A tool's note shows once its file is made; cancelled, nothing of it is left.
             if live != nil, outcome == .written, self.paper(session.key) == nil {
                 var made = paper
@@ -1093,7 +1163,7 @@ final class NoteStore {
         notebooks.append(Notebook(name: folderName, folder: folder, color: color, cover: paper.key, count: 0))
         if self.paper(paper.key) == nil { notes.append(paper) }
         touch(paper.key)
-        let session = sessions[paper.key] ?? makeSession(key: paper.key, url: url, noteID: cover.id, revision: nil)
+        let session = sessionAt(paper.key) ?? makeSession(key: paper.key, url: url, noteID: cover.id, revision: nil)
         enqueue(session, .create(text: cover.serialized(), stem: "About this notebook", folder: folder, exact: url)) { _ in self.reload() }
         return folderName
     }
@@ -1126,7 +1196,7 @@ final class NoteStore {
     }
 
     /// Pictures accepted for the note and not in it yet: it isn't empty.
-    func picturesPending(_ key: String) -> Bool { sessions[key]?.picturesPending ?? false }
+    func picturesPending(_ key: String) -> Bool { sessionAt(key)?.picturesPending ?? false }
 
     /// A note made and put away empty goes to the Trash (never deleted outright), after its own work, and only while
     /// its file still says what Petal last saw there; never one with pictures on the way.
@@ -1148,7 +1218,7 @@ final class NoteStore {
         let plan = NoteKeep(snapshot: snapshot, kept: kept.url, keptText: kept.version == nil ? nil : kept.file.serialized(),
                             files: Array(Set(shown.map(\.url))))
         let key = kept.url.path
-        let session = sessions[key] ?? makeSession(key: key, url: kept.url, noteID: kept.noteID, revision: kept.revision)
+        let session = sessionAt(key) ?? makeSession(key: key, url: kept.url, noteID: kept.noteID, revision: kept.revision)
         enqueue(session, .keep(plan), done: nil)
     }
 
@@ -1168,7 +1238,7 @@ final class NoteStore {
         let url = folder.appending(path: NoteShelf.coverName)
         let paper = PaperNote(file: cover, url: url, notebook: notebook, revision: cover.serialized())
         if self.paper(paper.key) == nil { notes.append(paper) }
-        let session = sessions[paper.key] ?? makeSession(key: paper.key, url: url, noteID: cover.id, revision: nil)
+        let session = sessionAt(paper.key) ?? makeSession(key: paper.key, url: url, noteID: cover.id, revision: nil)
         enqueue(session, .create(text: cover.serialized(), stem: "About this notebook", folder: folder, exact: url)) { _ in self.reload() }
     }
 
@@ -1214,6 +1284,24 @@ struct NoteLocal: Codable, Equatable {
         NoteStore.io.async {
             try? FileManager.default.createDirectory(at: Config.supportFolder, withIntermediateDirectories: true)
             try? data.write(to: Self.file, options: .atomic)
+        }
+    }
+}
+
+/// Provisional paths (lowercased) of notes being made, shared between the main thread (which reserves one when a
+/// note is shown) and the file queue (where its file's name is picked): a name picked on disk never takes another
+/// note's reservation.
+enum NoteReservations {
+    nonisolated(unsafe) private static var paths: Set<String> = []
+    nonisolated private static let lock = NSLock()
+
+    nonisolated static func add(_ path: String) { lock.withLock { _ = paths.insert(path) } }
+    nonisolated static func remove(_ path: String) { lock.withLock { _ = paths.remove(path) } }
+
+    /// The file names reserved in `folder` (lowercased), but `own`.
+    nonisolated static func names(in folder: String, except own: String?) -> Set<String> {
+        lock.withLock {
+            Set(paths.filter { $0 != own && ($0 as NSString).deletingLastPathComponent == folder }.map { ($0 as NSString).lastPathComponent })
         }
     }
 }

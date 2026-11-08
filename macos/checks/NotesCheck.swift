@@ -124,6 +124,25 @@ struct NotesCheck {
         expect(NoteShelf.journalTarget(found: ["/n/Work/Renamed.md"]) == .note("/n/Work/Renamed.md"), "found by its id after a rename: that note")
         expect(NoteShelf.journalTarget(found: []) == .separate, "its id gone (another note at its old path): a file of its own, never that note")
         expect(NoteShelf.journalTarget(found: ["/n/a.md", "/n/a 2.md"]) == .separate, "two papers of it: a file of its own")
+
+        // A snapshot whose text landed goes only once every picture it references is saved.
+        expect(NoteShelf.journalClears(snapshot: "t", landed: "t", referenced: ["p.png"], unsaved: []), "text landed, its picture saved: the snapshot goes")
+        expect(!NoteShelf.journalClears(snapshot: "t", landed: "t", referenced: ["p.png"], unsaved: ["p.png"]),
+               "text landed, its picture failed: the snapshot stays, with the picture's bytes")
+        expect(NoteShelf.journalClears(snapshot: "t", landed: "t", referenced: ["p.png"], unsaved: ["other.png"]), "a failed picture it doesn't reference keeps nothing")
+        expect(!NoteShelf.journalClears(snapshot: "t2", landed: "t", referenced: [], unsaved: []), "a newer snapshot stays")
+
+        // The Desktop only when the app said it has no window in front; a window Petal couldn't read is no place.
+        expect(NoteShelf.frontOffer(window: 7, none: false) == .window, "a window read: its places")
+        expect(NoteShelf.frontOffer(window: nil, none: true) == .desktop, "no window, said so: the Desktop")
+        expect(NoteShelf.frontOffer(window: nil, none: false) == .unknown, "a window that couldn't be read: no note, never the Desktop")
+
+        // A session's key follows its file, never onto a name another session holds.
+        let made = NoteShelf.rekey(["/n/Foo.md": 1, "/n/Foo 2.md": 2], session: 1, from: "/n/Foo.md", to: "/n/Foo 3.md")
+        expect(made == ["/n/Foo 2.md": 2, "/n/Foo 3.md": 1], "a new note landing under another name: its key moves, the other's stays", "\(String(describing: made))")
+        expect(NoteShelf.rekey(["/n/Foo.md": 1, "/n/Foo 2.md": 2], session: 1, from: "/n/Foo.md", to: "/n/Foo 2.md") == nil,
+               "the disk's name is another note's: refused, both keep their own")
+        expect(NoteShelf.rekey(["/n/Foo.md": 1], session: 1, from: "/n/Foo.md", to: "/n/Foo.md") == ["/n/Foo.md": 1], "the same name: unchanged")
         expect(NoteShelf.journalPictures(text: "see ![](x.assets/picture-a.png)", pending: ["picture-a.png", "picture-b.png"]) == ["picture-a.png"],
                "a snapshot carries the bytes its text references")
         expect(NoteShelf.journalPictures(text: "undone", pending: ["picture-a.png"]).isEmpty, "a paste undone: its bytes leave with it")

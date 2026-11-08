@@ -102,6 +102,7 @@ struct NoteStoreCheck {
         journal(root: root)
         toolCancelled(root: root)
         concurrentMakes(root: root)
+        renamedMakes(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
     }
@@ -198,6 +199,16 @@ struct NoteStoreCheck {
             NoteJournal.snapshot(NoteJournal.Entry(noteID: id, path: path.path, base: base, text: text, pictures: pictures), in: journal)
         }
 
+        // A text that landed while a picture it references failed: the snapshot stays with that picture's bytes,
+        // and goes once the picture is saved.
+        let pic = NoteJournal.Picture(name: "picture-f.png", data: Data("f".utf8))
+        snap("JP", notes.appending(path: "Pic.md"), nil, "words ![](x/picture-f.png)", [pic])
+        NoteJournal.landed(noteID: "JP", text: "words ![](x/picture-f.png)", unsaved: ["picture-f.png"], in: journal)
+        let kept = NoteJournal.read(NoteJournal.file("JP", in: journal))
+        expect(kept?.landed == true && kept?.pictures == [pic], "text landed, picture failed: the snapshot keeps the picture")
+        NoteJournal.picturesSaved(noteID: "JP", names: ["picture-f.png"], in: journal)
+        expect(!fm.fileExists(atPath: NoteJournal.file("JP", in: journal).path), "the picture saved: the snapshot goes")
+
         // An accepted edit (with a picture its text references), then the notes' queue hangs: its write never happens.
         let hung = notes.appending(path: "Hung.md")
         let hungBase = NoteFile(id: "J1", body: "before").serialized()
@@ -264,6 +275,34 @@ struct NoteStoreCheck {
     }
 
     /// Two notes of one title made at once by tools: each its own file and its own answer.
+    /// A new note whose name is taken on disk lands under another; it never takes the name another note being made
+    /// was shown with, so each keeps its own session and answer.
+    @MainActor static func renamedMakes(root: URL) {
+        let folder = root.appending(path: "Renamed")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try? Data("someone else's".utf8).write(to: folder.appending(path: "Renamed.md"))
+        let store = NoteStore(root: root)
+        store.preview([], notebooks: [Notebook(name: "Renamed", folder: folder, color: "", cover: nil, count: 0)])
+        var answers: [(name: String, id: String)] = []
+        var ids: [String] = []
+        for _ in 0..<2 {
+            let file = NoteFile(body: "# Renamed")
+            ids.append(file.id)
+            _ = store.make(file, in: "Renamed", live: { true }) { made in answers.append((made?.url.lastPathComponent ?? "none", made?.noteID ?? "")) }
+        }
+        let until = Date().addingTimeInterval(5)
+        while answers.count < 2 && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        expect(Set(answers.map(\.name)) == ["Renamed 2.md", "Renamed 3.md"] && Set(answers.map(\.id)) == Set(ids),
+               "a name taken on disk: each note lands on its own name, with its own answer", "\(answers)")
+        expect(NoteReservations.names(in: folder.path.lowercased(), except: nil).isEmpty, "and their names are free again")
+
+        // A conflict copy for an asker who went: nothing is made.
+        let original = folder.appending(path: "Renamed.md")
+        let before = (try? FileManager.default.contentsOfDirectory(atPath: folder.path))?.count
+        expect(NoteStore.keepBeside("late", original: original, root: root, live: { false }) == .cancelled
+               && (try? FileManager.default.contentsOfDirectory(atPath: folder.path))?.count == before, "a copy for a request that ended: none")
+    }
+
     @MainActor static func concurrentMakes(root: URL) {
         let store = NoteStore(root: root)
         store.preview([], notebooks: [Notebook(name: "Same", folder: root.appending(path: "Same"), color: "", cover: nil, count: 0)])

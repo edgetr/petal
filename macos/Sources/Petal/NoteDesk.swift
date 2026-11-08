@@ -892,6 +892,8 @@ final class NoteDesk {
             local.spots[paper.noteID] = NoteSpot.stick(panel: rect, window: NoteRules.appKitFrame(frame, primaryHeight: primaryHeight))
         }
         local.save()
+        // A note dragged off its window's side (or onto the Desktop) no longer needs the room it was given.
+        reconcileRoom()
     }
 
     // MARK: What the paper says
@@ -933,7 +935,8 @@ final class NoteDesk {
     // MARK: Making notes
 
     /// The places what's in front offers, most specific first: the passage selected, the tab, the file, the window,
-    /// all of the app; with no window, the Desktop.
+    /// all of the app; the Desktop only when the app said it has no window in front (`FrontRead.none`). A window
+    /// Petal couldn't read offers nothing (`NoteShelf.frontOffer`): never a Desktop note by mistake.
     func places(for scene: NoteScene, read: ClaudePanel.FrontRead, appName: String, passage: (quote: String, before: String, after: String)? = nil) -> [NoteStick] {
         var offers: [NoteStick] = []
         func stick(_ kind: NoteStick.Kind) -> NoteStick {
@@ -947,7 +950,10 @@ final class NoteDesk {
             s.mode = app.docks.focusedDock?.mode?.id ?? ""
             return s
         }
-        guard scene.window != nil else {
+        switch NoteShelf.frontOffer(window: scene.window, none: read.none) {
+        case .window: break
+        case .unknown: return []
+        case .desktop:
             var desk = NoteStick(kind: .desktop)
             desk.desktop = scene.desktop ?? app.docks.focusedDock?.desktop
             desk.mode = app.docks.focusedDock?.mode?.id ?? ""
@@ -1049,17 +1055,25 @@ final class NoteDesk {
                 let passage: (quote: String, before: String, after: String)?
                 switch selected {
                 case .refused: return self.say("Petal doesn't keep that selection in a note.")
+                case .changed: return self.say(Self.frontChanged)
                 case .none: passage = nil
                 case .text(let quote, let before, let after): passage = (quote, before, after)
                 }
-                if let first = self.places(for: scene, read: read, appName: name, passage: passage).first { self.make(on: first) }
+                // Filtered again as it's used: an app made private since the read gives nothing of itself.
+                let (scene, read) = Self.filtered(scene, read, since: privacy)
+                guard let first = self.places(for: scene, read: read, appName: name, passage: passage).first else { return self.say(Self.unknownFront) }
+                self.make(on: first)
             }
         }
     }
 
     /// The selection in `scene`'s app, as one read: refused when petal_look's rule says no (Assist.selectionInSecret),
     /// when its window, tab or the private apps changed between the scene and the selection, or when the app is
-    /// private now; nothing selected: `.none`. Off the main thread, answered on it.
+    /// private now; the window, tab or private apps changed since the scene (whatever was selected): `.changed`;
+    /// nothing selected: `.none`. Off the main thread, answered on it.
+    static let unknownFront = "Petal couldn't tell where you are, so no note was made."
+    static let frontChanged = "What's in front changed while Petal looked, so no note was made."
+
     func passage(in scene: NoteScene, privacy: Int, _ done: @escaping @MainActor (Selected) -> Void) {
         let pid = scene.pid, bundle = scene.app
         Self.queue.async {
@@ -1072,9 +1086,11 @@ final class NoteDesk {
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    let quiet = !ClaudePanel.privacy.current(privacy) || self.app.assist.neverLook(bundle)
+                    // Whatever was or wasn't selected: a window or tab that changed, or private apps that changed,
+                    // since the scene was read makes the read stale. An app kept private all along gives no text.
+                    guard same, ClaudePanel.privacy.current(privacy) else { return done(.changed) }
                     switch read.result {
-                    case .text where !same || quiet: done(.refused)
+                    case .text where self.app.assist.neverLook(bundle): done(.refused)
                     default: done(read.result)
                     }
                 }
@@ -1168,7 +1184,7 @@ final class NoteDesk {
     }
 
     /// The selected text in the app `pid` and a little of the text around it, when the app says. Off the main thread.
-    enum Selected { case none, refused, text(String, String, String) }
+    enum Selected { case none, refused, changed, text(String, String, String) }
 
     /// The selected text in the app `pid` and a little of the text around it, when the app says, with the window it
     /// was read in: refused when petal_look's rule says no (Assist.selectionInSecret). Off the main thread.
@@ -1236,7 +1252,7 @@ final class NoteDesk {
         // Read before the conversation: filtered again now, so an app made private since gives nothing of itself.
         let (scene, read) = Self.filtered(captured.scene, captured.read, since: captured.privacy)
         let offers = places(for: scene, read: read, appName: captured.name)
-        guard let place = offers.first(where: { $0.kind != .passage }) else { return }
+        guard let place = offers.first(where: { $0.kind != .passage }) else { return say(Self.unknownFront) }
         apply(scene, read: read)
         if let paper = make(on: place, body: lines.joined(separator: "\n"), chat: chat.uuidString) { fresh.remove(paper.key) }
     }

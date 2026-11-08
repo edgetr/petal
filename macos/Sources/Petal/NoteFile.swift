@@ -799,6 +799,34 @@ enum NoteShelf {
         pending.filter { text.contains($0) }.sorted()
     }
 
+    /// Whether a text landing clears its note's journal snapshot: only the snapshot holding exactly that text, and
+    /// only once every picture it references is saved (`unsaved`: pictures whose bytes aren't in the note's folder
+    /// yet, a failed one too). Else it stays, holding those pictures' bytes, for Try again and for quit's recovery.
+    static func journalClears(snapshot: String, landed: String, referenced: [String], unsaved: Set<String>) -> Bool {
+        snapshot == landed && !referenced.contains { unsaved.contains($0) }
+    }
+
+    /// What a new note may stick to when nothing sticks it to a window: the Desktop only when the app said plainly it
+    /// has no window in front (`none`, as Finder on the desktop); a window Petal couldn't read (no Accessibility, an
+    /// app that doesn't answer) is unknown, and makes no note at all.
+    enum FrontOffer: Equatable { case window, desktop, unknown }
+
+    static func frontOffer(window: UInt32?, none: Bool) -> FrontOffer {
+        if window != nil { return .window }
+        return none ? .desktop : .unknown
+    }
+
+    /// Which session a note's key leads to, as a session's file moves (a new note's name on disk, a move): the old
+    /// key goes (only if it was this session's), and the new one is this session's unless another session holds it
+    /// already (nil: never take another's).
+    static func rekey(_ index: [String: Int], session: Int, from: String, to: String) -> [String: Int]? {
+        if let holder = index[to], holder != session { return nil }
+        var next = index
+        if next[from] == session { next[from] = nil }
+        next[to] = session
+        return next
+    }
+
     /// The journal folders a launch recovers: every "recovering" one a launch before left (resumed, entry by entry),
     /// oldest first.
     static func journalFolders(_ names: [String]) -> [String] {

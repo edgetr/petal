@@ -85,7 +85,7 @@ extension NoteDesk {
             }
             let also = args["also"] as? Bool ?? false
             stickHere(kind: args["to"] as? String, live: live) { place in
-                guard let place else { return fail("Nothing in front Petal can stick it to.") }
+                guard let place else { return fail("Petal couldn't tell what's in front (or it changed while Petal looked): nothing was stuck.") }
                 self.persist(paper.key, live: live, send, fail, touch: false, edit: { file in
                     file.places = also ? file.places.filter { !$0.samePlace(place) } + [place] : [place]
                 }) { saved in
@@ -165,7 +165,7 @@ extension NoteDesk {
             self.passage(in: scene, privacy: privacy) { selected in
                 switch selected {
                 case .text(let quote, let before, let after): finish((quote, before, after))
-                case .refused where wanted == .passage: done(nil)
+                case .refused where wanted == .passage, .changed: done(nil)
                 default: finish(nil)
                 }
             }
