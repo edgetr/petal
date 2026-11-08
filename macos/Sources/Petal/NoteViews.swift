@@ -46,6 +46,8 @@ struct PaperView: View {
     var conflict = false
     /// Its last write failed: kept here, tried again, and said on the paper.
     var unsaved = false
+    /// Pictures whose bytes couldn't be saved: said on the paper, with Try again and Remove.
+    var pictureTrouble = 0
 
     @Environment(\.snapshotting) private var snapshotting
 
@@ -139,6 +141,17 @@ struct PaperView: View {
     }
 
     @ViewBuilder private var openBody: some View {
+        if pictureTrouble > 0, let desk {
+            HStack(spacing: 10) {
+                Text(pictureTrouble == 1 ? "Picture couldn't be saved" : "\(pictureTrouble) pictures couldn't be saved")
+                    .font(.system(size: 11)).foregroundStyle(Color(red: 0.7, green: 0.15, blue: 0.12))
+                Spacer()
+                Button("Try again") { desk.store.retryPictures(paper.key) }.buttonStyle(.plain).font(.system(size: 11, weight: .semibold))
+                Button("Remove") { desk.store.dropPictures(paper.key) }.buttonStyle(.plain).font(.system(size: 11))
+            }
+            .foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
+            .padding(.bottom, 6)
+        }
         if unsaved {
             Text("Not saved yet: Petal keeps it here and tries again.").font(.system(size: 11)).foregroundStyle(Color(red: 0.7, green: 0.15, blue: 0.12))
                 .padding(.bottom, 6)

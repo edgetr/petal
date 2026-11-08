@@ -30,9 +30,13 @@ swiftc -parse-as-library -O -o "$out/papernotes" Sources/Petal/NoteFile.swift So
 swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteEditor.swift checks/NoteRichCheck.swift
 "$out/noterich"
 # Petal Notes' files on throwaway folders in the temporary folder: saves that keep both, names from the disk, no
-# writes through symbolic links, two notebooks' Todo.md, a renamed file's bookmark (never the Trash).
-swiftc -parse-as-library -O -o "$out/notestore" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/PaperNotes.swift checks/NoteStoreCheck.swift
+# writes through symbolic links, two notebooks' Todo.md, a renamed file's bookmark, the journal's launch recovery
+# after a hang, and a cancelled tool write leaving nothing (never the Trash).
+swiftc -parse-as-library -O -o "$out/notestore" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/PaperNotes.swift Sources/Petal/NoteJournal.swift checks/NoteStoreCheck.swift
 "$out/notestore"
+# A passage for Petal AI follows petal_look's rule for selected text (UIMap.selectionHidden).
+swiftc -parse-as-library -O -o "$out/noteselection" Sources/Petal/UIMap.swift checks/NoteSelectionCheck.swift
+"$out/noteselection"
 swiftc -parse-as-library -O -o "$out/background" Sources/Petal/Background.swift Sources/Petal/UIMap.swift checks/BackgroundCheck.swift
 "$out/background"
 swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Petal/UIMap.swift checks/VaultCheck.swift

@@ -116,6 +116,18 @@ struct NotesCheck {
         expect(NoteShelf.save(disk: "R0", text: "T2", base: "T1") == .keepBoth, "made on a text that never landed (a write that failed): a copy, never over")
         expect(NoteShelf.save(disk: "R2", text: "T2", base: "R1") == .keepBoth, "made on an older one: a copy")
 
+        // The journal, at launch: what a Petal before accepted and never saw land.
+        expect(NoteShelf.journalRecovery(disk: "T", base: "B", text: "T", aside: false) == .nothing, "landed after all: nothing")
+        expect(NoteShelf.journalRecovery(disk: "B", base: "B", text: "T", aside: false) == .write, "the file as the edit began: written")
+        expect(NoteShelf.journalRecovery(disk: nil, base: nil, text: "T", aside: false) == .write, "a new note never made: made")
+        expect(NoteShelf.journalRecovery(disk: "C", base: "B", text: "T", aside: false) == .copy, "changed elsewhere since: a copy beside it, never over")
+        expect(NoteShelf.journalRecovery(disk: "B", base: "B", text: "T", aside: true) == .copy, "an edit kept aside: always a copy")
+        let withPicture = NoteShelf.journalText(text: nil, disk: NoteFile(id: "J", body: "words").serialized(), noteID: "J", pictures: [("picture-1.png", "")])
+        expect(withPicture?.contains(NoteShelf.assetsFolder(id: "J") + "/picture-1.png") == true && withPicture?.contains("words") == true,
+               "a picture accepted with no edit after it: the file's text with its reference")
+        expect(NoteShelf.journalText(text: "has picture-1.png", disk: nil, noteID: "J", pictures: [("picture-1.png", "")]) == "has picture-1.png",
+               "a reference already there isn't added twice")
+
         // Pictures: bytes first, then their reference, as ordinary text.
         expect(NoteShelf.pictureReference(bytesWritten: true, editorOpen: true, quitting: false) == .editor, "bytes in, editor open: into the editor")
         expect(NoteShelf.pictureReference(bytesWritten: true, editorOpen: false, quitting: false) == .write,

@@ -26,6 +26,8 @@ final class NoteDesk {
     @ObservationIgnored private var panels: [String: NotePanel] = [:]
     @ObservationIgnored private var tabPanels: [String: EdgeTabPanel] = [:]
     @ObservationIgnored private(set) var scene: NoteScene?
+    /// The private apps' generation the cached scene was filtered against: every reuse filters it again.
+    @ObservationIgnored private var scenePrivacy = 0
     /// The front window's frame (Accessibility's: top-left origin) and its read.
     @ObservationIgnored private(set) var frame: CGRect?
     @ObservationIgnored private var front: ClaudePanel.FrontRead?
@@ -61,7 +63,14 @@ final class NoteDesk {
     // MARK: Starting
 
     func start() {
-        store.switchRoot(to: NoteStore.rootFolder(setting: app.config.string("notesFolder")))
+        // Writing a Petal before this one accepted and never saw land: put back first (NoteJournal.recover), from the
+        // journal's own queue to the notes' queue.
+        let root = NoteStore.rootFolder(setting: app.config.string("notesFolder"))
+        NoteJournal.queue.async {
+            guard let holding = NoteJournal.takeLeftovers() else { return }
+            NoteStore.io.async { NoteJournal.recover(holding, root: root) }
+        }
+        store.switchRoot(to: root)
         store.onChange = { [weak self] in self?.refresh() }
         store.onPictures = { [weak self] key, pictures, at in self?.insertPictures(key, pictures, at: at) ?? false }
         store.onRekey = { [weak self] old, paper in self?.rekey(old, to: paper) }
@@ -98,7 +107,7 @@ final class NoteDesk {
         case .moved, .resized: lookAgain(after: 0.03)
         case .activated, .focused, .closed, .titleChanged, .tabSwitched, .created, .minimized, .unminimized, .shown, .hidden, .quit: lookAgain(after: 0.12)
         case .space, .screens: lookAgain(after: 0.2); placeDesktop()
-        case .missionControl: for panel in Array(panels.values) + tabPanels.values.map({ $0 as NSPanel }) { panel.orderOut(nil) }
+        case .missionControl: for panel in Array(panels.values) + tabPanels.values.map({ $0 as NSPanel }) { panel.conceal() }
         case .missionControlEnded: lookAgain(after: 0.1)
         default: break
         }
@@ -112,9 +121,9 @@ final class NoteDesk {
     }
 
     private func hideAll() {
-        for panel in panels.values { panel.orderOut(nil) }
-        for panel in tabPanels.values { panel.orderOut(nil) }
-        for panel in pinPanels.values { panel.orderOut(nil) }
+        for panel in panels.values { panel.conceal() }
+        for panel in tabPanels.values { panel.conceal() }
+        for panel in pinPanels.values { panel.conceal() }
     }
 
     /// Petal is about to quit (`applicationShouldTerminate`, which answers later): what's typed is handed to each
@@ -125,13 +134,27 @@ final class NoteDesk {
         quitWaiters.append(done)
         guard !quitting else { return }
         quitting = true
+        // Nothing new from here: no window events, no reads under way counted, no narrowing.
+        if listening {
+            listening = false
+            WindowEvents.shared.stopListening("papernotes")
+        }
+        lookSoon?.cancel()
+        looks += 1
+        Self.roomTurn.cancel()
         for editor in editors.values { editor.flush() }
+        // The journal holds every accepted edit and paste: once its queue is done, nothing is lost, whatever the
+        // notes' folder (iCloud) does in the time it's given.
+        let journal = DispatchGroup()
+        journal.enter()
+        NoteJournal.queue.async { journal.leave() }
         let group = DispatchGroup()
         group.enter()
         store.drain { group.leave() }
         group.enter()
         giveBackAll { group.leave() }
         DispatchQueue.global(qos: .userInitiated).async {
+            journal.wait()
             _ = group.wait(timeout: .now() + 10)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -158,9 +181,9 @@ final class NoteDesk {
     private func switchFolder(to root: URL) {
         for editor in editors.values { editor.flush() }
         editors = [:]
-        for panel in panels.values { panel.orderOut(nil) }
-        for panel in tabPanels.values { panel.orderOut(nil) }
-        for panel in pinPanels.values { panel.orderOut(nil) }
+        for panel in panels.values { panel.conceal() }
+        for panel in tabPanels.values { panel.conceal() }
+        for panel in pinPanels.values { panel.conceal() }
         panels = [:]
         tabPanels = [:]
         pinPanels = [:]
@@ -182,7 +205,7 @@ final class NoteDesk {
 
     /// Reads the window in front (its browser tab, the file it shows), off the main thread, and shows its notes.
     func look() {
-        guard on, !Headless.on else { return }
+        guard on, !quitting, !Headless.on else { return }
         let me = ProcessInfo.processInfo.processIdentifier
         guard let running = NSWorkspace.shared.frontmostApplication else { return }
         // Petal's own windows (the settings, a page) leave the notes where they are.
@@ -260,7 +283,9 @@ final class NoteDesk {
     /// `scan`: look for the passages again (not when only the files changed: the person typing in a note).
     private func apply(_ scene: NoteScene, read: ClaudePanel.FrontRead, scan: Bool = true) {
         let moved = self.scene?.window != scene.window || self.scene?.pid != scene.pid
+        let (scene, read) = Self.filtered(scene, read, since: ClaudePanel.privacy.now)
         self.scene = scene
+        scenePrivacy = ClaudePanel.privacy.now
         front = read
         frame = read.frame
         var fits: [String: Int] = [:]
@@ -463,9 +488,9 @@ final class NoteDesk {
     func layout() {
         defer { reconcileRoom() }
         guard on, let frame, let scene, scene.window != nil else {
-            for panel in tabPanels.values { panel.orderOut(nil) }
-            for panel in pinPanels.values { panel.orderOut(nil) }
-            for (key, panel) in panels where !isDesktop(key) { panel.orderOut(nil) }
+            for panel in tabPanels.values { panel.conceal() }
+            for panel in pinPanels.values { panel.conceal() }
+            for (key, panel) in panels where !isDesktop(key) { panel.conceal() }
             return
         }
         let now = Date()
@@ -486,7 +511,7 @@ final class NoteDesk {
             panel.show(tab, outside: outside, window: frame, primaryHeight: primaryHeight)
         }
         for (key, panel) in tabPanels where !keep.contains(key) {
-            panel.orderOut(nil)
+            panel.conceal()
             tabPanels[key] = nil
         }
         // The notes showing on this window, stacked down its right side where nobody moved them.
@@ -509,7 +534,7 @@ final class NoteDesk {
             }
             panel.place(paperFrame: rect)
         }
-        for (key, panel) in panels where !isDesktop(key) && !showing.contains(key) { panel.orderOut(nil) }
+        for (key, panel) in panels where !isDesktop(key) && !showing.contains(key) { panel.conceal() }
         drawPins(showing)
     }
 
@@ -518,7 +543,7 @@ final class NoteDesk {
     private func drawPins(_ showing: [String]) {
         var keep: Set<String> = []
         for key in showing {
-            guard let rect = passageRects[key], let paper = store.paper(key), let note = panels[key], note.isVisible else { continue }
+            guard let rect = passageRects[key], let paper = store.paper(key), let note = panels[key], note.unveiled else { continue }
             keep.insert(key)
             let words = NoteRules.appKitFrame(rect, primaryHeight: primaryHeight)
             let paperFrame = note.frame.insetBy(dx: PaperLook.margin, dy: PaperLook.margin)
@@ -528,7 +553,7 @@ final class NoteDesk {
                      color: store.color(of: paper.notebook))
         }
         for (key, pin) in pinPanels where !keep.contains(key) {
-            pin.orderOut(nil)
+            pin.conceal()
             pinPanels[key] = nil
         }
     }
@@ -571,7 +596,7 @@ final class NoteDesk {
         }
         for (key, panel) in panels where panel.desktop && !showing.contains(key) {
             panel.desktop = false
-            panel.orderOut(nil)
+            panel.conceal()
         }
     }
 
@@ -613,7 +638,7 @@ final class NoteDesk {
         editors[key]?.flush()
         faces[key] = nil
         if keyboard == key { keyboard = nil }
-        panels[key]?.orderOut(nil)
+        panels[key]?.conceal()
         if let paper = store.paper(key) {
             local.shown.removeAll { $0 == paper.noteID }
             local.save()
@@ -647,7 +672,7 @@ final class NoteDesk {
         else { return }
         fresh.remove(key)
         faces[key] = nil
-        panels[key]?.orderOut(nil)
+        panels[key]?.conceal()
         panels[key] = nil
         _ = paper
         store.trash(key)
@@ -702,7 +727,7 @@ final class NoteDesk {
     /// nobody moved it) has no room, and every other narrowed window gets its width back.
     private func reconcileRoom() {
         var wanted: (number: CGWindowID, pid: pid_t, frame: CGRect, target: CGRect?)?
-        if on, let frame, let scene, let number = scene.window,
+        if on, !quitting, let frame, let scene, let number = scene.window,
            here.keys.contains(where: { faces[$0] == .open && local.spots[store.paper($0)?.noteID ?? ""] == nil }) {
             let target = visible(for: frame).flatMap { NoteRoom.narrowed(window: frame, visible: $0, note: PaperLook.openWidth) }
             wanted = (number, scene.pid, frame, target)
@@ -1111,7 +1136,10 @@ final class NoteDesk {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
         guard let focused: AXUIElement = Windows.value(app, kAXFocusedUIElementAttribute) else { return nil }
-        if (Windows.value(focused, kAXSubroleAttribute) as String?) == kAXSecureTextFieldSubrole as String { return nil }
+        // petal_look's rule exactly (Assist.selectionInSecret): nothing from a field holding, named for, or filled
+        // with a secret, nor any text holding a vault secret.
+        let window: CGWindowID? = (Windows.value(app, kAXFocusedWindowAttribute) as AXUIElement?).flatMap { Windows.id(of: $0) }
+        if Assist.selectionInSecret(focused, pid: pid, window: window) { return nil }
         guard let text: String = Windows.value(focused, kAXSelectedTextAttribute) else { return nil }
         let quote = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard quote.count >= 2 else { return nil }
@@ -1192,7 +1220,9 @@ final class NoteDesk {
             }
             menu.addItem(item)
         }
-        if let scene, let front, scene.window != nil {
+        if let cached = scene, let cachedRead = front, cached.window != nil {
+            // Cached from the last look: filtered again, an app made private since gives nothing of itself.
+            let (scene, front) = Self.filtered(cached, cachedRead, since: scenePrivacy)
             let name = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
             let offers = places(for: scene, read: front, appName: name).filter { offer in !paper.file.places.contains { $0.samePlace(offer) } }
             if !offers.isEmpty {
@@ -1313,11 +1343,14 @@ final class NoteDesk {
         // Notes shown on this Mac before it last quit show again.
         for paper in store.notes where local.shown.contains(paper.noteID) && faces[paper.key] == nil { faces[paper.key] = .folded }
         for (key, panel) in panels where store.paper(key) == nil {
-            panel.orderOut(nil)
+            panel.conceal()
             panels[key] = nil
             faces[key] = nil
         }
-        if let scene, let front { apply(scene, read: front, scan: false) } else { look() }
+        if let scene, let front {
+            let (scene, read) = Self.filtered(scene, front, since: scenePrivacy)
+            apply(scene, read: read, scan: false)
+        } else { look() }
         placeDesktop()
         for panel in panels.values { panel.refresh() }
     }
@@ -1404,7 +1437,7 @@ final class NotePanel: NSPanel {
         guard dragStart == nil else { return }
         let target = paperFrame.insetBy(dx: -PaperLook.margin, dy: -PaperLook.margin).integral
         if frame != target { setFrame(target, display: true) }
-        if !isVisible { orderFrontRegardless() }
+        unveil()
         level = desktop && desk?.faces[key] != .open ? Self.desktopLevel : .floating
     }
 
@@ -1419,7 +1452,7 @@ final class NotePanel: NSPanel {
 
     func takeKeyboard() {
         refit()
-        if !isVisible { orderFrontRegardless() }
+        unveil()
         makeKeyAndOrderFront(nil)
     }
 
@@ -1463,7 +1496,8 @@ struct NotePanelContent: View {
             PaperView(paper: paper, color: desk.store.color(of: paper.notebook), glass: desk.glass, face: face,
                       place: head.place, notebook: head.notebook, others: head.others, footer: desk.footer(paper),
                       keyboard: desk.keyboard == key, editorHeight: desk.heights[key] ?? 0, desk: desk,
-                      conflict: desk.store.readOnly(paper), unsaved: desk.store.failed.contains(key))
+                      conflict: desk.store.readOnly(paper), unsaved: desk.store.failed.contains(key),
+                      pictureTrouble: desk.store.pictureTrouble[key]?.count ?? 0)
                 .background {
                     // Open, the paper moves by its margins and letterhead's row, never by the writing (the editor
                     // takes its own clicks and drags).
@@ -1528,7 +1562,7 @@ final class EdgeTabPanel: NSPanel {
         let top = primaryHeight - (window.minY + tab.y)
         anchor = CGPoint(x: window.maxX, y: top)
         draw()
-        if !isVisible { orderFrontRegardless() }
+        unveil()
     }
 
     private func draw() {
@@ -1582,12 +1616,12 @@ final class PinPanel: NSPanel {
     func show(from start: CGPoint, to end: CGPoint, color: NSColor) {
         let box = CGRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y))
             .insetBy(dx: -4, dy: -4)
-        guard box.width > 12 else { return orderOut(nil) }
+        guard box.width > 12 else { return conceal() }
         let a = CGPoint(x: start.x - box.minX, y: box.maxY - start.y)
         let b = CGPoint(x: end.x - box.minX, y: box.maxY - end.y)
         hosting.rootView = AnyView(PinLine(from: a, to: b, color: Color(nsColor: color)).frame(width: box.width, height: box.height))
         setFrame(box.integral, display: true)
-        if !isVisible { orderFrontRegardless() }
+        unveil(mouse: false)
     }
 }
 
@@ -1604,4 +1638,26 @@ struct PinLine: View {
         }
         .stroke(color.opacity(0.55), style: StrokeStyle(lineWidth: 1.5, dash: [3, 4]))
     }
+}
+
+extension NSPanel {
+    /// Hidden as GlassPanel hides (see its `hide`): clear and letting the mouse through, never ordered out. Ordering
+    /// a window with macOS's glass out (and back in) waits on the window server for most of half a second; paper
+    /// notes hide the same way, so a note's look never changes how it hides. One with the keyboard gives it back.
+    func conceal() {
+        guard alphaValue != 0 || !ignoresMouseEvents else { return }
+        if isKeyWindow { resignKey() }
+        alphaValue = 0
+        ignoresMouseEvents = true
+    }
+
+    /// Showing again: on screen once, then only made opaque. `mouse`: whether it takes clicks (a pin never does).
+    func unveil(mouse: Bool = true) {
+        if !isVisible { orderFrontRegardless() }
+        if alphaValue != 1 { alphaValue = 1 }
+        if ignoresMouseEvents == mouse { ignoresMouseEvents = !mouse }
+    }
+
+    /// On the screen and seen (not concealed).
+    var unveiled: Bool { isVisible && alphaValue > 0 }
 }

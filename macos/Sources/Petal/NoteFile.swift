@@ -750,6 +750,31 @@ enum NoteShelf {
         return editorOpen && !quitting ? .editor : .write
     }
 
+    /// What launch does with a journal entry a Petal before left behind (NoteJournal): the file holds its text
+    /// already (nothing); still holds what the edit was made on, or is gone (a new note, or one deleted elsewhere):
+    /// write it, as quitting would have; else it changed elsewhere since: a conflict copy beside it, never over it.
+    /// An edit kept aside is always a copy.
+    enum JournalRecovery: Equatable { case nothing, write, copy }
+
+    static func journalRecovery(disk: String?, base: String?, text: String, aside: Bool) -> JournalRecovery {
+        if disk == text { return .nothing }
+        if aside { return .copy }
+        if disk == nil || disk == base { return .write }
+        return .copy
+    }
+
+    /// The text a journal entry puts back: its own, or the file's (a picture accepted with no edit after it), with a
+    /// reference for each of its pictures (name, caption) not referenced in it yet.
+    static func journalText(text: String?, disk: String?, noteID: String, pictures: [(name: String, caption: String)]) -> String? {
+        guard let start = text ?? disk else { return nil }
+        let missing = pictures.filter { !start.contains($0.name) }
+        guard !missing.isEmpty else { return start }
+        var file = NoteFile.parse(start, fallbackID: noteID, fallbackDate: Date())
+        let lines = missing.map { NoteBlock.image(path: assetsFolder(id: noteID) + "/" + $0.name, caption: $0.caption).markdown }
+        file.body += (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + lines.joined(separator: "\n")
+        return file.serialized()
+    }
+
     /// A note made and put away empty goes to the Trash, unless pictures were accepted for it (their bytes or
     /// reference still on the way): those make it a note.
     static func mayTrash(bodyEmpty: Bool, picturesPending: Bool) -> Bool { bodyEmpty && !picturesPending }

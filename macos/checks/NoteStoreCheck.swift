@@ -38,7 +38,7 @@ struct NoteStoreCheck {
         expect(NoteShelf.isCopyName(copy.lastPathComponent), "as a copy", copy.lastPathComponent)
         _ = NoteStore.save("E", to: file, base: "B", root: root)
         let copies = (try? fm.contentsOfDirectory(atPath: root.appending(path: "Work").path))?.filter { $0.contains("conflicted copy") } ?? []
-        expect(copies.count == 1 && text(copy) == "E", "the same edit again updates its copy, never another", "\(copies)")
+        expect(copies.count == 2 && text(copy) == "D", "the same edit again gets a copy of its own, never over the first", "\(copies)")
 
         // A copy changed elsewhere since Petal wrote it is never written over: the next edit makes another.
         try? Data("the copy, edited elsewhere".utf8).write(to: copy)
@@ -99,6 +99,8 @@ struct NoteStoreCheck {
         expect(NoteStore.followBookmarks(&note) && URL(fileURLWithPath: note.places[0].path).resolvingSymlinksInPath() == renamed.resolvingSymlinksInPath(), "a renamed file keeps its note", note.places[0].path)
         expect(!NoteStore.followBookmarks(&note), "and nothing changes once it's followed")
         sessions(root: root)
+        journal(root: root)
+        toolCancelled(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
     }
@@ -189,6 +191,70 @@ struct NoteStoreCheck {
         let plan = NoteKeep(snapshot: ["file:" + keepA.path: "ka", "file:" + keepB.path: "kb"], kept: keepA, keptText: nil, files: [keepA, keepB])
         expect(!NoteStore.keep(plan, root: root) && text(keepB) == "kb edited", "a paper edited since it was shown: nothing removed")
         expect(NoteWork.keepAside(text: "x").keeps && !NoteWork.trash(revision: nil).keeps, "writing is kept until it lands; a trash isn't")
+    }
+
+    /// The journal: accepted writing put back at launch after the notes' queue never got to it.
+    @MainActor static func journal(root: URL) {
+        let fm = FileManager.default
+        let journal = Config.supportFolder.appending(path: "Notes journal")
+        let notes = root.appending(path: "Journal")
+        try? fm.createDirectory(at: notes, withIntermediateDirectories: true)
+
+        // An accepted edit, then the notes' queue hangs (its write never happens), then Petal quits and starts again.
+        let hung = notes.appending(path: "Hung.md")
+        let hungBase = NoteFile(id: "J1", body: "before").serialized()
+        _ = NoteStore.create(hungBase, at: hung, root: root)
+        let typed = NoteFile(id: "J1", body: "typed just before quit").serialized()
+        NoteJournal.record(noteID: "J1", path: hung.path, base: hungBase, text: typed, in: journal)
+
+        // One changed elsewhere meanwhile: put back beside it, never over.
+        let elsewhere = notes.appending(path: "Elsewhere.md")
+        let elsewhereBase = NoteFile(id: "J2", body: "start").serialized()
+        _ = NoteStore.create(elsewhereBase, at: elsewhere, root: root)
+        let typed2 = NoteFile(id: "J2", body: "mine").serialized()
+        NoteJournal.record(noteID: "J2", path: elsewhere.path, base: elsewhereBase, text: typed2, in: journal)
+        try? Data("changed on another Mac".utf8).write(to: elsewhere)
+
+        // One that landed: out of the journal.
+        let landedNote = notes.appending(path: "Landed.md")
+        NoteJournal.record(noteID: "J3", path: landedNote.path, base: nil, text: "landed text", in: journal)
+        NoteJournal.landed(noteID: "J3", text: "landed text", in: journal)
+        expect(!fm.fileExists(atPath: NoteJournal.file("J3", in: journal).path), "a landed edit leaves the journal")
+
+        // A picture accepted with no edit after it.
+        let pictured = notes.appending(path: "Pictured.md")
+        _ = NoteStore.create(NoteFile(id: "J4", body: "see below").serialized(), at: pictured, root: root)
+        NoteJournal.recordPictures(noteID: "J4", path: pictured.path, base: nil,
+                                   pictures: [NotePictureBytes(name: "picture-j.png", data: Data("jpg".utf8), caption: "")], in: journal)
+
+        // Launch.
+        guard let holding = NoteJournal.takeLeftovers(in: journal) else { return expect(false, "leftovers to recover") }
+        expect(!fm.fileExists(atPath: journal.path), "leftovers taken out of the journal (new edits never mix with them)")
+        NoteJournal.recover(holding, root: root)
+        expect(text(hung) == typed, "an accepted edit the notes' queue never wrote is written at launch")
+        let copies = ((try? fm.contentsOfDirectory(atPath: notes.path)) ?? []).filter { $0.hasPrefix("Elsewhere (conflicted copy") }
+        expect(text(elsewhere) == "changed on another Mac" && copies.count == 1 && text(notes.appending(path: copies[0])) == typed2,
+               "one changed elsewhere since: its edit beside it, the other words untouched", "\(copies)")
+        expect(fm.fileExists(atPath: notes.appending(path: NoteShelf.assetsFolder(id: "J4") + "/picture-j.png").path)
+               && text(pictured)?.contains("picture-j.png") == true, "an accepted picture: its bytes and its reference")
+        expect(!fm.fileExists(atPath: holding.path), "recovered leftovers go")
+    }
+
+    /// A tool's change whose asker went: nothing in memory, nothing on disk.
+    @MainActor static func toolCancelled(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Tools")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Tool.md")
+        let base = NoteFile(id: "T1", body: "the person's words").serialized()
+        _ = NoteStore.create(base, at: file, root: root)
+        let store = NoteStore(root: root)
+        store.preview([PaperNote(file: NoteFile.parse(base, fallbackID: "", fallbackDate: Date()), url: file, notebook: "Tools", revision: base)], notebooks: [])
+        let returned = store.change(file.path, live: { false }) { $0.body = "from a tool that went away" }
+        expect(returned != nil && store.paper(file.path)?.file.body == "the person's words", "a tool's change shows nothing until it lands")
+        NoteStore.io.sync {}
+        NoteStore.io.sync {}
+        expect(text(file) == base, "and, cancelled, leaves the file as it was")
     }
 
     static func finish() {
