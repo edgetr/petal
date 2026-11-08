@@ -285,6 +285,40 @@ struct NotesCheck {
         expect(NoteShelf.passageWatch(wanted: ["a"], known: ["a", "b"], busy: false) == .measure, "all known: measure")
         expect(NoteShelf.passageWatch(wanted: [], known: [], busy: true) == .stop, "the last passage note re-stuck elsewhere: stop, even mid-measure")
 
+        // Lasting records only by a real id that's in its file.
+        expect(NoteShelf.lasting("U1", pending: []) && !NoteShelf.lasting("U1", pending: ["U1"]) && !NoteShelf.lasting("file:Inbox/a.md", pending: []),
+               "a real id written: lasting; one still being written, or a path's id: memory only")
+        expect(NoteShelf.copyKey(noteID: "U1", fileName: "A 2.md").hasPrefix("U1#") && !NoteShelf.copyKey(noteID: "U1", fileName: "A 2.md").contains("A 2"),
+               "a conflict paper's key: its note's id and a hash of its file's name, no path")
+
+        // A passage that moved is an explicit state: no line, no pin, not found.
+        let pageWindow = CGRect(x: 0, y: 50, width: 800, height: 600)
+        let pageText = CGRect(x: 0, y: 100, width: 800, height: 500)
+        expect(NoteShelf.passagePlacement(.moved, window: pageWindow) == NoteShelf.PassagePlacement(line: nil, pin: nil, found: false),
+               "moved: its old line and pin cleared, \"passage moved\"")
+        let seen = CGRect(x: 20, y: 200, width: 200, height: 16)
+        expect(NoteShelf.passagePlacement(.at(words: seen, visible: pageText), window: pageWindow) == NoteShelf.PassagePlacement(line: 150, pin: seen, found: true),
+               "found: at its line, with its pin")
+        expect(NoteShelf.passagePlacement(.at(words: CGRect(x: 20, y: 10, width: 200, height: 16), visible: pageText), window: pageWindow)
+               == NoteShelf.PassagePlacement(line: 50, pin: nil, found: true), "scrolled above: on the top edge, no pin")
+
+        // Scans of a window coalesce: one at a time, any number of requests meanwhile become one follow-up.
+        var gate = NoteShelf.ScanGate()
+        let starts = [gate.request(), gate.request(), gate.request(), gate.request()]
+        expect(starts == [true, false, false, false], "one scan runs; the rest wait as one")
+        expect(gate.finished() && gate.running, "it ends: the one follow-up starts")
+        expect(!gate.finished() && !gate.running, "that ends: nothing more")
+        expect(gate.request() && !gate.finished(), "a later request starts at once")
+
+        // A folded note at the screen's right edge turned over (it grows) stays whole on its screen.
+        let screen = CGRect(x: 0, y: 0, width: 1440, height: 875)
+        let flipped = NoteShelf.wholeOnScreen(CGRect(x: 1250, y: 600, width: 380, height: 420), visible: screen)
+        expect(flipped == CGRect(x: 1060, y: 455, width: 380, height: 420), "it moves in from the edges it would cross", "\(flipped)")
+        expect(NoteShelf.wholeOnScreen(CGRect(x: 100, y: 100, width: 190, height: 190), visible: screen) == CGRect(x: 100, y: 100, width: 190, height: 190),
+               "one that fits stays where it is")
+        let second = CGRect(x: 1440, y: 0, width: 1920, height: 1055)
+        expect(NoteShelf.wholeOnScreen(CGRect(x: 3200, y: 100, width: 380, height: 420), visible: second).maxX == second.maxX, "on a second screen, its own edge")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

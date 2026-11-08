@@ -234,9 +234,10 @@ extension NoteDesk {
     func handle(_ paper: PaperNote) -> String {
         let base = noteHandle(paper.holder)
         guard (store.conflicts[paper.noteID]?.count ?? 0) > 1 else { return base }
-        let had = local.copies?[paper.key] != nil
-        let copy = local.copyHandle(paper.key)
-        if !had { local.save() }
+        let copyKey = NoteShelf.copyKey(noteID: paper.noteID, fileName: paper.version ?? paper.url.lastPathComponent)
+        let had = local.copies?[copyKey] != nil
+        let copy = local.copyHandle(copyKey)
+        if !had { local.save(pending: store.pendingIDs) }
         return base + "." + copy
     }
 

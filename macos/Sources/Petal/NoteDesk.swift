@@ -37,7 +37,19 @@ final class NoteDesk {
     @ObservationIgnored private var pinPanels: [String: PinPanel] = [:]
     /// Each open editor: to save what's typed now (on quit, or as it closes), and put pictures in.
     @ObservationIgnored var editors: [String: NoteEditorHandle] = [:]
-    @ObservationIgnored private var looks = 0
+    @ObservationIgnored private var looks = 0 { didSet { Self.lookNow.set(looks) } }
+
+    /// `looks` as a scan on its own queue sees it: a scan whose look is gone by the time it starts doesn't traverse.
+    final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        func set(_ new: Int) { lock.withLock { value = new } }
+        var now: Int { lock.withLock { value } }
+    }
+    nonisolated static let lookNow = Counter()
+
+    /// Passage scans and measurements: a queue of their own, so restoring or narrowing windows never waits behind one.
+    nonisolated static let passageQueue = DispatchQueue(label: "petal.notes.passages", qos: .utility)
     @ObservationIgnored private var lookSoon: DispatchWorkItem?
     @ObservationIgnored private var listening = false
     /// Windows narrowed for an open note: their frame from before and the one Petal gave them.
@@ -78,10 +90,15 @@ final class NoteDesk {
         store.switchRoot(to: root)
         store.onChange = { [weak self] in self?.refresh() }
         store.onRekey = { [weak self] old, paper in self?.rekey(old, to: paper) }
+        // An id now in its file: what's kept by it is lasting (written to disk) from now on.
+        store.onIDLanded = { [weak self] _ in
+            guard let self else { return }
+            self.local.save(pending: self.store.pendingIDs)
+        }
         store.onIdentity = { [weak self] old, holder, new in
             guard let self else { return }
             self.local.rekeyID(old, holder: holder, new)
-            self.local.save()
+            self.local.save(pending: store.pendingIDs)
         }
         store.onProblem = { [weak self] text in self?.say(text) }
         store.keepAlive = { [weak self] key in self?.editors[key] != nil }
@@ -417,67 +434,81 @@ final class NoteDesk {
     /// Where each passage stuck on this window is, off the main thread: the one place on the window its whole quote
     /// is, told apart by the words before and after it, else none ("passage moved").
     private func findPassages(_ scene: NoteScene) {
-        guard let window = scene.window else { return stopWatchingPassages() }
-        let wanted = here.compactMap { key, index -> (String, NoteStick)? in
-            guard let paper = store.paper(key), paper.file.places[index].kind == .passage else { return nil }
+        guard scene.window != nil else { return stopWatchingPassages() }
+        guard !wantedPassages().isEmpty else { return stopWatchingPassages() }
+        // One scan at a time: a request while one runs is one follow-up, for the scene in front by then.
+        guard scans.request() else { return }
+        scan()
+    }
+
+    @ObservationIgnored private var scans = NoteShelf.ScanGate()
+
+    private func wantedPassages() -> [(String, NoteStick)] {
+        here.compactMap { key, index -> (String, NoteStick)? in
+            guard let paper = store.paper(key), paper.file.places.indices.contains(index), paper.file.places[index].kind == .passage else { return nil }
             return (key, paper.file.places[index])
         }
-        guard !wanted.isEmpty else { return stopWatchingPassages() }
+    }
+
+    private func scan() {
+        let wanted = wantedPassages()
+        guard let scene, let window = scene.window, !wanted.isEmpty else {
+            if scans.finished() { scan() }
+            return
+        }
         let pid = scene.pid
         let ticket = looks, turn = passageTurn
         finding = true
         rescanned = Date()
-        Self.queue.async {
-            let anchors = Self.passageAnchors(pid: pid, window: window, wanted.map { $0.1 })
+        Self.passageQueue.async {
+            // Stale before it starts (the window in front changed): no traversal.
+            let current = Self.lookNow.now == ticket
+            let anchors = current ? Self.passageAnchors(pid: pid, window: window, wanted.map { $0.1 }) : []
             let measured = anchors.map { $0.map(Self.measure) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.finding = false
-                    guard ticket == self.looks, turn == self.passageTurn else { return }
-                    var spots: [String: (words: CGRect?, visible: CGRect?)?] = [:]
-                    for (index, item) in wanted.enumerated() {
-                        // Found again by its quote: there (its pin and line), or moved (none; never the text's frame).
-                        let measure = measured[index]
-                        switch NoteShelf.passagePoll(read: measure?.read, quote: item.1.quote, words: measure?.words, rescanned: true) {
-                        case .still(let words):
-                            self.anchors[item.0] = anchors[index]
-                            self.lost.remove(item.0)
-                            spots[item.0] = (words, measure?.visible)
-                        default:
-                            self.anchors[item.0] = nil
-                            self.lost.insert(item.0)
-                            spots[item.0] = nil
+                    if current, ticket == self.looks, turn == self.passageTurn {
+                        var states: [String: NoteShelf.PassageState] = [:]
+                        for (index, item) in wanted.enumerated() {
+                            // Found again by its quote: there (its pin and line), or moved: an explicit state that
+                            // clears its line, pin and "found" (never the text's frame).
+                            let measure = measured[index]
+                            switch NoteShelf.passagePoll(read: measure?.read, quote: item.1.quote, words: measure?.words, rescanned: true) {
+                            case .still(let words):
+                                self.anchors[item.0] = anchors[index]
+                                self.lost.remove(item.0)
+                                states[item.0] = .at(words: words, visible: measure?.visible)
+                            default:
+                                self.anchors[item.0] = nil
+                                self.lost.insert(item.0)
+                                states[item.0] = .moved
+                            }
                         }
+                        self.place(states)
+                        self.reconcilePassages()
                     }
-                    self.place(spots)
-                    self.reconcilePassages()
+                    if self.scans.finished() { self.scan() }
                 }
             }
         }
     }
 
-    /// Where each passage note's sentence is now (its words and the visible part of its text), decided by
-    /// NoteShelf.passageSpot: at its line with its pin; scrolled above or below the visible text, its tab rests on
-    /// that edge with no pin; not found, as before (stacked at the top, "passage moved").
-    private func place(_ measured: [String: (words: CGRect?, visible: CGRect?)?]) {
+    /// Each passage note's sentence placed by its state (NoteShelf.passagePlacement): at its line with its pin;
+    /// above or below the visible text, on that edge with no pin; moved, no line, no pin and not found ("passage
+    /// moved").
+    private func place(_ states: [String: NoteShelf.PassageState]) {
         guard let frame else { return }
         var found = self.found
         var changed = false
-        for (key, measure) in measured {
-            let line: CGFloat?
-            let rect: CGRect?
-            switch NoteShelf.passageSpot(words: measure?.words, visible: measure?.visible) {
-            case .line(let words): line = words.minY - frame.minY; rect = words
-            case .above: line = max(0, (measure?.visible?.minY ?? frame.minY) - frame.minY); rect = nil
-            case .below: line = max(0, (measure?.visible?.maxY ?? frame.maxY) - frame.minY - 32); rect = nil
-            case .unknown: line = nil; rect = nil
-            }
-            if lines[key] != line || passageRects[key] != rect { changed = true }
-            lines[key] = line
-            passageRects[key] = rect
-            found[key] = line != nil
+        for (key, state) in states {
+            let placed = NoteShelf.passagePlacement(state, window: frame)
+            if lines[key] != placed.line || passageRects[key] != placed.pin { changed = true }
+            lines[key] = placed.line
+            passageRects[key] = placed.pin
+            found[key] = placed.found
         }
-        if found != self.found { self.found = found }
+        if found != self.found { self.found = found; changed = true }
         if changed { layout() }
     }
 
@@ -543,21 +574,21 @@ final class NoteDesk {
             here[key].flatMap { index in store.paper(key).map { (key, $0.file.places[index].quote) } }
         })
         let ticket = looks, turn = passageTurn
-        Self.queue.async {
+        Self.passageQueue.async {
             let measured = watched.mapValues(Self.measure)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.measuring = false
                     guard ticket == self.looks, turn == self.passageTurn else { return }
-                    var spots: [String: (words: CGRect?, visible: CGRect?)?] = [:]
+                    var states: [String: NoteShelf.PassageState] = [:]
                     var relocate = false
                     for (key, measure) in measured {
                         switch NoteShelf.passagePoll(read: measure.read, quote: quotes[key] ?? "", words: measure.words, rescanned: false) {
-                        case .still(let words): spots[key] = (words, measure.visible)
+                        case .still(let words): states[key] = .at(words: words, visible: measure.visible)
                         default: relocate = true
                         }
                     }
-                    self.place(spots)
+                    self.place(states)
                     // A range that no longer holds its quote: found again by quote and context (once a second at most).
                     if relocate, let scene = self.scene, Date().timeIntervalSince(self.rescanned) > 1 { self.findPassages(scene) }
                 }
@@ -823,9 +854,8 @@ final class NoteDesk {
         faces[key] = .open
         keyboard = key
         local.shown = Array(Set(local.shown + [paper.noteID]))
-        local.save()
-        layout()
-        if isDesktopNote(key) { placeDesktop() }
+        local.save(pending: store.pendingIDs)
+        faceChanged(key)
         panel(for: key).takeKeyboard()
     }
 
@@ -836,8 +866,7 @@ final class NoteDesk {
         faces[key] = .folded
         if keyboard == key { keyboard = nil }
         letGoIfEmpty(key)
-        layout()
-        if isDesktopNote(key) { placeDesktop() }
+        faceChanged(key)
     }
 
     func hide(_ key: String) {
@@ -848,7 +877,7 @@ final class NoteDesk {
         panels[key]?.conceal()
         if let paper = store.paper(key) {
             local.shown.removeAll { $0 == paper.noteID }
-            local.save()
+            local.save(pending: store.pendingIDs)
         }
         letGoIfEmpty(key)
     }
@@ -857,6 +886,14 @@ final class NoteDesk {
         faces[key] = faces[key] == .back ? .open : .back
         if faces[key] == .open { panel(for: key).takeKeyboard() }
         panels[key]?.refit()
+        faceChanged(key)
+    }
+
+    /// After any change of a note's face (open, turned over, folded): placed again the one way (on its window or its
+    /// Desktop, kept whole on its screen), and the room beside its window reconciled.
+    private func faceChanged(_ key: String) {
+        layout()
+        if isDesktopNote(key) { placeDesktop() }
     }
 
     /// Clicked away from every note: the open ones fold back.
@@ -1039,6 +1076,17 @@ final class NoteDesk {
     @discardableResult
     func importPictures(_ items: NoteImport, into key: String) -> Bool {
         guard let paper = store.paper(key), !store.readOnly(paper) else { say("This note has two versions: keep one before adding pictures."); return false }
+        // A paste is journaled by the note's own id: an id-less note gets it in its file first (its session), and
+        // the paste waits for that; it can't be written, the paste is refused (the paper says the note isn't saved).
+        guard NoteShelf.lasting(paper.noteID, pending: store.pendingIDs) else {
+            store.ensureID(key) { id in
+                guard let id, let now = self.store.notes.first(where: { $0.noteID == id && $0.version == nil }) else {
+                    return self.say("Petal couldn't write an id into this note's file, so the picture wasn't added.")
+                }
+                self.importPictures(items, into: now.key)
+            }
+            return true
+        }
         guard let (token, sources) = store.beginImport(key, items) else { say("This note can't take pictures right now."); return false }
         let noteID = paper.noteID, instance = paper.instance
         let pastedIn = store.root
@@ -1170,8 +1218,6 @@ final class NoteDesk {
     /// A note's file got another name on disk than it was shown with: everything showing it follows.
     private func rekey(_ old: String, to paper: PaperNote) {
         let new = paper.key
-        // A conflict paper's handle follows its file.
-        if let copy = local.copies?.removeValue(forKey: old) { local.copies?[new] = copy; local.save() }
         if let face = faces.removeValue(forKey: old) { faces[new] = face }
         if keyboard == old { keyboard = new }
         if let height = heights.removeValue(forKey: old) { heights[new] = height }
@@ -1200,7 +1246,7 @@ final class NoteDesk {
         } else if let frame {
             local.spots[paper.noteID] = NoteSpot.stick(panel: rect, window: NoteRules.appKitFrame(frame, primaryHeight: primaryHeight))
         }
-        local.save()
+        local.save(pending: store.pendingIDs)
         // A note dragged off its window's side (or onto the Desktop) no longer needs the room it was given.
         reconcileRoom()
     }
@@ -1307,7 +1353,7 @@ final class NoteDesk {
         guard let stick else { return }
         let site = NoteText.host(stick.url)
         local.lastNotebook[site.isEmpty ? stick.app : site] = notebook
-        local.save()
+        local.save(pending: store.pendingIDs)
     }
 
     /// A new note on `stick`, open with the keyboard. `body`: what it starts with.
@@ -1454,7 +1500,7 @@ final class NoteDesk {
         let made = local.handle(noteID)
         if !had, !handlesSaving {
             handlesSaving = true
-            DispatchQueue.main.async { self.handlesSaving = false; self.local.save() }
+            DispatchQueue.main.async { self.handlesSaving = false; self.local.save(pending: self.store.pendingIDs) }
         }
         return made
     }
@@ -1848,7 +1894,7 @@ final class NotePanel: NSPanel {
     /// Shows the paper at `paperFrame` (AppKit's coordinates).
     func place(paperFrame: CGRect) {
         guard dragStart == nil else { return }
-        let target = paperFrame.insetBy(dx: -PaperLook.margin, dy: -PaperLook.margin).integral
+        let target = Self.whole(paperFrame.insetBy(dx: -PaperLook.margin, dy: -PaperLook.margin).integral)
         if frame != target { setFrame(target, display: true) }
         unveil()
         level = desktop && desk?.faces[key] != .open ? Self.desktopLevel : .floating
@@ -1858,9 +1904,18 @@ final class NotePanel: NSPanel {
     func refit() {
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
-        let target = NSRect(x: frame.minX, y: frame.maxY - size.height, width: size.width, height: size.height).integral
+        // Kept whole on its screen: a note near an edge that grows (opened, turned over) moves in from it.
+        let target = Self.whole(NSRect(x: frame.minX, y: frame.maxY - size.height, width: size.width, height: size.height).integral)
         if target != frame { setFrame(target, display: true, animate: false) }
         level = desktop && desk?.faces[key] != .open ? Self.desktopLevel : .floating
+    }
+
+    /// `rect` whole on the screen it's mostly on (NoteShelf.wholeOnScreen).
+    static func whole(_ rect: NSRect) -> NSRect {
+        let screens = NSScreen.screens
+        let area = { (screen: NSScreen) -> CGFloat in let cut = screen.frame.intersection(rect); return cut.isNull ? 0 : cut.width * cut.height }
+        guard let screen = screens.max(by: { area($0) < area($1) }).flatMap({ area($0) > 0 ? $0 : nil }) ?? NSScreen.main else { return rect }
+        return NoteShelf.wholeOnScreen(rect, visible: screen.visibleFrame)
     }
 
     func takeKeyboard() {

@@ -1000,6 +1000,75 @@ enum NoteShelf {
         return rescanned ? .moved : .relocate
     }
 
+    /// What a passage note's sentence is, as the desk keeps it: found (its words and the visible part of its text),
+    /// or moved, an explicit state (never a missing entry) that clears its line, its pin and its "found".
+    enum PassageState: Equatable { case at(words: CGRect, visible: CGRect?), moved }
+
+    struct PassagePlacement: Equatable {
+        var line: CGFloat?
+        var pin: CGRect?
+        var found: Bool
+    }
+
+    /// Where its tab goes (`line`, from the window's top), whether it has a pin, and whether it's found: at its line
+    /// with a pin; above or below the visible text, on that edge with no pin; moved, none of them ("passage moved").
+    static func passagePlacement(_ state: PassageState, window: CGRect) -> PassagePlacement {
+        guard case .at(let words, let visible) = state else { return PassagePlacement(line: nil, pin: nil, found: false) }
+        switch passageSpot(words: words, visible: visible) {
+        case .line(let at): return PassagePlacement(line: at.minY - window.minY, pin: at, found: true)
+        case .above: return PassagePlacement(line: max(0, (visible?.minY ?? window.minY) - window.minY), pin: nil, found: true)
+        case .below: return PassagePlacement(line: max(0, (visible?.maxY ?? window.maxY) - window.minY - 32), pin: nil, found: true)
+        case .unknown: return PassagePlacement(line: nil, pin: nil, found: false)
+        }
+    }
+
+    /// One scan of a window for its passages at a time: a request while one runs is kept as one follow-up (however
+    /// many came), started when it ends.
+    struct ScanGate: Equatable {
+        var running = false
+        var again = false
+
+        /// True: start a scan now.
+        mutating func request() -> Bool {
+            if running { again = true; return false }
+            running = true
+            return true
+        }
+
+        /// A scan ended: true to start the one follow-up now.
+        mutating func finished() -> Bool {
+            running = false
+            guard again else { return false }
+            again = false
+            running = true
+            return true
+        }
+    }
+
+    /// A note's paper kept whole on its screen (`visible`: the screen's visible frame, AppKit's coordinates): after
+    /// any change of its face (open, back, folded) or place, it moves in from an edge it would cross, keeping its
+    /// top-left when it fits.
+    static func wholeOnScreen(_ frame: CGRect, visible: CGRect) -> CGRect {
+        guard !visible.isEmpty else { return frame }
+        var out = frame
+        out.origin.x = frame.width >= visible.width ? visible.minX : min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+        out.origin.y = frame.height >= visible.height ? visible.maxY - frame.height : min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+        return out
+    }
+
+    /// Lasting things about a note (a handle, a paste being read, where it was left, that it was showing) are kept
+    /// only by a real id that's in its file: never by an id taken from a path, and never by one still being written
+    /// (`pending`). Until then they live only in memory, for this run.
+    static func lasting(_ id: String, pending: Set<String>) -> Bool { !needsID(id) && !pending.contains(id) }
+
+    /// A conflict paper's own handle part is kept by its note's id and a hash of its file's name (`id#hash`), never a
+    /// path or an inode.
+    static func copyKey(noteID: String, fileName: String) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in fileName.utf8 { hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
+        return noteID + "#" + String(format: "%016llx", hash)
+    }
+
     /// One tick of the passage watcher: stop when no passage note is on the window (`wanted` empty); find again
     /// when one has no anchor and wasn't already found to have moved (`known`: anchored or moved); skip while a
     /// measurement is still under way; else measure.

@@ -108,6 +108,7 @@ struct NoteStoreCheck {
         identity(root: root)
         idBeforeChange(root: root)
         identityFollowed(root: root)
+        idFirst(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
     }
@@ -465,6 +466,61 @@ struct NoteStoreCheck {
         expect(local.handle("U2") == firstLook && local.handles?[plainHolder] == nil, "an id-less note given its id keeps its handle, and its path's is retired")
     }
 
+    /// Nothing lasting for an id-less note before its own id is in its file: a paste waits for it, records of it stay
+    /// in memory, and a write that can't land fails closed.
+    @MainActor static func idFirst(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "IdFirst")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Plain.md")
+        try? Data("# Plain\nwords".utf8).write(to: file)
+        let store = NoteStore(root: root)
+        var read = NoteStore.read(root)
+        store.preview(read.notes, notebooks: read.notebooks)
+        guard let paper = store.notes.first(where: { $0.notebook == "IdFirst" && $0.url.lastPathComponent == "Plain.md" }) else { return expect(false, "read") }
+        let png = Data([0x89, 0x50, 0x4E, 0x47])
+        expect(store.beginImport(paper.key, NoteImport(files: [], png: png, tiff: nil, at: -1)) == nil, "a paste on an id-less note isn't recorded by its path's id")
+        var given: String??
+        store.ensureID(paper.key) { given = .some($0) }
+        let until = Date().addingTimeInterval(5)
+        while given == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let id = given ?? nil
+        let written = text(file).map { NoteFile.parse($0, fallbackID: "?", fallbackDate: Date()).id }
+        expect(id != nil && written == id && store.pendingIDs.isEmpty, "its id written into its file first, then told", "\(String(describing: id)) \(String(describing: written))")
+        if let now = store.notes.first(where: { $0.noteID == id }) {
+            let begun = store.beginImport(now.key, NoteImport(files: [], png: png, tiff: nil, at: -1))
+            expect(begun != nil, "then the paste is recorded, by the real id")
+            if let begun, let id { store.endImport(id, begun.token, journal: true) }
+        }
+
+        // A write that can't land: fail closed (no id told, nothing lasting kept by it).
+        let locked = root.appending(path: "IdLocked")
+        try? fm.createDirectory(at: locked, withIntermediateDirectories: true)
+        try? Data("# Locked\nwords".utf8).write(to: locked.appending(path: "Stuck.md"))
+        read = NoteStore.read(root)
+        store.preview(read.notes, notebooks: read.notebooks)
+        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: locked.path)
+        try? fm.setAttributes([.posixPermissions: 0o444], ofItemAtPath: locked.appending(path: "Stuck.md").path)
+        var refused: String??
+        if let stuck = store.notes.first(where: { $0.notebook == "IdLocked" }) {
+            store.ensureID(stuck.key) { refused = .some($0) }
+            let until = Date().addingTimeInterval(5)
+            while refused == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        }
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: locked.appending(path: "Stuck.md").path)
+        let pendingID = store.notes.first(where: { $0.notebook == "IdLocked" })?.noteID ?? ""
+        expect(refused != nil && (refused ?? "x") == nil && store.pendingIDs.contains(pendingID), "its id couldn't be written: none told, still pending")
+        var local = NoteLocal()
+        _ = local.handle(pendingID)
+        _ = local.handle(NoteShelf.holderKey(id: "file:Inbox/x.md", instance: "1:2"))
+        local.shown = [pendingID, "file:Inbox/x.md", "REAL"]
+        _ = local.handle("REAL")
+        let kept = local.persisted(pending: store.pendingIDs)
+        expect(kept.handles?.keys.sorted() == ["REAL"] && kept.shown == ["REAL"], "only records by a real id in its file are written to disk",
+               "\(String(describing: kept.handles?.keys.sorted())) \(kept.shown)")
+    }
+
     /// An id given to an id-less note is an event every holder follows: a paste being read, the journal, the store's
     /// lookups (the editor's rule is NoteShelf.editorKeeps, checked pure).
     @MainActor static func identityFollowed(root: URL) {
@@ -478,7 +534,7 @@ struct NoteStoreCheck {
         store.preview(read.notes, notebooks: read.notebooks)
         guard let paper = store.notes.first(where: { $0.url.lastPathComponent == "Loose.md" }) else { return expect(false, "the id-less note is read") }
         let old = paper.noteID
-        // A paste starts being read, then the note is changed (and so given its id) before the paste is done.
+        // A paste on it is refused until its id is in; the note is changed (and so given its id).
         let png = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
                                    isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?.representation(using: .png, properties: [:])
         let begun = store.beginImport(paper.key, NoteImport(files: [], png: png, tiff: nil, at: -1))
@@ -486,9 +542,8 @@ struct NoteStoreCheck {
         let new = store.currentID(old, instance: paper.instance)
         NoteJournal.queue.sync {}
         let entry = NoteJournal.read(NoteJournal.file(new))
-        expect(begun != nil && new != old && !NoteShelf.needsID(new), "the note is given its own id", new)
-        expect(store.importing(paper.key) && entry?.imports?.contains { $0.token == begun?.token } == true,
-               "the paste being read follows it (in memory and in the journal)", "\(String(describing: entry?.imports?.count))")
+        expect(begun == nil, "a paste on an id-less note waits for its id (never recorded by its path's id)")
+        expect(new != old && !NoteShelf.needsID(new), "the note is given its own id", new)
         expect(!fm.fileExists(atPath: NoteJournal.file(old).path) && entry?.text.contains("more") == true, "the journal entry is the new id's, with the typing")
         expect(store.sameNote(old, instance: paper.instance, new), "an editor holding the old id keeps its typing")
         if let begun { store.endImport(new, begun.token, journal: true) }

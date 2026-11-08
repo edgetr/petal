@@ -129,6 +129,8 @@ final class NoteSession {
     /// The provisional path (lowercased) a new note was shown with: reserved until its file is made, or its making
     /// ends (a failed one stays reserved while it's tried again).
     var reservation: String?
+    /// An id given to an id-less note, whose write hasn't landed yet.
+    var idPending: String?
     var pending: [Item] = []
     var running = false
     /// The first piece of work couldn't be done: it's tried again in a few seconds.
@@ -923,6 +925,11 @@ final class NoteStore {
             return
         }
         session.pending.removeFirst()
+        // An id write that failed before and landed on a retry: lasting now.
+        if case .write = item.work, result.outcome == .written, let id = session.idPending {
+            session.idPending = nil
+            idWritten(id, landed: true)
+        }
         // A new note's making is over (made, or its asker went): its provisional name is free again, after its key
         // moved to the name it landed under (below).
         defer {
@@ -1280,9 +1287,18 @@ final class NoteStore {
     /// its front matter, written through its session (after whatever is waiting there), and taken at once by every
     /// owner: the paper, the session, what waits for it in memory, and the desk's records (`onIdentity`). The
     /// journal's snapshot moves to the new id. Nothing for a note that has one.
-    func ensureID(_ key: String) {
-        guard let index = notes.firstIndex(where: { $0.key == key }), notes[index].version == nil, NoteShelf.needsID(notes[index].noteID),
-              !readOnly(notes[index]), let session = session(for: key) else { return }
+    ///
+    /// `then`: the note's id once it's in its file (now, for a note that has one), or nil when it couldn't be
+    /// written (fail closed: nothing lasting is kept for it).
+    func ensureID(_ key: String, then: (@MainActor (String?) -> Void)? = nil) {
+        guard let index = notes.firstIndex(where: { $0.key == key }), notes[index].version == nil else { then?(nil); return }
+        let current = notes[index].noteID
+        if !NoteShelf.needsID(current) {
+            // Its id being written still: told once it's in.
+            if pendingIDs.contains(current), let then { idWaiters[current, default: []].append(then) } else { then?(current) }
+            return
+        }
+        guard !readOnly(notes[index]), let session = session(for: key) else { then?(nil); return }
         var paper = notes[index]
         let old = paper.noteID
         let base = paper.revision
@@ -1299,8 +1315,11 @@ final class NoteStore {
         // Followed only from this very file: its path's id is retired (another file there later is another note).
         let oldHolder = NoteShelf.holderKey(id: old, instance: paper.instance)
         aliases[oldHolder] = new
+        pendingIDs.insert(new)
+        session.idPending = new
+        if let then { idWaiters[new, default: []].append(then) }
         onIdentity(old, oldHolder, new)
-        enqueue(session, .write(text: text, base: base), done: nil)
+        enqueue(session, .write(text: text, base: base), done: { outcome in self.idWritten(new, landed: outcome == .written) })
         snapshot(paper, text: text, session: session)
         NoteJournal.queue.async { NoteJournal.forget(noteID: old) }
     }
@@ -1309,6 +1328,20 @@ final class NoteStore {
     /// handles) and kept in `aliases`, which the editor, a paste being read and a tool's request follow.
     /// (old id, old holder key, new id).
     @ObservationIgnored var onIdentity: @MainActor (String, String, String) -> Void = { _, _, _ in }
+
+    /// Ids given to id-less notes whose write hasn't landed yet: nothing lasting is kept by them until it has.
+    @ObservationIgnored private(set) var pendingIDs: Set<String> = []
+    @ObservationIgnored private var idWaiters: [String: [@MainActor (String?) -> Void]] = [:]
+
+    /// A note's id is in its file now (its own, given by `ensureID`).
+    @ObservationIgnored var onIDLanded: @MainActor (String) -> Void = { _ in }
+
+    /// An id write ended: landed, it's lasting (and said); not, those waiting are told nil (a failed write is still
+    /// tried again, and said when it lands).
+    private func idWritten(_ id: String, landed: Bool) {
+        if landed, pendingIDs.remove(id) != nil { onIDLanded(id) }
+        for waiter in idWaiters.removeValue(forKey: id) ?? [] { waiter(landed ? id : nil) }
+    }
 
     /// Ids notes had before they were given their own: old → new, for this run.
     @ObservationIgnored private(set) var aliases: [String: String] = [:]
@@ -1439,7 +1472,9 @@ final class NoteStore {
     /// A paste or drop on `key`, recorded before anything is read: its sources go into the journal at once. Nil when
     /// the note can't take pictures now.
     func beginImport(_ key: String, _ items: NoteImport) -> (token: Int, sources: [NoteJournal.Import])? {
-        guard !switching, !draining, let paper = paper(key), !readOnly(paper), let session = session(for: key) else { return nil }
+        // Only a note whose own id is in its file: a paste is journaled by it (never by a path's id).
+        guard !switching, !draining, let paper = paper(key), !readOnly(paper), NoteShelf.lasting(paper.noteID, pending: pendingIDs),
+              let session = session(for: key) else { return nil }
         nextID += 1
         let token = nextID
         var sources = items.files.map { NoteJournal.Import(token: token, path: $0.path, ext: $0.pathExtension.lowercased(), caption: $0.deletingPathExtension().lastPathComponent) }
@@ -1640,8 +1675,21 @@ struct NoteLocal: Codable, Equatable {
         return local
     }
 
-    func save() {
-        guard !Headless.on, let data = try? JSONEncoder().encode(self) else { return }
+    /// What's written to disk: only what's kept by a real id that's in its file (NoteShelf.lasting); records of id-less
+    /// notes, or of ids still being written, stay in memory for this run.
+    func persisted(pending: Set<String>) -> NoteLocal {
+        var out = self
+        let keep = { (id: String) in NoteShelf.lasting(id, pending: pending) }
+        out.shown = shown.filter(keep)
+        out.spots = spots.filter { keep($0.key) }
+        out.desk = desk.filter { keep($0.key) }
+        out.handles = handles?.filter { keep($0.key) }
+        out.copies = copies?.filter { keep(String($0.key.split(separator: "#").first ?? "")) }
+        return out
+    }
+
+    func save(pending: Set<String> = []) {
+        guard !Headless.on, let data = try? JSONEncoder().encode(persisted(pending: pending)) else { return }
         NoteStore.io.async {
             try? FileManager.default.createDirectory(at: Config.supportFolder, withIntermediateDirectories: true)
             try? data.write(to: Self.file, options: .atomic)
