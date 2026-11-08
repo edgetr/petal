@@ -82,12 +82,21 @@ final class PetalApp {
         focus = FocusGuard()
         connectWindowsToGuard()
         refreshSystemFacts()
-        if !Headless.on { Task {
-            for provider in Provider.allCases { await lookFor(provider) }
-            loadCodexModels()
-            // The person's other AI sessions get Petal's tools, skill and command too.
-            if config.bool("otherAgents") { OtherAgents.connect(paths: paths) }
-        } }
+        if !Headless.on {
+            // Back from System Settings (or anywhere): what changed there shows in the windows still open.
+            NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated {
+                    let app = PetalApp.shared
+                    if app.settings.isOpen || app.welcome.isOpen || app.overview.isOpen { app.refreshSystemFacts() }
+                }
+            }
+            Task {
+                for provider in Provider.allCases { await lookFor(provider) }
+                loadCodexModels()
+                // The person's other AI sessions get Petal's tools, skill and command too.
+                if config.bool("otherAgents") { OtherAgents.connect(paths: paths) }
+            }
+        }
     }
 
     var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev" }

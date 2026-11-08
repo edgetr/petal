@@ -8,6 +8,7 @@ import SwiftUI
 @MainActor
 final class SettingsWindow {
     private(set) var window: NSWindow?
+    var isOpen: Bool { window?.isVisible ?? false }
     /// The page a fresh view, made ahead in the closed window and never shown, opens on.
     private var madeAhead: SettingsSection?
 
@@ -1017,12 +1018,15 @@ struct InstructionsEditor: View {
 
 /// The notes for the AI, kept in memory for the settings window. Read and written off the main thread, on one queue,
 /// in order: a read asked for after a save reads what that save wrote. A read begun before a save, or while the
-/// person is typing, never replaces what they typed.
+/// person is typing, never replaces what they typed. A save never writes over a change made elsewhere that the editor
+/// hasn't shown: the file's version comes into the editor instead, as a change made elsewhere always has.
 @MainActor @Observable
 final class InstructionsText {
     @ObservationIgnored private(set) var text = ""
     /// Counts reads that changed `text`, so the editor follows a change made elsewhere.
     private(set) var version = 0
+    /// What the file held when `text` was read from it or written to it: a save writes only over this.
+    @ObservationIgnored private var base = ""
     /// Counts saves: a read begun before one is older than what's typed, and is dropped.
     @ObservationIgnored private var saves = 0
     @ObservationIgnored private var lastSave = Date.distantPast
@@ -1043,16 +1047,14 @@ final class InstructionsText {
         let read = { () -> (stamp: Date?, text: String)? in
             let stamp = Self.modified(file)
             if ifChanged, stamp == known { return nil }
-            return (stamp, (try? String(contentsOf: file, encoding: .utf8)) ?? "")
+            return (stamp, Self.contents(file))
         }
         let apply = { (disk: (stamp: Date?, text: String)?) in
             guard let disk, asOf == self.saves else { return }
-            // Typing: theirs stays; the change is read again once they pause (unless their typing replaced it).
+            // Typing: theirs stays; the change is read again once they pause (and a save meanwhile doesn't write
+            // over it: it shows the file's version instead).
             guard Date().timeIntervalSince(self.lastSave) >= Self.typing else { return }
-            self.seen = disk.stamp
-            guard disk.text != self.text else { return }
-            self.text = disk.text
-            self.version += 1
+            self.show(disk)
         }
         if wait { apply(Self.queue.sync { read() }); return }
         Self.queue.async {
@@ -1063,15 +1065,31 @@ final class InstructionsText {
 
     func save(_ new: String, to file: URL) {
         guard new != text else { return }
+        let over = base
         text = new
+        base = new   // the next save builds on this one
         saves += 1
         lastSave = Date()
         let saved = saves
         Self.queue.async {
-            try? new.write(to: file, atomically: true, encoding: .utf8)
-            let stamp = Self.modified(file)
-            DispatchQueue.main.async { MainActor.assumeIsolated { if saved == self.saves { self.seen = stamp } } }
+            // Writes only over what the editor had: a change made elsewhere since then is kept, and shown instead.
+            let now = Self.contents(file)
+            let written = now == over && (try? new.write(to: file, atomically: true, encoding: .utf8)) != nil
+            let disk = (stamp: Self.modified(file), text: written ? new : now)
+            DispatchQueue.main.async { MainActor.assumeIsolated {
+                guard saved == self.saves else { return }   // a later save decides (and finds the same change)
+                if written { self.seen = disk.stamp } else { self.show(disk) }
+            } }
         }
+    }
+
+    /// The file as read: the editor shows it and builds on it.
+    private func show(_ disk: (stamp: Date?, text: String)) {
+        seen = disk.stamp
+        base = disk.text
+        guard disk.text != text else { return }
+        text = disk.text
+        version += 1
     }
 
     /// An editor showing the notes appeared (true) or went (false).
@@ -1085,6 +1103,10 @@ final class InstructionsText {
 
     nonisolated private static func modified(_ file: URL) -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date
+    }
+
+    nonisolated private static func contents(_ file: URL) -> String {
+        (try? String(contentsOf: file, encoding: .utf8)) ?? ""
     }
 }
 

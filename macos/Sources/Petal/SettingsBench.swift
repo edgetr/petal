@@ -193,38 +193,73 @@ enum WindowBench {
     }
 
     /// Scrolls the window's scroll view top to bottom and back in `step` pt steps, a frame each, as a trackpad does.
+    /// A lazy list's height is an estimate that changes as it scrolls, so the range is read again after every step:
+    /// it goes on until the end shows and the offset stops changing, and only steps that moved count.
     static func scroll(_ window: NSWindow, step: CGFloat = 8, passes: Int = 1) -> ScrollStat? {
         frame(window)
         guard let scroll = scrollView(in: window), let document = scroll.documentView else { return nil }
         let clip = scroll.contentView
         var times: [Double] = []
         var bodies = 0
-        func go(_ y: CGFloat) {
+        var tallest = document.frame.height
+        func range() -> CGFloat { max(0, document.frame.height - clip.bounds.height) }
+        /// How far down from the top it is.
+        func offset() -> CGFloat { document.isFlipped ? clip.bounds.origin.y : range() - clip.bounds.origin.y }
+        /// Scrolls to `distance` from the top (within the range as it is now); whether it moved.
+        func go(_ distance: CGFloat) -> Bool {
+            let before = offset()
+            let target = min(max(0, distance), range())
             BodyCount.counts = [:]
             let start = now()
-            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
+            clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: document.isFlipped ? target : range() - target))
             scroll.reflectScrolledClipView(clip)
+            NotificationCenter.default.post(name: NSScrollView.didLiveScrollNotification, object: scroll)
             frame(window)
-            times.append(ms(start, now()))
+            let elapsed = ms(start, now())
+            tallest = max(tallest, document.frame.height)
+            guard abs(offset() - before) > 0.01 else { return false }
+            times.append(elapsed)
             bodies += BodyCount.total
+            return true
         }
-        let range = max(0, document.frame.height - clip.bounds.height)
-        let top: CGFloat = document.isFlipped ? 0 : range
-        let sign: CGFloat = document.isFlipped ? 1 : -1
-        let count = Int(range / step)
-        guard count > 0 else { return nil }
-        for _ in 0..<(count > 400 ? 1 : passes) {
-            for i in 1...count { go(top + sign * CGFloat(i) * step) }
-            for i in stride(from: count - 1, through: 0, by: -1) { go(top + sign * CGFloat(i) * step) }
+        /// Steps one way until three steps in a row don't move: the end shows and its height has settled.
+        func run(down: Bool) {
+            // As a trackpad's scroll says it: SwiftUI then takes it as the person's, and drops what an earlier
+            // `scrollTo` asked for (a chat's last message, which it would otherwise scroll back to as the lazy
+            // list's height changes).
+            NotificationCenter.default.post(name: NSScrollView.willStartLiveScrollNotification, object: scroll)
+            defer { NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: scroll) }
+            var still = 0
+            var guardSteps = 200_000
+            while still < 3 && guardSteps > 0 {
+                guardSteps -= 1
+                still = go(offset() + (down ? step : -step)) ? 0 : still + 1
+            }
         }
-        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: top))
-        scroll.reflectScrolledClipView(clip)
-        frame(window)
+        /// To the top, untimed (a chat opens at its end), until it stays there.
+        func toTop() {
+            NotificationCenter.default.post(name: NSScrollView.willStartLiveScrollNotification, object: scroll)
+            defer { NotificationCenter.default.post(name: NSScrollView.didEndLiveScrollNotification, object: scroll) }
+            for _ in 0..<20 {
+                clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: document.isFlipped ? 0 : range()))
+                scroll.reflectScrolledClipView(clip)
+                frame(window)
+                if offset() < 0.01 { break }
+            }
+        }
+        guard range() >= step else { return nil }
+        toTop()
+        for _ in 0..<(range() / step > 400 ? 1 : passes) {
+            run(down: true)
+            run(down: false)
+        }
+        toTop()
+        guard !times.isEmpty else { return nil }
         let sorted = times.sorted()
         let mean = times.reduce(0, +) / Double(times.count)
         let deviation = (times.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Double(times.count)).squareRoot()
         let jump = zip(times, times.dropFirst()).map { abs($0 - $1) }.reduce(0, +) / Double(max(1, times.count - 1))
-        return ScrollStat(steps: times.count, height: Double(document.frame.height), median: pick(sorted, 0.5), p95: pick(sorted, 0.95),
+        return ScrollStat(steps: times.count, height: Double(tallest), median: pick(sorted, 0.5), p95: pick(sorted, 0.95),
                           p99: pick(sorted, 0.99), max: sorted.last ?? 0, over8: times.filter { $0 > 8.333 }.count,
                           over16: times.filter { $0 > 16.667 }.count, jitter: deviation, jump: jump,
                           bodies: Double(bodies) / Double(times.count))

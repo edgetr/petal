@@ -7,6 +7,7 @@ import SwiftUI
 @MainActor
 final class Welcome {
     private var window: NSWindow?
+    var isOpen: Bool { window?.isVisible ?? false }
 
     func show() {
         PetalApp.shared.refreshSystemFacts()
