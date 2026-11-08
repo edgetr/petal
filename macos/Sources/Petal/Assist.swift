@@ -772,7 +772,7 @@ final class Assist {
                         guard let frame = self.arranged(window, layout) else { return fail("layout is left, right, top, bottom, full or center") }
                         Self.queue.async {
                             guard live() else { return }   // its asker gone while it waited its turn
-                            _ = Windows.place(window.element, pid: window.pid, frame)
+                            _ = Windows.place(window.element, pid: window.pid, frame, live: live)
                             DispatchQueue.main.async { send(["arranged": label, "layout": layout]) }
                         }
                     default: fail("action is list, focus, minimize, close or arrange")

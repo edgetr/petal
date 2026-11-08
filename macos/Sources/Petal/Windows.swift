@@ -353,19 +353,24 @@ extension Windows {
     /// enhanced interface (for VoiceOver and the like) animate every move, so it's off for the moment of the move, as
     /// Rectangle and AeroSpace do. Returns the frame the app accepted.
     @discardableResult
-    nonisolated static func place(_ element: AXUIElement, pid: pid_t, _ frame: CGRect, size: Bool = true) -> CGRect? {
+    nonisolated static func place(_ element: AXUIElement, pid: pid_t, _ frame: CGRect, size: Bool = true,
+                                  live: () -> Bool = { true }) -> CGRect? {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.3)
+        // `live`: asked right before each change, after the reads that may wait on the app (an AI session that asked
+        // for it may have gone meanwhile); once it says no, nothing more moves.
+        guard live() else { return nil }
         let enhanced: Bool = value(app, "AXEnhancedUserInterface") ?? false
+        defer { if enhanced { AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue) } }
+        guard live() else { return nil }
         if enhanced { AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanFalse) }
         var origin = frame.origin, extent = frame.size
         let sizeValue = AXValueCreate(.cgSize, &extent)
         // Size, then position, then size again: a window moving to a smaller screen first shrinks, and one the
         // screen's edge had held back gets its full size once it's in place.
-        if size, let sizeValue { AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, sizeValue) }
-        if let point = AXValueCreate(.cgPoint, &origin) { AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, point) }
-        if size, let sizeValue { AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, sizeValue) }
-        if enhanced { AXUIElementSetAttributeValue(app, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue) }
+        if size, let sizeValue { guard live() else { return nil }; AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, sizeValue) }
+        if let point = AXValueCreate(.cgPoint, &origin) { guard live() else { return nil }; AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, point) }
+        if size, let sizeValue { guard live() else { return nil }; AXUIElementSetAttributeValue(element, kAXSizeAttribute as CFString, sizeValue) }
         return self.frame(of: element)
     }
 
