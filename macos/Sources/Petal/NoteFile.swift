@@ -916,6 +916,39 @@ enum NoteShelf {
         return name
     }
 
+    /// Notes renamed or moved elsewhere (Finder, another Mac) while Petal holds them: old key → new key, for each id
+    /// that is one paper in memory and one in the read, whose old path the read no longer has and whose new path
+    /// memory doesn't. Followed before the read is fenced, so an open note moves with its file (its editor, session
+    /// and work along), never left beside it as a second paper of the same id. `memory`/`read`: (key, id) of the
+    /// papers that aren't iCloud versions.
+    static func follow(memory: [(key: String, id: String)], read: [(key: String, id: String)]) -> [String: String] {
+        let mine = Dictionary(grouping: memory, by: \.id)
+        let theirs = Dictionary(grouping: read, by: \.id)
+        let readKeys = Set(read.map(\.key)), memoryKeys = Set(memory.map(\.key))
+        var out: [String: String] = [:]
+        for (id, held) in mine {
+            guard held.count == 1, let found = theirs[id], found.count == 1 else { continue }
+            let old = held[0].key, new = found[0].key
+            guard old != new, !readKeys.contains(old), !memoryKeys.contains(new) else { continue }
+            out[old] = new
+        }
+        return out
+    }
+
+    /// How a paste's read ends: its pictures put in through the note's session (`accepted`); left in the journal
+    /// for the next launch (quitting); put in from the journal into its note in the folder it was pasted in
+    /// (`putIn`: the notes folder changed meanwhile, or the note couldn't take them now); or let go (nothing in it
+    /// could be read). Only `accepted` and `nothingRead` take it out of the journal before its bytes and reference
+    /// are stored.
+    enum ImportEnd: Equatable { case accepted, keepForLaunch, putIn, nothingRead }
+
+    static func importEnd(read: Bool, quitting: Bool, sameRoot: Bool, taken: Bool) -> ImportEnd {
+        if quitting { return .keepForLaunch }
+        if !read { return .nothingRead }
+        if !sameRoot { return .putIn }
+        return taken ? .accepted : .putIn
+    }
+
     /// The notes after a read of the folder that began at `started`: what was read, except notes changed in memory
     /// since it began (`changed`: key → when, on the same clock), which keep their newer selves, and notes made
     /// since, which the read can't have seen yet. Removed since (`removed`): left out.

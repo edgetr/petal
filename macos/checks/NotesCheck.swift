@@ -162,6 +162,24 @@ struct NotesCheck {
         expect(NoteShelf.rebind(key: "/n/A.md", at: ["/n/A.md"]) == nil && NoteShelf.rebind(key: "/n/A.md", at: ["/n/x.md", "/n/y.md"]) == nil,
                "where it was, or found twice: left alone")
 
+        // A note renamed elsewhere while open: followed by its id, never left as a second paper.
+        expect(NoteShelf.follow(memory: [("/n/A.md", "A")], read: [("/n/A renamed.md", "A")]) == ["/n/A.md": "/n/A renamed.md"],
+               "renamed in Finder: the open note follows to its new path")
+        expect(NoteShelf.follow(memory: [("/n/A.md", "A")], read: [("/n/A.md", "A")]).isEmpty, "where it was: nothing to follow")
+        expect(NoteShelf.follow(memory: [("/n/A.md", "A")], read: [("/n/A.md", "A"), ("/n/A copy.md", "A")]).isEmpty,
+               "its old path still there (a copy made elsewhere): not a rename")
+        expect(NoteShelf.follow(memory: [("/n/A.md", "A")], read: [("/n/x.md", "A"), ("/n/y.md", "A")]).isEmpty, "two papers of that id read: no guess")
+        expect(NoteShelf.follow(memory: [("/n/A.md", "A"), ("/n/B.md", "B")], read: [("/n/B.md", "A")]).isEmpty,
+               "its new path is another note's in memory: not followed")
+        expect(NoteShelf.follow(memory: [("/n/new.md", "N")], read: []).isEmpty, "a new note not on disk yet: left alone")
+
+        // A paste's read ends: out of the journal only once its bytes and reference are stored, or nothing was read.
+        expect(NoteShelf.importEnd(read: true, quitting: false, sameRoot: true, taken: true) == .accepted, "taken by its note: put in through its session")
+        expect(NoteShelf.importEnd(read: true, quitting: false, sameRoot: true, taken: false) == .putIn, "rejected by its note: put in from the journal, never dropped")
+        expect(NoteShelf.importEnd(read: true, quitting: false, sameRoot: false, taken: true) == .putIn, "the notes folder changed: into its note in its own folder")
+        expect(NoteShelf.importEnd(read: true, quitting: true, sameRoot: true, taken: true) == .keepForLaunch, "quitting: kept for the next launch")
+        expect(NoteShelf.importEnd(read: false, quitting: false, sameRoot: true, taken: true) == .nothingRead, "nothing readable: let go, and said")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

@@ -181,6 +181,18 @@ enum NoteJournal {
         if (((try? fm.contentsOfDirectory(atPath: holding.path)) ?? []).filter { $0.hasSuffix(".json") }).isEmpty { try? fm.removeItem(at: holding) }
     }
 
+    /// One paste of an entry (`token`) put into its note now, on what the entry says the note was: true once its
+    /// pictures and their lines are written. Its other pastes and pictures wait for theirs.
+    nonisolated static func putIn(_ entry: Entry, token: Int, root: URL) -> Bool {
+        guard let mine = entry.imports?.filter({ $0.token == token }), !mine.isEmpty else { return false }
+        var one = Entry(noteID: entry.noteID, path: entry.path, base: entry.base, text: entry.text)
+        one.landed = entry.landed
+        one.imports = mine
+        let (ready, waiting) = readImports(one)
+        guard waiting.isEmpty, !ready.pictures.isEmpty else { return false }
+        return recoverEntry(ready, notes: NoteStore.read(root).notes, root: root)
+    }
+
     /// One entry put back somewhere safe: true once it's written and said so.
     nonisolated static func recoverEntry(_ entry: Entry, notes: [PaperNote], root: URL) -> Bool {
         let found = notes.filter { $0.noteID == entry.noteID && $0.version == nil }.map(\.url.path)

@@ -232,7 +232,10 @@ final class NoteStore {
 
     var inICloud: Bool { root.path.contains("/Mobile Documents/") }
 
+    /// Reading and watching the notes folder as it is now: called once the first folder is settled, and again after
+    /// every switch (the watcher always follows the folder in use).
     func start() {
+        guard !switching else { return }
         reload()
         watch()
     }
@@ -297,6 +300,8 @@ final class NoteStore {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard mine == self.generation, !self.switching, root == self.root else { return }
+                    // Notes renamed or moved elsewhere meanwhile: followed first, editor, session and work along.
+                    self.followRenamed(read.notes)
                     // Papers with work under way, or open in an editor, count as changed now: never replaced by a read.
                     var changed = self.changedAt
                     for session in self.sessions.values where session.busy { changed[session.key] = Int.max }
@@ -333,6 +338,35 @@ final class NoteStore {
                     self.onChange()
                 }
             }
+        }
+    }
+
+    /// A note renamed or moved elsewhere (Finder, another Mac): the paper in memory takes its new path, and its open
+    /// editor and panel (`onRekey`), its session and the work waiting in it go along (`NoteShelf.follow`), so it
+    /// never becomes a second paper of the same id beside its old self.
+    private func followRenamed(_ read: [PaperNote]) {
+        let moves = NoteShelf.follow(memory: notes.filter { $0.version == nil }.map { ($0.key, $0.noteID) },
+                                     read: read.filter { $0.version == nil }.map { ($0.key, $0.noteID) })
+        guard !moves.isEmpty else { return }
+        let found = Dictionary(read.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
+        for (old, new) in moves {
+            guard let index = notes.firstIndex(where: { $0.key == old }), let there = found[new] else { continue }
+            var paper = notes[index]
+            paper.url = there.url
+            paper.notebook = there.notebook
+            notes[index] = paper
+            if let at = changedAt.removeValue(forKey: old) { changedAt[new] = at }
+            if let session = sessionAt(old, noteID: paper.noteID), let next = NoteShelf.rekey(keys, session: session.id, from: old, to: new) {
+                keys = next
+                session.key = new
+                let id = session.id, url = there.url
+                // After whatever is under way; everything waiting goes to the new path.
+                Self.io.async { NoteDisk.states[id]?.url = url }
+            }
+            if failed.remove(old) != nil { failed.insert(new) }
+            if let trouble = pictureTrouble.removeValue(forKey: old) { pictureTrouble[new] = trouble }
+            touch(new)
+            onRekey(old, paper)
         }
     }
 
@@ -1088,8 +1122,13 @@ final class NoteStore {
 
     // MARK: Watching
 
+    @ObservationIgnored private var watched: URL?
+
     private func watch() {
-        guard stream == nil, !Headless.on else { return }
+        guard !Headless.on, !switching else { return }
+        if stream != nil, watched == root { return }
+        stopWatching()
+        watched = root
         var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
         let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
             guard let info else { return }
@@ -1109,6 +1148,7 @@ final class NoteStore {
         FSEventStreamInvalidate(stream)
         FSEventStreamRelease(stream)
         self.stream = nil
+        watched = nil
     }
 
     private func changed() {
@@ -1278,7 +1318,7 @@ final class NoteStore {
 
     /// A paste or drop on `key`, recorded before anything is read: its sources go into the journal at once. Nil when
     /// the note can't take pictures now.
-    func beginImport(_ key: String, _ items: NoteImport) -> Int? {
+    func beginImport(_ key: String, _ items: NoteImport) -> (token: Int, sources: [NoteJournal.Import])? {
         guard !switching, !draining, let paper = paper(key), !readOnly(paper), let session = session(for: key) else { return nil }
         nextID += 1
         let token = nextID
@@ -1287,7 +1327,13 @@ final class NoteStore {
         if let tiff = items.tiff { sources.append(NoteJournal.Import(token: token, data: tiff, ext: "tiff")) }
         importsLoading[paper.noteID, default: [:]][token] = sources
         snapshot(paper, text: paper.file.serialized(), session: session)
-        return token
+        return (token, sources)
+    }
+
+    /// A paste that couldn't go in after all: its sources stay with the note (and in every snapshot) until it's
+    /// put in from the journal, or the next launch does.
+    func holdImport(_ noteID: String, _ token: Int, _ sources: [NoteJournal.Import]) {
+        importsLoading[noteID, default: [:]][token] = sources
     }
 
     /// A paste's read is over. `journal`: its sources leave the journal too (it was accepted and its references
@@ -1298,11 +1344,32 @@ final class NoteStore {
         if journal { NoteJournal.queue.async { NoteJournal.importsDone(noteID: noteID, token: token) } }
     }
 
+    /// A paste that couldn't go in through the note's session (the notes folder changed, or the note couldn't take
+    /// it): put in from its journal entry, into its note in the folder it was pasted in (found by id; a copy beside
+    /// it or a file of its own when that's what's safe: NoteJournal.recoverEntry), and out of the journal only once
+    /// its bytes and reference are stored. Else it stays for the next launch.
+    func putIn(_ noteID: String, _ token: Int, root: URL, then done: @escaping @MainActor (Bool) -> Void) {
+        NoteJournal.queue.async {
+            let entry = NoteJournal.read(NoteJournal.file(noteID))
+            Self.io.async {
+                var stored = false
+                if var entry {
+                    // Its text already in its note (the folder switch's drain wrote it): the base its lines go on.
+                    let found = NoteStore.read(root).notes.filter { $0.noteID == noteID && $0.version == nil }
+                    if found.count == 1, NoteStore.coordinatedRead(found[0].url) == entry.text { entry.landed = true }
+                    stored = NoteJournal.putIn(entry, token: token, root: root)
+                }
+                if stored { NoteJournal.queue.async { NoteJournal.importsDone(noteID: noteID, token: token) } }
+                DispatchQueue.main.async { MainActor.assumeIsolated { if stored, root == self.root { self.reload() }; done(stored) } }
+            }
+        }
+    }
+
     /// Pictures still being read for the note: it isn't empty.
     func importing(_ key: String) -> Bool { paper(key).map { importsLoading[$0.noteID]?.isEmpty == false } ?? false }
 
-    /// Quitting or changing folders: a paste finishing now isn't put in (the journal keeps it).
-    var closing: Bool { switching || draining }
+    /// Quitting: a paste finishing now is left in the journal for the next launch.
+    var quitting: Bool { draining }
 
     /// Pictures accepted for the note and not in it yet: it isn't empty.
     func picturesPending(_ key: String) -> Bool { paper(key).flatMap { sessionAt(key, noteID: $0.noteID) }?.picturesPending ?? false }

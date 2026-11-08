@@ -526,7 +526,11 @@ final class PetalApp {
         let path = Bundle.main.bundlePath
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", path]
+        // Quitting can take a while now (notes saved, windows given back: up to 10 s), so the helper waits for this
+        // very process to be gone, by its pid, before opening Petal again; still there after a minute, it opens
+        // nothing (a second Petal would only step aside for this one).
+        process.arguments = ["-c", "i=0; while /bin/kill -0 \"$1\" 2>/dev/null && [ $i -lt 300 ]; do sleep 0.2; i=$((i+1)); done; "
+                             + "/bin/kill -0 \"$1\" 2>/dev/null || /usr/bin/open \"$0\"", path, String(getpid())]
         try? process.run()
         NSApp.terminate(nil)
     }

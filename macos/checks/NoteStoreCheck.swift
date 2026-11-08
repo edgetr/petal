@@ -244,6 +244,27 @@ struct NoteStoreCheck {
         NoteJournal.importsDone(noteID: "JI", token: 1, in: journal)
         expect(!fm.fileExists(atPath: NoteJournal.file("JI", in: journal).path), "the paste done and the text landed: the snapshot goes")
 
+        // A paste its note couldn't take (or one finished after the notes folder changed): put in from the journal
+        // into that note in its own folder, and out of the journal only then.
+        let rejected = notes.appending(path: "Rejected.md")
+        let rejectedText = NoteFile(id: "JR", body: "kept words").serialized()
+        _ = NoteStore.create(rejectedText, at: rejected, root: root)
+        var held = NoteJournal.Entry(noteID: "JR", path: rejected.path, base: nil, text: rejectedText)
+        held.landed = true
+        held.imports = [NoteJournal.Import(token: 7, path: source.path, ext: "png", caption: "source")]
+        NoteJournal.snapshot(held, in: journal)
+        let unreadable = root.appending(path: "later.png")
+        try? Data("not yet".utf8).write(to: unreadable)
+        var notYet = held
+        notYet.imports = [NoteJournal.Import(token: 8, path: unreadable.path, ext: "png")]
+        expect(!NoteJournal.putIn(notYet, token: 8, root: root) && text(rejected) == rejectedText,
+               "a paste whose file can't be read yet: nothing written, kept")
+        expect(NoteJournal.putIn(held, token: 7, root: root) && text(rejected)?.contains(NoteShelf.assetsFolder(id: "JR")) == true,
+               "put in from the journal: the note has the picture", text(rejected) ?? "nil")
+        expect(NoteJournal.read(NoteJournal.file("JR", in: journal))?.imports?.count == 1, "and the journal still has it until it's said stored")
+        NoteJournal.importsDone(noteID: "JR", token: 7, in: journal)
+        expect(!fm.fileExists(atPath: NoteJournal.file("JR", in: journal).path), "stored: out of the journal")
+
         // A text that landed while a picture it references failed: the snapshot stays with that picture's bytes,
         // and goes once the picture is saved.
         let pic = NoteJournal.Picture(name: "picture-f.png", data: Data("f".utf8))

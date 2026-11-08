@@ -78,7 +78,9 @@ final class NoteDesk {
         store.onProblem = { [weak self] text in self?.say(text) }
         store.keepAlive = { [weak self] key in self?.editors[key] != nil }
         Self.queue.async { Self.recoverNarrowed() }
-        store.start()
+        // Read and watched only once the first folder is settled: a folder set in Settings is switched to first, and
+        // the switch starts the store itself when it's done (and after every later switch).
+        if !store.switching { store.start() }
         settingsChanged()
     }
 
@@ -819,8 +821,9 @@ final class NoteDesk {
     /// and a quit meanwhile keeps it for the next launch.
     func importPictures(_ items: NoteImport, into key: String) {
         guard let paper = store.paper(key), !store.readOnly(paper) else { return say("This note has two versions: keep one before adding pictures.") }
-        guard let token = store.beginImport(key, items) else { return say("This note can't take pictures right now.") }
+        guard let (token, sources) = store.beginImport(key, items) else { return say("This note can't take pictures right now.") }
         let noteID = paper.noteID
+        let pastedIn = store.root
         DispatchQueue.global(qos: .userInitiated).async {
             var read: [(ext: String, data: Data, caption: String)] = []
             for file in items.files {
@@ -833,29 +836,47 @@ final class NoteDesk {
             let ready = read
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    // Quitting meanwhile: the journal keeps the paste for the next launch.
-                    if self.store.closing { return self.store.endImport(noteID, token, journal: false) }
-                    guard !ready.isEmpty else {
+                    // Tied to the note's id and the folder it was pasted in. Quitting meanwhile: left in the journal
+                    // for the next launch. The folder changed, or the note can't take it now: put in from the
+                    // journal into that note in that folder. It leaves the journal only once its bytes and
+                    // reference are stored (NoteShelf.importEnd).
+                    let sameRoot = !self.store.switching && self.store.root == pastedIn
+                    var end = NoteShelf.importEnd(read: !ready.isEmpty, quitting: self.store.quitting, sameRoot: sameRoot, taken: true)
+                    var taken: (key: String, pictures: [(path: String, file: URL, caption: String)])?
+                    if end == .accepted {
+                        // Its read is over before its pictures go in, so the snapshot they make carries their bytes,
+                        // not their sources.
+                        self.store.endImport(noteID, token, journal: false)
+                        if let now = self.store.notes.first(where: { $0.noteID == noteID && $0.version == nil }),
+                           let accepted = self.store.acceptPictures(now.key, ready) {
+                            taken = (now.key, accepted)
+                        } else {
+                            self.store.holdImport(noteID, token, sources)
+                            end = NoteShelf.importEnd(read: true, quitting: false, sameRoot: true, taken: false)
+                        }
+                    }
+                    switch end {
+                    case .keepForLaunch: return
+                    case .nothingRead:
                         self.store.endImport(noteID, token, journal: true)
                         self.letGoIfEmpty(self.store.notes.first { $0.noteID == noteID && $0.version == nil }?.key ?? "")
                         return self.say("Petal couldn't read that picture.")
+                    case .putIn:
+                        return self.store.putIn(noteID, token, root: pastedIn) { stored in
+                            if stored { self.store.endImport(noteID, token, journal: false) }
+                            else { self.say("Petal keeps that picture and puts it in the note when it next starts.") }
+                        }
+                    case .accepted: break
                     }
-                    // The note as it is now (moved or named again meanwhile: found by its id). Its read is over
-                    // before its pictures go in, so the snapshot they make carries their bytes, not their sources.
-                    self.store.endImport(noteID, token, journal: false)
-                    guard let now = self.store.notes.first(where: { $0.noteID == noteID && $0.version == nil }),
-                          let accepted = self.store.acceptPictures(now.key, ready) else {
-                        NoteJournal.queue.async { NoteJournal.importsDone(noteID: noteID, token: token) }
-                        return self.say("This note can't take pictures right now.")
-                    }
+                    guard let (nowKey, accepted) = taken else { return }
                     for (index, picture) in accepted.enumerated() { NotePictures.shared.preview(picture.file, NSImage(data: ready[index].data) ?? NSImage()) }
-                    self.fresh.remove(now.key)
-                    if self.insertPictures(now.key, accepted, at: items.at) {
+                    self.fresh.remove(nowKey)
+                    if self.insertPictures(nowKey, accepted, at: items.at) {
                         // Into the note now (and its snapshot), not a moment later.
-                        self.editors[now.key]?.flush()
+                        self.editors[nowKey]?.flush()
                     } else {
                         let lines = accepted.map { NoteBlock.image(path: $0.path, caption: $0.caption).markdown }
-                        self.store.change(now.key) { file in
+                        self.store.change(nowKey) { file in
                             file.body += (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + lines.joined(separator: "\n")
                         }
                     }

@@ -22,6 +22,21 @@ struct NoteSelectionCheck {
                "never a field whose whole text holds a vault secret, whatever part is selected")
         expect(!UIMap.selectionHidden(in: UINode(role: "AXStaticText", title: "Card number", value: "Card number"), filled: false, secret: vault),
                "a label named Card number isn't a field")
+
+        // What the note tools tell an agent: every string redacted with the vault's index, all of it or nothing.
+        let index = UIMap.SecretIndex(["sk-live-1234567890abcdef"])
+        let answer: [String: Any] = ["text": "config:\nkey = sk-live-1234567890abcdef\nport = 80", "title": "sk-live-1234567890abcdef",
+                                     "notes": [["preview": "uses sk-live-1234567890abcdef here", "places": ["The page example.com"]]],
+                                     "count": 3, "onScreen": true]
+        let shown = NoteShield.shield(answer, index: index) as? [String: Any]
+        let text = shown?["text"] as? String ?? ""
+        let preview = ((shown?["notes"] as? [Any])?.first as? [String: Any])?["preview"] as? String ?? ""
+        expect(!text.contains("sk-live") && text.contains("port = 80") && text.contains(UIMap.hidden), "a note's text: its key hidden, the rest kept")
+        expect(shown?["title"] as? String == UIMap.hidden, "a title that is a key: hidden")
+        expect(!preview.contains("sk-live") && preview.hasPrefix("uses "), "previews in lists too")
+        expect(shown?["count"] as? Int == 3 && shown?["onScreen"] as? Bool == true, "numbers and flags as they were")
+        expect(NoteShield.shield(answer, index: .unavailable) == nil, "the vault unreadable: nothing told")
+        expect(NoteShield.shield("Couldn't move it.", index: .unavailable) == nil, "not even a plain message")
         print("note selection: " + (failures == 0 ? "all checks passed" : "\(failures) failed"))
         if failures > 0 { exit(1) }
     }

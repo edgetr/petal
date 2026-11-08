@@ -13,7 +13,11 @@ extension NoteDesk {
     static let hungUp = "The request ended before this was done: nothing was changed."
 
     func handle(_ name: String, _ args: [String: Any], live: @escaping @Sendable () -> Bool = { true },
-                _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+                _ answer: @escaping (Any) -> Void, _ refuse: @escaping (String) -> Void) {
+        // Everything told goes through the vault's redaction first (NoteShield, the rule petal_ui and petal_look
+        // follow), off the main thread; while the vault can't be read, nothing of the notes is told.
+        let send: (Any) -> Void = { value in Self.shielded(value) { out in if let out { answer(out) } else { refuse(NoteShield.unreadable) } } }
+        let fail: (String) -> Void = { text in Self.shielded(text) { out in refuse(out as? String ?? NoteShield.unreadable) } }
         guard on else { return fail("Petal Notes is off in Petal's settings (notes).") }
         switch name {
         case "petal_notes":
@@ -95,6 +99,23 @@ extension NoteDesk {
             }
         default:
             fail("Unknown tool \(name)")
+        }
+    }
+
+    private final class Carry: @unchecked Sendable {
+        let value: Any?
+        init(_ value: Any?) { self.value = value }
+    }
+
+    private static let shieldQueue = DispatchQueue(label: "petal.notes.shield", qos: .userInitiated)
+
+    /// `value` with the vault's secrets taken out, on a queue of its own (the index may read the Keychain); nil
+    /// when the vault can't be read (or kept changing while it was checked).
+    private static func shielded(_ value: Any, _ done: @escaping @MainActor (Any?) -> Void) {
+        let carried = Carry(value)
+        shieldQueue.async {
+            let out = Carry(VaultIndex.settled { NoteShield.shield(carried.value as Any, index: $0) } ?? nil)
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(out.value) } }
         }
     }
 
