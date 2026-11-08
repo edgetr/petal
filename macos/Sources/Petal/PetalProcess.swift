@@ -47,15 +47,24 @@ enum PetalProcess {
         return arguments.count == argc ? arguments : nil
     }
 
-    /// The Dock guard's shell test (Setup.swift), the same flags: whether a process named Petal is running that
-    /// has none of them. Unlike `isDock`, a command (`petal mode`) counts as running there: it's gone in a moment,
-    /// and a guard unsure whether Petal runs leaves the Dock alone.
+    /// The Dock guard's shell test (Setup.swift), the same rules as `isDock(arguments:)`: whether a process named
+    /// Petal is running that is a dock. `ps -o comm=` is the program (argv[0], spaces and all), so what follows it in
+    /// `ps -o args=` is its words: a first word that isn't a flag is a command (`petal run … -- npm run dev` may run
+    /// for hours, and must never keep macOS's Dock hidden after the dock crashed), and so are the flags above.
+    /// Anything it can't read (the process ended, words that don't follow the program) counts as running: a guard
+    /// unsure whether the dock runs leaves the Dock alone.
     static var shellDockRunning: String {
         let flags = (notDockFlags.sorted().map { "*\" \($0) \"*" } + ["*\" \(benchPrefix)\"*"]).joined(separator: "|")
         return """
         petal_dock() {
           for pid in $(pgrep -x Petal); do
-            case " $(ps -o args= -p "$pid" 2>/dev/null) " in
+            args="$(ps -o args= -p "$pid" 2>/dev/null)"; prog="$(ps -o comm= -p "$pid" 2>/dev/null)"
+            words="${args#"$prog"}"
+            case "$args" in "$prog"*) ;; *) return 0 ;; esac
+            case "$words" in ''|' '*) ;; *) return 0 ;; esac
+            first="${words# }"; first="${first%% *}"
+            case "$first" in ''|-*) ;; *) continue ;; esac
+            case "$words " in
               \(flags)) ;;
               *) return 0 ;;
             esac

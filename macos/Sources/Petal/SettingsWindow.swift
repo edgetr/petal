@@ -1001,6 +1001,9 @@ struct InstructionsEditor: View {
             .frame(minHeight: 110)
             .padding(8)
             .background(.black.opacity(0.12), in: .rect(cornerRadius: 12))
+            // Nothing to type over until the file was first read: typing onto an empty editor while the notes are
+            // still on their way would be lost, or write over them. It's empty until then, so it looks no different.
+            .disabled(!notes.loaded)
             // As last read off the main thread; read again as it appears, and while it shows, a change made elsewhere
             // (an agent, an editor) comes in within a second.
             .onAppear {
@@ -1023,6 +1026,8 @@ final class InstructionsText {
     @ObservationIgnored private(set) var text = ""
     /// Counts reads that changed `text`, so the editor follows a change made elsewhere.
     private(set) var version = 0
+    /// Whether the file was read once: until then `text` is no baseline, and the editor takes no typing.
+    private(set) var loaded = false
     /// What the file held when `text` was read from it or written to it: a save writes only over this.
     @ObservationIgnored private var base = ""
     /// Counts saves: a read begun before one is older than what's typed, and is dropped.
@@ -1085,6 +1090,7 @@ final class InstructionsText {
     private func show(_ disk: (stamp: Date?, text: String)) {
         seen = disk.stamp
         base = disk.text
+        if !loaded { loaded = true }
         guard disk.text != text else { return }
         text = disk.text
         version += 1

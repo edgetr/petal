@@ -34,19 +34,34 @@ struct PetalProcessCheck {
         expect(PetalProcess.arguments(of: 999_999) == nil, "a process that doesn't exist has no arguments")
         expect(PetalProcess.isDock(pid: 999_999), "unreadable arguments count as a dock")
 
-        // The Dock guard's test, with stand-ins for pgrep and ps: (the processes' arguments, whether a dock runs).
-        let cases: [([String], Bool)] = [
+        // The Dock guard's test, with stand-ins for pgrep and ps: (each process's argv, whether a dock runs). The
+        // same rules as isDock: a command, `petal run` above all (it lasts as long as what it runs), is never a dock.
+        let spaced = "/Users/me/Petal Builds/Petal.app/Contents/MacOS/Petal"
+        let cases: [([[String]], Bool)] = [
             ([], false),
-            (["\(petal)"], true),
-            (["\(petal) --bench-windows --runs 20", "\(petal) --bench-windows-idle Chat, 60 messages"], false),
-            (["\(petal) --mcp", "\(petal) --snapshot /tmp/s", "\(petal) --routines-check", "\(petal) --restore-dock"], false),
-            (["\(petal) --bench-dock", "\(petal) -psn_0_1"], true),
-            (["\(petal) mode social"], true),   // a command counts there: the guard leaves the Dock alone when unsure
-            ([""], true),                       // gone before ps read it: unsure, so running
+            ([[petal]], true),
+            ([[spaced]], true),
+            ([[petal, "--bench-windows", "--runs", "20"], [petal, "--bench-windows-idle", "Chat, 60 messages"]], false),
+            ([[petal, "--mcp"], [petal, "--snapshot", "/tmp/s"], [petal, "--routines-check"], [petal, "--restore-dock"]], false),
+            ([[petal, "--bench-dock"], [petal, "-psn_0_1"]], true),
+            ([[petal, "-NSDocumentRevisionsDebugMode", "YES"]], true),
+            ([[petal, "mode", "social"]], false),
+            ([[petal, "doctor"], [petal, "no-such-command"]], false),
+            ([[petal, "run", "--key", "Anthropic", "--", "npm", "run", "dev"]], false),
+            ([[spaced, "run", "--key", "x", "--stdin", "--", "sh", "-c", "sleep 3600"]], false),
+            ([[petal, "run", "--", "env"], [spaced]], true),
+            ([[petal, "-psn_0_1", "--mcp"]], false),
+            ([[""]], true),                     // gone before ps read it: unsure, so running
         ]
         for (processes, running) in cases {
+            func quoted(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }
             var script = "pgrep() { \(processes.isEmpty ? ":" : "echo " + processes.indices.map { String($0 + 1) }.joined(separator: " ")); }\n"
-            script += "ps() { case \"$4\" in " + processes.enumerated().map { "\($0.offset + 1)) printf '%s\\n' '\($0.element)' ;;" }.joined(separator: " ")
+            script += "ps() { case \"$2 $4\" in " + processes.enumerated().map { process in
+                let pid = process.offset + 1
+                let program = process.element.first ?? ""
+                let args = process.element.joined(separator: " ")
+                return "\"comm= \(pid)\") printf '%s\\n' \(quoted(program)) ;; \"args= \(pid)\") printf '%s\\n' \(quoted(args)) ;;"
+            }.joined(separator: " ")
             script += " *) ;; esac; }\n"
             script += PetalProcess.shellDockRunning + "\nif petal_dock; then echo yes; else echo no; fi\n"
             let process = Process()
@@ -58,6 +73,9 @@ struct PetalProcessCheck {
             let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
             process.waitUntilExit()
             expect(out.trimmingCharacters(in: .whitespacesAndNewlines) == (running ? "yes" : "no"), "guard with \(processes): \(out)")
+            for argv in processes where argv != [""] {
+                expect(PetalProcess.isDock(arguments: argv) == running || processes.count > 1, "guard and isDock agree on \(argv)")
+            }
         }
 
         if failed > 0 { print("petal process: \(failed) failed"); exit(1) }
