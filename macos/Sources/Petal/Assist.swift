@@ -29,6 +29,11 @@ final class Assist {
         var warn = false
         /// The word on the button that says yes ("Allow", "Buy").
         var allow = "Allow"
+        /// An Always of its own, even where Don't is the default: "Always for this project" for an agent outside
+        /// Petal (AgentCallers.swift), kept as a grant rather than in aiAllowed.
+        var keep: String?
+        /// The agent asking, when it's one outside Petal: its mark on the card.
+        var mark: AgentAccess.Agent?
         var takesKeys: Bool { form != nil }
     }
 
@@ -70,14 +75,19 @@ final class Assist {
     /// Allowed already (Full access, or Always for this kind), or asked with a card; `done` hears the answer.
     /// `always`: asked even with Full access (the vault). `form`: the card takes what the person types for the vault,
     /// handed to `typed` before `done`. `warn`: Don't is the default (what's asked doesn't match).
+    /// `keep`: the label of an Always kept as `kept` says (an agent's grant), shown even when Don't is the default.
+    /// `owner`: the chat or AI session asking (Assist.handle's caller), always said: its Stop, next turn or hanging up
+    /// answers its card Don't. Only what no chat asked for (a routine's own run) passes nil.
     func ask(_ kind: String, _ title: String, detail: String = "", always: Bool = false, form: VaultForm? = nil, warn: Bool = false,
-             allow: String = "Allow", owner: String? = nil, typed: ((VaultForm.Answer) -> Void)? = nil, done: @escaping (Bool) -> Void) {
+             allow: String = "Allow", owner: String?, keep: String? = nil, mark: AgentAccess.Agent? = nil, kept: (() -> Void)? = nil,
+             typed: ((VaultForm.Answer) -> Void)? = nil, done: @escaping (Bool) -> Void) {
         // `always` (the vault) asks every time: neither Full access nor an earlier Always skips it.
         if form == nil, !always, !warn, config.string("claudeAccess") == "full" || config.strings("aiAllowed").contains(kind) { return done(true) }
         settle(false)   // one question at a time: a newer one replaces an older one, which is declined
         formTyped = typed
+        keptAlways = keep == nil ? nil : kept
         let request = Request(kind: kind, title: title, detail: detail, every: always || warn, owner: owner, form: form, warn: warn,
-                              allow: allow)
+                              allow: allow, keep: keep, mark: mark)
         pending = request
         answer = done
         // In the chat when it's open and the question is its own (the card shows there); over the dock otherwise
@@ -94,6 +104,7 @@ final class Assist {
     }
 
     @ObservationIgnored private var formTyped: ((VaultForm.Answer) -> Void)?
+    @ObservationIgnored private var keptAlways: (() -> Void)?
 
     /// Shows a made-up question, for `Petal --snapshot`.
     func preview(_ request: Request?) { pending = request }
@@ -107,6 +118,7 @@ final class Assist {
             formTyped?(typed)
         }
         formTyped = nil
+        if choice == .always, pending.keep != nil { keptAlways?() }
         if choice == .always, !pending.every {
             var allowed = config.strings("aiAllowed")
             if !allowed.contains(pending.kind) { allowed.append(pending.kind); config.set("aiAllowed", allowed) }
@@ -116,6 +128,7 @@ final class Assist {
 
     private func settle(_ allowed: Bool) {
         formTyped = nil
+        keptAlways = nil
         giveUp?.cancel()
         giveUp = nil
         let done = answer
@@ -140,6 +153,15 @@ final class Assist {
         if pending?.owner == owner { settle(false) }
     }
 
+    /// A request's asker went before its answer (an agent that gave up waiting, or quit): what that chat or AI
+    /// session had going stops, its card is answered Don't, and what it was allowed this task goes, so nothing it
+    /// asked for happens with nobody to hear of it; its next request starts afresh and asks again. (An AI session's
+    /// requests share one caller: all of them stop.)
+    func hungUp(_ caller: String) {
+        computer.abandon(caller)
+        decline(owner: caller)
+    }
+
     /// The card went away without an answer (×, Escape, another card): that's Don't.
     func cardClosed() {
         if pending != nil { settle(false) }
@@ -148,8 +170,18 @@ final class Assist {
     // MARK: The tools
 
     /// One of Petal AI's tools, from `Petal --mcp` (["assist", name, json]); the reply is one line of JSON.
-    /// `note`: the sticky note whose chat asks (PETAL_NOTE), so looking looks at its window.
-    func handle(_ name: String, _ json: String, note: String? = nil, reply: @escaping @MainActor (String) -> Void) {
+    /// `note`: the sticky note whose chat asks (PETAL_NOTE), so looking looks at its window. `who`: who's asking, as
+    /// Petal read it off the socket when the request came in (AgentCallers). `request`: the socket's request; once its
+    /// client hangs up, its cards are answered Don't (hungUp) and what it started off the main thread neither asks nor
+    /// acts.
+    func handle(_ name: String, _ json: String, note: String? = nil, who: AgentAccess.Caller? = nil, request: IPC.Pending? = nil,
+                reply: @escaping @MainActor (String) -> Void) {
+        // Read on any thread: the socket's own flag, set the moment its client closes. Every change made for an
+        // outside caller reads it on the thread making the change, right before it (`off`, an act's or a vault
+        // call's `Acting.Cancel`, a routine's `RoutineStop`), never waiting for the main thread's `hungUp`.
+        let gone: @Sendable () -> Bool = { request?.hungUp == true }
+        let live: @Sendable () -> Bool = { !gone() }
+        guard live() else { return }   // its client went before Petal got to it: nothing to answer
         let args = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
         let send: (Any) -> Void = { result in
             let object: Any = JSONSerialization.isValidJSONObject(result) ? result : ["result": "\(result)"]
@@ -160,9 +192,9 @@ final class Assist {
         switch name {
         // The note's window as it is now (a note stuck to none, or notes off: what's in front).
         case "petal_look": look(args, place: app.claude.notesOn ? note.flatMap { app.claude.note(withID: $0) }?.place : nil, note: note, send)
-        case "petal_apps": apps(args, send, fail)
-        case "petal_windows": windows(args, send, fail)
-        case "petal_trash": trash(args, send, fail)
+        case "petal_apps": apps(args, caller: note, live: live, send, fail)
+        case "petal_windows": windows(args, caller: note, live: live, send, fail)
+        case "petal_trash": trash(args, caller: note, live: live, send, fail)
         case "petal_remember":
             guard config.bool("aiMemory") else { return fail("Memory is off in Petal's settings (aiMemory).") }
             let text = (args["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -182,10 +214,13 @@ final class Assist {
                 did("Made a page: \(title)", undo: .open(file.path, title))
                 send(["opened": file.path])
             } catch { fail(error.localizedDescription) }
-        case "petal_vault": vault(args, caller: note, send, fail)
-        case "petal_ui", "petal_act": computer.handle(name, args, note: note, send: send, fail: fail)
+        case "petal_vault": vault(args, caller: note, who: who, gone: request == nil ? nil : gone, send, fail)
+        case "petal_ui", "petal_act": computer.handle(name, args, note: note, gone: request == nil ? nil : gone, send: send, fail: fail)
         case "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
-            app.routines.handle(name, args, send, fail)
+            // Its asker hanging up stops a tidy's moves under way off the main thread, not only what comes next.
+            let stop = RoutineStop(also: gone)
+            request?.onHangUp { stop.stop() }
+            app.routines.handle(name, args, send, fail, caller: note, live: live, stop: stop)
         case "petal_memories":
             let mode = args["mode"] as? String
             send(["memories": memories.filter { mode == nil || $0.mode == mode || $0.mode.isEmpty }.map(record)])
@@ -584,7 +619,8 @@ final class Assist {
 
     // MARK: Apps
 
-    private func apps(_ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func apps(_ args: [String: Any], caller: String?, live: @escaping @Sendable () -> Bool, _ send: @escaping (Any) -> Void,
+                      _ fail: @escaping (String) -> Void) {
         let action = args["action"] as? String ?? ""
         let name = args["app"] as? String ?? ""
         let target = args["open"] as? String ?? ""
@@ -596,22 +632,24 @@ final class Assist {
                 guard let url else { return fail("That isn't an address or a file.") }
                 // Finding the app (a scan of the Applications folders) and Launch Services wait on the disk or the
                 // app: off the main thread.
-                return Self.off({
+                return Self.off(live, {
                     let appURL = name.isEmpty ? nil : NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID(name))
+                    // Its asker gone while the app was looked up: nothing opens.
+                    guard live() else { return }
                     if let appURL {
                         NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: NSWorkspace.OpenConfiguration())
                     } else {
                         NSWorkspace.shared.open(url)
                     }
-                }) { send(["opened": target]) }
+                }) { ran in if ran { send(["opened": target]) } }
             }
             // The name is looked up off the main thread (it scans the Applications folders); the launch is the dock's.
             var found: (id: String, url: URL?) = (name, nil)
-            Self.off({
+            Self.off(live, {
                 let id = Self.bundleID(name)
                 found = (id, NSWorkspace.shared.urlForApplication(withBundleIdentifier: id))
-            }) { [weak self] in
-                guard let self else { return }
+            }) { [weak self] ran in
+                guard let self, ran, live() else { return }
                 guard found.url != nil else { return fail("No app called \(name) is installed.") }
                 self.app.docks.launch(found.id)
                 send(["opened": Apps.name(found.id)])
@@ -621,20 +659,25 @@ final class Assist {
             let label = running.localizedName ?? name
             switch action {
             // Each asks the app (or Launch Services): off the main thread, the answer back on it.
-            case "hide": Self.off({ running.hide() }) { send(["hidden": label]) }
+            case "hide": Self.off(live, { running.hide() }) { ran in if ran { send(["hidden": label]) } }
             case "focus":
                 let url = running.bundleURL
-                Self.off({
+                Self.off(live, {
                     guard let url else { return }
                     let configuration = NSWorkspace.OpenConfiguration()
                     configuration.activates = true
                     configuration.addsToRecentItems = false
                     NSWorkspace.shared.openApplication(at: url, configuration: configuration)
-                }) { if url == nil { running.activate() }; send(["focused": label]) }
+                }) { ran in
+                    guard ran else { return }
+                    if url == nil, live() { running.activate() }
+                    send(["focused": label])
+                }
             default:
-                ask("quit", "Quit \(label)", detail: "It asks to save anything unsaved.") { allowed in
-                    guard allowed else { return send(["declined": "The person didn't allow quitting \(label)."]) }
-                    Self.off({ running.terminate() }) {
+                ask("quit", "Quit \(label)", detail: "It asks to save anything unsaved.", owner: caller) { allowed in
+                    guard allowed, live() else { return send(["declined": "The person didn't allow quitting \(label)."]) }
+                    Self.off(live, { running.terminate() }) { ran in
+                        guard ran else { return }
                         self.did("Quit \(label)")
                         send(["quit": label])
                     }
@@ -645,11 +688,16 @@ final class Assist {
         }
     }
 
-    /// Does `work` (which waits on another app) off the main thread, then `then` back on it.
-    nonisolated static func off(_ work: @escaping () -> Void, then: @escaping @MainActor () -> Void) {
+    /// Does `work` (which waits on another app) off the main thread, then `then` back on it. `live`: whoever asked
+    /// is still there (or the routine still running), read on that thread right before `work`: one gone while it
+    /// waited its turn gets nothing done, and `then` hears it didn't run (false). A `work` that waits before its
+    /// change (a lookup) reads `live` again right before the change.
+    nonisolated static func off(_ live: @escaping @Sendable () -> Bool, _ work: @escaping () -> Void,
+                                then: @escaping @MainActor (_ ran: Bool) -> Void) {
         queue.async {
-            work()
-            DispatchQueue.main.async { MainActor.assumeIsolated { then() } }
+            let ran = live()
+            if ran { work() }
+            DispatchQueue.main.async { MainActor.assumeIsolated { then(ran) } }
         }
     }
 
@@ -662,7 +710,8 @@ final class Assist {
 
     // MARK: Windows
 
-    private func windows(_ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func windows(_ args: [String: Any], caller: String?, live: @escaping @Sendable () -> Bool, _ send: @escaping (Any) -> Void,
+                         _ fail: @escaping (String) -> Void) {
         let action = args["action"] as? String ?? "list"
         let appName = args["app"] as? String ?? ""
         let wanted = args["window"] as? String ?? ""
@@ -678,6 +727,8 @@ final class Assist {
             for pid in pids { found += Windows.windows(of: pid) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    // Its asker gone while the windows were read: nothing is asked or done for it.
+                    guard live() else { return }
                     if action == "list" {
                         let hidden = self.privatePIDs
                         return send(["windows": found.map { w in
@@ -696,17 +747,22 @@ final class Assist {
                     case "minimize":
                         // Accessibility waits on the app (a hung one for its timeout): never on the main thread.
                         let element = window.element
-                        Self.off({ AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue) }) {
-                            send(["minimized": label])
+                        Self.off(live, { AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue) }) { ran in
+                            if ran { send(["minimized": label]) }
                         }
                     case "close":
-                        self.ask("close", "Close “\(label)”", detail: "Its app asks to save anything unsaved.") { allowed in
-                            guard allowed else { return send(["declined": "The person didn't allow closing it."]) }
+                        self.ask("close", "Close “\(label)”", detail: "Its app asks to save anything unsaved.", owner: caller) { allowed in
+                            guard allowed, live() else { return send(["declined": "The person didn't allow closing it."]) }
                             let element = window.element
-                            Self.off({
+                            var pressed = false
+                            Self.off(live, {
                                 guard let button: AXUIElement = Windows.value(element, kAXCloseButtonAttribute) else { return }
+                                // Its asker gone while the app answered: the window stays.
+                                guard live() else { return }
                                 AXUIElementPerformAction(button, kAXPressAction as CFString)
-                            }) {
+                                pressed = true
+                            }) { ran in
+                                guard ran, pressed || live() else { return }
                                 self.did("Closed “\(label)”")
                                 send(["closed": label])
                             }
@@ -715,7 +771,8 @@ final class Assist {
                         let layout = args["layout"] as? String ?? "full"
                         guard let frame = self.arranged(window, layout) else { return fail("layout is left, right, top, bottom, full or center") }
                         Self.queue.async {
-                            _ = Windows.place(window.element, pid: window.pid, frame)
+                            guard live() else { return }   // its asker gone while it waited its turn
+                            _ = Windows.place(window.element, pid: window.pid, frame, live: live)
                             DispatchQueue.main.async { send(["arranged": label, "layout": layout]) }
                         }
                     default: fail("action is list, focus, minimize, close or arrange")
@@ -745,13 +802,16 @@ final class Assist {
     // MARK: The Trash
 
     /// Files to the Trash (asked first), or the last ones back where they were (`undo`).
-    private func trash(_ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func trash(_ args: [String: Any], caller: String?, live: @escaping @Sendable () -> Bool, _ send: @escaping (Any) -> Void,
+                       _ fail: @escaping (String) -> Void) {
         if args["undo"] as? Bool == true {
             let items = trashed
             Self.queue.async {
                 var back: [String] = []
                 var stuck: [(from: URL, to: URL)] = []
                 for item in items {
+                    // Its asker gone meanwhile: the rest stays in the Trash, to put back another time.
+                    guard live() else { stuck.append(item); continue }
                     if (try? FileManager.default.moveItem(at: item.to, to: item.from)) != nil { back.append(item.from.path) }
                     else if FileManager.default.fileExists(atPath: item.to.path) { stuck.append(item) }
                 }
@@ -771,8 +831,8 @@ final class Assist {
         guard !urls.isEmpty else { return fail("None of those files are there.") }
         let names = urls.prefix(3).map(\.lastPathComponent).joined(separator: ", ") + (urls.count > 3 ? " and \(urls.count - 3) more" : "")
         ask("trash", urls.count == 1 ? "Move “\(urls[0].lastPathComponent)” to the Trash" : "Move \(urls.count) items to the Trash",
-            detail: urls.count == 1 ? "You can put it back." : names) { allowed in
-            guard allowed else { return send(["declined": "The person didn't allow it."]) }
+            detail: urls.count == 1 ? "You can put it back." : names, owner: caller) { allowed in
+            guard allowed, live() else { return send(["declined": "The person didn't allow it."]) }
             NSWorkspace.shared.recycle(urls) { moved, error in
                 MainActor.assumeIsolated {
                     self.trashed = moved.map { (from: $0.key, to: $0.value) }

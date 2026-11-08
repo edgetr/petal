@@ -12,12 +12,59 @@ final class IPC {
     /// A function that answers later (the AI's tools waiting for the person to allow something): it calls `reply`
     /// once, on the main thread.
     typealias Later = @MainActor ([String], @escaping @MainActor (String) -> Void) -> Void
+    /// A function that needs to know who's asking (the vault, for agents outside Petal): Petal works it out from the
+    /// socket itself (AgentCallers), never from what the caller says. It's handed its request, to hear when the
+    /// client goes and to say when the person has a card up for it (`Pending`).
+    typealias From = @MainActor ([String], AgentAccess.Caller, Pending, @escaping @MainActor (String) -> Void) -> Void
+
+    /// An identified request still waiting for its answer, as its handler sees it. `hungUp`: its client went (closed,
+    /// or was killed) before the answer. The socket's thread sets it the moment it sees the client go, so it's true at
+    /// once on every thread, even for a handler queued on the main thread before the client went and not yet run: that
+    /// one never starts, and every check a running one makes (`Assist.handle`'s `live`) sees it before its next step.
+    /// What `onHangUp` holds runs after, once, on the main thread, so nothing it asked for goes on with nobody to hear
+    /// the answer. `waiting`, set by the handler: the person has a card up for this request now. While they do, the
+    /// client is sent a space every 10 seconds ahead of the answer's line, so a request that asks more than once (an
+    /// agent's card, then the app's) never runs out of time while they read.
+    @MainActor final class Pending {
+        nonisolated private let gone = Flag()
+        nonisolated var hungUp: Bool { gone.isSet }
+        var waiting: (() -> Bool)?
+        private var cleanup: [() -> Void] = []
+        private var cleanedUp = false
+
+        nonisolated init() {}
+
+        /// The socket's thread saw the client go: from now on the request is hung up, before anything on the main
+        /// thread hears of it.
+        nonisolated func cancel() { gone.set() }
+
+        func onHangUp(_ body: @escaping () -> Void) {
+            if cleanedUp { body() } else { cleanup.append(body) }
+        }
+
+        /// What the request left waiting is undone, on the main thread, once.
+        func hangUp() {
+            gone.set()
+            guard !cleanedUp else { return }
+            cleanedUp = true
+            let all = cleanup
+            cleanup = []
+            all.forEach { $0() }
+        }
+    }
     private var handlers: [String: Handler] = [:]
     private var later: [String: Later] = [:]
+    private var from: [String: From] = [:]
     private var fd: Int32 = -1
+    /// The functions registered with `onFrom`: the socket's thread identifies their callers before they run.
+    nonisolated static let identified: Set<String> = ["assist", "agentKeys"]
 
     func on(_ name: String, _ handler: @escaping Handler) { handlers[name] = handler }
     func onLater(_ name: String, _ handler: @escaping Later) { later[name] = handler }
+    func onFrom(_ name: String, _ handler: @escaping From) {
+        precondition(Self.identified.contains(name))
+        from[name] = handler
+    }
 
     /// Another Petal answers on the socket already: this one mustn't take it from it.
     nonisolated static func answering() -> Bool {
@@ -91,6 +138,12 @@ final class IPC {
         }
         let done = DispatchSemaphore(value: 0)
         let answer = Answer()
+        // Who's asking, read here (off the main thread) from the socket itself.
+        let caller = Self.identified.contains(words.first ?? "") ? AgentCallers.identify(client: client) : nil
+        let pending = Pending()
+        // Its client watched from here on: one already gone is hung up before its handler is even queued.
+        let peer = caller == nil ? nil : Peer(client)
+        if peer?.gone() == true { pending.cancel() }
         DispatchQueue.main.async {
             MainActor.assumeIsolated {
                 let name = words.first ?? ""
@@ -100,21 +153,95 @@ final class IPC {
                     answer.text = text
                     done.signal()
                 }
-                if let handler = self.later[name] {
+                if let handler = self.from[name], let caller {
+                    // Its client went while it waited its turn here: nothing is done for nobody.
+                    guard !pending.hungUp else { return }
+                    handler(Array(words.dropFirst()), caller, pending, finish)
+                } else if let handler = self.later[name] {
                     handler(Array(words.dropFirst()), finish)
                 } else if let handler = self.handlers[name] {
                     finish(handler(Array(words.dropFirst())))
                 } else {
-                    finish("unknown function; try: " + (Array(self.handlers.keys) + Array(self.later.keys)).sorted().joined(separator: ", "))
+                    finish("unknown function; try: " + (Array(self.handlers.keys) + Array(self.later.keys) + Array(self.from.keys)).sorted().joined(separator: ", "))
                 }
             }
         }
-        done.wait()
+        if caller == nil {
+            done.wait()
+        } else if let peer, !Self.wait(done, client: client, peer: peer, pending: pending) {
+            close(client)
+            return
+        }
         let reply = answer.text
         let out = Array((reply + "\n").utf8)
         _ = out.withUnsafeBytes { write(client, $0.baseAddress, out.count) }
         close(client)
     }
+}
+
+extension IPC {
+    /// Waits for an identified request's answer, watching its client: once it has gone (its end closed, not only its
+    /// writing half, as `nc` does once it has sent its line), the request is hung up there and then (`cancel`), what
+    /// it left waiting is undone on the main thread (`hangUp`), and false says nobody is left to answer. While the
+    /// person has a card up for it, the client hears a space every 10 seconds.
+    nonisolated fileprivate static func wait(_ done: DispatchSemaphore, client: Int32, peer: Peer, pending: Pending) -> Bool {
+        let beat = Beat()
+        var asked = DispatchTime.now()
+        while true {
+            if peer.gone() {
+                pending.cancel()
+                DispatchQueue.main.async { MainActor.assumeIsolated { pending.hangUp() } }
+                return false
+            }
+            if done.wait(timeout: .now() + 0.25) == .success { return true }
+            if beat.take() {
+                var space: UInt8 = 0x20
+                _ = write(client, &space, 1)
+            }
+            if DispatchTime.now() >= asked + 10 {
+                asked = .now()
+                DispatchQueue.main.async { MainActor.assumeIsolated { if pending.waiting?() == true { beat.set() } } }
+            }
+        }
+    }
+}
+
+/// Whether a request's client has gone, asked from the socket's thread. A closed peer ends this socket's sending side
+/// too: the write filter says so (EV_EOF); a half-close doesn't.
+private final class Peer {
+    private let queue: Int32
+    private let watching: Bool
+
+    init(_ client: Int32) {
+        queue = kqueue()
+        var watch = kevent(ident: UInt(client), filter: Int16(EVFILT_WRITE), flags: UInt16(EV_ADD), fflags: 0, data: 0, udata: nil)
+        watching = queue >= 0 && kevent(queue, &watch, 1, nil, 0, nil) == 0
+    }
+
+    deinit { if queue >= 0 { close(queue) } }
+
+    func gone() -> Bool {
+        guard watching else { return false }
+        var event = kevent()
+        var now = timespec(tv_sec: 0, tv_nsec: 0)
+        return kevent(queue, nil, 0, &event, 1, &now) > 0 && event.flags & UInt16(EV_EOF) != 0
+    }
+}
+
+/// Set once, read from any thread.
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var on = false
+    func set() { lock.withLock { on = true } }
+    var isSet: Bool { lock.withLock { on } }
+}
+
+/// The main thread saying a request's client should hear it's still waiting on the person.
+private final class Beat: @unchecked Sendable {
+    private let lock = NSLock()
+    private var due = false
+    func set() { lock.withLock { due = true } }
+    func take() -> Bool { lock.withLock { defer { due = false }; return due } }
 }
 
 /// One reply, handed from the main thread to the socket's.

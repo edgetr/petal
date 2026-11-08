@@ -851,7 +851,8 @@ def assist(name):
         # Which chat asks: a Petal chat's note (Petal sets PETAL_NOTE for its own), answered about the note's window;
         # any other AI session is this process, so two sessions never share what they looked at or were allowed.
         caller = os.environ.get("PETAL_NOTE") or "mcp-py-%d" % os.getpid()
-        # A card asking the person first waits up to 120 s: this waits longer, so their answer always arrives.
+        # Petal answers within 150 s, or sends a space every 10 s while a card is up for the person (each wait on the
+        # socket starts again), so their answer always arrives; giving up answers the card Don't.
         reply = petal("assist", name, json.dumps(args), caller, timeout=150)
         try:
             out = json.loads(reply)
@@ -891,6 +892,8 @@ ASSIST_TOOLS = {
                     "Payment info fills only on https pages after one Buy card per checkout: pass buying (what, in a few words) and price; Buy covers that card on that exact page, in that window and tab, for the rest of the reply (another page or tab ends it, and Petal asks again); then place the order there (using the browser may ask once, as any app does); after Don't, stop. "
                     "request (kind login, contact, address, card or apiKey; fields to fill, title, why): the user types what's missing into Petal's card (never into the chat); for a login, Submit fills the page and saves it. "
                     "new_login (password_id, confirm_id, username_id, username; symbols false or allowed_symbols for sites that limit them): Petal makes a strong password, saves it for the page's site and fills it. "
+                    "From a session outside Petal's own chat (T3 Code, a terminal), the first time your agent uses an item in a project (fill, or new_login for making logins) Petal asks the user (Always for this project, Allow once, Don't); they may allow it ahead in Settings › Vault › Agents. "
+                    "To use an API key in a command (a test, a BYOK app on localhost), run it with the petal command: petal run --key \"<title>\" -- <command>; Petal puts the key in its service's variable (ANTHROPIC_API_KEY, OPENAI_API_KEY…; --env NAME for another, --stdin for its input) and takes it out of what the command prints. You never see a key: never try to get one out. "
                     "If the user declines, don't find another way.",
                     {"action": {"type": "string", "enum": ["list", "fill", "request", "new_login", "use"]},
                      "item": {"type": "string", "description": "an item's id from list (or its title)"},

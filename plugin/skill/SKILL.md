@@ -46,7 +46,10 @@ Use, in this order:
    app; elsewhere Petal asks the user. An `unsorted` item (saved before the vault had kinds) shows only its title
    and always asks before it fills (field `value`); the user sorts it in Settings › Vault. Payment info waits for one "Buy?" card per checkout (pass what you're buying
    and the price). Missing details: `action: request` (the user types them into Petal's card); a new account:
-   `action: new_login`. Never ask for a password, card or key in the chat.
+   `action: new_login`. Never ask for a password, card or key in the chat. From a session outside Petal's own chat
+   (T3 Code, a terminal), the first time you use an item in a project (or make a login there) Petal asks the user:
+   Always for this project (Claude Code or Codex only), Allow once or Don't. They can allow it ahead in Settings ›
+   Vault › Agents; an unanswered card counts as Don't after two minutes. API keys for commands: see below.
    In Petal's own panel each chat is a sticky note (`aiNotes`): stuck to the browser tab, window, or all of the
    app it was opened on (a chip on the note changes which), so `petal_look` looks there even after the user moves
    on (`front: true` for what's in front now; a tab's note says its tab under `noteTab`, and reads, acts and fills
@@ -59,7 +62,8 @@ Use, in this order:
 2. The `petal` command: `petal get` (everything, with each setting's help), `petal set <key> <json value>`,
    `petal mode <id>`, `petal current`, `petal modes`, `petal dock petal|macos` (macOS), `petal restart`,
    `petal recipe export [<file>]`, `petal recipe import <file> [--look]`, `petal suggest`, `petal summary`,
-   `petal overview` (macOS: every Desktop and its mode), `petal panel [page]` (Omarchy: the Petal menu);
+   `petal overview` (macOS: every Desktop and its mode), `petal run --key "<title>" -- <command>` (macOS: a
+   command with an API key from the vault, below), `petal panel [page]` (Omarchy: the Petal menu);
    `petal help` lists them all.
 3. The files in `~/.config/petal/`; Petal reloads them within a second:
 
@@ -96,6 +100,27 @@ More that shapes a dock:
   on Omarchy each mode has its own workspace.
 - **Tiling** (macOS: `tiling`, `tilingGaps`, `tilingFloat`): Petal tiles the mode's windows like Hyprland;
   Control-Option-arrows focus, with Shift swap, Control-Option-T floats a window, Control-Option-R rebalances.
+
+## Testing with the user's keys and logins (macOS)
+
+When the user says "get the Anthropic key from Petal to test this" or "use the logins for <email>":
+
+- Run the command through Petal: `petal run --key "Anthropic" -- npm test`. Petal puts the key in the command's
+  variable for its service (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `GITHUB_TOKEN`,
+  `STRIPE_SECRET_KEY`; `--env NAME` after a `--key` for another), or writes it to the command's input with
+  `--stdin`. Several `--key`s are fine; two that would go in the same variable (two OpenAI keys) each need their own
+  `--env`. What the command prints comes back with the key replaced by
+  `[Anthropic key]`, and its exit code is the command's. `petal_vault` `action: list` (`kind: apiKey`) shows the
+  titles. A key under 16 characters is refused (too short to keep out of the output): fill it into a field
+  instead. Removing a grant stops a use still waiting on it, and an Allow once covers that one run or fill.
+- A server you start to test (a bring-your-own-key app): start it with `petal run` so it has the key, or fill the
+  key into its settings page with `petal_vault` `fill` (an API key fills by itself on `http://localhost` and in apps).
+- Never ask for the key, print it, write it to a file, or put it on a command line, and don't try to get it out of
+  `petal run` (echo, base64, a file you read later): keeping it out of your transcript is why the user doesn't have to
+  rotate it. If a test truly needs to see it, ask the user.
+- Logins in a browser (T3 Code's own browser, Chrome…): `petal_ui`, then `petal_vault` `fill` with the login's id
+  (or none: Petal finds the one saved for the page); a new account: `new_login`; a login that isn't saved:
+  `request` (the user types it into Petal's card, which waits for them).
 
 ## When something's wrong
 

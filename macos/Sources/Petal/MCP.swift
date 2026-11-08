@@ -10,7 +10,8 @@ enum MCP {
     static let settingsFile = folder.appending(path: "settings.json")
     static let modesFile = folder.appending(path: "modes.json")
     static let dockFile = folder.appending(path: "dock.json")
-    static let socket = folder.appending(path: "petal.sock").path
+    /// The running Petal's socket (`PETAL_SOCKET` points a client at another, for testing).
+    static let socket = ProcessInfo.processInfo.environment["PETAL_SOCKET"].flatMap { $0.isEmpty ? nil : $0 } ?? folder.appending(path: "petal.sock").path
 
     static let description: [String: Any] = {
         guard let url = Bundle.main.url(forResource: "tools", withExtension: "json", subdirectory: "mcp"),
@@ -231,7 +232,9 @@ enum MCP {
             // or were allowed.
             let note = ProcessInfo.processInfo.environment["PETAL_NOTE"] ?? ""
             let caller = note.isEmpty ? "mcp-\(getpid())" : note
-            // A card asking the person first waits up to 120 s: this waits longer, so their answer always arrives.
+            // Petal answers within 150 seconds, or keeps saying it's waiting (a space every 10 s) while a card is up for
+            // the person, however many one request shows (an agent's, then the app's), so their answer always arrives.
+            // Giving up (or this process ending) ends what the request had going, and answers its card Don't.
             let reply = petal(["assist", name, json, caller], timeout: 150)
             guard let data = reply.data(using: .utf8), let object = try? JSONSerialization.jsonObject(with: data) else {
                 throw Failure(reply.isEmpty ? "Petal isn't running" : reply)
@@ -331,11 +334,23 @@ enum MCP {
     /// Asks the running Petal over its socket, as petal-mcp.py does.
     static func petal(_ args: String...) -> String { petal(args) }
 
-    /// `timeout`: seconds to wait for the answer (nil waits as long as it takes). Running out of time says so; it's
-    /// never "Petal isn't running".
+    /// `timeout`: seconds to wait for the answer, or for the next sign Petal is still waiting on the person (nil waits
+    /// as long as it takes). Running out of time says so; it's never "Petal isn't running".
     static func petal(_ args: [String], timeout: Int? = nil) -> String {
+        switch petalAnswer(args, timeout: timeout) {
+        case .failed(let text): return text
+        case .bytes(let bytes): return String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    /// Petal's answer as it came (`bytes`, the line's end included), or what went wrong on this side (`failed`: one of
+    /// this function's own sentences, never anything Petal sent). Its read buffer is zeroed before it returns; the
+    /// answer is the caller's to wipe.
+    enum Answer { case bytes([UInt8]), failed(String) }
+
+    static func petalAnswer(_ args: [String], timeout: Int? = nil) -> Answer {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return "Petal isn't running" }
+        guard fd >= 0 else { return .failed("Petal isn't running") }
         defer { close(fd) }
         if let timeout {
             var limit = timeval(tv_sec: timeout, tv_usec: 0)
@@ -348,19 +363,30 @@ enum MCP {
         let connected = withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
-        guard connected == 0, let request = try? JSONSerialization.data(withJSONObject: args) else { return "Petal isn't running" }
+        guard connected == 0, let request = try? JSONSerialization.data(withJSONObject: args) else { return .failed("Petal isn't running") }
         let out = Array(request + Data("\n".utf8))
         _ = out.withUnsafeBytes { write(fd, $0.baseAddress, out.count) }
-        var reply = Data()
+        var reply = [UInt8]()
         var buffer = [UInt8](repeating: 0, count: 4096)
+        defer { wipe(&buffer) }
         while true {
             let count = Darwin.read(fd, &buffer, buffer.count)
-            if count < 0, errno == EAGAIN || errno == EWOULDBLOCK { return "Petal didn't answer in time" }
+            if count < 0, errno == EAGAIN || errno == EWOULDBLOCK {
+                wipe(&reply)
+                return .failed("Petal didn't answer in time")
+            }
             if count <= 0 { break }
-            reply.append(buffer, count: count)
+            reply.append(contentsOf: buffer[..<count])
             if reply.last == 0x0A { break }
         }
-        return String(decoding: reply, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        return .bytes(reply)
+    }
+
+    /// Overwrites `bytes` with zeros in place (memset_s, which the compiler keeps).
+    static func wipe(_ bytes: inout [UInt8]) {
+        bytes.withUnsafeMutableBytes { raw in
+            if let base = raw.baseAddress { _ = memset_s(base, raw.count, 0, raw.count) }
+        }
     }
 
     /// Installed apps by bundle id and name, filtered by a word in either.
