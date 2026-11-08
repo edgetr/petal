@@ -10,6 +10,7 @@ enum Snapshot {
         let vault = sampleVault()
         VaultStore.standIn(vault)
         let app = PetalApp()
+        app.refreshSystemFacts(wait: true)
         VaultModel.shared.preview(vault)
         // Made-up grants for Settings › Vault › Agents: nothing is read or written.
         let home = NSHomeDirectory()
@@ -228,14 +229,32 @@ enum Snapshot {
         if let pointer = FakeCursor.picture() { views.append(("computer-cursor", AnyView(Image(nsImage: pointer)), nil)) }
         for dot in [false, true] {
             let mark = MenuBar.mark(dot: dot)
+            // A template image is colored by the menu bar (white here); the update's blue one draws as it is.
+            let rendering: Image.TemplateRenderingMode = mark.isTemplate ? .template : .original
             views.append(("menubar\(dot ? "-dot" : "")", AnyView(HStack(spacing: 16) {
-                Image(nsImage: mark).renderingMode(.template).foregroundStyle(.white)
-                Image(nsImage: mark).renderingMode(.template).resizable().frame(width: 72, height: 72).foregroundStyle(.white)
+                Image(nsImage: mark).renderingMode(rendering).foregroundStyle(.white)
+                Image(nsImage: mark).renderingMode(rendering).resizable().frame(width: 72, height: 72).foregroundStyle(.white)
             }.padding(12)), nil))
+        }
+        if let mode = dock.mode {
+            let image = MenuBar.modeImage(mode.icon, dot: true)
+            views.append(("menubar-mode-dot", AnyView(Image(nsImage: image).renderingMode(image.isTemplate ? .template : .original)
+                .foregroundStyle(.white).padding(10)), nil))
         }
         for section in SettingsSection.allCases {
             views.append(("settings-\(section.rawValue)", AnyView(SettingsView(selection: section)), CGSize(width: 920, height: 700)))
         }
+        // The AI page whole, with the notes changed elsewhere while the person typed: their typing kept, and the
+        // line under the editor to pick theirs or mine.
+        app.instructions.preview(changedElsewhere: true)
+        write(render(AnyView(SettingsView(selection: .claude)), app: app, size: CGSize(width: 920, height: 2400)), name: "settings-claude-conflict", folder: folder)
+        app.instructions.preview(changedElsewhere: false)
+        // A vault of 300 logins, whole, and twelve releases' notes.
+        VaultModel.shared.preview(vault + BenchTargets.logins(300))
+        write(render(AnyView(SettingsView(selection: .vault)), app: app, size: CGSize(width: 920, height: 14000)), name: "settings-vault-300", folder: folder)
+        VaultModel.shared.preview(vault)
+        views.append(("whats-new-long", AnyView(ReleaseNotesView(version: "1.0.0", preloaded: .init(body: BenchTargets.releaseNotes, link: nil))),
+                      CGSize(width: 560, height: 3200)))
         try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
         // Magnification: drawn once to find where everything is, then with the pointer over the third app.
         Magnifier.forced = true
@@ -297,7 +316,11 @@ enum Snapshot {
     }
 
     private static func write(_ image: NSImage?, name: String, folder: String) {
-        guard let tiff = image?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
+        guard let tiff = image?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else {
+            print("couldn't draw \(name)")
+            return
+        }
+        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
         let path = (folder as NSString).appendingPathComponent(name + ".png")
         try? png.write(to: URL(fileURLWithPath: path))
         print(path)

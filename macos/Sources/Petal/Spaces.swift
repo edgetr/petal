@@ -13,11 +13,11 @@ enum Spaces {
     private typealias MainConnection = @convention(c) () -> Int32
     private typealias CopyManagedDisplaySpaces = @convention(c) (Int32) -> Unmanaged<CFArray>?
 
-    private static let skyLight = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
-    private static let mainConnection: MainConnection? = symbol("SLSMainConnectionID")
-    private static let copySpaces: CopyManagedDisplaySpaces? = symbol("SLSCopyManagedDisplaySpaces")
+    nonisolated(unsafe) private static let skyLight = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
+    nonisolated private static let mainConnection: MainConnection? = symbol("SLSMainConnectionID")
+    nonisolated private static let copySpaces: CopyManagedDisplaySpaces? = symbol("SLSCopyManagedDisplaySpaces")
 
-    private static func symbol<T>(_ name: String) -> T? {
+    nonisolated private static func symbol<T>(_ name: String) -> T? {
         guard let skyLight, let pointer = dlsym(skyLight, name) else { return nil }
         return unsafeBitCast(pointer, to: T.self)
     }
@@ -51,8 +51,8 @@ enum Spaces {
         return (found, fullScreen)
     }
 
-    /// How many Desktops there are, across every display.
-    static func count() -> Int {
+    /// How many Desktops there are, across every display. A read-only call to the window server: from any thread.
+    nonisolated static func count() -> Int {
         guard let mainConnection, let copySpaces,
               let displays = copySpaces(mainConnection())?.takeRetainedValue() as? [[String: Any]] else { return 0 }
         return displays.reduce(0) { $0 + ($1["Spaces"] as? [[String: Any]] ?? []).filter { $0["type"] as? Int == 0 }.count }

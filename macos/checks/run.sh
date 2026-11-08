@@ -4,7 +4,7 @@
 # preview says (Background), the vault's pure side (sites, 2FA codes, exports, when it fills by itself), and agents
 # using the vault (AgentAccess: petal run's variables and redaction, who's asking, projects and grants; worktrees on
 # throwaway folders in the temporary folder; writing through a full pipe; an unreadable answer and which signals it
-# passes on), a routine's tidy stopping once its asker hangs up (RoutineStop), a request whose client hung up before its
+# passes on), the notes for the AI keeping both sides of a change made elsewhere (Instructions), a routine's tidy stopping once its asker hangs up (RoutineStop), a request whose client hung up before its
 # turn never being done (IPC, on a throwaway socket), an act's or vault call's Stop seen at once on any thread when its
 # caller hangs up (Acting.Cancel), and that every card Petal AI's tools put up names its owner, without running Petal,
 # moving any window or touching the Keychain:
@@ -27,8 +27,15 @@ swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Pe
 "$out/vault"
 swiftc -parse-as-library -O -o "$out/agents" Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/AgentAccessCheck.swift
 "$out/agents"
+# The notes for the AI in the settings window: typing, changes made elsewhere, picks and late answers (no file).
+swiftc -parse-as-library -O -o "$out/instructions" Sources/Petal/InstructionsState.swift checks/InstructionsCheck.swift
+"$out/instructions"
 swiftc -parse-as-library -O -o "$out/routinestop" Sources/Petal/RoutineStop.swift checks/RoutineStopCheck.swift
 "$out/routinestop"
+# Which Petal processes are a dock: a benchmark, snapshot, the AI's tools or a command never count as a second one
+# (PetalProcess; the Dock guard's shell test with pgrep and ps stood in for, never a real Petal).
+swiftc -parse-as-library -O -o "$out/petalprocess" Sources/Petal/PetalProcess.swift checks/PetalProcessCheck.swift
+"$out/petalprocess"
 # IPC.swift on a throwaway socket in the temporary folder (never Petal's): a request whose client hangs up first is
 # never done.
 swiftc -parse-as-library -O -o "$out/ipc" Sources/Petal/IPC.swift Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/IPCCheck.swift

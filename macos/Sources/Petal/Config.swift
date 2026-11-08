@@ -46,7 +46,17 @@ struct Mode: Equatable, Identifiable {
 /// Each is read again within a second of changing on disk, whoever changed it (the settings window, Claude, an editor).
 @MainActor @Observable
 final class Config {
-    nonisolated static let folder = URL(fileURLWithPath: NSHomeDirectory()).appending(path: ".config/petal")
+    /// `PETAL_CONFIG_DIR` points Petal at another folder, for benchmarks and tests that must never touch the real one.
+    nonisolated static let folder: URL = {
+        if let dir = ProcessInfo.processInfo.environment["PETAL_CONFIG_DIR"], !dir.isEmpty { return URL(fileURLWithPath: dir) }
+        return URL(fileURLWithPath: NSHomeDirectory()).appending(path: ".config/petal")
+    }()
+    /// Petal's own state, ~/Library/Application Support/Petal. `PETAL_SUPPORT_DIR` points it at another folder, so a
+    /// benchmark or snapshot never reads or writes the person's.
+    nonisolated static let supportFolder: URL = {
+        if let dir = ProcessInfo.processInfo.environment["PETAL_SUPPORT_DIR"], !dir.isEmpty { return URL(fileURLWithPath: dir) }
+        return URL(fileURLWithPath: NSHomeDirectory()).appending(path: "Library/Application Support/Petal")
+    }()
     @ObservationIgnored let modesFile = folder.appending(path: "modes.json")
     @ObservationIgnored let settingsFile = folder.appending(path: "settings.json")
     @ObservationIgnored let dockFile = folder.appending(path: "dock.json")
@@ -73,10 +83,40 @@ final class Config {
     private(set) var modes: [Mode] = []
     private(set) var defaultMode = ""
     private(set) var workspaces: [String: String] = [:]
-    private(set) var settings: [String: Any] = [:]
+    /// settings.json as Petal has it. Reading it whole watches every setting; `bool`, `string` and the rest watch
+    /// only their own, so a switch changing draws again only what shows that setting.
+    private(set) var settings: [String: Any] {
+        get {
+            access(keyPath: \.settings)
+            return values
+        }
+        set {
+            let changed = Set(values.keys).union(newValue.keys).filter { !Self.same(values[$0], newValue[$0]) }
+            values = newValue
+            guard !changed.isEmpty else { return }
+            withMutation(keyPath: \.settings) {}
+            for key in changed { withMutation(keyPath: \.[setting: key]) {} }
+        }
+    }
+    @ObservationIgnored private var values: [String: Any] = [:]
+
+    /// What watching one setting is keyed by (Observation's key path); never read.
+    nonisolated subscript(setting key: String) -> Int { 0 }
+
+    private func watch(_ key: String) { access(keyPath: \.[setting: key]) }
+
+    nonisolated private static func same(_ a: Any?, _ b: Any?) -> Bool {
+        switch (a, b) {
+        case (nil, nil): true
+        case let (a?, b?): (a as AnyObject).isEqual(b as AnyObject)
+        default: false
+        }
+    }
     private(set) var dock: [String: Any] = [:]
 
     @ObservationIgnored var onChange: (() -> Void)?
+    /// Runs with the watcher, once a second: other files Petal follows look for changes then too.
+    @ObservationIgnored var everySecond: (() -> Void)?
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var stamps: [Date?] = []
 
@@ -92,13 +132,14 @@ final class Config {
 
     // MARK: Settings
 
-    func bool(_ key: String) -> Bool { settings[key] as? Bool ?? Self.defaults[key] as? Bool ?? false }
+    func bool(_ key: String) -> Bool { watch(key); return values[key] as? Bool ?? Self.defaults[key] as? Bool ?? false }
     func number(_ key: String) -> Double {
-        (settings[key] as? NSNumber)?.doubleValue ?? (Self.defaults[key] as? NSNumber)?.doubleValue ?? 0
+        watch(key)
+        return (values[key] as? NSNumber)?.doubleValue ?? (Self.defaults[key] as? NSNumber)?.doubleValue ?? 0
     }
-    func string(_ key: String) -> String { settings[key] as? String ?? Self.defaults[key] as? String ?? "" }
-    func strings(_ key: String) -> [String] { settings[key] as? [String] ?? Self.defaults[key] as? [String] ?? [] }
-    func value(_ key: String) -> Any? { settings[key] ?? Self.defaults[key] }
+    func string(_ key: String) -> String { watch(key); return values[key] as? String ?? Self.defaults[key] as? String ?? "" }
+    func strings(_ key: String) -> [String] { watch(key); return values[key] as? [String] ?? Self.defaults[key] as? [String] ?? [] }
+    func value(_ key: String) -> Any? { watch(key); return values[key] ?? Self.defaults[key] }
 
     /// Changes one setting; everything else in settings.json stays as it was.
     func set(_ key: String, _ value: Any) {
@@ -368,6 +409,7 @@ final class Config {
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                self.everySecond?()
                 guard self.writing == 0 else { return }
                 let now = self.currentStamps()
                 guard now != self.stamps else { return }

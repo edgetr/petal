@@ -8,24 +8,59 @@ import SwiftUI
 @MainActor
 final class SettingsWindow {
     private(set) var window: NSWindow?
+    var isOpen: Bool { window?.isVisible ?? false }
+    /// The page a fresh view, made ahead in the closed window and never shown, opens on.
+    private var madeAhead: SettingsSection?
 
     func show(_ section: SettingsSection = .dock) {
-        if window == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 640),
-                                  styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                                  backing: .buffered, defer: false)
-            window.titlebarAppearsTransparent = true
-            window.titleVisibility = .hidden
-            window.isMovableByWindowBackground = true
-            window.isReleasedWhenClosed = false
-            window.minSize = NSSize(width: 780, height: 540)
-            window.title = "Petal Settings"
-            window.center()
-            self.window = window
+        PetalWindow.bringForward(prepare(section))
+    }
+
+    /// The window with its content, ready to show (`Petal --bench-settings` times this without showing it). Each
+    /// opening shows a view nobody has seen yet: the one made ahead while the window was closed (on the page asked
+    /// for), else one made now, as it always was.
+    func prepare(_ section: SettingsSection = .dock) -> NSWindow {
+        PetalApp.shared.refreshSystemFacts()
+        let window = self.window ?? makeWindow()
+        if let ahead = madeAhead, !window.isVisible {
+            madeAhead = nil
+            if ahead != section { SettingsBench.commands.send(.open(section)) }
+        } else {
+            madeAhead = nil
+            window.setGlassContent(SettingsView(selection: section).environment(PetalApp.shared))
         }
-        window?.setGlassContent(SettingsView(selection: section).environment(PetalApp.shared))
-        NSApp.activate()
-        window?.makeKeyAndOrderFront(nil)
+        return window
+    }
+
+    /// Makes a fresh view in the closed window while nobody waits for it (a while after launch, and a moment after
+    /// the window closes, which also lets the last one go: its views and timers stop), so the next opening only
+    /// has to show it. Nothing of the last opening is kept: what was typed, picked or shown in it.
+    func makeAhead() {
+        let window = self.window ?? makeWindow()
+        guard !window.isVisible, madeAhead == nil else { return }
+        window.setGlassContent(SettingsView(selection: .dock).environment(PetalApp.shared))
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        madeAhead = .dock
+    }
+
+    private func makeWindow() -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 640),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isMovableByWindowBackground = true
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 780, height: 540)
+        window.title = "Petal Settings"
+        window.center()
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+            // A moment after it's gone, so its closing is drawn as it was.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { self?.makeAhead() } }
+        }
+        self.window = window
+        return window
     }
 }
 
@@ -100,6 +135,7 @@ struct SettingsView: View {
     @State private var ask = ""
 
     var body: some View {
+        let _ = BodyCount.hit("SettingsView")
         ZStack {
             Backdrop()
             HStack(spacing: 14) {
@@ -124,10 +160,22 @@ struct SettingsView: View {
         }
         .frame(minWidth: 780, minHeight: 540)
         .animation(.smooth(duration: 0.25), value: selection)
+        .onReceive(SettingsBench.commands) { command in
+            switch command {
+            case .select(let section): selection = section
+            case .type(let text): ask = text
+            case .open(let section):
+                // A view made ahead, opening on another page: as if made on it, without the page's animation.
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) { selection = section }
+            }
+        }
     }
 
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let _ = BodyCount.hit("sidebar")
+        return VStack(alignment: .leading, spacing: 4) {
             if let provider = app.chatProvider {
             HStack(spacing: 8) {
                 Image(systemName: "sparkle").foregroundStyle(SettingsSection.claude.tint)
@@ -199,6 +247,7 @@ struct SettingsView: View {
     }
 
     @ViewBuilder private var content: some View {
+        let _ = BodyCount.hit("page")
         switch selection {
         case .dock: DockSettings()
         case .modes: ModesSettings()
@@ -224,6 +273,7 @@ struct Backdrop: View {
     @Environment(\.snapshotting) private var snapshotting
 
     var body: some View {
+        let _ = BodyCount.hit("Backdrop")
         ZStack {
             if snapshotting {
                 LinearGradient(colors: [Color(red: 0.85, green: 0.21, blue: 0.50), Color(red: 0.36, green: 0.27, blue: 0.62)],
@@ -236,6 +286,20 @@ struct Backdrop: View {
 }
 
 extension NSWindow {
+    /// Once closed, the window lets its content go, so its views, timers and observers stop instead of running on
+    /// out of sight; `setGlassContent` makes it anew the next time it's shown. A moment after it's gone, so its
+    /// closing is drawn as it was.
+    func letContentGoWhenClosed() {
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: self, queue: .main) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                MainActor.assumeIsolated {
+                    guard let self, !self.isVisible, let glass = self.contentView as? NSGlassEffectView else { return }
+                    glass.contentView = nil
+                }
+            }
+        }
+    }
+
     /// The window itself becomes Liquid Glass (AppKit's own `NSGlassEffectView`): what's behind it shows through,
     /// blurred, and the content sits in the glass.
     func setGlassContent<Content: View>(_ view: Content) {
@@ -256,6 +320,7 @@ struct Card<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
+        let _ = BodyCount.hit("Card")
         VStack(alignment: .leading, spacing: 12) {
             if let title { Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary) }
             content
@@ -275,6 +340,7 @@ struct SettingToggle: View {
     var detail: String? = nil
 
     var body: some View {
+        let _ = BodyCount.hit("SettingToggle")
         Toggle(isOn: Binding(get: { app.config.bool(key) }, set: { app.config.set(key, $0) })) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
@@ -295,6 +361,7 @@ struct SettingSlider: View {
     var format: (Double) -> String = { String(Int($0)) }
 
     var body: some View {
+        let _ = BodyCount.hit("SettingSlider")
         HStack {
             Text(title)
             Slider(value: Binding(get: { app.config.number(key) },
@@ -312,6 +379,7 @@ struct DockSettings: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
+        let _ = BodyCount.hit("DockSettings")
         HStack(spacing: 14) {
             DockChoice(title: "Petal", detail: "A mode for every Desktop, and Claude.", selected: app.config.whichDock == "petal") {
                 PetalDockSketch()
@@ -352,7 +420,7 @@ struct DockSettings: View {
 
         Card(title: "Bring your Dock along", footer: "Copies macOS's Dock into a mode called My Dock, which every Desktop starts in, and its folders into stacks. Your Dock itself doesn't change.") {
             HStack(spacing: -6) {
-                ForEach(SystemDock.apps().prefix(9), id: \.self) { id in
+                ForEach(app.systemDockApps.prefix(9), id: \.self) { id in
                     Image(nsImage: Apps.icon(id)).resizable().frame(width: 34, height: 34)
                 }
             }
@@ -423,9 +491,11 @@ struct PetalDockSketch: View {
 
 /// A small drawing of macOS's Dock, with its own apps.
 struct MacDockSketch: View {
+    @Environment(PetalApp.self) private var app
+
     var body: some View {
         HStack(spacing: 4) {
-            ForEach(SystemDock.apps().prefix(7), id: \.self) { id in
+            ForEach(app.systemDockApps.prefix(7), id: \.self) { id in
                 Image(nsImage: Apps.icon(id)).resizable().frame(width: 22, height: 22)
             }
             Rectangle().fill(.white.opacity(0.3)).frame(width: 1, height: 18)
@@ -443,6 +513,7 @@ struct ModesSettings: View {
     @State private var editing: Mode?
 
     var body: some View {
+        let _ = BodyCount.hit("ModesSettings")
         SettingToggle(key: "modes", title: "Focus modes", detail: "Each Desktop's own mode, with its own apps.")
             .padding(16).glassEffect(.regular, in: .rect(cornerRadius: 20))
         WindowsCard()
@@ -473,7 +544,7 @@ struct ModesSettings: View {
         }
 
         Card(title: "Desktops", footer: "Switching Desktop swaps the dock to that Desktop's mode. Clicking the mode button in the dock changes it too.") {
-            let count = max(Spaces.count(), app.config.workspaces.keys.compactMap(Int.init).max() ?? 0, 1)
+            let count = max(app.desktopCount, app.config.workspaces.keys.compactMap(Int.init).max() ?? 0, 1)
             ForEach(1...count, id: \.self) { number in
                 HStack {
                     Text("Desktop \(number)")
@@ -502,6 +573,7 @@ struct ModeCard: View {
     let desktops: [Int]
 
     var body: some View {
+        let _ = BodyCount.hit("ModeCard")
         let color = Color(nsColor: mode.color)
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
@@ -677,6 +749,7 @@ struct ClaudeSettings: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
+        let _ = BodyCount.hit("ClaudeSettings")
         Card(title: "Your AI", footer: "Each is your own app and account. Choose one, both, or neither: without AI, Petal is still a whole dock.") {
             ProviderList()
         }
@@ -919,16 +992,273 @@ struct AllowedKindName: View {
 struct InstructionsEditor: View {
     @Environment(PetalApp.self) private var app
     @State private var text = ""
+    /// The notes' `version` the editor's text was last given: typing goes with it, so typing over text the editor no
+    /// longer holds is never written over the file.
+    @State private var shown = 0
 
     var body: some View {
+        let notes = app.instructions
+        VStack(alignment: .leading, spacing: 6) {
+            editor(notes)
+            // Only when the file changed elsewhere while the person had typing not yet written: neither is dropped
+            // until they pick.
+            if notes.changedElsewhere {
+                HStack(spacing: 8) {
+                    Text("Changed elsewhere since you started typing.").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Button("Use theirs") { notes.useTheirs() }
+                    Button("Keep mine") { notes.keepMine() }
+                }
+                .buttonStyle(.glass)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private func editor(_ notes: InstructionsText) -> some View {
         TextEditor(text: $text)
             .font(.system(size: 12))
             .scrollContentBackground(.hidden)
             .frame(minHeight: 110)
             .padding(8)
             .background(.black.opacity(0.12), in: .rect(cornerRadius: 12))
-            .onAppear { text = (try? String(contentsOf: app.config.instructionsFile, encoding: .utf8)) ?? "" }
-            .onChange(of: text) { _, new in try? new.write(to: app.config.instructionsFile, atomically: true, encoding: .utf8) }
+            // Nothing to type over until the file was first read: typing onto an empty editor while the notes are
+            // still on their way would be lost, or write over them. It's empty until then, so it looks no different.
+            .disabled(!notes.loaded)
+            // As last read off the main thread; read again as it appears, and while it shows, a change made elsewhere
+            // (an agent, an editor) comes in within a second.
+            .onAppear {
+                shown = notes.version
+                text = notes.text
+                notes.watch(true)
+                notes.refresh()
+            }
+            .onDisappear { notes.watch(false) }
+            .onChange(of: notes.version) { _, new in
+                shown = new
+                if text != notes.text { text = notes.text }
+            }
+            .onChange(of: text) { _, new in notes.typed(new, basedOn: shown) }
+    }
+}
+
+/// The notes for the AI as the settings window shows them: what the editor is given, from the notes' one state
+/// (`InstructionsStore`, on its own queue). Typing, picks and the watcher's looks go to that queue in order; what comes
+/// back is shown only once it has taken every key sent, so a key on its way is never undone.
+@MainActor @Observable
+final class InstructionsText {
+    /// What the editor holds: as last given, or typed since.
+    @ObservationIgnored private(set) var text = ""
+    /// Counts the times the editor is given text it didn't type (the file read, a pick, a draft kept from before).
+    private(set) var version = 0
+    /// Whether the file was read once: until then the editor takes no typing.
+    private(set) var loaded = false
+    /// The conflict the line under the editor answers: the file changed elsewhere while the typing wasn't written.
+    private(set) var conflict: Int?
+    var changedElsewhere: Bool { conflict != nil }
+    /// Keys sent to the queue: what comes back before it took the last one isn't shown.
+    @ObservationIgnored private var sent = 0
+    /// Editors showing the notes: while any does, the file is watched.
+    @ObservationIgnored private var watchers = 0
+    nonisolated private static let store = InstructionsStore(file: Config.folder.appending(path: "instructions.md"),
+                                                             draft: Config.folder.appending(path: "instructions.draft.md"))
+
+    /// Reads the file (off the main thread, unless `wait`).
+    func refresh(wait: Bool = false) { send(wait: wait) { $0.refresh(ifChanged: false) } }
+
+    /// The editor's text changed: typed over what it was given at `basedOn` (its `version`).
+    func typed(_ new: String, basedOn: Int) {
+        guard loaded, new != text else { return }
+        text = new
+        sent += 1
+        let seq = sent, now = Date().timeIntervalSinceReferenceDate
+        send { $0.typed(new, basedOn: basedOn, now: now, seq: seq) }
+    }
+
+    /// "Use theirs": the file as it is now comes into the editor; the typing not yet written is dropped.
+    func useTheirs() {
+        guard conflict != nil else { return }
+        send { $0.useTheirs() }
+    }
+
+    /// "Keep mine": what's in the editor is written over the change the person saw.
+    func keepMine() {
+        guard let conflict else { return }
+        send { $0.keepMine(conflict) }
+    }
+
+    /// Snapshots: the editor as it is when the file changed elsewhere while the person typed (false: as before).
+    func preview(changedElsewhere: Bool) { conflict = changedElsewhere ? 0 : nil }
+
+    /// Waits for the notes' reads and writes to finish (on quit): an edit made just before, and the draft of a
+    /// conflict not picked yet, are on disk.
+    nonisolated static func flush() { InstructionsStore.queue.sync {} }
+
+    /// An editor showing the notes appeared (true) or went (false).
+    func watch(_ on: Bool) { watchers = max(0, watchers + (on ? 1 : -1)) }
+
+    /// Each second (Config's watcher): while an editor shows the notes, a change made elsewhere is read.
+    func tick() {
+        guard watchers > 0 else { return }
+        send { $0.refresh(ifChanged: true) }
+    }
+
+    private func send(wait: Bool = false, _ job: @escaping @Sendable (InstructionsStore) -> InstructionsStore.Shown?) {
+        let store = Self.store
+        if wait {
+            if let shown = InstructionsStore.queue.sync(execute: { job(store) }) { apply(shown) }
+            return
+        }
+        InstructionsStore.queue.async {
+            guard let shown = job(store) else { return }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.apply(shown) } }
+        }
+    }
+
+    private func apply(_ shown: InstructionsStore.Shown) {
+        // Keys still on their way: the answer to the last one shows them.
+        guard shown.through == sent else { return }
+        if shown.loaded != loaded { loaded = shown.loaded }
+        if shown.conflict != conflict { conflict = shown.conflict }
+        text = shown.text
+        if shown.version != version { version = shown.version }
+    }
+}
+
+/// The notes' one state (`NotesState`), owned by one serial queue: reading the file, typing, writing, the person's
+/// picks and the watcher's looks all go through it in order, each write's answer taken at once, so none crosses
+/// another. After every step the draft file beside the notes follows the state: it holds the draft while a conflict
+/// is unresolved (so quitting loses neither side, and the next launch shows the line again), and is gone otherwise.
+final class InstructionsStore: @unchecked Sendable {
+    static let queue = DispatchQueue(label: "petal.instructions", qos: .userInitiated)
+
+    /// What the editor is given after a step; `through` counts the keys taken so far.
+    struct Shown: Sendable {
+        var text: String
+        var version: Int
+        var loaded: Bool
+        var conflict: Int?
+        var through: Int
+    }
+
+    private let file: URL
+    private let draftFile: URL
+    // Only touched on `queue`.
+    private var state = NotesState()
+    private var through = 0
+    private var draftOnDisk: String?
+
+    init(file: URL, draft: URL) {
+        self.file = file
+        draftFile = draft
+    }
+
+    /// Reads the file, and the first time the draft kept beside it. `ifChanged`: only once its modification date moved.
+    func refresh(ifChanged: Bool) -> Shown? {
+        let now = Date().timeIntervalSinceReferenceDate
+        if !state.loaded {
+            let saved = try? String(contentsOf: draftFile, encoding: .utf8)
+            draftOnDisk = saved
+            run(.opened(read(), saved: saved, now: now))
+        } else {
+            if ifChanged, Self.modified(file) == state.stamp { return nil }
+            run(.read(read(), now: now))
+        }
+        return shown
+    }
+
+    func typed(_ text: String, basedOn: Int, now: Double, seq: Int) -> Shown {
+        through = seq
+        run(.typed(text, basedOn: basedOn, now: now))
+        return shown
+    }
+
+    func keepMine(_ conflict: Int) -> Shown {
+        run(.keepMine(conflict: conflict))
+        return shown
+    }
+
+    func useTheirs() -> Shown {
+        run(.useTheirs(read()))
+        return shown
+    }
+
+    private var shown: Shown {
+        Shown(text: state.draft, version: state.shown, loaded: state.loaded, conflict: state.conflictShown, through: through)
+    }
+
+    /// One step, and the write it asks for done at once, its answer the next step.
+    private func run(_ event: NotesEvent) {
+        var next: NotesEvent? = event
+        while let step = next { next = NotesSteps.step(&state, step).map(write) }
+        keepDraft()
+    }
+
+    /// Writes only while the file holds what the write builds on: a change made elsewhere is kept, and said. The new
+    /// text is written beside the file and swapped in at once (`RENAME_SWAP`), so what was in place at that very
+    /// moment comes back: a save made elsewhere between the check and the swap is put back and said too, never lost.
+    private func write(_ asked: NotesWrite) -> NotesEvent {
+        let refused = { (now: String) in
+            NotesEvent.wrote(generation: asked.generation, ok: false, NotesDisk(stamp: Self.modified(self.file), text: now))
+        }
+        let now = Self.contents(file)
+        guard now == asked.over else { return refused(now) }
+        // Through a link to the file it names (made if it isn't there yet): the link stays, as the person set it.
+        let target = Self.linked(file)
+        let fm = FileManager.default
+        let existing = (try? fm.attributesOfItem(atPath: target.path))?[.posixPermissions] as? NSNumber
+        let temp = target.deletingLastPathComponent().appending(path: ".\(target.lastPathComponent).\(UUID().uuidString).tmp")
+        defer { try? fm.removeItem(at: temp) }
+        // Private from the start, then the file's own permissions: a private file stays private.
+        guard fm.createFile(atPath: temp.path, contents: Data(asked.text.utf8), attributes: [.posixPermissions: 0o600]) else { return refused(now) }
+        if let existing { try? fm.setAttributes([.posixPermissions: existing], ofItemAtPath: temp.path) }
+        if existing != nil {
+            guard renamex_np(temp.path, target.path, UInt32(RENAME_SWAP)) == 0 else { return refused(now) }
+            let displaced = Self.contents(temp)
+            if displaced != asked.over {
+                // Saved elsewhere in between: that version goes back in place, and the person is asked.
+                _ = renamex_np(temp.path, target.path, UInt32(RENAME_SWAP))
+                return refused(displaced)
+            }
+        } else {
+            // No file yet: only if none appeared meanwhile.
+            guard renamex_np(temp.path, target.path, UInt32(RENAME_EXCL)) == 0 else { return refused(Self.contents(file)) }
+        }
+        return .wrote(generation: asked.generation, ok: true, NotesDisk(stamp: Self.modified(file), text: asked.text))
+    }
+
+    /// The file a path names, following links (a few deep), whether or not that file is there yet.
+    private static func linked(_ url: URL) -> URL {
+        var url = url
+        for _ in 0..<8 {
+            guard let next = try? FileManager.default.destinationOfSymbolicLink(atPath: url.path) else { break }
+            url = URL(fileURLWithPath: next, relativeTo: url.deletingLastPathComponent()).standardizedFileURL
+        }
+        return url
+    }
+
+    private func keepDraft() {
+        let want = state.draftFile
+        guard want != draftOnDisk else { return }
+        if let want {
+            // Private, as the notes it holds may be.
+            guard (try? want.write(to: draftFile, atomically: true, encoding: .utf8)) != nil else { return }
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: draftFile.path)
+        } else {
+            try? FileManager.default.removeItem(at: draftFile)
+        }
+        draftOnDisk = want
+    }
+
+    private func read() -> NotesDisk { NotesDisk(stamp: Self.modified(file), text: Self.contents(file)) }
+
+    /// The date of the file the notes are in (through a link, its target's: the link's own never changes).
+    private static func modified(_ file: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: linked(file).path))?[.modificationDate] as? Date
+    }
+
+    private static func contents(_ file: URL) -> String {
+        (try? String(contentsOf: file, encoding: .utf8)) ?? ""
     }
 }
 
@@ -940,6 +1270,7 @@ struct AppsSettings: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
+        let _ = BodyCount.hit("AppsSettings")
         Card(title: "Apps") {
             SettingToggle(key: "thisWorkspaceOnly", title: "Only this Desktop's apps", detail: "Running apps from other Desktops stay out of the dock.")
             SettingToggle(key: "previews", title: "Window previews", detail: "Hover a running app to see its windows.")
@@ -983,6 +1314,7 @@ struct LookSettings: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
+        let _ = BodyCount.hit("LookSettings")
         Card(title: "Icons") {
             SettingSlider(key: "iconSize", title: "Size", range: 24...72)
             SettingSlider(key: "idleOpacity", title: "Apps not running", range: 0.2...1, step: 0.05,
@@ -1028,22 +1360,29 @@ struct ColorSetting: View {
 
 struct PermissionsSettings: View {
     @Environment(PetalApp.self) private var app
-    @State private var tick = 0
+    /// Checked every 1.5 s; the page draws again only when one changes.
+    @State private var trusted = Windows.trusted
+    @State private var capture = Capture.allowed
     let timer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
-        let _ = tick
+        let _ = BodyCount.hit("PermissionsSettings")
         Permission(symbol: "accessibility", title: "Accessibility", detail: "Window previews, minimized windows, badges, and focus cards.",
-                   granted: Windows.trusted) { Windows.askForPermission() }
+                   granted: trusted) { Windows.askForPermission() }
         Permission(symbol: "rectangle.dashed.badge.record", title: "Screen Recording", detail: "A picture of each window in previews; without it, they list windows by name. Petal never records: it takes a still while you hover an app.",
-                   granted: Capture.allowed) { Capture.askForPermission() }
+                   granted: capture) { Capture.askForPermission() }
         Permission(symbol: "bell.badge", title: "Full Disk Access", detail: "Seeing notifications, to hold them in modes that hold them. Petal only reads Notification Center's list.",
                    granted: app.notes.canRead) { NotificationAccessRow.openSettings() }
         Permission(symbol: "safari", title: "Browsers", detail: "Which site a tab is on, and closing a distracting one. Each browser asks once.",
                    granted: Browsers.installed().isEmpty ? nil : app.browsers.allAllowed) { app.browsers.askAll {} }
         Permission(symbol: "music.note", title: "Music and Spotify", detail: "Now playing. macOS asks the first time a player is open.",
                    granted: nil) {}
-            .onReceive(timer) { _ in tick += 1; app.browsers.refresh() }
+            .onReceive(timer) { _ in
+                let nowTrusted = Windows.trusted, nowCapture = Capture.allowed
+                if nowTrusted != trusted { trusted = nowTrusted }
+                if nowCapture != capture { capture = nowCapture }
+                app.browsers.refresh()
+            }
     }
 }
 
@@ -1080,6 +1419,7 @@ struct AboutSettings: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
+        let _ = BodyCount.hit("AboutSettings")
         VStack(spacing: 10) {
             Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 128, height: 128)
                 .shadow(color: .black.opacity(0.3), radius: 18, y: 8)

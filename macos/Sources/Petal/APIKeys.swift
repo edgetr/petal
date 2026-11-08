@@ -41,7 +41,8 @@ enum APIKeys {
     }
 
     static func key(_ provider: Provider) -> String? {
-        cache.get(provider) {
+        if Headless.on { return nil }   // a benchmark or snapshot never reads the Keychain
+        return cache.get(provider) {
             var query = query(provider)
             query[kSecReturnData as String] = true
             query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -57,6 +58,7 @@ enum APIKeys {
     /// Saves (or replaces) the key; false when the Keychain refused.
     @discardableResult
     static func save(_ key: String, for provider: Provider) -> Bool {
+        if Headless.on { return false }
         let data = Data(key.utf8)
         var status = SecItemUpdate(query(provider) as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         if status == errSecItemNotFound {
@@ -71,6 +73,7 @@ enum APIKeys {
     }
 
     static func remove(_ provider: Provider) {
+        if Headless.on { return }
         SecItemDelete(query(provider) as CFDictionary)
         cache.set(provider, nil)
     }
@@ -260,6 +263,7 @@ struct APIKeyCard: View {
     @State private var refused = false
 
     var body: some View {
+        let _ = BodyCount.hit("APIKeyCard")
         let api = app.usesAPIKey(provider)
         let key = app.apiKeyCheck.savedKey(provider)
         let check = app.apiKeyCheck.state(provider)

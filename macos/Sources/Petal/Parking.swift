@@ -45,7 +45,7 @@ enum Parking {
         var owners: [String: Owner]
     }
 
-    static let file = URL(fileURLWithPath: NSHomeDirectory()).appending(path: "Library/Application Support/Petal/parked.json")
+    static let file = Config.supportFolder.appending(path: "parked.json")
 
     /// A window of a mode not in front was brought forward (⌘-Tab, a click on its sliver, its app showing it). The
     /// focus guard sets this; until it does, the Desktop switches to the window's mode. The same news is posted as

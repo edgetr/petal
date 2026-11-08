@@ -78,6 +78,8 @@ Use, in this order:
 - `dock.json` (macOS): `position` (bottom, left, right), `autoHide`, `dock` (petal or macos), `keepWindowsClear`.
   On Omarchy, position and auto-hide live in Omarchy's shell config (`omarchy-dock position|autohide`).
 - `instructions.md`: the user's own notes for the AI in Petal's panel.
+- `instructions.draft.md` (macOS): the notes typed in Settings, there only while they and a change made elsewhere
+  wait for the user to pick one. Petal keeps it; leave it alone.
 - `routines.json` (macOS): the routines; change them with the routine tools rather than by hand. What they did is in
   `~/Library/Application Support/Petal/routines-log.json`.
 

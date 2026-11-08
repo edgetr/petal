@@ -183,18 +183,34 @@ final class Notes {
     }
 
     private func tick() {
-        if Date().timeIntervalSince(lastAccessCheck) > 10 || !canRead {
-            lastAccessCheck = Date()
+        guard Date().timeIntervalSince(lastAccessCheck) > 10 || !canRead else { return looked() }
+        lastAccessCheck = Date()
+        // Opening Notification Center's database reads the disk: never on the main thread.
+        Self.reader.async {
             let now = NoteRecords.readable()
-            if now != canRead {
-                canRead = now
-                if now { last = NoteRecords.latest() ?? -1; watch() }
+            let latest = now ? NoteRecords.latest() : nil
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if now != self.canRead {
+                        self.canRead = now
+                        if now { self.last = latest ?? -1; self.watch() }
+                    }
+                    self.looked()
+                }
             }
         }
+    }
+
+    private func looked() {
         if sources.isEmpty && canRead { watch() }
         read()
         update()
     }
+
+    /// Reads of the database, one at a time, off the main thread.
+    nonisolated private static let reader = DispatchQueue(label: "petal.notes.read", qos: .utility)
+    @ObservationIgnored private var reading = false
+    @ObservationIgnored private var readAgain = false
 
     /// The database's files change when a notification arrives: look then, a moment later.
     private func watch() {
@@ -226,11 +242,24 @@ final class Notes {
 
     private func read() {
         guard canRead else { return }
-        if last < 0 { last = NoteRecords.latest() ?? -1; return }
-        let fresh = NoteRecords.records(after: last)
-        guard let newest = fresh.last?.id else { return }
-        last = newest
-        for note in fresh where Date().timeIntervalSince(note.date) < 120 { arrived(note) }
+        guard !reading else { readAgain = true; return }
+        reading = true
+        let after = last
+        Self.reader.async {
+            let latest = after < 0 ? NoteRecords.latest() : nil
+            let fresh = after < 0 ? [] : NoteRecords.records(after: after)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.reading = false
+                    defer { if self.readAgain { self.readAgain = false; self.read() } }
+                    guard self.last == after else { return }   // started over meanwhile (access came back)
+                    if after < 0 { self.last = latest ?? -1; return }
+                    guard let newest = fresh.last?.id else { return }
+                    self.last = newest
+                    for note in fresh where Date().timeIntervalSince(note.date) < 120 { self.arrived(note) }
+                }
+            }
+        }
     }
 
     /// A new notification: shown by Petal if it belongs here, else held on its mode.

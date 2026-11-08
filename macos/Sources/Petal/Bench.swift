@@ -274,7 +274,7 @@ enum DockBench {
     static func run() -> Never {
         let app = PetalApp()
         let modes = app.config.modes
-        guard !modes.isEmpty else { print("no modes"); exit(0) }
+        guard !modes.isEmpty else { print("no modes"); SettingsBench.cleanUp(); exit(0) }
         // A few running apps that belong to no mode, as the dock usually has.
         let loose = Apps.installed().map(\.id).filter { id in !modes.contains { $0.apps.contains(id) } }.prefix(2)
         print("Petal dock bench: \(modes.count) modes, \(modes.map { $0.apps.count }) apps, \(loose.count) more running")
@@ -284,6 +284,7 @@ enum DockBench {
             measure(app: app, modes: modes, loose: Array(loose))
         }
         DockStrip.shared.layers = was
+        SettingsBench.cleanUp()
         exit(0)
     }
 

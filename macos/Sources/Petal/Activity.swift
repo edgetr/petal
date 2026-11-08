@@ -6,7 +6,7 @@ import AppKit
 /// days; nothing leaves the Mac. Off with `activityLog`.
 @MainActor
 final class ActivityLog {
-    nonisolated static let folder = URL(fileURLWithPath: NSHomeDirectory()).appending(path: "Library/Application Support/Petal")
+    nonisolated static let folder = Config.supportFolder
     /// PETAL_ACTIVITY points somewhere else, for trying the suggestions on a made-up history.
     nonisolated static let file = ProcessInfo.processInfo.environment["PETAL_ACTIVITY"].map { URL(fileURLWithPath: $0) }
         ?? folder.appending(path: "activity.jsonl")

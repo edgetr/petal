@@ -18,6 +18,7 @@ final class AISetup {
     func refreshAll() { for provider in Provider.allCases { refresh(provider) } }
 
     func refresh(_ provider: Provider) {
+        guard !Headless.on else { return }   // a benchmark runs nothing
         Task {
             if app.paths[provider] == nil { await app.lookFor(provider) }
             guard let path = app.paths[provider] else { states[provider] = .missing; return }
@@ -139,16 +140,17 @@ enum DockGuard {
         let app = Bundle.main.bundlePath
         let backup = Config.folder.appending(path: "macos-dock.json").path
         let quiet = Quiet.marker.path
-        let off = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Petal/quiet-off.txt").path
+        let off = Config.supportFolder.appending(path: "quiet-off.txt").path
         let script = """
         app='\(app)'; backup='\(backup)'; plist='\(plist.path)'; quiet='\(quiet)'; off='\(off)'
-        if [ -f "$quiet" ] && ! pgrep -qx Petal; then
+        \(PetalProcess.shellDockRunning)
+        if [ -f "$quiet" ] && ! petal_dock; then
           if grep -q shortcut "$quiet"; then mkdir -p "$(dirname "$off")"; printf off > "$off"; shortcuts run '\(Quiet.shortcutName)' --input-path "$off"; fi
           rm -f "$quiet"
         fi
         if [ ! -d "$app" ] && [ ! -f "$backup" ]; then launchctl bootout gui/$(id -u)/\(label) 2>/dev/null; rm -f "$plist"; exit 0; fi
         [ -f "$backup" ] || exit 0
-        if [ -d "$app" ] && pgrep -qx Petal; then exit 0; fi
+        if [ -d "$app" ] && petal_dock; then exit 0; fi
         if [ "$(plutil -extract autohide raw -o - "$backup" 2>/dev/null)" = "true" ]; then
           defaults write com.apple.dock autohide -bool true
         else

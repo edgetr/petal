@@ -41,6 +41,9 @@ final class FocusGuard {
 
     private var scheduled: DispatchWorkItem?
     private var lastTitle = ""
+    /// The front window's title is being read (off the main thread).
+    private var readingTitle = false
+    nonisolated private static let titleQueue = DispatchQueue(label: "petal.guard.title", qos: .userInitiated)
     private var lastOk: String?
     private var timer: Timer?
     private var asking: Set<String> = []
@@ -51,11 +54,11 @@ final class FocusGuard {
     var app: PetalApp { PetalApp.shared }
     var config: Config { app.config }
 
-    static let sortedFile = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appending(path: "Petal/sorted.json")
+    static let sortedFile = Config.supportFolder.appending(path: "sorted.json")
 
     init() {
         sorted = (Config.parse(Self.sortedFile) ?? [:]).compactMapValues { $0 as? String }
+        guard !Headless.on else { return }   // a benchmark never looks at what's in front
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil,
                                                           queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.schedule() }
@@ -65,9 +68,23 @@ final class FocusGuard {
             MainActor.assumeIsolated {
                 guard let self, PetalApp.started else { return }
                 self.sortModes()
-                guard self.config.bool("focusGuard") else { return }
-                let title = Windows.frontTitle()
-                if title != self.lastTitle { self.lastTitle = title; self.schedule() }
+                guard self.config.bool("focusGuard"), !self.readingTitle,
+                      let front = NSWorkspace.shared.frontmostApplication else { return }
+                // Petal's own windows are never sorted, and asking Accessibility about Petal would wait on Petal's
+                // own main thread: with its settings or chat in front, there's nothing to read.
+                let pid = front.processIdentifier
+                guard pid != ProcessInfo.processInfo.processIdentifier else { return }
+                // Accessibility asks the other app and waits for it (up to 0.3 s): never on the main thread.
+                self.readingTitle = true
+                Self.titleQueue.async {
+                    let title = Windows.frontTitle(of: pid)
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            self.readingTitle = false
+                            if title != self.lastTitle { self.lastTitle = title; self.schedule() }
+                        }
+                    }
+                }
             }
         }
     }
@@ -81,15 +98,38 @@ final class FocusGuard {
     }
 
     func check() {
+        checks += 1
         guard config.bool("modes"), config.bool("focusGuard") else { return clearCards() }
         // A suggestion or the weekly summary stays until it's answered.
         if let card = app.popups.card, [.suggestion, .made, .summary].contains(card.kind) { return }
         guard let running = NSWorkspace.shared.frontmostApplication, running.activationPolicy == .regular,
-              running.bundleIdentifier != Bundle.main.bundleIdentifier, let id = running.bundleIdentifier,
-              let dock = app.docks.focusedDock, let desktop = dock.desktop, let mode = config.mode(forDesktop: desktop) else { return }
+              running.bundleIdentifier != Bundle.main.bundleIdentifier, running.bundleIdentifier != nil else { return }
+        // The front window's title: Accessibility asks the app and waits for it (up to 0.3 s), never on the main
+        // thread. Used only if nothing newer was asked for meanwhile and the app is still the one in front.
+        let asked = checks
+        let pid = running.processIdentifier
+        Self.titleQueue.async {
+            let window = Windows.frontTitle(of: pid)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard asked == self.checks, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+                    self.check(running, window: window)
+                }
+            }
+        }
+    }
+    /// Counts checks asked for: a title read for an older one is dropped.
+    private var checks = 0
+
+    /// The rest of `check`, with the front window's title read.
+    private func check(_ running: NSRunningApplication, window: String) {
+        guard config.bool("modes"), config.bool("focusGuard") else { return clearCards() }
+        if let card = app.popups.card, [.suggestion, .made, .summary].contains(card.kind) { return }
+        guard let id = running.bundleIdentifier, let dock = app.docks.focusedDock, let desktop = dock.desktop,
+              let mode = config.mode(forDesktop: desktop) else { return }
         let name = Apps.name(id)
         let isBrowser = Browsers.kind(id) != nil || Self.browsers.contains(id)
-        let title = isBrowser ? Self.cleanTitle(Windows.frontTitle(), app: name) : name
+        let title = isBrowser ? Self.cleanTitle(window, app: name) : name
         guard !isBrowser else {
             app.browsers.frontURL(of: running) { [weak self] url in
                 guard let self, NSWorkspace.shared.frontmostApplication?.processIdentifier == running.processIdentifier else { return }
@@ -107,11 +147,12 @@ final class FocusGuard {
             return
         }
         evaluate(Front(bundleID: id, pid: running.processIdentifier, name: name, domain: nil, title: title, isBrowser: false),
-                 mode: mode, desktop: desktop)
+                 mode: mode, desktop: desktop, window: window)
     }
 
     /// Steps 1–4 for what's in front.
-    func evaluate(_ front: Front, mode: Mode, desktop: Int, asked: Bool = false) {
+    /// `window`: the front window's title, read off the main thread (an app's, for the AI).
+    func evaluate(_ front: Front, mode: Mode, desktop: Int, window: String = "", asked: Bool = false) {
         if mode.isDistracting || mode.isEverything { return ok(front.bundleID) }
         let owners = Self.owners(of: front, in: config.modes)
         if owners.contains(where: { $0.id == mode.id }) { return ok(front.bundleID) }
@@ -129,7 +170,7 @@ final class FocusGuard {
         guard !asked, brain.enabled, !asking.contains(front.key), (failed[front.key].map { Date().timeIntervalSince($0) > 600 } ?? true) else { return }
         asking.insert(front.key)
         let what = front.domain.map { "\(front.name) tab: \($0)" } ?? (front.isBrowser ? "\(front.name) tab" : front.name)
-        let title = front.isBrowser ? front.title : "\(front.name) — \(Windows.frontTitle())"
+        let title = front.isBrowser ? front.title : "\(front.name) — \(window)"
         brain.classifyWindow(app: what, title: title, key: front.key) { [weak self] answer in
             guard let self else { return }
             self.asking.remove(front.key)
@@ -146,7 +187,7 @@ final class FocusGuard {
                                         reason: answer["reason"] as? String ?? "", desktop: desktop, front: front))
                 }
             } else if target != nil {
-                self.evaluate(front, mode: now, desktop: desktop, asked: true)
+                self.evaluate(front, mode: now, desktop: desktop, window: window, asked: true)
             }
         }
     }

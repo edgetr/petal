@@ -5,6 +5,7 @@ import SwiftUI
 /// Settings > Focus: focus cards, distracting modes, browser tabs and held notifications.
 struct FocusSettings: View {
     var body: some View {
+        let _ = BodyCount.hit("FocusSettings")
         Card(footer: "When what's in front belongs to another mode, a card says so: \"x.com · belongs to Social\". A distracting mode's apps and sites are blocked in the other modes; Stay closes the tab or hides the app.") {
             SettingToggle(key: "focusGuard", title: "Focus cards")
             SettingToggle(key: "blockDistractions", title: "Block distractions", detail: "Apps and sites of distracting modes, like Social, outside them.")

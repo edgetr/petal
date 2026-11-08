@@ -193,8 +193,14 @@ enum Windows {
 
     /// The title of the front window of the app in front: a browser's is its tab's title.
     static func frontTitle() -> String {
-        guard trusted, let app = NSWorkspace.shared.frontmostApplication else { return "" }
-        let element = AXUIElementCreateApplication(app.processIdentifier)
+        guard let app = NSWorkspace.shared.frontmostApplication else { return "" }
+        return frontTitle(of: app.processIdentifier)
+    }
+
+    /// The title of an app's focused window, from any thread.
+    nonisolated static func frontTitle(of pid: pid_t) -> String {
+        guard trusted else { return "" }
+        let element = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(element, 0.3)
         guard let window: AXUIElement = value(element, kAXFocusedWindowAttribute) else { return "" }
         return value(window, kAXTitleAttribute) ?? ""

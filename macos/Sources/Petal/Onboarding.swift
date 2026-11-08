@@ -7,8 +7,10 @@ import SwiftUI
 @MainActor
 final class Welcome {
     private var window: NSWindow?
+    var isOpen: Bool { window?.isVisible ?? false }
 
     func show() {
+        PetalApp.shared.refreshSystemFacts()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 920),
                               styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         window.titlebarAppearsTransparent = true
@@ -16,10 +18,10 @@ final class Welcome {
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
         window.setGlassContent(WelcomeView { [weak self] in self?.window?.close() }.environment(PetalApp.shared))
+        window.letContentGoWhenClosed()
         window.center()
         self.window = window
-        NSApp.activate()
-        window.makeKeyAndOrderFront(nil)
+        PetalWindow.bringForward(window)
     }
 }
 
@@ -29,9 +31,12 @@ struct WelcomeView: View {
     @State private var bringDock = true
     @State private var atLogin = true
     @State private var day = ""
-    @State private var tick = 0
+    /// Checked every second; the window draws again only when one changes.
+    @State private var trusted = Windows.trusted
+    @State private var capture = Capture.allowed
     @State private var askingBrowsers = false
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    private let browsersTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         let accent = SettingsSection.dock.tint
@@ -52,7 +57,7 @@ struct WelcomeView: View {
                             Toggle("", isOn: $bringDock).toggleStyle(.switch).labelsHidden()
                         } extra: {
                             HStack(spacing: -6) {
-                                ForEach(SystemDock.apps().prefix(10), id: \.self) { id in
+                                ForEach(app.systemDockApps.prefix(10), id: \.self) { id in
                                     Image(nsImage: Apps.icon(id)).resizable().frame(width: 30, height: 30)
                                 }
                             }
@@ -77,8 +82,7 @@ struct WelcomeView: View {
                         .padding(14).frame(width: 520).glassEffect(.regular, in: .rect(cornerRadius: 20))
                         step(symbol: "macwindow.on.rectangle", title: "Let Petal see your windows",
                              detail: "For window lists, badges and focus cards. macOS asks once.") {
-                            let _ = tick
-                            if Windows.trusted {
+                            if trusted {
                                 Label("Allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 12, weight: .medium))
                             } else {
                                 Button("Allow…") { Windows.askForPermission() }.buttonStyle(.glass)
@@ -98,8 +102,7 @@ struct WelcomeView: View {
                         } extra: { EmptyView() }
                         step(symbol: "rectangle.dashed.badge.record", title: "Window previews",
                              detail: "Optional. A still of each window when you hover its app.") {
-                            let _ = tick
-                            if Capture.allowed {
+                            if capture {
                                 Label("Allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 12, weight: .medium))
                             } else {
                                 Button("Allow…") { Capture.askForPermission() }.buttonStyle(.glass)
@@ -137,9 +140,15 @@ struct WelcomeView: View {
             .padding(28)
         }
         .frame(width: 640, height: 920)
-        .onReceive(timer) { _ in tick += 1; if tick % 2 == 0 { app.browsers.refresh() } }
+        .onReceive(timer) { _ in
+            let nowTrusted = Windows.trusted, nowCapture = Capture.allowed
+            if nowTrusted != trusted { trusted = nowTrusted }
+            if nowCapture != capture { capture = nowCapture }
+        }
+        .onReceive(browsersTimer) { _ in app.browsers.refresh() }
         .task {
             // Start with the AIs already on this Mac switched on, and none otherwise: it's optional.
+            guard !Headless.on else { return }   // a benchmark changes no setting by itself
             for provider in Provider.allCases { await app.lookFor(provider) }
             app.config.set("aiProviders", Provider.allCases.filter { app.paths[$0] != nil }.map(\.rawValue))
             app.aiSetup.refreshAll()

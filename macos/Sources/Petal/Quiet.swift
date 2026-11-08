@@ -113,7 +113,7 @@ final class Quiet {
     }
 
     nonisolated static func runShortcut(_ on: Bool, wait: Bool) {
-        let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Petal")
+        let folder = Config.supportFolder
         let input = folder.appending(path: on ? "quiet-on.txt" : "quiet-off.txt")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try? Data((on ? "on" : "off").utf8).write(to: input)

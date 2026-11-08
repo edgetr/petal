@@ -4,7 +4,7 @@ import SwiftUI
 
 /// Petal in the menu bar (`menuBarIcon`): the current mode's icon and name (Petal's mark when modes are off), with a
 /// menu of this Desktop's mode and the others, every Desktop, settings, and updates. When a new Petal is ready, the
-/// icon gets a dot and the menu offers the restart and what's new.
+/// icon turns blue with a dot and the menu offers the restart and what's new.
 @MainActor
 final class MenuBar: NSObject, NSMenuDelegate {
     private var item: NSStatusItem?
@@ -62,8 +62,8 @@ final class MenuBar: NSObject, NSMenuDelegate {
         refresh()
     }
 
-    /// A mode's SF Symbol as a menu bar template image, with the update dot; a Nerd Font glyph (from an Omarchy
-    /// modes.json) has no symbol, so Petal's mark stands in.
+    /// A mode's SF Symbol as a menu bar template image; with an update ready, in blue with the update dot. A Nerd
+    /// Font glyph (from an Omarchy modes.json) has no symbol, so Petal's mark stands in.
     static func modeImage(_ symbol: String, dot: Bool) -> NSImage {
         guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 13, weight: .medium)) else { return mark(dot: dot) }
@@ -76,12 +76,18 @@ final class MenuBar: NSObject, NSMenuDelegate {
             base.draw(in: NSRect(x: 0, y: (rect.height - base.size.height) / 2, width: base.size.width, height: base.size.height))
             NSColor.black.setFill()
             NSBezierPath(ovalIn: NSRect(x: rect.maxX - 5, y: rect.maxY - 5, width: 5, height: 5)).fill()
+            // The symbol and its dot in blue (drawn again for each appearance, so it's macOS's blue for it).
+            updateBlue.setFill()
+            rect.fill(using: .sourceAtop)
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = false
         image.accessibilityDescription = "update ready"
         return image
     }
+
+    /// The menu bar icon's color while an update is ready, as an app's menu bar icon says it has news.
+    static let updateBlue = NSColor.systemBlue
 
     private func observe() {
         withObservationTracking { _ = app.updater.ready } onChange: {
@@ -143,7 +149,7 @@ final class MenuBar: NSObject, NSMenuDelegate {
     // MARK: The mark
 
     /// Petal's five petals (plugin/assets/petal.svg, without its tile) as a template image, so macOS colors it like
-    /// the menu bar's own icons; with a dot when an update is ready.
+    /// the menu bar's own icons; when an update is ready, in blue with a dot.
     static func mark(dot: Bool) -> NSImage {
         let petals: [[CGFloat]] = [
             [32.00, 29.50, 36.80, 25.30, 36.80, 18.70, 32.00, 14.50, 27.20, 18.70, 27.20, 25.30],
@@ -173,10 +179,13 @@ final class MenuBar: NSObject, NSMenuDelegate {
                 ring.fill()
                 NSGraphicsContext.current?.compositingOperation = .sourceOver
                 NSBezierPath(ovalIn: NSRect(x: side - 6, y: 1, width: 5, height: 5)).fill()
+                // The petals and the dot in blue (drawn again for each appearance, so it's macOS's blue for it).
+                updateBlue.setFill()
+                NSRect(x: 0, y: 0, width: side, height: side).fill(using: .sourceAtop)
             }
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = !dot
         image.accessibilityDescription = dot ? "Petal, update ready" : "Petal"
         return image
     }
@@ -198,14 +207,14 @@ final class ReleaseNotes {
             window.isMovableByWindowBackground = true
             window.isReleasedWhenClosed = false
             window.minSize = NSSize(width: 460, height: 360)
+            window.letContentGoWhenClosed()
             return window
         }()
         self.window = window
         window.title = "What’s New in Petal \(version)"
         window.setGlassContent(ReleaseNotesView(version: version).environment(PetalApp.shared))
         window.center()
-        NSApp.activate()
-        window.makeKeyAndOrderFront(nil)
+        PetalWindow.bringForward(window)
     }
 
     struct Notes: Sendable { let body: String; let link: URL? }

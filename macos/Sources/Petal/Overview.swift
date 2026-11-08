@@ -13,9 +13,10 @@ final class Overview {
         let app = PetalApp.shared
         app.tooltips.hide()
         app.popups.closeAll()
+        app.refreshSystemFacts()
         let panel = self.panel ?? OverviewPanel()
         self.panel = panel
-        panel.show(OverviewView { [weak panel] in panel?.close() })
+        panel.show(OverviewView(done: { [weak panel] in panel?.close() }, resized: { [weak panel] in panel?.refit() }))
     }
 
     func close() { panel?.close() }
@@ -25,6 +26,8 @@ final class Overview {
 @MainActor
 final class OverviewPanel: NSPanel {
     private let hosting = NSHostingView(rootView: AnyView(EmptyView()))
+    /// The screen it opened on: a refit stays there.
+    private var home: NSScreen?
 
     init() {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -50,23 +53,39 @@ final class OverviewPanel: NSPanel {
 
     func show<Content: View>(_ content: Content) {
         hosting.rootView = AnyView(content.environment(PetalApp.shared))
-        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
+        home = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
+        place()
+        makeKeyAndOrderFront(nil)
+    }
+
+    /// Fits the panel to its content again and centres it, once the Desktops counted after it opened change its
+    /// size (it opens with the count last read).
+    func refit() {
+        guard isVisible else { return }
+        place()
+    }
+
+    /// Sized to the content, a little above the middle of its screen, and kept on it.
+    private func place() {
+        guard let area = (home.flatMap { NSScreen.screens.contains($0) ? $0 : nil } ?? NSScreen.main)?.visibleFrame else { return }
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
-        let area = screen.visibleFrame
-        setFrame(NSRect(x: area.midX - size.width / 2, y: area.midY - size.height / 2 + area.height * 0.08,
-                        width: size.width, height: size.height).integral, display: true)
-        makeKeyAndOrderFront(nil)
+        let x = min(max(area.midX - size.width / 2, area.minX), area.maxX - size.width)
+        let y = min(max(area.midY - size.height / 2 + area.height * 0.08, area.minY), area.maxY - size.height)
+        let frame = NSRect(x: x, y: y, width: size.width, height: size.height).integral
+        if frame != self.frame { setFrame(frame, display: true) }
     }
 }
 
 struct OverviewView: View {
     @Environment(PetalApp.self) private var app
     let done: () -> Void
+    /// The number of Desktops changed its size: its panel fits and centres it again.
+    var resized: () -> Void = {}
 
     var body: some View {
         let config = app.config
-        let count = max(Spaces.count(), config.workspaces.keys.compactMap(Int.init).max() ?? 0, 1)
+        let count = max(app.desktopCount, config.workspaces.keys.compactMap(Int.init).max() ?? 0, 1)
         let here = app.docks.focusedDock?.desktop
         let columns = Array(repeating: GridItem(.fixed(168), spacing: 12), count: min(4, count))
         VStack(alignment: .leading, spacing: 16) {
@@ -92,6 +111,8 @@ struct OverviewView: View {
         .padding(20)
         .glassEffect(.regular, in: .rect(cornerRadius: 26))
         .padding(8)
+        // After this layout pass, so the panel measures the new grid.
+        .onChange(of: count) { _, _ in DispatchQueue.main.async { resized() } }
     }
 }
 

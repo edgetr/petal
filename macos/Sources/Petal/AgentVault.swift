@@ -14,7 +14,7 @@ final class AgentGrants {
 
     nonisolated static var file: URL {
         if let path = ProcessInfo.processInfo.environment["PETAL_AGENT_GRANTS"], !path.isEmpty { return URL(fileURLWithPath: path) }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Petal/agent-grants.json")
+        return Config.supportFolder.appending(path: "agent-grants.json")
     }
 
     nonisolated private static let queue = DispatchQueue(label: "petal.agent-grants", qos: .utility)

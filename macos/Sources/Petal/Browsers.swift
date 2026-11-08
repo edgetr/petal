@@ -65,7 +65,7 @@ final class Browsers {
         let ids = Self.installed().map(\.id)
         queue.async {
             var found: [String: Access] = [:]
-            for id in ids { found[id] = Self.access(id) }
+            for id in ids { found[id] = Headless.on ? .notRunning : Self.access(id) }
             DispatchQueue.main.async { MainActor.assumeIsolated { if self.states != found { self.states = found } } }
         }
     }

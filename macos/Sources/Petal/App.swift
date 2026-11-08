@@ -81,11 +81,21 @@ final class PetalApp {
         docks = DockController()
         focus = FocusGuard()
         connectWindowsToGuard()
-        Task {
-            for provider in Provider.allCases { await lookFor(provider) }
-            loadCodexModels()
-            // The person's other AI sessions get Petal's tools, skill and command too.
-            if config.bool("otherAgents") { OtherAgents.connect(paths: paths) }
+        refreshSystemFacts()
+        if !Headless.on {
+            // Back from System Settings (or anywhere): what changed there shows in the windows still open.
+            NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+                MainActor.assumeIsolated {
+                    let app = PetalApp.shared
+                    if app.settings.isOpen || app.welcome.isOpen || app.overview.isOpen { app.refreshSystemFacts() }
+                }
+            }
+            Task {
+                for provider in Provider.allCases { await lookFor(provider) }
+                loadCodexModels()
+                // The person's other AI sessions get Petal's tools, skill and command too.
+                if config.bool("otherAgents") { OtherAgents.connect(paths: paths) }
+            }
         }
     }
 
@@ -111,6 +121,8 @@ final class PetalApp {
             self.assist.computer.settingsChanged()   // using apps turned off, or an app made private: what's under way stops
 
         }
+        // The notes for the AI, while the settings show them: a change made elsewhere comes in.
+        config.everySecond = { [weak self] in self?.instructions.tick() }
         registerIPC()
         ipc.start()
         usage.start { [weak self] in self?.config.bool("claudeUsage") ?? false }
@@ -121,7 +133,17 @@ final class PetalApp {
         menuBar.start()
         aiSetup.refreshAll()
         Apps.warm()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.search.prepare() }
+        // Codex's default model, as Codex's own settings change (read off the main thread).
+        codexTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.config.string(Provider.codex.modelSetting).isEmpty else { return }
+                self.refreshCodexDefault()
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            self?.search.prepare()
+            self?.settings.makeAhead()   // the settings open at once
+        }
         notes.start()
         assist.start()
         claude.startNotes()
@@ -138,6 +160,7 @@ final class PetalApp {
 
     func stop() {
         config.flush()
+        InstructionsText.flush()
         Chats.flush()
         Assist.flushHistory()
         AgentGrants.flush()
@@ -176,10 +199,72 @@ final class PetalApp {
     }
 
     var openAtLogin: Bool {
-        get { SMAppService.mainApp.status == .enabled }
+        get { loginItem }
         set {
             if newValue { try? SMAppService.mainApp.register() } else { try? SMAppService.mainApp.unregister() }
+            loginItem = newValue
             config.setDock("openAtLogin", newValue)
+            refreshSystemFacts()   // what macOS made of it
+        }
+    }
+
+    // MARK: What the windows show of macOS, read ahead
+
+    /// Whether Petal opens at login, as macOS's login items say.
+    private(set) var loginItem = false
+    /// The apps in macOS's Dock (SystemDock.apps), for Import Dock and the sketches.
+    private(set) var systemDockApps: [String] = []
+    /// How many Desktops there are, across every display.
+    private(set) var desktopCount = 0
+    /// The person's notes for the AI (~/.config/petal/instructions.md), as the settings window edits them.
+    @ObservationIgnored let instructions = InstructionsText()
+
+    /// Reads what the settings, welcome and overview windows show of macOS and of files off the main thread, so those
+    /// windows never wait on them while they draw: the login item (an XPC call to macOS's service manager), macOS's
+    /// Dock (its preferences), the Desktops (the window server), Codex's default model and the notes for the AI.
+    /// Called at launch and as each of them opens. Reads go one after another, and only the newest one asked for is
+    /// used: one begun before another (or before the login item was changed here) never overwrites it. `wait` reads
+    /// it all before returning (snapshots).
+    func refreshSystemFacts(wait: Bool = false) {
+        factsAsked += 1
+        let asked = factsAsked
+        let read = { () -> (login: Bool, dock: [String], desktops: Int) in
+            (SMAppService.mainApp.status == .enabled, SystemDock.readApps(), Spaces.count())
+        }
+        let apply = { (facts: (login: Bool, dock: [String], desktops: Int)) in
+            guard asked == self.factsAsked else { return }
+            if facts.login != self.loginItem { self.loginItem = facts.login }
+            if facts.dock != self.systemDockApps { self.systemDockApps = facts.dock }
+            if facts.desktops != self.desktopCount { self.desktopCount = facts.desktops }
+        }
+        refreshCodexDefault(wait: wait)
+        instructions.refresh(wait: wait)
+        if wait { apply(Self.factsQueue.sync { read() }); return }
+        Self.factsQueue.async {
+            let facts = read()
+            DispatchQueue.main.async { MainActor.assumeIsolated { apply(facts) } }
+        }
+    }
+
+    /// Where `refreshSystemFacts` and `refreshCodexDefault` read, one at a time.
+    nonisolated private static let factsQueue = DispatchQueue(label: "petal.facts", qos: .userInitiated)
+    /// How many reads were asked for: only the newest one's answer is used.
+    @ObservationIgnored private var factsAsked = 0
+    @ObservationIgnored private var codexAsked = 0
+
+    /// Reads Codex's default model (~/.codex/config.toml) off the main thread: as the windows open, and every 10 s
+    /// while no Codex model is chosen, so a change to Codex's own default shows (with its efforts) as it did.
+    func refreshCodexDefault(wait: Bool = false) {
+        codexAsked += 1
+        let asked = codexAsked
+        let apply = { (model: String?) in
+            guard asked == self.codexAsked, model != self.codexDefault else { return }
+            self.codexDefault = model
+        }
+        if wait { apply(Self.factsQueue.sync { PetalApp.readCodexDefault() }); return }
+        Self.factsQueue.async {
+            let model = PetalApp.readCodexDefault()
+            DispatchQueue.main.async { MainActor.assumeIsolated { apply(model) } }
         }
     }
 
@@ -367,19 +452,23 @@ final class PetalApp {
     func currentModel(for provider: Provider) -> String {
         let chosen = config.string(provider.modelSetting)
         guard provider == .codex, chosen.isEmpty else { return chosen }
-        // Read at most every 10 s: the settings window asks on every redraw, and the disk mustn't hold it up.
-        if let known = codexDefault, Date().timeIntervalSince(known.at) < 10 { return known.model ?? codexModels.first?.id ?? "" }
+        // Read off the main thread (refreshCodexDefault), at launch, as the settings open and every 10 s: never while
+        // they draw.
+        return codexDefault ?? codexModels.first?.id ?? ""
+    }
+    /// The `model` at the top of ~/.codex/config.toml, if it has one.
+    private var codexDefault: String?
+    @ObservationIgnored private var codexTimer: Timer?
+
+    nonisolated private static func readCodexDefault() -> String? {
         let path = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".codex/config.toml")
         let top = ((try? String(contentsOf: path, encoding: .utf8)) ?? "").components(separatedBy: "\n[").first ?? ""
-        var found: String?
         for line in top.split(separator: "\n") {
             let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
-            if parts.count == 2, parts[0] == "model" { found = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"")); break }
+            if parts.count == 2, parts[0] == "model" { return parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"")) }
         }
-        codexDefault = (Date(), found)
-        return found ?? codexModels.first?.id ?? ""
+        return nil
     }
-    @ObservationIgnored private var codexDefault: (at: Date, model: String?)?
 
     /// The newest Codex model of each family (Sol, Astra, Terra, Luna), in Codex's order, named "6.1 Sol"; the model
     /// already chosen stays even when it's older.
@@ -420,6 +509,7 @@ final class PetalApp {
 
     /// Asking the login shell can take a moment; the dock doesn't wait for it.
     func lookFor(_ provider: Provider) async {
+        guard !Headless.on else { return }   // a benchmark starts no shell
         let setting = config.string(provider.pathSetting)
         paths[provider] = await Task.detached { PetalApp.find(provider, setting: setting) }.value
     }

@@ -1,0 +1,509 @@
+{
+  "coldProcess": {
+    "cpuMedian": 4440.391,
+    "footprintMBMedian": 431.9229965209961,
+    "peakMBMedian": 432.0479965209961
+  },
+  "commit": "1e75704c4d6dcb247487c3a7ca079517bb82e676",
+  "machine": "Apple M4 Max, macOS Version 27.3 (Build 26C5035r)",
+  "note": "The Settings part of windows-after.json (the same run).",
+  "runs": 20,
+  "unit": "ms",
+  "warmProcess": {
+    "backgroundCPUPerSecond": 26.985333333335195,
+    "cpu": 255853.119,
+    "footprintMB": 2767.550148010254,
+    "peakMB": 2922.2374420166016
+  },
+  "windows": {
+    "Settings": {
+      "idle": {
+        "AI": {
+          "bodiesPerSecond": 0,
+          "cpuMsPerSecond": 13.075333333333333
+        },
+        "Dock": {
+          "bodiesPerSecond": 0,
+          "cpuMsPerSecond": 11.010333333333335
+        },
+        "Focus": {
+          "bodiesPerSecond": 0,
+          "cpuMsPerSecond": 13.238
+        },
+        "Permissions": {
+          "bodiesPerSecond": 0.3333333333333333,
+          "cpuMsPerSecond": 13.84566666666666
+        }
+      },
+      "metrics": {
+        "AI, first visit": {
+          "bodies": 24,
+          "draw": 12.872292,
+          "mainCPU": 130.313,
+          "max": 151.115333,
+          "median": 135.678084,
+          "min": 120.356042,
+          "p95": 149.154625,
+          "runs": 20,
+          "settleCPU": 323.756,
+          "update": 121.544041
+        },
+        "AI, switch back": {
+          "bodies": 24,
+          "draw": 7.071083,
+          "mainCPU": 118.8070000000007,
+          "max": 134.553,
+          "median": 121.934792,
+          "min": 99.674125,
+          "p95": 132.370792,
+          "runs": 20,
+          "settleCPU": 320.4220000000023,
+          "update": 114.099667
+        },
+        "About, first visit": {
+          "bodies": 7,
+          "draw": 5.272209,
+          "mainCPU": 29.98700000000008,
+          "max": 33.929166,
+          "median": 30.11175,
+          "min": 25.365333,
+          "p95": 33.794042,
+          "runs": 20,
+          "settleCPU": 273.44799999999987,
+          "update": 25.506292
+        },
+        "About, switch back": {
+          "bodies": 7,
+          "draw": 2.057125,
+          "mainCPU": 26.693999999999505,
+          "max": 30.134041,
+          "median": 26.741292,
+          "min": 23.161708,
+          "p95": 29.226208,
+          "runs": 20,
+          "settleCPU": 306.9400000000023,
+          "update": 24.703125
+        },
+        "Apps & Extras, first visit": {
+          "bodies": 18,
+          "draw": 5.316417,
+          "mainCPU": 48.5619999999999,
+          "max": 59.141292,
+          "median": 48.690833,
+          "min": 44.875209,
+          "p95": 58.196542,
+          "runs": 20,
+          "settleCPU": 297.7510000000002,
+          "update": 43.329625
+        },
+        "Apps & Extras, switch back": {
+          "bodies": 18,
+          "draw": 2.965875,
+          "mainCPU": 56.81899999999587,
+          "max": 67.329459,
+          "median": 57.092792,
+          "min": 39.843125,
+          "p95": 64.047125,
+          "runs": 20,
+          "settleCPU": 310.7360000000044,
+          "update": 53.687166
+        },
+        "Dock, switch back": {
+          "bodies": 9,
+          "draw": 2.965,
+          "mainCPU": 48.3179999999993,
+          "max": 57.51225,
+          "median": 48.330875,
+          "min": 43.004541,
+          "p95": 53.977375,
+          "runs": 20,
+          "settleCPU": 312.20600000000013,
+          "update": 45.040833
+        },
+        "Focus, first visit": {
+          "bodies": 17,
+          "draw": 5.481458,
+          "mainCPU": 55.38999999999987,
+          "max": 72.857666,
+          "median": 56.610875,
+          "min": 50.375042,
+          "p95": 72.3855,
+          "runs": 20,
+          "settleCPU": 296.4169999999999,
+          "update": 50.357292
+        },
+        "Focus, switch back": {
+          "bodies": 17,
+          "draw": 3.214667,
+          "mainCPU": 59.520000000004075,
+          "max": 65.203458,
+          "median": 59.516541,
+          "min": 47.260167,
+          "p95": 64.908708,
+          "runs": 20,
+          "settleCPU": 306.9459999999999,
+          "update": 56.088708
+        },
+        "Look, first visit": {
+          "bodies": 14,
+          "draw": 6.403708,
+          "mainCPU": 66.66499999999996,
+          "max": 76.881,
+          "median": 67.88325,
+          "min": 60.13925,
+          "p95": 75.647917,
+          "runs": 20,
+          "settleCPU": 303.308,
+          "update": 60.7915
+        },
+        "Look, switch back": {
+          "bodies": 14,
+          "draw": 2.889834,
+          "mainCPU": 65.20999999999913,
+          "max": 76.238208,
+          "median": 65.677209,
+          "min": 51.928125,
+          "p95": 71.991917,
+          "runs": 20,
+          "settleCPU": 309.67199999999866,
+          "update": 62.223542
+        },
+        "Modes, first visit": {
+          "bodies": 16,
+          "draw": 16.390625,
+          "mainCPU": 65.786,
+          "max": 77.533125,
+          "median": 70.958666,
+          "min": 62.853875,
+          "p95": 76.800791,
+          "runs": 20,
+          "settleCPU": 307.1719999999999,
+          "update": 51.973792
+        },
+        "Modes, switch back": {
+          "bodies": 16,
+          "draw": 2.958417,
+          "mainCPU": 46.43899999999849,
+          "max": 52.909792,
+          "median": 46.560958,
+          "min": 38.84525,
+          "p95": 51.061834,
+          "runs": 20,
+          "settleCPU": 315.77100000000064,
+          "update": 42.93525
+        },
+        "Permissions, first visit": {
+          "bodies": 4,
+          "draw": 4.974875,
+          "mainCPU": 35.57500000000027,
+          "max": 50.65675,
+          "median": 46.898791,
+          "min": 41.447667,
+          "p95": 50.48125,
+          "runs": 20,
+          "settleCPU": 293.0039999999999,
+          "update": 41.788833
+        },
+        "Permissions, switch back": {
+          "bodies": 4,
+          "draw": 1.770042,
+          "mainCPU": 30.36200000000099,
+          "max": 46.335375,
+          "median": 40.156291,
+          "min": 33.48975,
+          "p95": 46.093833,
+          "runs": 20,
+          "settleCPU": 310.24699999999575,
+          "update": 37.890416
+        },
+        "Routines, first visit": {
+          "bodies": 7,
+          "draw": 5.650041,
+          "mainCPU": 33.15099999999984,
+          "max": 43.418333,
+          "median": 33.287666,
+          "min": 26.155125,
+          "p95": 36.474625,
+          "runs": 20,
+          "settleCPU": 282.9290000000001,
+          "update": 27.880459
+        },
+        "Routines, switch back": {
+          "bodies": 7,
+          "draw": 3.591542,
+          "mainCPU": 37.92699999999968,
+          "max": 44.55925,
+          "median": 38.092917,
+          "min": 33.102209,
+          "p95": 43.954417,
+          "runs": 20,
+          "settleCPU": 312.08899999999267,
+          "update": 34.028416
+        },
+        "Vault with 300 logins, switch back": {
+          "bodies": 3,
+          "draw": 8.004292,
+          "mainCPU": 111.46399999999267,
+          "max": 466.981375,
+          "median": 111.558667,
+          "min": 96.887917,
+          "p95": 135.779666,
+          "runs": 20,
+          "settleCPU": 329.50800000000163,
+          "update": 103.987833
+        },
+        "Vault, first visit": {
+          "bodies": 8,
+          "draw": 11.442,
+          "mainCPU": 84.23800000000006,
+          "max": 106.169875,
+          "median": 84.505875,
+          "min": 71.670166,
+          "p95": 104.6945,
+          "runs": 20,
+          "settleCPU": 300.02600000000007,
+          "update": 74.350791
+        },
+        "Vault, switch back": {
+          "bodies": 18,
+          "draw": 8.767,
+          "mainCPU": 87.68899999999849,
+          "max": 107.853708,
+          "median": 89.605666,
+          "min": 71.018666,
+          "p95": 100.942625,
+          "runs": 20,
+          "settleCPU": 324.50900000000547,
+          "update": 78.325084
+        },
+        "a switch (Apps & Extras)": {
+          "bodies": 1,
+          "draw": 0.268875,
+          "mainCPU": 5.894000000000233,
+          "max": 12.347125,
+          "median": 6.957166,
+          "min": 3.266583,
+          "p95": 8.387166,
+          "runs": 20,
+          "settleCPU": 34.71600000000035,
+          "update": 5.500959
+        },
+        "dragging a slider (Look), a step": {
+          "bodies": 1,
+          "draw": 0.287542,
+          "mainCPU": 10.929000000003725,
+          "max": 19.139584,
+          "median": 10.9275,
+          "min": 6.604625,
+          "p95": 15.973542,
+          "runs": 20,
+          "settleCPU": 0.7450000000098953,
+          "update": 9.808084
+        },
+        "made ahead while closed (not waited on)": {
+          "bodies": 10,
+          "draw": 2.764875,
+          "mainCPU": 65.39099999999962,
+          "max": 77.08975,
+          "median": 65.712833,
+          "min": 44.540958,
+          "p95": 76.483,
+          "runs": 20,
+          "settleCPU": 4.087999999999738,
+          "update": 0.002125
+        },
+        "open on Modes (again)": {
+          "bodies": 16,
+          "draw": 2.636042,
+          "mainCPU": 56.715000000000146,
+          "max": 66.88575,
+          "median": 57.653292,
+          "min": 38.987417,
+          "p95": 64.981791,
+          "runs": 20,
+          "settleCPU": 6.661000000000058,
+          "update": 53.888042
+        },
+        "open, cold (first in a process)": {
+          "bodies": 0,
+          "draw": 16.568791,
+          "mainCPU": 15.415999999999997,
+          "max": 28.109917,
+          "median": 17.115708,
+          "min": 15.324208,
+          "p95": 20.15925,
+          "runs": 20,
+          "settleCPU": 44.735000000000014,
+          "update": 0.022834
+        },
+        "open, warm (again)": {
+          "bodies": 0,
+          "draw": 0.370959,
+          "mainCPU": 0.6039999999993597,
+          "max": 5.848375,
+          "median": 0.876875,
+          "min": 0.302375,
+          "p95": 5.483875,
+          "runs": 20,
+          "settleCPU": 4.470999999999549,
+          "update": 0.084084
+        },
+        "page, first visit (every page)": {
+          "bodies": 14,
+          "draw": 6.105084,
+          "mainCPU": 57.2030000000002,
+          "max": 151.115333,
+          "median": 57.492958,
+          "min": 25.365333,
+          "p95": 135.678084,
+          "runs": 180,
+          "settleCPU": 298.779,
+          "update": 49.788875
+        },
+        "page, switch back (every page)": {
+          "bodies": 16,
+          "draw": 3.065,
+          "mainCPU": 50.54000000000087,
+          "max": 134.553,
+          "median": 50.898042,
+          "min": 23.161708,
+          "p95": 119.306542,
+          "runs": 200,
+          "settleCPU": 311.72499999999854,
+          "update": 46.579209
+        },
+        "typing in the ask field (a key)": {
+          "bodies": 0,
+          "draw": 0.865208,
+          "mainCPU": 6.086999999999534,
+          "max": 10.149083,
+          "median": 6.291375,
+          "min": 2.082083,
+          "p95": 8.998416,
+          "runs": 76,
+          "settleCPU": 0.7769999999873107,
+          "update": 4.641959
+        }
+      },
+      "scroll": {
+        "AI": {
+          "bodies": 0,
+          "height": 2108,
+          "jitter": 1.0855411644319575,
+          "jump": 0.4195706666666663,
+          "max": 7.410125,
+          "median": 1.90175,
+          "over16ms": 0,
+          "over8ms": 0,
+          "p95": 4.605125,
+          "p99": 5.952958,
+          "steps": 772
+        },
+        "About": {
+          "bodies": 0,
+          "height": 708,
+          "jitter": 0.12232941800259722,
+          "jump": 0.07230570422535208,
+          "max": 1.455291,
+          "median": 0.605958,
+          "over16ms": 0,
+          "over8ms": 0,
+          "p95": 0.765792,
+          "p99": 0.889,
+          "steps": 72
+        },
+        "Apps & Extras": {
+          "bodies": 0,
+          "height": 755,
+          "jitter": 0.18194418229407275,
+          "jump": 0.126503547368421,
+          "max": 1.443542,
+          "median": 0.62975,
+          "over16ms": 0,
+          "over8ms": 0,
+          "p95": 1.153958,
+          "p99": 1.29,
+          "steps": 96
+        },
+        "Dock": {
+          "bodies": 0,
+          "height": 1029,
+          "jitter": 0.19140082648740522,
+          "jump": 0.11767196103896098,
+          "max": 2.20525,
+          "median": 0.688208,
+          "over16ms": 0,
+          "over8ms": 0,
+          "p95": 1.065875,
+          "p99": 1.433292,
+          "steps": 232
+        },
+        "Focus": {
+          "bodies": 0,
+          "height": 1007,
+          "jitter": 0.24729837255416853,
+          "jump": 0.1332670717488789,
+          "max": 2.362375,
+          "median": 0.948666,
+          "over16ms": 0,
+          "over8ms": 0,
+          "p95": 1.629083,
+          "p99": 1.852667,
+          "steps": 224
+        },
+        "Look": {
+          "bodies": 0,
+          "height": 580,
+          "jitter": 1.1594272992741665,
+          "jump": 0.6023512857142858,
+          "max": 5.785667,
+          "median": 2.388459,
+          "over16ms": 0,
+          "over8ms": 0,
+          "p95": 5.785667,
+          "p99": 5.785667,
+          "steps": 8
+        },
+        "Modes": {
+          "bodies": 0,
+          "height": 1367,
+          "jitter": 0.8459268422660473,
+          "jump": 0.47848427791563336,
+          "max": 7.424625,
+          "median": 0.933125,
+          "over16ms": 0,
+          "over8ms": 0,
+          "p95": 2.308542,
+          "p99": 5.465084,
+          "steps": 404
+        },
+        "Vault": {
+          "bodies": 0,
+          "height": 1163,
+          "jitter": 0.28540128541829785,
+          "jump": 0.1472162842809365,
+          "max": 3.159708,
+          "median": 1.349167,
+          "over16ms": 0,
+          "over8ms": 0,
+          "p95": 2.074125,
+          "p99": 2.389791,
+          "steps": 300
+        },
+        "Vault with 300 logins": {
+          "bodies": 0,
+          "height": 15263,
+          "jitter": 2.9841187648125644,
+          "jump": 2.3664763202721124,
+          "max": 38.142708,
+          "median": 24.289875,
+          "over16ms": 3673,
+          "over8ms": 3676,
+          "p95": 28.0475,
+          "p99": 29.239708,
+          "steps": 3676
+        }
+      }
+    }
+  }
+}

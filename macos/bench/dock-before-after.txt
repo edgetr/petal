@@ -1,0 +1,27 @@
+Petal --bench-dock, before (acc5e8d):
+Petal dock bench: 4 modes, [10, 7, 8, 25] apps, 2 more running
+strip: SwiftUI
+  switch mode median    3.59 ms   worst    5.66 ms   (24 runs)
+  an app comes forward median    1.39 ms   worst    2.18 ms   (20 runs)
+  refresh with nothing new median    0.22 ms   worst    0.47 ms   (20 runs)
+  dock sizes seen: 1757×76, 1759×76, 1769×76, 1771×76; window 1920×76
+strip: layers
+  switch mode median    2.06 ms   worst    3.26 ms   (24 runs)
+  rows not shown in the same pass: 0 of 4
+  an app comes forward median    0.48 ms   worst    1.36 ms   (20 runs)
+  refresh with nothing new median    0.32 ms   worst    2.58 ms   (20 runs)
+  dock sizes seen: 1757×76, 1759×76, 1769×76, 1771×76; window 1920×76
+
+Petal --bench-dock, after (1e75704):
+Petal dock bench: 4 modes, [10, 7, 8, 25] apps, 2 more running
+strip: SwiftUI
+  switch mode median    3.52 ms   worst    5.77 ms   (24 runs)
+  an app comes forward median    1.49 ms   worst    2.13 ms   (20 runs)
+  refresh with nothing new median    0.14 ms   worst    0.66 ms   (20 runs)
+  dock sizes seen: 1757×76, 1759×76, 1769×76, 1771×76; window 1920×76
+strip: layers
+  switch mode median    1.90 ms   worst    4.20 ms   (24 runs)
+  rows not shown in the same pass: 0 of 4
+  an app comes forward median    0.46 ms   worst    1.55 ms   (20 runs)
+  refresh with nothing new median    0.25 ms   worst    0.47 ms   (20 runs)
+  dock sizes seen: 1757×76, 1759×76, 1769×76, 1771×76; window 1920×76
