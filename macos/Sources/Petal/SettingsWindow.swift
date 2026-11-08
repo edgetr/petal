@@ -10,6 +10,13 @@ final class SettingsWindow {
     private(set) var window: NSWindow?
 
     func show(_ section: SettingsSection = .dock) {
+        let window = prepare(section)
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    /// The window with its content, ready to show (`Petal --bench-settings` times this without showing it).
+    func prepare(_ section: SettingsSection = .dock) -> NSWindow {
         if window == nil {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 920, height: 640),
                                   styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -23,9 +30,8 @@ final class SettingsWindow {
             window.center()
             self.window = window
         }
-        window?.setGlassContent(SettingsView(selection: section).environment(PetalApp.shared))
-        NSApp.activate()
-        window?.makeKeyAndOrderFront(nil)
+        window!.setGlassContent(SettingsView(selection: section).environment(PetalApp.shared))
+        return window!
     }
 }
 
@@ -100,6 +106,7 @@ struct SettingsView: View {
     @State private var ask = ""
 
     var body: some View {
+        let _ = BodyCount.hit("SettingsView")
         ZStack {
             Backdrop()
             HStack(spacing: 14) {
@@ -124,10 +131,17 @@ struct SettingsView: View {
         }
         .frame(minWidth: 780, minHeight: 540)
         .animation(.smooth(duration: 0.25), value: selection)
+        .onReceive(SettingsBench.commands) { command in
+            switch command {
+            case .select(let section): selection = section
+            case .type(let text): ask = text
+            }
+        }
     }
 
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let _ = BodyCount.hit("sidebar")
+        return VStack(alignment: .leading, spacing: 4) {
             if let provider = app.chatProvider {
             HStack(spacing: 8) {
                 Image(systemName: "sparkle").foregroundStyle(SettingsSection.claude.tint)
@@ -199,6 +213,7 @@ struct SettingsView: View {
     }
 
     @ViewBuilder private var content: some View {
+        let _ = BodyCount.hit("page")
         switch selection {
         case .dock: DockSettings()
         case .modes: ModesSettings()
@@ -224,6 +239,7 @@ struct Backdrop: View {
     @Environment(\.snapshotting) private var snapshotting
 
     var body: some View {
+        let _ = BodyCount.hit("Backdrop")
         ZStack {
             if snapshotting {
                 LinearGradient(colors: [Color(red: 0.85, green: 0.21, blue: 0.50), Color(red: 0.36, green: 0.27, blue: 0.62)],
@@ -256,6 +272,7 @@ struct Card<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
+        let _ = BodyCount.hit("Card")
         VStack(alignment: .leading, spacing: 12) {
             if let title { Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary) }
             content
@@ -275,6 +292,7 @@ struct SettingToggle: View {
     var detail: String? = nil
 
     var body: some View {
+        let _ = BodyCount.hit("SettingToggle")
         Toggle(isOn: Binding(get: { app.config.bool(key) }, set: { app.config.set(key, $0) })) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
@@ -295,6 +313,7 @@ struct SettingSlider: View {
     var format: (Double) -> String = { String(Int($0)) }
 
     var body: some View {
+        let _ = BodyCount.hit("SettingSlider")
         HStack {
             Text(title)
             Slider(value: Binding(get: { app.config.number(key) },
@@ -312,6 +331,7 @@ struct DockSettings: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
+        let _ = BodyCount.hit("DockSettings")
         HStack(spacing: 14) {
             DockChoice(title: "Petal", detail: "A mode for every Desktop, and Claude.", selected: app.config.whichDock == "petal") {
                 PetalDockSketch()
@@ -443,6 +463,7 @@ struct ModesSettings: View {
     @State private var editing: Mode?
 
     var body: some View {
+        let _ = BodyCount.hit("ModesSettings")
         SettingToggle(key: "modes", title: "Focus modes", detail: "Each Desktop's own mode, with its own apps.")
             .padding(16).glassEffect(.regular, in: .rect(cornerRadius: 20))
         WindowsCard()
@@ -502,6 +523,7 @@ struct ModeCard: View {
     let desktops: [Int]
 
     var body: some View {
+        let _ = BodyCount.hit("ModeCard")
         let color = Color(nsColor: mode.color)
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
@@ -677,6 +699,7 @@ struct ClaudeSettings: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
+        let _ = BodyCount.hit("ClaudeSettings")
         Card(title: "Your AI", footer: "Each is your own app and account. Choose one, both, or neither: without AI, Petal is still a whole dock.") {
             ProviderList()
         }
@@ -940,6 +963,7 @@ struct AppsSettings: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
+        let _ = BodyCount.hit("AppsSettings")
         Card(title: "Apps") {
             SettingToggle(key: "thisWorkspaceOnly", title: "Only this Desktop's apps", detail: "Running apps from other Desktops stay out of the dock.")
             SettingToggle(key: "previews", title: "Window previews", detail: "Hover a running app to see its windows.")
@@ -983,6 +1007,7 @@ struct LookSettings: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
+        let _ = BodyCount.hit("LookSettings")
         Card(title: "Icons") {
             SettingSlider(key: "iconSize", title: "Size", range: 24...72)
             SettingSlider(key: "idleOpacity", title: "Apps not running", range: 0.2...1, step: 0.05,
@@ -1032,6 +1057,7 @@ struct PermissionsSettings: View {
     let timer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
 
     var body: some View {
+        let _ = BodyCount.hit("PermissionsSettings")
         let _ = tick
         Permission(symbol: "accessibility", title: "Accessibility", detail: "Window previews, minimized windows, badges, and focus cards.",
                    granted: Windows.trusted) { Windows.askForPermission() }
@@ -1080,6 +1106,7 @@ struct AboutSettings: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
+        let _ = BodyCount.hit("AboutSettings")
         VStack(spacing: 10) {
             Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 128, height: 128)
                 .shadow(color: .black.opacity(0.3), radius: 18, y: 8)

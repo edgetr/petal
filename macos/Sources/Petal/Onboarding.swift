@@ -140,6 +140,7 @@ struct WelcomeView: View {
         .onReceive(timer) { _ in tick += 1; if tick % 2 == 0 { app.browsers.refresh() } }
         .task {
             // Start with the AIs already on this Mac switched on, and none otherwise: it's optional.
+            guard !Headless.on else { return }   // a benchmark changes no setting by itself
             for provider in Provider.allCases { await app.lookFor(provider) }
             app.config.set("aiProviders", Provider.allCases.filter { app.paths[$0] != nil }.map(\.rawValue))
             app.aiSetup.refreshAll()

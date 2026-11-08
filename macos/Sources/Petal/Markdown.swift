@@ -254,6 +254,9 @@ enum Pages {
         window.load(file, title: title)
     }
 
+    /// A page's whole document: `body` in Petal's look.
+    static func document(title: String, body: String) -> String { template(title: title, body: body) }
+
     private static func template(title: String, body: String) -> String {
         """
         <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -279,7 +282,7 @@ enum Pages {
 /// page drawn over the glass.
 @MainActor
 final class PageWindow: NSWindow, WKNavigationDelegate {
-    private let web: WKWebView
+    let web: WKWebView
     private let titleLabel = NSTextField(labelWithString: "")
     private var file: URL?
 
@@ -325,13 +328,13 @@ final class PageWindow: NSWindow, WKNavigationDelegate {
         center()
     }
 
-    func load(_ file: URL, title: String) {
+    func load(_ file: URL, title: String, show: Bool = true) {
         self.file = file
         self.title = title
         titleLabel.stringValue = title
         web.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent())
         // In front, without taking the keyboard from the chat (which closes when it loses it).
-        orderFrontRegardless()
+        if show { orderFrontRegardless() }
     }
 
     @objc private func openInBrowser() {

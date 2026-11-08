@@ -18,6 +18,7 @@ final class AISetup {
     func refreshAll() { for provider in Provider.allCases { refresh(provider) } }
 
     func refresh(_ provider: Provider) {
+        guard !Headless.on else { return }   // a benchmark runs nothing
         Task {
             if app.paths[provider] == nil { await app.lookFor(provider) }
             guard let path = app.paths[provider] else { states[provider] = .missing; return }

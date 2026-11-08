@@ -1519,6 +1519,7 @@ struct RoutinesSettings: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
+        let _ = BodyCount.hit("RoutinesSettings")
         let routines = app.routines
         Card(title: "Routines", footer: "Ask Petal AI in your own words: “keep my Downloads tidy”, “when a PDF lands in Downloads, file it under Receipts”, “when I open Figma, switch to Design”. Files are only moved into folders, never deleted, and everything a routine moves can be put back.") {
             SettingToggle(key: "routines", title: "Run my routines", detail: "Petal does them by itself, without asking each time.")

@@ -69,6 +69,7 @@ final class Usage {
     private static let store = "usageLimits"
 
     private func save() {
+        guard !Headless.on else { return }
         let plain = limitsBy.mapValues { $0.map { ["label": $0.label, "percent": $0.percent, "resets": $0.resetsAt?.timeIntervalSince1970 ?? 0] } }
         UserDefaults.standard.set(Dictionary(uniqueKeysWithValues: plain.map { ($0.key.rawValue, $0.value) }), forKey: Self.store)
     }

@@ -39,8 +39,25 @@ MainActor.assumeIsolated {
         SystemDock.restore()
         exit(0)
     }
+    // Petal's windows, timed headless on a copy of the settings (SettingsBench.swift).
+    if let index = arguments.firstIndex(of: "--bench-windows-idle"), arguments.count > index + 1 {
+        app.setActivationPolicy(.prohibited)
+        SettingsBench.isolate()
+        WindowBench.idle(arguments[index + 1])
+    }
+    if arguments.contains("--bench-windows-child") {
+        app.setActivationPolicy(.prohibited)
+        SettingsBench.isolate()
+        WindowBench.child(settingsOnly: arguments.contains("settings"))
+    }
+    if arguments.contains("--bench-settings") || arguments.contains("--bench-windows") {
+        app.setActivationPolicy(.prohibited)
+        SettingsBench.isolate()
+        WindowBench.run(arguments, settingsOnly: arguments.contains("--bench-settings"))
+    }
     if arguments.contains("--bench-dock") {
         app.setActivationPolicy(.prohibited)
+        SettingsBench.isolate()
         DockBench.run()
     }
     if arguments.contains("--bench") {
@@ -53,7 +70,9 @@ MainActor.assumeIsolated {
     }
     if let index = arguments.firstIndex(of: "--snapshot"), arguments.count > index + 1 {
         app.setActivationPolicy(.prohibited)
+        SettingsBench.isolate()
         Snapshot.run(to: arguments[index + 1])
+        SettingsBench.cleanUp()
         exit(0)
     }
     // Anything else typed after `petal` is a command it doesn't know: say so, rather than start a second dock.

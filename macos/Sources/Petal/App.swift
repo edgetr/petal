@@ -81,12 +81,12 @@ final class PetalApp {
         docks = DockController()
         focus = FocusGuard()
         connectWindowsToGuard()
-        Task {
+        if !Headless.on { Task {
             for provider in Provider.allCases { await lookFor(provider) }
             loadCodexModels()
             // The person's other AI sessions get Petal's tools, skill and command too.
             if config.bool("otherAgents") { OtherAgents.connect(paths: paths) }
-        }
+        } }
     }
 
     var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev" }
@@ -420,6 +420,7 @@ final class PetalApp {
 
     /// Asking the login shell can take a moment; the dock doesn't wait for it.
     func lookFor(_ provider: Provider) async {
+        guard !Headless.on else { return }   // a benchmark starts no shell
         let setting = config.string(provider.pathSetting)
         paths[provider] = await Task.detached { PetalApp.find(provider, setting: setting) }.value
     }

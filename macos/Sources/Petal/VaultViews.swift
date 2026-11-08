@@ -177,6 +177,7 @@ struct VaultSettings: View {
     @State private var dropping = false
 
     var body: some View {
+        let _ = BodyCount.hit("VaultSettings")
         VStack(alignment: .leading, spacing: 14) {
             Card {
                 tabs

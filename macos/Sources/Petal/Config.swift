@@ -46,7 +46,11 @@ struct Mode: Equatable, Identifiable {
 /// Each is read again within a second of changing on disk, whoever changed it (the settings window, Claude, an editor).
 @MainActor @Observable
 final class Config {
-    nonisolated static let folder = URL(fileURLWithPath: NSHomeDirectory()).appending(path: ".config/petal")
+    /// `PETAL_CONFIG_DIR` points Petal at another folder, for benchmarks and tests that must never touch the real one.
+    nonisolated static let folder: URL = {
+        if let dir = ProcessInfo.processInfo.environment["PETAL_CONFIG_DIR"], !dir.isEmpty { return URL(fileURLWithPath: dir) }
+        return URL(fileURLWithPath: NSHomeDirectory()).appending(path: ".config/petal")
+    }()
     @ObservationIgnored let modesFile = folder.appending(path: "modes.json")
     @ObservationIgnored let settingsFile = folder.appending(path: "settings.json")
     @ObservationIgnored let dockFile = folder.appending(path: "dock.json")

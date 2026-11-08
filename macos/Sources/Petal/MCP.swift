@@ -6,7 +6,7 @@ import Foundation
 /// by build.sh as Resources/mcp/tools.json, so both platforms describe them the same way; what each tool does on a
 /// Mac is here, as in petal-mcp.py's macOS branch.
 enum MCP {
-    static let folder = URL(fileURLWithPath: NSHomeDirectory()).appending(path: ".config/petal")
+    static let folder = Config.folder
     static let settingsFile = folder.appending(path: "settings.json")
     static let modesFile = folder.appending(path: "modes.json")
     static let dockFile = folder.appending(path: "dock.json")

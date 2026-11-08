@@ -57,6 +57,7 @@ final class DockController {
     var config: Config { app.config }
 
     init() {
+        guard !Headless.on else { return }   // a benchmark's docks never follow the screen
         let center = NSWorkspace.shared.notificationCenter
         // Another app in front changes only which icon is active: the last look at the windows does, at once.
         center.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in

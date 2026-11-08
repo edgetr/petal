@@ -56,6 +56,7 @@ final class FocusGuard {
 
     init() {
         sorted = (Config.parse(Self.sortedFile) ?? [:]).compactMapValues { $0 as? String }
+        guard !Headless.on else { return }   // a benchmark never looks at what's in front
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil,
                                                           queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.schedule() }

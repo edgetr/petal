@@ -236,6 +236,12 @@ enum Snapshot {
         for section in SettingsSection.allCases {
             views.append(("settings-\(section.rawValue)", AnyView(SettingsView(selection: section)), CGSize(width: 920, height: 700)))
         }
+        // A vault of 300 logins, whole, and twelve releases' notes.
+        VaultModel.shared.preview(vault + BenchTargets.logins(300))
+        write(render(AnyView(SettingsView(selection: .vault)), app: app, size: CGSize(width: 920, height: 14000)), name: "settings-vault-300", folder: folder)
+        VaultModel.shared.preview(vault)
+        views.append(("whats-new-long", AnyView(ReleaseNotesView(version: "1.0.0", preloaded: .init(body: BenchTargets.releaseNotes, link: nil))),
+                      CGSize(width: 560, height: 3200)))
         try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
         // Magnification: drawn once to find where everything is, then with the pointer over the third app.
         Magnifier.forced = true
