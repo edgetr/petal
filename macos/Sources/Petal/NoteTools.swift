@@ -28,9 +28,11 @@ extension NoteDesk {
             // Searched, filtered by notebook and counted only on what the agent may see of each note (redacted),
             // never its raw text: matching can't be used to guess a secret one character at a time.
             let papers = store.notes.filter { $0.version == nil && (!onlyHere || here[$0.key] != nil) }
-            let texts = papers.map { $0.file.title + "\n" + $0.file.body + "\n" + $0.notebook }
+            let sources = papers.map { ($0.file.body, $0.notebook) }
             let books = papers.map(\.notebook)
             Self.onShield({ index -> [Int]? in
+                // Each note's text and notebook redacted whole first (its title is in its text), then searched.
+                let texts = sources.map { NoteTold.searchText($0.0, notebook: $0.1) { index.redacted($0) } }
                 guard let hits = NoteShield.search(query, in: texts, index: index, matches: NoteText.matches) else { return nil }
                 return notebook.isEmpty ? hits : hits.filter { index.redacted(books[$0]).localizedCaseInsensitiveCompare(notebook) == .orderedSame }
             }) { (hits: [Int]??) in
@@ -45,7 +47,8 @@ extension NoteDesk {
             resolve(args["id"] as? String ?? "", refuse, fail) { paper in
             var result = self.summary(paper)
             result["text"] = paper.file.body
-            result["file"] = paper.url.path
+            let body = paper.file.body, path = paper.url.path
+            result["file"] = NoteShield.Derived { NoteTold.path(path, body: body, $0) }
             result["created"] = NoteFile.stamp(paper.file.created)
             if paper.file.cover { result["cover"] = true }
             if self.store.readOnly(paper) { result["note"] = "This note changed in two places at once: the person sees both papers until they keep one, and it can't be changed until then." }
@@ -58,7 +61,7 @@ extension NoteDesk {
                 resolve(id, refuse, fail) { paper in
                     self.persist(paper.key, live: live, send, fail, touch: true, edit: { file in
                         file.body = append ? file.body + (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + text : text
-                    }) { ["written": $0.noteID, "title": $0.file.title, "file": $0.url.path] }
+                    }) { self.written($0) }
                 }
             } else {
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return fail("Nothing to write.") }
@@ -70,8 +73,9 @@ extension NoteDesk {
                     if let place { file.places = [place] }
                     self.store.make(file, in: notebook, live: live) { made in
                         guard let made else { return fail(Self.notMade) }
-                        var result: [String: Any] = ["written": made.noteID, "title": made.file.title, "notebook": made.notebook, "file": made.url.path]
-                        if sticking { result["stuck"] = place.map(self.told) ?? "nowhere (nothing in front Petal could stick it to)" }
+                        var result = self.written(made)
+                        result["notebook"] = made.notebook
+                        if sticking { result["stuck"] = place.map { self.told($0) as Any } ?? "nowhere (nothing in front Petal could stick it to)" }
                         send(result)
                     }
                 }
@@ -85,7 +89,10 @@ extension NoteDesk {
                 guard live() else { return fail(Self.hungUp) }
                 // The same move as the letterhead's: what's typed in it goes with it, and its panel and editor follow.
                 self.move(paper.key, to: notebook, live: live) { moved in
-                    if let moved { send(["moved": moved.noteID, "notebook": moved.notebook]) }
+                    if let moved {
+                        let id = moved.noteID, body = moved.file.body
+                        send(["moved": NoteShield.Derived { NoteTold.id(id, body: body, $0) }, "notebook": moved.notebook])
+                    }
                     else { fail(live() ? "Couldn't move it (or its pictures); it's where it was." : Self.hungUp) }
                 }
             }
@@ -123,14 +130,17 @@ extension NoteDesk {
     private func resolve(_ name: String, _ refuse: @escaping (String) -> Void, _ fail: @escaping (String) -> Void,
                          _ then: @escaping @MainActor (PaperNote) -> Void) {
         let papers = store.notes
-        let rows = papers.map { (id: $0.noteID, key: $0.key, title: $0.file.title, version: $0.version != nil) }
+        let rows = papers.map { (id: $0.noteID, key: $0.key, body: $0.file.body, version: $0.version != nil) }
         Self.onShield({ NoteShield.find(name, rows: rows, index: $0) }) { (lookup: NoteShield.Lookup?) in
             switch lookup {
             case .found(let at)?:
-                // The note as it is now (it may have moved meanwhile).
-                guard let paper = self.store.notes.first(where: { $0.noteID == papers[at].noteID && $0.version == papers[at].version })
-                        ?? self.store.paper(papers[at].key) else { return fail("No note with that id; petal_notes lists them.") }
-                then(paper)
+                // The very paper the lookup chose (a conflict's copy stays that copy), as the notes are now; renamed
+                // meanwhile, followed by its id only when that id names one paper; its path now another note's, refused.
+                let now = self.store.notes
+                guard let index = NoteShelf.pick(key: papers[at].key, id: papers[at].noteID, now: now.map { ($0.key, $0.noteID) }) else {
+                    return fail("That note changed while Petal looked (renamed, or another note has its name now); petal_notes lists them.")
+                }
+                then(now[index])
             case .none?: fail("No note with that id; petal_notes lists them.")
             case .unreadable?, nil: refuse(NoteShield.unreadable)
             }
@@ -174,9 +184,12 @@ extension NoteDesk {
         let saved = store.change(key, touch: touch, live: live, edit: edit) { outcome in
             switch outcome {
             case .cancelled: fail(Self.hungUp)
-            case .written: send(result(self.store.notes.first { $0.noteID == paper.noteID && $0.version == nil } ?? paper))
+            // The paper written (by its file; moved meanwhile, by its id when that names one paper).
+            case .written: send(result(self.store.paper(key) ?? NoteShelf.pick(key: key, id: paper.noteID, now: self.store.notes.map { ($0.key, $0.noteID) }).map { self.store.notes[$0] } ?? paper))
             case .keptBoth(let copy):
-                fail("The note changed elsewhere meanwhile, so this was kept beside it as “\(copy.lastPathComponent)”; the person picks which to keep.")
+                // The copy's name comes from the note's title (cut to fit), so it isn't told.
+                _ = copy
+                fail("The note changed elsewhere meanwhile, so this was kept beside it as a conflicted copy; the person picks which to keep.")
             case .failed:
                 fail("Petal couldn't write the note's file. It keeps the change and tries again; nothing to do now.")
             }
@@ -185,14 +198,27 @@ extension NoteDesk {
     }
 
     /// A place as the AI is told it: in words, or, in an app kept private, only what it is and the app.
-    private func told(_ stick: NoteStick) -> String {
-        Self.describe(app.assist.neverLook(stick.app) ? stick.scrubbed : stick)
+    /// Its words are derived only after they're redacted (NoteShield.Derived): a passage's quote is cut to 60
+    /// characters, an address to 40.
+    private func told(_ stick: NoteStick) -> NoteShield.Derived {
+        let place = app.assist.neverLook(stick.app) ? stick.scrubbed : stick
+        return NoteShield.Derived { place.redacted($0).words }
     }
 
+    /// A note as the tools list it: its id, title, preview and places derived from its redacted text (NoteTold).
     private func summary(_ paper: PaperNote) -> [String: Any] {
-        ["id": paper.noteID, "title": paper.file.title, "notebook": paper.notebook, "preview": String(paper.file.preview.prefix(160)),
-         "places": paper.file.places.map(told), "modified": NoteFile.stamp(paper.file.modified),
-         "onScreen": here[paper.key] != nil]
+        let body = paper.file.body, id = paper.noteID
+        return ["id": NoteShield.Derived { NoteTold.id(id, body: body, $0) }, "title": NoteShield.Derived { NoteTold.title(body, $0) },
+                "notebook": paper.notebook, "preview": NoteShield.Derived { NoteTold.preview(body, $0) },
+                "places": paper.file.places.map(told), "modified": NoteFile.stamp(paper.file.modified),
+                "onScreen": here[paper.key] != nil]
+    }
+
+    /// What a write answers: the note's id, title and file, derived after redaction.
+    private func written(_ paper: PaperNote) -> [String: Any] {
+        let body = paper.file.body, id = paper.noteID, path = paper.url.path
+        return ["written": NoteShield.Derived { NoteTold.id(id, body: body, $0) }, "title": NoteShield.Derived { NoteTold.title(body, $0) },
+                "file": NoteShield.Derived { NoteTold.path(path, body: body, $0) }]
     }
 
     /// What's in front now, read off the main thread, as one place: `kind` (tab, window, app, file, desktop) or the

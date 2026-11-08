@@ -9,7 +9,7 @@ import Foundation
 struct NoteSelectionCheck {
     static func main() {
         var failures = 0
-        func expect(_ ok: Bool, _ what: String) { if !ok { failures += 1; print("FAIL \(what)") } }
+        func expect(_ ok: Bool, _ what: String, _ detail: @autoclosure () -> String = "") { if !ok { failures += 1; print("FAIL \(what) \(detail())") } }
         let vault = { (text: String) in text.contains("sk-live-123456789") }
         let plain = UINode(role: "AXTextArea", value: "Doors open at 8. Talks start at 9.")
         expect(!UIMap.selectionHidden(in: plain, filled: false, secret: vault), "a plain text's sentence may be a passage")
@@ -51,12 +51,35 @@ struct NoteSelectionCheck {
         expect(NoteShield.search("hotel", in: notes, index: vaultIndex, matches: matches) == [0], "words around it still find the note")
         expect(NoteShield.search("", in: notes, index: vaultIndex, matches: matches) == [0, 1, 2], "an empty search lists them all")
         expect(NoteShield.search("milk", in: notes, index: .unavailable, matches: matches) == nil, "the vault unreadable: no results at all")
-        let rows = [(id: "n1", key: "/n/Card \(card).md", title: "Card \(card)", version: false), (id: "n2", key: "/n/Door.md", title: "Door", version: false)]
+        let rows = [(id: "n1", key: "/n/Card \(card).md", body: "# Card \(card)", version: false), (id: "n2", key: "/n/Door.md", body: "# Door", version: false)]
         expect(NoteShield.find("Card \(card)", rows: rows, index: vaultIndex) == .none && NoteShield.find("/n/Card \(card).md", rows: rows, index: vaultIndex) == .none,
                "naming a guessed secret in a title or file finds nothing")
         expect(NoteShield.find("Card (hidden)", rows: rows, index: vaultIndex) == .found(0) && NoteShield.find("n2", rows: rows, index: vaultIndex) == .found(1),
                "a note found by what petal_notes showed of it, or its id")
         expect(NoteShield.find("n2", rows: rows, index: .unavailable) == .unreadable, "the vault unreadable: nothing looked up")
+
+        // Redacted whole before anything is cut: a secret straddling a cut leaves nothing of itself.
+        let straddle = "# Door\n" + String(repeating: "a", count: 157) + " \(pin) more words after it"
+        expect(String(NoteText.preview(straddle).prefix(160)).hasSuffix(" 48"), "the case is real: a raw cut leaves part of the PIN")
+        let told = NoteShield.shield(["preview": NoteShield.Derived { NoteTold.preview(straddle, $0) },
+                                      "title": NoteShield.Derived { NoteTold.title(String(repeating: "b", count: 76) + " \(card) end", $0) }],
+                                     index: vaultIndex) as? [String: Any]
+        let toldPreview = told?["preview"] as? String ?? "?", toldTitle = told?["title"] as? String ?? "?"
+        expect(!toldPreview.contains("48") && !toldPreview.isEmpty, "a PIN across the preview's cut: none of it told", toldPreview)
+        expect(!toldTitle.contains("411") && !toldTitle.isEmpty, "a card number across the title's cut: none of it told", toldTitle)
+        var passage = NoteStick(kind: .passage)
+        passage.quote = String(repeating: "c", count: 57) + " \(card)"
+        passage.url = "https://example.com/\(card)"
+        let place = passage.redacted { vaultIndex.redacted($0) }.words
+        expect(!place.contains("41") && place.contains("example.com"), "a passage's quote and address cut only after redaction", place)
+        let titled = "# Card \(card)\nmore"
+        expect(NoteTold.path("/n/Inbox/Card 41111111111.md", body: titled) { vaultIndex.redacted($0) } == "/n/Inbox/(hidden).md",
+               "a file named from a title holding a secret: its name not told")
+        expect(NoteTold.path("/n/Inbox/Groceries.md", body: "# Groceries") { vaultIndex.redacted($0) } == "/n/Inbox/Groceries.md", "any other file as it is")
+
+        // A specific conflict copy, named by its file: that copy, never the first paper of its id.
+        let copies = [(id: "A", key: "/n/A.md", body: "# A\nmine", version: false), (id: "A", key: "/n/A (conflicted copy).md", body: "# A\ntheirs", version: false)]
+        expect(NoteShield.find("/n/A (conflicted copy).md", rows: copies, index: vaultIndex) == .found(1), "the copy named is the copy found")
         print("note selection: " + (failures == 0 ? "all checks passed" : "\(failures) failed"))
         if failures > 0 { exit(1) }
     }

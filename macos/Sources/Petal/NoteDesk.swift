@@ -1020,18 +1020,7 @@ final class NoteDesk {
     }
 
     /// A place in a few plain words, for the back of a note and Petal AI.
-    static func describe(_ stick: NoteStick) -> String {
-        switch stick.kind {
-        case .passage:
-            let quote = "“" + stick.quote.prefix(60) + (stick.quote.count > 60 ? "…”" : "”")
-            return quote + " on " + (stick.url.isEmpty ? (stick.path as NSString).lastPathComponent : NoteText.shortAddress(stick.url))
-        case .tab: return "The page " + (NoteText.shortAddress(stick.url).isEmpty ? stick.title : NoteText.shortAddress(stick.url))
-        case .file: return "The file " + (stick.path as NSString).lastPathComponent + (stick.appName.isEmpty ? "" : " (in any app)")
-        case .window: return "A window of \(stick.appName.isEmpty ? stick.app : stick.appName)" + (stick.title.isEmpty ? "" : ": “\(stick.title)”")
-        case .app: return "Every window of \(stick.appName.isEmpty ? stick.app : stick.appName)"
-        case .desktop: return "Desktop \(stick.desktop.map(String.init) ?? "")" + (stick.mode.isEmpty ? "" : " (\(stick.mode))")
-        }
-    }
+    static func describe(_ stick: NoteStick) -> String { stick.words }
 
     // MARK: Making notes
 

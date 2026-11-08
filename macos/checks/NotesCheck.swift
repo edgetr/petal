@@ -195,6 +195,14 @@ struct NotesCheck {
         expect(NoteShelf.nextRoot(wanted: c, current: b, switching: false) == c, "once the switch to B is done, C (asked meanwhile) follows")
         expect(NoteShelf.nextRoot(wanted: b, current: b, switching: false) == nil, "the one in use: nothing")
 
+        // The paper a lookup chose, kept: a conflict's copy stays that copy; a rename followed only when its id names
+        // one paper; a path now another note's refused.
+        let papers = [(key: "/n/A.md", id: "A"), (key: "/n/A (conflicted copy).md", id: "A"), (key: "/n/B.md", id: "B")]
+        expect(NoteShelf.pick(key: "/n/A (conflicted copy).md", id: "A", now: papers) == 1, "reading a specific conflict copy reads that copy")
+        expect(NoteShelf.pick(key: "/n/A gone.md", id: "A", now: papers) == nil, "gone, with its id on two papers: no guess")
+        expect(NoteShelf.pick(key: "/n/B old.md", id: "B", now: papers) == 2, "renamed, its id on one paper: followed")
+        expect(NoteShelf.pick(key: "/n/B.md", id: "C", now: papers) == nil, "its path now another note's: refused")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

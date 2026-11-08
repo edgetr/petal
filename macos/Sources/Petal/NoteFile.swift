@@ -112,6 +112,34 @@ struct NoteStick: Equatable, Sendable {
         }
     }
 
+    /// Its words (the passage, the text around it, the address, title, file and app's name), each through `redact`
+    /// whole, before anything is cut from it: what an agent may be told is derived from this.
+    func redacted(_ redact: (String) -> String) -> NoteStick {
+        var s = self
+        s.quote = redact(quote)
+        s.before = redact(before)
+        s.after = redact(after)
+        s.url = redact(url)
+        s.title = redact(title)
+        s.path = redact(path)
+        s.appName = redact(appName)
+        return s
+    }
+
+    /// In a few plain words, for the back of a note and Petal AI (cut to fit: for an agent, only after `redacted`).
+    var words: String {
+        switch kind {
+        case .passage:
+            let quote = "“" + self.quote.prefix(60) + (self.quote.count > 60 ? "…”" : "”")
+            return quote + " on " + (url.isEmpty ? (path as NSString).lastPathComponent : NoteText.shortAddress(url))
+        case .tab: return "The page " + (NoteText.shortAddress(url).isEmpty ? title : NoteText.shortAddress(url))
+        case .file: return "The file " + (path as NSString).lastPathComponent + (appName.isEmpty ? "" : " (in any app)")
+        case .window: return "A window of \(appName.isEmpty ? app : appName)" + (title.isEmpty ? "" : ": “\(title)”")
+        case .app: return "Every window of \(appName.isEmpty ? app : appName)"
+        case .desktop: return "Desktop \(desktop.map(String.init) ?? "")" + (mode.isEmpty ? "" : " (\(mode))")
+        }
+    }
+
     /// What the letterhead says for this place, in a few words.
     func label(found: Bool = true) -> String {
         switch kind {
@@ -916,6 +944,15 @@ enum NoteShelf {
         return name
     }
 
+    /// The paper a lookup chose (its file `key` and note `id`), as the notes are now: that same file while it's still
+    /// that note's (a path another note now has is refused); gone, followed by its id only when the id names exactly
+    /// one paper (never one of a conflict's copies picked for another).
+    static func pick(key: String, id: String, now: [(key: String, id: String)]) -> Int? {
+        if let at = now.firstIndex(where: { $0.key == key }) { return now[at].id == id ? at : nil }
+        let same = now.indices.filter { now[$0].id == id }
+        return same.count == 1 ? same[0] : nil
+    }
+
     /// Notes renamed or moved elsewhere (Finder, another Mac) while Petal holds them: old key → new key, for each id
     /// that is one paper in memory and one in the read, whose old path the read no longer has and whose new path
     /// memory doesn't. Followed before the read is fenced, so an open note moves with its file (its editor, session
@@ -1241,4 +1278,27 @@ enum NoteInk {
     static func tabPaper(_ c: RGB) -> RGB { mix(c, 0.18, paper) }
     /// Petal's ink on the paper.
     static func ink(_ c: RGB) -> RGB { mix(c, 0.62, black) }
+}
+
+/// What Petal Notes' tools tell an agent of a note, each derived from its source after the vault's redaction
+/// (`redact`), never cut first: a secret straddling a cut can't leave part of itself behind.
+enum NoteTold {
+    static func title(_ body: String, _ redact: (String) -> String) -> String { NoteText.title(redact(body)) }
+
+    static func preview(_ body: String, _ redact: (String) -> String) -> String { String(NoteText.preview(redact(body)).prefix(160)) }
+
+    /// A note's file: its name is made from its title, cut to 60 characters, so while that title holds something
+    /// the redaction hides, the name isn't told (part of a secret may be in it).
+    static func path(_ path: String, body: String, _ redact: (String) -> String) -> String {
+        guard NoteText.title(redact(body)) != NoteText.title(body) else { return redact(path) }
+        return redact((path as NSString).deletingLastPathComponent) + "/(hidden).md"
+    }
+
+    /// A note's id: a file's (one with no id of its own) is its path, told as `path` tells it.
+    static func id(_ id: String, body: String, _ redact: (String) -> String) -> String {
+        id.hasPrefix("file:") ? "file:" + path(String(id.dropFirst(5)), body: body, redact) : redact(id)
+    }
+
+    /// What a search looks through: the note's whole text and its notebook, each redacted whole.
+    static func searchText(_ body: String, notebook: String, _ redact: (String) -> String) -> String { redact(body) + "\n" + redact(notebook) }
 }
