@@ -3,7 +3,8 @@ import Carbon.HIToolbox
 import Observation
 
 /// Petal's keyboard shortcuts, global while `shortcuts` is on: Control-Option-1…9 puts the Desktop in front in that
-/// mode (in modes.json's order), Control-Option-Space opens the AI panel, Control-Option-= the "+" search. A
+/// mode (in modes.json's order), Control-Option-Space opens the AI panel, Control-Option-= the "+" search,
+/// Control-Option-N a new Petal Note on what's in front (with notes on). A
 /// combination macOS or another app already uses is left alone.
 @MainActor @Observable
 final class Hotkeys {
@@ -23,6 +24,7 @@ final class Hotkeys {
     static let digits = [kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5, kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9]
     static let ask: UInt32 = 100
     static let search: UInt32 = 101
+    static let note: UInt32 = 102
 
     var app: PetalApp { PetalApp.shared }
 
@@ -31,6 +33,7 @@ final class Hotkeys {
         var keys = app.config.modes.prefix(9).indices.map { Key(id: UInt32($0 + 1), code: Self.digits[$0], label: "⌃⌥\($0 + 1)") }
         if !app.providers.isEmpty { keys.append(Key(id: Self.ask, code: kVK_Space, label: "⌃⌥Space")) }
         keys.append(Key(id: Self.search, code: kVK_ANSI_Equal, label: "⌃⌥="))
+        if app.config.bool("notes") { keys.append(Key(id: Self.note, code: kVK_ANSI_N, label: "⌃⌥N")) }
         return keys
     }
 
@@ -85,6 +88,8 @@ final class Hotkeys {
             app.claude.toggle()
         case Self.search:
             if app.search.isOpen { app.search.close() } else { app.search.open(in: nil) }
+        case Self.note:
+            app.paper.newHere()
         case 1...9:
             let modes = app.config.modes
             guard Int(key) <= modes.count,

@@ -52,7 +52,10 @@ extension ClaudePanel {
     /// No more than this many notes work at once; the next waits for one to finish.
     static let atOnce = 4
 
-    var notesOn: Bool { PetalApp.shared.config.bool("aiNotes") }
+    /// AI chats were sticky notes (`aiNotes`) until Petal Notes replaced them: the AI button opens the quick
+    /// question, stuck nowhere, and Stick here makes it a note (NoteDesk). The notes' agents, their background acting
+    /// and previews stay, for helpers in notes to come; nothing makes a chat a note now.
+    var notesOn: Bool { false }
 
     var working: Int { notes.filter { $0.agent.running }.count }
 
@@ -563,10 +566,11 @@ extension ClaudePanel {
     /// Reads what's in front in an app, off the main thread. The browser's tab is read from its front window, the
     /// window from Accessibility: the tab counts only when the same window is in front before and after it's read
     /// (once more if not, else no tab). An app made private meanwhile has nothing of its tab or title kept.
-    static func readFront(of running: NSRunningApplication, _ done: @escaping @MainActor (FrontRead) -> Void) {
+    /// `tabs: false` leaves the browser's tab unread (no AppleScript: Petal Notes asks only when a note needs it).
+    static func readFront(of running: NSRunningApplication, tabs wanted: Bool = true, _ done: @escaping @MainActor (FrontRead) -> Void) {
         let pid = running.processIdentifier
         let bundle = running.bundleIdentifier ?? ""
-        let tabs = Browsers.kind(bundle) != nil && !PetalApp.shared.assist.neverLook(bundle)
+        let tabs = wanted && Browsers.kind(bundle) != nil && !PetalApp.shared.assist.neverLook(bundle)
         let privacy = Self.privacy.now
         let finish: @Sendable (FrontRead) -> Void = { read in
             DispatchQueue.main.async {

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Checks the window maths (tiling and parking), when the dock looks at the windows, and which controls Petal AI is
-# told about (UIMap), where AI sticky notes show and sit (NoteLayout), how a note works in the background and what its
+# told about (UIMap), where notes' tabs and AI sticky notes show and sit (NoteLayout), Petal Notes' files, places, edge tabs and
+# room beside a window (NoteFile), how a note works in the background and what its
 # preview says (Background), the vault's pure side (sites, 2FA codes, exports, when it fills by itself), and agents
 # using the vault (AgentAccess: petal run's variables and redaction, who's asking, projects and grants; worktrees on
 # throwaway folders in the temporary folder; writing through a full pipe; an unreadable answer and which signals it
@@ -21,6 +22,13 @@ swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIM
 "$out/uimap"
 swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift checks/NoteLayoutCheck.swift
 "$out/notes"
+# Petal Notes: the note file's round trip, iCloud's conflict copies, the ranked fallback of a note's places, the tabs
+# on a window's edge, fading, and the room beside a window (no file, no window).
+swiftc -parse-as-library -O -o "$out/papernotes" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift checks/NotesCheck.swift
+"$out/papernotes"
+# A note's text in the editor and back: the same Markdown, line for line (AppKit, nothing shown).
+swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteEditor.swift checks/NoteRichCheck.swift
+"$out/noterich"
 swiftc -parse-as-library -O -o "$out/background" Sources/Petal/Background.swift Sources/Petal/UIMap.swift checks/BackgroundCheck.swift
 "$out/background"
 swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Petal/UIMap.swift checks/VaultCheck.swift

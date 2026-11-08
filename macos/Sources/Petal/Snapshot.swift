@@ -34,11 +34,6 @@ enum Snapshot {
             .init(kind: .claude, text: "Done — icons are now **44 pt**, up from 36. Say *smaller* if it's too much."),
             .init(kind: .ask, text: "defaults write com.apple.finder AppleShowAllFiles -bool true"),
         ])
-        // A sticky note: the tab it's stuck to shows under the header, with the chip that changes it.
-        agent.place = NotePlace(pid: 0, app: "com.apple.Safari", appName: "Safari", window: 1, title: "Liquid Glass – Apple Developer",
-                                mode: dock.mode?.id ?? "", desktop: 1, scope: .tab,
-                                tab: NoteTab(index: 2, count: 5, url: "https://developer.apple.com/design/", title: "Liquid Glass – Apple Developer"))
-
         let installed = Apps.installed().map(\.id)
         let pick = { (wanted: [String]) in wanted.filter(installed.contains) + installed.filter { !wanted.contains($0) } }
         let sampleNew = Insights.Suggestion(kind: .mode, key: "a+b", apps: Array(pick(["com.figma.Desktop", "com.linear", "com.apple.Preview"]).prefix(2)),
@@ -154,6 +149,9 @@ enum Snapshot {
         }
         sites.stageSlots = sites.items.count + 1
         views.append(("dock-sites", AnyView(DockView(dock: sites)), nil))
+        // Petal Notes: a note folded, open, turned over, on glass, resting as tabs on a window's edge, and the quick
+        // question with Stick here (NoteSnapshot.swift).
+        paperNotes(app: app, folder: folder)
         views.append(("site-icons", AnyView(HStack(spacing: 14) {
             ForEach(["https://github.com", "https://www.figma.com", "https://example.invalid"], id: \.self) { SiteIcon(id: $0, size: 64) }
         }.padding(14)), nil))
@@ -306,7 +304,7 @@ enum Snapshot {
         return [github, bank, me, deniz, home, card, key] + old
     }
 
-    private static func render(_ view: AnyView, app: PetalApp, size: CGSize?) -> NSImage? {
+    static func render(_ view: AnyView, app: PetalApp, size: CGSize?) -> NSImage? {
         let content = view.environment(app).environment(\.colorScheme, .dark).environment(\.snapshotting, true)
             .frame(width: size?.width, height: size?.height)
             .background(Color(white: 0.16))
@@ -315,7 +313,7 @@ enum Snapshot {
         return renderer.nsImage
     }
 
-    private static func write(_ image: NSImage?, name: String, folder: String) {
+    static func write(_ image: NSImage?, name: String, folder: String) {
         guard let tiff = image?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else {
             print("couldn't draw \(name)")
             return

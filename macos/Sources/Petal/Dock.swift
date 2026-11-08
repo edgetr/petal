@@ -1258,6 +1258,8 @@ struct ClaudeButton: View {
                                if app.previews.hoverNotes(on, in: dock) { app.tooltips.hide() }
                                else { app.tooltips.show(on ? app.usageTooltip : nil, over: "claude", in: dock) }
                            },
+                           // Dragged out onto a spot: a blank Petal Note there (on the window under it, or the Desktop).
+                           drag: app.config.bool("notes") ? { _, ended in app.paper.dragFromAI(ended: ended) } : nil,
                            // A file dropped on it goes to the AI: "summarize it", "what's in it?".
                            files: { urls in
                                dropped = urls.first.map { NSWorkspace.shared.icon(forFile: $0.path) }

@@ -97,8 +97,11 @@ SETTINGS_SCHEMA = {
     "aiLearns": (True, "Once a day Petal AI learns from how each mode is used (its apps, how long) and remembers it; a quick call to the chat AI's small model."),
     "dailySummary": ("", "A card with the day in the user's modes at this time each day (\"HH:MM\"; empty for none), with a line from Petal AI."),
     "aiNeverLook": (["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"], "Apps Petal AI never looks into (bundle ids): petal_look gives only their name, window lists leave out their titles, and screenshots leave them out."),
-    "selectionAsk": (True, "macOS: selecting text in any app brings up a small \"Ask Petal AI\" button by it; clicking it quotes the text in the chat. (Also in every app's Services menu.) Never in apps kept private or password fields."),
-    "aiNotes": (True, "macOS: AI sticky notes. Each chat sticks to the browser tab, window, or all of the app it was opened on (a chip on the note changes which) and looks there even after the user moves on; the user can drag a note anywhere on its window and it comes back there whenever that tab, window or app is in front again; several notes can work at once (up to 4), and a note done while away nudges its app's icon (and its mode). Off: one chat that looks at whatever is in front."),
+    "selectionAsk": (True, "macOS: selecting text in any app brings up a small \"Ask Petal AI\" button by it (and \"Note\", a new note on that sentence, when notes is on); clicking Ask quotes the text in the chat. (Also in every app's Services menu.) Never in apps kept private or password fields."),
+    "notes": (True, "macOS: Petal Notes, the user's own notes on paper stuck to places: a sentence, a browser tab, a window, all of an app, a file in any app, a Desktop. On a window they rest as tabs on its right edge at their line's height; ⌃⌥N, \"Note\" by selected text, dragging from the AI button or Stick here on a quick question makes one. Markdown files, one per note, a folder per notebook. petal_notes / petal_note_read / petal_note_write / petal_note_move / petal_note_stick."),
+    "notesLook": ("paper", "macOS: how notes look: paper (opaque paper tinted with the notebook's color) or glass (macOS's Liquid Glass)."),
+    "notesFolder": ("", "macOS: where notes are kept (a folder path; empty: iCloud Drive's Petal Notes when iCloud Drive is on, else Petal's own folder in Application Support)."),
+    "notesNotebook": ("Inbox", "macOS: the notebook new notes go to, unless one was last used on that site or app."),
     "chatWhileWorking": ("steer", "Writing in the AI chat while it works: steer (it stops where it is and carries on from the new message) or queue (sent once it's done)."),
     "finderInDock": (True, "macOS: Finder as its own button next to the AI button, the same in every mode (never among the apps, so it never appears at the end and moves the rest)."),
     "replyDrafts": (True, "Entering a mode with held messages that need an answer, Petal AI drafts replies in the user's own style (learned from the replies they edit), shown on a card; it never sends anything."),
@@ -941,6 +944,20 @@ ASSIST_TOOLS = {
     "petal_routine_undo": (assist("petal_routine_undo"), "Put back the files a routine moved: the latest run that can be, or entry (a history id from petal_routines).",
                            {"entry": {"type": "string"}}),
     "petal_routine_delete": (assist("petal_routine_delete"), "Delete a routine (what it moved stays where it is, and can still be put back).", {"id": {"type": "string"}}),
+    "petal_notes": (assist("petal_notes"), "The user's Petal Notes (macOS): their own notes, Markdown files on paper stuck to places (a sentence, a tab, a window, all of an app, a file, a Desktop), one notebook (folder) each; Inbox by default. "
+                    "Search them (query: words, any order; notebook; here: true for the notes on what's in front now; limit). Each has id, title, notebook, preview, places (in words), modified and onScreen; notebooks lists the notebooks. When the user asks what they noted, wrote down or saved, search here first and say which notes you used.",
+                    {"query": {"type": "string"}, "notebook": {"type": "string"}, "here": {"type": "boolean"}, "limit": {"type": "integer"}}),
+    "petal_note_read": (assist("petal_note_read"), "One note whole: its text (Markdown: # headings, - [ ] checkboxes, an address alone on a line is a link card, ![caption](file) a picture, > lines are Petal's own words), places, notebook, dates and file. id: from petal_notes (or a title).",
+                        {"id": {"type": "string"}}),
+    "petal_note_write": (assist("petal_note_write"), "Write a note. No id: a new note with text in notebook (default the user's own default; a new name makes one); stick: \"here\" sticks it to what's in front (to: tab, window, app, file or desktop; else the most specific there is), else it's stuck nowhere. "
+                         "With id: replaces its text, or append: true adds text at its end. A note is the user's own writing: never change their words unless they asked; add to it instead. Nothing is ever deleted.",
+                         {"id": {"type": "string"}, "text": {"type": "string"}, "append": {"type": "boolean"}, "notebook": {"type": "string"},
+                          "stick": {"type": "string", "enum": ["here", "none"]}, "to": {"type": "string", "enum": ["passage", "tab", "window", "app", "file", "desktop"]}}),
+    "petal_note_move": (assist("petal_note_move"), "Put a note in another notebook (a new name makes the notebook). Its pictures go with it.",
+                        {"id": {"type": "string"}, "notebook": {"type": "string"}}),
+    "petal_note_stick": (assist("petal_note_stick"), "Stick a note to what's in front now: to tab, window, app, file or desktop (else the most specific there is: the selected sentence, its tab, its file, its window). also: true keeps its other places; remove: an index from its places takes it off that one (a note keeps at least one).",
+                         {"id": {"type": "string"}, "to": {"type": "string", "enum": ["passage", "tab", "window", "app", "file", "desktop"]},
+                          "also": {"type": "boolean"}, "remove": {"type": "integer"}}),
 }
 
 

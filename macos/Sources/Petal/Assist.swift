@@ -221,6 +221,8 @@ final class Assist {
             let stop = RoutineStop(also: gone)
             request?.onHangUp { stop.stop() }
             app.routines.handle(name, args, send, fail, caller: note, live: live, stop: stop)
+        case _ where NoteDesk.tools.contains(name):
+            app.paper.handle(name, args, send, fail)
         case "petal_memories":
             let mode = args["mode"] as? String
             send(["memories": memories.filter { mode == nil || $0.mode == mode || $0.mode.isEmpty }.map(record)])

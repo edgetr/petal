@@ -1,0 +1,118 @@
+import AppKit
+
+/// Petal Notes for Petal AI and the person's other agents (`petal_notes`, `petal_note_read`, `petal_note_write`,
+/// `petal_note_move`, `petal_note_stick`, through Assist's socket). They read and write the person's note files;
+/// nothing is ever deleted, and nothing a note says is run.
+extension NoteDesk {
+    static let tools: Set<String> = ["petal_notes", "petal_note_read", "petal_note_write", "petal_note_move", "petal_note_stick"]
+
+    func handle(_ name: String, _ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+        guard on else { return fail("Petal Notes is off in Petal's settings (notes).") }
+        switch name {
+        case "petal_notes":
+            let query = args["query"] as? String ?? ""
+            let notebook = args["notebook"] as? String ?? ""
+            let limit = min(200, max(1, (args["limit"] as? NSNumber)?.intValue ?? 30))
+            let onlyHere = args["here"] as? Bool ?? false
+            let found = store.notes.filter { paper in
+                paper.version == nil && (notebook.isEmpty || paper.notebook.localizedCaseInsensitiveCompare(notebook) == .orderedSame)
+                    && (!onlyHere || here[paper.key] != nil)
+                    && NoteText.matches(query, paper.file.title + "\n" + paper.file.body + "\n" + paper.notebook)
+            }
+            send(["notes": found.prefix(limit).map(summary), "count": found.count,
+                  "notebooks": store.notebooks.map { ["name": $0.name, "color": $0.color.isEmpty ? "accent" : $0.color, "notes": $0.count] },
+                  "folder": store.root.path])
+        case "petal_note_read":
+            guard let paper = store.find(args["id"] as? String ?? "") else { return fail("No note with that id; petal_notes lists them.") }
+            var result = summary(paper)
+            result["text"] = paper.file.body
+            result["file"] = paper.url.path
+            result["created"] = NoteFile.stamp(paper.file.created)
+            if paper.file.cover { result["cover"] = true }
+            if (store.conflicts[paper.noteID]?.count ?? 0) > 1 { result["note"] = "This note changed on two Macs at once: the person sees both papers until they keep one." }
+            send(result)
+        case "petal_note_write":
+            let text = args["text"] as? String ?? ""
+            if let id = args["id"] as? String, !id.isEmpty {
+                guard var paper = store.find(id) else { return fail("No note with that id; petal_notes lists them.") }
+                let append = args["append"] as? Bool ?? false
+                paper.file.body = append ? paper.file.body + (paper.file.body.isEmpty || paper.file.body.hasSuffix("\n") ? "" : "\n") + text : text
+                store.save(paper)
+                send(["written": paper.noteID, "title": paper.file.title, "file": paper.url.path])
+            } else {
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return fail("Nothing to write.") }
+                var file = NoteFile(body: text)
+                let notebook = (args["notebook"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? defaultNotebook
+                if args["stick"] as? String == "here" {
+                    stickHere(nil, kind: args["to"] as? String) { place in
+                        if let place { file.places = [place] }
+                        let paper = self.store.make(file, in: notebook)
+                        send(["written": paper.noteID, "title": paper.file.title, "notebook": paper.notebook, "file": paper.url.path,
+                              "stuck": place.map(Self.describe) ?? "nowhere (nothing in front Petal could stick it to)"])
+                    }
+                    return
+                }
+                let paper = store.make(file, in: notebook)
+                send(["written": paper.noteID, "title": paper.file.title, "notebook": paper.notebook, "file": paper.url.path])
+            }
+        case "petal_note_move":
+            guard let paper = store.find(args["id"] as? String ?? "") else { return fail("No note with that id; petal_notes lists them.") }
+            let notebook = (args["notebook"] as? String ?? "").trimmingCharacters(in: .whitespaces)
+            guard !notebook.isEmpty else { return fail("Which notebook? (a new name makes one)") }
+            store.move(paper, to: notebook) { moved in
+                if let moved { send(["moved": moved.noteID, "notebook": moved.notebook]) } else { fail("Couldn't move it.") }
+            }
+        case "petal_note_stick":
+            guard let paper = store.find(args["id"] as? String ?? "") else { return fail("No note with that id; petal_notes lists them.") }
+            if let remove = (args["remove"] as? NSNumber)?.intValue {
+                guard paper.file.places.indices.contains(remove), paper.file.places.count > 1 else { return fail("A note keeps at least one place; remove is an index from places.") }
+                var changed = paper
+                changed.file.places.remove(at: remove)
+                store.save(changed)
+                return send(["places": changed.file.places.map(Self.describe)])
+            }
+            let also = args["also"] as? Bool ?? false
+            stickHere(paper, kind: args["to"] as? String) { place in
+                guard let place, var changed = self.store.paper(paper.key) else { return fail("Nothing in front Petal can stick it to.") }
+                changed.file.places = also ? changed.file.places.filter { !$0.samePlace(place) } + [place] : [place]
+                self.store.save(changed)
+                self.refresh()
+                send(["places": changed.file.places.map(Self.describe)])
+            }
+        default:
+            fail("Unknown tool \(name)")
+        }
+    }
+
+    private func summary(_ paper: PaperNote) -> [String: Any] {
+        ["id": paper.noteID, "title": paper.file.title, "notebook": paper.notebook, "preview": String(paper.file.preview.prefix(160)),
+         "places": paper.file.places.map(Self.describe), "modified": NoteFile.stamp(paper.file.modified),
+         "onScreen": here[paper.key] != nil]
+    }
+
+    /// What's in front now, read off the main thread, as one place: `kind` (tab, window, app, file, desktop) or the
+    /// most specific there is (a passage only with a selection).
+    private func stickHere(_ paper: PaperNote?, kind: String?, _ done: @escaping @MainActor (NoteStick?) -> Void) {
+        let wanted = kind.flatMap(NoteStick.Kind.init(rawValue:))
+        if wanted == .desktop {
+            var desk = NoteStick(kind: .desktop)
+            desk.desktop = app.docks.focusedDock?.desktop
+            desk.mode = app.docks.focusedDock?.mode?.id ?? ""
+            return done(desk)
+        }
+        guard let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return done(nil) }
+        let name = running.localizedName ?? ""
+        let pid = running.processIdentifier
+        Self.read(running, mac: local.mac) { scene, read in
+            Self.queue.async {
+                let passage = wanted == .passage || wanted == nil ? Self.selection(pid: pid) : nil
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        let offers = self.places(for: scene, read: read, appName: name, passage: passage)
+                        done(wanted.flatMap { kind in offers.first { $0.kind == kind } } ?? (wanted == nil ? offers.first : nil))
+                    }
+                }
+            }
+        }
+    }
+}

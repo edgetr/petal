@@ -63,6 +63,8 @@ final class PetalApp {
     @ObservationIgnored let selection = SelectionAsk()
     /// Routines in the person's own words: what Petal does by itself when a file lands, an app opens, a mode starts.
     let routines = Routines()
+    /// Petal Notes: the person's own notes on paper, stuck to places (NoteDesk.swift).
+    let paper = NoteDesk()
     /// Reading and closing browser tabs (Browsers.swift).
     @ObservationIgnored let browsers = Browsers()
     /// Where each AI app is installed, when it is.
@@ -118,6 +120,7 @@ final class PetalApp {
             Perf.span("onChange: hotkeys") { self.hotkeys.refresh() }
             Perf.span("onChange: menuBar") { self.menuBar.refresh() }
             self.claude.notesSettingChanged()   // sticky notes turned off: no listening, nudges or taking app clicks
+            self.paper.settingsChanged()   // Petal Notes on or off, its look or its folder
             self.assist.computer.settingsChanged()   // using apps turned off, or an app made private: what's under way stops
 
         }
@@ -131,6 +134,7 @@ final class PetalApp {
         activity.start()
         automation.start()
         menuBar.start()
+        paper.start()
         aiSetup.refreshAll()
         Apps.warm()
         // Codex's default model, as Codex's own settings change (read off the main thread).
