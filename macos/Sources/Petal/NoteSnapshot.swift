@@ -88,7 +88,9 @@ extension Snapshot {
     }
 
     /// A made-up window with a sentence highlighted, its notes resting as tabs on its right edge (one with a count,
-    /// one hovered, one faded), and the note on the sentence open beside it.
+    /// one hovered, one faded), and the note on the sentence open beside it. The highlight and the pin are where the
+    /// sentence's words are, measured with the font they're drawn in (as the live pin uses the app's own bounds for
+    /// them), and the pin runs under the tabs (as live, one level below them).
     @MainActor private static func edgeScene(app: PetalApp, keys: [String], sentence: PaperNote) -> some View {
         let width: CGFloat = 620, height: CGFloat = 520
         let tabs = EdgeLayout.tabs([
@@ -99,42 +101,46 @@ extension Snapshot {
             EdgeNote(id: "e", line: 440, color: "#007aff", faded: true),
         ], height: height)
         let head = app.paper.letterhead(sentence)
-        return HStack(alignment: .top, spacing: 26) {
-            ZStack(alignment: .topLeading) {
-                RoundedRectangle(cornerRadius: 14).fill(.white).shadow(color: .black.opacity(0.22), radius: 30, y: 22)
-                    .overlay { RoundedRectangle(cornerRadius: 14).stroke(.black.opacity(0.25), lineWidth: 0.5) }
-                VStack(alignment: .leading, spacing: 0) {
-                    Rectangle().fill(Color(white: 0.95)).frame(height: 52)
-                    VStack(alignment: .leading, spacing: 11) {
-                        Text("Day one").font(.system(size: 26, weight: .bold)).foregroundStyle(Color(white: 0.07))
-                        Text("Registration is in the main hall. Doors open at 8. Talks start at 9.").font(.system(size: 14.5))
-                            .foregroundStyle(Color(white: 0.27))
-                            .background(alignment: .leading) {
-                                RoundedRectangle(cornerRadius: 3).fill(Color(.sRGB, red: 0, green: 0.48, blue: 1, opacity: 0.24)).frame(width: 118, height: 20).offset(x: 230)
-                            }
-                        ForEach(0..<3, id: \.self) { row in Capsule().fill(Color(white: 0.91)).frame(width: CGFloat([520, 440, 480][row]), height: 9) }
-                        Text("Where to eat").font(.system(size: 18, weight: .bold)).foregroundStyle(Color(white: 0.07)).padding(.top, 12)
-                        ForEach(0..<4, id: \.self) { row in Capsule().fill(Color(white: 0.91)).frame(width: CGFloat([500, 410, 470, 360][row]), height: 9) }
-                    }
-                    .padding(.horizontal, 44).padding(.top, 36)
-                }
-                .clipShape(.rect(cornerRadius: 14))
-                ForEach(Array(tabs.enumerated()), id: \.offset) { index, tab in
-                    EdgeTabView(tab: tab, colors: [:], outside: false, hovering: index == 1, label: index == 1 ? "Lunch near the venue" : "")
-                        .frame(width: 300, alignment: .trailing)
-                        .offset(x: width - 300, y: tab.y)
-                }
+        let color = app.paper.store.color(of: sentence.notebook)
+        // The sentence: its words' place in the line, measured.
+        let font = NSFont.systemFont(ofSize: 14.5)
+        let before = "Registration is in the main hall. ", quote = "Doors open at 8.", after = " Talks start at 9."
+        let measure = { (text: String) in ceil((text as NSString).size(withAttributes: [.font: font]).width) }
+        let left: CGFloat = 44, line: CGFloat = 132, lineHeight: CGFloat = 20
+        let quoteX = left + measure(before), quoteWidth = measure(quote)
+        let note = CGPoint(x: width + 26 + 120, y: 100)
+        return ZStack(alignment: .topLeading) {
+            // The window.
+            RoundedRectangle(cornerRadius: 14).fill(.white).shadow(color: .black.opacity(0.22), radius: 30, y: 22)
+                .overlay { RoundedRectangle(cornerRadius: 14).stroke(.black.opacity(0.25), lineWidth: 0.5) }
+                .frame(width: width, height: height)
+            Rectangle().fill(Color(white: 0.95)).frame(width: width, height: 52)
+                .clipShape(UnevenRoundedRectangle(topLeadingRadius: 14, topTrailingRadius: 14))
+            Text("Day one").font(.system(size: 26, weight: .bold)).foregroundStyle(Color(white: 0.07)).offset(x: left, y: 88)
+            RoundedRectangle(cornerRadius: 3).fill(Color(.sRGB, red: 0, green: 0.48, blue: 1, opacity: 0.24))
+                .frame(width: quoteWidth + 4, height: lineHeight).offset(x: quoteX - 2, y: line - 1)
+            Text(before + quote + after).font(Font(font)).foregroundStyle(Color(white: 0.27)).fixedSize()
+                .frame(height: lineHeight - 2).offset(x: left, y: line)
+            ForEach(0..<3, id: \.self) { row in
+                Capsule().fill(Color(white: 0.91)).frame(width: CGFloat([520, 440, 480][row]), height: 9).offset(x: left, y: 166 + CGFloat(row) * 20)
             }
-            .frame(width: width, height: height)
-            PaperView(paper: sentence, color: app.paper.store.color(of: sentence.notebook), glass: false, face: .folded,
-                      place: head.place, notebook: head.notebook, others: head.others, footer: NoteDesk.when(sentence.file.modified))
-                .padding(.top, 100).padding(.leading, 120)
-        }
-        // The pin from the sentence's end to the note, as NoteDesk draws it where it knows the sentence's bounds.
-        .overlay(alignment: .topLeading) {
-            PinLine(from: CGPoint(x: 392, y: 140), to: CGPoint(x: width + 26 + 120, y: 128), color: Color(nsColor: app.paper.store.color(of: sentence.notebook)))
-                .frame(width: width + 26 + 120 + 10, height: 200)
+            Text("Where to eat").font(.system(size: 18, weight: .bold)).foregroundStyle(Color(white: 0.07)).offset(x: left, y: 242)
+            ForEach(0..<4, id: \.self) { row in
+                Capsule().fill(Color(white: 0.91)).frame(width: CGFloat([500, 410, 470, 360][row]), height: 9).offset(x: left, y: 278 + CGFloat(row) * 20)
+            }
+            // The pin, from the end of the sentence's words to the note, under the tabs.
+            PinLine(from: CGPoint(x: quoteX + quoteWidth + 2, y: line + lineHeight / 2 - 1), to: CGPoint(x: note.x, y: note.y + 28), color: Color(nsColor: color))
+                .frame(width: note.x + 10, height: height)
                 .allowsHitTesting(false)
+            ForEach(Array(tabs.enumerated()), id: \.offset) { index, tab in
+                EdgeTabView(tab: tab, colors: [:], outside: false, hovering: index == 1, label: index == 1 ? "Lunch near the venue" : "")
+                    .frame(width: 300, alignment: .trailing)
+                    .offset(x: width - 300, y: tab.y)
+            }
+            PaperView(paper: sentence, color: color, glass: false, face: .folded,
+                      place: head.place, notebook: head.notebook, others: head.others, footer: NoteDesk.when(sentence.file.modified))
+                .offset(x: note.x, y: note.y)
         }
+        .frame(width: note.x + PaperLook.folded + 24, height: height, alignment: .topLeading)
     }
 }

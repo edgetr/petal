@@ -222,7 +222,8 @@ final class Assist {
             request?.onHangUp { stop.stop() }
             app.routines.handle(name, args, send, fail, caller: note, live: live, stop: stop)
         case _ where NoteDesk.tools.contains(name):
-            app.paper.handle(name, args, send, fail)
+            // Its asker hanging up stops what's still to come: each change checks `live` right before it's made.
+            app.paper.handle(name, args, live: live, send, fail)
         case "petal_memories":
             let mode = args["mode"] as? String
             send(["memories": memories.filter { mode == nil || $0.mode == mode || $0.mode.isEmpty }.map(record)])

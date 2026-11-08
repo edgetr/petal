@@ -53,13 +53,12 @@ struct PaperView: View {
     private var words: Color { glass ? .primary : PaperLook.words }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            content
-                .padding(.top, face == .open ? 16 : 15).padding(.horizontal, face == .open ? 18 : 14).padding(.bottom, face == .open ? 14 : 12)
-                .frame(width: face == .folded ? PaperLook.folded : PaperLook.openWidth,
-                       height: face == .folded ? PaperLook.folded : nil, alignment: .topLeading)
-            strip
-        }
+        content
+            .padding(.top, face == .open ? 16 : 15).padding(.horizontal, face == .open ? 18 : 14).padding(.bottom, face == .open ? 14 : 12)
+            .frame(width: face == .folded ? PaperLook.folded : PaperLook.openWidth,
+                   height: face == .folded ? PaperLook.folded : nil, alignment: .topLeading)
+            // The strip is the paper's width, whatever room the paper is offered.
+            .overlay(alignment: .top) { strip }
         .overlay(alignment: .bottomTrailing) { corner }
         .clipShape(.rect(cornerRadius: 12))
         // The shadow is the paper's alone: on the whole view SwiftUI would give every letter one too.

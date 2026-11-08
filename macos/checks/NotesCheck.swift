@@ -105,9 +105,22 @@ struct NotesCheck {
         expect(NoteFile.parse("words", fallbackID: todoA, fallbackDate: when).id == todoA, "a file with no front matter takes its place's id")
 
         // Saving over a file changed elsewhere keeps both.
-        expect(NoteShelf.save(disk: "A", base: "A") == .write && NoteShelf.save(disk: nil, base: "A") == .write && NoteShelf.save(disk: nil, base: nil) == .write,
+        expect(NoteShelf.save(disk: "A", text: "T", base: "A") == .write && NoteShelf.save(disk: nil, text: "T", base: "A") == .write
+               && NoteShelf.save(disk: nil, text: "T", base: nil) == .write,
                "a file as the edit began, or none, is written")
-        expect(NoteShelf.save(disk: "B", base: nil) == .keepBoth, "a new note never goes over a file that's there")
+        expect(NoteShelf.save(disk: "B", text: "T", base: nil) == .keepBoth, "a new note never goes over a file that's there")
+        expect(NoteShelf.save(disk: "T", text: "T", base: "A") == .already && NoteShelf.save(disk: "T", text: "T", base: nil) == .already,
+               "a file that already says it (a write whose answer never came back, a quit's last try) is done, never a conflict")
+        // An edit made on a text this note's own writes carried (one that failed too) was made on what the file said
+        // before them; any other base is as read.
+        expect(NoteShelf.effectiveBase("mine", ours: ["mine".hashValue], anchor: "disk") == "disk" && NoteShelf.effectiveBase("read", ours: ["mine".hashValue], anchor: "disk") == "read"
+               && NoteShelf.effectiveBase(nil, ours: [], anchor: "disk") == nil, "an edit's real base")
+        // Keep this one: only on exactly what was shown.
+        let shown = ["file:/n/A.md": "a", "version:v1": "b"]
+        expect(NoteShelf.keepAllowed(shown: shown, now: ["file:/n/A.md": "a", "version:v1": "b"]), "unchanged: kept")
+        expect(!NoteShelf.keepAllowed(shown: shown, now: ["file:/n/A.md": "a", "version:v1": "b", "version:v2": "c"]), "a version that arrived since: nothing removed")
+        expect(!NoteShelf.keepAllowed(shown: shown, now: ["file:/n/A.md": "a edited", "version:v1": "b"]), "one edited since: nothing removed")
+        expect(!NoteShelf.keepAllowed(shown: shown, now: ["file:/n/A.md": String?.none, "version:v1": "b"]), "one gone: nothing removed")
         var placed = NoteFile(id: "R", created: when, body: "my words")
         let editorBase = placed.serialized()
         placed.places = [tabForRebase()]
@@ -116,7 +129,7 @@ struct NotesCheck {
                "Petal's own change of a note's places is no reason to keep both")
         expect(NoteShelf.rebase(editor: editorBase, current: petalChanged, currentBody: "words from elsewhere") == editorBase,
                "words changed elsewhere are")
-        expect(NoteShelf.save(disk: "B", base: "A") == .keepBoth, "a file changed since the edit began: both are kept")
+        expect(NoteShelf.save(disk: "B", text: "T", base: "A") == .keepBoth, "a file changed since the edit began: both are kept")
         expect(NoteShelf.conflictName("Talk", taken: []) == "Talk (conflicted copy).md"
                && NoteShelf.conflictName("Talk", taken: ["talk (conflicted copy).md"]) == "Talk (conflicted copy 2).md", "the copy's name")
         expect(NoteShelf.isCopyName(NoteShelf.conflictName("Talk", taken: [])), "and it reads as a copy")
@@ -130,8 +143,10 @@ struct NotesCheck {
                "changed since: kept; before: the disk's; made since: kept; removed since: gone", "\(fenced)")
 
         // Pictures' folders by the note's id: stable through moves, never shared.
-        expect(NoteShelf.assetsFolder(id: "5F3A-1") == "5F3A-1.assets" && NoteShelf.assetsFolder(id: "file:Work/Todo.md") == "file-Work-Todo-md.assets",
-               "a note's pictures' folder")
+        expect(NoteShelf.assetsFolder(id: "5F3A-1").hasPrefix("5F3A-1-") && NoteShelf.assetsFolder(id: "5F3A-1").hasSuffix(".assets")
+               && NoteShelf.assetsFolder(id: "5F3A-1") == NoteShelf.assetsFolder(id: "5F3A-1"), "a note's pictures' folder, the same every time")
+        expect(NoteShelf.assetsFolder(id: "file:Inbox/My notes.md") != NoteShelf.assetsFolder(id: "file:Inbox/My-notes.md"),
+               "ids that read alike never share one", NoteShelf.assetsFolder(id: "file:Inbox/My notes.md"))
 
         // Writes stay inside the notes' folder.
         expect(NoteShelf.within("/n/Inbox/a.md", "/n") == "Inbox/a.md", "inside")
@@ -265,6 +280,41 @@ struct NotesCheck {
         expect(spot.minX == roomy.maxX + NoteRoom.gap && spot.minY == roomy.minY + 118, "an open note beside its line")
         let low = NoteRoom.beside(window: roomy, visible: visible, size: CGSize(width: 340, height: 300), top: 690)
         expect(low.maxY <= visible.maxY, "and kept on the screen")
+
+        // A Chromium tab after its browser restarted: found by address, decided over every note it could be.
+        var oldTab = NoteStick(kind: .tab)
+        oldTab.mac = "mac-1"; oldTab.pid = 50; oldTab.tabID = "t1"; oldTab.shared = 1; oldTab.url = "https://a.example/page"
+        var otherOld = oldTab
+        otherOld.tabID = "t7"
+        let reopened = NoteScene(mac: "mac-1", app: "", pid: 90, window: 2, tab: NoteTab(id: "n4", shared: 1, url: "https://a.example/page", title: "Page"))
+        expect(NoteMatch.tabMatch(oldTab, reopened) == .address && NoteMatch.tabMatch(oldTab, NoteScene(mac: "mac-1", pid: 50, tab: NoteTab(id: "t1", url: "x", title: ""))) == .identity,
+               "how a tab's note fits")
+        expect(NoteMatch.recover([oldTab]) && NoteMatch.recover([oldTab, oldTab]), "notes from one old tab take it")
+        expect(!NoteMatch.recover([oldTab, otherOld]), "notes from two old tabs on one page: no guess")
+        let adopted = NoteMatch.adopt(oldTab, reopened)
+        expect(adopted.tabID == "n4" && adopted.pid == 90 && NoteMatch.tabMatch(adopted, reopened) == .identity, "recovered, it's that tab's from now on")
+        expect(NoteMatch.best([oldTab, app], reopened, excluding: [0]) == 1 || NoteMatch.best([oldTab, app], reopened, excluding: [0]) == nil,
+               "left out, it falls back to its other places")
+        // Safari's only tab (no tab strip) can't be told apart: never offered as a tab.
+        expect(!NoteTab(url: "https://a.example", title: "").known, "a tab with no id or button isn't known")
+
+        // A private app's place and scene: nothing of their words.
+        var secret = NoteStick(kind: .passage)
+        secret.app = "com.example.vault"; secret.quote = "q"; secret.url = "https://bank.example"; secret.path = "/x"; secret.title = "t"
+        let scrubbed = secret.scrubbed
+        expect(scrubbed.quote.isEmpty && scrubbed.url.isEmpty && scrubbed.path.isEmpty && scrubbed.title.isEmpty && scrubbed.app == secret.app, "a private place, scrubbed")
+        let privateScene = NoteScene(mac: "m", app: "x", pid: 1, window: 2, title: "Statement", titleTwins: 1,
+                                     tab: NoteTab(id: "1", url: "https://bank.example", title: "Bank"), file: "/Users/x/a.pdf", fileBookmark: "b").privately
+        expect(privateScene.title.isEmpty && privateScene.tab == nil && privateScene.file.isEmpty && privateScene.fileBookmark.isEmpty
+               && privateScene.window == 2 && privateScene.titleTwins == nil, "a private app's scene: its window, nothing else")
+
+        // Giving a window its width back: the record stays until it's surely done.
+        let wasFrame = CGRect(x: 0, y: 0, width: 1000, height: 700), gave = CGRect(x: 0, y: 0, width: 600, height: 700)
+        expect(NoteRoom.giveBackPlan(found: false, now: nil, before: wasFrame, given: gave) == (false, true), "the window's gone: forgotten")
+        expect(NoteRoom.giveBackPlan(found: true, now: nil, before: wasFrame, given: gave) == (false, false), "couldn't be read: kept for the next try")
+        expect(NoteRoom.giveBackPlan(found: true, now: gave, before: wasFrame, given: gave) == (true, false), "as Petal left it: put back (forgotten once it's back)")
+        expect(NoteRoom.giveBackPlan(found: true, now: CGRect(x: 50, y: 50, width: 800, height: 500), before: wasFrame, given: gave) == (false, true),
+               "changed by the person: theirs, forgotten")
 
         // Room: one path for every change; a narrowing cut short is still put back.
         expect(NoteRoom.reconcile(narrowed: [3, 5], wanted: 5) == ([3], nil), "the window in front keeps its room, the others get theirs back")

@@ -6,6 +6,14 @@ import Foundation
 // conflict copies, and the room an open note needs beside its window. No AppKit, so macos/checks/run.sh checks it on
 // its own (with NoteLayout.swift, whose NoteTab and NoteRules it reuses for tabs).
 
+/// Pictures to bring into a note: files, or a screenshot's data, and where the cursor was.
+struct NoteImport: @unchecked Sendable {
+    var files: [URL]
+    var png: Data?
+    var tiff: Data?
+    var at: Int
+}
+
 // MARK: - Places
 
 /// One place a note is stuck to. A note may have several; the most specific that fits what's in front wins
@@ -76,6 +84,16 @@ struct NoteStick: Equatable, Sendable {
             && a.extra.map(\.key) == b.extra.map(\.key) && a.extra.map(\.lines) == b.extra.map(\.lines)
     }
 
+    /// As the AI may see it from an app kept private: what it is and the app, never its words, address or file.
+    var scrubbed: NoteStick {
+        var s = NoteStick(kind: kind)
+        s.app = app
+        s.appName = appName
+        s.desktop = desktop
+        s.mode = mode
+        return s
+    }
+
     /// The tab as NoteRules knows tabs.
     var noteTab: NoteTab { NoteTab(id: tabID, element: tabElement, shared: shared, url: url, title: title) }
 
@@ -124,7 +142,60 @@ struct NoteScene: Equatable, Sendable {
     var desktop: Int? = nil
 }
 
+extension NoteScene {
+    /// What's in front as Petal may use it from an app kept private: the app and its window, never the window's
+    /// title, the tab (its address or title), the file it shows, or how many windows share a title.
+    var privately: NoteScene {
+        var s = self
+        s.title = ""
+        s.titleTwins = nil
+        s.tab = nil
+        s.file = ""
+        s.fileBookmark = ""
+        return s
+    }
+}
+
 enum NoteMatch {
+    enum TabMatch: Equatable { case identity, address }
+
+    /// How a tab's note fits the tab in front: by its own tab's identity (its id or tab-strip button, this run of
+    /// the browser), or by address only (a Chromium tab after a restart, the one tab with that address).
+    static func tabMatch(_ stick: NoteStick, _ scene: NoteScene) -> TabMatch? {
+        guard stick.kind == .tab, fits(stick, scene), let now = scene.tab else { return nil }
+        let samePlace = stick.mac == scene.mac && stick.pid == scene.pid
+        let sure = samePlace && ((stick.tabID != nil && stick.tabID == now.id) || (stick.tabElement != nil && stick.tabElement == now.element))
+        return sure ? .identity : .address
+    }
+
+    /// Notes found on one tab by address alone, decided together: they may take it only when they all come from
+    /// one tab before (the same Mac and tab id), so notes from two old tabs that showed the same page are never
+    /// guessed onto one. Never a guess between candidates.
+    static func recover(_ sticks: [NoteStick]) -> Bool {
+        guard let first = sticks.first, first.tabID != nil else { return false }
+        return sticks.allSatisfy { $0.tabID == first.tabID && $0.mac == first.mac }
+    }
+
+    /// A tab's note recovered onto a tab after its browser restarted: from now on it's that tab's (its id, process
+    /// and address).
+    static func adopt(_ stick: NoteStick, _ scene: NoteScene) -> NoteStick {
+        guard let now = scene.tab else { return stick }
+        var next = stick
+        next.mac = scene.mac
+        next.pid = scene.pid
+        next.tabID = now.id
+        next.tabElement = now.element
+        next.shared = now.shared
+        next.url = now.url
+        if !now.title.isEmpty { next.title = now.title }
+        return next
+    }
+
+    /// The most specific place that fits, leaving out some (address matches that couldn't be decided).
+    static func best(_ places: [NoteStick], _ scene: NoteScene, excluding: Set<Int>) -> Int? {
+        places.indices.filter { !excluding.contains($0) && fits(places[$0], scene) }.min { places[$0].kind.rank < places[$1].kind.rank }
+    }
+
     /// A tab's note seen on its own tab, surely (this Mac, the same browser process, the same id or tab-strip
     /// button): the place as it is now (its address, title and whether it's the one tab with that address), so after
     /// a restart it's found by the address it last had, never the one it was stuck on. nil when it isn't surely its
@@ -633,13 +704,31 @@ enum NoteShelf {
     /// edit was made on `base` (the file as Petal last read or wrote it; nil for a new note): write it, or, when
     /// someone changed the file since (another editor, another Mac), keep both: the edit goes to a copy beside it,
     /// and the two show as one note's papers until one is kept.
-    enum Save: Equatable { case write, keepBoth }
+    enum Save: Equatable { case write, already, keepBoth }
 
-    static func save(disk: String?, base: String?) -> Save {
+    static func save(disk: String?, text: String, base: String?) -> Save {
         guard let disk else { return .write }
+        // The file says it already (a write that landed before its answer came back, a quit's last try): done.
+        if disk == text { return .already }
         // A new note (no base) never goes over a file that's there.
         guard let base else { return .keepBoth }
         return disk == base ? .write : .keepBoth
+    }
+
+    /// What an edit was really made on: an edit made on a text this note's own writes put there (or tried to: a
+    /// write that failed) was made on what the file said when those began, or after the last of them that landed
+    /// (`anchor`). Any other base is the file as it was read. `ours`: hashes of the texts this note's writes carried.
+    static func effectiveBase(_ base: String?, ours: Set<Int>, anchor: String?) -> String? {
+        guard let base else { return nil }
+        return ours.contains(base.hashValue) ? anchor : base
+    }
+
+    /// Keep this one, on the papers exactly as they were shown: each candidate (a file's path, or a version iCloud
+    /// kept) as it was then (`shown`: its text) and as it is now (`now`: its text, nil when it's gone). Only when
+    /// every one shown is still there and unchanged, and nothing new arrived (a version iCloud delivered since).
+    static func keepAllowed(shown: [String: String], now: [String: String?]) -> Bool {
+        guard Set(shown.keys) == Set(now.keys) else { return false }
+        return shown.allSatisfy { key, text in now[key] == .some(text) }
     }
 
     /// The base an editor's save is made on, when Petal itself changed the note since the editor last had it (a
@@ -685,8 +774,11 @@ enum NoteShelf {
     /// A note's pictures' folder, named for the note's id (never its file's name), so it keeps its name wherever the
     /// note moves and two notes never share one: "<id>.assets".
     static func assetsFolder(id: String) -> String {
+        // Readable, then a stable hash of the whole id, so ids that read alike ("My notes", "My-notes") never share.
         let safe = id.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) || $0 == "-" ? String($0) : "-" }.joined()
-        return (safe.isEmpty ? "note" : String(safe.prefix(80))) + assets
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325   // FNV-1a, 64 bits: the same on every Mac and every run
+        for byte in id.utf8 { hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
+        return (safe.isEmpty ? "note" : String(safe.prefix(40))) + "-" + String(format: "%016llx", hash) + assets
     }
 
     /// A copy iCloud Drive made of a file that changed on two Macs at once: "Name 2.md" beside "Name.md" (or
@@ -842,6 +934,16 @@ enum NoteRoom {
     /// every change (a note opened, folded, hidden, moved to the Desktop, notes off, quitting with `wanted` nil).
     static func reconcile(narrowed: Set<UInt32>, wanted: UInt32?) -> (giveBack: [UInt32], narrow: UInt32?) {
         (narrowed.filter { $0 != wanted }.sorted(), wanted.flatMap { narrowed.contains($0) ? nil : $0 })
+    }
+
+    /// What happens to a narrowed window's record when its width is to come back: `found` (the window is still
+    /// there), `now` (its frame, nil when it couldn't be read). The record goes only once the window is gone, the
+    /// person changed it, or it's back as it was; a window that couldn't be read keeps it, for the next try.
+    static func giveBackPlan(found: Bool, now: CGRect?, before: CGRect, given: CGRect) -> (restore: Bool, forget: Bool) {
+        guard found else { return (false, true) }
+        guard let now else { return (false, false) }
+        if restore(before: before, given: given, now: now) { return (true, false) }
+        return (false, true)
     }
 
     /// Whether a window narrowed for a note gets its frame from before: while it still has the frame Petal gave it,

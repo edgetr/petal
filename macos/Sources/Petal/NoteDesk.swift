@@ -61,8 +61,9 @@ final class NoteDesk {
     // MARK: Starting
 
     func start() {
-        store.use(root: NoteStore.rootFolder(setting: app.config.string("notesFolder")))
+        store.switchRoot(to: NoteStore.rootFolder(setting: app.config.string("notesFolder")))
         store.onChange = { [weak self] in self?.refresh() }
+        store.onPictures = { [weak self] key, pictures, at in self?.insertPictures(key, pictures, at: at) ?? false }
         store.onRekey = { [weak self] old, paper in self?.rekey(old, to: paper) }
         store.onProblem = { [weak self] text in self?.say(text) }
         store.keepAlive = { [weak self] key in self?.editors[key] != nil }
@@ -74,12 +75,7 @@ final class NoteDesk {
     /// `notes`, `notesLook` or `notesFolder` changed (or any setting did).
     func settingsChanged() {
         let root = NoteStore.rootFolder(setting: app.config.string("notesFolder"))
-        if root != store.root {
-            // What's typed goes to the folder it was typed in, before notes come from the new one.
-            for editor in editors.values { editor.flush() }
-            NoteStore.flush()
-            store.use(root: root)
-        }
+        if root != store.root, !store.switching { switchFolder(to: root) }
         if on && !listening {
             listening = true
             WindowEvents.shared.listen("papernotes") { [weak self] event in self?.event(event) }
@@ -125,8 +121,25 @@ final class NoteDesk {
     func stop() {
         for editor in editors.values { editor.flush() }
         giveBackAll(wait: true)
-        NoteStore.flush()
-        store.rescue()
+        store.drain()
+    }
+
+    /// Another notes folder: what's typed is saved into the folder it was typed in (each note's session, drained off
+    /// the main thread), every open note and editor of the old folder is put away, then the new folder's notes come.
+    private func switchFolder(to root: URL) {
+        for editor in editors.values { editor.flush() }
+        editors = [:]
+        for panel in panels.values { panel.orderOut(nil) }
+        for panel in tabPanels.values { panel.orderOut(nil) }
+        for panel in pinPanels.values { panel.orderOut(nil) }
+        panels = [:]
+        tabPanels = [:]
+        pinPanels = [:]
+        faces = [:]
+        here = [:]
+        keyboard = nil
+        fresh = []
+        store.switchRoot(to: root) { [weak self] in self?.look() }
     }
 
     /// Something couldn't be done to the notes' files: said by the AI button for a moment.
@@ -195,10 +208,13 @@ final class NoteDesk {
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         var scene = scene
-                        // Made private (or the private apps changed) meanwhile: nothing of its file is kept.
+                        var read = read
+                        // The one final filter, as the result is used: an app kept private (now, or made private
+                        // while it was read) leaves nothing but itself and its window: no title, tab, address or file.
                         if !ClaudePanel.privacy.current(privacy) || PetalApp.shared.assist.neverLook(app) {
-                            scene.file = ""
-                            scene.fileBookmark = ""
+                            scene = scene.privately
+                            read.title = ""
+                            read.tab = nil
                         }
                         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
                         scene.desktop = screen.flatMap { Spaces.desktop(on: $0) }
@@ -220,6 +236,7 @@ final class NoteDesk {
             for paper in store.notes where !paper.file.places.isEmpty {
                 if let index = NoteMatch.best(paper.file.places, scene) { fits[paper.key] = index }
             }
+            fits = recoverTabs(fits, scene)
         }
         if fits != here { here = fits }
         followTabs(scene)
@@ -235,16 +252,44 @@ final class NoteDesk {
         placeDesktop()
     }
 
+    /// Notes found on the tab in front by its address alone (a Chromium tab after its browser restarted), decided
+    /// together: when they all come from one tab before, they take this one as theirs (its id and process from now
+    /// on); notes from different old tabs that showed the same page never guess, and fall back to their other places.
+    private func recoverTabs(_ fits: [String: Int], _ scene: NoteScene) -> [String: Int] {
+        let byAddress = fits.filter { key, index in
+            store.paper(key).map { $0.file.places.indices.contains(index) && NoteMatch.tabMatch($0.file.places[index], scene) == .address } ?? false
+        }
+        guard !byAddress.isEmpty else { return fits }
+        var fits = fits
+        let sticks = byAddress.compactMap { key, index in store.paper(key)?.file.places[index] }
+        if NoteMatch.recover(sticks) {
+            for (key, index) in byAddress {
+                guard let paper = store.paper(key), !store.readOnly(paper) else { continue }
+                let adopted = NoteMatch.adopt(paper.file.places[index], scene)
+                store.change(key, expect: paper.revision, touch: false) { file in
+                    if file.places.indices.contains(index) { file.places[index] = adopted }
+                }
+            }
+            return fits
+        }
+        for (key, index) in byAddress {
+            guard let paper = store.paper(key) else { continue }
+            fits[key] = NoteMatch.best(paper.file.places, scene, excluding: [index])
+        }
+        return fits
+    }
+
     /// Tab notes seen surely on their own tab keep its address as it is now (and its title, and whether it's the one
     /// tab with it), so after a restart they're found by where the tab was last, never where it was stuck first.
     /// Not a change of the note's words: its modified time stays.
     private func followTabs(_ scene: NoteScene) {
         let keepWords = !app.assist.neverLook(scene.app)
         for (key, index) in here {
-            guard var paper = store.paper(key), paper.file.places.indices.contains(index), !store.readOnly(paper),
+            guard let paper = store.paper(key), paper.file.places.indices.contains(index), !store.readOnly(paper),
                   let next = NoteMatch.followTab(paper.file.places[index], scene, keepWords: keepWords) else { continue }
-            paper.file.places[index] = next
-            store.save(paper, touch: false)
+            store.change(key, expect: paper.revision, touch: false) { file in
+                if file.places.indices.contains(index) { file.places[index] = next }
+            }
         }
     }
 
@@ -261,20 +306,20 @@ final class NoteDesk {
         guard !anchored.isEmpty, !here.contains(where: { key, index in
             store.paper(key).flatMap { $0.file.places.indices.contains(index) ? $0.file.places[index].path : nil } == scene.file
         }) else { return }
-        let files = anchored.map { ($0.key, $0.file) }
+        let files = anchored.map { ($0.key, $0.file, $0.revision) }
         Self.queue.async {
-            var changed: [(String, NoteFile)] = []
-            for (key, file) in files {
+            var changed: [(String, NoteFile, String?)] = []
+            for (key, file, revision) in files {
                 var file = file
-                if NoteStore.followBookmarks(&file) { changed.append((key, file)) }
+                if NoteStore.followBookmarks(&file) { changed.append((key, file, revision)) }
             }
             guard !changed.isEmpty else { return }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    for (key, file) in changed {
-                        guard var paper = self.store.paper(key) else { continue }
-                        paper.file.places = file.places
-                        self.store.save(paper, touch: false)
+                    for (key, file, revision) in changed {
+                        // Fenced: only onto the note it was read from; changed since (stuck elsewhere, typed in), it
+                        // waits for the next time this file is in front.
+                        if self.store.change(key, expect: revision, touch: false, edit: { $0.places = file.places }) == nil { self.followedFile = "" }
                     }
                     self.lookAgain(after: 0.05)
                 }
@@ -560,7 +605,8 @@ final class NoteDesk {
         faces[key] = nil
         panels[key]?.orderOut(nil)
         panels[key] = nil
-        store.trash(paper)
+        _ = paper
+        store.trash(key)
     }
 
     // MARK: Room beside the window
@@ -646,13 +692,25 @@ final class NoteDesk {
     /// A narrowed window's width back, on `queue`: the frame from before, while it still has the one Petal gave it
     /// (or part of it: a change cut short); the record goes either way.
     nonisolated private static func giveBack(_ number: CGWindowID) {
-        guard let record = ledger.removeValue(forKey: number) else { return }
+        guard let record = ledger[number] else { return }
         let app = AXUIElementCreateApplication(record.pid)
         AXUIElementSetMessagingTimeout(app, 0.3)
-        let all: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
-        guard let element = all.first(where: { Windows.id(of: $0) == number }), let now = Windows.frame(of: element),
-              NoteRoom.restore(before: record.before, given: record.given, now: now) else { return }
-        Windows.place(element, pid: record.pid, record.before)
+        // Its app gone, or no window of it with that number: nothing left to give back.
+        let alive = NSRunningApplication(processIdentifier: record.pid).map { !$0.isTerminated } ?? false
+        var windows: CFTypeRef?
+        let listed = alive && AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windows) == .success
+        let all = (windows as? [AXUIElement]) ?? []
+        let element = all.first { Windows.id(of: $0) == number }
+        // Gone with its app; there when its app couldn't list its windows (asked again next time); else by its number.
+        let found = alive ? (listed ? element != nil : true) : false
+        let plan = NoteRoom.giveBackPlan(found: found, now: element.flatMap { Windows.frame(of: $0) }, before: record.before, given: record.given)
+        if plan.restore, let element {
+            let back = Windows.place(element, pid: record.pid, record.before)
+            // Kept until it's surely back (an app that refused is tried again with the next change).
+            if let back, NoteRoom.close(back, record.before) { ledger[number] = nil }
+            return
+        }
+        if plan.forget { ledger[number] = nil }
     }
 
     /// Every narrowed window gets its width back (notes off, Petal quitting). `wait`: before returning (on quit),
@@ -677,64 +735,37 @@ final class NoteDesk {
     /// What the editor typed, made on `base` (the file as the editor last had it). Returns the next base; nil when
     /// the paper can't be written (read only: one of a conflict's papers).
     func write(_ key: String, body: String, base: String?) -> String? {
-        guard var paper = store.paper(key) else { return nil }
+        guard let paper = store.paper(key) else { return nil }
         if store.readOnly(paper) {
             // Typed just as it became one of two papers: kept in the copy beside it, never dropped.
-            if paper.version == nil, paper.file.body != body {
-                paper.file.body = body
-                store.keepAside(paper)
-            }
+            if paper.version == nil, paper.file.body != body { store.keepAside(key, body: body) }
             return nil
         }
         // Petal's own changes since (a place followed or added) don't make this a conflict; words changed do.
         let base = NoteShelf.rebase(editor: base, current: paper.revision, currentBody: paper.file.body)
         guard paper.file.body != body else { return base }
-        paper.file.body = body
         if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fresh.remove(key) }
-        return store.save(paper, base: base)
+        return store.change(key, base: base) { $0.body = body }
     }
 
-    /// Pictures pasted or dropped on a note: read and decoded off the main thread, saved beside the note, and put
-    /// in where the cursor was; with its editor gone by then (folded, hidden), at the end of the note. The note owns
-    /// the import, so it finishes and is saved whatever happens to the editor meanwhile.
+    /// Pictures pasted or dropped on a note: its session reads, decodes and saves them beside it (after whatever is
+    /// waiting there, a move too), then they go in where the cursor was, or at the end of the note once its editor
+    /// is gone.
     func importPictures(_ items: NoteImport, into key: String) {
-        guard let paper = store.paper(key), !store.readOnly(paper) else {
-            return say("This note has two versions: keep one before adding pictures.")
+        if !store.importPictures(key, items) { say("This note has two versions: keep one before adding pictures.") }
+    }
+
+    /// The session saved pictures for a note: into its open editor, at the cursor's place then (true); no editor open
+    /// on it (false), the session puts them at the end of the note.
+    private func insertPictures(_ key: String, _ pictures: [(path: String, file: URL, caption: String)], at: Int) -> Bool {
+        guard let editor = editors[key] else { return false }
+        var at = at
+        for picture in pictures {
+            guard editor.insert(picture.path, picture.file, picture.caption, at) else { return false }
+            at = -1   // the next one after it, at the cursor
         }
-        let noteID = paper.noteID
-        DispatchQueue.global(qos: .userInitiated).async {
-            var found: [(data: Data, ext: String, caption: String, image: NSImage?)] = []
-            for file in items.files {
-                if let data = try? Data(contentsOf: file) { found.append((data, file.pathExtension.lowercased(), file.deletingPathExtension().lastPathComponent, NSImage(data: data))) }
-            }
-            if let png = items.png { found.append((png, "png", "", NSImage(data: png))) }
-            if let tiff = items.tiff, let rep = NSBitmapImageRep(data: tiff), let data = rep.representation(using: .png, properties: [:]) {
-                found.append((data, "png", "", NSImage(data: data)))
-            }
-            let ready = found
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    // The note as it is now (named again or moved meanwhile: found by its id).
-                    guard !ready.isEmpty, let now = self.store.notes.first(where: { $0.noteID == noteID && $0.version == nil }) else { return }
-                    guard !self.store.readOnly(now) else { return self.say("This note has two versions now: the pictures weren't added.") }
-                    var lines: [String] = []
-                    var at = items.at
-                    for item in ready {
-                        let saved = self.store.addPicture(item.data, ext: item.ext, to: now)
-                        if let image = item.image { NotePictures.shared.preview(saved.file, image) }
-                        if let editor = self.editors[now.key], editor.insert(saved.path, saved.file, item.caption, at) {
-                            at = -1   // the next one after it, at the cursor
-                        } else {
-                            lines.append(NoteBlock.image(path: saved.path, caption: item.caption).markdown)
-                        }
-                    }
-                    guard !lines.isEmpty, var paper = self.store.paper(now.key) else { return }
-                    paper.file.body += (paper.file.body.isEmpty || paper.file.body.hasSuffix("\n") ? "" : "\n") + lines.joined(separator: "\n")
-                    self.fresh.remove(paper.key)
-                    self.store.save(paper)
-                }
-            }
-        }
+        fresh.remove(key)
+        return true
     }
 
     /// A note's file got another name on disk than it was shown with: everything showing it follows.
@@ -841,7 +872,9 @@ final class NoteDesk {
             if scene.tab == nil { s.bookmark = scene.fileBookmark }
             offers.append(s)
         }
-        if let tab = scene.tab, !tab.url.isEmpty {
+        // A tab Petal can tell from the others (its id, or its tab-strip button): Safari's only tab, with no strip,
+        // can't be, so its note goes on the window instead.
+        if let tab = scene.tab, tab.known, !tab.url.isEmpty {
             var s = stick(.tab)
             s.url = tab.url
             s.title = tab.title
@@ -882,12 +915,12 @@ final class NoteDesk {
 
     /// A new note on `stick`, open with the keyboard. `body`: what it starts with.
     @discardableResult
-    func make(on stick: NoteStick, body: String = "", chat: String = "", at point: CGPoint? = nil) -> PaperNote {
+    func make(on stick: NoteStick, body: String = "", chat: String = "", at point: CGPoint? = nil) -> PaperNote? {
         var file = NoteFile(body: body)
         file.places = [stick]
         file.chat = chat
         let notebook = notebook(for: stick)
-        let paper = store.make(file, in: notebook)
+        guard let paper = store.make(file, in: notebook) else { return nil }
         remember(paper.notebook, for: stick)
         if body.isEmpty { fresh.insert(paper.key) }
         if let point {
@@ -1086,8 +1119,7 @@ final class NoteDesk {
         let offers = places(for: captured.scene, read: captured.read, appName: captured.name)
         guard let place = offers.first(where: { $0.kind != .passage }) else { return }
         apply(captured.scene, read: captured.read)
-        let paper = make(on: place, body: lines.joined(separator: "\n"), chat: chat.uuidString)
-        fresh.remove(paper.key)
+        if let paper = make(on: place, body: lines.joined(separator: "\n"), chat: chat.uuidString) { fresh.remove(paper.key) }
     }
 
     // MARK: The letterhead's menus
@@ -1135,10 +1167,9 @@ final class NoteDesk {
     }
 
     private func restick(_ key: String, _ places: [NoteStick]) {
-        guard var paper = store.paper(key) else { return }
+        guard let paper = store.paper(key) else { return }
         guard !store.readOnly(paper) else { return say("This note has two versions: keep one first.") }
-        paper.file.places = places
-        guard store.save(paper, touch: false) != nil else { return }
+        guard store.change(key, touch: false, edit: { $0.places = places }) != nil else { return }
         if let scene, let index = NoteMatch.best(places, scene) { here[key] = index } else { here[key] = nil }
         if places.contains(where: { $0.kind == .desktop }) { faces[key] = .folded; placeDesktop() }
         layout()
@@ -1184,16 +1215,17 @@ final class NoteDesk {
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
-    func move(_ key: String, to notebook: String) {
-        editors[key]?.flush()   // what's typed goes with it
-        guard let paper = store.paper(key) else { return }
-        let wasShown = faces[key]
-        store.move(paper, to: notebook) { moved in
-            guard let moved else { return }
-            _ = wasShown
-            self.rekey(key, to: moved)
-            self.remember(moved.notebook, for: moved.file.places.first)
-            self.layout()
+    /// The one move, from the letterhead and the note tools alike: what's typed is saved first, the move goes
+    /// through the note's session, and its panel, editor and everything showing it follow it (`rekey`, from the
+    /// store, for every change of a note's file). `done`: the note where it is now, or nil.
+    func move(_ key: String, to notebook: String, then done: @escaping @MainActor (PaperNote?) -> Void = { _ in }) {
+        editors[key]?.flush()
+        store.move(key, to: notebook) { moved in
+            if let moved {
+                self.remember(moved.notebook, for: moved.file.places.first)
+                self.layout()
+            }
+            done(moved)
         }
     }
 
@@ -1483,12 +1515,13 @@ final class PinPanel: NSPanel {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         contentView = hosting
         isFloatingPanel = true
-        level = .floating
         backgroundColor = .clear
         isOpaque = false
         hasShadow = false
         hidesOnDeactivate = false
         ignoresMouseEvents = true
+        // Under the notes and their tabs (one level down), over the windows: it never crosses a tab.
+        level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue - 1)
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
     }
 

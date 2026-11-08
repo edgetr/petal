@@ -6,7 +6,7 @@ import AppKit
 // through its bookmark. Stand-ins below for the parts of Petal it would reach. Run with macos/checks/run.sh.
 enum Headless { nonisolated(unsafe) static var on = true }
 extension NSColor { convenience init?(hex: String?) { nil } }
-enum Config { static let supportFolder = FileManager.default.temporaryDirectory.appending(path: "petal-check-support") }
+enum Config { static let supportFolder = FileManager.default.temporaryDirectory.appending(path: "petal-check-support-\(UUID().uuidString)") }
 
 @main
 struct NoteStoreCheck {
@@ -19,7 +19,7 @@ struct NoteStoreCheck {
 
     static func text(_ url: URL) -> String? { try? String(contentsOf: url, encoding: .utf8) }
 
-    static func main() {
+    @MainActor static func main() {
         let fm = FileManager.default
         let top = fm.temporaryDirectory.appending(path: "petal-notes-check-\(UUID().uuidString)")
         let root = top.appending(path: "Notes")
@@ -47,8 +47,8 @@ struct NoteStoreCheck {
             expect(next != copy && text(copy) == "the copy, edited elsewhere" && text(next) == "F", "a copy changed since gets a new copy beside it")
         } else { expect(false, "a copy changed since gets a new copy beside it", "\(again)") }
 
-        // A write that failed (a folder Petal can't write to) is no base for a conflict: the next save, made on it,
-        // goes over the file as it was.
+        // A write that failed (a folder Petal can't write to) leaves the file as it was. (Edits made on a failed one
+        // are a session's to chain: see `sessions`.)
         let locked = root.appending(path: "Locked")
         try? fm.createDirectory(at: locked, withIntermediateDirectories: true)
         let held = locked.appending(path: "Held.md")
@@ -56,7 +56,7 @@ struct NoteStoreCheck {
         try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: locked.path)
         expect(NoteStore.save("H", to: held, base: "G", root: root) == .failed && text(held) == "G", "a failed write leaves the file as it was")
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
-        expect(NoteStore.save("I", to: held, base: "H", root: root) == .written && text(held) == "I", "and the next save, made on the failed one, is written")
+        expect(NoteStore.save("I", to: held, base: "G", root: root) == .written && text(held) == "I", "and the next, made on the file as it is, is written")
 
         // New names come from the disk, and a name taken first is passed over.
         let made = NoteStore.createNamed("new", stem: "Talk", in: root.appending(path: "Work"), root: root)
@@ -98,7 +98,60 @@ struct NoteStoreCheck {
         try? fm.moveItem(at: doc, to: renamed)
         expect(NoteStore.followBookmarks(&note) && URL(fileURLWithPath: note.places[0].path).resolvingSymlinksInPath() == renamed.resolvingSymlinksInPath(), "a renamed file keeps its note", note.places[0].path)
         expect(!NoteStore.followBookmarks(&note), "and nothing changes once it's followed")
+        sessions(root: root)
+        try? fm.removeItem(at: Config.supportFolder)
         finish()
+    }
+
+    /// A note's session's work, as the file queue does it (NoteStore.perform) and as quitting drains it.
+    @MainActor static func sessions(root: URL) {
+        let fm = FileManager.default
+        let work = root.appending(path: "Sessions")
+        try? fm.createDirectory(at: work, withIntermediateDirectories: true)
+        let item = { (id: Int, w: NoteWork) in NoteSession.Item(id: id, work: w, done: []) }
+
+        // Writes chained across a failure: the one after is made on the failed one, and goes over the file as it was.
+        let held = work.appending(path: "Held.md")
+        _ = NoteStore.create("v0", at: held, root: root)
+        NoteDisk.states[1] = NoteDisk.State(url: held, noteID: "S1", anchor: "v0", latest: "v0")
+        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: work.path)
+        expect(NoteStore.perform(.write(text: "v1", base: "v0"), session: 1, root: root).outcome == .failed, "a write that can't land fails")
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: work.path)
+        expect(NoteStore.perform(.write(text: "v2", base: "v1"), session: 1, root: root).outcome == .written && text(held) == "v2",
+               "the next, made on the failed one, lands: no false conflict")
+        // Already there (a write that landed before its answer came back): done, never a copy.
+        expect(NoteStore.perform(.write(text: "v2", base: "elsewhere"), session: 1, root: root).outcome == .written, "a file that already says it is done")
+
+        // A move, then writes made meanwhile, as quitting drains them: the writing lands where the note landed.
+        let moving = work.appending(path: "Moving.md")
+        _ = NoteStore.create("m0", at: moving, root: root)
+        NoteDisk.states[2] = NoteDisk.State(url: moving, noteID: "S2", anchor: "m0", latest: "m0")
+        NoteStore.drain([(session: 2, items: [item(10, .move(folder: root.appending(path: "Elsewhere"))), item(11, .write(text: "m1", base: "m0"))])], root: root)
+        let landed = root.appending(path: "Elsewhere/Moving.md")
+        expect(text(landed) == "m1" && !fm.fileExists(atPath: moving.path), "a move and the typing after it, drained at quit", text(landed) ?? "nil")
+
+        // Writing that still can't land at quit goes to "Unsaved notes", never lost.
+        let stuck = work.appending(path: "Stuck.md")
+        _ = NoteStore.create("s0", at: stuck, root: root)
+        NoteDisk.states[3] = NoteDisk.State(url: stuck, noteID: "S3", anchor: "s0", latest: "s0")
+        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: work.path)
+        var kept = NoteFile(id: "S3", body: "# Rescued words\nkeep me")
+        NoteStore.drain([(session: 3, items: [item(20, .write(text: kept.serialized(), base: "s0"))])], root: root)
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: work.path)
+        let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
+        let rescued = (try? fm.contentsOfDirectory(atPath: unsaved.path)) ?? []
+        kept.body = ""
+        expect(rescued.contains("Rescued words.md") && text(unsaved.appending(path: "Rescued words.md"))?.contains("keep me") == true,
+               "writing that can't land by quit is kept in Unsaved notes", "\(rescued)")
+        expect(text(stuck) == "s0", "and the file is as it was")
+
+        // A keep-aside that can't land fails, and is tried again (and rescued) like any writing.
+        NoteDisk.states[4] = NoteDisk.State(url: stuck, noteID: "S3", anchor: "s0", latest: "s0")
+        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: work.path)
+        expect(NoteStore.perform(.keepAside(text: "aside"), session: 4, root: root).outcome == .failed, "a keep-aside that can't land fails")
+        expect(NoteWork.keepAside(text: "x").keeps && NoteWork.pictures(NoteImport(files: [], at: 0), noteID: "x").keeps && !NoteWork.trash(revision: nil).keeps,
+               "writing is kept until it lands; a trash isn't")
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: work.path)
     }
 
     static func finish() {

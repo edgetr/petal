@@ -623,14 +623,6 @@ final class NoteTextView: NSTextView {
     override func cancelOperation(_ sender: Any?) { escape() }
 }
 
-/// Pictures to bring into a note: files, or a screenshot's data, and where the cursor was.
-struct NoteImport: @unchecked Sendable {
-    var files: [URL]
-    var png: Data?
-    var tiff: Data?
-    var at: Int
-}
-
 /// An open editor, as the desk reaches it: save what's typed now; put a picture in.
 @MainActor
 final class NoteEditorHandle {
