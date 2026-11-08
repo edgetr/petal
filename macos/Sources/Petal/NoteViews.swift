@@ -174,7 +174,8 @@ struct PaperView: View {
                            save: { desk.write(paper.key, body: $0, base: $1) },
                            register: { desk.editors[paper.key] = $0 },
                            importPictures: { desk.importPictures($0, into: paper.key) },
-                           escape: { desk.fold(paper.key) })
+                           escape: { desk.fold(paper.key) },
+                           sameNote: { desk.store.sameNote($0, $1) })
                 .frame(height: min(PaperLook.maxOpen - 70, max(PaperLook.minOpen - 70, editorHeight)))
                 .padding(.bottom, 18)
         }

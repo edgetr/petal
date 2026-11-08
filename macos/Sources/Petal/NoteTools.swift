@@ -141,6 +141,9 @@ extension NoteDesk {
                 }
                 then(paper)
             case .none?: fail("No note with that id; petal_notes lists them.")
+            case .ambiguous(let all)?:
+                // Never a guess between notes titled alike: their handles, to name one.
+                fail("More than one note is titled that: name one by its id (" + all.map { rows[$0].handle }.joined(separator: ", ") + ").")
             case .unreadable?, nil: refuse(NoteShield.unreadable)
             }
         }
@@ -158,7 +161,13 @@ extension NoteDesk {
     /// id only when that id named one paper at the start and still does.
     func repick(_ ticket: Ticket) -> PaperNote? {
         let now = store.notes
-        return NoteShelf.pick(key: ticket.key, id: ticket.noteID, now: now.map { ($0.key, $0.noteID) }, unique: ticket.unique).map { now[$0] }
+        // Its id as it is now: an id-less note given its own meanwhile is followed (store.currentID).
+        let id = store.currentID(ticket.noteID)
+        if let at = NoteShelf.pick(key: ticket.key, id: id, now: now.map { ($0.key, $0.noteID) }, unique: ticket.unique) { return now[at] }
+        // Its key gone with the new id (a move made it): by that id, when the note had one paper and still has.
+        guard id != ticket.noteID, ticket.unique else { return nil }
+        let same = now.indices.filter { now[$0].noteID == id }
+        return same.count == 1 ? now[same[0]] : nil
     }
 
     /// `work` with a settled vault index, on the shield's queue; nil when the vault kept changing.
@@ -226,8 +235,10 @@ extension NoteDesk {
     func handle(_ paper: PaperNote) -> String {
         let base = noteHandle(paper.noteID)
         guard (store.conflicts[paper.noteID]?.count ?? 0) > 1 else { return base }
-        if copyHandles[paper.key] == nil { copyHandles[paper.key] = String(UUID().uuidString.prefix(4).lowercased()) }
-        return base + "." + (copyHandles[paper.key] ?? "")
+        let had = local.copies?[paper.key] != nil
+        let copy = local.copyHandle(paper.key)
+        if !had { local.save() }
+        return base + "." + copy
     }
 
     /// A note as the tools list it: its handle, title, preview and places derived from its redacted text (NoteTold).

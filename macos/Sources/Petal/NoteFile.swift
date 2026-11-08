@@ -944,6 +944,35 @@ enum NoteShelf {
         return name
     }
 
+    /// A note's id as it is now: an id-less note given its own (`aliases`: old → new, published when it happens)
+    /// is followed, however many times, never round in circles. Every holder of an id (the editor, a paste being
+    /// read, a tool's request) looks it up through this before it acts.
+    static func current(_ id: String, aliases: [String: String]) -> String {
+        var now = id
+        var seen: Set<String> = [id]
+        while let next = aliases[now], seen.insert(next).inserted { now = next }
+        return now
+    }
+
+    /// Whether an open editor keeps what's typed across an update: the same note (its id, followed) whatever its key
+    /// is now (a move, a rename, an id given). Another note in it: what's typed is saved into the note it was typed
+    /// in first, then the other is read.
+    static func editorKeeps(typedIn: String, paper: String, aliases: [String: String]) -> Bool {
+        current(typedIn, aliases: aliases) == current(paper, aliases: aliases)
+    }
+
+    /// Where a passage's sentence is while its page scrolls (Accessibility's coordinates): at its line inside the
+    /// visible part of its text, scrolled above or below it (its tab rests on that edge, without a pin), or unknown.
+    enum PassageSpot: Equatable { case line(CGRect), above, below, unknown }
+
+    static func passageSpot(words: CGRect?, visible: CGRect?) -> PassageSpot {
+        guard let words else { return .unknown }
+        guard let visible, !visible.isEmpty else { return .line(words) }
+        if words.maxY <= visible.minY { return .above }
+        if words.minY >= visible.maxY { return .below }
+        return .line(words)
+    }
+
     /// The paper a lookup chose (its file `key` and note `id`), as the notes are now: that same file while it's still
     /// that note's (a path another note now has is refused); gone, followed by its id only when the id names exactly
     /// one paper (never one of a conflict's copies picked for another).
@@ -1344,15 +1373,19 @@ enum NoteTold {
         }.joined(separator: "\n")
     }
 
+    /// The index of an agent's picture number `n` among `count` pictures: only 1...count, checked before any
+    /// arithmetic (a number like Int.min never overflows).
+    static func pictureIndex(_ n: Int, count: Int) -> Int? { n > 0 && n <= count ? n - 1 : nil }
+
     /// A tool's text back into the note: each `![picture N]` line is the note's own Nth picture again (as it was in
     /// `body`); one with no such picture stays words.
     static func restorePictures(_ text: String, from body: String) -> String {
         let pictures = body.components(separatedBy: "\n").filter { if case .image = NoteBlock.parse($0) { true } else { false } }
         return text.components(separatedBy: "\n").map { line in
             let words = line.trimmingCharacters(in: .whitespaces)
-            guard words.hasPrefix("![picture "), words.hasSuffix("]"), let n = Int(words.dropFirst(10).dropLast()), pictures.indices.contains(n - 1)
-            else { return line }
-            return pictures[n - 1]
+            guard words.hasPrefix("![picture "), words.hasSuffix("]"), let n = Int(words.dropFirst(10).dropLast()),
+                  let at = NoteTold.pictureIndex(n, count: pictures.count) else { return line }
+            return pictures[at]
         }.joined(separator: "\n")
     }
 

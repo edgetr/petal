@@ -230,6 +230,33 @@ struct NotesCheck {
                && !NoteShelf.mayTrashFile(.text("x"), foundID: "B", expected: "A", texts: ["x"]), "only that note, as Petal last saw it")
         expect(NoteShelf.needsID("file:Inbox/x.md") && !NoteShelf.needsID("5F3A-1"), "an id taken from a path needs a real one before a change")
 
+        // An identity change is followed by every holder: an id given to an id-less note, however many times.
+        let aliases = ["file:Inbox/a.md": "U1", "U1": "U2", "loop-a": "loop-b", "loop-b": "loop-a"]
+        expect(NoteShelf.current("file:Inbox/a.md", aliases: aliases) == "U2" && NoteShelf.current("X", aliases: aliases) == "X",
+               "an old id leads to the note's id now")
+        expect(["loop-a", "loop-b"].contains(NoteShelf.current("loop-a", aliases: aliases)), "never round in circles")
+        expect(NoteShelf.editorKeeps(typedIn: "file:Inbox/a.md", paper: "U2", aliases: aliases), "the editor keeps its typing when its note is given an id")
+        expect(!NoteShelf.editorKeeps(typedIn: "U2", paper: "OTHER", aliases: aliases), "another note in the paper: saved first, then read")
+
+        // An agent's picture number: only 1...count, never arithmetic on what it sent first.
+        expect(NoteTold.pictureIndex(1, count: 2) == 0 && NoteTold.pictureIndex(2, count: 2) == 1, "pictures 1 and 2 of two")
+        expect(NoteTold.pictureIndex(0, count: 2) == nil && NoteTold.pictureIndex(3, count: 2) == nil
+               && NoteTold.pictureIndex(Int.min, count: 2) == nil && NoteTold.pictureIndex(Int.max, count: 2) == nil, "anything else is no picture")
+        let invented = NoteTold.restorePictures("![picture -9223372036854775808]\n![picture 9223372036854775807]\n![picture 99999999999999999999]",
+                                                from: "![](pictures-x.assets/p.png)")
+        expect(invented == "![picture -9223372036854775808]\n![picture 9223372036854775807]\n![picture 99999999999999999999]",
+               "invented numbers stay words, and nothing overflows")
+
+        // A passage's tab follows its sentence as the page scrolls.
+        let textShown = CGRect(x: 0, y: 100, width: 400, height: 300)
+        expect(NoteShelf.passageSpot(words: CGRect(x: 10, y: 150, width: 100, height: 16), visible: textShown) == .line(CGRect(x: 10, y: 150, width: 100, height: 16)),
+               "in view: at its line, with its pin")
+        expect(NoteShelf.passageSpot(words: CGRect(x: 10, y: 60, width: 100, height: 16), visible: textShown) == .above, "scrolled up out of view: on the top edge")
+        expect(NoteShelf.passageSpot(words: CGRect(x: 10, y: 420, width: 100, height: 16), visible: textShown) == .below, "scrolled down out of view: on the bottom edge")
+        expect(NoteShelf.passageSpot(words: nil, visible: textShown) == .unknown, "not found: passage moved")
+        expect(NoteShelf.passageSpot(words: CGRect(x: 10, y: 90, width: 100, height: 16), visible: textShown) == .line(CGRect(x: 10, y: 90, width: 100, height: 16)),
+               "partly in view: at its line")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

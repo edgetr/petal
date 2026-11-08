@@ -102,6 +102,7 @@ final class NoteDesk {
         } else if !on && listening {
             listening = false
             WindowEvents.shared.stopListening("papernotes")
+            stopWatchingPassages()
             for editor in editors.values { editor.flush() }
             hideAll()
             // Notes off: every window narrowed for one gets its width back (unless the person changed it since).
@@ -151,6 +152,7 @@ final class NoteDesk {
         }
         lookSoon?.cancel()
         looks += 1
+        stopWatchingPassages()
         Self.roomTurn.cancel()
         for editor in editors.values { editor.flush() }
         // The journal holds every accepted edit and paste: once its queue is done, nothing is lost, whatever the
@@ -333,6 +335,7 @@ final class NoteDesk {
         if moved {
             lines = [:]
             passageRects = [:]
+            stopWatchingPassages()
             // Notes that were open on the window left behind fold.
             for (key, face) in faces where face == .open && fits[key] == nil { faces[key] = .folded }
             }
@@ -414,37 +417,135 @@ final class NoteDesk {
     /// Where each passage stuck on this window is, off the main thread: the one place on the window its whole quote
     /// is, told apart by the words before and after it, else none ("passage moved").
     private func findPassages(_ scene: NoteScene) {
-        guard let window = scene.window else { return }
+        guard let window = scene.window else { return stopWatchingPassages() }
         let wanted = here.compactMap { key, index -> (String, NoteStick)? in
             guard let paper = store.paper(key), paper.file.places[index].kind == .passage else { return nil }
             return (key, paper.file.places[index])
         }
-        guard !wanted.isEmpty else { return }
+        guard !wanted.isEmpty else { return stopWatchingPassages() }
         let pid = scene.pid
         let ticket = looks
         Self.queue.async {
-            let bounds = Self.passageBounds(pid: pid, window: window, wanted.map { $0.1 })
+            let anchors = Self.passageAnchors(pid: pid, window: window, wanted.map { $0.1 })
+            let measured = anchors.map { $0.map(Self.measure) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard ticket == self.looks, let frame = self.frame else { return }
-                    var found: [String: Bool] = [:]
-                    for (index, item) in wanted.enumerated() {
-                        self.lines[item.0] = bounds[index].map { $0.minY - frame.minY }
-                        self.passageRects[item.0] = bounds[index]
-                        found[item.0] = bounds[index] != nil
-                    }
-                    if found != self.found { self.found = found }
-                    self.layout()
+                    guard ticket == self.looks else { return }
+                    self.anchors = [:]
+                    for (index, item) in wanted.enumerated() { if let anchor = anchors[index] { self.anchors[item.0] = anchor } }
+                    self.place(Dictionary(uniqueKeysWithValues: wanted.indices.map { (wanted[$0].0, measured[$0]) }))
+                    self.watchPassages()
                 }
             }
         }
     }
 
-    /// Each passage's words' bounds on the screen (Accessibility's coordinates), where the app tells them: among
-    /// the window's texts that hold its whole quote, the one place the words around it fit best (NoteMatch.pick),
-    /// within half a second; a text's own bounds for those words where it gives them, else the text's frame. Off the
-    /// main thread.
-    nonisolated static func passageBounds(pid: pid_t, window number: CGWindowID, _ passages: [NoteStick]) -> [CGRect?] {
+    /// Where each passage note's sentence is now (its words and the visible part of its text), decided by
+    /// NoteShelf.passageSpot: at its line with its pin; scrolled above or below the visible text, its tab rests on
+    /// that edge with no pin; not found, as before (stacked at the top, "passage moved").
+    private func place(_ measured: [String: (words: CGRect?, visible: CGRect?)?]) {
+        guard let frame else { return }
+        var found = self.found
+        var changed = false
+        for (key, measure) in measured {
+            let line: CGFloat?
+            let rect: CGRect?
+            switch NoteShelf.passageSpot(words: measure?.words, visible: measure?.visible) {
+            case .line(let words): line = words.minY - frame.minY; rect = words
+            case .above: line = max(0, (measure?.visible?.minY ?? frame.minY) - frame.minY); rect = nil
+            case .below: line = max(0, (measure?.visible?.maxY ?? frame.maxY) - frame.minY - 32); rect = nil
+            case .unknown: line = nil; rect = nil
+            }
+            if lines[key] != line || passageRects[key] != rect { changed = true }
+            lines[key] = line
+            passageRects[key] = rect
+            found[key] = line != nil
+        }
+        if found != self.found { self.found = found }
+        if changed { layout() }
+    }
+
+    /// The elements and ranges where passage notes' sentences were found (this window), measured again on a light
+    /// timer while any are here, so their tabs and pins follow the page as it scrolls. One gone (the page redrawn)
+    /// finds them all again, debounced.
+    @ObservationIgnored private var anchors: [String: PassageAnchor] = [:]
+    @ObservationIgnored private var passageTimer: Timer?
+    @ObservationIgnored private var measuring = false
+
+    private func watchPassages() {
+        guard !anchors.isEmpty, on, listening else { return stopWatchingPassages() }
+        guard passageTimer == nil else { return }
+        passageTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.measurePassages() }
+        }
+    }
+
+    private func stopWatchingPassages() {
+        passageTimer?.invalidate()
+        passageTimer = nil
+        anchors = [:]
+    }
+
+    private func measurePassages() {
+        guard !measuring, !anchors.isEmpty, on, listening else { return stopWatchingPassages() }
+        measuring = true
+        let watched = anchors
+        let ticket = looks
+        Self.queue.async {
+            let measured = watched.mapValues(Self.measure)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.measuring = false
+                    guard ticket == self.looks else { return }
+                    if measured.values.contains(where: { $0.words == nil }), let scene = self.scene {
+                        // An element gone or moved in the page: find them all again (not more than once a second).
+                        if Date().timeIntervalSince(self.rescanned) > 1 { self.rescanned = Date(); self.findPassages(scene) }
+                        return
+                    }
+                    self.place(measured.mapValues { Optional($0) })
+                }
+            }
+        }
+    }
+
+    @ObservationIgnored private var rescanned = Date.distantPast
+
+    /// Where a passage's sentence was found: its text element and the range of its words in it. AXUIElement is a
+    /// CF object, read only on `queue`.
+    struct PassageAnchor: @unchecked Sendable {
+        let element: AXUIElement
+        let range: CFRange
+    }
+
+    /// A passage's words' bounds now, and the visible part of the scroll area holding them (Accessibility's
+    /// coordinates). Off the main thread.
+    nonisolated static func measure(_ anchor: PassageAnchor) -> (words: CGRect?, visible: CGRect?) {
+        var cf = anchor.range
+        var words: CGRect?
+        if let axRange = AXValueCreate(.cfRange, &cf) {
+            var raw: CFTypeRef?
+            if AXUIElementCopyParameterizedAttributeValue(anchor.element, kAXBoundsForRangeParameterizedAttribute as CFString, axRange, &raw) == .success,
+               let raw, CFGetTypeID(raw) == AXValueGetTypeID() {
+                var rect = CGRect.zero
+                AXValueGetValue(raw as! AXValue, .cgRect, &rect)
+                if rect.height > 1 { words = rect }
+            }
+        }
+        if words == nil { words = Windows.frame(of: anchor.element) }
+        // The scroll area it's in: its frame is the part of the text that shows.
+        var visible: CGRect?
+        var element = anchor.element
+        for _ in 0..<16 {
+            guard let parent: AXUIElement = Windows.value(element, kAXParentAttribute) else { break }
+            if (Windows.value(parent, kAXRoleAttribute) as String?) == kAXScrollAreaRole as String { visible = Windows.frame(of: parent); break }
+            element = parent
+        }
+        return (words, visible)
+    }
+
+    /// Where each passage's sentence is in the window: among the window's texts that hold its whole quote, the one
+    /// place the words around it fit best (NoteMatch.pick), within half a second. Off the main thread.
+    nonisolated static func passageAnchors(pid: pid_t, window number: CGWindowID, _ passages: [NoteStick]) -> [PassageAnchor?] {
         guard Windows.trusted else { return passages.map { _ in nil } }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.2)
@@ -469,22 +570,12 @@ final class NoteDesk {
         }
         // The window wasn't read whole in time: whatever was found may not be the only place.
         let whole = queue.isEmpty
-        return passages.indices.map { index -> CGRect? in
+        return passages.indices.map { index -> PassageAnchor? in
             let passage = passages[index]
             guard whole, let picked = NoteMatch.pick(quote: passage.quote, before: passage.before, after: passage.after, in: hits[index].map(\.1)) else { return nil }
             let (element, value) = hits[index][picked.text]
             let ns = NSRange(picked.range, in: value)
-            var cf = CFRange(location: ns.location, length: ns.length)
-            if let axRange = AXValueCreate(.cfRange, &cf) {
-                var raw: CFTypeRef?
-                if AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeParameterizedAttribute as CFString, axRange, &raw) == .success,
-                   let raw, CFGetTypeID(raw) == AXValueGetTypeID() {
-                    var rect = CGRect.zero
-                    AXValueGetValue(raw as! AXValue, .cgRect, &rect)
-                    if rect.height > 1 { return rect }
-                }
-            }
-            return Windows.frame(of: element)
+            return PassageAnchor(element: element, range: CFRange(location: ns.location, length: ns.length))
         }
     }
 
@@ -909,6 +1000,8 @@ final class NoteDesk {
             let ready = read, unread = waiting
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    // The note's id as it is now (one given its own meanwhile is followed: store.currentID).
+                    let noteID = self.store.currentID(noteID)
                     // Tied to the note's id and the folder it was pasted in. Quitting meanwhile: left in the journal
                     // for the next launch. The folder changed, or the note can't take it now: put in from the
                     // journal into that note in that folder. Files not read yet but still there wait, in the journal
@@ -941,6 +1034,7 @@ final class NoteDesk {
                         return self.say("Petal couldn't read that picture.")
                     case .putIn:
                         return self.store.putIn(noteID, token, root: pastedIn) { stored, left in
+                            let noteID = self.store.currentID(noteID)
                             if stored, left.isEmpty { return self.store.endImport(noteID, token, journal: false) }
                             // Files still waiting stay with the note (on its paper, when it's in this folder).
                             if stored { self.store.keepWaiting(noteID, token, left) }
@@ -1011,6 +1105,8 @@ final class NoteDesk {
     /// A note's file got another name on disk than it was shown with: everything showing it follows.
     private func rekey(_ old: String, to paper: PaperNote) {
         let new = paper.key
+        // A conflict paper's handle follows its file.
+        if let copy = local.copies?.removeValue(forKey: old) { local.copies?[new] = copy; local.save() }
         if let face = faces.removeValue(forKey: old) { faces[new] = face }
         if keyboard == old { keyboard = new }
         if let height = heights.removeValue(forKey: old) { heights[new] = height }
@@ -1151,7 +1247,9 @@ final class NoteDesk {
 
     /// A new note on `stick`, open with the keyboard. `body`: what it starts with.
     @discardableResult
-    func make(on stick: NoteStick, body: String = "", chat: String = "", at point: CGPoint? = nil) -> PaperNote? {
+    /// `window`: the frame (Accessibility's coordinates) of the window it's made on, when that isn't the one in
+    /// front (a drop on a window behind): its spot is recorded against that window.
+    func make(on stick: NoteStick, body: String = "", chat: String = "", at point: CGPoint? = nil, window: CGRect? = nil) -> PaperNote? {
         var file = NoteFile(body: body)
         file.places = [stick]
         file.chat = chat
@@ -1161,7 +1259,7 @@ final class NoteDesk {
         if body.isEmpty { fresh.insert(paper.key) }
         if let point {
             if stick.kind == .desktop { local.desk[paper.noteID] = [point.x, point.y] }
-            else if let frame {
+            else if let frame = window ?? frame {
                 let rect = CGRect(x: point.x, y: point.y - PaperLook.folded, width: PaperLook.folded, height: PaperLook.folded)
                 local.spots[paper.noteID] = NoteSpot.stick(panel: rect, window: NoteRules.appKitFrame(frame, primaryHeight: primaryHeight))
             }
@@ -1257,6 +1355,10 @@ final class NoteDesk {
             let pid = hit?[kCGWindowOwnerPID as String] as? pid_t
             let number = hit?[kCGWindowNumber as String] as? CGWindowID
             let title = hit?[kCGWindowName as String] as? String ?? ""
+            // That window's own frame (the window server's, top-left: Accessibility's coordinates), for the note's spot.
+            let bounds = (hit?[kCGWindowBounds as String] as? [String: CGFloat]).map {
+                CGRect(x: $0["X"] ?? 0, y: $0["Y"] ?? 0, width: $0["Width"] ?? 0, height: $0["Height"] ?? 0)
+            }
             // No window under it: the Desktop that screen shows, read here (off the main thread).
             let target = screens.first { $0.frame.contains(point) }?.id
             let desktop: Int? = hit == nil ? target.flatMap { Spaces.desktops([$0])[$0] } : nil
@@ -1271,7 +1373,7 @@ final class NoteDesk {
                         self.make(on: desk, at: point)
                         return
                     }
-                    self.noteOnDropped(running, window: number, title: title, at: point, drop: drop)
+                    self.noteOnDropped(running, window: number, frame: bounds, title: title, at: point, drop: drop)
                 }
             }
         }
@@ -1279,7 +1381,6 @@ final class NoteDesk {
 
     @ObservationIgnored private var drops = 0
     /// Handles of a conflict's papers beyond the note's own (by paper key), for this run.
-    @ObservationIgnored var copyHandles: [String: String] = [:]
     @ObservationIgnored private var handlesSaving = false
 
     /// A note's handle for tools (made the first time; saved a moment later, once for many).
@@ -1295,7 +1396,7 @@ final class NoteDesk {
 
     /// The note for a drop on `running`'s window `number`, once what's in front of that app is read and the window
     /// is checked to be still there (off the main thread).
-    private func noteOnDropped(_ running: NSRunningApplication, window number: CGWindowID?, title: String, at point: CGPoint, drop: Int) {
+    private func noteOnDropped(_ running: NSRunningApplication, window number: CGWindowID?, frame bounds: CGRect?, title: String, at point: CGPoint, drop: Int) {
         let name = running.localizedName ?? ""
         let pid = running.processIdentifier
         Self.read(running, mac: local.mac) { scene, read in
@@ -1312,7 +1413,7 @@ final class NoteDesk {
                         if scene.window != number { scene.tab = nil; scene.file = ""; scene.window = number; scene.title = title }
                         if read.window == number { self.apply(scene, read: read) }
                         let offers = self.places(for: scene, read: read, appName: name)
-                        if let first = offers.first(where: { $0.kind != .passage }) { self.make(on: first, at: point) }
+                        if let first = offers.first(where: { $0.kind != .passage }) { self.make(on: first, at: point, window: read.window == number ? read.frame ?? bounds : bounds) }
                         // Another window than the one in front: it comes forward (the pointer stays), and the note with it.
                         if read.window != number || !running.isActive { self.bringForward(pid: pid, window: number) }
                     }

@@ -92,6 +92,15 @@ struct NoteSelectionCheck {
         expect(back == "Tickets\n![](\(assets)/picture-3c4d.png)\nnew line\n![boarding pass](\(assets)/picture-1a2b.png)\n![picture 7]",
                "an agent's `![picture N]` written back is that picture again; one there isn't stays words", back)
 
+        // A title names a note only when exactly one has it, as the tools tell titles: never a guess.
+        let alike = [(handle: "naaa", body: "# Shopping\nmilk", version: false), (handle: "nbbb", body: "# Shopping\nbread", version: false),
+                     (handle: "nccc", body: "# PIN \(pin)", version: false), (handle: "nddd", body: "# PIN (hidden)", version: false)]
+        expect(NoteShield.find("Shopping", rows: alike, index: vaultIndex) == .ambiguous([0, 1]), "two notes titled Shopping: ambiguous, with both")
+        expect(NoteShield.find("PIN (hidden)", rows: alike, index: vaultIndex) == .ambiguous([2, 3]), "titles redaction made alike: ambiguous too")
+        expect(NoteShield.find("nbbb", rows: alike, index: vaultIndex) == .found(1), "a handle still names one")
+        expect(NoteShield.find("naaa.f00d", rows: [(handle: "naaa", body: "# A", version: false)], index: vaultIndex) == .found(0),
+               "a copy's handle after its conflict was settled names the note's one paper")
+
         // A specific conflict copy, named by its own handle: that copy, never the first paper of its id.
         let copies = [(handle: "nabc.1f2e", body: "# A\nmine", version: false), (handle: "nabc.9d8c", body: "# A\ntheirs", version: false)]
         expect(NoteShield.find("nabc.9d8c", rows: copies, index: vaultIndex) == .found(1), "the copy named is the copy found")

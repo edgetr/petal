@@ -107,6 +107,7 @@ struct NoteStoreCheck {
         renamedMakes(root: root)
         identity(root: root)
         idBeforeChange(root: root)
+        identityFollowed(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
     }
@@ -459,6 +460,36 @@ struct NoteStoreCheck {
         let firstLook = local.handle("file:Inbox/Plain.md")
         local.rekeyID("file:Inbox/Plain.md", "U2")
         expect(local.handle("U2") == firstLook, "an id-less note given its id keeps its handle")
+    }
+
+    /// An id given to an id-less note is an event every holder follows: a paste being read, the journal, the store's
+    /// lookups (the editor's rule is NoteShelf.editorKeeps, checked pure).
+    @MainActor static func identityFollowed(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Follow")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Loose.md")
+        try? Data("# Loose\nwords".utf8).write(to: file)
+        let store = NoteStore(root: root)
+        let read = NoteStore.read(root)
+        store.preview(read.notes, notebooks: read.notebooks)
+        guard let paper = store.notes.first(where: { $0.url.lastPathComponent == "Loose.md" }) else { return expect(false, "the id-less note is read") }
+        let old = paper.noteID
+        // A paste starts being read, then the note is changed (and so given its id) before the paste is done.
+        let png = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1, pixelsHigh: 1, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                   isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?.representation(using: .png, properties: [:])
+        let begun = store.beginImport(paper.key, NoteImport(files: [], png: png, tiff: nil, at: -1))
+        _ = store.change(paper.key) { $0.body += "\nmore" }
+        let new = store.currentID(old)
+        NoteJournal.queue.sync {}
+        let entry = NoteJournal.read(NoteJournal.file(new))
+        expect(begun != nil && new != old && !NoteShelf.needsID(new), "the note is given its own id", new)
+        expect(store.importing(paper.key) && entry?.imports?.contains { $0.token == begun?.token } == true,
+               "the paste being read follows it (in memory and in the journal)", "\(String(describing: entry?.imports?.count))")
+        expect(!fm.fileExists(atPath: NoteJournal.file(old).path) && entry?.text.contains("more") == true, "the journal entry is the new id's, with the typing")
+        expect(store.sameNote(old, new), "an editor holding the old id keeps its typing")
+        if let begun { store.endImport(new, begun.token, journal: true) }
+        NoteJournal.queue.sync {}
     }
 
     /// An id-less note (a Markdown file made elsewhere) gets its own id in its file before Petal moves or changes it.

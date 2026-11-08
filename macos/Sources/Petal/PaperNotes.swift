@@ -1281,14 +1281,25 @@ final class NoteStore {
         if let loading = importsLoading.removeValue(forKey: old) { importsLoading[new] = loading }
         if let trouble = importTrouble.removeValue(forKey: old) { importTrouble[new] = trouble }
         touch(key)
+        aliases[old] = new
         onIdentity(old, new)
         enqueue(session, .write(text: text, base: base), done: nil)
         snapshot(paper, text: text, session: session)
         NoteJournal.queue.async { NoteJournal.forget(noteID: old) }
     }
 
-    /// A note given its own id (`ensureID`): old id, new id.
+    /// A note given its own id (`ensureID`): old id, new id. Published to every holder (the desk's records and
+    /// handles) and kept in `aliases`, which the editor, a paste being read and a tool's request follow.
     @ObservationIgnored var onIdentity: @MainActor (String, String) -> Void = { _, _ in }
+
+    /// Ids notes had before they were given their own: old → new, for this run.
+    @ObservationIgnored private(set) var aliases: [String: String] = [:]
+
+    /// A note's id as it is now (NoteShelf.current).
+    func currentID(_ id: String) -> String { NoteShelf.current(id, aliases: aliases) }
+
+    /// Whether two ids are the same note now.
+    func sameNote(_ a: String, _ b: String) -> Bool { NoteShelf.editorKeeps(typedIn: a, paper: b, aliases: aliases) }
 
     /// What was typed into a paper that turned read only as the person typed: kept beside its file, never lost.
     func keepAside(_ key: String, body: String) {
@@ -1574,6 +1585,18 @@ struct NoteLocal: Codable, Equatable {
     /// Each note's handle for tools, by note id: a random token, so a tool never sees a file name, path or id taken
     /// from one, and the same note keeps its handle when it's renamed or moved.
     var handles: [String: String]? = nil
+
+    /// Each paper of a conflict's own part of its handle (the note's handle, a dot, then this), by the paper's key:
+    /// kept across restarts and moved with its file; once the conflict is settled, the note's handle names the one
+    /// left (NoteShield.find).
+    var copies: [String: String]? = nil
+
+    mutating func copyHandle(_ key: String) -> String {
+        if let made = copies?[key] { return made }
+        let made = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(6).lowercased())
+        copies = (copies ?? [:]).merging([key: made]) { a, _ in a }
+        return made
+    }
 
     /// The note's handle, made the first time it's asked for.
     mutating func handle(_ noteID: String) -> String {

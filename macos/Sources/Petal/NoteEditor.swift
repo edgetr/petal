@@ -643,6 +643,8 @@ struct NoteEditorView: NSViewRepresentable {
     /// Pictures pasted or dropped: the desk reads them and puts them in, here or (once this editor is gone) in the note.
     let importPictures: (NoteImport) -> Void
     let escape: () -> Void
+    /// Whether two note ids are the same note now (an id-less note given its own is followed: NoteShelf.editorKeeps).
+    var sameNote: (String, String) -> Bool = { $0 == $1 }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var saveLater: DispatchWorkItem?
@@ -768,17 +770,23 @@ struct NoteEditorView: NSViewRepresentable {
         let coordinator = context.coordinator
         // Another note in this paper, or the file changed elsewhere while the person isn't typing here: read again.
         let elsewhere = paper.file.body != coordinator.body && text.window?.firstResponder !== text
-        let renamed = coordinator.key != paper.key && coordinator.noteID == paper.noteID && text.window?.firstResponder === text
-        if !renamed && (coordinator.key != paper.key || elsewhere) {
-            // What's typed and not saved yet is saved first, into the note it was typed in and on the file as it was
-            // then: a newer version on disk makes it the conflict copy beside it. Neither is ever lost.
+        // The same note, whatever happened to its identity since (moved, renamed, given its own id): what's typed
+        // stays, and is saved through the note as it is now (this view's save), never through a key that's gone.
+        let same = sameNote(coordinator.noteID, paper.noteID)
+        if same {
+            coordinator.parent = self
+            coordinator.key = paper.key
+            coordinator.noteID = paper.noteID
+            if elsewhere {
+                coordinator.flush(text)
+                load(text, coordinator)
+            }
+        } else {
+            // Another note: what's typed and not saved yet is saved first, into the note it was typed in and on the
+            // file as it was then (a newer version on disk makes it the conflict copy beside it). Neither is lost.
             coordinator.flush(text)
             coordinator.parent = self
             load(text, coordinator)
-        } else {
-            coordinator.parent = self
-            // The same note, its file named again on disk while the person types: what's typed stays.
-            if renamed { coordinator.key = paper.key }
         }
         if focus, let window = text.window, window.firstResponder !== text {
             DispatchQueue.main.async { window.makeFirstResponder(text) }

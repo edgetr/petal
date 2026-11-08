@@ -20,7 +20,9 @@ enum NoteShield {
         return texts.indices.filter { matches(query, index.redacted(texts[$0])) }
     }
 
-    enum Lookup: Equatable { case found(Int), none, unreadable }
+    /// `ambiguous`: the name is the title of more than one note as the tools tell it (the papers' places): none is
+    /// picked; the agent is told their handles.
+    enum Lookup: Equatable { case found(Int), none, unreadable, ambiguous([Int]) }
 
     /// The note an agent names (`rows`: each paper's handle, its text, and whether it's a version): its handle (a
     /// random token, a conflict's copy its own), or its title as the tools tell it (derived after redaction), never
@@ -28,8 +30,17 @@ enum NoteShield {
     static func find(_ name: String, rows: [(handle: String, body: String, version: Bool)], index: UIMap.SecretIndex) -> Lookup {
         guard !index.unreadable else { return .unreadable }
         if let at = rows.firstIndex(where: { $0.handle == name }) { return .found(at) }
+        // A conflict's copy named by its handle after the conflict was settled: the note's one paper now.
+        if let dot = name.firstIndex(of: ".") {
+            let base = String(name[..<dot])
+            let papers = rows.indices.filter { rows[$0].handle == base }
+            if papers.count == 1 { return .found(papers[0]) }
+        }
+        // By title only when exactly one note has it as the tools tell it (redaction can make two alike).
         let redact = { (text: String) in index.redacted(text) }
-        if let at = rows.firstIndex(where: { !$0.version && NoteTold.title($0.body, redact).localizedCaseInsensitiveCompare(name) == .orderedSame }) { return .found(at) }
+        let titled = rows.indices.filter { !rows[$0].version && NoteTold.title(rows[$0].body, redact).localizedCaseInsensitiveCompare(name) == .orderedSame }
+        if titled.count == 1 { return .found(titled[0]) }
+        if titled.count > 1 { return .ambiguous(titled) }
         return .none
     }
 

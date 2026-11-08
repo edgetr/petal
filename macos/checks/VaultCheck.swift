@@ -149,20 +149,27 @@ struct VaultCheck {
     }
 
     static func sample() -> [VaultItem] {
+        // Fixed ids, so a random one can never hold a secret's digits (a card's "737") and fail the checks that
+        // nothing secret is shown.
         var login = VaultItem(kind: .login, title: "GitHub, \"work\"", sites: ["github.com"], updated: Date(timeIntervalSince1970: 1_700_000_000.123))
+        login.id = "item-login"
         login[.username] = "ada"
         login[.password] = "p,w\"q\nx"
         login[.notes] = "two\nlines"
         var app = VaultItem(kind: .login, title: "Slack", apps: ["com.tinyspeck.slackmacgap"], appSigners: ["com.tinyspeck.slackmacgap": "BQR82RBBHL"])
+        app.id = "item-app"
         app[.password] = "slack-pass-1234"
         var deniz = VaultItem(kind: .contact, title: "Deniz")
+        deniz.id = "item-deniz"
         deniz[.name] = "Deniz Kaya"
         deniz[.relationship] = "girlfriend"
         deniz[.email] = "deniz@example.com"
         var me = VaultItem(kind: .contact, title: "Me")
+        me.id = "item-me"
         me[.name] = "Ada Lovelace"
         me[.relationship] = "me"
         var home = VaultItem(kind: .address, title: "Home")
+        home.id = "item-home"
         home[.name] = "Deniz Kaya"
         home[.street] = "Bağdat Cd. 12"
         home[.street2] = "Daire 4"
@@ -171,11 +178,13 @@ struct VaultCheck {
         home[.country] = "Türkiye"
         home[.contact] = deniz.id
         var card = VaultItem(kind: .card, title: "Visa")
+        card.id = "item-card"
         card[.name] = "Ada Lovelace"
         card[.number] = "4111 1111 1111 1111"
         card[.expiry] = "04/27"
         card[.securityCode] = "737"
         var key = VaultItem(kind: .apiKey, title: "OpenAI", sites: ["platform.openai.com"])
+        key.id = "item-key"
         key[.value] = "sk-abcdefghijklmnop"
         return [login, app, deniz, me, home, card, key]
     }
