@@ -25,31 +25,41 @@ extension NoteDesk {
             let notebook = args["notebook"] as? String ?? ""
             let limit = min(200, max(1, (args["limit"] as? NSNumber)?.intValue ?? 30))
             let onlyHere = args["here"] as? Bool ?? false
-            let found = store.notes.filter { paper in
-                paper.version == nil && (notebook.isEmpty || paper.notebook.localizedCaseInsensitiveCompare(notebook) == .orderedSame)
-                    && (!onlyHere || here[paper.key] != nil)
-                    && NoteText.matches(query, paper.file.title + "\n" + paper.file.body + "\n" + paper.notebook)
+            // Searched, filtered by notebook and counted only on what the agent may see of each note (redacted),
+            // never its raw text: matching can't be used to guess a secret one character at a time.
+            let papers = store.notes.filter { $0.version == nil && (!onlyHere || here[$0.key] != nil) }
+            let texts = papers.map { $0.file.title + "\n" + $0.file.body + "\n" + $0.notebook }
+            let books = papers.map(\.notebook)
+            Self.onShield({ index -> [Int]? in
+                guard let hits = NoteShield.search(query, in: texts, index: index, matches: NoteText.matches) else { return nil }
+                return notebook.isEmpty ? hits : hits.filter { index.redacted(books[$0]).localizedCaseInsensitiveCompare(notebook) == .orderedSame }
+            }) { (hits: [Int]??) in
+                // The vault unreadable, or changing all the while: nothing searched, and said why.
+                guard let hits = hits ?? nil else { return refuse(NoteShield.unreadable) }
+                let found = hits.map { papers[$0] }
+                send(["notes": found.prefix(limit).map(self.summary), "count": found.count,
+                      "notebooks": self.store.notebooks.map { ["name": $0.name, "color": $0.color.isEmpty ? "accent" : $0.color, "notes": $0.count] },
+                      "folder": self.store.root.path])
             }
-            send(["notes": found.prefix(limit).map(summary), "count": found.count,
-                  "notebooks": store.notebooks.map { ["name": $0.name, "color": $0.color.isEmpty ? "accent" : $0.color, "notes": $0.count] },
-                  "folder": store.root.path])
         case "petal_note_read":
-            guard let paper = store.find(args["id"] as? String ?? "") else { return fail("No note with that id; petal_notes lists them.") }
-            var result = summary(paper)
+            resolve(args["id"] as? String ?? "", refuse, fail) { paper in
+            var result = self.summary(paper)
             result["text"] = paper.file.body
             result["file"] = paper.url.path
             result["created"] = NoteFile.stamp(paper.file.created)
             if paper.file.cover { result["cover"] = true }
-            if store.readOnly(paper) { result["note"] = "This note changed in two places at once: the person sees both papers until they keep one, and it can't be changed until then." }
+            if self.store.readOnly(paper) { result["note"] = "This note changed in two places at once: the person sees both papers until they keep one, and it can't be changed until then." }
             send(result)
+            }
         case "petal_note_write":
             let text = args["text"] as? String ?? ""
             if let id = args["id"] as? String, !id.isEmpty {
-                guard let paper = store.find(id) else { return fail("No note with that id; petal_notes lists them.") }
                 let append = args["append"] as? Bool ?? false
-                persist(paper.key, live: live, send, fail, touch: true, edit: { file in
-                    file.body = append ? file.body + (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + text : text
-                }) { ["written": $0.noteID, "title": $0.file.title, "file": $0.url.path] }
+                resolve(id, refuse, fail) { paper in
+                    self.persist(paper.key, live: live, send, fail, touch: true, edit: { file in
+                        file.body = append ? file.body + (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + text : text
+                    }) { ["written": $0.noteID, "title": $0.file.title, "file": $0.url.path] }
+                }
             } else {
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return fail("Nothing to write.") }
                 var file = NoteFile(body: text)
@@ -68,18 +78,27 @@ extension NoteDesk {
                 if sticking { stickHere(kind: args["to"] as? String, live: live, make) } else { make(nil) }
             }
         case "petal_note_move":
-            guard let paper = store.find(args["id"] as? String ?? "") else { return fail("No note with that id; petal_notes lists them.") }
             let notebook = (args["notebook"] as? String ?? "").trimmingCharacters(in: .whitespaces)
             guard !notebook.isEmpty else { return fail("Which notebook? (a new name makes one)") }
-            guard !store.readOnly(paper) else { return fail(Self.readOnlyWords) }
-            guard live() else { return fail(Self.hungUp) }
-            // The same move as the letterhead's: what's typed in it goes with it, and its panel and editor follow.
-            move(paper.key, to: notebook, live: live) { moved in
-                if let moved { send(["moved": moved.noteID, "notebook": moved.notebook]) }
-                else { fail(live() ? "Couldn't move it (or its pictures); it's where it was." : Self.hungUp) }
+            resolve(args["id"] as? String ?? "", refuse, fail) { paper in
+                guard !self.store.readOnly(paper) else { return fail(Self.readOnlyWords) }
+                guard live() else { return fail(Self.hungUp) }
+                // The same move as the letterhead's: what's typed in it goes with it, and its panel and editor follow.
+                self.move(paper.key, to: notebook, live: live) { moved in
+                    if let moved { send(["moved": moved.noteID, "notebook": moved.notebook]) }
+                    else { fail(live() ? "Couldn't move it (or its pictures); it's where it was." : Self.hungUp) }
+                }
             }
         case "petal_note_stick":
-            guard let paper = store.find(args["id"] as? String ?? "") else { return fail("No note with that id; petal_notes lists them.") }
+            resolve(args["id"] as? String ?? "", refuse, fail) { paper in self.stickTool(paper, args, live: live, send, fail) }
+        default:
+            fail("Unknown tool \(name)")
+        }
+    }
+
+    /// petal_note_stick, once the note is found.
+    private func stickTool(_ paper: PaperNote, _ args: [String: Any], live: @escaping @Sendable () -> Bool,
+                           _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
             guard !store.readOnly(paper) else { return fail(Self.readOnlyWords) }
             if let remove = (args["remove"] as? NSNumber)?.intValue {
                 guard paper.file.places.indices.contains(remove), paper.file.places.count > 1 else { return fail("A note keeps at least one place; remove is an index from places.") }
@@ -97,8 +116,34 @@ extension NoteDesk {
                     return ["places": saved.file.places.map(self.told)]
                 }
             }
-        default:
-            fail("Unknown tool \(name)")
+    }
+
+    /// The note an agent names, found on what it may see of ids, files and titles (NoteShield.find, redacted with a
+    /// settled index); while the vault can't be read, nothing is looked up and it's told why.
+    private func resolve(_ name: String, _ refuse: @escaping (String) -> Void, _ fail: @escaping (String) -> Void,
+                         _ then: @escaping @MainActor (PaperNote) -> Void) {
+        let papers = store.notes
+        let rows = papers.map { (id: $0.noteID, key: $0.key, title: $0.file.title, version: $0.version != nil) }
+        Self.onShield({ NoteShield.find(name, rows: rows, index: $0) }) { (lookup: NoteShield.Lookup?) in
+            switch lookup {
+            case .found(let at)?:
+                // The note as it is now (it may have moved meanwhile).
+                guard let paper = self.store.notes.first(where: { $0.noteID == papers[at].noteID && $0.version == papers[at].version })
+                        ?? self.store.paper(papers[at].key) else { return fail("No note with that id; petal_notes lists them.") }
+                then(paper)
+            case .none?: fail("No note with that id; petal_notes lists them.")
+            case .unreadable?, nil: refuse(NoteShield.unreadable)
+            }
+        }
+    }
+
+    /// `work` with a settled vault index, on the shield's queue; nil when the vault kept changing.
+    private static func onShield<T>(_ work: @escaping (UIMap.SecretIndex) -> T, _ done: @escaping @MainActor (T?) -> Void) {
+        let carried = Carry(work)
+        shieldQueue.async {
+            let work = carried.value as! (UIMap.SecretIndex) -> T
+            let out = Carry(VaultIndex.settled { work($0) })
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(out.value as? T) } }
         }
     }
 

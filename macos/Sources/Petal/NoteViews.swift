@@ -146,8 +146,8 @@ struct PaperView: View {
                 Text(pictureTrouble == 1 ? "Picture couldn't be saved" : "\(pictureTrouble) pictures couldn't be saved")
                     .font(.system(size: 11)).foregroundStyle(Color(red: 0.7, green: 0.15, blue: 0.12))
                 Spacer()
-                Button("Try again") { desk.store.retryPictures(paper.key) }.buttonStyle(.plain).font(.system(size: 11, weight: .semibold))
-                Button("Remove") { desk.store.dropPictures(paper.key) }.buttonStyle(.plain).font(.system(size: 11))
+                Button("Try again") { desk.retryPictures(paper.key) }.buttonStyle(.plain).font(.system(size: 11, weight: .semibold))
+                Button("Remove") { desk.dropPictures(paper.key) }.buttonStyle(.plain).font(.system(size: 11))
             }
             .foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
             .padding(.bottom, 6)

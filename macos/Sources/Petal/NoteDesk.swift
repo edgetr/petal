@@ -86,8 +86,7 @@ final class NoteDesk {
 
     /// `notes`, `notesLook` or `notesFolder` changed (or any setting did).
     func settingsChanged() {
-        let root = NoteStore.rootFolder(setting: app.config.string("notesFolder"))
-        if root != store.root, !store.switching { switchFolder(to: root) }
+        followFolderSetting()
         if on && !listening {
             listening = true
             WindowEvents.shared.listen("papernotes") { [weak self] event in self?.event(event) }
@@ -181,9 +180,21 @@ final class NoteDesk {
         prepareToQuit {}
     }
 
+    /// The notes folder the setting asks for now (the latest asked): switched to unless it's the one in use; while a
+    /// switch is under way, it's asked again when that switch is done (NoteShelf.nextRoot), so a change made
+    /// meanwhile is never forgotten.
+    private func followFolderSetting() {
+        let wanted = NoteStore.rootFolder(setting: app.config.string("notesFolder"))
+        if let next = NoteShelf.nextRoot(wanted: wanted, current: store.root, switching: store.switching) { switchFolder(to: next) }
+    }
+
     /// Another notes folder: what's typed is saved into the folder it was typed in (each note's session, drained off
-    /// the main thread), every open note and editor of the old folder is put away, then the new folder's notes come.
+    /// the main thread), every open note and editor of the old folder is put away and every window narrowed for one
+    /// gets its width back (narrowing under way cancelled first), then the new folder's notes come.
     private func switchFolder(to root: URL) {
+        lookSoon?.cancel()
+        looks += 1
+        giveBackAll {}
         for editor in editors.values { editor.flush() }
         editors = [:]
         for panel in panels.values { panel.conceal() }
@@ -196,7 +207,10 @@ final class NoteDesk {
         here = [:]
         keyboard = nil
         fresh = []
-        store.switchRoot(to: root) { [weak self] in self?.look() }
+        store.switchRoot(to: root) { [weak self] in
+            self?.look()
+            self?.followFolderSetting()
+        }
     }
 
     /// Something couldn't be done to the notes' files: said by the AI button for a moment.
@@ -819,52 +833,72 @@ final class NoteDesk {
     /// end of the note once the editor is gone. The paste is recorded with the note before anything is read
     /// (`beginImport`: its sources in the journal), so a note with a picture loading is never put away as empty,
     /// and a quit meanwhile keeps it for the next launch.
-    func importPictures(_ items: NoteImport, into key: String) {
-        guard let paper = store.paper(key), !store.readOnly(paper) else { return say("This note has two versions: keep one before adding pictures.") }
-        guard let (token, sources) = store.beginImport(key, items) else { return say("This note can't take pictures right now.") }
+    @discardableResult
+    func importPictures(_ items: NoteImport, into key: String) -> Bool {
+        guard let paper = store.paper(key), !store.readOnly(paper) else { say("This note has two versions: keep one before adding pictures."); return false }
+        guard let (token, sources) = store.beginImport(key, items) else { say("This note can't take pictures right now."); return false }
         let noteID = paper.noteID
         let pastedIn = store.root
         DispatchQueue.global(qos: .userInitiated).async {
+            // Each file on its own (NoteShelf.sourceEnd): read, not read but still there (waiting), or gone (or not
+            // a picture at all).
             var read: [(ext: String, data: Data, caption: String)] = []
-            for file in items.files {
-                if let data = try? Data(contentsOf: file), NSImage(data: data) != nil {
-                    read.append((file.pathExtension.lowercased(), data, file.deletingPathExtension().lastPathComponent))
+            var waiting: [NoteJournal.Import] = []
+            for source in sources {
+                if let path = source.path {
+                    let data = try? Data(contentsOf: URL(fileURLWithPath: path))
+                    let picture = data.map { NSImage(data: $0) != nil } ?? false
+                    let end = NoteShelf.sourceEnd(read: picture, exists: data == nil && FileManager.default.fileExists(atPath: path))
+                    if end == .taken, let data { read.append((source.ext, data, source.caption)) }
+                    if end == .waiting { waiting.append(source) }
+                } else if let data = source.data {
+                    if source.ext == "tiff" {
+                        if let rep = NSBitmapImageRep(data: data), let png = rep.representation(using: .png, properties: [:]) { read.append(("png", png, "")) }
+                    } else if NSImage(data: data) != nil {
+                        read.append((source.ext, data, source.caption))
+                    }
                 }
             }
-            if let png = items.png { read.append(("png", png, "")) }
-            if let tiff = items.tiff, let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) { read.append(("png", png, "")) }
-            let ready = read
+            let ready = read, unread = waiting
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Tied to the note's id and the folder it was pasted in. Quitting meanwhile: left in the journal
                     // for the next launch. The folder changed, or the note can't take it now: put in from the
-                    // journal into that note in that folder. It leaves the journal only once its bytes and
-                    // reference are stored (NoteShelf.importEnd).
+                    // journal into that note in that folder. Files not read yet but still there wait, in the journal
+                    // and on the paper's Try again line. Nothing leaves the journal before its bytes and reference
+                    // are stored (NoteShelf.importEnd).
                     let sameRoot = !self.store.switching && self.store.root == pastedIn
-                    var end = NoteShelf.importEnd(read: !ready.isEmpty, quitting: self.store.quitting, sameRoot: sameRoot, taken: true)
+                    var end = NoteShelf.importEnd(read: !ready.isEmpty, waiting: !unread.isEmpty, quitting: self.store.quitting, sameRoot: sameRoot, taken: true)
                     var taken: (key: String, pictures: [(path: String, file: URL, caption: String)])?
                     if end == .accepted {
                         // Its read is over before its pictures go in, so the snapshot they make carries their bytes,
-                        // not their sources.
-                        self.store.endImport(noteID, token, journal: false)
+                        // not their sources (only the files still waiting).
+                        self.store.keepWaiting(noteID, token, unread)
                         if let now = self.store.notes.first(where: { $0.noteID == noteID && $0.version == nil }),
                            let accepted = self.store.acceptPictures(now.key, ready) {
                             taken = (now.key, accepted)
                         } else {
+                            self.store.keepWaiting(noteID, token, [])
                             self.store.holdImport(noteID, token, sources)
                             end = NoteShelf.importEnd(read: true, quitting: false, sameRoot: true, taken: false)
                         }
                     }
                     switch end {
                     case .keepForLaunch: return
+                    case .waiting:
+                        self.store.keepWaiting(noteID, token, unread)
+                        return self.say("That picture isn't downloaded yet: Try again on the note once it is.")
                     case .nothingRead:
                         self.store.endImport(noteID, token, journal: true)
                         self.letGoIfEmpty(self.store.notes.first { $0.noteID == noteID && $0.version == nil }?.key ?? "")
                         return self.say("Petal couldn't read that picture.")
                     case .putIn:
-                        return self.store.putIn(noteID, token, root: pastedIn) { stored in
-                            if stored { self.store.endImport(noteID, token, journal: false) }
-                            else { self.say("Petal keeps that picture and puts it in the note when it next starts.") }
+                        return self.store.putIn(noteID, token, root: pastedIn) { stored, left in
+                            if stored, left.isEmpty { return self.store.endImport(noteID, token, journal: false) }
+                            // Files still waiting stay with the note (on its paper, when it's in this folder).
+                            if stored { self.store.keepWaiting(noteID, token, left) }
+                            self.say(left.isEmpty ? "Petal keeps that picture and puts it in the note when it next starts."
+                                                  : "That picture isn't downloaded yet: Try again on the note once it is.")
                         }
                     case .accepted: break
                     }
@@ -880,10 +914,39 @@ final class NoteDesk {
                             file.body += (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + lines.joined(separator: "\n")
                         }
                     }
-                    NoteJournal.queue.async { NoteJournal.importsDone(noteID: noteID, token: token) }
+                    // Out of the journal: the files that went in; the ones still waiting stay.
+                    NoteJournal.queue.async { NoteJournal.importsDone(noteID: noteID, token: token, keeping: unread) }
+                    if !unread.isEmpty { self.say("A picture isn't downloaded yet: Try again on the note once it is.") }
                 }
             }
         }
+        return true
+    }
+
+    /// Try again on a paper: pictures whose bytes couldn't be written, and files of pastes not read yet (each read
+    /// again as a new paste, recorded before its old one leaves the journal).
+    func retryPictures(_ key: String) {
+        store.retryPictures(key)
+        guard let paper = store.paper(key) else { return }
+        for (token, sources) in store.takeWaiting(paper.noteID) {
+            let files = sources.compactMap { $0.path.map(URL.init(fileURLWithPath:)) }
+            if !files.isEmpty, importPictures(NoteImport(files: files, png: nil, tiff: nil, at: -1), into: key) {
+                store.endImport(paper.noteID, token, journal: true)
+            } else {
+                store.keepWaiting(paper.noteID, token, sources)
+            }
+        }
+    }
+
+    /// Remove on a paper: those pictures and waiting files let go.
+    func dropPictures(_ key: String) {
+        if let paper = store.paper(key) { store.dropWaiting(paper.noteID) }
+        store.dropPictures(key)
+    }
+
+    /// How many pictures the paper says couldn't be saved (or read yet).
+    func troubleCount(_ paper: PaperNote) -> Int {
+        (store.pictureTrouble[paper.key]?.count ?? 0) + (store.importTrouble[paper.noteID]?.values.reduce(0) { $0 + $1.count } ?? 0)
     }
 
     /// Pictures' references into a note's open editor, as ordinary text, at the cursor's place then; false when no
@@ -1142,31 +1205,63 @@ final class NoteDesk {
         guard on else { return }
         let ax = CGPoint(x: point.x, y: primaryHeight - point.y)
         let me = getpid()
-        let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-        let hit = info.first { entry in
-            guard (entry[kCGWindowLayer as String] as? Int) == 0, let pid = entry[kCGWindowOwnerPID as String] as? pid_t, pid != me,
-                  let bounds = entry[kCGWindowBounds as String] as? [String: CGFloat] else { return false }
-            return CGRect(x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0, width: bounds["Width"] ?? 0, height: bounds["Height"] ?? 0).contains(ax)
+        drops += 1
+        let drop = drops
+        // The window list is the WindowServer's: asked off the main thread, and what it found checked again before
+        // the note is made (Petal Notes still on, no newer drop, the app still running, the window still there).
+        DispatchQueue.global(qos: .userInitiated).async {
+            let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+            let hit = info.first { entry in
+                guard (entry[kCGWindowLayer as String] as? Int) == 0, let pid = entry[kCGWindowOwnerPID as String] as? pid_t, pid != me,
+                      let bounds = entry[kCGWindowBounds as String] as? [String: CGFloat] else { return false }
+                return CGRect(x: bounds["X"] ?? 0, y: bounds["Y"] ?? 0, width: bounds["Width"] ?? 0, height: bounds["Height"] ?? 0).contains(ax)
+            }
+            let pid = hit?[kCGWindowOwnerPID as String] as? pid_t
+            let number = hit?[kCGWindowNumber as String] as? CGWindowID
+            let title = hit?[kCGWindowName as String] as? String ?? ""
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard self.on, drop == self.drops else { return }
+                    guard let pid, let running = NSRunningApplication(processIdentifier: pid), !running.isTerminated else {
+                        var desk = NoteStick(kind: .desktop)
+                        desk.desktop = (NSScreen.screens.first { $0.frame.contains(point) }).flatMap { Spaces.desktop(on: $0) }
+                        desk.mode = self.app.docks.focusedDock?.mode?.id ?? ""
+                        self.make(on: desk, at: point)
+                        return
+                    }
+                    self.noteOnDropped(running, window: number, title: title, at: point, drop: drop)
+                }
+            }
         }
-        guard let hit, let pid = hit[kCGWindowOwnerPID as String] as? pid_t, let running = NSRunningApplication(processIdentifier: pid) else {
-            var desk = NoteStick(kind: .desktop)
-            desk.desktop = (NSScreen.screens.first { $0.frame.contains(point) }).flatMap { Spaces.desktop(on: $0) }
-            desk.mode = app.docks.focusedDock?.mode?.id ?? ""
-            make(on: desk, at: point)
-            return
-        }
-        let number = hit[kCGWindowNumber as String] as? CGWindowID
+    }
+
+    @ObservationIgnored private var drops = 0
+
+    /// The note for a drop on `running`'s window `number`, once what's in front of that app is read and the window
+    /// is checked to be still there (off the main thread).
+    private func noteOnDropped(_ running: NSRunningApplication, window number: CGWindowID?, title: String, at point: CGPoint, drop: Int) {
         let name = running.localizedName ?? ""
+        let pid = running.processIdentifier
         Self.read(running, mac: local.mac) { scene, read in
-            // The front window of that app is the one under the drop: its tab and file. Another of its windows: that
-            // window alone.
-            var scene = scene
-            if scene.window != number { scene.tab = nil; scene.file = ""; scene.window = number; scene.title = hit[kCGWindowName as String] as? String ?? "" }
-            if read.window == number { self.apply(scene, read: read) }
-            let offers = self.places(for: scene, read: read, appName: name)
-            if let first = offers.first(where: { $0.kind != .passage }) { self.make(on: first, at: point) }
-            // Another window than the one in front: it comes forward (the pointer stays), and the note with it.
-            if read.window != number || !running.isActive, let number { self.bringForward(pid: pid, window: number) }
+            guard self.on, drop == self.drops, !running.isTerminated, let number else { return }
+            DispatchQueue.global(qos: .userInitiated).async {
+                let alive = (CGWindowListCopyWindowInfo([.optionIncludingWindow], number) as? [[String: Any]])?
+                    .contains { ($0[kCGWindowOwnerPID as String] as? pid_t) == pid } ?? false
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard alive, self.on, drop == self.drops, !running.isTerminated else { return self.say("That window closed before the note could go on it.") }
+                        // The front window of that app is the one under the drop: its tab and file. Another of its
+                        // windows: that window alone.
+                        var scene = scene
+                        if scene.window != number { scene.tab = nil; scene.file = ""; scene.window = number; scene.title = title }
+                        if read.window == number { self.apply(scene, read: read) }
+                        let offers = self.places(for: scene, read: read, appName: name)
+                        if let first = offers.first(where: { $0.kind != .passage }) { self.make(on: first, at: point) }
+                        // Another window than the one in front: it comes forward (the pointer stays), and the note with it.
+                        if read.window != number || !running.isActive { self.bringForward(pid: pid, window: number) }
+                    }
+                }
+            }
         }
     }
 
@@ -1592,7 +1687,7 @@ struct NotePanelContent: View {
                       place: head.place, notebook: head.notebook, others: head.others, footer: desk.footer(paper),
                       keyboard: desk.keyboard == key, editorHeight: desk.heights[key] ?? 0, desk: desk,
                       conflict: desk.store.readOnly(paper), unsaved: desk.store.failed.contains(key),
-                      pictureTrouble: desk.store.pictureTrouble[key]?.count ?? 0)
+                      pictureTrouble: desk.troubleCount(paper))
                 .background {
                     // Open, the paper moves by its margins and letterhead's row, never by the writing (the editor
                     // takes its own clicks and drags).

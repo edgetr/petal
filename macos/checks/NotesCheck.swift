@@ -180,6 +180,21 @@ struct NotesCheck {
         expect(NoteShelf.importEnd(read: true, quitting: true, sameRoot: true, taken: true) == .keepForLaunch, "quitting: kept for the next launch")
         expect(NoteShelf.importEnd(read: false, quitting: false, sameRoot: true, taken: true) == .nothingRead, "nothing readable: let go, and said")
 
+        // Each file of a paste on its own: read, waiting (still there, not downloaded), or gone.
+        expect(NoteShelf.sourceEnd(read: true, exists: false) == .taken && NoteShelf.sourceEnd(read: false, exists: true) == .waiting
+               && NoteShelf.sourceEnd(read: false, exists: false) == .gone, "a paste's files end one by one")
+        expect(NoteShelf.importEnd(read: true, waiting: true, quitting: false, sameRoot: true, taken: true) == .accepted,
+               "one read, one waiting: the read one goes in (the waiting one stays, by SourceEnd)")
+        expect(NoteShelf.importEnd(read: false, waiting: true, quitting: false, sameRoot: true, taken: true) == .waiting,
+               "none read yet but still there: kept for Try again, never let go")
+
+        // The latest notes folder asked for wins, even one asked for during a switch.
+        let a = URL(fileURLWithPath: "/notes/A"), b = URL(fileURLWithPath: "/notes/B"), c = URL(fileURLWithPath: "/notes/C")
+        expect(NoteShelf.nextRoot(wanted: b, current: a, switching: false) == b, "another folder asked for: switched to")
+        expect(NoteShelf.nextRoot(wanted: c, current: a, switching: true) == nil, "asked again during a switch: waits for it")
+        expect(NoteShelf.nextRoot(wanted: c, current: b, switching: false) == c, "once the switch to B is done, C (asked meanwhile) follows")
+        expect(NoteShelf.nextRoot(wanted: b, current: b, switching: false) == nil, "the one in use: nothing")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

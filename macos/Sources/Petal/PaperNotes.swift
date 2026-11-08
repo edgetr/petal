@@ -1348,21 +1348,53 @@ final class NoteStore {
     /// it): put in from its journal entry, into its note in the folder it was pasted in (found by id; a copy beside
     /// it or a file of its own when that's what's safe: NoteJournal.recoverEntry), and out of the journal only once
     /// its bytes and reference are stored. Else it stays for the next launch.
-    func putIn(_ noteID: String, _ token: Int, root: URL, then done: @escaping @MainActor (Bool) -> Void) {
+    func putIn(_ noteID: String, _ token: Int, root: URL, then done: @escaping @MainActor (Bool, [NoteJournal.Import]) -> Void) {
         NoteJournal.queue.async {
             let entry = NoteJournal.read(NoteJournal.file(noteID))
             Self.io.async {
                 var stored = false
+                var waiting: [NoteJournal.Import] = entry?.imports?.filter { $0.token == token } ?? []
                 if var entry {
                     // Its text already in its note (the folder switch's drain wrote it): the base its lines go on.
                     let found = NoteStore.read(root).notes.filter { $0.noteID == noteID && $0.version == nil }
                     if found.count == 1, NoteStore.coordinatedRead(found[0].url) == entry.text { entry.landed = true }
-                    stored = NoteJournal.putIn(entry, token: token, root: root)
+                    (stored, waiting) = NoteJournal.putIn(entry, token: token, root: root)
                 }
-                if stored { NoteJournal.queue.async { NoteJournal.importsDone(noteID: noteID, token: token) } }
-                DispatchQueue.main.async { MainActor.assumeIsolated { if stored, root == self.root { self.reload() }; done(stored) } }
+                // Out of the journal: what went in; a file not read yet stays for its own next try.
+                let keeping = waiting
+                if stored { NoteJournal.queue.async { NoteJournal.importsDone(noteID: noteID, token: token, keeping: keeping) } }
+                DispatchQueue.main.async { MainActor.assumeIsolated { if stored, root == self.root { self.reload() }; done(stored, keeping) } }
             }
         }
+    }
+
+    /// Files of pastes that weren't read yet (iCloud still downloading them), by note id and paste: kept in the
+    /// journal and in every snapshot, and said on the paper with Try again and Remove until their pictures and links
+    /// are stored.
+    private(set) var importTrouble: [String: [Int: [NoteJournal.Import]]] = [:]
+
+    /// What of a paste is still waiting after its read: kept with the note (and in its snapshots), and on its paper.
+    func keepWaiting(_ noteID: String, _ token: Int, _ waiting: [NoteJournal.Import]) {
+        importsLoading[noteID]?[token] = nil
+        importTrouble[noteID]?[token] = nil
+        if !waiting.isEmpty {
+            importsLoading[noteID, default: [:]][token] = waiting
+            importTrouble[noteID, default: [:]][token] = waiting
+        }
+        if importsLoading[noteID]?.isEmpty == true { importsLoading[noteID] = nil }
+        if importTrouble[noteID]?.isEmpty == true { importTrouble[noteID] = nil }
+    }
+
+    /// Try again: the waiting files of a note's pastes, taken off its paper to be read again (a new paste each);
+    /// their old pastes leave the journal once the new ones are recorded.
+    func takeWaiting(_ noteID: String) -> [(token: Int, sources: [NoteJournal.Import])] {
+        guard let trouble = importTrouble.removeValue(forKey: noteID) else { return [] }
+        return trouble.sorted { $0.key < $1.key }.map { ($0.key, $0.value) }
+    }
+
+    /// Remove: a note's waiting files let go (out of memory and the journal).
+    func dropWaiting(_ noteID: String) {
+        for token in (importTrouble.removeValue(forKey: noteID) ?? [:]).keys { endImport(noteID, token, journal: true) }
     }
 
     /// Pictures still being read for the note: it isn't empty.

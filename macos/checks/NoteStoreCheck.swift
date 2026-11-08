@@ -257,13 +257,33 @@ struct NoteStoreCheck {
         try? Data("not yet".utf8).write(to: unreadable)
         var notYet = held
         notYet.imports = [NoteJournal.Import(token: 8, path: unreadable.path, ext: "png")]
-        expect(!NoteJournal.putIn(notYet, token: 8, root: root) && text(rejected) == rejectedText,
+        expect(!NoteJournal.putIn(notYet, token: 8, root: root).stored && text(rejected) == rejectedText,
                "a paste whose file can't be read yet: nothing written, kept")
-        expect(NoteJournal.putIn(held, token: 7, root: root) && text(rejected)?.contains(NoteShelf.assetsFolder(id: "JR")) == true,
+        expect(NoteJournal.putIn(held, token: 7, root: root).stored && text(rejected)?.contains(NoteShelf.assetsFolder(id: "JR")) == true,
                "put in from the journal: the note has the picture", text(rejected) ?? "nil")
         expect(NoteJournal.read(NoteJournal.file("JR", in: journal))?.imports?.count == 1, "and the journal still has it until it's said stored")
         NoteJournal.importsDone(noteID: "JR", token: 7, in: journal)
         expect(!fm.fileExists(atPath: NoteJournal.file("JR", in: journal).path), "stored: out of the journal")
+
+        // A paste of two files, one read and one not downloaded yet: the read one goes in, the other stays in the
+        // journal for its own next try.
+        let partial = notes.appending(path: "Partial.md")
+        let partialText = NoteFile(id: "JQ", body: "two pictures").serialized()
+        _ = NoteStore.create(partialText, at: partial, root: root)
+        let notDownloaded = root.appending(path: "cloud.png")
+        try? Data("not yet".utf8).write(to: notDownloaded)
+        var both = NoteJournal.Entry(noteID: "JQ", path: partial.path, base: nil, text: partialText)
+        both.landed = true
+        let waitingOne = NoteJournal.Import(token: 9, path: notDownloaded.path, ext: "png")
+        both.imports = [NoteJournal.Import(token: 9, path: source.path, ext: "png", caption: "source"), waitingOne]
+        NoteJournal.snapshot(both, in: journal)
+        let (stored, left) = NoteJournal.putIn(both, token: 9, root: root)
+        expect(stored && left == [waitingOne] && text(partial)?.contains(NoteShelf.assetsFolder(id: "JQ")) == true,
+               "the read file goes in, the waiting one is said", "\(left)")
+        NoteJournal.importsDone(noteID: "JQ", token: 9, keeping: left, in: journal)
+        expect(NoteJournal.read(NoteJournal.file("JQ", in: journal))?.imports == [waitingOne], "the waiting file stays in the journal")
+        NoteJournal.importsDone(noteID: "JQ", token: 9, in: journal)
+        expect(!fm.fileExists(atPath: NoteJournal.file("JQ", in: journal).path), "once it's in (or removed): out")
 
         // A text that landed while a picture it references failed: the snapshot stays with that picture's bytes,
         // and goes once the picture is saved.

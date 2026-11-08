@@ -935,16 +935,31 @@ enum NoteShelf {
         return out
     }
 
+    /// Each file of a paste, once its read is over: read (its picture goes in), not read but still there (an iCloud
+    /// file not downloaded yet: it waits, in the journal and on the paper's Try again line, until its picture and
+    /// link are stored), or gone (let go).
+    enum SourceEnd: Equatable { case taken, waiting, gone }
+
+    static func sourceEnd(read: Bool, exists: Bool) -> SourceEnd { read ? .taken : exists ? .waiting : .gone }
+
+    /// The notes folder to switch to now: the latest one asked for, when it isn't the one in use and no switch is
+    /// under way. A switch under way asks again when it's done, so a change made meanwhile is never forgotten.
+    static func nextRoot(wanted: URL, current: URL, switching: Bool) -> URL? {
+        switching || wanted.standardizedFileURL == current.standardizedFileURL ? nil : wanted
+    }
+
     /// How a paste's read ends: its pictures put in through the note's session (`accepted`); left in the journal
     /// for the next launch (quitting); put in from the journal into its note in the folder it was pasted in
     /// (`putIn`: the notes folder changed meanwhile, or the note couldn't take them now); or let go (nothing in it
-    /// could be read). Only `accepted` and `nothingRead` take it out of the journal before its bytes and reference
-    /// are stored.
-    enum ImportEnd: Equatable { case accepted, keepForLaunch, putIn, nothingRead }
+    /// could be read); `waiting`: nothing read yet, but a file of it is still there (not downloaded): it stays, in
+    /// the journal and on the paper's Try again line. Only `accepted` and `nothingRead` take any of it out of the
+    /// journal before its bytes and reference are stored, and `accepted` only the files that were read
+    /// (`SourceEnd`). `waiting` (as an argument): some file of it wasn't read but is still there.
+    enum ImportEnd: Equatable { case accepted, keepForLaunch, putIn, nothingRead, waiting }
 
-    static func importEnd(read: Bool, quitting: Bool, sameRoot: Bool, taken: Bool) -> ImportEnd {
+    static func importEnd(read: Bool, waiting: Bool = false, quitting: Bool, sameRoot: Bool, taken: Bool) -> ImportEnd {
         if quitting { return .keepForLaunch }
-        if !read { return .nothingRead }
+        if !read { return waiting ? .waiting : .nothingRead }
         if !sameRoot { return .putIn }
         return taken ? .accepted : .putIn
     }

@@ -37,6 +37,26 @@ struct NoteSelectionCheck {
         expect(shown?["count"] as? Int == 3 && shown?["onScreen"] as? Bool == true, "numbers and flags as they were")
         expect(NoteShield.shield(answer, index: .unavailable) == nil, "the vault unreadable: nothing told")
         expect(NoteShield.shield("Couldn't move it.", index: .unavailable) == nil, "not even a plain message")
+
+        // Search and lookup only see what the agent may see: prefixes of a saved card number or PIN find nothing.
+        let card = "4111111111111111", pin = "4821"
+        let vaultIndex = UIMap.SecretIndex([card, pin])
+        let matches = { (query: String, text: String) in query.isEmpty || text.localizedCaseInsensitiveContains(query) }
+        let notes = ["Travel\ncard \(card) for the hotel", "Door\ncode \(pin) at the gate", "Groceries\nmilk, bread"]
+        var probed: Set<Int> = []
+        for length in 1...card.count { probed.formUnion(NoteShield.search(String(card.prefix(length)), in: notes, index: vaultIndex, matches: matches) ?? [0]) }
+        expect(!probed.contains(0), "no prefix of a saved card number finds its note")
+        expect(NoteShield.search(pin, in: notes, index: vaultIndex, matches: matches) == [], "a saved PIN finds nothing")
+        expect(NoteShield.search("482", in: notes, index: vaultIndex, matches: matches) == [], "nor part of it")
+        expect(NoteShield.search("hotel", in: notes, index: vaultIndex, matches: matches) == [0], "words around it still find the note")
+        expect(NoteShield.search("", in: notes, index: vaultIndex, matches: matches) == [0, 1, 2], "an empty search lists them all")
+        expect(NoteShield.search("milk", in: notes, index: .unavailable, matches: matches) == nil, "the vault unreadable: no results at all")
+        let rows = [(id: "n1", key: "/n/Card \(card).md", title: "Card \(card)", version: false), (id: "n2", key: "/n/Door.md", title: "Door", version: false)]
+        expect(NoteShield.find("Card \(card)", rows: rows, index: vaultIndex) == .none && NoteShield.find("/n/Card \(card).md", rows: rows, index: vaultIndex) == .none,
+               "naming a guessed secret in a title or file finds nothing")
+        expect(NoteShield.find("Card (hidden)", rows: rows, index: vaultIndex) == .found(0) && NoteShield.find("n2", rows: rows, index: vaultIndex) == .found(1),
+               "a note found by what petal_notes showed of it, or its id")
+        expect(NoteShield.find("n2", rows: rows, index: .unavailable) == .unreadable, "the vault unreadable: nothing looked up")
         print("note selection: " + (failures == 0 ? "all checks passed" : "\(failures) failed"))
         if failures > 0 { exit(1) }
     }

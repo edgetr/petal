@@ -12,6 +12,28 @@ enum NoteShield {
         return clean(value, index)
     }
 
+    /// The notes a search finds (their places in `texts`), matched only on what the agent may see of each (redacted
+    /// with a settled index): whether a note matches never says anything about a secret's characters, so searching
+    /// longer and longer prefixes of a card number or PIN finds nothing. Nil while the vault can't be read.
+    static func search(_ query: String, in texts: [String], index: UIMap.SecretIndex, matches: (String, String) -> Bool) -> [Int]? {
+        guard !index.unreadable else { return nil }
+        return texts.indices.filter { matches(query, index.redacted(texts[$0])) }
+    }
+
+    enum Lookup: Equatable { case found(Int), none, unreadable }
+
+    /// The note an agent names (`rows`: each note's id, file path and title, and whether it's a version): its id, its
+    /// path or its title, each compared as the agent may see it (redacted), never the raw text, so naming a guess
+    /// can't tell whether a secret is in a title or file name.
+    static func find(_ name: String, rows: [(id: String, key: String, title: String, version: Bool)], index: UIMap.SecretIndex) -> Lookup {
+        guard !index.unreadable else { return .unreadable }
+        let shown = rows.map { (id: index.redacted($0.id), key: index.redacted($0.key), title: index.redacted($0.title), version: $0.version) }
+        if let at = shown.firstIndex(where: { !$0.version && $0.id == name }) { return .found(at) }
+        if let at = shown.firstIndex(where: { $0.key == name }) { return .found(at) }
+        if let at = shown.firstIndex(where: { !$0.version && $0.title.localizedCaseInsensitiveCompare(name) == .orderedSame }) { return .found(at) }
+        return .none
+    }
+
     private static func clean(_ value: Any, _ index: UIMap.SecretIndex) -> Any {
         switch value {
         case let text as String: return index.redacted(text)
