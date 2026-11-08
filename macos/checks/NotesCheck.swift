@@ -230,13 +230,25 @@ struct NotesCheck {
                && !NoteShelf.mayTrashFile(.text("x"), foundID: "B", expected: "A", texts: ["x"]), "only that note, as Petal last saw it")
         expect(NoteShelf.needsID("file:Inbox/x.md") && !NoteShelf.needsID("5F3A-1"), "an id taken from a path needs a real one before a change")
 
-        // An identity change is followed by every holder: an id given to an id-less note, however many times.
-        let aliases = ["file:Inbox/a.md": "U1", "U1": "U2", "loop-a": "loop-b", "loop-b": "loop-a"]
-        expect(NoteShelf.current("file:Inbox/a.md", aliases: aliases) == "U2" && NoteShelf.current("X", aliases: aliases) == "X",
-               "an old id leads to the note's id now")
-        expect(["loop-a", "loop-b"].contains(NoteShelf.current("loop-a", aliases: aliases)), "never round in circles")
-        expect(NoteShelf.editorKeeps(typedIn: "file:Inbox/a.md", paper: "U2", aliases: aliases), "the editor keeps its typing when its note is given an id")
-        expect(!NoteShelf.editorKeeps(typedIn: "U2", paper: "OTHER", aliases: aliases), "another note in the paper: saved first, then read")
+        // An identity change is followed by every holder, scoped to the file: an id-less note's path id follows only
+        // from that very file (its volume and inode), so a new file at that path never resolves to the moved note.
+        let todo = "file:Inbox/Todo.md"
+        let aliases = [NoteShelf.holderKey(id: todo, instance: "1:10"): "U1"]
+        expect(NoteShelf.current(todo, instance: "1:10", aliases: aliases) == "U1", "from the file that was given its id: followed")
+        expect(NoteShelf.current(todo, instance: "1:22", aliases: aliases) == todo, "from a new file at that path: not followed")
+        expect(NoteShelf.current("U9", instance: "", aliases: aliases) == "U9" && NoteShelf.holderKey(id: "U9", instance: "1:10") == "U9",
+               "a real id is never aliased or scoped")
+        expect(NoteShelf.editorKeeps(typedIn: todo, instance: "1:10", paper: "U1", aliases: aliases), "the editor keeps its typing when its note is given an id")
+        expect(!NoteShelf.editorKeeps(typedIn: todo, instance: "1:22", paper: "U1", aliases: aliases), "an editor on the new file at that path isn't that note")
+        expect(!NoteShelf.editorKeeps(typedIn: "U2", instance: "", paper: "OTHER", aliases: aliases), "another note in the paper: saved first, then read")
+        // A tool's request kept on the old file: follows it to where it moved; a request on the new file stays there.
+        let nowPapers = [(key: "/n/Inbox/Todo.md", id: todo, instance: "1:22"), (key: "/n/Away/Todo.md", id: "U1", instance: "1:10")]
+        expect(NoteShelf.follow(key: "/n/Inbox/Todo.md", id: todo, instance: "1:10", unique: true, aliases: aliases, now: nowPapers) == 1,
+               "the moved note, given its id, followed from its own file")
+        expect(NoteShelf.follow(key: "/n/Inbox/Todo.md", id: todo, instance: "1:22", unique: true, aliases: aliases, now: nowPapers) == 0,
+               "the new file at the old path is itself")
+        expect(NoteShelf.follow(key: "/n/Inbox/Todo.md", id: todo, instance: "1:10", unique: true, aliases: [:], now: [nowPapers[0]]) == nil,
+               "the old file gone without an id given, a new one at its path: refused, never redirected")
 
         // An agent's picture number: only 1...count, never arithmetic on what it sent first.
         expect(NoteTold.pictureIndex(1, count: 2) == 0 && NoteTold.pictureIndex(2, count: 2) == 1, "pictures 1 and 2 of two")
@@ -256,6 +268,22 @@ struct NotesCheck {
         expect(NoteShelf.passageSpot(words: nil, visible: textShown) == .unknown, "not found: passage moved")
         expect(NoteShelf.passageSpot(words: CGRect(x: 10, y: 90, width: 100, height: 16), visible: textShown) == .line(CGRect(x: 10, y: 90, width: 100, height: 16)),
                "partly in view: at its line")
+
+        // The passage watcher measures a remembered range only while it still holds the quote.
+        let words = CGRect(x: 0, y: 10, width: 50, height: 14)
+        expect(NoteShelf.passagePoll(read: "the sentence", quote: "the sentence", words: words, rescanned: false) == .still(words), "quote still there: at its words")
+        expect(NoteShelf.passagePoll(read: "text put in b", quote: "the sentence", words: words, rescanned: false) == .relocate,
+               "text put in before it: found again by quote and context")
+        expect(NoteShelf.passagePoll(read: "the sentence", quote: "the sentence", words: nil, rescanned: false) == .relocate, "no bounds: found again")
+        expect(NoteShelf.passagePoll(read: nil, quote: "the sentence", words: words, rescanned: true) == .moved,
+               "found again and still not there: moved (no pin), never the text's frame")
+        expect(NoteShelf.passagePoll(read: "the sentence", quote: "the sentence", words: words, rescanned: true) == .still(words), "found again: at its words")
+        // And runs only while a passage note is here; a busy tick is skipped, never the end of watching.
+        expect(NoteShelf.passageWatch(wanted: [], known: ["a"], busy: false) == .stop, "no passage note here: stop")
+        expect(NoteShelf.passageWatch(wanted: ["a"], known: ["a"], busy: true) == .skip, "a slow measurement: skip this tick, keep watching")
+        expect(NoteShelf.passageWatch(wanted: ["a", "b"], known: ["a"], busy: false) == .find, "a passage note not looked for yet: find it")
+        expect(NoteShelf.passageWatch(wanted: ["a"], known: ["a", "b"], busy: false) == .measure, "all known: measure")
+        expect(NoteShelf.passageWatch(wanted: [], known: [], busy: true) == .stop, "the last passage note re-stuck elsewhere: stop, even mid-measure")
 
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])

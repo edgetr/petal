@@ -944,21 +944,38 @@ enum NoteShelf {
         return name
     }
 
-    /// A note's id as it is now: an id-less note given its own (`aliases`: old → new, published when it happens)
-    /// is followed, however many times, never round in circles. Every holder of an id (the editor, a paste being
-    /// read, a tool's request) looks it up through this before it acts.
-    static func current(_ id: String, aliases: [String: String]) -> String {
-        var now = id
-        var seen: Set<String> = [id]
-        while let next = aliases[now], seen.insert(next).inserted { now = next }
-        return now
+    /// What a holder keeps to name a note: its own id; an id-less note's (taken from its path, which another file can
+    /// have later) only together with its file's instance (its volume and inode), so a new file at that path is
+    /// never taken for it.
+    static func holderKey(id: String, instance: String) -> String { needsID(id) ? id + "|" + instance : id }
+
+    /// A note's id as it is now: an id-less note given its own is followed only from that very file (`aliases`:
+    /// holder key → new id, published when it happens); its path's id is retired, so another file at that path
+    /// never resolves to it. A real id is never aliased.
+    static func current(_ id: String, instance: String, aliases: [String: String]) -> String {
+        aliases[holderKey(id: id, instance: instance)] ?? id
     }
 
-    /// Whether an open editor keeps what's typed across an update: the same note (its id, followed) whatever its key
-    /// is now (a move, a rename, an id given). Another note in it: what's typed is saved into the note it was typed
-    /// in first, then the other is read.
-    static func editorKeeps(typedIn: String, paper: String, aliases: [String: String]) -> Bool {
-        current(typedIn, aliases: aliases) == current(paper, aliases: aliases)
+    /// The paper a request kept (its file `key`, the note's id and that file's instance) as the notes are now: by
+    /// holder keys throughout (NoteShelf.holderKey), so an id-less note's path id never names another file that took
+    /// its path; an id given meanwhile is followed from that very file; moved, by its id only when it named one
+    /// paper from the start (`unique`) and still does. `now`: each paper's key, id and file instance.
+    static func follow(key: String, id: String, instance: String, unique: Bool, aliases: [String: String],
+                       now: [(key: String, id: String, instance: String)]) -> Int? {
+        let current = current(id, instance: instance, aliases: aliases)
+        let holder = current == id ? holderKey(id: id, instance: instance) : current
+        let rows = now.map { (key: $0.key, id: holderKey(id: $0.id, instance: $0.instance)) }
+        if let at = pick(key: key, id: holder, now: rows, unique: unique) { return at }
+        guard current != id, unique else { return nil }
+        let same = rows.indices.filter { rows[$0].id == holder }
+        return same.count == 1 ? same[0] : nil
+    }
+
+    /// Whether an open editor keeps what's typed across an update: the same note (its id followed from its file)
+    /// whatever its key is now (a move, a rename, an id given). Another note in it: what's typed is saved into the
+    /// note it was typed in first, then the other is read.
+    static func editorKeeps(typedIn: String, instance: String, paper: String, aliases: [String: String]) -> Bool {
+        current(typedIn, instance: instance, aliases: aliases) == paper
     }
 
     /// Where a passage's sentence is while its page scrolls (Accessibility's coordinates): at its line inside the
@@ -971,6 +988,28 @@ enum NoteShelf {
         if words.maxY <= visible.minY { return .above }
         if words.minY >= visible.maxY { return .below }
         return .line(words)
+    }
+
+    /// A passage measured again: its remembered range still holds its quote and has bounds (`still`, at those
+    /// words); else it's found again by its quote and the words around it (`relocate`); found again and still not
+    /// there, it moved (no pin, "passage moved"), never the whole text's frame instead.
+    enum PassagePoll: Equatable { case still(CGRect), relocate, moved }
+
+    static func passagePoll(read: String?, quote: String, words: CGRect?, rescanned: Bool) -> PassagePoll {
+        if let read, !quote.isEmpty, read == quote, let words { return .still(words) }
+        return rescanned ? .moved : .relocate
+    }
+
+    /// One tick of the passage watcher: stop when no passage note is on the window (`wanted` empty); find again
+    /// when one has no anchor and wasn't already found to have moved (`known`: anchored or moved); skip while a
+    /// measurement is still under way; else measure.
+    enum WatchStep: Equatable { case stop, find, skip, measure }
+
+    static func passageWatch(wanted: Set<String>, known: Set<String>, busy: Bool) -> WatchStep {
+        if wanted.isEmpty { return .stop }
+        if busy { return .skip }
+        if !wanted.isSubset(of: known) { return .find }
+        return .measure
     }
 
     /// The paper a lookup chose (its file `key` and note `id`), as the notes are now: that same file while it's still

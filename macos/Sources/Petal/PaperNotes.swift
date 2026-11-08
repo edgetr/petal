@@ -17,6 +17,12 @@ struct PaperNote: Identifiable, Equatable {
     /// Read from the folder with places that followed their files' bookmarks: worth writing back (through its
     /// session, fenced by `revision`).
     var followed = false
+    /// The file itself (its volume and inode, read with the folder): what an id-less note's path-derived id is
+    /// scoped to, since another file can take its path later.
+    var instance = ""
+
+    /// What a holder keeps to name this note (NoteShelf.holderKey).
+    var holder: String { NoteShelf.holderKey(id: noteID, instance: instance) }
 
     var key: String { version.map { url.path + "#" + $0 } ?? url.path }
     var id: String { key }
@@ -354,6 +360,7 @@ final class NoteStore {
             var paper = notes[index]
             paper.url = there.url
             paper.notebook = there.notebook
+            paper.instance = there.instance
             notes[index] = paper
             if let at = changedAt.removeValue(forKey: old) { changedAt[new] = at }
             if let session = sessionAt(old, noteID: paper.noteID), let next = NoteShelf.rekey(keys, session: session.id, from: old, to: new) {
@@ -416,6 +423,7 @@ final class NoteStore {
                 // A file with no id of its own is known by where it is under the notes' folder, never its name alone.
                 let fallback = NoteShelf.fallbackID(relativePath: NoteShelf.relative(url.path, to: root.path) ?? name + "/" + url.lastPathComponent)
                 var paper = PaperNote(file: NoteFile.parse(text, fallbackID: fallback, fallbackDate: date), url: url, notebook: name, revision: text)
+                paper.instance = instance(of: url)
                 paper.followed = followBookmarks(&paper.file)
                 here.append(paper)
                 // The versions iCloud kept from a change made on two Macs at once: each one a paper of its own.
@@ -461,6 +469,13 @@ final class NoteStore {
             }
         }
         return changed
+    }
+
+    /// A file's own identity on this Mac: its volume and inode ("dev:ino"); empty when it can't be read.
+    nonisolated static func instance(of url: URL) -> String {
+        var info = stat()
+        guard stat(url.path, &info) == 0 else { return "" }
+        return "\(info.st_dev):\(info.st_ino)"
     }
 
     /// A file's text, read the way iCloud Drive wants (it may need to bring the file down first). Off the main thread.
@@ -1281,8 +1296,10 @@ final class NoteStore {
         if let loading = importsLoading.removeValue(forKey: old) { importsLoading[new] = loading }
         if let trouble = importTrouble.removeValue(forKey: old) { importTrouble[new] = trouble }
         touch(key)
-        aliases[old] = new
-        onIdentity(old, new)
+        // Followed only from this very file: its path's id is retired (another file there later is another note).
+        let oldHolder = NoteShelf.holderKey(id: old, instance: paper.instance)
+        aliases[oldHolder] = new
+        onIdentity(old, oldHolder, new)
         enqueue(session, .write(text: text, base: base), done: nil)
         snapshot(paper, text: text, session: session)
         NoteJournal.queue.async { NoteJournal.forget(noteID: old) }
@@ -1290,16 +1307,17 @@ final class NoteStore {
 
     /// A note given its own id (`ensureID`): old id, new id. Published to every holder (the desk's records and
     /// handles) and kept in `aliases`, which the editor, a paste being read and a tool's request follow.
-    @ObservationIgnored var onIdentity: @MainActor (String, String) -> Void = { _, _ in }
+    /// (old id, old holder key, new id).
+    @ObservationIgnored var onIdentity: @MainActor (String, String, String) -> Void = { _, _, _ in }
 
     /// Ids notes had before they were given their own: old → new, for this run.
     @ObservationIgnored private(set) var aliases: [String: String] = [:]
 
-    /// A note's id as it is now (NoteShelf.current).
-    func currentID(_ id: String) -> String { NoteShelf.current(id, aliases: aliases) }
+    /// A note's id as it is now, from the id and file instance a holder kept (NoteShelf.current).
+    func currentID(_ id: String, instance: String) -> String { NoteShelf.current(id, instance: instance, aliases: aliases) }
 
-    /// Whether two ids are the same note now.
-    func sameNote(_ a: String, _ b: String) -> Bool { NoteShelf.editorKeeps(typedIn: a, paper: b, aliases: aliases) }
+    /// Whether an editor that has `a` from file `instance` still has the note `b`.
+    func sameNote(_ a: String, instance: String, _ b: String) -> Bool { NoteShelf.editorKeeps(typedIn: a, instance: instance, paper: b, aliases: aliases) }
 
     /// What was typed into a paper that turned read only as the person typed: kept beside its file, never lost.
     func keepAside(_ key: String, body: String) {
@@ -1606,12 +1624,13 @@ struct NoteLocal: Codable, Equatable {
         return made
     }
 
-    /// A note known by a new id (an id-less note given its own): everything kept for it follows.
-    mutating func rekeyID(_ old: String, _ new: String) {
+    /// A note known by a new id (an id-less note given its own): everything kept for it follows; its handle (kept by
+    /// its holder key: the old id and that file) too, so the old path's id never names it again.
+    mutating func rekeyID(_ old: String, holder: String, _ new: String) {
         if let spot = spots.removeValue(forKey: old) { spots[new] = spot }
         if let point = desk.removeValue(forKey: old) { desk[new] = point }
         shown = shown.map { $0 == old ? new : $0 }
-        if let handle = handles?.removeValue(forKey: old) { handles?[new] = handle }
+        if let handle = handles?.removeValue(forKey: holder) { handles?[new] = handle }
     }
 
     static var file: URL { Config.supportFolder.appending(path: "notes-state.json") }

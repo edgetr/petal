@@ -78,9 +78,9 @@ final class NoteDesk {
         store.switchRoot(to: root)
         store.onChange = { [weak self] in self?.refresh() }
         store.onRekey = { [weak self] old, paper in self?.rekey(old, to: paper) }
-        store.onIdentity = { [weak self] old, new in
+        store.onIdentity = { [weak self] old, holder, new in
             guard let self else { return }
-            self.local.rekeyID(old, new)
+            self.local.rekeyID(old, holder: holder, new)
             self.local.save()
         }
         store.onProblem = { [weak self] text in self?.say(text) }
@@ -424,17 +424,33 @@ final class NoteDesk {
         }
         guard !wanted.isEmpty else { return stopWatchingPassages() }
         let pid = scene.pid
-        let ticket = looks
+        let ticket = looks, turn = passageTurn
+        finding = true
+        rescanned = Date()
         Self.queue.async {
             let anchors = Self.passageAnchors(pid: pid, window: window, wanted.map { $0.1 })
             let measured = anchors.map { $0.map(Self.measure) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard ticket == self.looks else { return }
-                    self.anchors = [:]
-                    for (index, item) in wanted.enumerated() { if let anchor = anchors[index] { self.anchors[item.0] = anchor } }
-                    self.place(Dictionary(uniqueKeysWithValues: wanted.indices.map { (wanted[$0].0, measured[$0]) }))
-                    self.watchPassages()
+                    self.finding = false
+                    guard ticket == self.looks, turn == self.passageTurn else { return }
+                    var spots: [String: (words: CGRect?, visible: CGRect?)?] = [:]
+                    for (index, item) in wanted.enumerated() {
+                        // Found again by its quote: there (its pin and line), or moved (none; never the text's frame).
+                        let measure = measured[index]
+                        switch NoteShelf.passagePoll(read: measure?.read, quote: item.1.quote, words: measure?.words, rescanned: true) {
+                        case .still(let words):
+                            self.anchors[item.0] = anchors[index]
+                            self.lost.remove(item.0)
+                            spots[item.0] = (words, measure?.visible)
+                        default:
+                            self.anchors[item.0] = nil
+                            self.lost.insert(item.0)
+                            spots[item.0] = nil
+                        }
+                    }
+                    self.place(spots)
+                    self.reconcilePassages()
                 }
             }
         }
@@ -466,17 +482,37 @@ final class NoteDesk {
     }
 
     /// The elements and ranges where passage notes' sentences were found (this window), measured again on a light
-    /// timer while any are here, so their tabs and pins follow the page as it scrolls. One gone (the page redrawn)
-    /// finds them all again, debounced.
+    /// timer while any passage note is on it, so their tabs and pins follow the page as it scrolls. A range that no
+    /// longer holds its quote (text put in before it) is found again; found again and not there, it moved.
     @ObservationIgnored private var anchors: [String: PassageAnchor] = [:]
+    /// Passages found to have moved: not looked for again until the window or the notes change.
+    @ObservationIgnored private var lost: Set<String> = []
     @ObservationIgnored private var passageTimer: Timer?
     @ObservationIgnored private var measuring = false
+    @ObservationIgnored private var finding = false
+    /// Bumped whenever watching stops or what's watched changes: measurements still under way are dropped.
+    @ObservationIgnored private var passageTurn = 0
 
-    private func watchPassages() {
-        guard !anchors.isEmpty, on, listening else { return stopWatchingPassages() }
-        guard passageTimer == nil else { return }
-        passageTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.measurePassages() }
+    /// The passage notes on the window in front now.
+    private var passagesHere: Set<String> {
+        Set(here.compactMap { key, index in
+            store.paper(key).flatMap { $0.file.places.indices.contains(index) && $0.file.places[index].kind == .passage ? key : nil }
+        })
+    }
+
+    /// The one place passage watching follows what's placed: whenever placements change (every layout). What's no
+    /// longer a passage note here is let go (its anchor and any measurement of it); none left, the watcher stops.
+    private func reconcilePassages() {
+        let wanted = passagesHere
+        let before = Set(anchors.keys).union(lost)
+        anchors = anchors.filter { wanted.contains($0.key) }
+        lost = lost.intersection(wanted)
+        if Set(anchors.keys).union(lost) != before { passageTurn += 1 }
+        guard !wanted.isEmpty, on, listening else { return stopWatchingPassages() }
+        if passageTimer == nil {
+            passageTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.tickPassages() }
+            }
         }
     }
 
@@ -484,25 +520,46 @@ final class NoteDesk {
         passageTimer?.invalidate()
         passageTimer = nil
         anchors = [:]
+        lost = []
+        passageTurn += 1
+    }
+
+    /// One tick (NoteShelf.passageWatch): stop, find again, skip while busy, or measure.
+    private func tickPassages() {
+        guard on, listening else { return stopWatchingPassages() }
+        switch NoteShelf.passageWatch(wanted: passagesHere, known: Set(anchors.keys).union(lost), busy: measuring || finding) {
+        case .stop: stopWatchingPassages()
+        case .skip: break
+        case .find: if let scene, Date().timeIntervalSince(rescanned) > 1 { findPassages(scene) }
+        case .measure: measurePassages()
+        }
     }
 
     private func measurePassages() {
-        guard !measuring, !anchors.isEmpty, on, listening else { return stopWatchingPassages() }
+        guard !anchors.isEmpty else { return }
         measuring = true
         let watched = anchors
-        let ticket = looks
+        let quotes = Dictionary(uniqueKeysWithValues: watched.keys.compactMap { key in
+            here[key].flatMap { index in store.paper(key).map { (key, $0.file.places[index].quote) } }
+        })
+        let ticket = looks, turn = passageTurn
         Self.queue.async {
             let measured = watched.mapValues(Self.measure)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.measuring = false
-                    guard ticket == self.looks else { return }
-                    if measured.values.contains(where: { $0.words == nil }), let scene = self.scene {
-                        // An element gone or moved in the page: find them all again (not more than once a second).
-                        if Date().timeIntervalSince(self.rescanned) > 1 { self.rescanned = Date(); self.findPassages(scene) }
-                        return
+                    guard ticket == self.looks, turn == self.passageTurn else { return }
+                    var spots: [String: (words: CGRect?, visible: CGRect?)?] = [:]
+                    var relocate = false
+                    for (key, measure) in measured {
+                        switch NoteShelf.passagePoll(read: measure.read, quote: quotes[key] ?? "", words: measure.words, rescanned: false) {
+                        case .still(let words): spots[key] = (words, measure.visible)
+                        default: relocate = true
+                        }
                     }
-                    self.place(measured.mapValues { Optional($0) })
+                    self.place(spots)
+                    // A range that no longer holds its quote: found again by quote and context (once a second at most).
+                    if relocate, let scene = self.scene, Date().timeIntervalSince(self.rescanned) > 1 { self.findPassages(scene) }
                 }
             }
         }
@@ -519,11 +576,18 @@ final class NoteDesk {
 
     /// A passage's words' bounds now, and the visible part of the scroll area holding them (Accessibility's
     /// coordinates). Off the main thread.
-    nonisolated static func measure(_ anchor: PassageAnchor) -> (words: CGRect?, visible: CGRect?) {
+    /// `read`: the text its remembered range holds now (checked against the quote: NoteShelf.passagePoll); never the
+    /// whole element's frame for its words.
+    nonisolated static func measure(_ anchor: PassageAnchor) -> (words: CGRect?, visible: CGRect?, read: String?) {
         var cf = anchor.range
         var words: CGRect?
+        var read: String?
         if let axRange = AXValueCreate(.cfRange, &cf) {
             var raw: CFTypeRef?
+            if AXUIElementCopyParameterizedAttributeValue(anchor.element, kAXStringForRangeParameterizedAttribute as CFString, axRange, &raw) == .success {
+                read = raw as? String
+            }
+            raw = nil
             if AXUIElementCopyParameterizedAttributeValue(anchor.element, kAXBoundsForRangeParameterizedAttribute as CFString, axRange, &raw) == .success,
                let raw, CFGetTypeID(raw) == AXValueGetTypeID() {
                 var rect = CGRect.zero
@@ -531,7 +595,6 @@ final class NoteDesk {
                 if rect.height > 1 { words = rect }
             }
         }
-        if words == nil { words = Windows.frame(of: anchor.element) }
         // The scroll area it's in: its frame is the part of the text that shows.
         var visible: CGRect?
         var element = anchor.element
@@ -540,7 +603,7 @@ final class NoteDesk {
             if (Windows.value(parent, kAXRoleAttribute) as String?) == kAXScrollAreaRole as String { visible = Windows.frame(of: parent); break }
             element = parent
         }
-        return (words, visible)
+        return (words, visible, read)
     }
 
     /// Where each passage's sentence is in the window: among the window's texts that hold its whole quote, the one
@@ -598,6 +661,7 @@ final class NoteDesk {
             for panel in tabPanels.values { panel.conceal() }
             for panel in pinPanels.values { panel.conceal() }
             for (key, panel) in panels where !isDesktop(key) { panel.conceal() }
+            reconcilePassages()
             return
         }
         let now = Date()
@@ -645,6 +709,7 @@ final class NoteDesk {
         }
         for (key, panel) in panels where !isDesktop(key) && !showing.contains(key) { panel.conceal() }
         drawPins(showing)
+        reconcilePassages()
     }
 
     /// The sketch's dashed line in the notebook's color from each showing note to its sentence, wherever the
@@ -975,7 +1040,7 @@ final class NoteDesk {
     func importPictures(_ items: NoteImport, into key: String) -> Bool {
         guard let paper = store.paper(key), !store.readOnly(paper) else { say("This note has two versions: keep one before adding pictures."); return false }
         guard let (token, sources) = store.beginImport(key, items) else { say("This note can't take pictures right now."); return false }
-        let noteID = paper.noteID
+        let noteID = paper.noteID, instance = paper.instance
         let pastedIn = store.root
         DispatchQueue.global(qos: .userInitiated).async {
             // Each file on its own (NoteShelf.sourceEnd): read, not read but still there (waiting), or gone (or not
@@ -1001,7 +1066,7 @@ final class NoteDesk {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // The note's id as it is now (one given its own meanwhile is followed: store.currentID).
-                    let noteID = self.store.currentID(noteID)
+                    let noteID = self.store.currentID(noteID, instance: instance)
                     // Tied to the note's id and the folder it was pasted in. Quitting meanwhile: left in the journal
                     // for the next launch. The folder changed, or the note can't take it now: put in from the
                     // journal into that note in that folder. Files not read yet but still there wait, in the journal
@@ -1034,7 +1099,7 @@ final class NoteDesk {
                         return self.say("Petal couldn't read that picture.")
                     case .putIn:
                         return self.store.putIn(noteID, token, root: pastedIn) { stored, left in
-                            let noteID = self.store.currentID(noteID)
+                            let noteID = self.store.currentID(noteID, instance: instance)
                             if stored, left.isEmpty { return self.store.endImport(noteID, token, journal: false) }
                             // Files still waiting stay with the note (on its paper, when it's in this folder).
                             if stored { self.store.keepWaiting(noteID, token, left) }

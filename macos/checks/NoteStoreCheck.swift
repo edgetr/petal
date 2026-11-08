@@ -457,9 +457,12 @@ struct NoteStoreCheck {
         var local = NoteLocal()
         let handle = local.handle("H1")
         expect(handle.hasPrefix("n") && !handle.contains("H1") && local.handle("H1") == handle, "a note's handle: a token, the same each time")
-        let firstLook = local.handle("file:Inbox/Plain.md")
-        local.rekeyID("file:Inbox/Plain.md", "U2")
-        expect(local.handle("U2") == firstLook, "an id-less note given its id keeps its handle")
+        let plainHolder = NoteShelf.holderKey(id: "file:Inbox/Plain.md", instance: "1:10")
+        let firstLook = local.handle(plainHolder)
+        expect(local.handle(NoteShelf.holderKey(id: "file:Inbox/Plain.md", instance: "1:22")) != firstLook,
+               "a new file at an id-less note's path gets a handle of its own")
+        local.rekeyID("file:Inbox/Plain.md", holder: plainHolder, "U2")
+        expect(local.handle("U2") == firstLook && local.handles?[plainHolder] == nil, "an id-less note given its id keeps its handle, and its path's is retired")
     }
 
     /// An id given to an id-less note is an event every holder follows: a paste being read, the journal, the store's
@@ -480,16 +483,28 @@ struct NoteStoreCheck {
                                    isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?.representation(using: .png, properties: [:])
         let begun = store.beginImport(paper.key, NoteImport(files: [], png: png, tiff: nil, at: -1))
         _ = store.change(paper.key) { $0.body += "\nmore" }
-        let new = store.currentID(old)
+        let new = store.currentID(old, instance: paper.instance)
         NoteJournal.queue.sync {}
         let entry = NoteJournal.read(NoteJournal.file(new))
         expect(begun != nil && new != old && !NoteShelf.needsID(new), "the note is given its own id", new)
         expect(store.importing(paper.key) && entry?.imports?.contains { $0.token == begun?.token } == true,
                "the paste being read follows it (in memory and in the journal)", "\(String(describing: entry?.imports?.count))")
         expect(!fm.fileExists(atPath: NoteJournal.file(old).path) && entry?.text.contains("more") == true, "the journal entry is the new id's, with the typing")
-        expect(store.sameNote(old, new), "an editor holding the old id keeps its typing")
+        expect(store.sameNote(old, instance: paper.instance, new), "an editor holding the old id keeps its typing")
         if let begun { store.endImport(new, begun.token, journal: true) }
         NoteJournal.queue.sync {}
+        expect(!paper.instance.isEmpty, "the file's instance is read with the folder")
+
+        // The note moves away; a new id-less file appears at its old path: never the moved note.
+        var answered = false
+        store.move(paper.key, to: "Away", then: { _ in answered = true })
+        let until = Date().addingTimeInterval(5)
+        while !answered && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        try? Data("# Loose\nsomeone else's".utf8).write(to: file)
+        let again = NoteStore.read(root).notes.first { $0.notebook == "Follow" && $0.url.lastPathComponent == "Loose.md" }
+        expect(again != nil && again?.noteID == old && again?.instance != paper.instance, "a new file at the old path, with the old path's id",
+               "\(String(describing: again?.noteID)) \(String(describing: again?.instance)) was \(old) \(paper.instance); moved: \(FileManager.default.fileExists(atPath: root.appending(path: "Away/Loose.md").path))")
+        expect(store.currentID(old, instance: again?.instance ?? "") == old, "its id never resolves to the moved note")
     }
 
     /// An id-less note (a Markdown file made elsewhere) gets its own id in its file before Petal moves or changes it.
@@ -505,7 +520,7 @@ struct NoteStoreCheck {
         guard let paper = store.notes.first(where: { $0.url.lastPathComponent == "Shopping.md" }) else { return expect(false, "the id-less note is read") }
         expect(NoteShelf.needsID(paper.noteID), "read with an id taken from its path", paper.noteID)
         var renamed: (String, String)?
-        store.onIdentity = { old, new in renamed = (old, new) }
+        store.onIdentity = { old, _, new in renamed = (old, new) }
         var moved: PaperNote?
         var answered = false
         store.move(paper.key, to: "Elsewhere", then: { moved = $0; answered = true })

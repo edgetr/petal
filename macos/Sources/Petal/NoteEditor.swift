@@ -644,12 +644,14 @@ struct NoteEditorView: NSViewRepresentable {
     let importPictures: (NoteImport) -> Void
     let escape: () -> Void
     /// Whether two note ids are the same note now (an id-less note given its own is followed: NoteShelf.editorKeeps).
-    var sameNote: (String, String) -> Bool = { $0 == $1 }
+    var sameNote: (String, String, String) -> Bool = { a, _, b in a == b }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var saveLater: DispatchWorkItem?
         var key = ""
         var noteID = ""
+        /// The file it was read from (an id-less note's id means something only with it).
+        var instance = ""
         var body = ""
         /// The note's file as this editor last had it: what its edits are made on.
         var base: String?
@@ -742,6 +744,7 @@ struct NoteEditorView: NSViewRepresentable {
         }
         coordinator.key = paper.key
         coordinator.noteID = paper.noteID
+        coordinator.instance = paper.instance
         coordinator.body = paper.file.body
         coordinator.base = paper.revision
         text.importPictures = importPictures
@@ -772,11 +775,12 @@ struct NoteEditorView: NSViewRepresentable {
         let elsewhere = paper.file.body != coordinator.body && text.window?.firstResponder !== text
         // The same note, whatever happened to its identity since (moved, renamed, given its own id): what's typed
         // stays, and is saved through the note as it is now (this view's save), never through a key that's gone.
-        let same = sameNote(coordinator.noteID, paper.noteID)
+        let same = sameNote(coordinator.noteID, coordinator.instance, paper.noteID)
         if same {
             coordinator.parent = self
             coordinator.key = paper.key
             coordinator.noteID = paper.noteID
+            if !paper.instance.isEmpty { coordinator.instance = paper.instance }
             if elsewhere {
                 coordinator.flush(text)
                 load(text, coordinator)

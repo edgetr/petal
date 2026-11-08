@@ -110,7 +110,7 @@ extension NoteDesk {
                 }) { ["places": $0.file.places.map(self.told)] }
             }
             let also = args["also"] as? Bool ?? false
-            let ticket = Ticket(key: paper.key, noteID: paper.noteID, unique: store.notes.filter { $0.noteID == paper.noteID }.count == 1)
+            let ticket = Ticket(key: paper.key, noteID: paper.noteID, instance: paper.instance, unique: store.notes.filter { $0.holder == paper.holder }.count == 1)
             stickHere(kind: args["to"] as? String, live: live) { place in
                 guard let place else { return fail("Petal couldn't tell what's in front (or it changed while Petal looked): nothing was stuck.") }
                 // The same note after the wait, by its id (its path may be another note's by now).
@@ -135,7 +135,8 @@ extension NoteDesk {
             case .found(let at)?:
                 // The very paper the lookup chose (a conflict's copy stays that copy), as the notes are now; renamed
                 // meanwhile, followed by its id only when that id names one paper; its path now another note's, refused.
-                let chosen = Ticket(key: papers[at].key, noteID: papers[at].noteID, unique: papers.filter { $0.noteID == papers[at].noteID }.count == 1)
+                let chosen = Ticket(key: papers[at].key, noteID: papers[at].noteID, instance: papers[at].instance,
+                                    unique: papers.filter { $0.holder == papers[at].holder }.count == 1)
                 guard let paper = self.repick(chosen) else {
                     return fail("That note changed while Petal looked (renamed, or another note has its name now); petal_notes lists them.")
                 }
@@ -154,6 +155,8 @@ extension NoteDesk {
     struct Ticket {
         let key: String
         let noteID: String
+        /// The file it was (an id-less note's id means something only with it).
+        var instance = ""
         let unique: Bool
     }
 
@@ -161,13 +164,9 @@ extension NoteDesk {
     /// id only when that id named one paper at the start and still does.
     func repick(_ ticket: Ticket) -> PaperNote? {
         let now = store.notes
-        // Its id as it is now: an id-less note given its own meanwhile is followed (store.currentID).
-        let id = store.currentID(ticket.noteID)
-        if let at = NoteShelf.pick(key: ticket.key, id: id, now: now.map { ($0.key, $0.noteID) }, unique: ticket.unique) { return now[at] }
-        // Its key gone with the new id (a move made it): by that id, when the note had one paper and still has.
-        guard id != ticket.noteID, ticket.unique else { return nil }
-        let same = now.indices.filter { now[$0].noteID == id }
-        return same.count == 1 ? now[same[0]] : nil
+        // By holder keys (NoteShelf.follow): a new file at an id-less note's old path is never it.
+        return NoteShelf.follow(key: ticket.key, id: ticket.noteID, instance: ticket.instance, unique: ticket.unique, aliases: store.aliases,
+                                now: now.map { ($0.key, $0.noteID, $0.instance) }).map { now[$0] }
     }
 
     /// `work` with a settled vault index, on the shield's queue; nil when the vault kept changing.
@@ -233,7 +232,7 @@ extension NoteDesk {
     /// each paper of a conflict its own (the note's, then a token for that paper). Never a file name, path or an id
     /// taken from one.
     func handle(_ paper: PaperNote) -> String {
-        let base = noteHandle(paper.noteID)
+        let base = noteHandle(paper.holder)
         guard (store.conflicts[paper.noteID]?.count ?? 0) > 1 else { return base }
         let had = local.copies?[paper.key] != nil
         let copy = local.copyHandle(paper.key)
