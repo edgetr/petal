@@ -85,10 +85,11 @@ MainActor.assumeIsolated {
         }
     }
 
-    // One Petal at a time. A restart waits for the old one to finish giving the Dock back.
+    // One Petal at a time. A restart waits for the old one to finish giving the Dock back. Only docks count: the AI's
+    // tools, a command, a benchmark or a snapshot run alongside it (PetalProcess).
     let others = {
         NSRunningApplication.runningApplications(withBundleIdentifier: "tech.edgetr.petal")
-            .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+            .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && PetalProcess.isDock(pid: $0.processIdentifier) }
     }
     let deadline = Date().addingTimeInterval(5)
     while !others().isEmpty && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }

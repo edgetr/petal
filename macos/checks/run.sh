@@ -29,6 +29,10 @@ swiftc -parse-as-library -O -o "$out/agents" Sources/Petal/AgentAccess.swift Sou
 "$out/agents"
 swiftc -parse-as-library -O -o "$out/routinestop" Sources/Petal/RoutineStop.swift checks/RoutineStopCheck.swift
 "$out/routinestop"
+# Which Petal processes are a dock: a benchmark, snapshot, the AI's tools or a command never count as a second one
+# (PetalProcess; the Dock guard's shell test with pgrep and ps stood in for, never a real Petal).
+swiftc -parse-as-library -O -o "$out/petalprocess" Sources/Petal/PetalProcess.swift checks/PetalProcessCheck.swift
+"$out/petalprocess"
 # IPC.swift on a throwaway socket in the temporary folder (never Petal's): a request whose client hangs up first is
 # never done.
 swiftc -parse-as-library -O -o "$out/ipc" Sources/Petal/IPC.swift Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/IPCCheck.swift

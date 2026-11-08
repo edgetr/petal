@@ -91,7 +91,7 @@ enum Doctor {
         // macOS's Dock: never left hidden without Petal running.
         let dock = Config.parse(folder.appending(path: "dock.json")) ?? [:]
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-            .contains { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+            .contains { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && PetalProcess.isDock(pid: $0.processIdentifier) }
         if SystemDock.isReplaced && !running {
             if fix { SystemDock.restore() }
             note("error", "dock", "macOS's Dock is hidden but Petal isn't running.", fixed: fix ? "gave macOS its Dock back" : nil)

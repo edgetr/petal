@@ -143,13 +143,14 @@ enum DockGuard {
         let off = Config.supportFolder.appending(path: "quiet-off.txt").path
         let script = """
         app='\(app)'; backup='\(backup)'; plist='\(plist.path)'; quiet='\(quiet)'; off='\(off)'
-        if [ -f "$quiet" ] && ! pgrep -qx Petal; then
+        \(PetalProcess.shellDockRunning)
+        if [ -f "$quiet" ] && ! petal_dock; then
           if grep -q shortcut "$quiet"; then mkdir -p "$(dirname "$off")"; printf off > "$off"; shortcuts run '\(Quiet.shortcutName)' --input-path "$off"; fi
           rm -f "$quiet"
         fi
         if [ ! -d "$app" ] && [ ! -f "$backup" ]; then launchctl bootout gui/$(id -u)/\(label) 2>/dev/null; rm -f "$plist"; exit 0; fi
         [ -f "$backup" ] || exit 0
-        if [ -d "$app" ] && pgrep -qx Petal; then exit 0; fi
+        if [ -d "$app" ] && petal_dock; then exit 0; fi
         if [ "$(plutil -extract autohide raw -o - "$backup" 2>/dev/null)" = "true" ]; then
           defaults write com.apple.dock autohide -bool true
         else
