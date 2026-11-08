@@ -111,10 +111,27 @@ struct NotesCheck {
         expect(NoteShelf.save(disk: "B", text: "T", base: nil) == .keepBoth, "a new note never goes over a file that's there")
         expect(NoteShelf.save(disk: "T", text: "T", base: "A") == .already && NoteShelf.save(disk: "T", text: "T", base: nil) == .already,
                "a file that already says it (a write whose answer never came back, a quit's last try) is done, never a conflict")
-        // An edit made on a text this note's own writes carried (one that failed too) was made on what the file said
-        // before them; any other base is as read.
-        expect(NoteShelf.effectiveBase("mine", ours: ["mine".hashValue], anchor: "disk") == "disk" && NoteShelf.effectiveBase("read", ours: ["mine".hashValue], anchor: "disk") == "read"
-               && NoteShelf.effectiveBase(nil, ours: [], anchor: "disk") == nil, "an edit's real base")
+        // The base rule: a write lands only on the exact text it was made on, or where its text already is.
+        expect(NoteShelf.save(disk: "R1", text: "T2", base: "R1") == .write, "made on what's there: lands")
+        expect(NoteShelf.save(disk: "R0", text: "T2", base: "T1") == .keepBoth, "made on a text that never landed (a write that failed): a copy, never over")
+        expect(NoteShelf.save(disk: "R2", text: "T2", base: "R1") == .keepBoth, "made on an older one: a copy")
+
+        // Pictures: bytes first, then their reference, as ordinary text.
+        expect(NoteShelf.pictureReference(bytesWritten: true, editorOpen: true, quitting: false) == .editor, "bytes in, editor open: into the editor")
+        expect(NoteShelf.pictureReference(bytesWritten: true, editorOpen: false, quitting: false) == .write,
+               "folded before the import finished: a based write at the end of the note")
+        expect(NoteShelf.pictureReference(bytesWritten: false, editorOpen: true, quitting: false) == .wait, "bytes not in yet: no reference, tried again")
+        expect(NoteShelf.pictureReference(bytesWritten: true, editorOpen: true, quitting: true) == .write, "quitting with the bytes in: the reference is written")
+        expect(NoteShelf.pictureReference(bytesWritten: false, editorOpen: false, quitting: true) == .unsaved,
+               "quitting before the import: the pictures and the note go to Unsaved notes")
+        expect(!NoteShelf.mayTrash(bodyEmpty: true, picturesPending: true) && NoteShelf.mayTrash(bodyEmpty: true, picturesPending: false)
+               && !NoteShelf.mayTrash(bodyEmpty: false, picturesPending: false), "a new note with a picture on its way is never trashed")
+
+        // A note's pictures moving into a notebook that has a folder by their name.
+        expect(NoteShelf.assetPlan(source: ["a.png": 1, "b.png": 2], destination: [:]) == .move(["a.png", "b.png"]), "all of them, into an empty place")
+        expect(NoteShelf.assetPlan(source: ["a.png": 1, "b.png": 2], destination: ["a.png": 1]) == .move(["b.png"]), "the same picture there already stays")
+        expect(NoteShelf.assetPlan(source: ["a.png": 1], destination: ["a.png": 9]) == .conflict("a.png"), "another picture in the way: nothing moves")
+
         // Keep this one: only on exactly what was shown.
         let shown = ["file:/n/A.md": "a", "version:v1": "b"]
         expect(NoteShelf.keepAllowed(shown: shown, now: ["file:/n/A.md": "a", "version:v1": "b"]), "unchanged: kept")
@@ -297,6 +314,18 @@ struct NotesCheck {
                "left out, it falls back to its other places")
         // Safari's only tab (no tab strip) can't be told apart: never offered as a tab.
         expect(!NoteTab(url: "https://a.example", title: "").known, "a tab with no id or button isn't known")
+
+        // Windows found by title after their app restarted: decided over every candidate together.
+        var newTab1 = NoteStick(kind: .window)
+        newTab1.app = "com.example.browser"; newTab1.title = "New Tab"; newTab1.mac = "mac-1"; newTab1.pid = 10; newTab1.window = 1
+        var newTab2 = newTab1
+        newTab2.window = 2
+        let restoredWindow = NoteScene(mac: "mac-1", app: "com.example.browser", pid: 99, window: 7, title: "New Tab", titleTwins: 1)
+        expect(NoteMatch.windowMatch(newTab1, restoredWindow) == .address, "by title alone")
+        expect(NoteMatch.recoverWindows([newTab1]) && NoteMatch.recoverWindows([newTab1, newTab1]), "notes from one old window take it")
+        expect(!NoteMatch.recoverWindows([newTab1, newTab2]), "two old windows titled alike (\"New Tab\"): no guess")
+        let adoptedWindow = NoteMatch.adoptWindow(newTab1, restoredWindow)
+        expect(NoteMatch.windowMatch(adoptedWindow, restoredWindow) == .identity, "recovered, it's that window's from now on")
 
         // A private app's place and scene: nothing of their words.
         var secret = NoteStick(kind: .passage)

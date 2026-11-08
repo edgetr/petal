@@ -54,7 +54,7 @@ extension NoteDesk {
                 let make = { (place: NoteStick?) in
                     guard live() else { return fail(Self.hungUp) }
                     if let place { file.places = [place] }
-                    self.store.make(file, in: notebook) { made in
+                    self.store.make(file, in: notebook, live: live) { made in
                         guard let made else { return fail(Self.notMade) }
                         var result: [String: Any] = ["written": made.noteID, "title": made.file.title, "notebook": made.notebook, "file": made.url.path]
                         if sticking { result["stuck"] = place.map(self.told) ?? "nowhere (nothing in front Petal could stick it to)" }
@@ -70,8 +70,9 @@ extension NoteDesk {
             guard !store.readOnly(paper) else { return fail(Self.readOnlyWords) }
             guard live() else { return fail(Self.hungUp) }
             // The same move as the letterhead's: what's typed in it goes with it, and its panel and editor follow.
-            move(paper.key, to: notebook) { moved in
-                if let moved { send(["moved": moved.noteID, "notebook": moved.notebook]) } else { fail("Couldn't move it; it's where it was.") }
+            move(paper.key, to: notebook, live: live) { moved in
+                if let moved { send(["moved": moved.noteID, "notebook": moved.notebook]) }
+                else { fail(live() ? "Couldn't move it (or its pictures); it's where it was." : Self.hungUp) }
             }
         case "petal_note_stick":
             guard let paper = store.find(args["id"] as? String ?? "") else { return fail("No note with that id; petal_notes lists them.") }
@@ -104,8 +105,9 @@ extension NoteDesk {
                          touch: Bool, edit: (inout NoteFile) -> Void, _ result: @escaping @MainActor (PaperNote) -> [String: Any]) {
         guard live() else { return fail(Self.hungUp) }
         guard let paper = store.paper(key), !store.readOnly(paper) else { return fail(Self.readOnlyWords) }
-        let saved = store.change(key, touch: touch, edit: edit) { outcome in
+        let saved = store.change(key, touch: touch, live: live, edit: edit) { outcome in
             switch outcome {
+            case .cancelled: fail(Self.hungUp)
             case .written: send(result(self.store.notes.first { $0.noteID == paper.noteID && $0.version == nil } ?? paper))
             case .keptBoth(let copy):
                 fail("The note changed elsewhere meanwhile, so this was kept beside it as “\(copy.lastPathComponent)”; the person picks which to keep.")

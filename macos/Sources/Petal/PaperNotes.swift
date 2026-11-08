@@ -39,47 +39,84 @@ struct Notebook: Identifiable, Equatable {
     var id: String { name }
 }
 
+/// One picture pasted or dropped on a note: its name in the note's pictures' folder (chosen when it was accepted,
+/// so writing it again is the same file), and where its bytes come from.
+struct NotePictureBytes: @unchecked Sendable {
+    var name: String
+    var file: URL?
+    var data: Data?
+    var tiff: Data?
+    var caption: String
+}
+
+/// Keep this one, as session work: the papers exactly as shown (`snapshot`: a file by "file:" + its path, a version
+/// by "version:" + its name, each with its text then), the file kept and, when it was a version iCloud kept, its
+/// text to write there; the other files to go to the Trash.
+struct NoteKeep: @unchecked Sendable {
+    var snapshot: [String: String]
+    var kept: URL
+    var keptText: String?
+    var files: [URL]
+}
+
 /// Work waiting to reach a note's file, done in order by its session.
 enum NoteWork: @unchecked Sendable {
-    /// A new note's file, under the first name free in `folder`.
-    case create(text: String, stem: String, folder: URL)
-    /// The note's text, made on `base` (what the file said when the edit began).
+    /// A new note's file, under the first name free in `folder`; `exact`: only at that one place (a notebook's
+    /// cover), and a file already there is the one.
+    case create(text: String, stem: String, folder: URL, exact: URL? = nil)
+    /// The note's text, made on `base`: the exact text of the file it was made on (nil: a new note). It lands only
+    /// while the file still says `base`, or already says `text`; else it's kept beside the file as a conflict copy.
     case write(text: String, base: String?)
     /// An edit to a paper that turned read only as it was typed: kept beside the file as a conflict copy.
     case keepAside(text: String)
-    /// Into another notebook (made if it's new), its pictures' folder with it.
+    /// Into another notebook (made if it's new), its pictures' folder first.
     case move(folder: URL)
-    /// Pictures pasted or dropped, saved into the note's pictures' folder.
-    case pictures(NoteImport, noteID: String)
+    /// A picture's bytes, step one: into the note's pictures' folder, a file of its own; the Markdown is untouched.
+    /// Step two, its reference, is ordinary text (the editor, or a based write).
+    case pictureBytes([NotePictureBytes], noteID: String)
     /// To the Trash, only while the file still says `revision`.
     case trash(revision: String?)
+    /// Keep this one: checked against the papers as shown inside each coordinated write or trash.
+    case keep(NoteKeep)
 
     /// Carries the person's writing: tried again until it lands, and kept in "Unsaved notes" if it can't by quit.
     var keeps: Bool {
         switch self {
-        case .create, .write, .keepAside, .pictures: true
-        case .move, .trash: false
+        case .create, .write, .keepAside, .pictureBytes: true
+        case .move, .trash, .keep: false
+        }
+    }
+
+    /// The person's own text it carries, for "Unsaved notes".
+    var text: String? {
+        switch self {
+        case .create(let text, _, _, _), .write(let text, _), .keepAside(let text): text
+        default: nil
         }
     }
 }
 
-/// What a piece of work did: its outcome, where the note's file is now, and pictures saved.
+/// What a piece of work did: its outcome, where the note's file is now, and pictures written.
 struct NoteWorkResult: @unchecked Sendable {
     var outcome: NoteStore.Outcome
     var url: URL?
     var pictures: [(path: String, file: URL, caption: String)] = []
 }
 
-/// One note's work not yet on disk: typed text, keep-asides, pictures, a move, a new file, a trash. Every path
-/// (the editor's saves, the tools, a place followed, a picture import, a move from the letterhead or the socket)
-/// goes through it, in order; quitting, trying again and switching the notes' folder drain the same list the same
-/// way (`NoteStore.drain`). Its paper is never replaced by a read of the folder while it has work.
+/// One note's work not yet on disk: typed text, keep-asides, pictures, a move, a new file, a trash, a conflict
+/// settled. Every path (the editor's saves, the tools, a place followed, a picture, a move from the letterhead or
+/// the socket) goes through it, in order; quitting, trying again and switching the notes' folder drain the same list
+/// the same way (`NoteStore.drain`). Its paper is never replaced by a read of the folder while it has work.
 @MainActor
 final class NoteSession {
     struct Item {
         let id: Int
         var work: NoteWork
         var done: [@MainActor (NoteStore.Outcome) -> Void]
+        /// The asker is still there (a tool's request): checked right before the work is done, retries and drains too.
+        var live: (@Sendable () -> Bool)? = nil
+        /// Where the cursor was when pictures were pasted (their reference goes there in an open editor).
+        var at = -1
     }
 
     let id: Int
@@ -95,18 +132,17 @@ final class NoteSession {
     }
 
     var busy: Bool { running || !pending.isEmpty }
+    var picturesPending: Bool { pending.contains { if case .pictureBytes = $0.work { true } else { false } } }
 }
 
-/// What the file queue knows of each session's file: where it is, what it said when this Mac's chain of writes
-/// began or after the last that landed (`anchor`), the texts this session's writes carried (`ours`, hashes), the
-/// newest of them (`latest`), and each piece of work's result. Only ever touched on `NoteStore.io`.
+/// What the file queue knows of each session's file: where it is, the note's id, and the text that last landed
+/// there through this session (or was read: what a picture's reference is written on at quit). Each piece of
+/// work's result. Only ever touched on `NoteStore.io`.
 enum NoteDisk {
     struct State {
         var url: URL
         var noteID: String
-        var anchor: String?
-        var ours: Set<Int> = []
-        var latest: String?
+        var revision: String?
     }
 
     nonisolated(unsafe) static var states: [Int: State] = [:]
@@ -392,7 +428,7 @@ final class NoteStore {
         return true
     }
 
-    enum Outcome: Equatable { case written, keptBoth(URL), failed }
+    enum Outcome: Equatable { case written, keptBoth(URL), failed, cancelled }
 
     /// Writes `text` over the file at `url` only while it still says `base` (what the edit was made on); changed
     /// since, the edit goes to a copy beside it instead ("Name (conflicted copy).md"), and both show as the note's
@@ -486,23 +522,28 @@ final class NoteStore {
 
     // MARK: Doing a session's work (off the main thread)
 
-    /// One piece of a session's work, on `io`, with what the queue knows of its file.
-    nonisolated static func perform(_ work: NoteWork, session: Int, root: URL) -> NoteWorkResult {
+    /// One piece of a session's work, on `io`, with what the queue knows of its file. `live`: the asker (a tool's
+    /// request) is still there, checked right before anything changes.
+    nonisolated static func perform(_ work: NoteWork, session: Int, root: URL, live: (@Sendable () -> Bool)? = nil) -> NoteWorkResult {
         guard var state = NoteDisk.states[session] else { return NoteWorkResult(outcome: .failed) }
         defer { NoteDisk.states[session] = state }
+        if let live, !live() { return NoteWorkResult(outcome: .cancelled, url: state.url) }
         switch work {
-        case .create(let text, let stem, let folder):
+        case .create(let text, let stem, let folder, let exact):
+            if let exact {
+                // A cover: only there; one already there is the cover (never a second).
+                guard create(text, at: exact, root: root) || FileManager.default.fileExists(atPath: exact.path) else { return NoteWorkResult(outcome: .failed) }
+                state.url = exact
+                state.revision = coordinatedRead(exact)
+                return NoteWorkResult(outcome: .written, url: exact)
+            }
             guard let made = createNamed(text, stem: stem, in: folder, root: root) else { return NoteWorkResult(outcome: .failed) }
             state.url = made
-            state.anchor = text
-            state.ours.insert(text.hashValue)
-            state.latest = text
+            state.revision = text
             return NoteWorkResult(outcome: .written, url: made)
         case .write(let text, let base):
-            let outcome = save(text, to: state.url, base: NoteShelf.effectiveBase(base, ours: state.ours, anchor: state.anchor), root: root)
-            state.ours.insert(text.hashValue)
-            state.latest = text
-            if outcome == .written { state.anchor = text }
+            let outcome = save(text, to: state.url, base: base, root: root)
+            if outcome == .written { state.revision = text }
             return NoteWorkResult(outcome: outcome, url: state.url)
         case .keepAside(let text):
             return NoteWorkResult(outcome: keepBeside(text, original: state.url, root: root), url: state.url)
@@ -510,57 +551,146 @@ final class NoteStore {
             guard let target = move(state.url, noteID: state.noteID, into: folder, root: root) else { return NoteWorkResult(outcome: .failed, url: state.url) }
             state.url = target
             return NoteWorkResult(outcome: .written, url: target)
-        case .pictures(let items, let noteID):
-            var saved: [(path: String, file: URL, caption: String)] = []
-            let folder = state.url.deletingLastPathComponent().appending(path: NoteShelf.assetsFolder(id: noteID))
-            guard safe(folder, root: root) else { return NoteWorkResult(outcome: .failed, url: state.url) }
-            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            var found: [(Data, String, String)] = []
-            for file in items.files { if let data = try? Data(contentsOf: file) { found.append((data, file.pathExtension.lowercased(), file.deletingPathExtension().lastPathComponent)) } }
-            if let png = items.png { found.append((png, "png", "")) }
-            if let tiff = items.tiff, let rep = NSBitmapImageRep(data: tiff), let data = rep.representation(using: .png, properties: [:]) { found.append((data, "png", "")) }
-            for (data, ext, caption) in found {
-                let name = "picture-\(UUID().uuidString.prefix(8).lowercased()).\(ext)"
-                let file = folder.appending(path: name)
-                guard safe(file, root: root), (try? data.write(to: file, options: .withoutOverwriting)) != nil else {
-                    return NoteWorkResult(outcome: .failed, url: state.url, pictures: saved)
-                }
-                saved.append((folder.lastPathComponent + "/" + name, file, caption))
-            }
-            return NoteWorkResult(outcome: .written, url: state.url, pictures: saved)
+        case .pictureBytes(let pictures, let noteID):
+            let written = writePictures(pictures, into: state.url.deletingLastPathComponent().appending(path: NoteShelf.assetsFolder(id: noteID)), root: root)
+            guard written.count == pictures.count else { return NoteWorkResult(outcome: .failed, url: state.url) }
+            return NoteWorkResult(outcome: .written, url: state.url, pictures: written)
         case .trash(let revision):
-            // Only while it still says what Petal last saw there: words written into it elsewhere keep it.
-            let disk = coordinatedRead(state.url)
-            if disk == nil || disk == revision || disk == state.latest { trash(state.url, root: root) }
+            // Only while it still says what Petal last saw there, checked inside the coordinated trash.
+            trash(state.url, root: root) { disk in disk == nil || disk == revision || disk == state.revision }
             return NoteWorkResult(outcome: .written, url: state.url)
+        case .keep(let plan):
+            return NoteWorkResult(outcome: keep(plan, root: root) ? .written : .failed, url: state.url)
         }
     }
 
-    /// Moves a note's file (and its pictures' folder) into `folder`, under the first name free there on disk, never
-    /// over a file. Off the main thread.
+    /// Step one of a picture: its bytes into `folder` under the name chosen when it was accepted. The same picture
+    /// written again is the same file (a retry, a drain). Never the Markdown. Off the main thread.
+    nonisolated static func writePictures(_ pictures: [NotePictureBytes], into folder: URL, root: URL) -> [(path: String, file: URL, caption: String)] {
+        guard safe(folder, root: root) else { return [] }
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var written: [(path: String, file: URL, caption: String)] = []
+        for picture in pictures {
+            let file = folder.appending(path: picture.name)
+            guard safe(file, root: root) else { return written }
+            if !FileManager.default.fileExists(atPath: file.path) {
+                guard let data = pictureData(picture), (try? data.write(to: file, options: .withoutOverwriting)) != nil else { return written }
+            }
+            written.append((folder.lastPathComponent + "/" + picture.name, file, picture.caption))
+        }
+        return written
+    }
+
+    /// A picture's bytes: its file read, or its data (a screenshot's TIFF made PNG). Off the main thread.
+    nonisolated static func pictureData(_ picture: NotePictureBytes) -> Data? {
+        if let file = picture.file { return try? Data(contentsOf: file) }
+        if let data = picture.data { return data }
+        if let tiff = picture.tiff, let rep = NSBitmapImageRep(data: tiff) { return rep.representation(using: .png, properties: [:]) }
+        return nil
+    }
+
+    /// Moves a file to the Trash inside one coordinated step, only while `still` says yes to what it holds then.
+    @discardableResult
+    nonisolated static func trash(_ url: URL, root: URL, still: (String?) -> Bool) -> Bool {
+        guard safe(url, root: root) else { return false }
+        var done = false
+        var error: NSError?
+        NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: url, options: .forDeleting, error: &error) { url in
+            let disk = FileManager.default.fileExists(atPath: url.path) ? (try? String(contentsOf: url, encoding: .utf8)) : nil
+            guard still(disk) else { return }
+            done = (try? FileManager.default.trashItem(at: url, resultingItemURL: nil)) != nil
+        }
+        return done
+    }
+
+    /// Keep this one, on `io`: first, every paper as shown, checked (`NoteShelf.keepAllowed`); then the kept version
+    /// written over the file, inside its coordinated write and only while the file still says what was shown, and
+    /// read back; then the shown versions marked resolved; then each other file trashed, inside its coordinated
+    /// trash and only while it still says what was shown. Any change found on the way stops it there.
+    nonisolated static func keep(_ plan: NoteKeep, root: URL) -> Bool {
+        var now: [String: String?] = [:]
+        for url in plan.files {
+            if plan.snapshot["file:" + url.path] != nil {
+                now["file:" + url.path] = FileManager.default.fileExists(atPath: url.path) ? coordinatedRead(url) : String?.none
+            }
+            for version in NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? [] {
+                now["version:" + version.url.lastPathComponent] = try? String(contentsOf: version.url, encoding: .utf8)
+            }
+        }
+        guard NoteShelf.keepAllowed(shown: plan.snapshot, now: now), safe(plan.kept, root: root) else { return false }
+        if let text = plan.keptText {
+            var ok = false
+            var error: NSError?
+            let shown = plan.snapshot["file:" + plan.kept.path]
+            NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: plan.kept, options: [], error: &error) { url in
+                let disk = try? String(contentsOf: url, encoding: .utf8)
+                guard shown == nil || disk == shown else { return }
+                ok = (try? Data(text.utf8).write(to: url, options: .atomic)) != nil && (try? String(contentsOf: url, encoding: .utf8)) == text
+            }
+            guard ok else { return false }
+        }
+        for url in plan.files {
+            for version in NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? [] where plan.snapshot["version:" + version.url.lastPathComponent] != nil {
+                version.isResolved = true
+            }
+        }
+        for url in plan.files where url != plan.kept {
+            let shown = plan.snapshot["file:" + url.path]
+            trash(url, root: root) { disk in disk == shown }
+        }
+        return true
+    }
+
+    /// Moves a note's file (and first its pictures' folder) into `folder`, under the first name free there on disk,
+    /// never over a file. The pictures go first, merged into a folder of the same name already there only where it
+    /// holds the same pictures (`NoteShelf.assetPlan`); a picture in the way, or a note that then can't move, puts
+    /// everything back: never a note whose pictures stayed behind. Off the main thread.
     nonisolated static func move(_ from: URL, noteID: String, into folder: URL, root: URL) -> URL? {
         guard safe(from, root: root), safe(folder, root: root) else { return nil }
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let fm = FileManager.default
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let assets = from.deletingLastPathComponent().appending(path: NoteShelf.assetsFolder(id: noteID))
+        let newAssets = folder.appending(path: assets.lastPathComponent)
+        var movedPictures: [String] = []
+        if fm.fileExists(atPath: assets.path) {
+            guard safe(assets, root: root), safe(newAssets, root: root) else { return nil }
+            func hashes(_ dir: URL) -> [String: Int] {
+                var out: [String: Int] = [:]
+                for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] { out[name] = (try? Data(contentsOf: dir.appending(path: name)))?.hashValue ?? 0 }
+                return out
+            }
+            guard case .move(let names) = NoteShelf.assetPlan(source: hashes(assets), destination: hashes(newAssets)) else { return nil }
+            try? fm.createDirectory(at: newAssets, withIntermediateDirectories: true)
+            for name in names {
+                guard (try? fm.moveItem(at: assets.appending(path: name), to: newAssets.appending(path: name))) != nil else {
+                    for back in movedPictures { try? fm.moveItem(at: newAssets.appending(path: back), to: assets.appending(path: back)) }
+                    return nil
+                }
+                movedPictures.append(name)
+            }
+        }
         let stem = from.deletingPathExtension().lastPathComponent
         var target: URL?
         for _ in 0..<20 where target == nil {
-            let taken = Set(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).map { $0.lowercased() })
+            let taken = Set(((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).map { $0.lowercased() })
             let candidate = folder.appending(path: NoteShelf.freeName(stem, taken: taken))
             guard safe(candidate, root: root) else { break }
             var error: NSError?
             var moved = false
             NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: from, options: .forMoving, writingItemAt: candidate, options: .forReplacing, error: &error) { a, b in
-                guard !FileManager.default.fileExists(atPath: b.path) else { return }
-                moved = (try? FileManager.default.moveItem(at: a, to: b)) != nil
+                guard !fm.fileExists(atPath: b.path) else { return }
+                moved = (try? fm.moveItem(at: a, to: b)) != nil
             }
             if moved { target = candidate } else if error != nil { break }
         }
-        guard let target else { return nil }
-        let assets = from.deletingLastPathComponent().appending(path: NoteShelf.assetsFolder(id: noteID))
-        let newAssets = folder.appending(path: assets.lastPathComponent)
-        if FileManager.default.fileExists(atPath: assets.path), !FileManager.default.fileExists(atPath: newAssets.path),
-           safe(assets, root: root), safe(newAssets, root: root) {
-            try? FileManager.default.moveItem(at: assets, to: newAssets)
+        guard let target else {
+            // The note couldn't move: its pictures go back where they were.
+            for back in movedPictures { try? fm.moveItem(at: newAssets.appending(path: back), to: assets.appending(path: back)) }
+            return nil
+        }
+        // The old pictures' folder, now empty, goes (to the Trash, never deleted outright).
+        if fm.fileExists(atPath: assets.path), ((try? fm.contentsOfDirectory(atPath: assets.path)) ?? []).filter({ !$0.hasPrefix(".") }).isEmpty {
+            try? fm.trashItem(at: assets, resultingItemURL: nil)
         }
         return target
     }
@@ -570,24 +700,31 @@ final class NoteStore {
     private func session(for key: String) -> NoteSession? {
         if let session = sessions[key] { return session }
         guard let paper = paper(key), paper.version == nil else { return nil }
+        return makeSession(key: key, url: paper.url, noteID: paper.noteID, revision: paper.revision)
+    }
+
+    private func makeSession(key: String, url: URL, noteID: String, revision: String?) -> NoteSession {
         nextID += 1
         let session = NoteSession(id: nextID, key: key)
         sessions[key] = session
-        let state = NoteDisk.State(url: paper.url, noteID: paper.noteID, anchor: paper.revision, latest: paper.revision)
+        let state = NoteDisk.State(url: url, noteID: noteID, revision: revision)
         let id = session.id
         Self.io.async { NoteDisk.states[id] = state }
         return session
     }
 
-    private func enqueue(_ session: NoteSession, _ work: NoteWork, done: (@MainActor (Outcome) -> Void)?) {
-        // A write joins the last one waiting (not started): the newest text, on the base the first was made on.
+    private func enqueue(_ session: NoteSession, _ work: NoteWork, live: (@Sendable () -> Bool)? = nil, at: Int = -1,
+                         done: (@MainActor (Outcome) -> Void)?) {
+        // A write joins the last one waiting (not started, from the same asker): the newest text, on the base the
+        // first was made on (the file it will find).
         let lastWaiting = session.pending.count > (session.running ? 1 : 0)
-        if case .write(let text, _) = work, lastWaiting, let last = session.pending.last, case .write(_, let base) = last.work {
+        if case .write(let text, _) = work, lastWaiting, live == nil, let last = session.pending.last, last.live == nil,
+           case .write(_, let base) = last.work {
             session.pending[session.pending.count - 1].work = .write(text: text, base: base)
             if let done { session.pending[session.pending.count - 1].done.append(done) }
         } else {
             nextID += 1
-            session.pending.append(NoteSession.Item(id: nextID, work: work, done: done.map { [$0] } ?? []))
+            session.pending.append(NoteSession.Item(id: nextID, work: work, done: done.map { [$0] } ?? [], live: live, at: at))
         }
         pump(session)
     }
@@ -598,7 +735,7 @@ final class NoteStore {
         let id = session.id, root = self.root
         Self.io.async {
             NoteDisk.results[item.id] = nil
-            let result = Self.perform(item.work, session: id, root: root)
+            let result = Self.perform(item.work, session: id, root: root, live: item.live)
             NoteDisk.results[item.id] = result
             DispatchQueue.main.async { MainActor.assumeIsolated { self.finished(session, item, result) } }
         }
@@ -607,8 +744,7 @@ final class NoteStore {
     private func finished(_ session: NoteSession, _ item: NoteSession.Item, _ result: NoteWorkResult) {
         session.running = false
         guard !switching, sessions[session.key] === session else { return }
-        let failedWork = result.outcome == .failed
-        if failedWork && item.work.keeps {
+        if result.outcome == .failed && item.work.keeps {
             // Kept, said on the paper, tried again: never dropped.
             session.failing = true
             failed.insert(session.key)
@@ -636,17 +772,21 @@ final class NoteStore {
             sessions[paper.key] = session
             onRekey(old, paper)
         }
-        if failedWork { onProblem(Self.words(item.work)) }
-        if case .pictures(let items, _) = item.work, !result.pictures.isEmpty, !onPictures(session.key, result.pictures, items.at) {
-            // No editor open on it: at the end of the note, through its session like any change.
-            let lines = result.pictures.map { NoteBlock.image(path: $0.path, caption: $0.caption).markdown }
-            change(session.key) { file in
-                file.body += (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + lines.joined(separator: "\n")
+        if result.outcome == .failed { onProblem(Self.words(item.work)) }
+        // Step two of a picture: its reference, as ordinary text, once its bytes are there.
+        if case .pictureBytes = item.work, result.outcome == .written, !result.pictures.isEmpty {
+            switch NoteShelf.pictureReference(bytesWritten: true, editorOpen: onPictures(session.key, result.pictures, item.at), quitting: false) {
+            case .editor: break
+            default:
+                let lines = result.pictures.map { NoteBlock.image(path: $0.path, caption: $0.caption).markdown }
+                change(session.key) { file in
+                    file.body += (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + lines.joined(separator: "\n")
+                }
             }
         }
         for done in item.done { done(result.outcome) }
         switch item.work {
-        case .move, .trash: reload()
+        case .move, .trash, .keep: reload()
         default: if case .keptBoth = result.outcome { reload() }
         }
         pump(session)
@@ -654,7 +794,8 @@ final class NoteStore {
 
     private static func words(_ work: NoteWork) -> String {
         switch work {
-        case .move: "Petal couldn't move that note: it's where it was."
+        case .move: "Petal couldn't move that note (or its pictures): it's where it was."
+        case .keep: "Something changed since these were shown (a version arrived, or one was edited): nothing was removed."
         default: "Petal couldn't finish something for a note."
         }
     }
@@ -677,51 +818,75 @@ final class NoteStore {
         sessions.values.filter { !$0.pending.isEmpty }.map { ($0.id, $0.pending) }
     }
 
-    /// Petal quits: every session's work is done now, in order, on the file queue (after whatever is under way
-    /// there); what still can't be written goes to "Unsaved notes". Waits for it.
-    func drain() {
+    /// Petal quits: every session's work is done on the file queue, in order, after whatever is under way there;
+    /// what still can't be written goes to "Unsaved notes". Never waits on the main thread: `done` is called (on any
+    /// thread) once it's finished.
+    func drain(then done: @escaping @Sendable () -> Void) {
         let jobs = drainJobs()
         let root = self.root
-        Self.io.sync { Self.drain(jobs, root: root) }
+        Self.io.async {
+            Self.drain(jobs, root: root)
+            done()
+        }
     }
 
     /// The one way a session's work is finished without the main thread (quit, switching folders): each piece not
-    /// done yet is done; one done whose answer the main thread never saw is taken as it was (pictures saved but not
-    /// put in the note go at the end of its text); work that carries writing and fails once more is kept in
-    /// "Unsaved notes". Only on `io`.
+    /// done yet is done (a tool's, only while its asker is there); one done whose answer the main thread never saw is
+    /// taken as it was. Pictures whose bytes are in get their references, at the end of the note, in one based write
+    /// after the rest; bytes that can't be written, and writing that fails once more, go to "Unsaved notes". Only on
+    /// `io`.
     nonisolated static func drain(_ jobs: [(session: Int, items: [NoteSession.Item])], root: URL) {
         for job in jobs {
+            var references: [String] = []
+            var unsavedPictures: [NotePictureBytes] = []
+            var latest: String?
             for item in job.items {
                 var result = NoteDisk.results[item.id]
-                if result == nil || result?.outcome == .failed { result = perform(item.work, session: job.session, root: root) }
+                if result == nil || result?.outcome == .failed { result = perform(item.work, session: job.session, root: root, live: item.live) }
                 NoteDisk.results[item.id] = nil
+                if let text = item.work.text { latest = text }
                 guard let result else { continue }
-                if case .pictures = item.work, !result.pictures.isEmpty, let latest = NoteDisk.states[job.session]?.latest {
-                    var file = NoteFile.parse(latest, fallbackID: "", fallbackDate: Date())
-                    file.body += (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n")
-                        + result.pictures.map { NoteBlock.image(path: $0.path, caption: $0.caption).markdown }.joined(separator: "\n")
-                    let text = file.serialized()
-                    if perform(.write(text: text, base: latest), session: job.session, root: root).outcome == .failed { rescue(text) }
+                if case .pictureBytes(let pictures, _) = item.work {
+                    switch NoteShelf.pictureReference(bytesWritten: result.outcome == .written, editorOpen: false, quitting: true) {
+                    case .write: references += result.pictures.map { NoteBlock.image(path: $0.path, caption: $0.caption).markdown }
+                    case .unsaved: unsavedPictures += pictures
+                    default: break
+                    }
                     continue
                 }
-                guard result.outcome == .failed, item.work.keeps else { continue }
-                switch item.work {
-                case .create(let text, _, _), .write(let text, _), .keepAside(let text): rescue(text)
-                default: break
-                }
+                if result.outcome == .failed, item.work.keeps, let text = item.work.text { rescue(text, pictures: []) }
+            }
+            if !references.isEmpty, let base = NoteDisk.states[job.session]?.revision {
+                var file = NoteFile.parse(base, fallbackID: "", fallbackDate: Date())
+                file.body += (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + references.joined(separator: "\n")
+                let text = file.serialized()
+                if perform(.write(text: text, base: base), session: job.session, root: root).outcome == .failed { rescue(text, pictures: []) }
+            } else if !references.isEmpty, let latest {
+                rescue(latest + "\n" + references.joined(separator: "\n"), pictures: [])
+            }
+            if !unsavedPictures.isEmpty {
+                // The pictures that couldn't be written, with the note as last known, in "Unsaved notes".
+                let note = latest ?? NoteDisk.states[job.session]?.revision ?? ""
+                rescue(note + "\n" + unsavedPictures.map { NoteBlock.image(path: $0.name, caption: $0.caption).markdown }.joined(separator: "\n"), pictures: unsavedPictures)
             }
         }
     }
 
-    /// Writing that couldn't reach its file, kept in Application Support's "Unsaved notes", named for the note.
-    nonisolated private static func rescue(_ text: String) {
+    /// Writing that couldn't reach its file, kept in Application Support's "Unsaved notes", named for the note, with
+    /// any pictures beside it.
+    nonisolated static func rescue(_ text: String, pictures: [NotePictureBytes]) {
         let folder = Config.supportFolder.appending(path: "Unsaved notes")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let note = NoteFile.parse(text, fallbackID: "", fallbackDate: Date())
         let stem = NoteText.fileName(note.title.isEmpty ? "Note" : note.title)
         for n in 0..<100 {
-            let file = folder.appending(path: n == 0 ? stem + ".md" : "\(stem) \(n + 1).md")
-            if (try? Data(text.utf8).write(to: file, options: .withoutOverwriting)) != nil { return }
+            let name = n == 0 ? stem : "\(stem) \(n + 1)"
+            let file = folder.appending(path: name + ".md")
+            guard (try? Data(text.utf8).write(to: file, options: .withoutOverwriting)) != nil else { continue }
+            for picture in pictures {
+                if let data = pictureData(picture) { try? data.write(to: folder.appending(path: picture.name), options: .withoutOverwriting) }
+            }
+            return
         }
     }
 
@@ -776,12 +941,14 @@ final class NoteStore {
     // MARK: Changing notes (every path comes here)
 
     /// The one way to change a note: `edit` applied to it in memory at once, then written through its session.
-    /// `base`: what the file said when the edit began (the editor's own); `expect`: only while the note is still
-    /// this revision (a completion that started from an older one: nothing changes); `touch`: a change of the
-    /// person's words (its modified time). Returns the note's text as it will be written, the base for the next
-    /// edit; nil when nothing changed (read only, gone, fenced, switching folders).
+    /// `base`: the exact text of the file the edit was made on (an editor's own: what it last loaded or wrote; a
+    /// tool's or Petal's: the note as it is now); the write lands only while the file still says it, or already says
+    /// the new text, else it's kept beside it. `expect`: only while the note is still this revision (a completion that
+    /// started from an older one: nothing changes). `touch`: a change of the person's words (its modified time).
+    /// `live`: a tool's asker, checked right before the write. Returns the note's text as it will be written, the
+    /// base for the editor's next edit; nil when nothing changed (read only, gone, fenced, switching folders).
     @discardableResult
-    func change(_ key: String, base: String? = nil, expect: String?? = nil, touch stamp: Bool = true,
+    func change(_ key: String, base: String? = nil, expect: String?? = nil, touch stamp: Bool = true, live: (@Sendable () -> Bool)? = nil,
                 edit: (inout NoteFile) -> Void, done: (@MainActor (Outcome) -> Void)? = nil) -> String? {
         guard !switching, var paper = paper(key), !readOnly(paper) else { return nil }
         if let expect, paper.revision != expect { return nil }
@@ -793,7 +960,7 @@ final class NoteStore {
         paper.revision = text
         if let index = notes.firstIndex(where: { $0.key == key }) { notes[index] = paper }
         touch(key)
-        enqueue(session, .write(text: text, base: since), done: done)
+        enqueue(session, .write(text: text, base: since), live: live, done: done)
         return text
     }
 
@@ -805,13 +972,14 @@ final class NoteStore {
         enqueue(session, .keepAside(text: paper.file.serialized()), done: { _ in self.reload() })
     }
 
-    /// A new note in `notebook` (made if it's new), its file named for its first words: shown at once, its file made
-    /// through its session under the first name free on disk (`onRekey` when that isn't the one it was shown with).
-    /// `done`: the note once its file is there, or nil when it couldn't be made yet (kept, tried again).
+    /// A new note in `notebook` (made, cover and all, if it's new), its file named for its first words: shown at
+    /// once, its file made through its session under the first name free on disk (`onRekey` when that isn't the one
+    /// it was shown with). `done`: the note once its file is there, or nil when it couldn't be made yet (kept, tried
+    /// again) or its asker went.
     @discardableResult
-    func make(_ file: NoteFile, in notebook: String, then done: (@MainActor (PaperNote?) -> Void)? = nil) -> PaperNote? {
+    func make(_ file: NoteFile, in notebook: String, live: (@Sendable () -> Bool)? = nil, then done: (@MainActor (PaperNote?) -> Void)? = nil) -> PaperNote? {
         guard !switching else { done?(nil); return nil }
-        let name = NoteShelf.folderName(notebook)
+        let name = ensureNotebook(notebook, color: "")
         let folder = root.appending(path: name)
         let taken = Set(notes.filter { $0.notebook == name }.map { $0.url.lastPathComponent.lowercased() })
         let stem = NoteText.fileName(file.title.isEmpty ? "Note \(Self.shortDate.string(from: file.created))" : file.title)
@@ -819,9 +987,12 @@ final class NoteStore {
         let paper = PaperNote(file: file, url: folder.appending(path: NoteShelf.freeName(stem, taken: taken)), notebook: name, revision: text)
         notes.insert(paper, at: 0)
         touch(paper.key)
-        if self.notebook(name) == nil { notebooks.append(Notebook(name: name, folder: folder, color: "", cover: nil, count: 1)) }
-        guard let session = session(for: paper.key) else { done?(nil); return paper }
-        enqueue(session, .create(text: text, stem: stem, folder: folder)) { outcome in
+        let session = makeSession(key: paper.key, url: paper.url, noteID: paper.noteID, revision: nil)
+        enqueue(session, .create(text: text, stem: stem, folder: folder), live: live) { outcome in
+            if outcome == .cancelled, let index = self.notes.firstIndex(where: { $0.key == session.key }) {
+                self.gone(session.key)
+                self.notes.remove(at: index)
+            }
             done?(outcome == .written ? self.paper(session.key) : nil)
         }
         return paper
@@ -833,103 +1004,80 @@ final class NoteStore {
         return format
     }()
 
-    /// A new notebook: its folder and its cover with its color (never over a cover already there).
-    func makeNotebook(_ name: String, color: String) -> String {
+    /// The one way a notebook is made, for every path (a new note in it, a new default notebook, a move into it,
+    /// New notebook…, its color): its folder and its cover ("About this notebook", with its color), the cover made
+    /// through a session of its own and only where no cover is. Returns the notebook's folder name.
+    @discardableResult
+    func ensureNotebook(_ name: String, color: String) -> String {
         let folderName = NoteShelf.folderName(name)
+        guard notebook(folderName) == nil, !switching else { return folderName }
         let folder = root.appending(path: folderName)
-        guard notebook(folderName) == nil else { return folderName }
-        notebooks.append(Notebook(name: folderName, folder: folder, color: color, cover: nil, count: 0))
         var cover = NoteFile(body: "# About this notebook\n\nWhat \(folderName) is for.")
         cover.cover = true
         cover.color = color
-        let text = cover.serialized(), root = self.root
-        Self.io.async {
-            guard Self.safe(folder, root: root) else { return }
-            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            Self.create(text, at: folder.appending(path: NoteShelf.coverName), root: root)
-        }
+        let url = folder.appending(path: NoteShelf.coverName)
+        let paper = PaperNote(file: cover, url: url, notebook: folderName, revision: cover.serialized())
+        notebooks.append(Notebook(name: folderName, folder: folder, color: color, cover: paper.key, count: 0))
+        if self.paper(paper.key) == nil { notes.append(paper) }
+        touch(paper.key)
+        let session = sessions[paper.key] ?? makeSession(key: paper.key, url: url, noteID: cover.id, revision: nil)
+        enqueue(session, .create(text: cover.serialized(), stem: "About this notebook", folder: folder, exact: url)) { _ in self.reload() }
         return folderName
     }
 
-    /// The one move: a note (and its pictures' folder) into another notebook, made if it's new, through its
-    /// session, after whatever is waiting there and before whatever comes next (saves and pictures made meanwhile
-    /// land where it lands). `done`: the note where it is now, or nil when it couldn't be moved.
-    func move(_ key: String, to notebook: String, then done: @escaping @MainActor (PaperNote?) -> Void = { _ in }) {
+    /// The one move: a note (and first its pictures) into another notebook, made if it's new, through its session,
+    /// after whatever is waiting there and before whatever comes next (saves and pictures made meanwhile land where
+    /// it lands). `done`: the note where it is now, or nil when it couldn't be moved (or its asker went).
+    func move(_ key: String, to notebook: String, live: (@Sendable () -> Bool)? = nil, then done: @escaping @MainActor (PaperNote?) -> Void = { _ in }) {
         guard let paper = paper(key) else { return done(nil) }
         let name = NoteShelf.folderName(notebook)
         guard name != paper.notebook else { return done(paper) }
         guard !switching, !readOnly(paper), let session = session(for: key) else { return done(nil) }
-        _ = makeNotebook(name, color: "")
-        enqueue(session, .move(folder: root.appending(path: name))) { outcome in
+        ensureNotebook(name, color: "")
+        enqueue(session, .move(folder: root.appending(path: name)), live: live) { outcome in
             done(outcome == .written ? self.paper(session.key) : nil)
         }
     }
 
-    /// Pictures pasted or dropped on a note: read, decoded and saved beside it through its session (so a move or a
-    /// fold meanwhile changes nothing), then put in its editor or at the end of its text.
+    /// Pictures pasted or dropped on a note, accepted at once (each with its own name in the note's pictures'
+    /// folder, so the note counts as written in): step one writes their bytes through its session (after whatever
+    /// is waiting there, a move too); step two puts their references in its editor, or at the end of its text.
     func importPictures(_ key: String, _ items: NoteImport) -> Bool {
         guard !switching, let paper = paper(key), !readOnly(paper), let session = session(for: key) else { return false }
-        enqueue(session, .pictures(items, noteID: paper.noteID), done: nil)
+        func name(_ ext: String) -> String { "picture-\(UUID().uuidString.prefix(8).lowercased()).\(ext)" }
+        var pictures = items.files.map { NotePictureBytes(name: name($0.pathExtension.lowercased()), file: $0, caption: $0.deletingPathExtension().lastPathComponent) }
+        if let png = items.png { pictures.append(NotePictureBytes(name: name("png"), data: png, caption: "")) }
+        if let tiff = items.tiff { pictures.append(NotePictureBytes(name: name("png"), tiff: tiff, caption: "")) }
+        guard !pictures.isEmpty else { return false }
+        enqueue(session, .pictureBytes(pictures, noteID: paper.noteID), at: items.at, done: nil)
         return true
     }
 
+    /// Pictures accepted for the note and not in it yet: it isn't empty.
+    func picturesPending(_ key: String) -> Bool { sessions[key]?.picturesPending ?? false }
+
     /// A note made and put away empty goes to the Trash (never deleted outright), after its own work, and only while
-    /// its file still says what Petal last saw there.
+    /// its file still says what Petal last saw there; never one with pictures on the way.
     func trash(_ key: String) {
-        guard let paper = paper(key), let session = session(for: key) else { return }
+        guard let paper = paper(key), let session = session(for: key),
+              NoteShelf.mayTrash(bodyEmpty: paper.file.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, picturesPending: session.picturesPending)
+        else { return }
         notes.removeAll { $0.key == key }
         gone(key)
         enqueue(session, .trash(revision: paper.revision), done: nil)
     }
 
-    /// A conflict settled, on the papers exactly as they were shown: only while every one of them is still there and
-    /// unchanged, and no other version arrived since (`NoteShelf.keepAllowed`), the one kept becomes the note's file
-    /// (written and read back when it was a version iCloud kept), then the shown versions are marked resolved and the
-    /// other files go to the Trash (never deleted).
+    /// A conflict settled, through the session of the note's file, on the papers exactly as they were shown: each
+    /// candidate checked again inside its own coordinated write or trash (`NoteStore.keep`).
     func keep(_ kept: PaperNote) {
         let shown = conflicts[kept.noteID] ?? [kept]
-        let root = self.root
-        let keptURL = kept.url
-        // Each candidate as it was shown: a file by its path, a version by its name.
         var snapshot: [String: String] = [:]
         for paper in shown { snapshot[paper.version.map { "version:" + $0 } ?? "file:" + paper.url.path] = paper.revision ?? "" }
-        let files = Set(shown.map(\.url))
-        let keptText = kept.version == nil ? nil : kept.file.serialized()
-        let keptVersion = kept.version
-        Self.io.async {
-            var now: [String: String?] = [:]
-            for url in files {
-                if snapshot["file:" + url.path] != nil {
-                    now["file:" + url.path] = FileManager.default.fileExists(atPath: url.path) ? Self.coordinatedRead(url) : String?.none
-                }
-                for version in NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? [] {
-                    now["version:" + version.url.lastPathComponent] = try? String(contentsOf: version.url, encoding: .utf8)
-                }
-            }
-            var ok = NoteShelf.keepAllowed(shown: snapshot, now: now) && Self.safe(keptURL, root: root)
-            if ok, let keptText, keptVersion != nil {
-                var error: NSError?
-                var written = false
-                NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: keptURL, options: [], error: &error) { url in
-                    written = (try? Data(keptText.utf8).write(to: url, options: .atomic)) != nil
-                }
-                ok = written && Self.coordinatedRead(keptURL) == keptText
-            }
-            if ok {
-                for url in files {
-                    for version in NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? [] where snapshot["version:" + version.url.lastPathComponent] != nil {
-                        version.isResolved = true
-                    }
-                }
-                for url in files where url != keptURL { Self.trash(url, root: root) }
-            }
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    if !ok { self.onProblem("Something changed since these were shown (a version arrived, or one was edited): nothing was removed.") }
-                    self.reload()
-                }
-            }
-        }
+        let plan = NoteKeep(snapshot: snapshot, kept: kept.url, keptText: kept.version == nil ? nil : kept.file.serialized(),
+                            files: Array(Set(shown.map(\.url))))
+        let key = kept.url.path
+        let session = sessions[key] ?? makeSession(key: key, url: kept.url, noteID: kept.noteID, revision: kept.revision)
+        enqueue(session, .keep(plan), done: nil)
     }
 
     /// A notebook's color, kept on its cover (made where there's none).
@@ -939,14 +1087,17 @@ final class NoteStore {
             if let index = notebooks.firstIndex(where: { $0.name == book.name }) { notebooks[index].color = value }
             return
         }
+        if self.notebook(notebook) == nil { ensureNotebook(notebook, color: value); return }
+        // A notebook with no cover yet (a folder made elsewhere): its cover, through a session, never over one.
         var cover = NoteFile(body: "# About this notebook\n\nWhat \(notebook) is for.")
         cover.cover = true
         cover.color = value
-        let text = cover.serialized(), folder = root.appending(path: notebook), root = self.root
-        Self.io.async {
-            Self.create(text, at: folder.appending(path: NoteShelf.coverName), root: root)
-            DispatchQueue.main.async { MainActor.assumeIsolated { self.reload() } }
-        }
+        let folder = root.appending(path: notebook)
+        let url = folder.appending(path: NoteShelf.coverName)
+        let paper = PaperNote(file: cover, url: url, notebook: notebook, revision: cover.serialized())
+        if self.paper(paper.key) == nil { notes.append(paper) }
+        let session = sessions[paper.key] ?? makeSession(key: paper.key, url: url, noteID: cover.id, revision: nil)
+        enqueue(session, .create(text: cover.serialized(), stem: "About this notebook", folder: folder, exact: url)) { _ in self.reload() }
     }
 
     /// The notebook's color: its cover's ("accent" is the Mac's accent color), else the Mac's accent color.

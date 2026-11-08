@@ -762,6 +762,9 @@ struct NoteEditorView: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         guard let text = scroll.documentView as? NoteTextView else { return }
+        // The callbacks follow the note (moved, renamed on disk) on every update; the text is left alone.
+        text.importPictures = importPictures
+        text.escape = escape
         let coordinator = context.coordinator
         // Another note in this paper, or the file changed elsewhere while the person isn't typing here: read again.
         let elsewhere = paper.file.body != coordinator.body && text.window?.firstResponder !== text

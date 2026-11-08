@@ -40,7 +40,7 @@ final class NoteDesk {
     @ObservationIgnored private var listening = false
     /// Windows narrowed for an open note: their frame from before and the one Petal gave them.
     /// What was in front when the quick question opened, for Stick here.
-    private(set) var captured: (scene: NoteScene, read: ClaudePanel.FrontRead, url: String, name: String)?
+    private(set) var captured: (scene: NoteScene, read: ClaudePanel.FrontRead, url: String, name: String, privacy: Int)?
     @ObservationIgnored private var ghost: NSPanel?
     /// Made just now and still empty: let go of if it's put away empty.
     @ObservationIgnored private var fresh: Set<String> = []
@@ -86,7 +86,7 @@ final class NoteDesk {
             for editor in editors.values { editor.flush() }
             hideAll()
             // Notes off: every window narrowed for one gets its width back (unless the person changed it since).
-            giveBackAll(wait: false)
+            giveBackAll {}
         }
         for panel in panels.values { panel.refresh() }
         // A browser showing another tab says so only through its title: heard only while a note is on a page.
@@ -117,11 +117,40 @@ final class NoteDesk {
         for panel in pinPanels.values { panel.orderOut(nil) }
     }
 
-    /// Petal quits: what's typed is saved and written, and narrowed windows get their width back, before it goes.
-    func stop() {
+    /// Petal is about to quit (`applicationShouldTerminate`, which answers later): what's typed is handed to each
+    /// note's session, then every session is drained and every narrowed window given back, off the main thread, for
+    /// up to 10 seconds; then `done` (on the main thread) lets Petal go. The main thread never waits on the file or
+    /// window queue.
+    func prepareToQuit(then done: @escaping @MainActor () -> Void) {
+        quitWaiters.append(done)
+        guard !quitting else { return }
+        quitting = true
         for editor in editors.values { editor.flush() }
-        giveBackAll(wait: true)
-        store.drain()
+        let group = DispatchGroup()
+        group.enter()
+        store.drain { group.leave() }
+        group.enter()
+        giveBackAll { group.leave() }
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = group.wait(timeout: .now() + 10)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let waiting = self.quitWaiters
+                    self.quitWaiters = []
+                    for waiter in waiting { waiter() }
+                }
+            }
+        }
+    }
+
+    @ObservationIgnored private var quitting = false
+    @ObservationIgnored private var quitWaiters: [@MainActor () -> Void] = []
+
+    /// Petal quits without asking first (applicationWillTerminate only): what's typed is handed on and the drain
+    /// started, never waited for.
+    func stop() {
+        guard !quitting else { return }
+        prepareToQuit {}
     }
 
     /// Another notes folder: what's typed is saved into the folder it was typed in (each note's session, drained off
@@ -207,15 +236,7 @@ final class NoteDesk {
                 let scene = made
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
-                        var scene = scene
-                        var read = read
-                        // The one final filter, as the result is used: an app kept private (now, or made private
-                        // while it was read) leaves nothing but itself and its window: no title, tab, address or file.
-                        if !ClaudePanel.privacy.current(privacy) || PetalApp.shared.assist.neverLook(app) {
-                            scene = scene.privately
-                            read.title = ""
-                            read.tab = nil
-                        }
+                        var (scene, read) = Self.filtered(scene, read, since: privacy)
                         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
                         scene.desktop = screen.flatMap { Spaces.desktop(on: $0) }
                         done(scene, read)
@@ -223,6 +244,17 @@ final class NoteDesk {
                 }
             }
         }
+    }
+
+    /// The one final privacy filter, wherever a read of what's in front is used (as it arrives, and again when a
+    /// cached one is used later, as Stick here's): an app kept private, now or since `privacy` (the private apps
+    /// changed), leaves nothing but itself and its window: no title, tab, address or file.
+    static func filtered(_ scene: NoteScene, _ read: ClaudePanel.FrontRead, since privacy: Int) -> (NoteScene, ClaudePanel.FrontRead) {
+        guard !ClaudePanel.privacy.current(privacy) || PetalApp.shared.assist.neverLook(scene.app) else { return (scene, read) }
+        var read = read
+        read.title = ""
+        read.tab = nil
+        return (scene.privately, read)
     }
 
     /// `scan`: look for the passages again (not when only the files changed: the person typing in a note).
@@ -256,23 +288,34 @@ final class NoteDesk {
     /// together: when they all come from one tab before, they take this one as theirs (its id and process from now
     /// on); notes from different old tabs that showed the same page never guess, and fall back to their other places.
     private func recoverTabs(_ fits: [String: Int], _ scene: NoteScene) -> [String: Int] {
-        let byAddress = fits.filter { key, index in
-            store.paper(key).map { $0.file.places.indices.contains(index) && NoteMatch.tabMatch($0.file.places[index], scene) == .address } ?? false
+        // Tabs by address and windows by title: each decided over every candidate together, never a guess.
+        var fits = recover(fits, scene, match: { NoteMatch.tabMatch($0, scene) }, decide: NoteMatch.recover, adopt: NoteMatch.adopt)
+        fits = recover(fits, scene, match: { NoteMatch.windowMatch($0, scene) }, decide: NoteMatch.recoverWindows, adopt: NoteMatch.adoptWindow)
+        return fits
+    }
+
+    /// Notes that fit what's in front only by its address or title (their browser or app restarted): when they all
+    /// come from one tab or window before (`decide`), they take this one as theirs (`adopt`, fenced by revision);
+    /// else none of them does, and each falls back to its other places.
+    private func recover(_ fits: [String: Int], _ scene: NoteScene, match: (NoteStick) -> NoteMatch.TabMatch?,
+                         decide: ([NoteStick]) -> Bool, adopt: (NoteStick, NoteScene) -> NoteStick) -> [String: Int] {
+        let loose = fits.filter { key, index in
+            store.paper(key).map { $0.file.places.indices.contains(index) && match($0.file.places[index]) == .address } ?? false
         }
-        guard !byAddress.isEmpty else { return fits }
+        guard !loose.isEmpty else { return fits }
         var fits = fits
-        let sticks = byAddress.compactMap { key, index in store.paper(key)?.file.places[index] }
-        if NoteMatch.recover(sticks) {
-            for (key, index) in byAddress {
+        let sticks = loose.compactMap { key, index in store.paper(key)?.file.places[index] }
+        if decide(sticks) {
+            for (key, index) in loose {
                 guard let paper = store.paper(key), !store.readOnly(paper) else { continue }
-                let adopted = NoteMatch.adopt(paper.file.places[index], scene)
+                let adopted = adopt(paper.file.places[index], scene)
                 store.change(key, expect: paper.revision, touch: false) { file in
                     if file.places.indices.contains(index) { file.places[index] = adopted }
                 }
             }
             return fits
         }
-        for (key, index) in byAddress {
+        for (key, index) in loose {
             guard let paper = store.paper(key) else { continue }
             fits[key] = NoteMatch.best(paper.file.places, scene, excluding: [index])
         }
@@ -599,8 +642,9 @@ final class NoteDesk {
 
     /// A note made just now and put away with nothing written goes (to the Trash: never deleted outright).
     private func letGoIfEmpty(_ key: String) {
-        guard fresh.contains(key), let paper = store.paper(key), paper.file.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              faces[key] != .open else { return }
+        guard fresh.contains(key), let paper = store.paper(key), faces[key] != .open,
+              NoteShelf.mayTrash(bodyEmpty: paper.file.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, picturesPending: store.picturesPending(key))
+        else { return }
         fresh.remove(key)
         faces[key] = nil
         panels[key]?.orderOut(nil)
@@ -648,9 +692,9 @@ final class NoteDesk {
             guard let number = (row["window"] as? Double).map({ CGWindowID($0) }), let pid = (row["pid"] as? Double).map({ pid_t($0) }),
                   let before = rect(row["before"]), let given = rect(row["given"]) else { continue }
             ledger[number] = (pid, before, given)
+            // What couldn't be given back yet (its app not answering) stays, tried again with every change.
             giveBack(number)
         }
-        ledger = [:]
     }
 
     /// The one path for room beside windows, after every change of what's showing (a note opened, folded, hidden,
@@ -715,10 +759,12 @@ final class NoteDesk {
 
     /// Every narrowed window gets its width back (notes off, Petal quitting). `wait`: before returning (on quit),
     /// after whatever change is under way on the queue.
-    private func giveBackAll(wait: Bool) {
+    private func giveBackAll(then done: @escaping @Sendable () -> Void) {
         Self.roomTurn.cancel()
-        let work: @Sendable () -> Void = { for number in Array(Self.ledger.keys) { Self.giveBack(number) } }
-        if wait { Self.queue.sync(execute: work) } else { Self.queue.async(execute: work) }
+        Self.queue.async {
+            for number in Array(Self.ledger.keys) { Self.giveBack(number) }
+            done()
+        }
     }
 
     // MARK: Writing
@@ -752,7 +798,8 @@ final class NoteDesk {
     /// waiting there, a move too), then they go in where the cursor was, or at the end of the note once its editor
     /// is gone.
     func importPictures(_ items: NoteImport, into key: String) {
-        if !store.importPictures(key, items) { say("This note has two versions: keep one before adding pictures.") }
+        // Accepted: the note isn't empty from now on (never trashed as an empty new note).
+        if store.importPictures(key, items) { fresh.remove(key) } else { say("This note has two versions: keep one before adding pictures.") }
     }
 
     /// The session saved pictures for a note: into its open editor, at the cursor's place then (true); no editor open
@@ -1092,8 +1139,9 @@ final class NoteDesk {
         captured = nil
         guard on, let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return }
         let name = running.localizedName ?? ""
+        let privacy = ClaudePanel.privacy.now
         Self.read(running, mac: local.mac) { scene, read in
-            self.captured = (scene, read, read.tab?.url ?? "", name)
+            self.captured = (scene, read, read.tab?.url ?? "", name, privacy)
         }
     }
 
@@ -1116,9 +1164,11 @@ final class NoteDesk {
             lines.append("")
         }
         while lines.last == "" { lines.removeLast() }
-        let offers = places(for: captured.scene, read: captured.read, appName: captured.name)
+        // Read before the conversation: filtered again now, so an app made private since gives nothing of itself.
+        let (scene, read) = Self.filtered(captured.scene, captured.read, since: captured.privacy)
+        let offers = places(for: scene, read: read, appName: captured.name)
         guard let place = offers.first(where: { $0.kind != .passage }) else { return }
-        apply(captured.scene, read: captured.read)
+        apply(scene, read: read)
         if let paper = make(on: place, body: lines.joined(separator: "\n"), chat: chat.uuidString) { fresh.remove(paper.key) }
     }
 
@@ -1195,7 +1245,7 @@ final class NoteDesk {
         menu.addItem(ActionItem("New notebook…") { [weak self] in
             guard let self, let name = Self.askName("New notebook", "What's it for? Its name:") else { return }
             let colors = ["#a550a7", "#f74f9e", "#f7821b", "#ffc600", "#62ba46", "#8c8c8c", "#007aff"]
-            let made = self.store.makeNotebook(name, color: colors[self.store.notebooks.count % colors.count])
+            let made = self.store.ensureNotebook(name, color: colors[self.store.notebooks.count % colors.count])
             self.move(key, to: made)
         })
         menu.addItem(.separator())
@@ -1218,9 +1268,9 @@ final class NoteDesk {
     /// The one move, from the letterhead and the note tools alike: what's typed is saved first, the move goes
     /// through the note's session, and its panel, editor and everything showing it follow it (`rekey`, from the
     /// store, for every change of a note's file). `done`: the note where it is now, or nil.
-    func move(_ key: String, to notebook: String, then done: @escaping @MainActor (PaperNote?) -> Void = { _ in }) {
+    func move(_ key: String, to notebook: String, live: (@Sendable () -> Bool)? = nil, then done: @escaping @MainActor (PaperNote?) -> Void = { _ in }) {
         editors[key]?.flush()
-        store.move(key, to: notebook) { moved in
+        store.move(key, to: notebook, live: live) { moved in
             if let moved {
                 self.remember(moved.notebook, for: moved.file.places.first)
                 self.layout()
@@ -1276,7 +1326,8 @@ final class NoteDesk {
     func previewCapture() {
         var tab = NoteTab(url: "https://guide.example/day-one", title: "Day one")
         tab.id = "1"
-        captured = (NoteScene(mac: local.mac, app: "com.apple.Safari", pid: 1, window: 1, title: "Day one", tab: tab), ClaudePanel.FrontRead(), tab.url, "Safari")
+        captured = (NoteScene(mac: local.mac, app: "com.apple.Safari", pid: 1, window: 1, title: "Day one", tab: tab), ClaudePanel.FrontRead(), tab.url, "Safari",
+                    ClaudePanel.privacy.now)
     }
 
     /// For snapshots: nothing read, nothing shown.

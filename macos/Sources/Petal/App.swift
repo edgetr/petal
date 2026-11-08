@@ -684,6 +684,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    /// Notes first: what's typed is written and narrowed windows get their width back, off the main thread (up to
+    /// 10 seconds), then Petal goes.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard PetalApp.started else { return .terminateNow }
+        PetalApp.shared.paper.prepareToQuit { NSApp.reply(toApplicationShouldTerminate: true) }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         if PetalApp.started { PetalApp.shared.stop() }
     }

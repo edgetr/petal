@@ -191,6 +191,30 @@ enum NoteMatch {
         return next
     }
 
+    /// How a window's note fits the window in front: by the window itself (this Mac, the same process and window
+    /// number), or by its title alone (its app restarted, or another Mac).
+    static func windowMatch(_ stick: NoteStick, _ scene: NoteScene) -> TabMatch? {
+        guard stick.kind == .window, fits(stick, scene) else { return nil }
+        return stick.mac == scene.mac && stick.pid == scene.pid && stick.window == scene.window ? .identity : .address
+    }
+
+    /// Notes found on one window by title alone, decided together: they may take it only when they all come from one
+    /// window before (the same Mac, process and window number), so two old windows titled alike ("New Tab") never
+    /// guess onto one.
+    static func recoverWindows(_ sticks: [NoteStick]) -> Bool {
+        guard let first = sticks.first, first.window != nil else { return false }
+        return sticks.allSatisfy { $0.mac == first.mac && $0.pid == first.pid && $0.window == first.window }
+    }
+
+    /// A window's note recovered onto a window after its app restarted: from now on it's that window's.
+    static func adoptWindow(_ stick: NoteStick, _ scene: NoteScene) -> NoteStick {
+        var next = stick
+        next.mac = scene.mac
+        next.pid = scene.pid
+        next.window = scene.window
+        return next
+    }
+
     /// The most specific place that fits, leaving out some (address matches that couldn't be decided).
     static func best(_ places: [NoteStick], _ scene: NoteScene, excluding: Set<Int>) -> Int? {
         places.indices.filter { !excluding.contains($0) && fits(places[$0], scene) }.min { places[$0].kind.rank < places[$1].kind.rank }
@@ -715,12 +739,36 @@ enum NoteShelf {
         return disk == base ? .write : .keepBoth
     }
 
-    /// What an edit was really made on: an edit made on a text this note's own writes put there (or tried to: a
-    /// write that failed) was made on what the file said when those began, or after the last of them that landed
-    /// (`anchor`). Any other base is the file as it was read. `ours`: hashes of the texts this note's writes carried.
-    static func effectiveBase(_ base: String?, ours: Set<Int>, anchor: String?) -> String? {
-        guard let base else { return nil }
-        return ours.contains(base.hashValue) ? anchor : base
+    /// Where a picture's reference goes, once its bytes are (or aren't) in the note's pictures' folder: into its
+    /// open editor as ordinary text, else as a write of the note through its session; bytes that couldn't be
+    /// written by quit go to "Unsaved notes" with the note; not written yet and not quitting: nothing (tried again).
+    /// Bytes first, always: a reference never points at a picture that isn't there.
+    enum PictureReference: Equatable { case editor, write, unsaved, wait }
+
+    static func pictureReference(bytesWritten: Bool, editorOpen: Bool, quitting: Bool) -> PictureReference {
+        guard bytesWritten else { return quitting ? .unsaved : .wait }
+        return editorOpen && !quitting ? .editor : .write
+    }
+
+    /// A note made and put away empty goes to the Trash, unless pictures were accepted for it (their bytes or
+    /// reference still on the way): those make it a note.
+    static func mayTrash(bodyEmpty: Bool, picturesPending: Bool) -> Bool { bodyEmpty && !picturesPending }
+
+    /// Moving a note's pictures' folder into a notebook that has one by that name already (the same note, moved
+    /// there before): each picture moves unless the same file is there; one there with other bytes stops the whole
+    /// move (nothing moves, the note stays, its links never break). `source`/`destination`: name → content hash.
+    enum AssetPlan: Equatable { case move([String]), conflict(String) }
+
+    static func assetPlan(source: [String: Int], destination: [String: Int]) -> AssetPlan {
+        var moving: [String] = []
+        for name in source.keys.sorted() {
+            if let there = destination[name] {
+                if there != source[name] { return .conflict(name) }
+            } else {
+                moving.append(name)
+            }
+        }
+        return .move(moving)
     }
 
     /// Keep this one, on the papers exactly as they were shown: each candidate (a file's path, or a version iCloud

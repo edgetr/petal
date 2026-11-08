@@ -110,48 +110,85 @@ struct NoteStoreCheck {
         try? fm.createDirectory(at: work, withIntermediateDirectories: true)
         let item = { (id: Int, w: NoteWork) in NoteSession.Item(id: id, work: w, done: []) }
 
-        // Writes chained across a failure: the one after is made on the failed one, and goes over the file as it was.
+        // A write that fails stays first and is tried again; once it lands, the next (made on it) lands too.
         let held = work.appending(path: "Held.md")
         _ = NoteStore.create("v0", at: held, root: root)
-        NoteDisk.states[1] = NoteDisk.State(url: held, noteID: "S1", anchor: "v0", latest: "v0")
+        NoteDisk.states[1] = NoteDisk.State(url: held, noteID: "S1", revision: "v0")
         try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: work.path)
         expect(NoteStore.perform(.write(text: "v1", base: "v0"), session: 1, root: root).outcome == .failed, "a write that can't land fails")
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: work.path)
-        expect(NoteStore.perform(.write(text: "v2", base: "v1"), session: 1, root: root).outcome == .written && text(held) == "v2",
-               "the next, made on the failed one, lands: no false conflict")
-        // Already there (a write that landed before its answer came back): done, never a copy.
+        expect(NoteStore.perform(.write(text: "v1", base: "v0"), session: 1, root: root).outcome == .written, "tried again, it lands")
+        expect(NoteStore.perform(.write(text: "v2", base: "v1"), session: 1, root: root).outcome == .written && text(held) == "v2", "and the next, made on it")
         expect(NoteStore.perform(.write(text: "v2", base: "elsewhere"), session: 1, root: root).outcome == .written, "a file that already says it is done")
+        // A tool's write whose asker went: nothing changes.
+        expect(NoteStore.perform(.write(text: "v3", base: "v2"), session: 1, root: root, live: { false }).outcome == .cancelled && text(held) == "v2",
+               "a cancelled request changes nothing")
+
+        // Picture bytes: a file of their own, the same name again is the same file; the note's Markdown untouched.
+        let pictureNote = work.appending(path: "Pictures.md")
+        _ = NoteStore.create("p0", at: pictureNote, root: root)
+        NoteDisk.states[5] = NoteDisk.State(url: pictureNote, noteID: "P5", revision: "p0")
+        let bytes = NotePictureBytes(name: "picture-1.png", data: Data("png".utf8), caption: "")
+        let first = NoteStore.perform(.pictureBytes([bytes], noteID: "P5"), session: 5, root: root)
+        let again = NoteStore.perform(.pictureBytes([bytes], noteID: "P5"), session: 5, root: root)
+        expect(first.outcome == .written && again.outcome == .written && first.pictures.first?.path == again.pictures.first?.path && text(pictureNote) == "p0",
+               "picture bytes written once, idempotent, the note untouched")
+
+        // Moving a note with pictures: the pictures go first and come along; one in the way stops it all.
+        let assetsName = NoteShelf.assetsFolder(id: "P5")
+        let moved = NoteStore.move(pictureNote, noteID: "P5", into: root.appending(path: "Away"), root: root)
+        expect(moved != nil && fm.fileExists(atPath: root.appending(path: "Away/\(assetsName)/picture-1.png").path)
+               && !fm.fileExists(atPath: work.appending(path: assetsName).path), "a moved note's pictures go with it")
+        let blocked = work.appending(path: "Blocked.md")
+        _ = NoteStore.create("b0", at: blocked, root: root)
+        let blockedAssets = NoteShelf.assetsFolder(id: "B6")
+        try? fm.createDirectory(at: work.appending(path: blockedAssets), withIntermediateDirectories: true)
+        try? Data("mine".utf8).write(to: work.appending(path: "\(blockedAssets)/picture-2.png"))
+        try? fm.createDirectory(at: root.appending(path: "Away/\(blockedAssets)"), withIntermediateDirectories: true)
+        try? Data("other".utf8).write(to: root.appending(path: "Away/\(blockedAssets)/picture-2.png"))
+        expect(NoteStore.move(blocked, noteID: "B6", into: root.appending(path: "Away"), root: root) == nil && text(blocked) == "b0"
+               && text(work.appending(path: "\(blockedAssets)/picture-2.png")) == "mine", "another picture in the way: nothing moves, nothing breaks")
 
         // A move, then writes made meanwhile, as quitting drains them: the writing lands where the note landed.
         let moving = work.appending(path: "Moving.md")
         _ = NoteStore.create("m0", at: moving, root: root)
-        NoteDisk.states[2] = NoteDisk.State(url: moving, noteID: "S2", anchor: "m0", latest: "m0")
+        NoteDisk.states[2] = NoteDisk.State(url: moving, noteID: "S2", revision: "m0")
         NoteStore.drain([(session: 2, items: [item(10, .move(folder: root.appending(path: "Elsewhere"))), item(11, .write(text: "m1", base: "m0"))])], root: root)
         let landed = root.appending(path: "Elsewhere/Moving.md")
         expect(text(landed) == "m1" && !fm.fileExists(atPath: moving.path), "a move and the typing after it, drained at quit", text(landed) ?? "nil")
 
-        // Writing that still can't land at quit goes to "Unsaved notes", never lost.
+        // Quit with pictures whose bytes are in but whose reference isn't: one based write puts them at the end.
+        let quitNote = work.appending(path: "Quit.md")
+        let quitText = NoteFile(id: "Q7", body: "words").serialized()
+        _ = NoteStore.create(quitText, at: quitNote, root: root)
+        NoteDisk.states[7] = NoteDisk.State(url: quitNote, noteID: "Q7", revision: quitText)
+        NoteStore.drain([(session: 7, items: [item(30, .pictureBytes([NotePictureBytes(name: "picture-q.png", data: Data("q".utf8), caption: "")], noteID: "Q7"))])], root: root)
+        expect(text(quitNote)?.contains("picture-q.png") == true, "quitting after the bytes: the reference is written", text(quitNote) ?? "nil")
+
+        // Writing that still can't land at quit goes to "Unsaved notes", never lost; pictures that can't be written too.
         let stuck = work.appending(path: "Stuck.md")
         _ = NoteStore.create("s0", at: stuck, root: root)
-        NoteDisk.states[3] = NoteDisk.State(url: stuck, noteID: "S3", anchor: "s0", latest: "s0")
+        NoteDisk.states[3] = NoteDisk.State(url: stuck, noteID: "S3", revision: "s0")
         try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: work.path)
-        var kept = NoteFile(id: "S3", body: "# Rescued words\nkeep me")
-        NoteStore.drain([(session: 3, items: [item(20, .write(text: kept.serialized(), base: "s0"))])], root: root)
+        let kept = NoteFile(id: "S3", body: "# Rescued words\nkeep me")
+        NoteStore.drain([(session: 3, items: [item(20, .write(text: kept.serialized(), base: "s0")),
+                                              item(21, .pictureBytes([NotePictureBytes(name: "picture-u.png", data: Data("u".utf8), caption: "")], noteID: "S3"))])], root: root)
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: work.path)
         let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
         let rescued = (try? fm.contentsOfDirectory(atPath: unsaved.path)) ?? []
-        kept.body = ""
         expect(rescued.contains("Rescued words.md") && text(unsaved.appending(path: "Rescued words.md"))?.contains("keep me") == true,
                "writing that can't land by quit is kept in Unsaved notes", "\(rescued)")
+        expect(rescued.contains("picture-u.png"), "and pictures that couldn't be written, beside it", "\(rescued)")
         expect(text(stuck) == "s0", "and the file is as it was")
 
-        // A keep-aside that can't land fails, and is tried again (and rescued) like any writing.
-        NoteDisk.states[4] = NoteDisk.State(url: stuck, noteID: "S3", anchor: "s0", latest: "s0")
-        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: work.path)
-        expect(NoteStore.perform(.keepAside(text: "aside"), session: 4, root: root).outcome == .failed, "a keep-aside that can't land fails")
-        expect(NoteWork.keepAside(text: "x").keeps && NoteWork.pictures(NoteImport(files: [], at: 0), noteID: "x").keeps && !NoteWork.trash(revision: nil).keeps,
-               "writing is kept until it lands; a trash isn't")
-        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: work.path)
+        // Keep this one: checked again inside each coordinated step; a file edited since stops it.
+        let keepA = work.appending(path: "Keep.md"), keepB = work.appending(path: "Keep 2.md")
+        _ = NoteStore.create("ka", at: keepA, root: root)
+        _ = NoteStore.create("kb", at: keepB, root: root)
+        try? Data("kb edited".utf8).write(to: keepB)
+        let plan = NoteKeep(snapshot: ["file:" + keepA.path: "ka", "file:" + keepB.path: "kb"], kept: keepA, keptText: nil, files: [keepA, keepB])
+        expect(!NoteStore.keep(plan, root: root) && text(keepB) == "kb edited", "a paper edited since it was shown: nothing removed")
+        expect(NoteWork.keepAside(text: "x").keeps && !NoteWork.trash(revision: nil).keeps, "writing is kept until it lands; a trash isn't")
     }
 
     static func finish() {
