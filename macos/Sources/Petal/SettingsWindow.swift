@@ -13,9 +13,7 @@ final class SettingsWindow {
     private var madeAhead: SettingsSection?
 
     func show(_ section: SettingsSection = .dock) {
-        let window = prepare(section)
-        NSApp.activate()
-        window.makeKeyAndOrderFront(nil)
+        PetalWindow.bringForward(prepare(section))
     }
 
     /// The window with its content, ready to show (`Petal --bench-settings` times this without showing it). Each

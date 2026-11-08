@@ -214,8 +214,7 @@ final class ReleaseNotes {
         window.title = "What’s New in Petal \(version)"
         window.setGlassContent(ReleaseNotesView(version: version).environment(PetalApp.shared))
         window.center()
-        NSApp.activate()
-        window.makeKeyAndOrderFront(nil)
+        PetalWindow.bringForward(window)
     }
 
     struct Notes: Sendable { let body: String; let link: URL? }

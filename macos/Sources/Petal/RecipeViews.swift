@@ -26,8 +26,7 @@ final class RecipeWindow {
         self.window = window
         window.setGlassContent(RecipeImportView(url: url) { [weak window] in window?.close() }.environment(PetalApp.shared))
         window.center()
-        NSApp.activate()
-        window.makeKeyAndOrderFront(nil)
+        PetalWindow.bringForward(window)
     }
 
     /// Picks a .petal file to add.

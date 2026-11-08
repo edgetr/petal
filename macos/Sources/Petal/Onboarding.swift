@@ -21,8 +21,7 @@ final class Welcome {
         window.letContentGoWhenClosed()
         window.center()
         self.window = window
-        NSApp.activate()
-        window.makeKeyAndOrderFront(nil)
+        PetalWindow.bringForward(window)
     }
 }
 
