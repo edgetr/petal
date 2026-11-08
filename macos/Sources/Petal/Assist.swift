@@ -214,7 +214,8 @@ final class Assist {
         case "petal_ui", "petal_act": computer.handle(name, args, note: note, send: send, fail: fail)
         case "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
             // Its asker hanging up stops a tidy's moves under way off the main thread, not only what comes next.
-            let stop = RoutineStop()
+            let asker = request
+            let stop = RoutineStop(also: { asker?.hungUp ?? false })
             request?.onHangUp { stop.stop() }
             app.routines.handle(name, args, send, fail, caller: note, live: live, stop: stop)
         case "petal_memories":

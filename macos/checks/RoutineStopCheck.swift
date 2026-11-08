@@ -2,6 +2,17 @@ import Foundation
 
 // Checks RoutineStop.swift: a routine's tidy stops before its next move once its asker hung up (or the routine
 // changed), set from another thread, and says it stopped. No file is moved. Run with macos/checks/run.sh.
+/// A value read and written from any thread, for the checks.
+final class Locked<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value
+    init(_ value: Value) { stored = value }
+    var value: Value {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
+    }
+}
+
 @main
 struct RoutineStopCheck {
     nonisolated(unsafe) static var failures = 0
@@ -56,6 +67,16 @@ struct RoutineStopCheck {
         finished.wait()
         expect(result.stopped && result.done.count < 10_000, "a stop from another thread ends the moves", "\(result.done.count)")
         expect(shared.isStopped, "it stays stopped")
+
+        // The asker's socket says it hung up before any main-thread cleanup calls stop(): the next move is the last.
+        let socketGone = Locked(false)
+        let watched = RoutineStop(also: { socketGone.value })
+        let cut = RoutineStop.each(Array(1...5), stop: watched) { item -> Int? in
+            if item == 2 { socketGone.value = true }
+            return item
+        }
+        expect(cut.done == [1, 2] && cut.stopped, "a hang-up seen on the socket's thread stops the moves at once", "\(cut)")
+        expect(!RoutineStop(also: { false }).isStopped, "an asker still there doesn't stop it")
 
         if failures > 0 { print("\(failures) routine stop check(s) failed"); exit(1) }
         print("routine stop: all checks passed")

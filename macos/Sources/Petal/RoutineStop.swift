@@ -6,11 +6,14 @@ import Foundation
 final class RoutineStop: @unchecked Sendable {
     private let lock = NSLock()
     private var stopped = false
+    /// Read on whichever thread asks, with no wait on the main thread: the socket's own flag for a caller that hung
+    /// up, set the moment its thread sees the close (the main-thread cleanup that calls `stop()` may come later).
+    private let also: @Sendable () -> Bool
 
-    init() {}
+    init(also: @escaping @Sendable () -> Bool = { false }) { self.also = also }
 
     func stop() { lock.withLock { stopped = true } }
-    var isStopped: Bool { lock.withLock { stopped } }
+    var isStopped: Bool { lock.withLock { stopped } || also() }
 
     /// Does `body` for each item in order, asking `stop` right before each: what was done (nil results are skipped:
     /// nothing moved), and whether it stopped before the end.
