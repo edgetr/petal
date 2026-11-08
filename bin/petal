@@ -24,7 +24,7 @@ if [[ $(uname) == Darwin ]]; then
       # Gives macOS's Dock back even if Petal crashed or was deleted.
       if pgrep -xq Petal; then ipc dock macos
       elif [[ -x /Applications/Petal.app/Contents/MacOS/Petal ]]; then /Applications/Petal.app/Contents/MacOS/Petal --restore-dock
-      else defaults write com.apple.dock autohide -bool false; defaults delete com.apple.dock autohide-delay 2>/dev/null; killall Dock; fi ;;
+      else defaults write com.apple.dock autohide -bool false; defaults delete com.apple.dock autohide-delay 2>/dev/null; defaults delete com.apple.dock no-bouncing 2>/dev/null; killall Dock; fi ;;
     modes)    osascript -l JavaScript -e "var d=JSON.parse($.NSString.stringWithContentsOfFileEncodingError('$config/modes.json',4,null).js); d.modes.map(m=>m.id+' - '+m.name+' | '+(m.apps||[]).join(', ')).join('\\n')" ;;
     edit)     open -t "$config/modes.json" ;;
     logs)     log show --last 30m --style compact --predicate 'process == "Petal"' 2>/dev/null | tail -n "${2:-40}" ;;
