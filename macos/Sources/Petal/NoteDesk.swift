@@ -656,7 +656,8 @@ final class NoteDesk {
     /// A note made just now and put away with nothing written goes (to the Trash: never deleted outright).
     private func letGoIfEmpty(_ key: String) {
         guard fresh.contains(key), let paper = store.paper(key), faces[key] != .open,
-              NoteShelf.mayTrash(bodyEmpty: paper.file.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, picturesPending: store.picturesPending(key))
+              NoteShelf.mayTrash(bodyEmpty: paper.file.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, picturesPending: store.picturesPending(key),
+                                 importing: store.importing(key))
         else { return }
         fresh.remove(key)
         faces[key] = nil
@@ -813,9 +814,12 @@ final class NoteDesk {
     /// yet, a screenshot's TIFF), on a background queue that's neither the journal's nor the notes' own. Only then is
     /// the paste accepted: the bytes into memory (and from there into the journal's snapshots and the note's
     /// pictures' folder), and the references into the note as ordinary text, at the cursor in its editor, or at the
-    /// end of the note once the editor is gone. A note with a picture in it is never trashed as empty.
+    /// end of the note once the editor is gone. The paste is recorded with the note before anything is read
+    /// (`beginImport`: its sources in the journal), so a note with a picture loading is never put away as empty,
+    /// and a quit meanwhile keeps it for the next launch.
     func importPictures(_ items: NoteImport, into key: String) {
         guard let paper = store.paper(key), !store.readOnly(paper) else { return say("This note has two versions: keep one before adding pictures.") }
+        guard let token = store.beginImport(key, items) else { return say("This note can't take pictures right now.") }
         let noteID = paper.noteID
         DispatchQueue.global(qos: .userInitiated).async {
             var read: [(ext: String, data: Data, caption: String)] = []
@@ -829,20 +833,33 @@ final class NoteDesk {
             let ready = read
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard !ready.isEmpty else { return self.say("Petal couldn't read that picture.") }
-                    // The note as it is now (moved or named again meanwhile: found by its id).
+                    // Quitting meanwhile: the journal keeps the paste for the next launch.
+                    if self.store.closing { return self.store.endImport(noteID, token, journal: false) }
+                    guard !ready.isEmpty else {
+                        self.store.endImport(noteID, token, journal: true)
+                        self.letGoIfEmpty(self.store.notes.first { $0.noteID == noteID && $0.version == nil }?.key ?? "")
+                        return self.say("Petal couldn't read that picture.")
+                    }
+                    // The note as it is now (moved or named again meanwhile: found by its id). Its read is over
+                    // before its pictures go in, so the snapshot they make carries their bytes, not their sources.
+                    self.store.endImport(noteID, token, journal: false)
                     guard let now = self.store.notes.first(where: { $0.noteID == noteID && $0.version == nil }),
                           let accepted = self.store.acceptPictures(now.key, ready) else {
+                        NoteJournal.queue.async { NoteJournal.importsDone(noteID: noteID, token: token) }
                         return self.say("This note can't take pictures right now.")
                     }
                     for (index, picture) in accepted.enumerated() { NotePictures.shared.preview(picture.file, NSImage(data: ready[index].data) ?? NSImage()) }
                     self.fresh.remove(now.key)
-                    if !self.insertPictures(now.key, accepted, at: items.at) {
+                    if self.insertPictures(now.key, accepted, at: items.at) {
+                        // Into the note now (and its snapshot), not a moment later.
+                        self.editors[now.key]?.flush()
+                    } else {
                         let lines = accepted.map { NoteBlock.image(path: $0.path, caption: $0.caption).markdown }
                         self.store.change(now.key) { file in
                             file.body += (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + lines.joined(separator: "\n")
                         }
                     }
+                    NoteJournal.queue.async { NoteJournal.importsDone(noteID: noteID, token: token) }
                 }
             }
         }

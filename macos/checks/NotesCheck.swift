@@ -137,6 +137,35 @@ struct NotesCheck {
         expect(NoteShelf.frontOffer(window: nil, none: true) == .desktop, "no window, said so: the Desktop")
         expect(NoteShelf.frontOffer(window: nil, none: false) == .unknown, "a window that couldn't be read: no note, never the Desktop")
 
+        // Windows: told apart by their live identity; two windows titled alike are two windows.
+        var untitledA = NoteStick(kind: .window); untitledA.app = "com.apple.TextEdit"; untitledA.mac = "m"; untitledA.pid = 9; untitledA.window = 31; untitledA.title = "Untitled"
+        var untitledB = untitledA; untitledB.window = 32
+        expect(!untitledA.samePlace(untitledB), "two “Untitled” windows with different numbers are two places")
+        var retitled = untitledA; retitled.title = "Renamed"
+        expect(untitledA.samePlace(retitled), "the same window under a new title is the same place")
+        var otherProcess = untitledA; otherProcess.pid = 10
+        expect(!untitledA.samePlace(otherProcess), "another process's window of that number isn't it")
+        var rememberedA = untitledA; rememberedA.window = nil; rememberedA.pid = nil
+        var rememberedB = rememberedA
+        expect(rememberedA.samePlace(rememberedB), "two remembered windows (no number) with the same title: told by title")
+        rememberedB.title = ""; rememberedA.title = ""
+        expect(!rememberedA.samePlace(rememberedB), "never by an empty title")
+        expect(!rememberedA.samePlace(untitledA) || !untitledA.title.isEmpty, "one with a number isn't one without by title alone")
+        rememberedA.title = "Untitled"
+        expect(!rememberedA.samePlace(untitledA), "a live window and a remembered one: not the same by title alone")
+
+        // A session belongs to one note: another note given a path a session still knows never gets it.
+        expect(NoteShelf.session(at: "/n/A.md", noteID: "A", keys: ["/n/A.md": 1], noteIDs: [1: "A"]) == 1, "its own note: its session")
+        expect(NoteShelf.session(at: "/n/A.md", noteID: "B", keys: ["/n/A.md": 1], noteIDs: [1: "A"]) == nil,
+               "A renamed elsewhere, B now at A's old path: not A's session")
+        expect(NoteShelf.rebind(key: "/n/A.md", at: ["/n/A renamed.md"]) == "/n/A renamed.md", "an idle session follows its note to its new name")
+        expect(NoteShelf.rebind(key: "/n/A.md", at: ["/n/A.md"]) == nil && NoteShelf.rebind(key: "/n/A.md", at: ["/n/x.md", "/n/y.md"]) == nil,
+               "where it was, or found twice: left alone")
+
+        // A piece of work is claimed once: the queue and the quit drain never both do it.
+        let claimed = NoteShelf.claim(5, [])
+        expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")
+
         // A session's key follows its file, never onto a name another session holds.
         let made = NoteShelf.rekey(["/n/Foo.md": 1, "/n/Foo 2.md": 2], session: 1, from: "/n/Foo.md", to: "/n/Foo 3.md")
         expect(made == ["/n/Foo 2.md": 2, "/n/Foo 3.md": 1], "a new note landing under another name: its key moves, the other's stays", "\(String(describing: made))")
@@ -157,8 +186,12 @@ struct NotesCheck {
         expect(NoteShelf.pictureReference(bytesWritten: true, editorOpen: true, quitting: true) == .write, "quitting with the bytes in: the reference is written")
         expect(NoteShelf.pictureReference(bytesWritten: false, editorOpen: false, quitting: true) == .unsaved,
                "quitting before the import: the pictures and the note go to Unsaved notes")
-        expect(!NoteShelf.mayTrash(bodyEmpty: true, picturesPending: true) && NoteShelf.mayTrash(bodyEmpty: true, picturesPending: false)
-               && !NoteShelf.mayTrash(bodyEmpty: false, picturesPending: false), "a new note with a picture on its way is never trashed")
+        expect(!NoteShelf.mayTrash(bodyEmpty: true, picturesPending: true, importing: false) && NoteShelf.mayTrash(bodyEmpty: true, picturesPending: false, importing: false)
+               && !NoteShelf.mayTrash(bodyEmpty: false, picturesPending: false, importing: false), "a new note with a picture on its way is never trashed")
+        expect(!NoteShelf.mayTrash(bodyEmpty: true, picturesPending: false, importing: true),
+               "a new note with a pasted picture still being read (a slow iCloud file) isn't empty")
+        expect(!NoteShelf.journalClears(snapshot: "t", landed: "t", referenced: [], unsaved: [], importing: true),
+               "a snapshot with a paste still being read stays, with its source, when its text lands")
 
         // A note's pictures moving into a notebook that has a folder by their name.
         expect(NoteShelf.assetPlan(source: ["a.png": 1, "b.png": 2], destination: [:]) == .move(["a.png", "b.png"]), "all of them, into an empty place")

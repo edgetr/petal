@@ -24,6 +24,19 @@ enum NoteJournal {
         var aside = false
         /// Its text landed, but pictures it references weren't saved: kept for their bytes until they are.
         var landed: Bool? = nil
+        /// Pictures pasted or dropped and still being read when it was taken: their sources (a file's path, or the
+        /// pasteboard's bytes), put in at the next launch when a quit came first.
+        var imports: [Import]? = nil
+    }
+
+    /// A paste or drop not read yet: a file (`path`) or bytes from the pasteboard (`data`, TIFF turned into PNG
+    /// when it's put in).
+    struct Import: Codable, Equatable {
+        var token: Int
+        var path: String? = nil
+        var data: Data? = nil
+        var ext: String
+        var caption = ""
     }
 
     /// A picture's bytes, as the editor accepted them (from memory, never read from its source here).
@@ -58,7 +71,8 @@ enum NoteJournal {
     nonisolated static func landed(noteID: String, text: String, aside: Bool = false, unsaved: Set<String> = [], in folder: URL = folder) {
         let url = file(noteID, aside: aside, in: folder)
         guard var entry = read(url), entry.text == text else { return }
-        if NoteShelf.journalClears(snapshot: entry.text, landed: text, referenced: entry.pictures.map(\.name), unsaved: unsaved) {
+        if NoteShelf.journalClears(snapshot: entry.text, landed: text, referenced: entry.pictures.map(\.name), unsaved: unsaved,
+                                   importing: !(entry.imports ?? []).isEmpty) {
             try? FileManager.default.removeItem(at: url)
             return
         }
@@ -73,7 +87,55 @@ enum NoteJournal {
         let url = file(noteID, in: folder)
         guard var entry = read(url) else { return }
         entry.pictures.removeAll { names.contains($0.name) }
-        if entry.landed == true && entry.pictures.isEmpty { try? FileManager.default.removeItem(at: url) } else { snapshot(entry, in: folder) }
+        settle(entry, at: url, in: folder)
+    }
+
+    /// A paste's read is over (put in, or nothing in it could be read): its sources leave the snapshot.
+    nonisolated static func importsDone(noteID: String, token: Int, in folder: URL = folder) {
+        let url = file(noteID, in: folder)
+        guard var entry = read(url), entry.imports?.contains(where: { $0.token == token }) == true else { return }
+        entry.imports?.removeAll { $0.token == token }
+        if entry.imports?.isEmpty == true { entry.imports = nil }
+        settle(entry, at: url, in: folder)
+    }
+
+    /// A snapshot whose text landed goes once nothing of it is left to save (pictures, pastes); else it's kept.
+    private nonisolated static func settle(_ entry: Entry, at url: URL, in folder: URL) {
+        if entry.landed == true && entry.pictures.isEmpty && (entry.imports ?? []).isEmpty { try? FileManager.default.removeItem(at: url) }
+        else { snapshot(entry, in: folder) }
+    }
+
+    /// The pastes a snapshot kept, read now: each one read becomes a picture (its bytes, a new name) and a line
+    /// for it at the end of the text; one whose file is there but can't be read yet stays for the next launch; one
+    /// whose file is gone is let go. Returns the entry to put back and the pastes still waiting.
+    nonisolated static func readImports(_ entry: Entry) -> (entry: Entry, waiting: [Import]) {
+        guard let imports = entry.imports, !imports.isEmpty else { return (entry, []) }
+        var entry = entry
+        var lines: [String] = []
+        var waiting: [Import] = []
+        for source in imports {
+            let bytes = source.data ?? source.path.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) }
+            guard var data = bytes, NSImage(data: data) != nil else {
+                if let path = source.path, FileManager.default.fileExists(atPath: path) { waiting.append(source) }
+                continue
+            }
+            var ext = source.ext.isEmpty ? "png" : source.ext
+            if ext == "tiff" || ext == "tif", let rep = NSBitmapImageRep(data: data), let png = rep.representation(using: .png, properties: [:]) {
+                data = png
+                ext = "png"
+            }
+            let name = "picture-\(UUID().uuidString.prefix(8).lowercased()).\(ext)"
+            entry.pictures.append(Picture(name: name, data: data))
+            lines.append(NoteBlock.image(path: NoteShelf.assetsFolder(id: entry.noteID) + "/" + name, caption: source.caption).markdown)
+        }
+        if !lines.isEmpty {
+            // A text already in its file is the base the pictures' lines are written on.
+            if entry.landed == true { entry.base = entry.text }
+            entry.text += (entry.text.isEmpty || entry.text.hasSuffix("\n") ? "" : "\n") + lines.joined(separator: "\n")
+            entry.landed = nil
+        }
+        entry.imports = nil
+        return (entry, waiting)
     }
 
     /// At launch, on the journal's queue: the journal as it is moves aside into a "recovering" folder of its own
@@ -105,8 +167,16 @@ enum NoteJournal {
         let notes = NoteStore.read(root).notes
         for name in names {
             let url = holding.appending(path: name)
-            guard let entry = read(url) else { try? fm.removeItem(at: url); continue }
-            if recoverEntry(entry, notes: notes, root: root) { try? fm.removeItem(at: url) }
+            guard let kept = read(url) else { try? fm.removeItem(at: url); continue }
+            let (entry, waiting) = readImports(kept)
+            guard recoverEntry(entry, notes: notes, root: root) else { continue }
+            if waiting.isEmpty { try? fm.removeItem(at: url); continue }
+            // Put back, but a paste's file couldn't be read yet (iCloud still downloading it): its source stays,
+            // on what was just put back, for the next launch.
+            var rest = Entry(noteID: entry.noteID, path: entry.path, base: nil, text: entry.text)
+            rest.landed = true
+            rest.imports = waiting
+            if let data = try? JSONEncoder().encode(rest) { try? data.write(to: url, options: .atomic) }
         }
         if (((try? fm.contentsOfDirectory(atPath: holding.path)) ?? []).filter { $0.hasSuffix(".json") }).isEmpty { try? fm.removeItem(at: holding) }
     }

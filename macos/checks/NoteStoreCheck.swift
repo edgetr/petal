@@ -112,7 +112,7 @@ struct NoteStoreCheck {
         let fm = FileManager.default
         let work = root.appending(path: "Sessions")
         try? fm.createDirectory(at: work, withIntermediateDirectories: true)
-        let item = { (id: Int, w: NoteWork) in NoteSession.Item(id: id, work: w, done: []) }
+        let item = { (id: Int, w: NoteWork) in NoteSession.Item(id: 1_000_000 + id, work: w, done: []) }   // far from the stores' own numbers
 
         // A write that fails stays first and is tried again; once it lands, the next (made on it) lands too.
         let held = work.appending(path: "Held.md")
@@ -161,6 +161,21 @@ struct NoteStoreCheck {
         let landed = root.appending(path: "Elsewhere/Moving.md")
         expect(text(landed) == "m1" && !fm.fileExists(atPath: moving.path), "a move and the typing after it, drained at quit", text(landed) ?? "nil")
 
+        // Exactly once: a write the queue did whose answer never reached the main thread, then the drain, then the
+        // queue's next turn (or a secondWrite drain): each piece is done once.
+        let once = work.appending(path: "Once.md")
+        _ = NoteStore.create("e0", at: once, root: root)
+        NoteDisk.states[7] = NoteDisk.State(url: once, noteID: "E7", revision: "e0")
+        let firstWrite = item(30, .write(text: "e1", base: "e0")), secondWrite = item(31, .write(text: "e2", base: "e1"))
+        expect(NoteDisk.once(firstWrite, session: 7, root: root)?.outcome == .written, "the queue writes the firstWrite")
+        NoteStore.drain([(session: 7, items: [firstWrite, secondWrite])], root: root)
+        expect(text(once) == "e2", "the drain takes the firstWrite as done and writes the secondWrite", text(once) ?? "nil")
+        try? Data("changed elsewhere".utf8).write(to: once)
+        expect(NoteDisk.once(secondWrite, session: 7, root: root) == nil && NoteDisk.once(firstWrite, session: 7, root: root) == nil,
+               "the queue's next turn after the drain: nothing done again")
+        NoteStore.drain([(session: 7, items: [firstWrite, secondWrite])], root: root)
+        expect(text(once) == "changed elsewhere", "a secondWrite drain does nothing again either", text(once) ?? "nil")
+
         // Writing that still can't land at quit goes to "Unsaved notes" with the pictures it references, laid out as
         // in the notes' folder so its references hold.
         let stuck = work.appending(path: "Stuck.md")
@@ -198,6 +213,36 @@ struct NoteStoreCheck {
         let snap = { (id: String, path: URL, base: String?, text: String, pictures: [NoteJournal.Picture]) in
             NoteJournal.snapshot(NoteJournal.Entry(noteID: id, path: path.path, base: base, text: text, pictures: pictures), in: journal)
         }
+
+        // A paste still being read when Petal quit: its source is in the snapshot; at the next launch it's read and
+        // put in the note (whose text was already there), and one whose file can't be read yet waits.
+        let pasted = notes.appending(path: "Pasted.md")
+        let pastedText = NoteFile(id: "JI", body: "words").serialized()
+        _ = NoteStore.create(pastedText, at: pasted, root: root)
+        let source = root.appending(path: "source.png")
+        let png = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                   isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?.representation(using: .png, properties: [:])
+        try? png?.write(to: source)
+        var loading = NoteJournal.Entry(noteID: "JI", path: pasted.path, base: nil, text: pastedText)
+        loading.landed = true
+        loading.imports = [NoteJournal.Import(token: 1, path: source.path, ext: "png", caption: "source")]
+        NoteJournal.importsDone(noteID: "JI", token: 2, in: journal)   // another paste's end: nothing to do
+        NoteJournal.snapshot(loading, in: journal)
+        NoteJournal.landed(noteID: "JI", text: pastedText, in: journal)
+        expect(NoteJournal.read(NoteJournal.file("JI", in: journal))?.imports?.count == 1, "its text landing keeps a paste still being read")
+        let (withPicture, waiting) = NoteJournal.readImports(loading)
+        expect(waiting.isEmpty && withPicture.pictures.count == 1 && withPicture.base == pastedText
+               && withPicture.text.contains(NoteShelf.assetsFolder(id: "JI") + "/" + (withPicture.pictures.first?.name ?? "?")),
+               "read at the next launch: a picture and its line, on the text that was there")
+        expect(NoteJournal.recoverEntry(withPicture, notes: NoteStore.read(root).notes, root: root)
+               && text(pasted) == withPicture.text
+               && fm.fileExists(atPath: notes.appending(path: NoteShelf.assetsFolder(id: "JI") + "/" + (withPicture.pictures.first?.name ?? "?")).path),
+               "put back: the note has the picture", text(pasted) ?? "nil")
+        var gone = loading
+        gone.imports = [NoteJournal.Import(token: 3, path: root.appending(path: "nowhere.png").path, ext: "png")]
+        expect(NoteJournal.readImports(gone).waiting.isEmpty && NoteJournal.readImports(gone).entry.text == pastedText, "a paste whose file is gone is let go")
+        NoteJournal.importsDone(noteID: "JI", token: 1, in: journal)
+        expect(!fm.fileExists(atPath: NoteJournal.file("JI", in: journal).path), "the paste done and the text landed: the snapshot goes")
 
         // A text that landed while a picture it references failed: the snapshot stays with that picture's bytes,
         // and goes once the picture is saved.

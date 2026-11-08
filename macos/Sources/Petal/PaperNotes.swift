@@ -149,6 +149,19 @@ enum NoteDisk {
 
     nonisolated(unsafe) static var states: [Int: State] = [:]
     nonisolated(unsafe) static var results: [Int: NoteWorkResult] = [:]
+    /// Pieces of work being done or done, by item id: the queue and the quit drain each claim a piece before doing
+    /// it (`NoteShelf.claim`), so none is done twice; a failed one is given back for its next try.
+    nonisolated(unsafe) static var claimed: Set<Int> = []
+
+    /// One piece of work, done only by whoever claims it first; nil when it was someone else's.
+    nonisolated static func once(_ item: NoteSession.Item, session: Int, root: URL) -> NoteWorkResult? {
+        guard let next = NoteShelf.claim(item.id, claimed) else { return nil }
+        claimed = next
+        let result = NoteStore.perform(item.work, session: session, root: root, live: item.live)
+        if result.outcome == .failed { claimed.remove(item.id) }
+        results[item.id] = result
+        return result
+    }
 }
 
 /// Petal Notes' files: one Markdown file per note, a folder per notebook, Inbox by default. They live in iCloud
@@ -182,7 +195,13 @@ final class NoteStore {
     /// `NoteShelf.rekey`, which never takes a name another session holds.
     @ObservationIgnored private var sessions: [Int: NoteSession] = [:]
     @ObservationIgnored private var keys: [String: Int] = [:]
-    @ObservationIgnored private var nextID = 0
+    /// Sessions, pieces of work and pastes are numbered on one clock for the whole run (never per store), so a
+    /// piece's claim on the file queue (`NoteDisk.claimed`) is never mistaken for another's.
+    private static var counter = 0
+    private var nextID: Int {
+        get { Self.counter }
+        set { Self.counter = newValue }
+    }
     @ObservationIgnored private var retrying = false
     /// Switching to another notes folder: the old one's work is drained and nothing new starts there.
     @ObservationIgnored private(set) var switching = false
@@ -243,6 +262,7 @@ final class NoteStore {
             Self.drain(jobs, unsaved: unsaved, root: oldRoot)
             NoteDisk.states = [:]
             NoteDisk.results = [:]
+            NoteDisk.claimed = []
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.sessions = [:]
@@ -302,6 +322,7 @@ final class NoteStore {
                     if merged != self.notes { self.notes = merged }
                     if read.notebooks != self.notebooks { self.notebooks = read.notebooks }
                     self.regroup()
+                    self.rebindSessions()
                     self.loaded = true
                     // Places that followed their files' bookmarks: written back through each note's session, only
                     // while the note is still what was read.
@@ -701,12 +722,50 @@ final class NoteStore {
     // MARK: Sessions
 
     private func session(for key: String) -> NoteSession? {
-        if let session = sessionAt(key) { return session }
         guard let paper = paper(key), paper.version == nil else { return nil }
+        if let session = sessionAt(key, noteID: paper.noteID) { return session }
         return makeSession(key: key, url: paper.url, noteID: paper.noteID, revision: paper.revision)
     }
 
-    private func sessionAt(_ key: String) -> NoteSession? { keys[key].flatMap { sessions[$0] } }
+    /// The session at `key`, only when it's that same note's (`NoteShelf.session`). A session another note left at
+    /// this path is let go from it: retired when it has nothing under way, else it keeps its work, unreachable here.
+    private func sessionAt(_ key: String, noteID: String) -> NoteSession? {
+        let ids = sessions.mapValues(\.noteID)
+        if let id = NoteShelf.session(at: key, noteID: noteID, keys: keys, noteIDs: ids) { return sessions[id] }
+        if let stale = keys[key] {
+            keys[key] = nil
+            retireIfIdle(stale)
+        }
+        return nil
+    }
+
+    private func retireIfIdle(_ id: Int) {
+        guard let session = sessions[id], !session.busy, (importsLoading[session.noteID] ?? [:]).isEmpty else { return }
+        sessions[id] = nil
+        if keys[session.key] == id { keys[session.key] = nil }
+        Self.io.async { NoteDisk.states[id] = nil }
+    }
+
+    /// After a read of the folder: each idle session follows its note to where it is now (renamed or moved
+    /// elsewhere), when that's one paper and its path isn't another session's; a session whose note isn't found is
+    /// retired. A busy one is left as it is: its work finishes where it began.
+    private func rebindSessions() {
+        let byID = Dictionary(grouping: notes.filter { $0.version == nil }, by: \.noteID)
+        for session in Array(sessions.values) where !session.busy {
+            let paths = (byID[session.noteID] ?? []).map(\.url.path)
+            if paths.isEmpty { retireIfIdle(session.id); continue }
+            guard let path = NoteShelf.rebind(key: session.key, at: paths),
+                  let next = NoteShelf.rekey(keys, session: session.id, from: session.key, to: path) else { continue }
+            keys = next
+            session.key = path
+            let id = session.id, url = URL(fileURLWithPath: path)
+            let revision = byID[session.noteID]?.first?.revision
+            Self.io.async {
+                NoteDisk.states[id]?.url = url
+                NoteDisk.states[id]?.revision = revision
+            }
+        }
+    }
 
     private func makeSession(key: String, url: URL, noteID: String, revision: String?) -> NoteSession {
         nextID += 1
@@ -736,21 +795,24 @@ final class NoteStore {
         pump(session)
     }
 
+    /// Quitting: the drain has taken every session's work; nothing more is started here.
+    @ObservationIgnored private var draining = false
+
     private func pump(_ session: NoteSession) {
-        guard !session.running, !session.failing, !switching, let item = session.pending.first else { return }
+        guard !session.running, !session.failing, !switching, !draining, let item = session.pending.first else { return }
         session.running = true
         let id = session.id, root = self.root
         Self.io.async {
             NoteDisk.results[item.id] = nil
-            let result = Self.perform(item.work, session: id, root: root, live: item.live)
-            NoteDisk.results[item.id] = result
+            // Claimed by the quit drain first: it's the drain's (done once, by it).
+            guard let result = NoteDisk.once(item, session: id, root: root) else { return }
             DispatchQueue.main.async { MainActor.assumeIsolated { self.finished(session, item, result) } }
         }
     }
 
     private func finished(_ session: NoteSession, _ item: NoteSession.Item, _ result: NoteWorkResult) {
         session.running = false
-        guard !switching, sessions[session.id] === session else { return }
+        guard !switching, !draining, sessions[session.id] === session else { return }
         if result.outcome == .failed && item.work.keeps {
             // Kept (in the journal too), said on the paper, tried again: never dropped.
             session.failing = true
@@ -772,7 +834,10 @@ final class NoteStore {
             }
         }
         let itemID = item.id
-        Self.io.async { NoteDisk.results[itemID] = nil }
+        Self.io.async {
+            NoteDisk.results[itemID] = nil
+            NoteDisk.claimed.remove(itemID)
+        }
         failed.remove(session.key)
         let noteID = session.noteID
         // Where the file is now: a new note's name on disk, a move.
@@ -874,7 +939,14 @@ final class NoteStore {
         let pictures = NoteShelf.journalPictures(text: text, pending: Array(pending.keys)).compactMap { name in
             pending[name].map { NoteJournal.Picture(name: name, data: $0) }
         }
-        let entry = NoteJournal.Entry(noteID: paper.noteID, path: paper.url.path, base: aside ? nil : base, text: text, pictures: pictures, aside: aside)
+        var entry = NoteJournal.Entry(noteID: paper.noteID, path: paper.url.path, base: aside ? nil : base, text: text, pictures: pictures, aside: aside)
+        if !aside {
+            // Pictures still being read for it: their sources, so a quit before they're in loses none.
+            let loading = (importsLoading[paper.noteID] ?? [:]).sorted { $0.key < $1.key }.flatMap(\.value)
+            if !loading.isEmpty { entry.imports = loading }
+            // Nothing waiting to be written: this text is the file's already.
+            if firstBase == nil, text == paper.revision { entry.landed = true }
+        }
         NoteJournal.queue.async { NoteJournal.snapshot(entry) }
     }
 
@@ -926,6 +998,9 @@ final class NoteStore {
     /// what still can't be written goes to "Unsaved notes". Never waits on the main thread: `done` is called (on any
     /// thread) once it's finished.
     func drain(then done: @escaping @Sendable () -> Void) {
+        // Nothing new is started (or answered) here from now: what's under way finishes on the file queue, and the
+        // drain does each piece left exactly once.
+        draining = true
         let jobs = drainJobs()
         let unsaved = drainUnsaved()
         let root = self.root
@@ -953,8 +1028,10 @@ final class NoteStore {
             var saved = Set<String>()
             var landed: [(text: String, aside: Bool)] = []
             for item in job.items {
+                // Done by the queue already (its answer never reached the main thread): taken as it was. Else done
+                // here, once (a failed one again).
                 var result = NoteDisk.results[item.id]
-                if result == nil || result?.outcome == .failed { result = perform(item.work, session: job.session, root: root, live: item.live) }
+                if result == nil || result?.outcome == .failed { result = NoteDisk.once(item, session: job.session, root: root) }
                 NoteDisk.results[item.id] = nil
                 guard let result else { continue }
                 switch (item.work, result.outcome) {
@@ -1163,7 +1240,7 @@ final class NoteStore {
         notebooks.append(Notebook(name: folderName, folder: folder, color: color, cover: paper.key, count: 0))
         if self.paper(paper.key) == nil { notes.append(paper) }
         touch(paper.key)
-        let session = sessionAt(paper.key) ?? makeSession(key: paper.key, url: url, noteID: cover.id, revision: nil)
+        let session = sessionAt(paper.key, noteID: cover.id) ?? makeSession(key: paper.key, url: url, noteID: cover.id, revision: nil)
         enqueue(session, .create(text: cover.serialized(), stem: "About this notebook", folder: folder, exact: url)) { _ in self.reload() }
         return folderName
     }
@@ -1195,14 +1272,47 @@ final class NoteStore {
         return pictures.map { (folder + "/" + $0.name, paper.url.deletingLastPathComponent().appending(path: folder + "/" + $0.name), $0.caption) }
     }
 
+    /// Pictures pasted or dropped and still being read (a file iCloud is downloading), by note id and paste: what
+    /// keeps a new note from being put away as empty, and what each snapshot carries so a quit loses none of them.
+    @ObservationIgnored private var importsLoading: [String: [Int: [NoteJournal.Import]]] = [:]
+
+    /// A paste or drop on `key`, recorded before anything is read: its sources go into the journal at once. Nil when
+    /// the note can't take pictures now.
+    func beginImport(_ key: String, _ items: NoteImport) -> Int? {
+        guard !switching, !draining, let paper = paper(key), !readOnly(paper), let session = session(for: key) else { return nil }
+        nextID += 1
+        let token = nextID
+        var sources = items.files.map { NoteJournal.Import(token: token, path: $0.path, ext: $0.pathExtension.lowercased(), caption: $0.deletingPathExtension().lastPathComponent) }
+        if let png = items.png { sources.append(NoteJournal.Import(token: token, data: png, ext: "png")) }
+        if let tiff = items.tiff { sources.append(NoteJournal.Import(token: token, data: tiff, ext: "tiff")) }
+        importsLoading[paper.noteID, default: [:]][token] = sources
+        snapshot(paper, text: paper.file.serialized(), session: session)
+        return token
+    }
+
+    /// A paste's read is over. `journal`: its sources leave the journal too (it was accepted and its references
+    /// are in a snapshot now, or nothing in it could be read); false while quitting, so the journal keeps them.
+    func endImport(_ noteID: String, _ token: Int, journal: Bool) {
+        importsLoading[noteID]?[token] = nil
+        if importsLoading[noteID]?.isEmpty == true { importsLoading[noteID] = nil }
+        if journal { NoteJournal.queue.async { NoteJournal.importsDone(noteID: noteID, token: token) } }
+    }
+
+    /// Pictures still being read for the note: it isn't empty.
+    func importing(_ key: String) -> Bool { paper(key).map { importsLoading[$0.noteID]?.isEmpty == false } ?? false }
+
+    /// Quitting or changing folders: a paste finishing now isn't put in (the journal keeps it).
+    var closing: Bool { switching || draining }
+
     /// Pictures accepted for the note and not in it yet: it isn't empty.
-    func picturesPending(_ key: String) -> Bool { sessionAt(key)?.picturesPending ?? false }
+    func picturesPending(_ key: String) -> Bool { paper(key).flatMap { sessionAt(key, noteID: $0.noteID) }?.picturesPending ?? false }
 
     /// A note made and put away empty goes to the Trash (never deleted outright), after its own work, and only while
     /// its file still says what Petal last saw there; never one with pictures on the way.
     func trash(_ key: String) {
         guard let paper = paper(key), let session = session(for: key),
-              NoteShelf.mayTrash(bodyEmpty: paper.file.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, picturesPending: session.picturesPending)
+              NoteShelf.mayTrash(bodyEmpty: paper.file.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, picturesPending: session.picturesPending,
+                                 importing: importing(key))
         else { return }
         notes.removeAll { $0.key == key }
         gone(key)
@@ -1218,7 +1328,7 @@ final class NoteStore {
         let plan = NoteKeep(snapshot: snapshot, kept: kept.url, keptText: kept.version == nil ? nil : kept.file.serialized(),
                             files: Array(Set(shown.map(\.url))))
         let key = kept.url.path
-        let session = sessionAt(key) ?? makeSession(key: key, url: kept.url, noteID: kept.noteID, revision: kept.revision)
+        let session = sessionAt(key, noteID: kept.noteID) ?? makeSession(key: key, url: kept.url, noteID: kept.noteID, revision: kept.revision)
         enqueue(session, .keep(plan), done: nil)
     }
 
@@ -1238,7 +1348,7 @@ final class NoteStore {
         let url = folder.appending(path: NoteShelf.coverName)
         let paper = PaperNote(file: cover, url: url, notebook: notebook, revision: cover.serialized())
         if self.paper(paper.key) == nil { notes.append(paper) }
-        let session = sessionAt(paper.key) ?? makeSession(key: paper.key, url: url, noteID: cover.id, revision: nil)
+        let session = sessionAt(paper.key, noteID: cover.id) ?? makeSession(key: paper.key, url: url, noteID: cover.id, revision: nil)
         enqueue(session, .create(text: cover.serialized(), stem: "About this notebook", folder: folder, exact: url)) { _ in self.reload() }
     }
 

@@ -106,7 +106,7 @@ struct NoteStick: Equatable, Sendable {
             if mac == other.mac, let a = pid, let b = other.pid { return NoteRules.sameTab(noteTab, pid: a, other.noteTab, pid: b) }
             return NoteRules.byAddress(noteTab, other.noteTab)
         case .file: return path == other.path
-        case .window: return app == other.app && (window != nil && window == other.window && mac == other.mac || title == other.title)
+        case .window: return NoteShelf.sameWindow(self, other)
         case .app: return app == other.app
         case .desktop: return desktop == other.desktop
         }
@@ -802,8 +802,15 @@ enum NoteShelf {
     /// Whether a text landing clears its note's journal snapshot: only the snapshot holding exactly that text, and
     /// only once every picture it references is saved (`unsaved`: pictures whose bytes aren't in the note's folder
     /// yet, a failed one too). Else it stays, holding those pictures' bytes, for Try again and for quit's recovery.
-    static func journalClears(snapshot: String, landed: String, referenced: [String], unsaved: Set<String>) -> Bool {
-        snapshot == landed && !referenced.contains { unsaved.contains($0) }
+    static func journalClears(snapshot: String, landed: String, referenced: [String], unsaved: Set<String>, importing: Bool = false) -> Bool {
+        snapshot == landed && !importing && !referenced.contains { unsaved.contains($0) }
+    }
+
+    /// The quit drain and the queue never both do one piece of work: whichever gets to it first claims it
+    /// (`claimed`, on the file queue), and the other leaves it. A piece that failed gives its claim back, for the
+    /// next try. Returns the claims after, or nil when it's someone else's.
+    static func claim(_ item: Int, _ claimed: Set<Int>) -> Set<Int>? {
+        claimed.contains(item) ? nil : claimed.union([item])
     }
 
     /// What a new note may stick to when nothing sticks it to a window: the Desktop only when the app said plainly it
@@ -835,7 +842,33 @@ enum NoteShelf {
 
     /// A note made and put away empty goes to the Trash, unless pictures were accepted for it (their bytes or
     /// reference still on the way): those make it a note.
-    static func mayTrash(bodyEmpty: Bool, picturesPending: Bool) -> Bool { bodyEmpty && !picturesPending }
+    /// `importing`: pictures pasted or dropped on it are still being read (their bytes not accepted yet).
+    static func mayTrash(bodyEmpty: Bool, picturesPending: Bool, importing: Bool) -> Bool { bodyEmpty && !picturesPending && !importing }
+
+    /// A window place is the same window by its live identity (this Mac, its process and window number) whenever
+    /// both know it: two "Untitled" windows are two windows. Only places with no window number (one remembered from
+    /// before its app restarted, never yet found again) are told by their title, and only a title that says something.
+    static func sameWindow(_ a: NoteStick, _ b: NoteStick) -> Bool {
+        guard a.kind == .window, b.kind == .window, a.app == b.app else { return false }
+        if a.window != nil || b.window != nil {
+            return a.window == b.window && a.pid == b.pid && a.mac == b.mac
+        }
+        return !a.title.isEmpty && a.title == b.title
+    }
+
+    /// The session for a paper at `key`: only one made for that same note (`noteIDs`, by session). Another note now
+    /// at a path a session still knows (the first renamed elsewhere, then a second given its old name) never gets it.
+    static func session(at key: String, noteID: String, keys: [String: Int], noteIDs: [Int: String]) -> Int? {
+        guard let id = keys[key], noteIDs[id] == noteID else { return nil }
+        return id
+    }
+
+    /// Where an idle session's note is now, after a read of the folder: its one paper with that id (`at`: their
+    /// paths), if it moved; nil when it's where it was, or isn't found exactly once.
+    static func rebind(key: String, at paths: [String]) -> String? {
+        guard paths.count == 1, let path = paths.first, path != key else { return nil }
+        return path
+    }
 
     /// Moving a note's pictures' folder into a notebook that has one by that name already (the same note, moved
     /// there before): each picture moves unless the same file is there; one there with other bytes stops the whole
