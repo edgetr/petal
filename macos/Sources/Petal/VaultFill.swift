@@ -412,13 +412,16 @@ extension Assist {
     /// never sees a password, card number, security code or key. Every step after the first checks the call's reply
     /// is still going (ComputerUse.token).
     /// `who`: who's asking, read off the socket when the call came in and carried with it to every card and gate.
-    func vault(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    /// `gone`: for a call from outside Petal, its socket's hung-up flag: the call's token (ComputerUse.token) carries
+    /// it, so every fill, save and key stops the moment the client goes, on whichever thread does it.
+    func vault(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, gone: (@Sendable () -> Bool)? = nil,
+               _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         switch (args["action"] as? String ?? "list").lowercased() {
         case "list": vaultList(args, send)
-        case "fill": vaultFill(args, caller: caller, who: who, send, fail)
-        case "request": vaultRequest(args, caller: caller, who: who, send, fail)
-        case "new_login", "generate": vaultNewLogin(args, caller: caller, who: who, send, fail)
-        case "use": vaultUse(args, caller: caller, who: who, send, fail)
+        case "fill": vaultFill(args, caller: caller, who: who, gone: gone, send, fail)
+        case "request": vaultRequest(args, caller: caller, who: who, gone: gone, send, fail)
+        case "new_login", "generate": vaultNewLogin(args, caller: caller, who: who, gone: gone, send, fail)
+        case "use": vaultUse(args, caller: caller, who: who, gone: gone, send, fail)
         default: fail("action is list, fill, request or new_login.")
         }
     }
@@ -580,7 +583,8 @@ extension Assist {
 
     // MARK: fill
 
-    private func vaultFill(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func vaultFill(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, gone: (@Sendable () -> Bool)?,
+                           _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         if let refusal = computer.refusal() { return fail(refusal) }
         guard let wanted = wantedFields(args), !wanted.isEmpty else {
             return fail("Give fields: {field: id} with ids from petal_ui, like {\"username\": \"e3\", \"password\": \"e4\"} (or field and id for one).")
@@ -593,7 +597,7 @@ extension Assist {
         let map = window.map, entries = window.entries
         let ref = args["item"] as? String ?? args["name"] as? String ?? ""
         let task = args["task"] as? String ?? ""
-        guard let token = computer.token(caller, task: task) else { return fail(Self.over) }
+        guard let token = computer.token(caller, task: task, gone: gone) else { return fail(Self.over) }
         vaultPlaces(map, entries, fail: fail) { places, targets, items in
             guard self.computer.live(caller, token) else { return fail(Self.over) }
             guard let items else { return fail(VaultStore.unreadableText + " Nothing was filled; try again in a moment.") }
@@ -749,7 +753,8 @@ extension Assist {
     /// payment info: that waits for Buy), and the card says plainly when that page or app isn't where a login or key
     /// belongs (not secure, another site in a frame, an app Petal can't verify); for a login, "Save to your vault"
     /// (on by default) keeps it for that site.
-    private func vaultRequest(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func vaultRequest(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, gone: (@Sendable () -> Bool)?,
+                              _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let legacyName = (args["name"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         let kind = (args["kind"] as? String).flatMap { $0.isEmpty ? nil : Vault.kindNamed($0) } ?? (legacyName.isEmpty ? .login : .apiKey)
         guard VaultKind.made.contains(kind) else { return fail("kind is login, contact, address, card or apiKey.") }
@@ -772,10 +777,10 @@ extension Assist {
         // The reply this belongs to: nothing is saved or filled for a reply that's over.
         var token: Acting.Cancel?
         if let caller {
-            guard let current = computer.token(caller, task: args["task"] as? String ?? "") else { return fail(Self.over) }
+            guard let current = computer.token(caller, task: args["task"] as? String ?? "", gone: gone) else { return fail(Self.over) }
             token = current
         }
-        let live = { token.map { self.computer.live(caller ?? "", $0) } ?? true }
+        let live = { token.map { self.computer.live(caller ?? "", $0) } ?? (gone?() != true) }
         let why = (args["why"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let title = (args["title"] as? String ?? legacyName).trimmingCharacters(in: .whitespaces)
         let saved = mapped.firstIndex { $0.0.isSecret } ?? 0
@@ -792,7 +797,7 @@ extension Assist {
             self.ask("vault-new", form.heading, detail: detail, always: true, form: form, warn: warning != nil, owner: caller, typed: { answer in
                 guard live() else { return send(["declined": Self.over]) }
                 self.vaultAnswered(answer, kind: kind, place: read, mapped: mapped, places: places, targets: targets, warned: warning,
-                                   window: window, caller: caller, token: token, send: send)
+                                   window: window, caller: caller, token: token, gone: gone, send: send)
             }) { allowed in
                 if !allowed { send(["declined": "The person closed it. Don't ask for it in the chat."]) }
             }
@@ -811,7 +816,7 @@ extension Assist {
     private func vaultAnswered(_ answer: VaultForm.Answer, kind: VaultKind, place: Vault.Place?, mapped: [(VaultField, String)],
                                places: [Vault.Place], targets: [Vault.Target], warned: String?,
                                window: (map: ComputerUse.Map, entries: [ComputerUse.Entry])?,
-                               caller: String?, token: Acting.Cancel?, send: @escaping (Any) -> Void) {
+                               caller: String?, token: Acting.Cancel?, gone: (@Sendable () -> Bool)?, send: @escaping (Any) -> Void) {
         var item = VaultItem(kind: kind, title: answer.title)
         for (field, value) in answer.values { item[field] = value }
         // Hidden from the AI from now on, whether it's saved or not.
@@ -828,7 +833,7 @@ extension Assist {
             case .unsorted: item.title = "Secret"
             }
         }
-        let live = { token.map { self.computer.live(caller ?? "", $0) } ?? true }
+        let live = { token.map { self.computer.live(caller ?? "", $0) } ?? (gone?() != true) }
         var reply: [String: Any] = ["note": Self.hidden]
         // `stored`: the item as the vault saved it, which the fill then takes from the vault at that version (edited
         // or deleted in Settings while the fill waits, nothing fills); nil when it wasn't saved.
@@ -867,8 +872,8 @@ extension Assist {
         guard live() else { return send(["declined": Self.over]) }
         let saving = item
         VaultStore.queue.async {
-            // Stopped, or the reply ended, while the save waited its turn: nothing is saved.
-            guard !(token?.stopped ?? false) else {
+            // Stopped, the reply ended, or its caller went, while the save waited its turn: nothing is saved.
+            guard !(token?.stopped ?? false), gone?() != true else {
                 return DispatchQueue.main.async { MainActor.assumeIsolated { send(["declined": Self.over]) } }
             }
             let ok = VaultStore.save([saving])
@@ -897,7 +902,8 @@ extension Assist {
     /// A new account: Petal makes a strong password, saves it as a login for the page it read, and fills the
     /// password field (and the one confirming it, and the username): only where every one of those fields would
     /// fill by itself (one secure page of that site, or an app Petal verified).
-    private func vaultNewLogin(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func vaultNewLogin(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, gone: (@Sendable () -> Bool)?,
+                               _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         if let refusal = computer.refusal() { return fail(refusal) }
         let passwordID = args["password_id"] as? String ?? args["id"] as? String ?? ""
         guard !passwordID.isEmpty else { return fail("Give password_id (the new password field's id from petal_ui), and confirm_id if the page asks for it twice.") }
@@ -912,7 +918,7 @@ extension Assist {
         let allowed = (args["allowed_symbols"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let task = args["task"] as? String ?? ""
         if !usernameID.isEmpty, username.isEmpty { return fail("Give username too: the email or username for the new account.") }
-        guard let token = computer.token(caller, task: task) else { return fail(Self.over) }
+        guard let token = computer.token(caller, task: task, gone: gone) else { return fail(Self.over) }
         vaultPlaces(map, entries, fail: fail) { places, targets, _ in
             guard self.computer.live(caller, token) else { return fail(Self.over) }
             let place = places[0]
@@ -944,6 +950,8 @@ extension Assist {
                 guard self.computer.live(caller, token) else { return fail(Self.over) }
                 guard stillGranted() else { return fail(AgentPass.revokedText) }
                 VaultStore.queue.async {
+                    // Stopped, or its caller went, while this waited its turn: no password is made.
+                    guard !token.stopped else { return DispatchQueue.main.async { MainActor.assumeIsolated { fail(Self.over) } } }
                     item[.password] = Vault.password(length: length, symbols: symbols, allowed: allowed, random: VaultStore.random)
                     VaultIndex.remember(Vault.secrets(item))
                     DispatchQueue.main.async {
@@ -995,7 +1003,8 @@ extension Assist {
     /// An older way to fill: a saved key or password by its name, into a field. It goes through `fill` with every
     /// one of fill's checks (the field's id from petal_ui, its page or app, its kind, Stop): `id`, else the one field
     /// petal_ui saw with the cursor.
-    private func vaultUse(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func vaultUse(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, gone: (@Sendable () -> Bool)?,
+                          _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let name = (args["name"] as? String ?? args["item"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         guard !name.isEmpty else { return fail("Give the item's id or name (action list shows them), and fill with action fill.") }
         var id = (args["id"] as? String ?? "").trimmingCharacters(in: .whitespaces)
@@ -1010,7 +1019,7 @@ extension Assist {
             id = focused[0]
         }
         let picked = id
-        guard let caller, let token = computer.token(caller, task: args["task"] as? String ?? "") else {
+        guard let caller, let token = computer.token(caller, task: args["task"] as? String ?? "", gone: gone) else {
             return fail(caller == nil ? ComputerUse.oldTools : Self.over)
         }
         VaultStore.load { read in
@@ -1026,7 +1035,7 @@ extension Assist {
             forwarded["field"] = nil
             forwarded["id"] = nil
             forwarded["fields"] = [item.kind == .login ? "password" : "value": picked]
-            self.vaultFill(forwarded, caller: caller, who: who, send, fail)
+            self.vaultFill(forwarded, caller: caller, who: who, gone: gone, send, fail)
         }
     }
 }

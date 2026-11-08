@@ -5,8 +5,9 @@
 # using the vault (AgentAccess: petal run's variables and redaction, who's asking, projects and grants; worktrees on
 # throwaway folders in the temporary folder; writing through a full pipe; an unreadable answer and which signals it
 # passes on), a routine's tidy stopping once its asker hangs up (RoutineStop), a request whose client hung up before its
-# turn never being done (IPC, on a throwaway socket), and that every card Petal AI's tools put up names its owner,
-# without running Petal, moving any window or touching the Keychain:
+# turn never being done (IPC, on a throwaway socket), an act's or vault call's Stop seen at once on any thread when its
+# caller hangs up (Acting.Cancel), and that every card Petal AI's tools put up names its owner, without running Petal,
+# moving any window or touching the Keychain:
 #   macos/checks/run.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -32,6 +33,10 @@ swiftc -parse-as-library -O -o "$out/routinestop" Sources/Petal/RoutineStop.swif
 # never done.
 swiftc -parse-as-library -O -o "$out/ipc" Sources/Petal/IPC.swift Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/IPCCheck.swift
 "$out/ipc"
+# An act's or vault call's Acting.Cancel for a caller outside Petal stops the moment its request is hung up, on any
+# thread, with the main thread blocked (IPC.Pending, no socket).
+swiftc -parse-as-library -O -o "$out/cancel" Sources/Petal/ActingCancel.swift Sources/Petal/IPC.swift Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/CancelCheck.swift
+"$out/cancel"
 # Every card Petal AI's tools put up says whose it is (Assist.ask's `owner`), so a chat's Stop or an agent hanging up
 # answers it Don't: the parameter has no default, and every call to it (a string first: the card's kind) names it.
 perl -0777 -ne '

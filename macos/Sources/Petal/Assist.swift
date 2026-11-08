@@ -176,8 +176,11 @@ final class Assist {
     /// acts.
     func handle(_ name: String, _ json: String, note: String? = nil, who: AgentAccess.Caller? = nil, request: IPC.Pending? = nil,
                 reply: @escaping @MainActor (String) -> Void) {
-        // Read on any thread: the socket's own flag, set the moment its client closes.
-        let live: @Sendable () -> Bool = { request?.hungUp != true }
+        // Read on any thread: the socket's own flag, set the moment its client closes. Every change made for an
+        // outside caller reads it on the thread making the change, right before it (`off`, an act's or a vault
+        // call's `Acting.Cancel`, a routine's `RoutineStop`), never waiting for the main thread's `hungUp`.
+        let gone: @Sendable () -> Bool = { request?.hungUp == true }
+        let live: @Sendable () -> Bool = { !gone() }
         guard live() else { return }   // its client went before Petal got to it: nothing to answer
         let args = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
         let send: (Any) -> Void = { result in
@@ -211,12 +214,11 @@ final class Assist {
                 did("Made a page: \(title)", undo: .open(file.path, title))
                 send(["opened": file.path])
             } catch { fail(error.localizedDescription) }
-        case "petal_vault": vault(args, caller: note, who: who, send, fail)
-        case "petal_ui", "petal_act": computer.handle(name, args, note: note, send: send, fail: fail)
+        case "petal_vault": vault(args, caller: note, who: who, gone: request == nil ? nil : gone, send, fail)
+        case "petal_ui", "petal_act": computer.handle(name, args, note: note, gone: request == nil ? nil : gone, send: send, fail: fail)
         case "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
             // Its asker hanging up stops a tidy's moves under way off the main thread, not only what comes next.
-            let asker = request
-            let stop = RoutineStop(also: { asker?.hungUp ?? false })
+            let stop = RoutineStop(also: gone)
             request?.onHangUp { stop.stop() }
             app.routines.handle(name, args, send, fail, caller: note, live: live, stop: stop)
         case "petal_memories":
@@ -617,7 +619,7 @@ final class Assist {
 
     // MARK: Apps
 
-    private func apps(_ args: [String: Any], caller: String?, live: @escaping () -> Bool, _ send: @escaping (Any) -> Void,
+    private func apps(_ args: [String: Any], caller: String?, live: @escaping @Sendable () -> Bool, _ send: @escaping (Any) -> Void,
                       _ fail: @escaping (String) -> Void) {
         let action = args["action"] as? String ?? ""
         let name = args["app"] as? String ?? ""
@@ -630,22 +632,24 @@ final class Assist {
                 guard let url else { return fail("That isn't an address or a file.") }
                 // Finding the app (a scan of the Applications folders) and Launch Services wait on the disk or the
                 // app: off the main thread.
-                return Self.off({
+                return Self.off(live, {
                     let appURL = name.isEmpty ? nil : NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID(name))
+                    // Its asker gone while the app was looked up: nothing opens.
+                    guard live() else { return }
                     if let appURL {
                         NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: NSWorkspace.OpenConfiguration())
                     } else {
                         NSWorkspace.shared.open(url)
                     }
-                }) { send(["opened": target]) }
+                }) { ran in if ran { send(["opened": target]) } }
             }
             // The name is looked up off the main thread (it scans the Applications folders); the launch is the dock's.
             var found: (id: String, url: URL?) = (name, nil)
-            Self.off({
+            Self.off(live, {
                 let id = Self.bundleID(name)
                 found = (id, NSWorkspace.shared.urlForApplication(withBundleIdentifier: id))
-            }) { [weak self] in
-                guard let self, live() else { return }
+            }) { [weak self] ran in
+                guard let self, ran, live() else { return }
                 guard found.url != nil else { return fail("No app called \(name) is installed.") }
                 self.app.docks.launch(found.id)
                 send(["opened": Apps.name(found.id)])
@@ -655,20 +659,25 @@ final class Assist {
             let label = running.localizedName ?? name
             switch action {
             // Each asks the app (or Launch Services): off the main thread, the answer back on it.
-            case "hide": Self.off({ running.hide() }) { send(["hidden": label]) }
+            case "hide": Self.off(live, { running.hide() }) { ran in if ran { send(["hidden": label]) } }
             case "focus":
                 let url = running.bundleURL
-                Self.off({
+                Self.off(live, {
                     guard let url else { return }
                     let configuration = NSWorkspace.OpenConfiguration()
                     configuration.activates = true
                     configuration.addsToRecentItems = false
                     NSWorkspace.shared.openApplication(at: url, configuration: configuration)
-                }) { if url == nil { running.activate() }; send(["focused": label]) }
+                }) { ran in
+                    guard ran else { return }
+                    if url == nil, live() { running.activate() }
+                    send(["focused": label])
+                }
             default:
                 ask("quit", "Quit \(label)", detail: "It asks to save anything unsaved.", owner: caller) { allowed in
                     guard allowed, live() else { return send(["declined": "The person didn't allow quitting \(label)."]) }
-                    Self.off({ running.terminate() }) {
+                    Self.off(live, { running.terminate() }) { ran in
+                        guard ran else { return }
                         self.did("Quit \(label)")
                         send(["quit": label])
                     }
@@ -679,11 +688,16 @@ final class Assist {
         }
     }
 
-    /// Does `work` (which waits on another app) off the main thread, then `then` back on it.
-    nonisolated static func off(_ work: @escaping () -> Void, then: @escaping @MainActor () -> Void) {
+    /// Does `work` (which waits on another app) off the main thread, then `then` back on it. `live`: whoever asked
+    /// is still there (or the routine still running), read on that thread right before `work`: one gone while it
+    /// waited its turn gets nothing done, and `then` hears it didn't run (false). A `work` that waits before its
+    /// change (a lookup) reads `live` again right before the change.
+    nonisolated static func off(_ live: @escaping @Sendable () -> Bool, _ work: @escaping () -> Void,
+                                then: @escaping @MainActor (_ ran: Bool) -> Void) {
         queue.async {
-            work()
-            DispatchQueue.main.async { MainActor.assumeIsolated { then() } }
+            let ran = live()
+            if ran { work() }
+            DispatchQueue.main.async { MainActor.assumeIsolated { then(ran) } }
         }
     }
 
@@ -733,19 +747,22 @@ final class Assist {
                     case "minimize":
                         // Accessibility waits on the app (a hung one for its timeout): never on the main thread.
                         let element = window.element
-                        Self.off({ if live() { AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue) } }) {
-                            send(["minimized": label])
+                        Self.off(live, { AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue) }) { ran in
+                            if ran { send(["minimized": label]) }
                         }
                     case "close":
                         self.ask("close", "Close “\(label)”", detail: "Its app asks to save anything unsaved.", owner: caller) { allowed in
                             guard allowed, live() else { return send(["declined": "The person didn't allow closing it."]) }
                             let element = window.element
-                            Self.off({
+                            var pressed = false
+                            Self.off(live, {
                                 guard let button: AXUIElement = Windows.value(element, kAXCloseButtonAttribute) else { return }
                                 // Its asker gone while the app answered: the window stays.
                                 guard live() else { return }
                                 AXUIElementPerformAction(button, kAXPressAction as CFString)
-                            }) {
+                                pressed = true
+                            }) { ran in
+                                guard ran, pressed || live() else { return }
                                 self.did("Closed “\(label)”")
                                 send(["closed": label])
                             }
@@ -785,13 +802,16 @@ final class Assist {
     // MARK: The Trash
 
     /// Files to the Trash (asked first), or the last ones back where they were (`undo`).
-    private func trash(_ args: [String: Any], caller: String?, live: @escaping () -> Bool, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func trash(_ args: [String: Any], caller: String?, live: @escaping @Sendable () -> Bool, _ send: @escaping (Any) -> Void,
+                       _ fail: @escaping (String) -> Void) {
         if args["undo"] as? Bool == true {
             let items = trashed
             Self.queue.async {
                 var back: [String] = []
                 var stuck: [(from: URL, to: URL)] = []
                 for item in items {
+                    // Its asker gone meanwhile: the rest stays in the Trash, to put back another time.
+                    guard live() else { stuck.append(item); continue }
                     if (try? FileManager.default.moveItem(at: item.to, to: item.from)) != nil { back.append(item.from.path) }
                     else if FileManager.default.fileExists(atPath: item.to.path) { stuck.append(item) }
                 }

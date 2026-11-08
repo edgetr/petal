@@ -190,7 +190,8 @@ final class Routines {
     @ObservationIgnored var quickCall: ((String, String, @escaping ([String: Any]?) -> Void) -> Void)?
 
     @ObservationIgnored private var watches: [String: FolderWatch] = [:]
-    @ObservationIgnored private var jobs: [(id: String, file: URL?)] = []
+    /// `stop`: a run asked for by a chat or AI session (petal_routine_run) stops once its asker hangs up, even while queued.
+    @ObservationIgnored private var jobs: [(id: String, file: URL?, stop: RoutineStop)] = []
     @ObservationIgnored private var working = false
     @ObservationIgnored private var learned: [String: [String: String]] = [:]
     /// Bumped when a routine's rule changes, and part of its quick-AI key, so an answer the quick AI gave for the
@@ -456,8 +457,8 @@ final class Routines {
     }
 
     /// One routine at a time, in order, so two files never make two folders for the same thing.
-    private func run(_ routine: Routine, file: URL?) {
-        jobs.append((routine.id, file))
+    private func run(_ routine: Routine, file: URL?, stop: RoutineStop = RoutineStop()) {
+        jobs.append((routine.id, file, stop))
         next()
     }
 
@@ -466,9 +467,9 @@ final class Routines {
         let job = jobs.removeFirst()
         // Routines turned off meanwhile ("Run my routines", or this one): what's still queued is dropped.
         guard isOn else { jobs = []; return }
-        guard let routine = list.first(where: { $0.id == job.id }), routine.on else { return next() }
+        guard let routine = list.first(where: { $0.id == job.id }), routine.on, !job.stop.isStopped else { return next() }
         working = true
-        execute(routine, file: job.file) { [weak self] _ in
+        execute(routine, file: job.file, stop: job.stop) { [weak self] _ in
             self?.working = false
             self?.next()
         }
@@ -507,7 +508,7 @@ final class Routines {
             let action = routine.actions[index]
             guard action.movesFiles else {
                 // The next step waits for this one (opening, hiding: off the main thread) to finish.
-                return perform(action) { text in
+                return perform(action, stop: stop) { text in
                     if let text { said.append(text) }
                     step(index + 1)
                 }
@@ -593,8 +594,9 @@ final class Routines {
 
     /// Switching mode, opening, hiding, a Shortcut: decided when the routine was made, so it costs nothing now.
     /// One action that isn't moving files; `done` hears what it did (nil: nothing to do). Opening addresses and
-    /// files and hiding apps wait on Launch Services and the apps: off the main thread, the answer back on it.
-    private func perform(_ action: Action, done: @escaping (String?) -> Void) {
+    /// files and hiding apps wait on Launch Services and the apps: off the main thread, the answer back on it, each
+    /// change there right after reading `stop` (its asker hung up, the routine changed or went).
+    private func perform(_ action: Action, stop: RoutineStop, done: @escaping (String?) -> Void) {
         guard !standalone else { return done(nil) }
         let app = PetalApp.shared
         switch action.kind {
@@ -623,18 +625,26 @@ final class Routines {
             let said = opened.isEmpty ? nil : "opened " + Insights.list(opened)
             guard !urls.isEmpty || !launched.isEmpty else { return done(said) }
             // The next step waits until the apps are running (30 s at most) and the addresses and files are opened.
-            Assist.off({
-                for url in urls { NSWorkspace.shared.open(url) }
+            Assist.off({ !stop.isStopped }, {
+                for url in urls {
+                    guard !stop.isStopped else { return }
+                    NSWorkspace.shared.open(url)
+                }
                 let end = Date().addingTimeInterval(30)
-                while Date() < end, !launched.allSatisfy({ !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty }) {
+                while Date() < end, !stop.isStopped, !launched.allSatisfy({ !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty }) {
                     Thread.sleep(forTimeInterval: 0.25)
                 }
-            }) { done(said) }
+            }) { ran in done(ran || !launched.isEmpty ? said : nil) }
         case "hide":
             let running = NSWorkspace.shared.runningApplications.filter { r in action.apps.contains { $0 == r.bundleIdentifier } && !r.isHidden }
             guard !running.isEmpty else { return done(nil) }
             let said = "hid " + Insights.list(running.compactMap(\.localizedName))
-            Assist.off({ running.forEach { $0.hide() } }) { done(said) }
+            Assist.off({ !stop.isStopped }, {
+                for app in running {
+                    guard !stop.isStopped else { return }
+                    app.hide()
+                }
+            }) { ran in done(ran ? said : nil) }
         case "shortcut":
             guard !action.name.isEmpty else { return done(nil) }
             // The next step waits for it to finish (5 minutes at most): an export it makes is there before filing.
@@ -813,7 +823,9 @@ final class Routines {
 
     /// Puts a history entry's files back where they were (the newest that can be, without an id), and takes away
     /// the folders made for them if they're empty now. `done(paths put back)`.
-    func undo(_ id: String? = nil, done: @escaping ([String]) -> Void = { _ in }) {
+    /// `stop`: the chat or AI session that asked (petal_routine_undo) hung up: the files not yet back stay put, read
+    /// before each move.
+    func undo(_ id: String? = nil, stop: RoutineStop = RoutineStop(), done: @escaping ([String]) -> Void = { _ in }) {
         guard let index = id.flatMap({ id in log.firstIndex { $0.id == id } }) ?? (id == nil ? log.firstIndex(where: \.canUndo) : nil),
               log[index].canUndo else { return done([]) }
         let entry = log[index]
@@ -833,6 +845,8 @@ final class Routines {
             var back: [String] = []
             var stuck: [Move] = []
             for move in entry.moves.reversed() {
+                // Its asker gone meanwhile: the rest stays where the routine put it, to put back another time.
+                guard !stop.isStopped else { stuck.append(move); continue }
                 // Something is in its old place now, or it's gone from where it was put: it stays to try again.
                 guard fm.fileExists(atPath: move.to), !fm.fileExists(atPath: move.from),
                       (try? fm.moveItem(atPath: move.to, toPath: move.from)) != nil else {
@@ -841,7 +855,7 @@ final class Routines {
                 }
                 back.append(move.from)
             }
-            for folder in Set(entry.made) {
+            for folder in Set(entry.made) where !stop.isStopped {
                 // rmdir only takes an empty folder, so a file that arrived a moment ago is never deleted with it.
                 try? fm.removeItem(atPath: folder + "/.DS_Store")
                 rmdir(folder)
@@ -943,7 +957,7 @@ final class Routines {
             }, "history": log.prefix(15).map { e -> [String: Any] in
                 ["id": e.id, "routine": e.name, "text": e.text, "at": e.at.timeIntervalSince1970, "canPutBack": e.canUndo]
             }])
-        case "petal_routine_save": saveTool(args, send, fail)
+        case "petal_routine_save": saveTool(args, live: live, send, fail)
         case "petal_routine_delete":
             let id = args["id"] as? String ?? ""
             guard list.contains(where: { $0.id == id }) else { return fail("No routine with id \(id); petal_routines lists them.") }
@@ -951,7 +965,7 @@ final class Routines {
             send(["deleted": id])
         case "petal_routine_run": runTool(args, caller: caller, live: live, stop: stop, send, fail)
         case "petal_routine_undo":
-            undo(args["entry"] as? String, done: { (back: [String]) in
+            undo(args["entry"] as? String, stop: stop, done: { (back: [String]) in
                 let reply: [String: Any] = back.isEmpty ? ["putBack": [String](), "note": "Nothing to put back."] : ["putBack": back]
                 send(reply)
             })
@@ -959,7 +973,7 @@ final class Routines {
         }
     }
 
-    private func saveTool(_ args: [String: Any], _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func saveTool(_ args: [String: Any], live: @escaping () -> Bool, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let old = list.first { $0.id == (args["id"] as? String ?? "") }
         var trigger = (args["trigger"] as? [String: Any]).map(Trigger.init) ?? old?.trigger ?? Trigger()
         var actions = (args["actions"] as? [[String: Any]])?.map(Action.init) ?? old?.actions ?? []
@@ -1022,6 +1036,8 @@ final class Routines {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     if let problem { return fail(problem) }
+                    // Its asker gone while the folders were checked: nothing is saved for it.
+                    guard live() else { return }
                     let routine = Routine(id: id, name: name, words: words, on: on, trigger: trigger, actions: actions)
                     self.save(routine)
                     var reply: [String: Any] = ["saved": routine.json, "does": self.summary(routine)]
@@ -1045,7 +1061,7 @@ final class Routines {
         let changed = { send(["note": "The routine changed while it waited; nothing moved. Run it again."]) }
         guard let action = routine.actions.first(where: \.movesFiles) else {
             if dry { return send(["wouldDo": summary(routine)]) }
-            run(routine, file: nil)
+            run(routine, file: nil, stop: stop)
             return send(["ran": summary(routine)])
         }
         let go = { (plan: Plan) in

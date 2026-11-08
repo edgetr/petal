@@ -147,12 +147,15 @@ final class ComputerUse {
         cursor.onStop = { [weak self] in self?.stop() }
     }
 
-    /// `caller`: the chat asking (`Petal --mcp` always sends one).
-    func handle(_ name: String, _ args: [String: Any], note caller: String?, send: @escaping (Any) -> Void, fail: @escaping (String) -> Void) {
+    /// `caller`: the chat asking (`Petal --mcp` always sends one). `gone`: for a call from outside Petal, its
+    /// socket's own hung-up flag, read on whichever thread does the work: an act's `cancel` is stopped by it the moment
+    /// the client goes, before the main thread hears (`Assist.hungUp`). Petal's own chats have none.
+    func handle(_ name: String, _ args: [String: Any], note caller: String?, gone: (@Sendable () -> Bool)? = nil,
+                send: @escaping (Any) -> Void, fail: @escaping (String) -> Void) {
         sweep()
         if let refusal = refusal() { return fail(refusal) }
         guard let caller, !caller.isEmpty else { return fail(Self.oldTools) }
-        if name == "petal_ui" { look(args, caller: caller, send, fail) } else { act(args, caller: caller, send, fail) }
+        if name == "petal_ui" { look(args, caller: caller, gone: gone, send, fail) } else { act(args, caller: caller, gone: gone, send, fail) }
     }
 
     /// Why Petal can't use apps now (turned off, or no Accessibility), or nil.
@@ -172,7 +175,8 @@ final class ComputerUse {
 
     // MARK: Seeing a window's controls
 
-    private func look(_ args: [String: Any], caller: String, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func look(_ args: [String: Any], caller: String, gone: (@Sendable () -> Bool)?, _ send: @escaping (Any) -> Void,
+                      _ fail: @escaping (String) -> Void) {
         let named = (args["app"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         // A sticky note's own window, as petal_look does, unless an app or what's in front is asked for.
         let place = named.isEmpty && args["front"] as? Bool != true && app.claude.notesOn ? app.claude.note(withID: caller)?.place : nil
@@ -205,6 +209,8 @@ final class ComputerUse {
         let tabPlace = place.flatMap { $0.kind == .tab && $0.tab != nil ? $0 : nil }
         let stuck = places[caller, default: 0]
         Self.readQueue.async {
+            // Its caller went while this waited its turn: nothing is read for nobody.
+            if gone?() == true { return }
             if let tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
                 return DispatchQueue.main.async { MainActor.assumeIsolated { self.waitsFor(caller, .tab) }; fail(ClaudePanel.tabNotShowing) }
             }
@@ -277,7 +283,8 @@ final class ComputerUse {
 
     // MARK: Acting
 
-    private func act(_ args: [String: Any], caller: String, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func act(_ args: [String: Any], caller: String, gone: (@Sendable () -> Bool)?, _ send: @escaping (Any) -> Void,
+                     _ fail: @escaping (String) -> Void) {
         let task = UIMap.tidy(args["task"] as? String ?? "").lowercased()
         let session = session(caller, task: task)
         sessions[caller]?.last = Date()
@@ -345,7 +352,7 @@ final class ComputerUse {
         }
 
         let job = Job(caller: caller, action: action, entry: entry, map: map, bundle: bundle, caption: caption, options: options,
-                      cancel: Acting.Cancel(under: session.cancel), send: send, fail: fail)
+                      cancel: Acting.Cancel(under: session.cancel, also: gone), send: send, fail: fail)
         // A Buy said in this window lasts only while it shows the tab and page it was said on: looked at before
         // every act there (an act may be what leaves it, or the person may have).
         guard let window = map.windowID, hasBuy(in: window) else { return proceed(job) }
@@ -365,18 +372,22 @@ final class ComputerUse {
 
     /// The reply a vault call belongs to, taken as the call comes in (nil when that reply can't act): every later
     /// step of the call checks it's still that reply (`live`), so a card answered or a save finished after the person
-    /// stopped or steered it never acts in the next reply.
-    func token(_ caller: String, task: String) -> Acting.Cancel? {
+    /// stopped or steered it never acts in the next reply. `gone`: a call from outside Petal's socket flag: the
+    /// call's own token, under the reply's, stops the moment its client goes, on every thread that reads it.
+    func token(_ caller: String, task: String, gone: (@Sendable () -> Bool)? = nil) -> Acting.Cancel? {
         let current = session(caller, task: UIMap.tidy(task).lowercased())
         sessions[caller]?.last = Date()
         keepSweeping()
-        return current.stopped || current.cancel.stopped ? nil : current.cancel
+        guard !current.stopped, !current.cancel.stopped else { return nil }
+        guard let gone else { return current.cancel }
+        let own = Acting.Cancel(under: current.cancel, also: gone)
+        return own.stopped ? nil : own
     }
 
     /// The reply `token` came from is still the caller's, and wasn't stopped.
     func live(_ caller: String, _ token: Acting.Cancel) -> Bool {
         guard let current = sessions[caller] else { return false }
-        return current.cancel === token && !current.stopped && !token.stopped
+        return token.isUnder(current.cancel) && !current.stopped && !token.stopped
     }
 
     /// A field filled from the vault (VaultFill.swift): the same line, pointer, Stop and checks as petal_act, on a
@@ -1479,33 +1490,6 @@ enum Acting {
         /// In the background, the person came back to the note's window before anything changed: nothing was done,
         /// and it's decided again (Background.behind).
         var again = false
-    }
-
-    /// Stop, seen at once from any thread. A job's is under its turn's: stopping the turn stops every job in it.
-    final class Cancel: @unchecked Sendable {
-        private let lock = NSLock()
-        private var flag = false
-        private let parent: Cancel?
-        /// A payment fill's Buy: revoking it stops the fill as a Stop would.
-        private let buy: Vault.BuyToken?
-        /// An agent's fill: removing the grant it relies on stops it as a Stop would.
-        private let pass: AgentPass?
-        init(under parent: Cancel? = nil, buy: Vault.BuyToken? = nil, pass: AgentPass? = nil) {
-            self.parent = parent
-            self.buy = buy
-            self.pass = pass
-        }
-        var stopped: Bool {
-            lock.lock()
-            let own = flag
-            lock.unlock()
-            return own || buyEnded || (pass?.revoked ?? false) || (parent?.stopped ?? false)
-        }
-        /// The Buy this fill was made under is over.
-        var buyEnded: Bool { (buy?.revoked ?? false) || (parent?.buyEnded ?? false) }
-        func stop() { lock.lock(); flag = true; lock.unlock() }
-        /// Ends the Buy this fill was made under, for good: its page moved on while it filled.
-        func endBuy() { buy?.revoke() }
     }
 
     static let buyEndedText = "The Buy is over (the tab moved on, the window closed, or the reply ended): no more payment info was filled. Don't try another way; if the person still wants it, fill again on the checkout page and Petal asks them again."
