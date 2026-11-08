@@ -41,6 +41,9 @@ final class FocusGuard {
 
     private var scheduled: DispatchWorkItem?
     private var lastTitle = ""
+    /// The front window's title is being read (off the main thread).
+    private var readingTitle = false
+    nonisolated private static let titleQueue = DispatchQueue(label: "petal.guard.title", qos: .userInitiated)
     private var lastOk: String?
     private var timer: Timer?
     private var asking: Set<String> = []
@@ -66,9 +69,23 @@ final class FocusGuard {
             MainActor.assumeIsolated {
                 guard let self, PetalApp.started else { return }
                 self.sortModes()
-                guard self.config.bool("focusGuard") else { return }
-                let title = Windows.frontTitle()
-                if title != self.lastTitle { self.lastTitle = title; self.schedule() }
+                guard self.config.bool("focusGuard"), !self.readingTitle,
+                      let front = NSWorkspace.shared.frontmostApplication else { return }
+                // Petal's own windows are never sorted, and asking Accessibility about Petal would wait on Petal's
+                // own main thread: with its settings or chat in front, there's nothing to read.
+                let pid = front.processIdentifier
+                guard pid != ProcessInfo.processInfo.processIdentifier else { return }
+                // Accessibility asks the other app and waits for it (up to 0.3 s): never on the main thread.
+                self.readingTitle = true
+                Self.titleQueue.async {
+                    let title = Windows.frontTitle(of: pid)
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            self.readingTitle = false
+                            if title != self.lastTitle { self.lastTitle = title; self.schedule() }
+                        }
+                    }
+                }
             }
         }
     }

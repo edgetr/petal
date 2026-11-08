@@ -190,9 +190,32 @@ final class Signals {
 
     /// Apps set their badge on macOS's Dock, and the Dock shows it to Accessibility as each item's status label.
     /// Petal reads it there; macOS's Dock keeps running, hidden, while Petal replaces it.
+    /// Reads macOS's Dock's badges through Accessibility (a call to the Dock for each of its items), off the main
+    /// thread, so the dock and Petal's windows never wait on it.
     private func readBadges() {
+        guard !readingBadges else { return }
+        readingBadges = true
+        Self.badgeQueue.async {
+            let found = Self.dockBadges()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.readingBadges = false
+                    guard let found else { return }
+                    for (id, label) in found where Self.count(label) > Self.count(self.badges[id] ?? "") {
+                        self.bounces[id, default: 0] += 1
+                    }
+                    if found != self.badges { self.badges = found }
+                }
+            }
+        }
+    }
+    @ObservationIgnored private var readingBadges = false
+    nonisolated private static let badgeQueue = DispatchQueue(label: "petal.badges", qos: .utility)
+
+    /// Each app's badge in macOS's Dock, by bundle id; nil without Accessibility or the Dock.
+    nonisolated private static func dockBadges() -> [String: String]? {
         guard AXIsProcessTrusted(), let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first
-        else { return }
+        else { return nil }
         let element = AXUIElementCreateApplication(dock.processIdentifier)
         AXUIElementSetMessagingTimeout(element, 0.3)
         var found: [String: String] = [:]
@@ -203,10 +226,7 @@ final class Signals {
                 found[id] = label
             }
         }
-        for (id, label) in found where Self.count(label) > Self.count(badges[id] ?? "") {
-            bounces[id, default: 0] += 1
-        }
-        if found != badges { badges = found }
+        return found
     }
 
     private static func count(_ label: String) -> Int { Int(label) ?? (label.isEmpty ? 0 : 1) }
