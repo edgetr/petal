@@ -176,7 +176,8 @@ final class Assist {
     /// acts.
     func handle(_ name: String, _ json: String, note: String? = nil, who: AgentAccess.Caller? = nil, request: IPC.Pending? = nil,
                 reply: @escaping @MainActor (String) -> Void) {
-        let live = { request?.hungUp != true }
+        // Read on any thread: the socket's own flag, set the moment its client closes.
+        let live: @Sendable () -> Bool = { request?.hungUp != true }
         guard live() else { return }   // its client went before Petal got to it: nothing to answer
         let args = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
         let send: (Any) -> Void = { result in
@@ -695,7 +696,7 @@ final class Assist {
 
     // MARK: Windows
 
-    private func windows(_ args: [String: Any], caller: String?, live: @escaping () -> Bool, _ send: @escaping (Any) -> Void,
+    private func windows(_ args: [String: Any], caller: String?, live: @escaping @Sendable () -> Bool, _ send: @escaping (Any) -> Void,
                          _ fail: @escaping (String) -> Void) {
         let action = args["action"] as? String ?? "list"
         let appName = args["app"] as? String ?? ""
@@ -732,7 +733,7 @@ final class Assist {
                     case "minimize":
                         // Accessibility waits on the app (a hung one for its timeout): never on the main thread.
                         let element = window.element
-                        Self.off({ AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue) }) {
+                        Self.off({ if live() { AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanTrue) } }) {
                             send(["minimized": label])
                         }
                     case "close":
@@ -741,6 +742,8 @@ final class Assist {
                             let element = window.element
                             Self.off({
                                 guard let button: AXUIElement = Windows.value(element, kAXCloseButtonAttribute) else { return }
+                                // Its asker gone while the app answered: the window stays.
+                                guard live() else { return }
                                 AXUIElementPerformAction(button, kAXPressAction as CFString)
                             }) {
                                 self.did("Closed “\(label)”")
@@ -751,6 +754,7 @@ final class Assist {
                         let layout = args["layout"] as? String ?? "full"
                         guard let frame = self.arranged(window, layout) else { return fail("layout is left, right, top, bottom, full or center") }
                         Self.queue.async {
+                            guard live() else { return }   // its asker gone while it waited its turn
                             _ = Windows.place(window.element, pid: window.pid, frame)
                             DispatchQueue.main.async { send(["arranged": label, "layout": layout]) }
                         }
