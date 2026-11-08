@@ -229,10 +229,17 @@ enum Snapshot {
         if let pointer = FakeCursor.picture() { views.append(("computer-cursor", AnyView(Image(nsImage: pointer)), nil)) }
         for dot in [false, true] {
             let mark = MenuBar.mark(dot: dot)
+            // A template image is colored by the menu bar (white here); the update's blue one draws as it is.
+            let rendering: Image.TemplateRenderingMode = mark.isTemplate ? .template : .original
             views.append(("menubar\(dot ? "-dot" : "")", AnyView(HStack(spacing: 16) {
-                Image(nsImage: mark).renderingMode(.template).foregroundStyle(.white)
-                Image(nsImage: mark).renderingMode(.template).resizable().frame(width: 72, height: 72).foregroundStyle(.white)
+                Image(nsImage: mark).renderingMode(rendering).foregroundStyle(.white)
+                Image(nsImage: mark).renderingMode(rendering).resizable().frame(width: 72, height: 72).foregroundStyle(.white)
             }.padding(12)), nil))
+        }
+        if let mode = dock.mode {
+            let image = MenuBar.modeImage(mode.icon, dot: true)
+            views.append(("menubar-mode-dot", AnyView(Image(nsImage: image).renderingMode(image.isTemplate ? .template : .original)
+                .foregroundStyle(.white).padding(10)), nil))
         }
         for section in SettingsSection.allCases {
             views.append(("settings-\(section.rawValue)", AnyView(SettingsView(selection: section)), CGSize(width: 920, height: 700)))
