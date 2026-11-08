@@ -238,7 +238,7 @@ final class PetalApp {
             if facts.desktops != self.desktopCount { self.desktopCount = facts.desktops }
         }
         refreshCodexDefault(wait: wait)
-        instructions.refresh(from: config.instructionsFile, wait: wait)
+        instructions.refresh(wait: wait)
         if wait { apply(Self.factsQueue.sync { read() }); return }
         Self.factsQueue.async {
             let facts = read()

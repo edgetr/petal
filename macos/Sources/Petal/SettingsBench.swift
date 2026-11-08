@@ -43,7 +43,7 @@ enum SettingsBench {
         let real = URL(fileURLWithPath: NSHomeDirectory()).appending(path: ".config/petal")
         let copy = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "petal-bench-\(getpid())")
         try? FileManager.default.createDirectory(at: copy, withIntermediateDirectories: true)
-        for name in ["modes.json", "settings.json", "dock.json", "instructions.md", "routines.json", "memory.json"] {
+        for name in ["modes.json", "settings.json", "dock.json", "instructions.md", "instructions.draft.md", "routines.json", "memory.json"] {
             try? FileManager.default.copyItem(at: real.appending(path: name), to: copy.appending(path: name))
         }
         setenv("PETAL_CONFIG_DIR", copy.path, 1)

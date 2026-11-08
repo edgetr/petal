@@ -992,6 +992,9 @@ struct AllowedKindName: View {
 struct InstructionsEditor: View {
     @Environment(PetalApp.self) private var app
     @State private var text = ""
+    /// The notes' `version` the editor's text was last given: typing goes with it, so typing over text the editor no
+    /// longer holds is never written over the file.
+    @State private var shown = 0
 
     var body: some View {
         let notes = app.instructions
@@ -1025,176 +1028,197 @@ struct InstructionsEditor: View {
             // As last read off the main thread; read again as it appears, and while it shows, a change made elsewhere
             // (an agent, an editor) comes in within a second.
             .onAppear {
+                shown = notes.version
                 text = notes.text
                 notes.watch(true)
-                notes.refresh(from: app.config.instructionsFile)
+                notes.refresh()
             }
             .onDisappear { notes.watch(false) }
-            .onChange(of: notes.version) { _, _ in if text != notes.text { text = notes.text } }
-            .onChange(of: text) { _, new in notes.save(new, to: app.config.instructionsFile) }
+            .onChange(of: notes.version) { _, new in
+                shown = new
+                if text != notes.text { text = notes.text }
+            }
+            .onChange(of: text) { _, new in notes.typed(new, basedOn: shown) }
     }
 }
 
-/// The notes for the AI, kept in memory for the settings window. Read and written off the main thread, on one queue,
-/// in order: a read asked for after a save reads what that save wrote. A read begun before a save, or while the
-/// person is typing, never replaces what they typed. A save never writes over a change made elsewhere that the editor
-/// hasn't shown, and neither side is ever dropped without the person: with typing not yet written, the editor keeps it
-/// and says the file changed elsewhere (`changedElsewhere`), and they pick theirs or mine. With nothing unwritten, a
-/// change made elsewhere just comes into the editor.
+/// The notes for the AI as the settings window shows them: what the editor is given, from the notes' one state
+/// (`InstructionsStore`, on its own queue). Typing, picks and the watcher's looks go to that queue in order; what comes
+/// back is shown only once it has taken every key sent, so a key on its way is never undone.
 @MainActor @Observable
 final class InstructionsText {
-    /// A file as read: when it was last changed, and what it holds.
-    struct Disk { var stamp: Date?; var text: String }
-
+    /// What the editor holds: as last given, or typed since.
     @ObservationIgnored private(set) var text = ""
-    /// Counts reads that changed `text`, so the editor follows a change made elsewhere.
+    /// Counts the times the editor is given text it didn't type (the file read, a pick, a draft kept from before).
     private(set) var version = 0
-    /// Whether the file was read once: until then `text` is no baseline, and the editor takes no typing.
+    /// Whether the file was read once: until then the editor takes no typing.
     private(set) var loaded = false
-    /// The file as changed elsewhere while `text` held typing not yet written: the editor keeps the typing until the
-    /// person picks one (`useTheirs`, `keepMine`). Nothing is written meanwhile.
-    private var theirs: Disk?
-    var changedElsewhere: Bool { theirs != nil }
-    /// What the file held when `text` was read from it or written to it: a save writes only over this.
-    @ObservationIgnored private var base = ""
-    /// Counts saves: a read begun before one is older than what's typed, and is dropped.
-    @ObservationIgnored private var saves = 0
-    @ObservationIgnored private var lastSave = Date.distantPast
-    /// The file's modification date as last seen: the watcher reads the file again only once it changes.
-    @ObservationIgnored private var seen: Date?
+    /// The conflict the line under the editor answers: the file changed elsewhere while the typing wasn't written.
+    private(set) var conflict: Int?
+    var changedElsewhere: Bool { conflict != nil }
+    /// Keys sent to the queue: what comes back before it took the last one isn't shown.
+    @ObservationIgnored private var sent = 0
     /// Editors showing the notes: while any does, the file is watched.
     @ObservationIgnored private var watchers = 0
-    @ObservationIgnored private var file: URL?
-    nonisolated private static let queue = DispatchQueue(label: "petal.instructions", qos: .userInitiated)
-    /// How long after a key the person counts as typing: a change from elsewhere waits until they pause.
-    private static let typing: TimeInterval = 1.5
+    nonisolated private static let store = InstructionsStore(file: Config.folder.appending(path: "instructions.md"),
+                                                             draft: Config.folder.appending(path: "instructions.draft.md"))
 
-    /// Reads the file (off the main thread, unless `wait`). `ifChanged`: only when its modification date changed.
-    func refresh(from file: URL, wait: Bool = false, ifChanged: Bool = false) {
-        self.file = file
-        let asOf = saves
-        let known = ifChanged ? seen : nil
-        let read = { () -> Disk? in
-            let stamp = Self.modified(file)
-            if ifChanged, stamp == known { return nil }
-            return Disk(stamp: stamp, text: Self.contents(file))
-        }
-        let apply = { (disk: Disk?) in
-            guard let disk, asOf == self.saves else { return }
-            // Typing not yet written stays, and the file's newer version waits beside it.
-            if self.theirs != nil { self.conflict(disk); return }
-            // Typing: theirs stays; the change is read again once they pause (and a save meanwhile doesn't write
-            // over it: it says the file changed elsewhere instead).
-            guard Date().timeIntervalSince(self.lastSave) >= Self.typing else { return }
-            self.show(disk)
-        }
-        if wait { apply(Self.queue.sync { read() }); return }
-        Self.queue.async {
-            let disk = read()
-            DispatchQueue.main.async { MainActor.assumeIsolated { apply(disk) } }
-        }
-    }
+    /// Reads the file (off the main thread, unless `wait`).
+    func refresh(wait: Bool = false) { send(wait: wait) { $0.refresh(ifChanged: false) } }
 
-    func save(_ new: String, to file: URL) {
-        guard new != text else { return }
-        self.file = file
+    /// The editor's text changed: typed over what it was given at `basedOn` (its `version`).
+    func typed(_ new: String, basedOn: Int) {
+        guard loaded, new != text else { return }
         text = new
-        saves += 1
-        lastSave = Date()
-        // Changed elsewhere and not picked yet: nothing is written; typing theirs exactly settles it.
-        if let theirs {
-            if new == theirs.text { self.theirs = nil; seen = theirs.stamp; base = theirs.text }
-            return
-        }
-        let over = base
-        base = new   // the next save builds on this one
-        let saved = saves
-        Self.queue.async {
-            // Writes only over what the editor had: a change made elsewhere since then is kept, and said.
-            let now = Self.contents(file)
-            let written = now == over && (try? new.write(to: file, atomically: true, encoding: .utf8)) != nil
-            let disk = Disk(stamp: Self.modified(file), text: written ? new : now)
-            DispatchQueue.main.async { MainActor.assumeIsolated {
-                if written { if saved == self.saves { self.seen = disk.stamp }; return }
-                // Not written: whatever was typed since is unwritten too (it built on this one), so the person picks.
-                self.conflict(disk)
-            } }
-        }
+        sent += 1
+        let seq = sent, now = Date().timeIntervalSinceReferenceDate
+        send { $0.typed(new, basedOn: basedOn, now: now, seq: seq) }
     }
 
     /// "Use theirs": the file as it is now comes into the editor; the typing not yet written is dropped.
     func useTheirs() {
-        guard theirs != nil, let file else { return }
-        saves += 1   // a read or save begun before this is older than what the person picked
-        let asOf = saves
-        Self.queue.async {
-            let disk = Disk(stamp: Self.modified(file), text: Self.contents(file))
-            DispatchQueue.main.async { MainActor.assumeIsolated {
-                guard asOf == self.saves else { return }
-                self.theirs = nil
-                self.show(disk)
-            } }
-        }
+        guard conflict != nil else { return }
+        send { $0.useTheirs() }
     }
 
-    /// "Keep mine": what's in the editor is written over the file.
+    /// "Keep mine": what's in the editor is written over the change the person saw.
     func keepMine() {
-        guard theirs != nil, let file else { return }
-        let mine = text
-        saves += 1
-        let asOf = saves
-        theirs = nil
-        base = mine
-        Self.queue.async {
-            let written = (try? mine.write(to: file, atomically: true, encoding: .utf8)) != nil
-            let disk = Disk(stamp: Self.modified(file), text: written ? mine : Self.contents(file))
-            DispatchQueue.main.async { MainActor.assumeIsolated {
-                guard asOf == self.saves else { return }
-                if written { self.seen = disk.stamp } else { self.conflict(disk) }
-            } }
-        }
-    }
-
-    /// The file changed elsewhere while the editor held typing not yet written: both kept, the person picks. When the
-    /// file now holds just what's typed, there's nothing to pick.
-    private func conflict(_ disk: Disk) {
-        seen = disk.stamp
-        if disk.text == text { theirs = nil; base = disk.text; return }
-        theirs = disk
-    }
-
-    /// The file as read: the editor shows it and builds on it.
-    private func show(_ disk: Disk) {
-        seen = disk.stamp
-        base = disk.text
-        if !loaded { loaded = true }
-        guard disk.text != text else { return }
-        text = disk.text
-        version += 1
+        guard let conflict else { return }
+        send { $0.keepMine(conflict) }
     }
 
     /// Snapshots: the editor as it is when the file changed elsewhere while the person typed (false: as before).
-    func preview(changedElsewhere: Bool) {
-        theirs = changedElsewhere ? Disk(stamp: seen, text: base + "\n(changed elsewhere)") : nil
-    }
+    func preview(changedElsewhere: Bool) { conflict = changedElsewhere ? 0 : nil }
 
-    /// Waits for the notes' reads and writes to finish (on quit): an edit made just before is on disk.
-    nonisolated static func flush() { queue.sync {} }
+    /// Waits for the notes' reads and writes to finish (on quit): an edit made just before, and the draft of a
+    /// conflict not picked yet, are on disk.
+    nonisolated static func flush() { InstructionsStore.queue.sync {} }
 
     /// An editor showing the notes appeared (true) or went (false).
     func watch(_ on: Bool) { watchers = max(0, watchers + (on ? 1 : -1)) }
 
     /// Each second (Config's watcher): while an editor shows the notes, a change made elsewhere is read.
     func tick() {
-        guard watchers > 0, let file else { return }
-        refresh(from: file, ifChanged: true)
+        guard watchers > 0 else { return }
+        send { $0.refresh(ifChanged: true) }
     }
 
-    nonisolated private static func modified(_ file: URL) -> Date? {
+    private func send(wait: Bool = false, _ job: @escaping @Sendable (InstructionsStore) -> InstructionsStore.Shown?) {
+        let store = Self.store
+        if wait {
+            if let shown = InstructionsStore.queue.sync(execute: { job(store) }) { apply(shown) }
+            return
+        }
+        InstructionsStore.queue.async {
+            guard let shown = job(store) else { return }
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.apply(shown) } }
+        }
+    }
+
+    private func apply(_ shown: InstructionsStore.Shown) {
+        // Keys still on their way: the answer to the last one shows them.
+        guard shown.through == sent else { return }
+        if shown.loaded != loaded { loaded = shown.loaded }
+        if shown.conflict != conflict { conflict = shown.conflict }
+        text = shown.text
+        if shown.version != version { version = shown.version }
+    }
+}
+
+/// The notes' one state (`NotesState`), owned by one serial queue: reading the file, typing, writing, the person's
+/// picks and the watcher's looks all go through it in order, each write's answer taken at once, so none crosses
+/// another. After every step the draft file beside the notes follows the state: it holds the draft while a conflict
+/// is unresolved (so quitting loses neither side, and the next launch shows the line again), and is gone otherwise.
+final class InstructionsStore: @unchecked Sendable {
+    static let queue = DispatchQueue(label: "petal.instructions", qos: .userInitiated)
+
+    /// What the editor is given after a step; `through` counts the keys taken so far.
+    struct Shown: Sendable {
+        var text: String
+        var version: Int
+        var loaded: Bool
+        var conflict: Int?
+        var through: Int
+    }
+
+    private let file: URL
+    private let draftFile: URL
+    // Only touched on `queue`.
+    private var state = NotesState()
+    private var through = 0
+    private var draftOnDisk: String?
+
+    init(file: URL, draft: URL) {
+        self.file = file
+        draftFile = draft
+    }
+
+    /// Reads the file, and the first time the draft kept beside it. `ifChanged`: only once its modification date moved.
+    func refresh(ifChanged: Bool) -> Shown? {
+        let now = Date().timeIntervalSinceReferenceDate
+        if !state.loaded {
+            let saved = try? String(contentsOf: draftFile, encoding: .utf8)
+            draftOnDisk = saved
+            run(.opened(read(), saved: saved, now: now))
+        } else {
+            if ifChanged, Self.modified(file) == state.stamp { return nil }
+            run(.read(read(), now: now))
+        }
+        return shown
+    }
+
+    func typed(_ text: String, basedOn: Int, now: Double, seq: Int) -> Shown {
+        through = seq
+        run(.typed(text, basedOn: basedOn, now: now))
+        return shown
+    }
+
+    func keepMine(_ conflict: Int) -> Shown {
+        run(.keepMine(conflict: conflict))
+        return shown
+    }
+
+    func useTheirs() -> Shown {
+        run(.useTheirs(read()))
+        return shown
+    }
+
+    private var shown: Shown {
+        Shown(text: state.draft, version: state.shown, loaded: state.loaded, conflict: state.conflictShown, through: through)
+    }
+
+    /// One step, and the write it asks for done at once, its answer the next step.
+    private func run(_ event: NotesEvent) {
+        var next: NotesEvent? = event
+        while let step = next { next = NotesSteps.step(&state, step).map(write) }
+        keepDraft()
+    }
+
+    /// Writes only while the file holds what the write builds on: a change made elsewhere is kept, and said.
+    private func write(_ asked: NotesWrite) -> NotesEvent {
+        let now = Self.contents(file)
+        let ok = now == asked.over && (try? asked.text.write(to: file, atomically: true, encoding: .utf8)) != nil
+        return .wrote(generation: asked.generation, ok: ok, NotesDisk(stamp: Self.modified(file), text: ok ? asked.text : now))
+    }
+
+    private func keepDraft() {
+        let want = state.draftFile
+        guard want != draftOnDisk else { return }
+        if let want {
+            guard (try? want.write(to: draftFile, atomically: true, encoding: .utf8)) != nil else { return }
+        } else {
+            try? FileManager.default.removeItem(at: draftFile)
+        }
+        draftOnDisk = want
+    }
+
+    private func read() -> NotesDisk { NotesDisk(stamp: Self.modified(file), text: Self.contents(file)) }
+
+    private static func modified(_ file: URL) -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date
     }
 
-    nonisolated private static func contents(_ file: URL) -> String {
+    private static func contents(_ file: URL) -> String {
         (try? String(contentsOf: file, encoding: .utf8)) ?? ""
     }
 }
