@@ -144,33 +144,29 @@ extension NoteDesk {
         }
         guard let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return done(nil) }
         let name = running.localizedName ?? ""
-        let pid = running.processIdentifier
         let bundle = running.bundleIdentifier ?? ""
         let privacy = ClaudePanel.privacy.now
         let quiet = app.assist.neverLook(bundle)
         if quiet && wanted == .passage { return done(nil) }
         Self.read(running, mac: local.mac) { scene, read in
             guard live() else { return }
-            Self.queue.async {
-                var passage: (quote: String, before: String, after: String)?
-                if !quiet, live(), wanted == .passage || wanted == nil, let selected = Self.selection(pid: pid) {
-                    // Nothing from the vault goes to the AI: a selection holding a secret isn't a place for it.
-                    let clean = VaultIndex.settled { index in
-                        [selected.quote, selected.before, selected.after].allSatisfy { index.redacted($0) == $0 }
-                    } ?? false
-                    if clean { passage = selected }
-                }
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard live() else { return }
-                        // The final filter, as the result is used: private now (or the private apps changed), no
-                        // passage and nothing of its words.
-                        let still = ClaudePanel.privacy.current(privacy) && !self.app.assist.neverLook(bundle)
-                        let offers = self.places(for: scene, read: read, appName: name, passage: still ? passage : nil)
-                            .map { still ? $0 : $0.privately }
-                            .filter { still || $0.kind != .passage }
-                        done(wanted.flatMap { kind in offers.first { $0.kind == kind } } ?? (wanted == nil ? offers.first : nil))
-                    }
+            let finish = { (passage: (quote: String, before: String, after: String)?) in
+                guard live() else { return }
+                // The final filter, as the result is used: private now (or the private apps changed), no passage and
+                // nothing of its words.
+                let still = ClaudePanel.privacy.current(privacy) && !self.app.assist.neverLook(bundle)
+                let offers = self.places(for: scene, read: read, appName: name, passage: still ? passage : nil)
+                    .map { still ? $0 : $0.privately }
+                    .filter { still || $0.kind != .passage }
+                done(wanted.flatMap { kind in offers.first { $0.kind == kind } } ?? (wanted == nil ? offers.first : nil))
+            }
+            guard !quiet, wanted == .passage || wanted == nil else { return finish(nil) }
+            // The same selection read as a note's own (petal_look's rule, the scene's window and tab still in front).
+            self.passage(in: scene, privacy: privacy) { selected in
+                switch selected {
+                case .text(let quote, let before, let after): finish((quote, before, after))
+                case .refused where wanted == .passage: done(nil)
+                default: finish(nil)
                 }
             }
         }

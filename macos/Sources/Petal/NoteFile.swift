@@ -215,6 +215,25 @@ enum NoteMatch {
         return next
     }
 
+    /// Every anchor of every note found on what's in front only by its address (a tab) or title (a window), decided
+    /// together, before any note picks its place: when all of one kind come from one old tab or window, they take
+    /// the new one (`adopt`); otherwise every one of them is left out (`excluded`), whichever place each note would
+    /// have picked. `notes`: each note's places.
+    static func anchors(_ notes: [[NoteStick]], _ scene: NoteScene) -> (adopt: [(note: Int, place: Int)], excluded: [(note: Int, place: Int)]) {
+        var adopt: [(note: Int, place: Int)] = []
+        var excluded: [(note: Int, place: Int)] = []
+        let kinds: [((NoteStick) -> TabMatch?, ([NoteStick]) -> Bool)] = [({ tabMatch($0, scene) }, recover), ({ windowMatch($0, scene) }, recoverWindows)]
+        for (match, decide) in kinds {
+            var loose: [(note: Int, place: Int)] = []
+            for (n, places) in notes.enumerated() {
+                for (p, stick) in places.enumerated() where match(stick) == .address { loose.append((n, p)) }
+            }
+            guard !loose.isEmpty else { continue }
+            if decide(loose.map { notes[$0.note][$0.place] }) { adopt += loose } else { excluded += loose }
+        }
+        return (adopt, excluded)
+    }
+
     /// The most specific place that fits, leaving out some (address matches that couldn't be decided).
     static func best(_ places: [NoteStick], _ scene: NoteScene, excluding: Set<Int>) -> Int? {
         places.indices.filter { !excluding.contains($0) && fits(places[$0], scene) }.min { places[$0].kind.rank < places[$1].kind.rank }
@@ -717,10 +736,12 @@ enum NoteShelf {
     /// out with "..". Petal writes, moves and trashes note files only where this says yes (with every part of the
     /// path checked for a symbolic link first).
     static func within(_ path: String, _ root: String) -> String? {
-        let parts = (path as NSString).standardizingPath.split(separator: "/", omittingEmptySubsequences: true)
-        let base = (root as NSString).standardizingPath.split(separator: "/", omittingEmptySubsequences: true)
-        guard path.hasPrefix("/"), root.hasPrefix("/"), parts.count > base.count, Array(parts.prefix(base.count)) == base,
-              !parts.contains(".."), !parts.contains(".") else { return nil }
+        // By the path's own words (no lookup on disk, which spells /private/var one way for files that exist and
+        // another for those that don't): "." dropped, ".." refused.
+        let parts = path.split(separator: "/", omittingEmptySubsequences: true).filter { $0 != "." }
+        let base = root.split(separator: "/", omittingEmptySubsequences: true).filter { $0 != "." }
+        guard path.hasPrefix("/"), root.hasPrefix("/"), !parts.contains(".."), !base.contains(".."), parts.count > base.count,
+              Array(parts.prefix(base.count)) == base else { return nil }
         return parts.dropFirst(base.count).joined(separator: "/")
     }
 
@@ -750,29 +771,38 @@ enum NoteShelf {
         return editorOpen && !quitting ? .editor : .write
     }
 
-    /// What launch does with a journal entry a Petal before left behind (NoteJournal): the file holds its text
-    /// already (nothing); still holds what the edit was made on, or is gone (a new note, or one deleted elsewhere):
-    /// write it, as quitting would have; else it changed elsewhere since: a conflict copy beside it, never over it.
-    /// An edit kept aside is always a copy.
+    /// What launch does with a journal entry a Petal before left behind (NoteJournal), once the note is found by
+    /// its id: the file holds the entry's text already (nothing); still holds what it was made on (write it, as
+    /// quitting would have); else it changed elsewhere since (a conflict copy beside it, never over it). An edit
+    /// kept aside is always a copy.
     enum JournalRecovery: Equatable { case nothing, write, copy }
 
     static func journalRecovery(disk: String?, base: String?, text: String, aside: Bool) -> JournalRecovery {
         if disk == text { return .nothing }
         if aside { return .copy }
-        if disk == nil || disk == base { return .write }
+        if disk == base { return .write }
         return .copy
     }
 
-    /// The text a journal entry puts back: its own, or the file's (a picture accepted with no edit after it), with a
-    /// reference for each of its pictures (name, caption) not referenced in it yet.
-    static func journalText(text: String?, disk: String?, noteID: String, pictures: [(name: String, caption: String)]) -> String? {
-        guard let start = text ?? disk else { return nil }
-        let missing = pictures.filter { !start.contains($0.name) }
-        guard !missing.isEmpty else { return start }
-        var file = NoteFile.parse(start, fallbackID: noteID, fallbackDate: Date())
-        let lines = missing.map { NoteBlock.image(path: assetsFolder(id: noteID) + "/" + $0.name, caption: $0.caption).markdown }
-        file.body += (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + lines.joined(separator: "\n")
-        return file.serialized()
+    /// Where a journal entry goes back: into its note, found by its id (`found`: the paths holding a note with that
+    /// id, as the folder is now), only when exactly one does; with none (gone, or a new note never made) or several
+    /// (two papers of one note), a file of its own: never into another note, whatever sits at its old path.
+    enum JournalTarget: Equatable { case note(String), separate }
+
+    static func journalTarget(found: [String]) -> JournalTarget {
+        found.count == 1 ? .note(found[0]) : .separate
+    }
+
+    /// The pictures a journal snapshot carries: those its text references whose bytes aren't in the note's pictures'
+    /// folder yet (`pending`). A picture the person undid is no longer referenced, and its bytes leave with it.
+    static func journalPictures(text: String, pending: [String]) -> [String] {
+        pending.filter { text.contains($0) }.sorted()
+    }
+
+    /// The journal folders a launch recovers: every "recovering" one a launch before left (resumed, entry by entry),
+    /// oldest first.
+    static func journalFolders(_ names: [String]) -> [String] {
+        names.filter { $0.hasPrefix("Notes journal, recovering ") }.sorted()
     }
 
     /// A note made and put away empty goes to the Trash, unless pictures were accepted for it (their bytes or

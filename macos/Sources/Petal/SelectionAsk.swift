@@ -72,7 +72,10 @@ final class SelectionAsk {
         let appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appElement, 0.25)
         guard let focused: AXUIElement = Windows.value(appElement, kAXFocusedUIElementAttribute) else { return nil }
-        if (Windows.value(focused, kAXSubroleAttribute) as String?) == kAXSecureTextFieldSubrole as String { return nil }
+        // petal_look's rule, before anything is captured (for Ask or a note): nothing from a password field, a field
+        // named for or filled with a secret, nor text holding a vault secret.
+        let window: CGWindowID? = (Windows.value(appElement, kAXFocusedWindowAttribute) as AXUIElement?).flatMap { Windows.id(of: $0) }
+        if Assist.selectionInSecret(focused, pid: pid, window: window) { return nil }
         guard let text: String = Windows.value(focused, kAXSelectedTextAttribute) else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count >= 2, trimmed.count <= 20000 else { return nil }

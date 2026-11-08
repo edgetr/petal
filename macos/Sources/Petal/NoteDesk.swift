@@ -67,12 +67,13 @@ final class NoteDesk {
         // journal's own queue to the notes' queue.
         let root = NoteStore.rootFolder(setting: app.config.string("notesFolder"))
         NoteJournal.queue.async {
-            guard let holding = NoteJournal.takeLeftovers() else { return }
-            NoteStore.io.async { NoteJournal.recover(holding, root: root) }
+            // The journal as it was, and any recovery a launch before didn't finish: resumed, entry by entry.
+            let leftovers = NoteJournal.leftovers()
+            guard !leftovers.isEmpty else { return }
+            NoteStore.io.async { for holding in leftovers { NoteJournal.recover(holding, root: root) } }
         }
         store.switchRoot(to: root)
         store.onChange = { [weak self] in self?.refresh() }
-        store.onPictures = { [weak self] key, pictures, at in self?.insertPictures(key, pictures, at: at) ?? false }
         store.onRekey = { [weak self] old, paper in self?.rekey(old, to: paper) }
         store.onProblem = { [weak self] text in self?.say(text) }
         store.keepAlive = { [weak self] key in self?.editors[key] != nil }
@@ -155,7 +156,9 @@ final class NoteDesk {
         giveBackAll { group.leave() }
         DispatchQueue.global(qos: .userInitiated).async {
             journal.wait()
-            _ = group.wait(timeout: .now() + 10)
+            // The drain clears journal entries as their writes land (on the journal's queue): waited for too, once the
+            // drain is done or its time is up, so what it cleared is cleared.
+            if group.wait(timeout: .now() + 10) == .success { NoteJournal.queue.sync {} }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     let waiting = self.quitWaiters
@@ -290,10 +293,11 @@ final class NoteDesk {
         frame = read.frame
         var fits: [String: Int] = [:]
         if read.window != nil {
-            for paper in store.notes where !paper.file.places.isEmpty {
-                if let index = NoteMatch.best(paper.file.places, scene) { fits[paper.key] = index }
+            let papers = store.notes.filter { !$0.file.places.isEmpty }
+            let excluded = decideAnchors(papers, scene)
+            for paper in papers {
+                if let index = NoteMatch.best(paper.file.places, scene, excluding: excluded[paper.key] ?? []) { fits[paper.key] = index }
             }
-            fits = recoverTabs(fits, scene)
         }
         if fits != here { here = fits }
         followTabs(scene)
@@ -312,39 +316,23 @@ final class NoteDesk {
     /// Notes found on the tab in front by its address alone (a Chromium tab after its browser restarted), decided
     /// together: when they all come from one tab before, they take this one as theirs (its id and process from now
     /// on); notes from different old tabs that showed the same page never guess, and fall back to their other places.
-    private func recoverTabs(_ fits: [String: Int], _ scene: NoteScene) -> [String: Int] {
-        // Tabs by address and windows by title: each decided over every candidate together, never a guess.
-        var fits = recover(fits, scene, match: { NoteMatch.tabMatch($0, scene) }, decide: NoteMatch.recover, adopt: NoteMatch.adopt)
-        fits = recover(fits, scene, match: { NoteMatch.windowMatch($0, scene) }, decide: NoteMatch.recoverWindows, adopt: NoteMatch.adoptWindow)
-        return fits
-    }
-
-    /// Notes that fit what's in front only by its address or title (their browser or app restarted): when they all
-    /// come from one tab or window before (`decide`), they take this one as theirs (`adopt`, fenced by revision);
-    /// else none of them does, and each falls back to its other places.
-    private func recover(_ fits: [String: Int], _ scene: NoteScene, match: (NoteStick) -> NoteMatch.TabMatch?,
-                         decide: ([NoteStick]) -> Bool, adopt: (NoteStick, NoteScene) -> NoteStick) -> [String: Int] {
-        let loose = fits.filter { key, index in
-            store.paper(key).map { $0.file.places.indices.contains(index) && match($0.file.places[index]) == .address } ?? false
-        }
-        guard !loose.isEmpty else { return fits }
-        var fits = fits
-        let sticks = loose.compactMap { key, index in store.paper(key)?.file.places[index] }
-        if decide(sticks) {
-            for (key, index) in loose {
-                guard let paper = store.paper(key), !store.readOnly(paper) else { continue }
-                let adopted = adopt(paper.file.places[index], scene)
-                store.change(key, expect: paper.revision, touch: false) { file in
-                    if file.places.indices.contains(index) { file.places[index] = adopted }
-                }
+    /// Notes whose anchors fit the tab or window in front only by address or title (their browser or app
+    /// restarted), decided over every such anchor of every note before any note picks its place
+    /// (`NoteMatch.anchors`): all from one old tab or window, they take this one (fenced by revision); else every one
+    /// is left out, and each note falls back to its other places.
+    private func decideAnchors(_ papers: [PaperNote], _ scene: NoteScene) -> [String: Set<Int>] {
+        let decided = NoteMatch.anchors(papers.map(\.file.places), scene)
+        for (note, place) in decided.adopt {
+            let paper = papers[note]
+            guard !store.readOnly(paper) else { continue }
+            let adopted = paper.file.places[place].kind == .tab ? NoteMatch.adopt(paper.file.places[place], scene) : NoteMatch.adoptWindow(paper.file.places[place], scene)
+            store.change(paper.key, expect: paper.revision, touch: false) { file in
+                if file.places.indices.contains(place) { file.places[place] = adopted }
             }
-            return fits
         }
-        for (key, index) in loose {
-            guard let paper = store.paper(key) else { continue }
-            fits[key] = NoteMatch.best(paper.file.places, scene, excluding: [index])
-        }
-        return fits
+        var excluded: [String: Set<Int>] = [:]
+        for (note, place) in decided.excluded { excluded[papers[note].key, default: []].insert(place) }
+        return excluded
     }
 
     /// Tab notes seen surely on their own tab keep its address as it is now (and its title, and whether it's the one
@@ -738,13 +726,13 @@ final class NoteDesk {
             for number in plan.giveBack { Self.giveBack(number) }
             // A newer look is on its way: it decides whether to narrow.
             guard let wanted, plan.narrow == wanted.number, let target = wanted.target, Self.roomTurn.current(turn) else { return }
-            Self.narrow(wanted.number, pid: wanted.pid, from: wanted.frame, to: target)
+            Self.narrow(wanted.number, pid: wanted.pid, from: wanted.frame, to: target, turn: turn)
         }
     }
 
     /// Narrows one window, on `queue`: only while it's still where it was when this was decided, recorded before it
     /// changes, and with the frame the app took.
-    nonisolated private static func narrow(_ number: CGWindowID, pid: pid_t, from frame: CGRect, to target: CGRect) {
+    nonisolated private static func narrow(_ number: CGWindowID, pid: pid_t, from frame: CGRect, to target: CGRect, turn: Int) {
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.3)
         let all: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
@@ -753,8 +741,10 @@ final class NoteDesk {
         var settable: DarwinBoolean = false
         guard AXUIElementIsAttributeSettable(element, kAXSizeAttribute as CFString, &settable) == .success, settable.boolValue else { return }
         ledger[number] = (pid, now, target)
-        let took = Windows.place(element, pid: pid, target)
-        if let took { ledger[number]?.given = took }
+        // A newer turn (a fold, notes off, quitting) stops it between its steps; whatever it had changed is put back
+        // at once (the record was written first).
+        let took = Windows.place(element, pid: pid, target, live: { Self.roomTurn.current(turn) })
+        if let took { ledger[number]?.given = took } else { giveBack(number) }
         DispatchQueue.main.async { MainActor.assumeIsolated { PetalApp.shared.paper.lookAgain(after: 0.05) } }
     }
 
@@ -819,16 +809,47 @@ final class NoteDesk {
         return store.change(key, base: base) { $0.body = body }
     }
 
-    /// Pictures pasted or dropped on a note: its session reads, decodes and saves them beside it (after whatever is
-    /// waiting there, a move too), then they go in where the cursor was, or at the end of the note once its editor
-    /// is gone.
+    /// Pictures pasted or dropped on a note: their bytes read and decoded first (a file that's slow or not downloaded
+    /// yet, a screenshot's TIFF), on a background queue that's neither the journal's nor the notes' own. Only then is
+    /// the paste accepted: the bytes into memory (and from there into the journal's snapshots and the note's
+    /// pictures' folder), and the references into the note as ordinary text, at the cursor in its editor, or at the
+    /// end of the note once the editor is gone. A note with a picture in it is never trashed as empty.
     func importPictures(_ items: NoteImport, into key: String) {
-        // Accepted: the note isn't empty from now on (never trashed as an empty new note).
-        if store.importPictures(key, items) { fresh.remove(key) } else { say("This note has two versions: keep one before adding pictures.") }
+        guard let paper = store.paper(key), !store.readOnly(paper) else { return say("This note has two versions: keep one before adding pictures.") }
+        let noteID = paper.noteID
+        DispatchQueue.global(qos: .userInitiated).async {
+            var read: [(ext: String, data: Data, caption: String)] = []
+            for file in items.files {
+                if let data = try? Data(contentsOf: file), NSImage(data: data) != nil {
+                    read.append((file.pathExtension.lowercased(), data, file.deletingPathExtension().lastPathComponent))
+                }
+            }
+            if let png = items.png { read.append(("png", png, "")) }
+            if let tiff = items.tiff, let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) { read.append(("png", png, "")) }
+            let ready = read
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard !ready.isEmpty else { return self.say("Petal couldn't read that picture.") }
+                    // The note as it is now (moved or named again meanwhile: found by its id).
+                    guard let now = self.store.notes.first(where: { $0.noteID == noteID && $0.version == nil }),
+                          let accepted = self.store.acceptPictures(now.key, ready) else {
+                        return self.say("This note can't take pictures right now.")
+                    }
+                    for (index, picture) in accepted.enumerated() { NotePictures.shared.preview(picture.file, NSImage(data: ready[index].data) ?? NSImage()) }
+                    self.fresh.remove(now.key)
+                    if !self.insertPictures(now.key, accepted, at: items.at) {
+                        let lines = accepted.map { NoteBlock.image(path: $0.path, caption: $0.caption).markdown }
+                        self.store.change(now.key) { file in
+                            file.body += (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + lines.joined(separator: "\n")
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    /// The session saved pictures for a note: into its open editor, at the cursor's place then (true); no editor open
-    /// on it (false), the session puts them at the end of the note.
+    /// Pictures' references into a note's open editor, as ordinary text, at the cursor's place then; false when no
+    /// editor is open on it.
     private func insertPictures(_ key: String, _ pictures: [(path: String, file: URL, caption: String)], at: Int) -> Bool {
         guard let editor = editors[key] else { return false }
         var at = at
@@ -836,7 +857,6 @@ final class NoteDesk {
             guard editor.insert(picture.path, picture.file, picture.caption, at) else { return false }
             at = -1   // the next one after it, at the cursor
         }
-        fresh.remove(key)
         return true
     }
 
@@ -1010,35 +1030,52 @@ final class NoteDesk {
 
     /// ⌃⌥N: a new note on what's in front: the selected sentence, else its tab, its file, its window; on the
     /// Desktop, the Desktop.
-    func newHere() {
+    func newHere() { noteOnSelection() }
+
+    /// "Note" by a selection: a new note on that sentence (its page or file); its text is read again here, under
+    /// petal_look's rule, never taken from the button's capture.
+    func note(on quote: String) { noteOnSelection() }
+
+    /// A new note on what's in front: the selected sentence, read and checked (`passage`), else its tab, file,
+    /// window or Desktop. A selection refused (a secret, a field named for one, an app made private, the window or
+    /// tab changed while it was read) makes no note at all: never a note without the check.
+    private func noteOnSelection() {
         guard on, let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return }
-        let pid = running.processIdentifier
         let name = running.localizedName ?? ""
+        let privacy = ClaudePanel.privacy.now
         Self.read(running, mac: local.mac) { scene, read in
             self.apply(scene, read: read)
-            Self.queue.async {
-                let passage = Self.selection(pid: pid)
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        if let first = self.places(for: scene, read: read, appName: name, passage: passage).first { self.make(on: first) }
-                    }
+            self.passage(in: scene, privacy: privacy) { selected in
+                let passage: (quote: String, before: String, after: String)?
+                switch selected {
+                case .refused: return self.say("Petal doesn't keep that selection in a note.")
+                case .none: passage = nil
+                case .text(let quote, let before, let after): passage = (quote, before, after)
                 }
+                if let first = self.places(for: scene, read: read, appName: name, passage: passage).first { self.make(on: first) }
             }
         }
     }
 
-    /// "Note" by a selection: a new note on that sentence (its page or file), else on what's in front.
-    func note(on quote: String) {
-        guard on, let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return }
-        let pid = running.processIdentifier
-        let name = running.localizedName ?? ""
-        Self.read(running, mac: local.mac) { scene, read in
-            self.apply(scene, read: read)
-            Self.queue.async {
-                let passage = Self.selection(pid: pid) ?? (quote, "", "")
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        if let first = self.places(for: scene, read: read, appName: name, passage: passage).first { self.make(on: first) }
+    /// The selection in `scene`'s app, as one read: refused when petal_look's rule says no (Assist.selectionInSecret),
+    /// when its window, tab or the private apps changed between the scene and the selection, or when the app is
+    /// private now; nothing selected: `.none`. Off the main thread, answered on it.
+    func passage(in scene: NoteScene, privacy: Int, _ done: @escaping @MainActor (Selected) -> Void) {
+        let pid = scene.pid, bundle = scene.app
+        Self.queue.async {
+            let read = Self.selection(pid: pid)
+            var same = read.window == scene.window
+            // A tab's selection only while that same tab still shows (its id or tab-strip button, its address).
+            if same, let tab = scene.tab {
+                let now = Browsers.activeTab(pid: pid, bundleID: bundle)
+                same = now.map { ($0.id != nil && $0.id == tab.id || $0.element != nil && $0.element == tab.element) && NoteRules.sameURL($0.url, tab.url) } ?? false
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let quiet = !ClaudePanel.privacy.current(privacy) || self.app.assist.neverLook(bundle)
+                    switch read.result {
+                    case .text where !same || quiet: done(.refused)
+                    default: done(read.result)
                     }
                 }
             }
@@ -1131,18 +1168,22 @@ final class NoteDesk {
     }
 
     /// The selected text in the app `pid` and a little of the text around it, when the app says. Off the main thread.
-    nonisolated static func selection(pid: pid_t) -> (quote: String, before: String, after: String)? {
-        guard Windows.trusted else { return nil }
+    enum Selected { case none, refused, text(String, String, String) }
+
+    /// The selected text in the app `pid` and a little of the text around it, when the app says, with the window it
+    /// was read in: refused when petal_look's rule says no (Assist.selectionInSecret). Off the main thread.
+    nonisolated static func selection(pid: pid_t) -> (result: Selected, window: CGWindowID?) {
+        guard Windows.trusted else { return (.none, nil) }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.25)
-        guard let focused: AXUIElement = Windows.value(app, kAXFocusedUIElementAttribute) else { return nil }
-        // petal_look's rule exactly (Assist.selectionInSecret): nothing from a field holding, named for, or filled
-        // with a secret, nor any text holding a vault secret.
         let window: CGWindowID? = (Windows.value(app, kAXFocusedWindowAttribute) as AXUIElement?).flatMap { Windows.id(of: $0) }
-        if Assist.selectionInSecret(focused, pid: pid, window: window) { return nil }
-        guard let text: String = Windows.value(focused, kAXSelectedTextAttribute) else { return nil }
+        guard let focused: AXUIElement = Windows.value(app, kAXFocusedUIElementAttribute) else { return (.none, window) }
+        // petal_look's rule exactly: nothing from a field holding, named for, or filled with a secret, nor any text
+        // holding a vault secret.
+        if Assist.selectionInSecret(focused, pid: pid, window: window) { return (.refused, window) }
+        guard let text: String = Windows.value(focused, kAXSelectedTextAttribute) else { return (.none, window) }
         let quote = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard quote.count >= 2 else { return nil }
+        guard quote.count >= 2 else { return (.none, window) }
         var before = "", after = ""
         if let rangeValue: AXValue = Windows.value(focused, kAXSelectedTextRangeAttribute) {
             var range = CFRange()
@@ -1157,7 +1198,7 @@ final class NoteDesk {
             before = string(range.location - 80, min(80, range.location))
             after = string(range.location + range.length, 80)
         }
-        return (quote, before, after)
+        return (.text(quote, before, after), window)
     }
 
     // MARK: The quick question

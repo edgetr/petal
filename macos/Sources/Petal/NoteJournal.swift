@@ -1,36 +1,34 @@
 import AppKit
 
-/// What can't be lost at quit, on this Mac's own disk: every accepted edit and paste, written to a small per-note
-/// journal (Application Support's "Notes journal", never iCloud) on a queue of its own, before it goes to the notes'
-/// folder. An entry is cleared once what it holds landed in the note (or its conflict copy did). At launch, anything
-/// still there is put back (`recover`): as the note when its file still says what the edit was made on, else as a
-/// conflict copy beside it, else (the folder can't be written) into "Unsaved notes". So quitting only waits for this
-/// queue, which is local and quick; the notes' own queue (iCloud may be slow) needn't finish first.
+/// What can't be lost at quit, on this Mac's own disk: a small per-note journal (Application Support's "Notes
+/// journal", never iCloud), on a queue of its own. Each entry is a whole snapshot, never a patch: the note's id, the
+/// text the note's oldest write not yet landed was made on (`base`), the person's full text at that moment, and the
+/// bytes of every picture that text references whose bytes aren't in the note's pictures' folder yet. Each new
+/// snapshot replaces the note's last one, atomically. A snapshot goes once a write of its text landed (or its
+/// conflict copy did). At launch, what's left is put back entry by entry (`recover`), and an entry goes only once its
+/// recovery wrote it somewhere safe. So quitting only waits for this queue, which is local and quick.
 enum NoteJournal {
     nonisolated static let queue = DispatchQueue(label: "petal.notes.journal", qos: .userInitiated)
 
     /// `PETAL_SUPPORT_DIR` moves it with the rest of Petal's own state (tests, snapshots).
     nonisolated static var folder: URL { Config.supportFolder.appending(path: "Notes journal") }
 
-    /// One note's writing not known to have landed: where its file is, the exact text its first unlanded edit was
-    /// made on (`base`, nil for a new note), its newest text, and pictures accepted for it (bytes beside the entry,
-    /// in "<entry>.pictures") whose reference isn't in a landed text yet. `aside`: an edit kept beside a paper that
-    /// turned read only, always a conflict copy.
     struct Entry: Codable, Equatable {
         var noteID: String
+        /// Where the note was when the snapshot was taken: a hint for where a new note goes, never how it's found.
         var path: String
         var base: String?
-        var text: String?
+        var text: String
         var pictures: [Picture] = []
+        /// An edit kept beside a paper that turned read only: always a conflict copy.
         var aside = false
     }
 
+    /// A picture's bytes, as the editor accepted them (from memory, never read from its source here).
     struct Picture: Codable, Equatable {
         var name: String
-        var caption: String
+        var data: Data
     }
-
-    // MARK: On the journal's queue
 
     nonisolated static func file(_ noteID: String, aside: Bool = false, in folder: URL = folder) -> URL {
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
@@ -43,114 +41,86 @@ enum NoteJournal {
         return try? JSONDecoder().decode(Entry.self, from: data)
     }
 
-    nonisolated static func write(_ entry: Entry, to url: URL) {
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if let data = try? JSONEncoder().encode(entry) { try? data.write(to: url, options: .atomic) }
+    // MARK: On the journal's queue
+
+    /// A whole snapshot, replacing the note's last one in one atomic write.
+    nonisolated static func snapshot(_ entry: Entry, in folder: URL = folder) {
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(entry) else { return }
+        try? data.write(to: file(entry.noteID, aside: entry.aside, in: folder), options: .atomic)
     }
 
-    /// An accepted edit: its newest text, on the base of the first edit not yet landed.
-    nonisolated static func record(noteID: String, path: String, base: String?, text: String, aside: Bool = false, in folder: URL = folder) {
-        let url = file(noteID, aside: aside, in: folder)
-        var entry = read(url) ?? Entry(noteID: noteID, path: path, base: base, aside: aside)
-        if entry.text == nil && !aside { entry.base = base }
-        entry.path = path
-        entry.text = text
-        write(entry, to: url)
-    }
-
-    /// Pictures accepted for a note: their bytes kept beside its entry until their reference has landed.
-    nonisolated static func recordPictures(noteID: String, path: String, base: String?, pictures: [NotePictureBytes], in folder: URL = folder) {
-        let url = file(noteID, in: folder)
-        var entry = read(url) ?? Entry(noteID: noteID, path: path, base: base)
-        let bytes = url.deletingPathExtension().appendingPathExtension("pictures")
-        try? FileManager.default.createDirectory(at: bytes, withIntermediateDirectories: true)
-        for picture in pictures {
-            guard let data = NoteStore.pictureData(picture) else { continue }
-            try? data.write(to: bytes.appending(path: picture.name), options: .atomic)
-            if !entry.pictures.contains(where: { $0.name == picture.name }) { entry.pictures.append(Picture(name: picture.name, caption: picture.caption)) }
-        }
-        entry.path = path
-        write(entry, to: url)
-    }
-
-    /// A text landed in the note (or its conflict copy): what it holds is safe. The entry goes once nothing newer
-    /// is in it; else what's newer is now made on this.
+    /// A text landed (in the note, or in its conflict copy): the snapshot holding exactly it goes; a newer one stays.
     nonisolated static func landed(noteID: String, text: String, aside: Bool = false, in folder: URL = folder) {
         let url = file(noteID, aside: aside, in: folder)
-        guard var entry = read(url) else { return }
-        // Pictures whose reference is in what landed: safe.
-        let bytes = url.deletingPathExtension().appendingPathExtension("pictures")
-        for picture in entry.pictures where text.contains(picture.name) { try? FileManager.default.removeItem(at: bytes.appending(path: picture.name)) }
-        entry.pictures.removeAll { text.contains($0.name) }
-        if entry.text == text { entry.text = nil }
-        entry.base = text
-        if entry.text == nil && entry.pictures.isEmpty {
-            try? FileManager.default.removeItem(at: url)
-            try? FileManager.default.removeItem(at: bytes)
-        } else {
-            write(entry, to: url)
-        }
+        guard let entry = read(url), entry.text == text else { return }
+        try? FileManager.default.removeItem(at: url)
     }
 
-    /// The note's file is somewhere else now (a move, a new note's name on disk).
-    nonisolated static func moved(noteID: String, path: String, in folder: URL = folder) {
-        for aside in [false, true] {
-            let url = file(noteID, aside: aside, in: folder)
-            guard var entry = read(url) else { continue }
-            entry.path = path
-            write(entry, to: url)
-        }
-    }
-
-    /// Pictures the person removed (a failed import they let go of): out of the journal too.
-    nonisolated static func dropPictures(noteID: String, names: [String], in folder: URL = folder) {
-        let url = file(noteID, in: folder)
-        guard var entry = read(url) else { return }
-        let bytes = url.deletingPathExtension().appendingPathExtension("pictures")
-        for name in names { try? FileManager.default.removeItem(at: bytes.appending(path: name)) }
-        entry.pictures.removeAll { names.contains($0.name) }
-        if entry.text == nil && entry.pictures.isEmpty { try? FileManager.default.removeItem(at: url) } else { write(entry, to: url) }
-    }
-
-    /// At launch, on the journal's queue: the entries left behind are taken out of the journal (into a folder of
-    /// their own, so new edits never mix with them) and handed to `recover` on the notes' queue.
-    nonisolated static func takeLeftovers(in folder: URL = folder) -> URL? {
+    /// At launch, on the journal's queue: the journal as it is moves aside into a "recovering" folder of its own
+    /// (new snapshots never mix with it), and every "recovering" folder a launch before left (stopped part way) is
+    /// handed back too, to resume. Returns them oldest first.
+    nonisolated static func leftovers(in folder: URL = folder) -> [URL] {
         let fm = FileManager.default
+        let parent = folder.deletingLastPathComponent()
         let entries = ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".json") }
-        guard !entries.isEmpty else { return nil }
-        let holding = folder.deletingLastPathComponent().appending(path: "Notes journal, recovering \(UUID().uuidString.prefix(8))")
-        guard (try? fm.moveItem(at: folder, to: holding)) != nil else { return nil }
-        return holding
+        if !entries.isEmpty {
+            let stamp = String(format: "%.0f", Date().timeIntervalSince1970 * 1000)
+            _ = try? fm.moveItem(at: folder, to: parent.appending(path: "Notes journal, recovering \(stamp)"))
+        }
+        let names = (try? fm.contentsOfDirectory(atPath: parent.path)) ?? []
+        return NoteShelf.journalFolders(names).map { parent.appending(path: $0) }
     }
 
-    /// Puts back each entry left behind (`recovery`): written into the note, kept beside it as a conflict copy, or,
-    /// when the notes' folder can't take it, kept in "Unsaved notes" with its pictures. Off the main thread, on the
-    /// notes' queue. The folder of leftovers goes once everything in it is somewhere safe.
+    // MARK: Recovery (on the notes' queue)
+
+    /// Puts back each entry of a recovering folder, one at a time: found by its note's id in the notes' folder as it
+    /// is now (`NoteShelf.journalTarget`), written into that note while it still says what the snapshot was made on,
+    /// else beside it as a conflict copy; with no single note of that id, a file of its own; and when the notes'
+    /// folder can't take it, into "Unsaved notes" with its pictures. An entry is deleted only once one of those
+    /// wrote and said so; one that couldn't is kept for the next launch. The folder goes once it's empty.
     nonisolated static func recover(_ holding: URL, root: URL) {
         let fm = FileManager.default
-        for name in ((try? fm.contentsOfDirectory(atPath: holding.path)) ?? []).filter({ $0.hasSuffix(".json") }) {
+        let names = ((try? fm.contentsOfDirectory(atPath: holding.path)) ?? []).filter { $0.hasSuffix(".json") }.sorted()
+        guard !names.isEmpty else { try? fm.removeItem(at: holding); return }
+        let notes = NoteStore.read(root).notes
+        for name in names {
             let url = holding.appending(path: name)
-            guard let entry = read(url) else { continue }
-            let note = URL(fileURLWithPath: entry.path)
-            let bytes = url.deletingPathExtension().appendingPathExtension("pictures")
-            let pictures = entry.pictures.map { NotePictureBytes(name: $0.name, file: bytes.appending(path: $0.name), caption: $0.caption) }
-            // The pictures' bytes first, into the note's pictures' folder (the same names: never twice).
-            let pictured = pictures.isEmpty || NoteStore.writePictures(pictures, into: note.deletingLastPathComponent().appending(path: NoteShelf.assetsFolder(id: entry.noteID)),
-                                                                          root: root).count == pictures.count
-            let disk = fm.fileExists(atPath: note.path) ? NoteStore.coordinatedRead(note) : nil
-            guard let text = NoteShelf.journalText(text: entry.text, disk: disk, noteID: entry.noteID, pictures: entry.pictures.map { ($0.name, $0.caption) })
-            else { continue }
-            var safe = false
-            // Pictures only (no edit after them): their references go on the file as it is.
-            switch NoteShelf.journalRecovery(disk: disk, base: entry.text == nil ? disk : entry.base, text: text, aside: entry.aside) {
-            case .nothing: safe = true
-            case .write: safe = NoteStore.save(text, to: note, base: disk, root: root) != .failed
-            case .copy: if case .keptBoth = NoteStore.keepBeside(text, original: note, root: root) { safe = true }
-            }
-            // Whatever couldn't go back into the notes' folder is kept in "Unsaved notes": safe either way.
-            if !safe || !pictured { NoteStore.rescue(text, pictures: pictured ? [] : pictures) }
+            guard let entry = read(url) else { try? fm.removeItem(at: url); continue }
+            if recoverEntry(entry, notes: notes, root: root) { try? fm.removeItem(at: url) }
         }
-        // Petal's own leftovers, all somewhere safe now.
-        try? fm.removeItem(at: holding)
+        if (((try? fm.contentsOfDirectory(atPath: holding.path)) ?? []).filter { $0.hasSuffix(".json") }).isEmpty { try? fm.removeItem(at: holding) }
+    }
+
+    /// One entry put back somewhere safe: true once it's written and said so.
+    nonisolated static func recoverEntry(_ entry: Entry, notes: [PaperNote], root: URL) -> Bool {
+        let found = notes.filter { $0.noteID == entry.noteID && $0.version == nil }.map(\.url.path)
+        let pictures = entry.pictures.map { NotePictureBytes(name: $0.name, data: $0.data, caption: "") }
+        func picturesBeside(_ note: URL) -> Bool {
+            pictures.isEmpty || NoteStore.writePictures(pictures, into: note.deletingLastPathComponent().appending(path: NoteShelf.assetsFolder(id: entry.noteID)),
+                                                         root: root).count == pictures.count
+        }
+        switch NoteShelf.journalTarget(found: found) {
+        case .note(let path):
+            let note = URL(fileURLWithPath: path)
+            let disk = NoteStore.coordinatedRead(note)
+            guard picturesBeside(note) else { break }
+            switch NoteShelf.journalRecovery(disk: disk, base: entry.base, text: entry.text, aside: entry.aside) {
+            case .nothing: return true
+            case .write: if NoteStore.save(entry.text, to: note, base: entry.base, root: root) == .written { return true }
+            case .copy: if case .keptBoth = NoteStore.keepBeside(entry.text, original: note, root: root) { return true }
+            }
+        case .separate:
+            // A file of its own in the notebook it was in: never into a note that isn't it.
+            let hint = URL(fileURLWithPath: entry.path)
+            let folder = hint.deletingLastPathComponent()
+            let note = NoteFile.parse(entry.text, fallbackID: entry.noteID, fallbackDate: Date())
+            let stem = NoteText.fileName(note.title.isEmpty ? hint.deletingPathExtension().lastPathComponent : note.title)
+            if NoteStore.safe(folder, root: root), picturesBeside(hint),
+               NoteStore.createNamed(entry.text, stem: entry.base == nil ? stem : stem + " (recovered)", in: folder, root: root) != nil {
+                return true
+            }
+        }
+        return NoteStore.rescue(entry.text, noteID: entry.noteID, pictures: pictures)
     }
 }

@@ -116,17 +116,19 @@ struct NotesCheck {
         expect(NoteShelf.save(disk: "R0", text: "T2", base: "T1") == .keepBoth, "made on a text that never landed (a write that failed): a copy, never over")
         expect(NoteShelf.save(disk: "R2", text: "T2", base: "R1") == .keepBoth, "made on an older one: a copy")
 
-        // The journal, at launch: what a Petal before accepted and never saw land.
+        // The journal, at launch: what a Petal before accepted and never saw land, found by its note's id.
         expect(NoteShelf.journalRecovery(disk: "T", base: "B", text: "T", aside: false) == .nothing, "landed after all: nothing")
         expect(NoteShelf.journalRecovery(disk: "B", base: "B", text: "T", aside: false) == .write, "the file as the edit began: written")
-        expect(NoteShelf.journalRecovery(disk: nil, base: nil, text: "T", aside: false) == .write, "a new note never made: made")
         expect(NoteShelf.journalRecovery(disk: "C", base: "B", text: "T", aside: false) == .copy, "changed elsewhere since: a copy beside it, never over")
         expect(NoteShelf.journalRecovery(disk: "B", base: "B", text: "T", aside: true) == .copy, "an edit kept aside: always a copy")
-        let withPicture = NoteShelf.journalText(text: nil, disk: NoteFile(id: "J", body: "words").serialized(), noteID: "J", pictures: [("picture-1.png", "")])
-        expect(withPicture?.contains(NoteShelf.assetsFolder(id: "J") + "/picture-1.png") == true && withPicture?.contains("words") == true,
-               "a picture accepted with no edit after it: the file's text with its reference")
-        expect(NoteShelf.journalText(text: "has picture-1.png", disk: nil, noteID: "J", pictures: [("picture-1.png", "")]) == "has picture-1.png",
-               "a reference already there isn't added twice")
+        expect(NoteShelf.journalTarget(found: ["/n/Work/Renamed.md"]) == .note("/n/Work/Renamed.md"), "found by its id after a rename: that note")
+        expect(NoteShelf.journalTarget(found: []) == .separate, "its id gone (another note at its old path): a file of its own, never that note")
+        expect(NoteShelf.journalTarget(found: ["/n/a.md", "/n/a 2.md"]) == .separate, "two papers of it: a file of its own")
+        expect(NoteShelf.journalPictures(text: "see ![](x.assets/picture-a.png)", pending: ["picture-a.png", "picture-b.png"]) == ["picture-a.png"],
+               "a snapshot carries the bytes its text references")
+        expect(NoteShelf.journalPictures(text: "undone", pending: ["picture-a.png"]).isEmpty, "a paste undone: its bytes leave with it")
+        expect(NoteShelf.journalFolders(["Notes journal", "Notes journal, recovering 2", "Notes journal, recovering 1", "Other"])
+               == ["Notes journal, recovering 1", "Notes journal, recovering 2"], "every recovery a launch before didn't finish is resumed, oldest first")
 
         // Pictures: bytes first, then their reference, as ordinary text.
         expect(NoteShelf.pictureReference(bytesWritten: true, editorOpen: true, quitting: false) == .editor, "bytes in, editor open: into the editor")
@@ -338,6 +340,19 @@ struct NotesCheck {
         expect(!NoteMatch.recoverWindows([newTab1, newTab2]), "two old windows titled alike (\"New Tab\"): no guess")
         let adoptedWindow = NoteMatch.adoptWindow(newTab1, restoredWindow)
         expect(NoteMatch.windowMatch(adoptedWindow, restoredWindow) == .identity, "recovered, it's that window's from now on")
+
+        // Anchors decided over every note before any picks: a note whose best place is elsewhere still counts.
+        var tabA = NoteStick(kind: .tab)
+        tabA.mac = "mac-1"; tabA.pid = 50; tabA.tabID = "t1"; tabA.shared = 1; tabA.url = "https://a.example/page"
+        var tabB = tabA
+        tabB.tabID = "t7"
+        var appB = NoteStick(kind: .app)
+        appB.app = "com.google.Chrome"
+        let samePage = NoteScene(mac: "mac-1", app: "com.google.Chrome", pid: 90, window: 2, tab: NoteTab(id: "n4", shared: 1, url: "https://a.example/page", title: ""))
+        let decided = NoteMatch.anchors([[tabA, appB], [appB, tabB]], samePage)
+        expect(decided.adopt.isEmpty && decided.excluded.count == 2, "two old tabs' anchors on one page: both left out, whichever place each note picks")
+        let single = NoteMatch.anchors([[tabA], [appB]], samePage)
+        expect(single.adopt.count == 1 && single.adopt[0].note == 0 && single.excluded.isEmpty, "one old tab's: taken")
 
         // A private app's place and scene: nothing of their words.
         var secret = NoteStick(kind: .passage)

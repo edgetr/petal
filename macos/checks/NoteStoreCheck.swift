@@ -101,6 +101,7 @@ struct NoteStoreCheck {
         sessions(root: root)
         journal(root: root)
         toolCancelled(root: root)
+        concurrentMakes(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
     }
@@ -159,28 +160,22 @@ struct NoteStoreCheck {
         let landed = root.appending(path: "Elsewhere/Moving.md")
         expect(text(landed) == "m1" && !fm.fileExists(atPath: moving.path), "a move and the typing after it, drained at quit", text(landed) ?? "nil")
 
-        // Quit with pictures whose bytes are in but whose reference isn't: one based write puts them at the end.
-        let quitNote = work.appending(path: "Quit.md")
-        let quitText = NoteFile(id: "Q7", body: "words").serialized()
-        _ = NoteStore.create(quitText, at: quitNote, root: root)
-        NoteDisk.states[7] = NoteDisk.State(url: quitNote, noteID: "Q7", revision: quitText)
-        NoteStore.drain([(session: 7, items: [item(30, .pictureBytes([NotePictureBytes(name: "picture-q.png", data: Data("q".utf8), caption: "")], noteID: "Q7"))])], root: root)
-        expect(text(quitNote)?.contains("picture-q.png") == true, "quitting after the bytes: the reference is written", text(quitNote) ?? "nil")
-
-        // Writing that still can't land at quit goes to "Unsaved notes", never lost; pictures that can't be written too.
+        // Writing that still can't land at quit goes to "Unsaved notes" with the pictures it references, laid out as
+        // in the notes' folder so its references hold.
         let stuck = work.appending(path: "Stuck.md")
         _ = NoteStore.create("s0", at: stuck, root: root)
         NoteDisk.states[3] = NoteDisk.State(url: stuck, noteID: "S3", revision: "s0")
         try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: work.path)
-        let kept = NoteFile(id: "S3", body: "# Rescued words\nkeep me")
-        NoteStore.drain([(session: 3, items: [item(20, .write(text: kept.serialized(), base: "s0")),
-                                              item(21, .pictureBytes([NotePictureBytes(name: "picture-u.png", data: Data("u".utf8), caption: "")], noteID: "S3"))])], root: root)
+        let reference = NoteShelf.assetsFolder(id: "S3") + "/picture-u.png"
+        let kept = NoteFile(id: "S3", body: "# Rescued words\nkeep me\n![](\(reference))")
+        NoteStore.drain([(session: 3, items: [item(21, .pictureBytes([NotePictureBytes(name: "picture-u.png", data: Data("u".utf8), caption: "")], noteID: "S3")),
+                                              item(20, .write(text: kept.serialized(), base: "s0"))])], root: root)
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: work.path)
         let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
         let rescued = (try? fm.contentsOfDirectory(atPath: unsaved.path)) ?? []
         expect(rescued.contains("Rescued words.md") && text(unsaved.appending(path: "Rescued words.md"))?.contains("keep me") == true,
                "writing that can't land by quit is kept in Unsaved notes", "\(rescued)")
-        expect(rescued.contains("picture-u.png"), "and pictures that couldn't be written, beside it", "\(rescued)")
+        expect(fm.fileExists(atPath: unsaved.appending(path: reference).path), "with the pictures it references, where its references point")
         expect(text(stuck) == "s0", "and the file is as it was")
 
         // Keep this one: checked again inside each coordinated step; a file edited since stops it.
@@ -199,45 +194,86 @@ struct NoteStoreCheck {
         let journal = Config.supportFolder.appending(path: "Notes journal")
         let notes = root.appending(path: "Journal")
         try? fm.createDirectory(at: notes, withIntermediateDirectories: true)
+        let snap = { (id: String, path: URL, base: String?, text: String, pictures: [NoteJournal.Picture]) in
+            NoteJournal.snapshot(NoteJournal.Entry(noteID: id, path: path.path, base: base, text: text, pictures: pictures), in: journal)
+        }
 
-        // An accepted edit, then the notes' queue hangs (its write never happens), then Petal quits and starts again.
+        // An accepted edit (with a picture its text references), then the notes' queue hangs: its write never happens.
         let hung = notes.appending(path: "Hung.md")
         let hungBase = NoteFile(id: "J1", body: "before").serialized()
         _ = NoteStore.create(hungBase, at: hung, root: root)
-        let typed = NoteFile(id: "J1", body: "typed just before quit").serialized()
-        NoteJournal.record(noteID: "J1", path: hung.path, base: hungBase, text: typed, in: journal)
+        let picture = NoteShelf.assetsFolder(id: "J1") + "/picture-j.png"
+        let typed = NoteFile(id: "J1", body: "typed just before quit\n![](\(picture))").serialized()
+        snap("J1", hung, hungBase, typed, [NoteJournal.Picture(name: "picture-j.png", data: Data("jpg".utf8))])
 
-        // One changed elsewhere meanwhile: put back beside it, never over.
-        let elsewhere = notes.appending(path: "Elsewhere.md")
-        let elsewhereBase = NoteFile(id: "J2", body: "start").serialized()
-        _ = NoteStore.create(elsewhereBase, at: elsewhere, root: root)
+        // Renamed since (found by its id), and changed elsewhere (a copy beside it).
+        let renamedFrom = notes.appending(path: "Old name.md"), renamedTo = notes.appending(path: "New name.md")
+        let renameBase = NoteFile(id: "J2", body: "start").serialized()
+        _ = NoteStore.create(renameBase, at: renamedTo, root: root)
         let typed2 = NoteFile(id: "J2", body: "mine").serialized()
-        NoteJournal.record(noteID: "J2", path: elsewhere.path, base: elsewhereBase, text: typed2, in: journal)
-        try? Data("changed on another Mac".utf8).write(to: elsewhere)
+        snap("J2", renamedFrom, renameBase, typed2, [])
 
-        // One that landed: out of the journal.
-        let landedNote = notes.appending(path: "Landed.md")
-        NoteJournal.record(noteID: "J3", path: landedNote.path, base: nil, text: "landed text", in: journal)
-        NoteJournal.landed(noteID: "J3", text: "landed text", in: journal)
-        expect(!fm.fileExists(atPath: NoteJournal.file("J3", in: journal).path), "a landed edit leaves the journal")
+        // Its old path now holds another note: never into it.
+        let reused = notes.appending(path: "Reused.md")
+        _ = NoteStore.create(NoteFile(id: "OTHER", body: "someone else's").serialized(), at: reused, root: root)
+        let typed3 = NoteFile(id: "J3", body: "the gone note's words").serialized()
+        snap("J3", reused, NoteFile(id: "J3", body: "was here").serialized(), typed3, [])
 
-        // A picture accepted with no edit after it.
-        let pictured = notes.appending(path: "Pictured.md")
-        _ = NoteStore.create(NoteFile(id: "J4", body: "see below").serialized(), at: pictured, root: root)
-        NoteJournal.recordPictures(noteID: "J4", path: pictured.path, base: nil,
-                                   pictures: [NotePictureBytes(name: "picture-j.png", data: Data("jpg".utf8), caption: "")], in: journal)
+        // A landed edit leaves; an undone paste's bytes leave with the next snapshot.
+        snap("J4", notes.appending(path: "Landed.md"), nil, "landed text", [])
+        NoteJournal.landed(noteID: "J4", text: "landed text", in: journal)
+        expect(!fm.fileExists(atPath: NoteJournal.file("J4", in: journal).path), "a landed edit leaves the journal")
 
-        // Launch.
-        guard let holding = NoteJournal.takeLeftovers(in: journal) else { return expect(false, "leftovers to recover") }
-        expect(!fm.fileExists(atPath: journal.path), "leftovers taken out of the journal (new edits never mix with them)")
-        NoteJournal.recover(holding, root: root)
-        expect(text(hung) == typed, "an accepted edit the notes' queue never wrote is written at launch")
-        let copies = ((try? fm.contentsOfDirectory(atPath: notes.path)) ?? []).filter { $0.hasPrefix("Elsewhere (conflicted copy") }
-        expect(text(elsewhere) == "changed on another Mac" && copies.count == 1 && text(notes.appending(path: copies[0])) == typed2,
-               "one changed elsewhere since: its edit beside it, the other words untouched", "\(copies)")
-        expect(fm.fileExists(atPath: notes.appending(path: NoteShelf.assetsFolder(id: "J4") + "/picture-j.png").path)
-               && text(pictured)?.contains("picture-j.png") == true, "an accepted picture: its bytes and its reference")
-        expect(!fm.fileExists(atPath: holding.path), "recovered leftovers go")
+        // Launch: the journal moves aside, and a recovery a launch before left part way is resumed too.
+        let earlier = Config.supportFolder.appending(path: "Notes journal, recovering 1")
+        try? fm.createDirectory(at: earlier, withIntermediateDirectories: true)
+        let resumedNote = notes.appending(path: "Resumed.md")
+        let resumedBase = NoteFile(id: "J5", body: "r0").serialized()
+        _ = NoteStore.create(resumedBase, at: resumedNote, root: root)
+        NoteJournal.snapshot(NoteJournal.Entry(noteID: "J5", path: resumedNote.path, base: resumedBase, text: NoteFile(id: "J5", body: "r1").serialized()), in: earlier)
+        let leftovers = NoteJournal.leftovers(in: journal)
+        expect(leftovers.count == 2 && leftovers.first?.lastPathComponent == "Notes journal, recovering 1" && !fm.fileExists(atPath: journal.path),
+               "the journal and an unfinished recovery, oldest first", "\(leftovers.map(\.lastPathComponent))")
+        for holding in leftovers { NoteJournal.recover(holding, root: root) }
+        expect(text(hung) == typed && fm.fileExists(atPath: notes.appending(path: picture).path), "an accepted edit and its picture, written at launch",
+               text(hung) ?? "nil")
+        expect(text(renamedTo) == typed2, "a note renamed since: found by its id and written there")
+        let reusedCopies = ((try? fm.contentsOfDirectory(atPath: notes.path)) ?? []).filter { (try? String(contentsOf: notes.appending(path: $0), encoding: .utf8)) == typed3 }
+        expect(text(reused)?.contains("someone else's") == true && reusedCopies.count == 1, "another note at its old path: untouched, the words in a file of their own")
+        expect(NoteFile.parse(text(resumedNote) ?? "", fallbackID: "", fallbackDate: Date()).body == "r1", "a resumed recovery finishes")
+        expect(leftovers.allSatisfy { !fm.fileExists(atPath: $0.path) }, "recovered folders go once empty")
+
+        // An entry is kept until its recovery wrote somewhere: with the notes' folder and Unsaved notes both shut, it stays.
+        let shut = root.appending(path: "Shut")
+        try? fm.createDirectory(at: shut, withIntermediateDirectories: true)
+        let shutNote = shut.appending(path: "Shut.md")
+        let shutBase = NoteFile(id: "J6", body: "s").serialized()
+        _ = NoteStore.create(shutBase, at: shutNote, root: root)
+        snap("J6", shutNote, shutBase, NoteFile(id: "J6", body: "s2").serialized(), [])
+        let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
+        try? fm.createDirectory(at: unsaved, withIntermediateDirectories: true)
+        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: shut.path)
+        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: unsaved.path)
+        let again = NoteJournal.leftovers(in: journal)
+        for holding in again { NoteJournal.recover(holding, root: root) }
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shut.path)
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: unsaved.path)
+        expect(again.count == 1 && fm.fileExists(atPath: again[0].path), "an entry whose recovery couldn't write anywhere is kept")
+        for holding in NoteJournal.leftovers(in: journal) { NoteJournal.recover(holding, root: root) }
+        expect(NoteFile.parse(text(shutNote) ?? "", fallbackID: "", fallbackDate: Date()).body == "s2", "and written on the next launch", text(shutNote) ?? "nil")
+    }
+
+    /// Two notes of one title made at once by tools: each its own file and its own answer.
+    @MainActor static func concurrentMakes(root: URL) {
+        let store = NoteStore(root: root)
+        store.preview([], notebooks: [Notebook(name: "Same", folder: root.appending(path: "Same"), color: "", cover: nil, count: 0)])
+        var answers: [String] = []
+        for _ in 0..<2 {
+            _ = store.make(NoteFile(body: "# Same title"), in: "Same", live: { true }) { made in answers.append(made?.url.lastPathComponent ?? "none") }
+        }
+        let until = Date().addingTimeInterval(5)
+        while answers.count < 2 && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        expect(Set(answers) == ["Same title.md", "Same title 2.md"], "two at once: two files, two answers", "\(answers)")
     }
 
     /// A tool's change whose asker went: nothing in memory, nothing on disk.
