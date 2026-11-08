@@ -1194,11 +1194,31 @@ final class InstructionsStore: @unchecked Sendable {
         keepDraft()
     }
 
-    /// Writes only while the file holds what the write builds on: a change made elsewhere is kept, and said.
+    /// Writes only while the file holds what the write builds on: a change made elsewhere is kept, and said. The new
+    /// text is written beside the file and swapped in at once (`RENAME_SWAP`), so what was in place at that very
+    /// moment comes back: a save made elsewhere between the check and the swap is put back and said too, never lost.
     private func write(_ asked: NotesWrite) -> NotesEvent {
+        let refused = { (now: String) in
+            NotesEvent.wrote(generation: asked.generation, ok: false, NotesDisk(stamp: Self.modified(self.file), text: now))
+        }
         let now = Self.contents(file)
-        let ok = now == asked.over && (try? asked.text.write(to: file, atomically: true, encoding: .utf8)) != nil
-        return .wrote(generation: asked.generation, ok: ok, NotesDisk(stamp: Self.modified(file), text: ok ? asked.text : now))
+        guard now == asked.over else { return refused(now) }
+        let temp = file.deletingLastPathComponent().appending(path: ".\(file.lastPathComponent).\(UUID().uuidString).tmp")
+        defer { try? FileManager.default.removeItem(at: temp) }
+        guard (try? asked.text.write(to: temp, atomically: false, encoding: .utf8)) != nil else { return refused(now) }
+        if FileManager.default.fileExists(atPath: file.path) {
+            guard renamex_np(temp.path, file.path, UInt32(RENAME_SWAP)) == 0 else { return refused(now) }
+            let displaced = Self.contents(temp)
+            if displaced != asked.over {
+                // Saved elsewhere in between: that version goes back in place, and the person is asked.
+                _ = renamex_np(temp.path, file.path, UInt32(RENAME_SWAP))
+                return refused(displaced)
+            }
+        } else {
+            // No file yet: only if none appeared meanwhile.
+            guard renamex_np(temp.path, file.path, UInt32(RENAME_EXCL)) == 0 else { return refused(Self.contents(file)) }
+        }
+        return .wrote(generation: asked.generation, ok: true, NotesDisk(stamp: Self.modified(file), text: asked.text))
     }
 
     private func keepDraft() {
