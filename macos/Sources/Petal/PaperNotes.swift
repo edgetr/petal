@@ -61,6 +61,8 @@ final class NoteStore {
     @ObservationIgnored private var clock = 0
     @ObservationIgnored private var changedAt: [String: Int] = [:]
     @ObservationIgnored private var removedAt: [String: Int] = [:]
+    /// Papers being written in (an open editor): never dropped by a read of the folder.
+    @ObservationIgnored var keepAlive: (String) -> Bool = { _ in false }
     /// Called on the main thread after every read of the folder.
     @ObservationIgnored var onChange: () -> Void = {}
     /// A new note's file got another name than the one it was given (a file had it on disk): old key, new paper.
@@ -122,8 +124,14 @@ final class NoteStore {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard mine == self.generation else { return }
+                    // Papers whose writing isn't on disk yet count as changed now: a read never replaces them.
+                    var changed = self.changedAt
+                    for key in self.unsaved.keys { changed[key] = Int.max }
+                    // A note open in an editor stays, even if its file went (deleted or moved elsewhere): what's
+                    // typed in it makes the file again rather than vanish.
+                    for paper in self.notes where self.keepAlive(paper.key) { changed[paper.key] = Int.max }
                     var merged = NoteShelf.fenced(read: read.notes, memory: self.notes, key: \.key, started: started,
-                                                  changed: self.changedAt, removed: self.removedAt)
+                                                  changed: changed, removed: self.removedAt)
                     // A Safari, Firefox or Zen tab's button is never written: it stays with the note while Petal runs.
                     let before = Dictionary(self.notes.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
                     for index in merged.indices {
@@ -275,7 +283,19 @@ final class NoteStore {
     /// Writes `text` over the file at `url` only while it still says `base` (what the edit was made on); changed
     /// since, the edit goes to a copy beside it instead ("Name (conflicted copy).md"), and both show as the note's
     /// papers. The file is read and written in one coordinated step. Off the main thread.
-    nonisolated static func save(_ text: String, to url: URL, base: String?, root: URL) -> Outcome {
+    nonisolated static func save(_ text: String, to url: URL, base given: String?, root: URL) -> Outcome {
+        // An edit made on a text that never reached the disk (its write failed) was made on what that one was
+        // made on.
+        let base = failedWrites[url.path].flatMap { given == $0.text ? $0.base : nil } ?? given
+        let outcome = write(text, to: url, base: base, root: root)
+        if outcome == .failed { failedWrites[url.path] = (text, base) } else { failedWrites[url.path] = nil }
+        return outcome
+    }
+
+    /// Writes that failed, by file: the text, and the base it was made on. Only on `io`.
+    nonisolated(unsafe) private static var failedWrites: [String: (text: String, base: String?)] = [:]
+
+    nonisolated private static func write(_ text: String, to url: URL, base: String?, root: URL) -> Outcome {
         guard safe(url, root: root) else { return .failed }
         var outcome = Outcome.failed
         var error: NSError?
@@ -293,7 +313,8 @@ final class NoteStore {
     }
 
     /// The same edit kept beside one file again overwrites the copy it made before, rather than making another.
-    nonisolated(unsafe) private static var copies: [String: URL] = [:]
+    /// With what Petal last wrote there: a copy changed since (another editor, another Mac) is never written over.
+    nonisolated(unsafe) private static var copies: [String: (url: URL, text: String)] = [:]
 
     /// An edit to a paper that became read only (its note has two papers now) as the person typed: kept in the copy
     /// beside the file rather than lost; the same copy as that edit's before.
@@ -309,9 +330,19 @@ final class NoteStore {
 
     nonisolated private static func keepBeside(_ text: String, original: URL, root: URL) -> Outcome {
         let mark = original.path + "\n" + (NoteFile.parse(text, fallbackID: "", fallbackDate: Date()).id)
-        if let copy = copies[mark], FileManager.default.fileExists(atPath: copy.path), safe(copy, root: root),
-           (try? Data(text.utf8).write(to: copy, options: .atomic)) != nil {
-            return .keptBoth(copy)
+        // Its copy from before, while it still says what Petal wrote there; changed since, a new copy.
+        if let copy = copies[mark], safe(copy.url, root: root) {
+            var reused = false
+            var error: NSError?
+            NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: copy.url, options: [], error: &error) { url in
+                guard (try? String(contentsOf: url, encoding: .utf8)) == copy.text else { return }
+                reused = (try? Data(text.utf8).write(to: url, options: .atomic)) != nil
+            }
+            if reused {
+                copies[mark] = (copy.url, text)
+                return .keptBoth(copy.url)
+            }
+            copies[mark] = nil
         }
         let folder = original.deletingLastPathComponent()
         let stem = original.deletingPathExtension().lastPathComponent
@@ -319,7 +350,7 @@ final class NoteStore {
             let taken = Set(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).map { $0.lowercased() })
             let copy = folder.appending(path: NoteShelf.conflictName(stem, taken: taken))
             if create(text, at: copy, root: root) {
-                copies[mark] = copy
+                copies[mark] = (copy, text)
                 return .keptBoth(copy)
             }
         }
@@ -417,8 +448,10 @@ final class NoteStore {
     /// Changes a note in memory at once and writes it off the main thread (with its modified time now), only over
     /// the file as it was when the edit began (`base`; the paper's own revision unless the editor says otherwise).
     /// Returns the note's text as written, the base for the next edit; nil when it can't be written (read only).
+    /// `done`: what became of it, on the main thread. A write that fails stays in memory, unsaved (the paper says
+    /// so), is tried again every few seconds, and no read of the folder replaces it.
     @discardableResult
-    func save(_ paper: PaperNote, base: String? = nil, touch stamp: Bool = true) -> String? {
+    func save(_ paper: PaperNote, base: String? = nil, touch stamp: Bool = true, done: (@MainActor (Outcome) -> Void)? = nil) -> String? {
         guard !readOnly(paper) else { return nil }
         var paper = paper
         if stamp { paper.file.modified = Date() }
@@ -427,23 +460,86 @@ final class NoteStore {
         paper.revision = text
         if let index = notes.firstIndex(where: { $0.key == paper.key }) { notes[index] = paper } else { notes.append(paper) }
         touch(paper.key)
-        let url = paper.url, root = self.root
-        Self.io.async {
-            let outcome = Self.save(text, to: url, base: since, root: root)
-            guard outcome != .written else { return }
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    if outcome == .failed { self.onProblem("Petal couldn't save “\(paper.file.title)”.") }
-                    self.reload()
-                }
-            }
+        // Moving to another notebook: written to where it lands, once it has.
+        if moving.contains(paper.key) {
+            afterMove[paper.key] = (since, done)
+            return text
         }
+        write(paper, text: text, base: since, done: done)
         return text
     }
 
+    private func write(_ paper: PaperNote, text: String, base: String?, done: (@MainActor (Outcome) -> Void)?) {
+        let url = paper.url, root = self.root, key = paper.key
+        unsaved[key] = (text, base)
+        Self.io.async {
+            let outcome = Self.save(text, to: url, base: base, root: root)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    // A newer save of this note since: its own answer counts.
+                    if self.unsaved[key]?.text == text {
+                        if outcome == .failed { self.failed.insert(key) } else { self.unsaved[key] = nil; self.failed.remove(key) }
+                    }
+                    if outcome == .failed {
+                        self.onProblem("Petal couldn't save “\(paper.file.title)”: it's kept here and tried again.")
+                        self.retryLater()
+                    }
+                    done?(outcome)
+                    if outcome != .written { self.reload() }
+                }
+            }
+        }
+    }
+
+    /// Writes not on disk yet, by paper: the text and what it was made on. While here, a read of the folder never
+    /// replaces the paper.
+    @ObservationIgnored private var unsaved: [String: (text: String, base: String?)] = [:]
+    /// Papers whose last write failed: the paper says it isn't saved yet.
+    private(set) var failed: Set<String> = []
+    @ObservationIgnored private var retrying = false
+
+    /// Petal quits: each write still failing is tried once more, and one that still can't be written is kept in
+    /// Application Support's "Unsaved notes" (never lost), named for the note.
+    func rescue() {
+        let pending = unsaved.compactMap { key, value -> (URL, String, String?, String)? in
+            guard let paper = paper(key) else { return nil }
+            return (paper.url, value.text, value.base, paper.file.title)
+        }
+        guard !pending.isEmpty else { return }
+        let root = self.root
+        Self.io.sync {
+            for (url, text, base, title) in pending where Self.save(text, to: url, base: base, root: root) == .failed {
+                let folder = Config.supportFolder.appending(path: "Unsaved notes")
+                try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                let stem = NoteText.fileName(title.isEmpty ? url.deletingPathExtension().lastPathComponent : title)
+                for n in 0..<50 {
+                    let file = folder.appending(path: n == 0 ? stem + ".md" : "\(stem) \(n + 1).md")
+                    if (try? Data(text.utf8).write(to: file, options: .withoutOverwriting)) != nil { break }
+                }
+            }
+        }
+    }
+
+    private func retryLater() {
+        guard !retrying else { return }
+        retrying = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self else { return }
+            self.retrying = false
+            for key in self.failed {
+                guard let paper = self.paper(key), let pending = self.unsaved[key] else { self.failed.remove(key); continue }
+                self.write(paper, text: pending.text, base: pending.base, done: nil)
+            }
+        }
+    }
+
+    /// Notes being moved, and saves made meanwhile: written to the note where it lands.
+    @ObservationIgnored private var moving: Set<String> = []
+    @ObservationIgnored private var afterMove: [String: (base: String?, done: (@MainActor (Outcome) -> Void)?)] = [:]
+
     /// A new note in `notebook` (made if it's new), its file named for its first words: shown at once, its file made
     /// off the main thread under the first name free on disk (`onRekey` when that isn't the one it was shown with).
-    func make(_ file: NoteFile, in notebook: String) -> PaperNote {
+    func make(_ file: NoteFile, in notebook: String, then done: (@MainActor (PaperNote?) -> Void)? = nil) -> PaperNote {
         let name = NoteShelf.folderName(notebook)
         let folder = root.appending(path: name)
         let taken = Set(notes.filter { $0.notebook == name }.map { $0.url.lastPathComponent.lowercased() })
@@ -459,16 +555,20 @@ final class NoteStore {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let made else {
-                        self.onProblem("Petal couldn't make the note's file in \(name).")
+                        // Kept in memory, unsaved, and tried again: the person's writing is never dropped.
+                        if let paper = self.paper(tentative) { self.unsaved[tentative] = (paper.revision ?? text, nil); self.failed.insert(tentative); self.retryLater() }
+                        self.onProblem("Petal couldn't make the note's file in \(name): it's kept here and tried again.")
+                        done?(nil)
                         return
                     }
-                    guard made.path != tentative, let index = self.notes.firstIndex(where: { $0.key == tentative }) else { return }
+                    guard made.path != tentative, let index = self.notes.firstIndex(where: { $0.key == tentative }) else { done?(self.paper(tentative)); return }
                     self.gone(tentative)
                     paper = self.notes[index]
                     paper.url = made
                     self.notes[index] = paper
                     self.touch(paper.key)
                     self.onRekey(tentative, paper)
+                    done?(paper)
                 }
             }
         }
@@ -504,7 +604,9 @@ final class NoteStore {
     /// note's references to its pictures hold.
     func move(_ paper: PaperNote, to notebook: String, then done: @escaping @MainActor (PaperNote?) -> Void = { _ in }) {
         let name = makeNotebook(notebook, color: "")
-        guard name != paper.notebook, !readOnly(paper) else { return done(paper) }
+        guard name != paper.notebook else { return done(paper) }
+        guard !readOnly(paper), !moving.contains(paper.key) else { return done(nil) }
+        moving.insert(paper.key)
         let folder = root.appending(path: name)
         let from = paper.url, assets = paper.assets, root = self.root
         let stem = paper.url.deletingPathExtension().lastPathComponent
@@ -533,8 +635,12 @@ final class NoteStore {
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    self.moving.remove(paper.key)
+                    let pending = self.afterMove.removeValue(forKey: paper.key)
                     guard let target, let index = self.notes.firstIndex(where: { $0.key == paper.key }) else {
                         if target == nil { self.onProblem("Petal couldn't move “\(paper.file.title)” to \(name).") }
+                        // Saves made while it moved go where it still is.
+                        if let pending, let here = self.paper(paper.key) { self.write(here, text: here.revision ?? here.file.serialized(), base: pending.base, done: pending.done) }
                         done(nil)
                         return
                     }
@@ -544,6 +650,7 @@ final class NoteStore {
                     moved.notebook = name
                     self.notes[index] = moved
                     self.touch(moved.key)
+                    if let pending { self.write(moved, text: moved.revision ?? moved.file.serialized(), base: pending.base, done: pending.done) }
                     done(moved)
                     self.reload()
                 }
@@ -555,7 +662,7 @@ final class NoteStore {
     /// do the other papers go (a version iCloud kept is marked resolved; a copy goes to the Trash, never deleted).
     func keep(_ kept: PaperNote) {
         let others = (conflicts[kept.noteID] ?? []).filter { $0.key != kept.key }
-        let keptURL = kept.url, keptVersion = kept.version, root = self.root
+        let keptURL = kept.url, keptVersion = kept.version, root = self.root, keptID = kept.noteID
         let text = kept.version == nil ? nil : kept.file.serialized()
         let files = others.filter { $0.version == nil && $0.url != keptURL }.map(\.url)
         let originals = Set(others.filter { $0.version != nil }.map(\.url))
@@ -572,6 +679,11 @@ final class NoteStore {
                     }
                     ok = written && Self.coordinatedRead(keptURL) == text
                 }
+            } else {
+                // The file kept must still be there, and still this note, before any other goes.
+                ok = Self.safe(keptURL, root: root) && Self.coordinatedRead(keptURL).map {
+                    NoteFile.parse($0, fallbackID: "", fallbackDate: Date()).id == keptID
+                } == true
             }
             if ok {
                 for url in Set([keptURL]).union(originals) {
@@ -582,7 +694,7 @@ final class NoteStore {
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if !ok { self.onProblem("Petal couldn't keep that version: nothing was changed.") }
+                    if !ok { self.onProblem("Petal couldn't keep that one (it's gone or changed): nothing was removed.") }
                     self.reload()
                 }
             }
@@ -593,9 +705,11 @@ final class NoteStore {
     func trash(_ paper: PaperNote) {
         notes.removeAll { $0.key == paper.key }
         gone(paper.key)
-        let url = paper.url, root = self.root
+        let url = paper.url, root = self.root, revision = paper.revision
         Self.io.async {
-            Self.trash(url, root: root)
+            // Only while it still says what Petal last saw there: words written into it elsewhere keep it.
+            let disk = Self.coordinatedRead(url)
+            if disk == nil || disk == revision { Self.trash(url, root: root) }
             DispatchQueue.main.async { MainActor.assumeIsolated { self.reload() } }
         }
     }

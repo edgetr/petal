@@ -119,10 +119,30 @@ struct NoteScene: Equatable, Sendable {
     var titleTwins: Int? = nil
     var tab: NoteTab? = nil
     var file = ""
+    /// A bookmark to `file` (base64), made with the read off the main thread, for a note stuck to it.
+    var fileBookmark = ""
     var desktop: Int? = nil
 }
 
 enum NoteMatch {
+    /// A tab's note seen on its own tab, surely (this Mac, the same browser process, the same id or tab-strip
+    /// button): the place as it is now (its address, title and whether it's the one tab with that address), so after
+    /// a restart it's found by the address it last had, never the one it was stuck on. nil when it isn't surely its
+    /// tab, or nothing changed. `keepWords` false (a private app): its address and title aren't kept.
+    static func followTab(_ stick: NoteStick, _ scene: NoteScene, keepWords: Bool) -> NoteStick? {
+        guard stick.kind == .tab, let now = scene.tab, stick.mac == scene.mac, stick.pid == scene.pid else { return nil }
+        let sure = (stick.tabID != nil && stick.tabID == now.id) || (stick.tabElement != nil && stick.tabElement == now.element)
+        guard sure else { return nil }
+        let followed = NoteRules.follow(stick.noteTab, to: now, keepWords: keepWords)
+        var next = stick
+        next.url = followed.url
+        next.title = followed.title
+        next.shared = followed.shared
+        next.tabID = followed.id
+        next.tabElement = followed.element
+        return next == stick ? nil : next
+    }
+
     /// Whether one place fits what's in front.
     static func fits(_ stick: NoteStick, _ scene: NoteScene) -> Bool {
         switch stick.kind {
@@ -616,8 +636,19 @@ enum NoteShelf {
     enum Save: Equatable { case write, keepBoth }
 
     static func save(disk: String?, base: String?) -> Save {
-        guard let disk, let base else { return .write }
+        guard let disk else { return .write }
+        // A new note (no base) never goes over a file that's there.
+        guard let base else { return .keepBoth }
         return disk == base ? .write : .keepBoth
+    }
+
+    /// The base an editor's save is made on, when Petal itself changed the note since the editor last had it (a
+    /// tab's address followed, a file's bookmark followed, a place added): those changes leave the words alone, so
+    /// the edit is on the note as it is now. Words changed since (another editor, another Mac): its own base, and
+    /// the save keeps both.
+    static func rebase(editor base: String?, current: String?, currentBody: String) -> String? {
+        guard let base, let current, base != current else { return base }
+        return NoteFile.parse(base, fallbackID: "", fallbackDate: Date()).body == currentBody ? current : base
     }
 
     /// The copy's name for an edit kept beside a file changed elsewhere: "Name (conflicted copy).md", then
@@ -804,6 +835,27 @@ enum NoteRoom {
 
     static func close(_ a: CGRect, _ b: CGRect, within slack: CGFloat = 4) -> Bool {
         abs(a.minX - b.minX) <= slack && abs(a.minY - b.minY) <= slack && abs(a.width - b.width) <= slack && abs(a.height - b.height) <= slack
+    }
+
+    /// What to do with the windows narrowed for notes (`narrowed`) when the window that wants room now is `wanted`
+    /// (nil: none): every other one gets its width back, and `wanted` is narrowed unless it is already. One path for
+    /// every change (a note opened, folded, hidden, moved to the Desktop, notes off, quitting with `wanted` nil).
+    static func reconcile(narrowed: Set<UInt32>, wanted: UInt32?) -> (giveBack: [UInt32], narrow: UInt32?) {
+        (narrowed.filter { $0 != wanted }.sorted(), wanted.flatMap { narrowed.contains($0) ? nil : $0 })
+    }
+
+    /// Whether a window narrowed for a note gets its frame from before: while it still has the frame Petal gave it,
+    /// or is part way there (a change cut short, the app holding its size), never once the person moved or resized
+    /// it to something else.
+    static func restore(before: CGRect, given: CGRect, now: CGRect) -> Bool {
+        if close(now, before) { return false }   // already as it was
+        if close(now, given) { return true }
+        // Part way: one of its size or position is Petal's, the other still the one from before.
+        let sizeOurs = abs(now.width - given.width) <= 4 && abs(now.height - given.height) <= 4
+        let sizeBefore = abs(now.width - before.width) <= 4 && abs(now.height - before.height) <= 4
+        let placeOurs = abs(now.minX - given.minX) <= 4 && abs(now.minY - given.minY) <= 4
+        let placeBefore = abs(now.minX - before.minX) <= 4 && abs(now.minY - before.minY) <= 4
+        return (sizeOurs && placeBefore) || (placeOurs && sizeBefore)
     }
 
     /// Where an open note sits: right of the window at its line (`top`: points down from the window's top), kept on

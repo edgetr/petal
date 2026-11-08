@@ -44,6 +44,8 @@ struct PaperView: View {
     var editorHeight: CGFloat = 0
     var desk: NoteDesk?
     var conflict = false
+    /// Its last write failed: kept here, tried again, and said on the paper.
+    var unsaved = false
 
     @Environment(\.snapshotting) private var snapshotting
 
@@ -130,13 +132,18 @@ struct PaperView: View {
                     .padding(.bottom, 4)
             }
             HStack(spacing: 6) {
-                Text(footer).font(.system(size: 11)).foregroundStyle(glass ? .secondary : PaperLook.footer).lineLimit(1)
+                Text(unsaved ? "Not saved yet: trying again" : footer).font(.system(size: 11))
+                    .foregroundStyle(unsaved ? Color(red: 0.7, green: 0.15, blue: 0.12) : glass ? .secondary : PaperLook.footer).lineLimit(1)
             }
             .padding(.trailing, 44)
         }
     }
 
     @ViewBuilder private var openBody: some View {
+        if unsaved {
+            Text("Not saved yet: Petal keeps it here and tries again.").font(.system(size: 11)).foregroundStyle(Color(red: 0.7, green: 0.15, blue: 0.12))
+                .padding(.bottom, 6)
+        }
         if conflict {
             HStack {
                 Text("Changed on two Macs at once").font(.system(size: 11)).foregroundStyle(glass ? .secondary : PaperLook.footer)
@@ -153,8 +160,8 @@ struct PaperView: View {
             NoteEditorView(paper: paper, style: desk.style(color, glass: glass), focus: keyboard,
                            height: { desk.measured(paper.key, $0) },
                            save: { desk.write(paper.key, body: $0, base: $1) },
-                           register: { desk.flushers[paper.key] = $0 },
-                           picture: { desk.savePicture($0, ext: $1, for: paper.key) },
+                           register: { desk.editors[paper.key] = $0 },
+                           importPictures: { desk.importPictures($0, into: paper.key) },
                            escape: { desk.fold(paper.key) })
                 .frame(height: min(PaperLook.maxOpen - 70, max(PaperLook.minOpen - 70, editorHeight)))
                 .padding(.bottom, 18)

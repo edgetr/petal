@@ -28,7 +28,19 @@ struct NoteRichCheck {
                 print("FAIL the editor changed a note:\n---\n\(body)\n---\n\(back)\n---")
             }
         }
-        print("note editor: \(bodies.count - failures) of \(bodies.count) round trips")
+        // A card or picture joined to the words around it (the newline between deleted, or typed beside it): every
+        // part stays, each on a line of its own.
+        let joined = NSMutableAttributedString(attributedString: NoteRich.attributed(NoteBlock.blocks("before\nhttps://example.com/page\nafter\n![cap](p.png)"),
+                                                                                     base: URL(fileURLWithPath: "/tmp"), style: style))
+        let ns = joined.string as NSString
+        joined.deleteCharacters(in: NSRange(location: ns.range(of: "after").location - 1, length: 1))   // the card's newline
+        joined.deleteCharacters(in: NSRange(location: (joined.string as NSString).range(of: "before").location + 6, length: 1))   // before's newline
+        let kept = NoteBlock.body(NoteRich.blocks(joined))
+        if kept != "before\nhttps://example.com/page\nafter\n![cap](p.png)" {
+            failures += 1
+            print("FAIL words beside a card were lost:\n\(kept)")
+        }
+        print("note editor: \(bodies.count + 1 - failures) of \(bodies.count + 1) round trips")
         if failures > 0 { exit(1) }
     }
 }

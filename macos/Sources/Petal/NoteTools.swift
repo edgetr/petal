@@ -37,8 +37,7 @@ extension NoteDesk {
                 guard var paper = store.find(id) else { return fail("No note with that id; petal_notes lists them.") }
                 let append = args["append"] as? Bool ?? false
                 paper.file.body = append ? paper.file.body + (paper.file.body.isEmpty || paper.file.body.hasSuffix("\n") ? "" : "\n") + text : text
-                store.save(paper)
-                send(["written": paper.noteID, "title": paper.file.title, "file": paper.url.path])
+                persist(paper, send, fail) { ["written": $0.noteID, "title": $0.file.title, "file": $0.url.path] }
             } else {
                 guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return fail("Nothing to write.") }
                 var file = NoteFile(body: text)
@@ -46,19 +45,25 @@ extension NoteDesk {
                 if args["stick"] as? String == "here" {
                     stickHere(nil, kind: args["to"] as? String) { place in
                         if let place { file.places = [place] }
-                        let paper = self.store.make(file, in: notebook)
-                        send(["written": paper.noteID, "title": paper.file.title, "notebook": paper.notebook, "file": paper.url.path,
-                              "stuck": place.map(Self.describe) ?? "nowhere (nothing in front Petal could stick it to)"])
+                        _ = self.store.make(file, in: notebook) { made in
+                            guard let made else { return fail(Self.notMade) }
+                            send(["written": made.noteID, "title": made.file.title, "notebook": made.notebook, "file": made.url.path,
+                                  "stuck": place.map(Self.describe) ?? "nowhere (nothing in front Petal could stick it to)"])
+                        }
                     }
                     return
                 }
-                let paper = store.make(file, in: notebook)
-                send(["written": paper.noteID, "title": paper.file.title, "notebook": paper.notebook, "file": paper.url.path])
+                _ = store.make(file, in: notebook) { made in
+                    guard let made else { return fail(Self.notMade) }
+                    send(["written": made.noteID, "title": made.file.title, "notebook": made.notebook, "file": made.url.path])
+                }
             }
         case "petal_note_move":
             guard let paper = store.find(args["id"] as? String ?? "") else { return fail("No note with that id; petal_notes lists them.") }
             let notebook = (args["notebook"] as? String ?? "").trimmingCharacters(in: .whitespaces)
             guard !notebook.isEmpty else { return fail("Which notebook? (a new name makes one)") }
+            guard !store.readOnly(paper) else { return fail(Self.readOnlyWords) }
+            editors[paper.key]?.flush()
             store.move(paper, to: notebook) { moved in
                 if let moved { send(["moved": moved.noteID, "notebook": moved.notebook]) } else { fail("Couldn't move it.") }
             }
@@ -68,20 +73,40 @@ extension NoteDesk {
                 guard paper.file.places.indices.contains(remove), paper.file.places.count > 1 else { return fail("A note keeps at least one place; remove is an index from places.") }
                 var changed = paper
                 changed.file.places.remove(at: remove)
-                store.save(changed)
-                return send(["places": changed.file.places.map(Self.describe)])
+                return persist(changed, send, fail, touch: false) { ["places": $0.file.places.map(Self.describe)] }
             }
             let also = args["also"] as? Bool ?? false
             stickHere(paper, kind: args["to"] as? String) { place in
                 guard let place, var changed = self.store.paper(paper.key) else { return fail("Nothing in front Petal can stick it to.") }
                 changed.file.places = also ? changed.file.places.filter { !$0.samePlace(place) } + [place] : [place]
-                self.store.save(changed)
-                self.refresh()
-                send(["places": changed.file.places.map(Self.describe)])
+                self.persist(changed, send, fail, touch: false) { saved in
+                    self.refresh()
+                    return ["places": saved.file.places.map(Self.describe)]
+                }
             }
         default:
             fail("Unknown tool \(name)")
         }
+    }
+
+    static let readOnlyWords = "This note has two versions right now (it changed in two places at once): nothing was changed. The person keeps one with Keep this one on the paper; then try again."
+    static let notMade = "Petal couldn't make the note's file. It keeps the note and tries again; nothing to do now."
+
+    /// Saves a change for the AI and answers with what reached the disk: written; kept beside the note as a copy
+    /// (it changed elsewhere meanwhile); or not saved (kept in Petal and tried again). A read-only paper is refused.
+    private func persist(_ paper: PaperNote, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void, touch: Bool = true,
+                         _ result: @escaping @MainActor (PaperNote) -> [String: Any]) {
+        guard !store.readOnly(paper) else { return fail(Self.readOnlyWords) }
+        let saved = store.save(paper, touch: touch) { outcome in
+            switch outcome {
+            case .written: send(result(self.store.paper(paper.key) ?? paper))
+            case .keptBoth(let copy):
+                fail("The note changed elsewhere meanwhile, so this was kept beside it as “\(copy.lastPathComponent)”; the person picks which to keep.")
+            case .failed:
+                fail("Petal couldn't write the note's file. It keeps the change and tries again; nothing to do now.")
+            }
+        }
+        if saved == nil { fail(Self.readOnlyWords) }
     }
 
     private func summary(_ paper: PaperNote) -> [String: Any] {

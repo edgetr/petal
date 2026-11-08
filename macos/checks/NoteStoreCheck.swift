@@ -40,6 +40,24 @@ struct NoteStoreCheck {
         let copies = (try? fm.contentsOfDirectory(atPath: root.appending(path: "Work").path))?.filter { $0.contains("conflicted copy") } ?? []
         expect(copies.count == 1 && text(copy) == "E", "the same edit again updates its copy, never another", "\(copies)")
 
+        // A copy changed elsewhere since Petal wrote it is never written over: the next edit makes another.
+        try? Data("the copy, edited elsewhere".utf8).write(to: copy)
+        let again = NoteStore.save("F", to: file, base: "B", root: root)
+        if case .keptBoth(let next) = again {
+            expect(next != copy && text(copy) == "the copy, edited elsewhere" && text(next) == "F", "a copy changed since gets a new copy beside it")
+        } else { expect(false, "a copy changed since gets a new copy beside it", "\(again)") }
+
+        // A write that failed (a folder Petal can't write to) is no base for a conflict: the next save, made on it,
+        // goes over the file as it was.
+        let locked = root.appending(path: "Locked")
+        try? fm.createDirectory(at: locked, withIntermediateDirectories: true)
+        let held = locked.appending(path: "Held.md")
+        _ = NoteStore.create("G", at: held, root: root)
+        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: locked.path)
+        expect(NoteStore.save("H", to: held, base: "G", root: root) == .failed && text(held) == "G", "a failed write leaves the file as it was")
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+        expect(NoteStore.save("I", to: held, base: "H", root: root) == .written && text(held) == "I", "and the next save, made on the failed one, is written")
+
         // New names come from the disk, and a name taken first is passed over.
         let made = NoteStore.createNamed("new", stem: "Talk", in: root.appending(path: "Work"), root: root)
         expect(made?.lastPathComponent == "Talk 2.md" && text(file) == "C, from another editor", "a new note never takes a file's name", made?.lastPathComponent ?? "nil")

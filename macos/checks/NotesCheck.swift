@@ -13,6 +13,12 @@ struct NotesCheck {
         if ok { passed += 1 } else { failures += 1; print("FAIL \(what) \(detail())") }
     }
 
+    static func tabForRebase() -> NoteStick {
+        var stick = NoteStick(kind: .tab)
+        stick.url = "https://example.com/next"
+        return stick
+    }
+
     static func main() {
         let when = NoteFile.date("2026-11-08T09:30:00Z")!
 
@@ -99,8 +105,17 @@ struct NotesCheck {
         expect(NoteFile.parse("words", fallbackID: todoA, fallbackDate: when).id == todoA, "a file with no front matter takes its place's id")
 
         // Saving over a file changed elsewhere keeps both.
-        expect(NoteShelf.save(disk: "A", base: "A") == .write && NoteShelf.save(disk: nil, base: "A") == .write && NoteShelf.save(disk: "B", base: nil) == .write,
+        expect(NoteShelf.save(disk: "A", base: "A") == .write && NoteShelf.save(disk: nil, base: "A") == .write && NoteShelf.save(disk: nil, base: nil) == .write,
                "a file as the edit began, or none, is written")
+        expect(NoteShelf.save(disk: "B", base: nil) == .keepBoth, "a new note never goes over a file that's there")
+        var placed = NoteFile(id: "R", created: when, body: "my words")
+        let editorBase = placed.serialized()
+        placed.places = [tabForRebase()]
+        let petalChanged = placed.serialized()
+        expect(NoteShelf.rebase(editor: editorBase, current: petalChanged, currentBody: "my words") == petalChanged,
+               "Petal's own change of a note's places is no reason to keep both")
+        expect(NoteShelf.rebase(editor: editorBase, current: petalChanged, currentBody: "words from elsewhere") == editorBase,
+               "words changed elsewhere are")
         expect(NoteShelf.save(disk: "B", base: "A") == .keepBoth, "a file changed since the edit began: both are kept")
         expect(NoteShelf.conflictName("Talk", taken: []) == "Talk (conflicted copy).md"
                && NoteShelf.conflictName("Talk", taken: ["talk (conflicted copy).md"]) == "Talk (conflicted copy 2).md", "the copy's name")
@@ -250,6 +265,32 @@ struct NotesCheck {
         expect(spot.minX == roomy.maxX + NoteRoom.gap && spot.minY == roomy.minY + 118, "an open note beside its line")
         let low = NoteRoom.beside(window: roomy, visible: visible, size: CGSize(width: 340, height: 300), top: 690)
         expect(low.maxY <= visible.maxY, "and kept on the screen")
+
+        // Room: one path for every change; a narrowing cut short is still put back.
+        expect(NoteRoom.reconcile(narrowed: [3, 5], wanted: 5) == ([3], nil), "the window in front keeps its room, the others get theirs back")
+        expect(NoteRoom.reconcile(narrowed: [3], wanted: 7) == ([3], 7), "and a new one narrows")
+        expect(NoteRoom.reconcile(narrowed: [3, 7], wanted: nil) == ([3, 7], nil), "no note open (notes off, quitting): all back")
+        let before = CGRect(x: 40, y: 60, width: 1380, height: 700), given = CGRect(x: 40, y: 60, width: 1036, height: 700)
+        expect(NoteRoom.restore(before: before, given: given, now: given), "the frame Petal gave it goes back")
+        expect(NoteRoom.restore(before: before, given: CGRect(x: 300, y: 60, width: 1036, height: 700), now: CGRect(x: 40, y: 60, width: 1036, height: 700)),
+               "a change cut short (only its size Petal's) goes back")
+        expect(!NoteRoom.restore(before: before, given: given, now: before), "already as it was: nothing to do")
+        expect(!NoteRoom.restore(before: before, given: given, now: CGRect(x: 200, y: 100, width: 800, height: 500)), "moved and resized by the person: theirs")
+
+        // A tab note seen on its own tab keeps the address it shows now.
+        var followed = NoteStick(kind: .tab)
+        followed.mac = "mac-1"; followed.pid = 50; followed.tabID = "t1"; followed.url = "https://a.example/one"; followed.shared = 1
+        let moved = NoteScene(mac: "mac-1", app: "com.google.Chrome", pid: 50, window: 9, tab: NoteTab(id: "t1", shared: 1, url: "https://a.example/two", title: "Two"))
+        expect(NoteMatch.followTab(followed, moved, keepWords: true)?.url == "https://a.example/two", "its tab's new address is saved")
+        expect(NoteMatch.followTab(followed, moved, keepWords: false) == nil || NoteMatch.followTab(followed, moved, keepWords: false)?.url == followed.url,
+               "a private app's address is never kept")
+        expect(NoteMatch.followTab(followed, NoteScene(mac: "mac-1", pid: 50, tab: NoteTab(id: "t2", url: "https://a.example/two", title: "")), keepWords: true) == nil,
+               "only on its own tab, surely")
+        expect(NoteMatch.followTab(followed, NoteScene(mac: "mac-1", pid: 51, tab: NoteTab(id: "t1", url: "https://a.example/two", title: "")), keepWords: true) == nil,
+               "never on another run of the browser")
+        var same = followed
+        same.url = "https://a.example/two"; same.title = "Two"
+        expect(NoteMatch.followTab(same, moved, keepWords: true) == nil, "nothing changed: nothing saved")
 
         // MARK: Paper colors (the sketch's color-mix)
 

@@ -33,13 +33,12 @@ final class NoteDesk {
     /// Each passage found on the window in front: its words' bounds (Accessibility's coordinates).
     @ObservationIgnored private var passageRects: [String: CGRect] = [:]
     @ObservationIgnored private var pinPanels: [String: PinPanel] = [:]
-    /// Each open editor's way to save what's typed now (on quit, or as it closes).
-    @ObservationIgnored var flushers: [String: () -> Void] = [:]
+    /// Each open editor: to save what's typed now (on quit, or as it closes), and put pictures in.
+    @ObservationIgnored var editors: [String: NoteEditorHandle] = [:]
     @ObservationIgnored private var looks = 0
     @ObservationIgnored private var lookSoon: DispatchWorkItem?
     @ObservationIgnored private var listening = false
     /// Windows narrowed for an open note: their frame from before and the one Petal gave them.
-    @ObservationIgnored private var narrowed: [CGWindowID: (pid: pid_t, before: CGRect, given: CGRect)] = [:]
     /// What was in front when the quick question opened, for Stick here.
     private(set) var captured: (scene: NoteScene, read: ClaudePanel.FrontRead, url: String, name: String)?
     @ObservationIgnored private var ghost: NSPanel?
@@ -66,6 +65,8 @@ final class NoteDesk {
         store.onChange = { [weak self] in self?.refresh() }
         store.onRekey = { [weak self] old, paper in self?.rekey(old, to: paper) }
         store.onProblem = { [weak self] text in self?.say(text) }
+        store.keepAlive = { [weak self] key in self?.editors[key] != nil }
+        Self.queue.async { Self.recoverNarrowed() }
         store.start()
         settingsChanged()
     }
@@ -73,7 +74,12 @@ final class NoteDesk {
     /// `notes`, `notesLook` or `notesFolder` changed (or any setting did).
     func settingsChanged() {
         let root = NoteStore.rootFolder(setting: app.config.string("notesFolder"))
-        if root != store.root { store.use(root: root) }
+        if root != store.root {
+            // What's typed goes to the folder it was typed in, before notes come from the new one.
+            for editor in editors.values { editor.flush() }
+            NoteStore.flush()
+            store.use(root: root)
+        }
         if on && !listening {
             listening = true
             WindowEvents.shared.listen("papernotes") { [weak self] event in self?.event(event) }
@@ -81,7 +87,7 @@ final class NoteDesk {
         } else if !on && listening {
             listening = false
             WindowEvents.shared.stopListening("papernotes")
-            for flush in flushers.values { flush() }
+            for editor in editors.values { editor.flush() }
             hideAll()
             // Notes off: every window narrowed for one gets its width back (unless the person changed it since).
             giveBackAll(wait: false)
@@ -102,7 +108,7 @@ final class NoteDesk {
         }
     }
 
-    private func lookAgain(after delay: Double) {
+    func lookAgain(after delay: Double) {
         lookSoon?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.look() }
         lookSoon = work
@@ -117,9 +123,10 @@ final class NoteDesk {
 
     /// Petal quits: what's typed is saved and written, and narrowed windows get their width back, before it goes.
     func stop() {
-        for flush in flushers.values { flush() }
+        for editor in editors.values { editor.flush() }
         giveBackAll(wait: true)
         NoteStore.flush()
+        store.rescue()
     }
 
     /// Something couldn't be done to the notes' files: said by the AI button for a moment.
@@ -158,27 +165,41 @@ final class NoteDesk {
     /// file the window shows (AXDocument), and how many of its windows share its title.
     /// `tabs`: read the browser's tab too (AppleScript, which macOS asks the person to allow once per browser): only
     /// when a note is on a page, or one is being made.
+    /// An app kept private (`aiNeverLook`) has no file read or offered (its document's name is never read), and
+    /// what was read is dropped when it's made private while the read was under way. A file's bookmark is made
+    /// here, off the main thread.
     static func read(_ running: NSRunningApplication, mac: String, tabs: Bool = true, _ done: @escaping @MainActor (NoteScene, ClaudePanel.FrontRead) -> Void) {
         let pid = running.processIdentifier
         let app = running.bundleIdentifier ?? ""
+        let privacy = ClaudePanel.privacy.now
+        let quiet = PetalApp.shared.assist.neverLook(app)
         ClaudePanel.readFront(of: running, tabs: tabs) { read in
             queue.async {
                 var file = ""
+                var bookmark = ""
                 var twins: Int?
                 if let number = read.window, Windows.trusted {
                     let element = AXUIElementCreateApplication(pid)
                     AXUIElementSetMessagingTimeout(element, 0.3)
                     let all: [AXUIElement] = Windows.value(element, kAXWindowsAttribute) ?? []
-                    if let window = all.first(where: { Windows.id(of: $0) == number }),
+                    if !quiet, ClaudePanel.privacy.current(privacy), let window = all.first(where: { Windows.id(of: $0) == number }),
                        let document: String = Windows.value(window, kAXDocumentAttribute), let url = URL(string: document), url.isFileURL {
                         file = url.path
+                        bookmark = (try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))?.base64EncodedString() ?? ""
                     }
                     if !read.title.isEmpty { twins = all.filter { (Windows.value($0, kAXTitleAttribute) as String?) == read.title }.count }
                 }
-                let scene = NoteScene(mac: mac, app: app, pid: pid, window: read.window, title: read.title, titleTwins: twins, tab: read.tab, file: file)
+                var made = NoteScene(mac: mac, app: app, pid: pid, window: read.window, title: read.title, titleTwins: twins, tab: read.tab, file: file)
+                made.fileBookmark = bookmark
+                let scene = made
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         var scene = scene
+                        // Made private (or the private apps changed) meanwhile: nothing of its file is kept.
+                        if !ClaudePanel.privacy.current(privacy) || PetalApp.shared.assist.neverLook(app) {
+                            scene.file = ""
+                            scene.fileBookmark = ""
+                        }
                         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
                         scene.desktop = screen.flatMap { Spaces.desktop(on: $0) }
                         done(scene, read)
@@ -201,16 +222,64 @@ final class NoteDesk {
             }
         }
         if fits != here { here = fits }
+        followTabs(scene)
+        followFiles(scene)
         if moved {
             lines = [:]
             passageRects = [:]
             // Notes that were open on the window left behind fold.
             for (key, face) in faces where face == .open && fits[key] == nil { faces[key] = .folded }
-            giveBackWidths()
-        }
+            }
         layout()
         if scan || moved { findPassages(scene) }
         placeDesktop()
+    }
+
+    /// Tab notes seen surely on their own tab keep its address as it is now (and its title, and whether it's the one
+    /// tab with it), so after a restart they're found by where the tab was last, never where it was stuck first.
+    /// Not a change of the note's words: its modified time stays.
+    private func followTabs(_ scene: NoteScene) {
+        let keepWords = !app.assist.neverLook(scene.app)
+        for (key, index) in here {
+            guard var paper = store.paper(key), paper.file.places.indices.contains(index), !store.readOnly(paper),
+                  let next = NoteMatch.followTab(paper.file.places[index], scene, keepWords: keepWords) else { continue }
+            paper.file.places[index] = next
+            store.save(paper, touch: false)
+        }
+    }
+
+    /// The file in front matched no note: notes stuck to files (or sentences in them) follow their bookmarks off the
+    /// main thread, so a file moved or renamed in any app keeps its notes. Once per file shown.
+    @ObservationIgnored private var followedFile = ""
+
+    private func followFiles(_ scene: NoteScene) {
+        guard !scene.file.isEmpty, scene.file != followedFile else { return }
+        followedFile = scene.file
+        let anchored = store.notes.filter { paper in
+            paper.version == nil && !store.readOnly(paper) && paper.file.places.contains { !$0.bookmark.isEmpty && ($0.kind == .file || $0.kind == .passage) }
+        }
+        guard !anchored.isEmpty, !here.contains(where: { key, index in
+            store.paper(key).flatMap { $0.file.places.indices.contains(index) ? $0.file.places[index].path : nil } == scene.file
+        }) else { return }
+        let files = anchored.map { ($0.key, $0.file) }
+        Self.queue.async {
+            var changed: [(String, NoteFile)] = []
+            for (key, file) in files {
+                var file = file
+                if NoteStore.followBookmarks(&file) { changed.append((key, file)) }
+            }
+            guard !changed.isEmpty else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    for (key, file) in changed {
+                        guard var paper = self.store.paper(key) else { continue }
+                        paper.file.places = file.places
+                        self.store.save(paper, touch: false)
+                    }
+                    self.lookAgain(after: 0.05)
+                }
+            }
+        }
     }
 
     /// Where each passage stuck on this window is, off the main thread: the one place on the window its whole quote
@@ -304,6 +373,7 @@ final class NoteDesk {
 
     /// The tabs on the window in front, and its notes that are showing beside it.
     func layout() {
+        defer { reconcileRoom() }
         guard on, let frame, let scene, scene.window != nil else {
             for panel in tabPanels.values { panel.orderOut(nil) }
             for panel in pinPanels.values { panel.orderOut(nil) }
@@ -437,24 +507,22 @@ final class NoteDesk {
         layout()
         if isDesktopNote(key) { placeDesktop() }
         panel(for: key).takeKeyboard()
-        makeRoom()
     }
 
     func fold(_ key: String) {
         guard faces[key] == .open || faces[key] == .back else { return }
         Self.roomTurn.cancel()
-        flushers[key]?()
+        editors[key]?.flush()
         faces[key] = .folded
         if keyboard == key { keyboard = nil }
         letGoIfEmpty(key)
         layout()
         if isDesktopNote(key) { placeDesktop() }
-        giveBackWidths()
     }
 
     func hide(_ key: String) {
         Self.roomTurn.cancel()
-        flushers[key]?()
+        editors[key]?.flush()
         faces[key] = nil
         if keyboard == key { keyboard = nil }
         panels[key]?.orderOut(nil)
@@ -463,7 +531,6 @@ final class NoteDesk {
             local.save()
         }
         letGoIfEmpty(key)
-        giveBackWidths()
     }
 
     func flip(_ key: String) {
@@ -498,65 +565,102 @@ final class NoteDesk {
 
     // MARK: Room beside the window
 
-    /// An open note on the window in front with no room beside it: the window narrows while it's open.
-    private func makeRoom() {
-        guard let frame, let scene, let number = scene.window, narrowed[number] == nil,
-              here.keys.contains(where: { faces[$0] == .open && local.spots[store.paper($0)?.noteID ?? ""] == nil }),
-              let visible = visible(for: frame), let target = NoteRoom.narrowed(window: frame, visible: visible, note: PaperLook.openWidth) else { return }
-        let pid = scene.pid
+    /// Windows narrowed for a note: their frame from before and the one Petal gave them. Only ever touched on
+    /// `queue`, the same serial queue that changes the windows, and written before a window is changed, so a change
+    /// under way, cut short or finished, always has its record, and whatever comes after it on the queue (a fold,
+    /// notes off, quitting) finds it.
+    nonisolated(unsafe) private static var ledger: [CGWindowID: (pid: pid_t, before: CGRect, given: CGRect)] = [:] {
+        didSet { keepLedger() }
+    }
+
+    /// The ledger on disk too (Application Support's notes-narrowed.json), so a window narrowed when Petal crashed
+    /// gets its width back the next time Petal starts. Only on `queue`.
+    nonisolated private static var ledgerFile: URL { Config.supportFolder.appending(path: "notes-narrowed.json") }
+
+    nonisolated private static func keepLedger() {
+        guard !Headless.on else { return }
+        let rows = ledger.map { number, record in
+            ["window": Double(number), "pid": Double(record.pid), "before": [record.before.minX, record.before.minY, record.before.width, record.before.height],
+             "given": [record.given.minX, record.given.minY, record.given.width, record.given.height]] as [String: Any]
+        }
+        if rows.isEmpty { try? FileManager.default.removeItem(at: ledgerFile); return }
+        if let data = try? JSONSerialization.data(withJSONObject: rows) {
+            try? FileManager.default.createDirectory(at: Config.supportFolder, withIntermediateDirectories: true)
+            try? data.write(to: ledgerFile, options: .atomic)
+        }
+    }
+
+    /// At start: windows left narrowed by a Petal that didn't quit get their width back (where still as Petal left them).
+    nonisolated private static func recoverNarrowed() {
+        guard !Headless.on, let data = try? Data(contentsOf: ledgerFile),
+              let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+        func rect(_ value: Any?) -> CGRect? {
+            guard let v = value as? [Double], v.count == 4 else { return nil }
+            return CGRect(x: v[0], y: v[1], width: v[2], height: v[3])
+        }
+        for row in rows {
+            guard let number = (row["window"] as? Double).map({ CGWindowID($0) }), let pid = (row["pid"] as? Double).map({ pid_t($0) }),
+                  let before = rect(row["before"]), let given = rect(row["given"]) else { continue }
+            ledger[number] = (pid, before, given)
+            giveBack(number)
+        }
+        ledger = [:]
+    }
+
+    /// The one path for room beside windows, after every change of what's showing (a note opened, folded, hidden,
+    /// put on the Desktop, another window in front): the window in front narrows while a note open on it (where
+    /// nobody moved it) has no room, and every other narrowed window gets its width back.
+    private func reconcileRoom() {
+        var wanted: (number: CGWindowID, pid: pid_t, frame: CGRect, target: CGRect?)?
+        if on, let frame, let scene, let number = scene.window,
+           here.keys.contains(where: { faces[$0] == .open && local.spots[store.paper($0)?.noteID ?? ""] == nil }) {
+            let target = visible(for: frame).flatMap { NoteRoom.narrowed(window: frame, visible: $0, note: PaperLook.openWidth) }
+            wanted = (number, scene.pid, frame, target)
+        }
         let turn = Self.roomTurn.next()
         Self.queue.async {
-            let app = AXUIElementCreateApplication(pid)
-            AXUIElementSetMessagingTimeout(app, 0.3)
-            let all: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
-            guard let element = all.first(where: { Windows.id(of: $0) == number }), let now = Windows.frame(of: element),
-                  NoteRoom.close(now, frame) else { return }
-            var settable: DarwinBoolean = false
-            guard AXUIElementIsAttributeSettable(element, kAXSizeAttribute as CFString, &settable) == .success, settable.boolValue else { return }
-            // The note folded (or notes went off, or Petal is quitting) while this waited: the window stays as it is.
-            guard let given = Windows.place(element, pid: pid, target, live: { Self.roomTurn.current(turn) }) else { return }
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    self.narrowed[number] = (pid, frame, given)
-                    // Folded meanwhile: its width comes back at once.
-                    if !Self.roomTurn.current(turn) || !self.here.keys.contains(where: { self.faces[$0] == .open }) { self.giveBackWidths() }
-                    self.lookAgain(after: 0.05)
-                }
-            }
+            let plan = NoteRoom.reconcile(narrowed: Set(Self.ledger.keys), wanted: wanted?.number)
+            for number in plan.giveBack { Self.giveBack(number) }
+            // A newer look is on its way: it decides whether to narrow.
+            guard let wanted, plan.narrow == wanted.number, let target = wanted.target, Self.roomTurn.current(turn) else { return }
+            Self.narrow(wanted.number, pid: wanted.pid, from: wanted.frame, to: target)
         }
     }
 
-    /// Every narrowed window gets its width back, open notes or not (notes off, Petal quitting). `wait`: before
-    /// returning (on quit).
-    private func giveBackAll(wait: Bool) {
-        Self.roomTurn.cancel()
-        let records = narrowed
-        narrowed = [:]
-        guard !records.isEmpty else { return }
-        let work: @Sendable () -> Void = {
-            for (number, record) in records { Self.giveBack(number, record) }
-        }
-        if wait { Self.queue.sync(execute: work) } else { Self.queue.async(execute: work) }
+    /// Narrows one window, on `queue`: only while it's still where it was when this was decided, recorded before it
+    /// changes, and with the frame the app took.
+    nonisolated private static func narrow(_ number: CGWindowID, pid: pid_t, from frame: CGRect, to target: CGRect) {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.3)
+        let all: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
+        guard let element = all.first(where: { Windows.id(of: $0) == number }), let now = Windows.frame(of: element),
+              NoteRoom.close(now, frame) else { return }
+        var settable: DarwinBoolean = false
+        guard AXUIElementIsAttributeSettable(element, kAXSizeAttribute as CFString, &settable) == .success, settable.boolValue else { return }
+        ledger[number] = (pid, now, target)
+        let took = Windows.place(element, pid: pid, target)
+        if let took { ledger[number]?.given = took }
+        DispatchQueue.main.async { MainActor.assumeIsolated { PetalApp.shared.paper.lookAgain(after: 0.05) } }
     }
 
-    nonisolated private static func giveBack(_ number: CGWindowID, _ record: (pid: pid_t, before: CGRect, given: CGRect)) {
+    /// A narrowed window's width back, on `queue`: the frame from before, while it still has the one Petal gave it
+    /// (or part of it: a change cut short); the record goes either way.
+    nonisolated private static func giveBack(_ number: CGWindowID) {
+        guard let record = ledger.removeValue(forKey: number) else { return }
         let app = AXUIElementCreateApplication(record.pid)
         AXUIElementSetMessagingTimeout(app, 0.3)
         let all: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
         guard let element = all.first(where: { Windows.id(of: $0) == number }), let now = Windows.frame(of: element),
-              let back = NoteRoom.giveBack(before: record.before, given: record.given, now: now) else { return }
-        Windows.place(element, pid: record.pid, back)
+              NoteRoom.restore(before: record.before, given: record.given, now: now) else { return }
+        Windows.place(element, pid: record.pid, record.before)
     }
 
-    /// Windows narrowed for a note that's no longer open get their width back, unless the person moved or resized
-    /// them since.
-    private func giveBackWidths() {
-        for (number, record) in narrowed {
-            let stillOpen = scene?.window == number && here.keys.contains { faces[$0] == .open }
-            guard !stillOpen else { continue }
-            narrowed[number] = nil
-            Self.queue.async { Self.giveBack(number, record) }
-        }
+    /// Every narrowed window gets its width back (notes off, Petal quitting). `wait`: before returning (on quit),
+    /// after whatever change is under way on the queue.
+    private func giveBackAll(wait: Bool) {
+        Self.roomTurn.cancel()
+        let work: @Sendable () -> Void = { for number in Array(Self.ledger.keys) { Self.giveBack(number) } }
+        if wait { Self.queue.sync(execute: work) } else { Self.queue.async(execute: work) }
     }
 
     // MARK: Writing
@@ -582,15 +686,55 @@ final class NoteDesk {
             }
             return nil
         }
+        // Petal's own changes since (a place followed or added) don't make this a conflict; words changed do.
+        let base = NoteShelf.rebase(editor: base, current: paper.revision, currentBody: paper.file.body)
         guard paper.file.body != body else { return base }
         paper.file.body = body
         if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fresh.remove(key) }
         return store.save(paper, base: base)
     }
 
-    func savePicture(_ data: Data, ext: String, for key: String) -> (path: String, file: URL)? {
-        guard let paper = store.paper(key), !store.readOnly(paper) else { return nil }
-        return store.addPicture(data, ext: ext, to: paper)
+    /// Pictures pasted or dropped on a note: read and decoded off the main thread, saved beside the note, and put
+    /// in where the cursor was; with its editor gone by then (folded, hidden), at the end of the note. The note owns
+    /// the import, so it finishes and is saved whatever happens to the editor meanwhile.
+    func importPictures(_ items: NoteImport, into key: String) {
+        guard let paper = store.paper(key), !store.readOnly(paper) else {
+            return say("This note has two versions: keep one before adding pictures.")
+        }
+        let noteID = paper.noteID
+        DispatchQueue.global(qos: .userInitiated).async {
+            var found: [(data: Data, ext: String, caption: String, image: NSImage?)] = []
+            for file in items.files {
+                if let data = try? Data(contentsOf: file) { found.append((data, file.pathExtension.lowercased(), file.deletingPathExtension().lastPathComponent, NSImage(data: data))) }
+            }
+            if let png = items.png { found.append((png, "png", "", NSImage(data: png))) }
+            if let tiff = items.tiff, let rep = NSBitmapImageRep(data: tiff), let data = rep.representation(using: .png, properties: [:]) {
+                found.append((data, "png", "", NSImage(data: data)))
+            }
+            let ready = found
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    // The note as it is now (named again or moved meanwhile: found by its id).
+                    guard !ready.isEmpty, let now = self.store.notes.first(where: { $0.noteID == noteID && $0.version == nil }) else { return }
+                    guard !self.store.readOnly(now) else { return self.say("This note has two versions now: the pictures weren't added.") }
+                    var lines: [String] = []
+                    var at = items.at
+                    for item in ready {
+                        let saved = self.store.addPicture(item.data, ext: item.ext, to: now)
+                        if let image = item.image { NotePictures.shared.preview(saved.file, image) }
+                        if let editor = self.editors[now.key], editor.insert(saved.path, saved.file, item.caption, at) {
+                            at = -1   // the next one after it, at the cursor
+                        } else {
+                            lines.append(NoteBlock.image(path: saved.path, caption: item.caption).markdown)
+                        }
+                    }
+                    guard !lines.isEmpty, var paper = self.store.paper(now.key) else { return }
+                    paper.file.body += (paper.file.body.isEmpty || paper.file.body.hasSuffix("\n") ? "" : "\n") + lines.joined(separator: "\n")
+                    self.fresh.remove(paper.key)
+                    self.store.save(paper)
+                }
+            }
+        }
     }
 
     /// A note's file got another name on disk than it was shown with: everything showing it follows.
@@ -602,7 +746,7 @@ final class NoteDesk {
         if let index = here.removeValue(forKey: old) { here[new] = index }
         if fresh.remove(old) != nil { fresh.insert(new) }
         if let line = lines.removeValue(forKey: old) { lines[new] = line }
-        if let flush = flushers.removeValue(forKey: old) { flushers[new] = flush }
+        if let editor = editors.removeValue(forKey: old) { editors[new] = editor }
         if let panel = panels.removeValue(forKey: old) { panel.rekey(new); panels[new] = panel }
     }
 
@@ -693,6 +837,8 @@ final class NoteDesk {
             s.after = String(passage.after.prefix(80))
             s.url = scene.tab?.url ?? ""
             s.path = scene.tab == nil ? scene.file : ""
+            // A sentence in a file follows the file through its bookmark, as a file's note does.
+            if scene.tab == nil { s.bookmark = scene.fileBookmark }
             offers.append(s)
         }
         if let tab = scene.tab, !tab.url.isEmpty {
@@ -710,9 +856,7 @@ final class NoteDesk {
             var s = stick(.file)
             s.path = scene.file
             s.title = (scene.file as NSString).lastPathComponent
-            if let data = try? URL(fileURLWithPath: scene.file).bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
-                s.bookmark = data.base64EncodedString()
-            }
+            s.bookmark = scene.fileBookmark   // made with the read, off the main thread
             offers.append(s)
         }
         offers.append(stick(.window))
@@ -992,8 +1136,9 @@ final class NoteDesk {
 
     private func restick(_ key: String, _ places: [NoteStick]) {
         guard var paper = store.paper(key) else { return }
+        guard !store.readOnly(paper) else { return say("This note has two versions: keep one first.") }
         paper.file.places = places
-        store.save(paper)
+        guard store.save(paper, touch: false) != nil else { return }
         if let scene, let index = NoteMatch.best(places, scene) { here[key] = index } else { here[key] = nil }
         if places.contains(where: { $0.kind == .desktop }) { faces[key] = .folded; placeDesktop() }
         layout()
@@ -1040,6 +1185,7 @@ final class NoteDesk {
     }
 
     func move(_ key: String, to notebook: String) {
+        editors[key]?.flush()   // what's typed goes with it
         guard let paper = store.paper(key) else { return }
         let wasShown = faces[key]
         store.move(paper, to: notebook) { moved in
@@ -1234,7 +1380,7 @@ struct NotePanelContent: View {
             PaperView(paper: paper, color: desk.store.color(of: paper.notebook), glass: desk.glass, face: face,
                       place: head.place, notebook: head.notebook, others: head.others, footer: desk.footer(paper),
                       keyboard: desk.keyboard == key, editorHeight: desk.heights[key] ?? 0, desk: desk,
-                      conflict: desk.store.readOnly(paper))
+                      conflict: desk.store.readOnly(paper), unsaved: desk.store.failed.contains(key))
                 .background {
                     // Open, the paper moves by its margins and letterhead's row, never by the writing (the editor
                     // takes its own clicks and drags).
