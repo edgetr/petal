@@ -69,7 +69,6 @@ final class NoteDesk {
         // File names are made from titles only after the vault's redaction (never a secret in a name); while the
         // vault can't be read, a plain name. And the names Petal made so, known again.
         NoteStore.nameRedactor = { text in VaultIndex.settled { $0.unreadable ? nil : $0.redacted(text) } ?? nil }
-        NoteStore.io.async { NoteNames.load() }
         NoteJournal.queue.async {
             // The journal as it was, and any recovery a launch before didn't finish: resumed, entry by entry.
             let leftovers = NoteJournal.leftovers()
@@ -79,6 +78,11 @@ final class NoteDesk {
         store.switchRoot(to: root)
         store.onChange = { [weak self] in self?.refresh() }
         store.onRekey = { [weak self] old, paper in self?.rekey(old, to: paper) }
+        store.onIdentity = { [weak self] old, new in
+            guard let self else { return }
+            self.local.rekeyID(old, new)
+            self.local.save()
+        }
         store.onProblem = { [weak self] text in self?.say(text) }
         store.keepAlive = { [weak self] key in self?.editors[key] != nil }
         Self.queue.async { Self.recoverNarrowed() }
@@ -261,8 +265,13 @@ final class NoteDesk {
         let app = running.bundleIdentifier ?? ""
         let privacy = ClaudePanel.privacy.now
         let quiet = PetalApp.shared.assist.neverLook(app)
+        // The screen under the pointer, for the Desktop it shows (read below, off the main thread, when the app has
+        // no window in front).
+        let mouse = NSEvent.mouseLocation
+        let screen = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main).flatMap(Spaces.screenID)
         ClaudePanel.readFront(of: running, tabs: tabs) { read in
             queue.async {
+                let desktop: Int? = read.window == nil && read.none ? screen.flatMap { Spaces.desktops([$0])[$0] } : nil
                 var file = ""
                 var bookmark = ""
                 var twins: Int?
@@ -283,8 +292,7 @@ final class NoteDesk {
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         var (scene, read) = Self.filtered(scene, read, since: privacy)
-                        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
-                        scene.desktop = Self.desktopShowing(on: screen)
+                        scene.desktop = desktop ?? Self.desktopShowing(on: NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)
                         done(scene, read)
                     }
                 }
@@ -1086,7 +1094,8 @@ final class NoteDesk {
             var desk = NoteStick(kind: .desktop)
             desk.desktop = scene.desktop ?? app.docks.focusedDock?.desktop
             desk.mode = app.docks.focusedDock?.mode?.id ?? ""
-            return [desk]
+            // Which Desktop it is, or no note: never one stuck to no Desktop.
+            return desk.desktop == nil ? [] : [desk]
         }
         if let passage, !passage.quote.isEmpty, scene.tab != nil || !scene.file.isEmpty {
             var s = stick(.passage)
@@ -1235,6 +1244,7 @@ final class NoteDesk {
         let me = getpid()
         drops += 1
         let drop = drops
+        let screens = NSScreen.screens.map { (frame: $0.frame, id: Spaces.screenID($0)) }
         // The window list is the WindowServer's: asked off the main thread, and what it found checked again before
         // the note is made (Petal Notes still on, no newer drop, the app still running, the window still there).
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1247,12 +1257,16 @@ final class NoteDesk {
             let pid = hit?[kCGWindowOwnerPID as String] as? pid_t
             let number = hit?[kCGWindowNumber as String] as? CGWindowID
             let title = hit?[kCGWindowName as String] as? String ?? ""
+            // No window under it: the Desktop that screen shows, read here (off the main thread).
+            let target = screens.first { $0.frame.contains(point) }?.id
+            let desktop: Int? = hit == nil ? target.flatMap { Spaces.desktops([$0])[$0] } : nil
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard self.on, drop == self.drops else { return }
                     guard let pid, let running = NSRunningApplication(processIdentifier: pid), !running.isTerminated else {
+                        guard let desktop else { return self.say("Petal couldn't tell which Desktop that is, so no note was made.") }
                         var desk = NoteStick(kind: .desktop)
-                        desk.desktop = Self.desktopShowing(on: NSScreen.screens.first { $0.frame.contains(point) })
+                        desk.desktop = desktop
                         desk.mode = self.app.docks.focusedDock?.mode?.id ?? ""
                         self.make(on: desk, at: point)
                         return
@@ -1264,6 +1278,20 @@ final class NoteDesk {
     }
 
     @ObservationIgnored private var drops = 0
+    /// Handles of a conflict's papers beyond the note's own (by paper key), for this run.
+    @ObservationIgnored var copyHandles: [String: String] = [:]
+    @ObservationIgnored private var handlesSaving = false
+
+    /// A note's handle for tools (made the first time; saved a moment later, once for many).
+    func noteHandle(_ noteID: String) -> String {
+        let had = local.handles?[noteID] != nil
+        let made = local.handle(noteID)
+        if !had, !handlesSaving {
+            handlesSaving = true
+            DispatchQueue.main.async { self.handlesSaving = false; self.local.save() }
+        }
+        return made
+    }
 
     /// The note for a drop on `running`'s window `number`, once what's in front of that app is read and the window
     /// is checked to be still there (off the main thread).

@@ -51,13 +51,12 @@ struct NoteSelectionCheck {
         expect(NoteShield.search("hotel", in: notes, index: vaultIndex, matches: matches) == [0], "words around it still find the note")
         expect(NoteShield.search("", in: notes, index: vaultIndex, matches: matches) == [0, 1, 2], "an empty search lists them all")
         expect(NoteShield.search("milk", in: notes, index: .unavailable, matches: matches) == nil, "the vault unreadable: no results at all")
-        let rows = [(id: "n1", key: "/n/Card \(card).md", body: "# Card \(card)", version: false, vouched: false),
-                    (id: "n2", key: "/n/Door.md", body: "# Door", version: false, vouched: true)]
+        let rows = [(handle: "n1a2b3c4d5e6f", body: "# Card \(card)", version: false), (handle: "n9f8e7d6c5b4a", body: "# Door", version: false)]
         expect(NoteShield.find("Card \(card)", rows: rows, index: vaultIndex) == .none && NoteShield.find("/n/Card \(card).md", rows: rows, index: vaultIndex) == .none,
-               "naming a guessed secret in a title or file finds nothing")
-        expect(NoteShield.find("Card (hidden)", rows: rows, index: vaultIndex) == .found(0) && NoteShield.find("n2", rows: rows, index: vaultIndex) == .found(1),
-               "a note found by what petal_notes showed of it, or its id")
-        expect(NoteShield.find("n2", rows: rows, index: .unavailable) == .unreadable, "the vault unreadable: nothing looked up")
+               "naming a guessed secret in a title, or a file, finds nothing")
+        expect(NoteShield.find("Card (hidden)", rows: rows, index: vaultIndex) == .found(0) && NoteShield.find("n9f8e7d6c5b4a", rows: rows, index: vaultIndex) == .found(1),
+               "a note found by what petal_notes showed of it: its title, or its handle")
+        expect(NoteShield.find("n9f8e7d6c5b4a", rows: rows, index: .unavailable) == .unreadable, "the vault unreadable: nothing looked up")
 
         // Redacted whole before anything is cut: a secret straddling a cut leaves nothing of itself.
         let straddle = "# Door\n" + String(repeating: "a", count: 157) + " \(pin) more words after it"
@@ -73,16 +72,29 @@ struct NoteSelectionCheck {
         passage.url = "https://example.com/\(card)"
         let place = passage.redacted { vaultIndex.redacted($0) }.words
         expect(!place.contains("41") && place.contains("example.com"), "a passage's quote and address cut only after redaction", place)
-        let opaque = NoteTold.path("/n/Inbox/Card 41111.md", vouched: false) { vaultIndex.redacted($0) }
-        expect(opaque.hasPrefix("/n/Inbox/note-") && !opaque.contains("41"), "a name Petal can't vouch for is told opaquely", opaque)
-        expect(opaque == NoteTold.path("/n/Inbox/Card 41111.md", vouched: false) { vaultIndex.redacted($0) }, "the same opaque name each time")
-        expect(NoteTold.path("/n/Inbox/Groceries.md", vouched: true) { vaultIndex.redacted($0) } == "/n/Inbox/Groceries.md", "a name Petal made, as it is")
-        expect(NoteTold.id("file:Inbox/Card 41111.md") { vaultIndex.redacted($0) }.hasPrefix("file:note-"), "a path's id told opaquely too")
 
-        // A specific conflict copy, named by its file: that copy, never the first paper of its id.
-        let copies = [(id: "A", key: "/n/A.md", body: "# A\nmine", version: false, vouched: true),
-                      (id: "A", key: "/n/A (conflicted copy).md", body: "# A\ntheirs", version: false, vouched: true)]
-        expect(NoteShield.find("/n/A (conflicted copy).md", rows: copies, index: vaultIndex) == .found(1), "the copy named is the copy found")
+        // A tool's answer holds no file name, path or pictures' folder: a handle, words derived after redaction, and
+        // pictures as `![picture N]`.
+        let assets = NoteShelf.assetsFolder(id: "file:Inbox/Card 41111.md")
+        expect(!assets.contains("Card") && !assets.contains("Inbox") && !assets.contains("41") && assets.hasPrefix("pictures-"),
+               "a pictures' folder name copies nothing of the id or the file's name", assets)
+        let body = "# Trip\nTickets for Friday\n![boarding pass](\(assets)/picture-1a2b.png)\nGate 12\n![](\(assets)/picture-3c4d.png)"
+        var filePlace = NoteStick(kind: .file)
+        filePlace.path = "/Users/someone/Documents/Itinerary.pdf"
+        let toolAnswer = NoteShield.shield(NoteShield.note(handle: "n1a2b3c4d5e6f", body: body, notebook: "Travel", places: [filePlace],
+                                                       modified: "2026-11-09T10:00:00Z", onScreen: false, text: true), index: vaultIndex)
+        let json = (try? JSONSerialization.data(withJSONObject: toolAnswer ?? [:], options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        expect(!json.isEmpty && !json.contains("pictures-") && !json.contains(".assets") && !json.contains(".png") && !json.contains(".md")
+               && !json.contains("/Users/someone/Documents"), "no path, file name or pictures' folder in the answer", json)
+        expect(json.contains("![picture 1]") && json.contains("![picture 2]") && json.contains("Gate 12") && json.contains("n1a2b3c4d5e6f"),
+               "its words, its pictures by number, its handle", json)
+        let back = NoteTold.restorePictures("Tickets\n![picture 2]\nnew line\n![picture 1]\n![picture 7]", from: body)
+        expect(back == "Tickets\n![](\(assets)/picture-3c4d.png)\nnew line\n![boarding pass](\(assets)/picture-1a2b.png)\n![picture 7]",
+               "an agent's `![picture N]` written back is that picture again; one there isn't stays words", back)
+
+        // A specific conflict copy, named by its own handle: that copy, never the first paper of its id.
+        let copies = [(handle: "nabc.1f2e", body: "# A\nmine", version: false), (handle: "nabc.9d8c", body: "# A\ntheirs", version: false)]
+        expect(NoteShield.find("nabc.9d8c", rows: copies, index: vaultIndex) == .found(1), "the copy named is the copy found")
         print("note selection: " + (failures == 0 ? "all checks passed" : "\(failures) failed"))
         if failures > 0 { exit(1) }
     }

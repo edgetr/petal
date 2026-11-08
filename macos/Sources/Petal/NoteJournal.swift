@@ -90,6 +90,12 @@ enum NoteJournal {
         settle(entry, at: url, in: folder)
     }
 
+    /// A note known by a new id from now on (an id-less note given its own): its old snapshot goes (the new one,
+    /// taken just before on this queue, holds all of it).
+    nonisolated static func forget(noteID: String, in folder: URL = folder) {
+        try? FileManager.default.removeItem(at: file(noteID, in: folder))
+    }
+
     /// A paste's read is over (put in, or nothing in it could be read): its sources leave the snapshot.
     /// `keeping`: the files of it that weren't read yet and are still there: they stay, for Try again or the next
     /// launch.

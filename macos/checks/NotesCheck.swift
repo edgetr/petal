@@ -223,6 +223,13 @@ struct NotesCheck {
         expect(NoteShelf.safeStem(redacted: nil, fallback: "Note 1") == "Note 1", "the vault unreadable: a plain name")
         expect(NoteShelf.safeStem(redacted: "", fallback: "Note 1") == "Note 1", "no title: a plain name")
 
+        // A trash never of an existing file Petal can't read to check.
+        expect(!NoteShelf.mayTrashFile(.unreadable, foundID: nil, expected: "A", texts: ["x"]), "an unreadable file is never trashed")
+        expect(NoteShelf.mayTrashFile(.missing, foundID: nil, expected: "A", texts: []), "nothing there: nothing to refuse")
+        expect(NoteShelf.mayTrashFile(.text("x"), foundID: "A", expected: "A", texts: ["x"]) && !NoteShelf.mayTrashFile(.text("y"), foundID: "A", expected: "A", texts: ["x"])
+               && !NoteShelf.mayTrashFile(.text("x"), foundID: "B", expected: "A", texts: ["x"]), "only that note, as Petal last saw it")
+        expect(NoteShelf.needsID("file:Inbox/x.md") && !NoteShelf.needsID("5F3A-1"), "an id taken from a path needs a real one before a change")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")
@@ -287,7 +294,7 @@ struct NotesCheck {
                "changed since: kept; before: the disk's; made since: kept; removed since: gone", "\(fenced)")
 
         // Pictures' folders by the note's id: stable through moves, never shared.
-        expect(NoteShelf.assetsFolder(id: "5F3A-1").hasPrefix("5F3A-1-") && NoteShelf.assetsFolder(id: "5F3A-1").hasSuffix(".assets")
+        expect(NoteShelf.assetsFolder(id: "5F3A-1").hasPrefix("pictures-") && !NoteShelf.assetsFolder(id: "5F3A-1").contains("5F3A") && NoteShelf.assetsFolder(id: "5F3A-1").hasSuffix(".assets")
                && NoteShelf.assetsFolder(id: "5F3A-1") == NoteShelf.assetsFolder(id: "5F3A-1"), "a note's pictures' folder, the same every time")
         expect(NoteShelf.assetsFolder(id: "file:Inbox/My notes.md") != NoteShelf.assetsFolder(id: "file:Inbox/My-notes.md"),
                "ids that read alike never share one", NoteShelf.assetsFolder(id: "file:Inbox/My notes.md"))

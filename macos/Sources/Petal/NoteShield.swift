@@ -22,18 +22,29 @@ enum NoteShield {
 
     enum Lookup: Equatable { case found(Int), none, unreadable }
 
-    /// The note an agent names (`rows`: each note's id, file path and text, and whether it's a version): its id, its
-    /// path or its title, each compared exactly as the tools tell them (NoteTold: derived after redaction), never
-    /// the raw text, so naming a guess can't tell whether a secret is in a title or file name.
-    static func find(_ name: String, rows: [(id: String, key: String, body: String, version: Bool, vouched: Bool)], index: UIMap.SecretIndex) -> Lookup {
+    /// The note an agent names (`rows`: each paper's handle, its text, and whether it's a version): its handle (a
+    /// random token, a conflict's copy its own), or its title as the tools tell it (derived after redaction), never
+    /// the raw text, a file name or a path.
+    static func find(_ name: String, rows: [(handle: String, body: String, version: Bool)], index: UIMap.SecretIndex) -> Lookup {
         guard !index.unreadable else { return .unreadable }
+        if let at = rows.firstIndex(where: { $0.handle == name }) { return .found(at) }
         let redact = { (text: String) in index.redacted(text) }
-        let shown = rows.map { (id: NoteTold.id($0.id, redact), key: NoteTold.path($0.key, vouched: $0.vouched, redact),
-                                title: NoteTold.title($0.body, redact), version: $0.version) }
-        if let at = shown.firstIndex(where: { !$0.version && $0.id == name }) { return .found(at) }
-        if let at = shown.firstIndex(where: { $0.key == name }) { return .found(at) }
-        if let at = shown.firstIndex(where: { !$0.version && $0.title.localizedCaseInsensitiveCompare(name) == .orderedSame }) { return .found(at) }
+        if let at = rows.firstIndex(where: { !$0.version && NoteTold.title($0.body, redact).localizedCaseInsensitiveCompare(name) == .orderedSame }) { return .found(at) }
         return .none
+    }
+
+    /// A note as the tools tell it: its handle (never a file name, path or an id taken from one), its title and
+    /// preview derived after redaction, its notebook, its places in words (cut only after redaction; a private app's
+    /// already scrubbed), and with `text` its whole text with every picture as `![picture N]`.
+    static func note(handle: String, body: String, notebook: String, places: [NoteStick], modified: String, onScreen: Bool,
+                     text: Bool = false, created: String? = nil) -> [String: Any] {
+        var out: [String: Any] = ["id": handle, "title": Derived { NoteTold.title(body, $0) }, "notebook": notebook,
+                                  "preview": Derived { NoteTold.preview(body, $0) },
+                                  "places": places.map { place in Derived { place.redacted($0).words } },
+                                  "modified": modified, "onScreen": onScreen]
+        if text { out["text"] = NoteTold.neutralPictures(body) }
+        if let created { out["created"] = created }
+        return out
     }
 
     /// A value an answer derives from text (a title, a preview, a place in words, a file's name): made from its

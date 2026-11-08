@@ -1050,13 +1050,30 @@ enum NoteShelf {
     }
 
     /// A note's pictures' folder, named for the note's id (never its file's name), so it keeps its name wherever the
-    /// note moves and two notes never share one: "<id>.assets".
+    /// note moves and two notes never share one. Opaque: a hash of the id only, never a character of the id or a
+    /// file's name ("pictures-<hash>.assets").
     static func assetsFolder(id: String) -> String {
-        // Readable, then a stable hash of the whole id, so ids that read alike ("My notes", "My-notes") never share.
-        let safe = id.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) || $0 == "-" ? String($0) : "-" }.joined()
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325   // FNV-1a, 64 bits: the same on every Mac and every run
         for byte in id.utf8 { hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
-        return (safe.isEmpty ? "note" : String(safe.prefix(40))) + "-" + String(format: "%016llx", hash) + assets
+        return "pictures-" + String(format: "%016llx", hash) + assets
+    }
+
+    /// A note with no id of its own is known by its path (`fallbackID`): Petal gives it a real one (written into its
+    /// front matter through its session) before it writes, moves or sticks it.
+    static func needsID(_ id: String) -> Bool { id.hasPrefix("file:") }
+
+    /// What's at a path, as a change sees it: nothing, something that can't be read (never treated as nothing), or
+    /// its text.
+    enum Disk: Equatable { case missing, unreadable, text(String) }
+
+    /// A trash only of a file that is still the note it's for and says what Petal last saw there (`texts`); never an
+    /// existing file Petal can't read to check; nothing there is nothing to do.
+    static func mayTrashFile(_ disk: Disk, foundID: String?, expected: String, texts: [String?]) -> Bool {
+        switch disk {
+        case .missing: return true
+        case .unreadable: return false
+        case .text(let text): return foundID == expected && texts.contains(text)
+        }
     }
 
     /// A copy iCloud Drive made of a file that changed on two Macs at once: "Name 2.md" beside "Name.md" (or
@@ -1316,27 +1333,31 @@ enum NoteTold {
 
     static func preview(_ body: String, _ redact: (String) -> String) -> String { String(NoteText.preview(redact(body)).prefix(160)) }
 
-    /// A note's file: its name is made from its title, cut to 60 characters, so while that title holds something
-    /// the redaction hides, the name isn't told (part of a secret may be in it).
-    /// A note's file: told by its name only when Petal made that name from a redacted title (`vouched`: recorded
-    /// when it made the file); any other name (made elsewhere, or by an older Petal) is told as an opaque one, the
-    /// same for that path every time, since part of a secret may be in it.
-    static func path(_ path: String, vouched: Bool, _ redact: (String) -> String) -> String {
-        if vouched { return redact(path) }
-        return redact((path as NSString).deletingLastPathComponent) + "/" + opaque(path) + ".md"
+    /// A note's text for a tool: every picture line as `![picture N]` (in order), so no folder or file name of a
+    /// picture is ever told.
+    static func neutralPictures(_ body: String) -> String {
+        var n = 0
+        return body.components(separatedBy: "\n").map { line in
+            guard case .image = NoteBlock.parse(line) else { return line }
+            n += 1
+            return "![picture \(n)]"
+        }.joined(separator: "\n")
     }
 
-    static func opaque(_ text: String) -> String {
-        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in text.utf8 { hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
-        return "note-" + String(format: "%016llx", hash)
-    }
-
-    /// A note's id: a file's own (one with no id of its own is known by its path, never made by Petal) told opaquely.
-    static func id(_ id: String, _ redact: (String) -> String) -> String {
-        id.hasPrefix("file:") ? "file:" + opaque(String(id.dropFirst(5))) : redact(id)
+    /// A tool's text back into the note: each `![picture N]` line is the note's own Nth picture again (as it was in
+    /// `body`); one with no such picture stays words.
+    static func restorePictures(_ text: String, from body: String) -> String {
+        let pictures = body.components(separatedBy: "\n").filter { if case .image = NoteBlock.parse($0) { true } else { false } }
+        return text.components(separatedBy: "\n").map { line in
+            let words = line.trimmingCharacters(in: .whitespaces)
+            guard words.hasPrefix("![picture "), words.hasSuffix("]"), let n = Int(words.dropFirst(10).dropLast()), pictures.indices.contains(n - 1)
+            else { return line }
+            return pictures[n - 1]
+        }.joined(separator: "\n")
     }
 
     /// What a search looks through: the note's whole text and its notebook, each redacted whole.
-    static func searchText(_ body: String, notebook: String, _ redact: (String) -> String) -> String { redact(body) + "\n" + redact(notebook) }
+    static func searchText(_ body: String, notebook: String, _ redact: (String) -> String) -> String {
+        redact(neutralPictures(body)) + "\n" + redact(notebook)
+    }
 }

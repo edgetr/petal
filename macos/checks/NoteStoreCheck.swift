@@ -106,6 +106,7 @@ struct NoteStoreCheck {
         concurrentMakes(root: root)
         renamedMakes(root: root)
         identity(root: root)
+        idBeforeChange(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
     }
@@ -429,8 +430,7 @@ struct NoteStoreCheck {
         NoteStore.nameRedactor = { $0.replacingOccurrences(of: "4111111111111111", with: "(hidden)") }
         let card = NoteFile(id: "C1", body: "# Card 4111111111111111 for travel").serialized()
         let named = NoteStore.createNamed(card, stem: NoteStore.safeStem(for: card, fallback: "Note 1"), in: folder, root: root)
-        expect(named?.lastPathComponent == "Card (hidden) for travel.md" && NoteNames.vouched("C1", named?.lastPathComponent ?? ""),
-               "a title holding a secret: the file named after redaction, and vouched for", named?.lastPathComponent ?? "nil")
+        expect(named?.lastPathComponent == "Card (hidden) for travel.md", "a title holding a secret: the file named after redaction", named?.lastPathComponent ?? "nil")
         NoteStore.nameRedactor = { _ in nil }
         let plain = NoteStore.createNamed(card, stem: NoteStore.safeStem(for: card, fallback: "Note 1"), in: folder, root: root)
         expect(plain?.lastPathComponent == "Note 1.md", "the vault unreadable: a plain name", plain?.lastPathComponent ?? "nil")
@@ -439,6 +439,53 @@ struct NoteStoreCheck {
         }
         expect(!((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).contains { $0.contains("4111") }, "no file name anywhere holds the card number")
         NoteStore.nameRedactor = { $0 }
+
+        // A trash never of an existing file Petal can't read to check (absence and unreadability told apart).
+        let locked = folder.appending(path: "Locked.md")
+        let lockedText = NoteFile(id: "L1", body: "# Locked").serialized()
+        _ = NoteStore.create(lockedText, at: locked, root: root)
+        NoteDisk.states[902] = NoteDisk.State(url: locked, noteID: "L1", revision: lockedText)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        _ = NoteStore.perform(.trash(revision: lockedText), session: 902, root: root)
+        let stillThere = fm.fileExists(atPath: locked.path)
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: locked.path)
+        expect(stillThere && text(locked) == lockedText, "an unreadable file at a note's path: never trashed")
+
+        // A tool's handle: kept per note id, the same when the note's file is renamed or moved, and when an id-less
+        // note is given its own id.
+        var local = NoteLocal()
+        let handle = local.handle("H1")
+        expect(handle.hasPrefix("n") && !handle.contains("H1") && local.handle("H1") == handle, "a note's handle: a token, the same each time")
+        let firstLook = local.handle("file:Inbox/Plain.md")
+        local.rekeyID("file:Inbox/Plain.md", "U2")
+        expect(local.handle("U2") == firstLook, "an id-less note given its id keeps its handle")
+    }
+
+    /// An id-less note (a Markdown file made elsewhere) gets its own id in its file before Petal moves or changes it.
+    @MainActor static func idBeforeChange(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Plain")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Shopping.md")
+        try? Data("# Shopping\nmilk".utf8).write(to: file)
+        let store = NoteStore(root: root)
+        let read = NoteStore.read(root)
+        store.preview(read.notes, notebooks: read.notebooks)
+        guard let paper = store.notes.first(where: { $0.url.lastPathComponent == "Shopping.md" }) else { return expect(false, "the id-less note is read") }
+        expect(NoteShelf.needsID(paper.noteID), "read with an id taken from its path", paper.noteID)
+        var renamed: (String, String)?
+        store.onIdentity = { old, new in renamed = (old, new) }
+        var moved: PaperNote?
+        var answered = false
+        store.move(paper.key, to: "Elsewhere", then: { moved = $0; answered = true })
+        let until = Date().addingTimeInterval(5)
+        while !answered && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let landed = root.appending(path: "Elsewhere/Shopping.md")
+        let written = text(landed).map { NoteFile.parse($0, fallbackID: "?", fallbackDate: Date()) }
+        expect(moved != nil && written != nil && !NoteShelf.needsID(written?.id ?? "file:") && written?.body.contains("milk") == true,
+               "moved with its own id written in its file first", text(landed) ?? "nil")
+        expect(renamed?.0 == paper.noteID && renamed?.1 == written?.id && store.notes.contains { $0.noteID == written?.id },
+               "and every owner knows it by that id", "\(String(describing: renamed))")
     }
 
     @MainActor static func concurrentMakes(root: URL) {

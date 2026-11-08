@@ -562,10 +562,7 @@ final class NoteStore {
             if let live, !live() { return .cancelled }
             let taken = Set(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).map { $0.lowercased() })
             let copy = folder.appending(path: NoteShelf.conflictName(stem, taken: taken))
-            if create(text, at: copy, root: root, live: live) {
-                NoteNames.vouch(noteID(of: text, at: copy, root: root), copy.lastPathComponent)
-                return .keptBoth(copy)
-            }
+            if create(text, at: copy, root: root, live: live) { return .keptBoth(copy) }
         }
         return live.map { $0() } == false ? .cancelled : .failed
     }
@@ -598,10 +595,7 @@ final class NoteStore {
             let name = NoteShelf.freeName(stem, taken: taken)
             let url = folder.appending(path: name)
             if let live, !live() { return nil }
-            if create(text, at: url, root: root, live: live) {
-                NoteNames.vouch(noteID(of: text, at: url, root: root), url.lastPathComponent)
-                return url
-            }
+            if create(text, at: url, root: root, live: live) { return url }
             tried.insert(name.lowercased())
         }
         return nil
@@ -639,7 +633,11 @@ final class NoteStore {
             return NoteWorkResult(outcome: .written, url: made)
         case .write(let text, let base):
             let outcome = save(text, to: state.url, base: base, root: root, live: live, noteID: state.noteID)
-            if outcome == .written { state.revision = text }
+            if outcome == .written {
+                state.revision = text
+                // An id-less note given its id by this write: known by that id from now on.
+                if NoteShelf.needsID(state.noteID) { state.noteID = noteID(of: text, at: state.url, root: root) }
+            }
             return NoteWorkResult(outcome: outcome, url: state.url)
         case .keepAside(let text):
             return NoteWorkResult(outcome: keepBeside(text, original: state.url, root: root, live: live), url: state.url)
@@ -659,9 +657,8 @@ final class NoteStore {
             // Only while it still says what Petal last saw there, checked inside the coordinated trash.
             let url = state.url, noteID = state.noteID
             trash(state.url, root: root) { disk in
-                guard let disk else { return true }
-                return NoteShelf.stillNote(found: Self.noteID(of: disk, at: url, root: root), expected: noteID, missing: true)
-                    && (disk == revision || disk == state.revision)
+                let found: String? = if case .text(let text) = disk { Self.noteID(of: text, at: url, root: root) } else { nil }
+                return NoteShelf.mayTrashFile(disk, foundID: found, expected: noteID, texts: [revision, state.revision])
             }
             return NoteWorkResult(outcome: .written, url: state.url)
         case .keep(let plan):
@@ -688,13 +685,17 @@ final class NoteStore {
 
     /// Moves a file to the Trash inside one coordinated step, only while `still` says yes to what it holds then.
     @discardableResult
-    nonisolated static func trash(_ url: URL, root: URL, still: (String?) -> Bool) -> Bool {
+    /// What's there is told apart: nothing, a file that can't be read (never taken for nothing), or its text.
+    nonisolated static func trash(_ url: URL, root: URL, still: (NoteShelf.Disk) -> Bool) -> Bool {
         guard safe(url, root: root) else { return false }
         var done = false
         var error: NSError?
         NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: url, options: .forDeleting, error: &error) { url in
-            let disk = FileManager.default.fileExists(atPath: url.path) ? (try? String(contentsOf: url, encoding: .utf8)) : nil
-            guard still(disk) else { return }
+            let disk: NoteShelf.Disk
+            if !FileManager.default.fileExists(atPath: url.path) { disk = .missing }
+            else if let text = try? String(contentsOf: url, encoding: .utf8) { disk = .text(text) }
+            else { disk = .unreadable }
+            guard disk != .missing, still(disk) else { return }
             done = (try? FileManager.default.trashItem(at: url, resultingItemURL: nil)) != nil
         }
         return done
@@ -733,7 +734,7 @@ final class NoteStore {
         }
         for url in plan.files where url != plan.kept {
             let shown = plan.snapshot["file:" + url.path]
-            trash(url, root: root) { disk in disk == shown }
+            trash(url, root: root) { disk in if case .text(let text) = disk { text == shown } else { false } }
         }
         return true
     }
@@ -795,7 +796,6 @@ final class NoteStore {
             for back in movedPictures { try? fm.moveItem(at: newAssets.appending(path: back), to: assets.appending(path: back)) }
             return nil
         }
-        if NoteNames.vouched(noteID, from.lastPathComponent) { NoteNames.vouch(noteID, target.lastPathComponent) }
         // The old pictures' folder, now empty, goes (to the Trash, never deleted outright).
         if fm.fileExists(atPath: assets.path), ((try? fm.contentsOfDirectory(atPath: assets.path)) ?? []).filter({ !$0.hasPrefix(".") }).isEmpty {
             try? fm.trashItem(at: assets, resultingItemURL: nil)
@@ -1238,10 +1238,13 @@ final class NoteStore {
     @discardableResult
     func change(_ key: String, base: String? = nil, expect: String?? = nil, touch stamp: Bool = true, live: (@Sendable () -> Bool)? = nil,
                 edit: (inout NoteFile) -> Void, done: (@MainActor (Outcome) -> Void)? = nil) -> String? {
-        guard !switching, var paper = paper(key), !readOnly(paper) else { return nil }
-        if let expect, paper.revision != expect { return nil }
-        guard let session = session(for: key) else { return nil }
-        let since = base ?? paper.revision
+        guard !switching, let before = paper(key), !readOnly(before) else { return nil }
+        if let expect, before.revision != expect { return nil }
+        // An id-less note gets its id first (written through its session); an edit made on the file as it was is
+        // made on it as it is once the id is in.
+        ensureID(key)
+        guard var paper = paper(key), let session = session(for: key) else { return nil }
+        let since = base.map { $0 == before.revision ? paper.revision : $0 } ?? paper.revision
         edit(&paper.file)
         if stamp { paper.file.modified = Date() }
         let text = paper.file.serialized()
@@ -1257,6 +1260,35 @@ final class NoteStore {
         if live == nil { snapshot(paper, text: text, session: session) }
         return text
     }
+
+    /// A note with no id of its own (known by its path) gets one before Petal writes, moves or sticks it: a new id in
+    /// its front matter, written through its session (after whatever is waiting there), and taken at once by every
+    /// owner: the paper, the session, what waits for it in memory, and the desk's records (`onIdentity`). The
+    /// journal's snapshot moves to the new id. Nothing for a note that has one.
+    func ensureID(_ key: String) {
+        guard let index = notes.firstIndex(where: { $0.key == key }), notes[index].version == nil, NoteShelf.needsID(notes[index].noteID),
+              !readOnly(notes[index]), let session = session(for: key) else { return }
+        var paper = notes[index]
+        let old = paper.noteID
+        let base = paper.revision
+        paper.file.id = UUID().uuidString
+        let new = paper.noteID
+        let text = paper.file.serialized()
+        paper.revision = text
+        notes[index] = paper
+        session.noteID = new
+        if let bytes = pendingPictures.removeValue(forKey: old) { pendingPictures[new] = bytes }
+        if let loading = importsLoading.removeValue(forKey: old) { importsLoading[new] = loading }
+        if let trouble = importTrouble.removeValue(forKey: old) { importTrouble[new] = trouble }
+        touch(key)
+        onIdentity(old, new)
+        enqueue(session, .write(text: text, base: base), done: nil)
+        snapshot(paper, text: text, session: session)
+        NoteJournal.queue.async { NoteJournal.forget(noteID: old) }
+    }
+
+    /// A note given its own id (`ensureID`): old id, new id.
+    @ObservationIgnored var onIdentity: @MainActor (String, String) -> Void = { _, _ in }
 
     /// What was typed into a paper that turned read only as the person typed: kept beside its file, never lost.
     func keepAside(_ key: String, body: String) {
@@ -1348,6 +1380,8 @@ final class NoteStore {
         guard name != paper.notebook else { return done(paper) }
         guard !switching, !readOnly(paper), let session = session(for: key) else { return done(nil) }
         ensureNotebook(name, color: "")
+        // Its id in its file first (an id-less note's is its path, which the move changes).
+        ensureID(key)
         enqueue(session, .move(folder: root.appending(path: name)), live: live) { outcome in
             done(outcome == .written ? self.paper(session.key) : nil)
         }
@@ -1358,7 +1392,10 @@ final class NoteStore {
     /// a move too). Returns each one's reference (as the note writes it), for the editor to put in as ordinary text;
     /// nil when the note can't take them.
     func acceptPictures(_ key: String, _ items: [(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? {
-        guard !switching, let paper = paper(key), !readOnly(paper), let session = session(for: key), !items.isEmpty else { return nil }
+        guard !switching, let before = paper(key), !readOnly(before), !items.isEmpty else { return nil }
+        // The pictures' folder is named for the note's id: an id-less note gets its own first.
+        ensureID(key)
+        guard let paper = paper(key), let session = session(for: key) else { return nil }
         let folder = NoteShelf.assetsFolder(id: paper.noteID)
         let pictures = items.map { NotePictureBytes(name: "picture-\(UUID().uuidString.prefix(8).lowercased()).\($0.ext)", data: $0.data, caption: $0.caption) }
         for picture in pictures { pendingPictures[paper.noteID, default: [:]][picture.name] = picture.data }
@@ -1534,6 +1571,25 @@ struct NoteLocal: Codable, Equatable {
     var desk: [String: [Double]] = [:]
     /// The notebook last used on each site or app.
     var lastNotebook: [String: String] = [:]
+    /// Each note's handle for tools, by note id: a random token, so a tool never sees a file name, path or id taken
+    /// from one, and the same note keeps its handle when it's renamed or moved.
+    var handles: [String: String]? = nil
+
+    /// The note's handle, made the first time it's asked for.
+    mutating func handle(_ noteID: String) -> String {
+        if let made = handles?[noteID] { return made }
+        let made = "n" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12).lowercased()
+        handles = (handles ?? [:]).merging([noteID: made]) { a, _ in a }
+        return made
+    }
+
+    /// A note known by a new id (an id-less note given its own): everything kept for it follows.
+    mutating func rekeyID(_ old: String, _ new: String) {
+        if let spot = spots.removeValue(forKey: old) { spots[new] = spot }
+        if let point = desk.removeValue(forKey: old) { desk[new] = point }
+        shown = shown.map { $0 == old ? new : $0 }
+        if let handle = handles?.removeValue(forKey: old) { handles?[new] = handle }
+    }
 
     static var file: URL { Config.supportFolder.appending(path: "notes-state.json") }
 
@@ -1566,31 +1622,5 @@ enum NoteReservations {
         lock.withLock {
             Set(paths.filter { $0 != own && ($0 as NSString).deletingLastPathComponent == folder }.map { ($0 as NSString).lastPathComponent })
         }
-    }
-}
-
-/// The file names Petal made from a redacted title, by note id (Application Support's notes-named.json): only these
-/// are told to agents as they are; any other name is told opaquely (NoteTold.path). Loaded and saved off the main
-/// thread; read anywhere.
-enum NoteNames {
-    nonisolated private static let lock = NSLock()
-    nonisolated(unsafe) private static var names: [String: Set<String>] = [:]
-    nonisolated private static var file: URL { Config.supportFolder.appending(path: "notes-named.json") }
-
-    nonisolated static func load() {
-        guard let data = try? Data(contentsOf: file), let read = try? JSONDecoder().decode([String: [String]].self, from: data) else { return }
-        lock.withLock { for (id, list) in read { names[id, default: []].formUnion(list.map { $0.lowercased() }) } }
-    }
-
-    nonisolated static func vouch(_ noteID: String, _ name: String) {
-        let all: [String: [String]] = lock.withLock {
-            names[noteID, default: []].insert(name.lowercased())
-            return names.mapValues { Array($0).sorted() }
-        }
-        if let data = try? JSONEncoder().encode(all) { try? data.write(to: file, options: .atomic) }
-    }
-
-    nonisolated static func vouched(_ noteID: String, _ name: String) -> Bool {
-        lock.withLock { names[noteID]?.contains(name.lowercased()) == true }
     }
 }
