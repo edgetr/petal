@@ -1002,36 +1002,89 @@ struct InstructionsEditor: View {
             .frame(minHeight: 110)
             .padding(8)
             .background(.black.opacity(0.12), in: .rect(cornerRadius: 12))
-            // As last read (off the main thread, at launch and as the window opened); a change on disk since then
-            // comes in as it's read.
-            .onAppear { text = notes.text }
+            // As last read off the main thread; read again as it appears, and while it shows, a change made elsewhere
+            // (an agent, an editor) comes in within a second.
+            .onAppear {
+                text = notes.text
+                notes.watch(true)
+                notes.refresh(from: app.config.instructionsFile)
+            }
+            .onDisappear { notes.watch(false) }
             .onChange(of: notes.version) { _, _ in if text != notes.text { text = notes.text } }
             .onChange(of: text) { _, new in notes.save(new, to: app.config.instructionsFile) }
     }
 }
 
-/// The notes for the AI, kept in memory for the settings window: read off the main thread, and written off it, in
-/// order, only when they change.
+/// The notes for the AI, kept in memory for the settings window. Read and written off the main thread, on one queue,
+/// in order: a read asked for after a save reads what that save wrote. A read begun before a save, or while the
+/// person is typing, never replaces what they typed.
 @MainActor @Observable
 final class InstructionsText {
     @ObservationIgnored private(set) var text = ""
     /// Counts reads that changed `text`, so the editor follows a change made elsewhere.
     private(set) var version = 0
     /// Counts saves: a read begun before one is older than what's typed, and is dropped.
-    @ObservationIgnored private(set) var saves = 0
-    nonisolated private static let writer = DispatchQueue(label: "petal.instructions.write", qos: .userInitiated)
+    @ObservationIgnored private var saves = 0
+    @ObservationIgnored private var lastSave = Date.distantPast
+    /// The file's modification date as last seen: the watcher reads the file again only once it changes.
+    @ObservationIgnored private var seen: Date?
+    /// Editors showing the notes: while any does, the file is watched.
+    @ObservationIgnored private var watchers = 0
+    @ObservationIgnored private var file: URL?
+    nonisolated private static let queue = DispatchQueue(label: "petal.instructions", qos: .userInitiated)
+    /// How long after a key the person counts as typing: a change from elsewhere waits until they pause.
+    private static let typing: TimeInterval = 1.5
 
-    func read(_ disk: String, asOf: Int) {
-        guard asOf == saves, disk != text else { return }
-        text = disk
-        version += 1
+    /// Reads the file (off the main thread, unless `wait`). `ifChanged`: only when its modification date changed.
+    func refresh(from file: URL, wait: Bool = false, ifChanged: Bool = false) {
+        self.file = file
+        let asOf = saves
+        let known = ifChanged ? seen : nil
+        let read = { () -> (stamp: Date?, text: String)? in
+            let stamp = Self.modified(file)
+            if ifChanged, stamp == known { return nil }
+            return (stamp, (try? String(contentsOf: file, encoding: .utf8)) ?? "")
+        }
+        let apply = { (disk: (stamp: Date?, text: String)?) in
+            guard let disk, asOf == self.saves else { return }
+            // Typing: theirs stays; the change is read again once they pause (unless their typing replaced it).
+            guard Date().timeIntervalSince(self.lastSave) >= Self.typing else { return }
+            self.seen = disk.stamp
+            guard disk.text != self.text else { return }
+            self.text = disk.text
+            self.version += 1
+        }
+        if wait { apply(Self.queue.sync { read() }); return }
+        Self.queue.async {
+            let disk = read()
+            DispatchQueue.main.async { MainActor.assumeIsolated { apply(disk) } }
+        }
     }
 
     func save(_ new: String, to file: URL) {
         guard new != text else { return }
         text = new
         saves += 1
-        Self.writer.async { try? new.write(to: file, atomically: true, encoding: .utf8) }
+        lastSave = Date()
+        let saved = saves
+        Self.queue.async {
+            try? new.write(to: file, atomically: true, encoding: .utf8)
+            let stamp = Self.modified(file)
+            DispatchQueue.main.async { MainActor.assumeIsolated { if saved == self.saves { self.seen = stamp } } }
+        }
+    }
+
+    /// An editor showing the notes appeared (true) or went (false).
+    func watch(_ on: Bool) { watchers = max(0, watchers + (on ? 1 : -1)) }
+
+    /// Each second (Config's watcher): while an editor shows the notes, a change made elsewhere is read.
+    func tick() {
+        guard watchers > 0, let file else { return }
+        refresh(from: file, ifChanged: true)
+    }
+
+    nonisolated private static func modified(_ file: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date
     }
 }
 

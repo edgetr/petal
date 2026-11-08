@@ -4,7 +4,8 @@
     python3 -I macos/bench/pngdiff.py <before folder> <after folder> [--tolerance N]
 
 For each file in both: same size or not, how many pixels differ (any channel by more than N, default 0), the
-largest channel difference, and the box around the differences. Exits 1 if any image differs."""
+largest channel difference, and the box around the differences. Exits 1 if any image differs or is missing
+from either folder."""
 import os, struct, sys, zlib
 
 def read_png(path):
@@ -48,9 +49,9 @@ def main():
     args = sys.argv[1:]
     tolerance = int(args[args.index('--tolerance') + 1]) if '--tolerance' in args else 0
     before, after = args[0], args[1]
-    names = sorted(set(os.listdir(before)) & set(os.listdir(after)))
-    names = [n for n in names if n.endswith('.png')]
-    only = sorted((set(os.listdir(before)) ^ set(os.listdir(after))))
+    pngs = lambda folder: {n for n in os.listdir(folder) if n.endswith('.png')}
+    names = sorted(pngs(before) & pngs(after))
+    missing = [(n, after) for n in sorted(pngs(before) - pngs(after))] + [(n, before) for n in sorted(pngs(after) - pngs(before))]
     changed = 0
     for name in names:
         a = read_png(os.path.join(before, name)); b = read_png(os.path.join(after, name))
@@ -71,8 +72,8 @@ def main():
             print(f'{name}: {count} of {w*h} pixels differ (largest {worst}/255), in x {box[0]}-{box[2]}, y {box[1]}-{box[3]}')
         else:
             print(f'{name}: identical')
-    for name in only: print(f'{name}: only in one folder')
-    print(f'{len(names)} compared, {changed} differ')
-    sys.exit(1 if changed else 0)
+    for name, folder in missing: print(f'{name}: missing from {folder}')
+    print(f'{len(names)} compared, {changed} differ, {len(missing)} missing')
+    sys.exit(1 if changed or missing else 0)
 
 main()

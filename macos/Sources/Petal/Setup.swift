@@ -140,7 +140,7 @@ enum DockGuard {
         let app = Bundle.main.bundlePath
         let backup = Config.folder.appending(path: "macos-dock.json").path
         let quiet = Quiet.marker.path
-        let off = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Petal/quiet-off.txt").path
+        let off = Config.supportFolder.appending(path: "quiet-off.txt").path
         let script = """
         app='\(app)'; backup='\(backup)'; plist='\(plist.path)'; quiet='\(quiet)'; off='\(off)'
         if [ -f "$quiet" ] && ! pgrep -qx Petal; then

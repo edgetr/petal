@@ -246,7 +246,7 @@ struct MarkdownView: View {
 @MainActor
 enum Pages {
     private static var windows: [String: PageWindow] = [:]
-    static let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Petal/pages")
+    static let folder = Config.supportFolder.appending(path: "pages")
 
     /// Shows a page: `markdown`, or `html` (a whole document, or a body), or a file at `path`. Returns its file.
     /// Each page is a new file (its title, and a few letters of its own, so two pages called the same never meet);

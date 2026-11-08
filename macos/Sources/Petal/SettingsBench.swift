@@ -27,10 +27,18 @@ enum SettingsBench {
     /// window's own: a view made ahead opening on another page.
     static let commands = PassthroughSubject<Command, Never>()
 
-    /// Before anything reads the settings: a copy of them in a temporary folder, unless `PETAL_CONFIG_DIR` already
-    /// points somewhere. Only reads the real folder.
+    /// Before anything reads the settings or Petal's state: a copy of the settings in a temporary folder, unless
+    /// `PETAL_CONFIG_DIR` already points somewhere (only the real folder is read), and an empty temporary folder for
+    /// what Petal keeps in Application Support (`PETAL_SUPPORT_DIR`: activity, spend, sorting, chats, pages), so a
+    /// headless run never reads or writes the person's state. The bench's own runs inherit both.
     static func isolate() {
         Headless.on = true
+        if ProcessInfo.processInfo.environment["PETAL_SUPPORT_DIR"]?.isEmpty != false {
+            let support = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "petal-bench-state-\(getpid())")
+            try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+            setenv("PETAL_SUPPORT_DIR", support.path, 1)
+            temporarySupport = support
+        }
         if let dir = ProcessInfo.processInfo.environment["PETAL_CONFIG_DIR"], !dir.isEmpty { return }
         let real = URL(fileURLWithPath: NSHomeDirectory()).appending(path: ".config/petal")
         let copy = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "petal-bench-\(getpid())")
@@ -42,6 +50,7 @@ enum SettingsBench {
         temporary = copy
     }
     private static var temporary: URL?
+    private static var temporarySupport: URL?
 
     /// A folder for headless runs' own files (chats, a stack), removed at the end.
     nonisolated static let scratch: URL = {
@@ -53,7 +62,9 @@ enum SettingsBench {
     /// Removes the copies `isolate` and the bench made.
     static func cleanUp() {
         if let temporary { try? FileManager.default.removeItem(at: temporary) }
+        if let temporarySupport { try? FileManager.default.removeItem(at: temporarySupport) }
         temporary = nil
+        temporarySupport = nil
         try? FileManager.default.removeItem(at: URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "petal-bench-files-\(getpid())"))
     }
 }

@@ -28,7 +28,7 @@ final class Drafts {
                                          "org.whispersystems.signal-desktop", "com.facebook.archon", "com.readdle.smartemail-mac"]
 
     private static var styleFile: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Petal/writing-style.json")
+        Config.supportFolder.appending(path: "writing-style.json")
     }
 
     /// Another mode in front: drafts still on their way for the last one are dropped.

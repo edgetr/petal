@@ -211,7 +211,7 @@ final class Routines {
 
     nonisolated static var stateFolder: URL {
         if let dir = ProcessInfo.processInfo.environment["PETAL_ROUTINES"], !dir.isEmpty { return URL(fileURLWithPath: dir) }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Petal")
+        return Config.supportFolder
     }
     nonisolated static var file: URL {
         if ProcessInfo.processInfo.environment["PETAL_ROUTINES"]?.isEmpty == false { return stateFolder.appending(path: "routines.json") }

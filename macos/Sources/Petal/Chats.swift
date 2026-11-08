@@ -21,7 +21,7 @@ struct SavedChat: Codable, Identifiable, Equatable {
 enum Chats {
     /// A headless run (a bench, a snapshot) keeps its chats in a temporary folder, never the person's.
     static let folder = Headless.on ? SettingsBench.scratch.appending(path: "chats")
-        : FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Petal/chats")
+        : Config.supportFolder.appending(path: "chats")
 
     /// One at a time, in order: an older save can never land after a newer one.
     nonisolated static let queue = DispatchQueue(label: "petal.chats", qos: .utility)

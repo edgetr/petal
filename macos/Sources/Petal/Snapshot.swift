@@ -311,7 +311,11 @@ enum Snapshot {
     }
 
     private static func write(_ image: NSImage?, name: String, folder: String) {
-        guard let tiff = image?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { return }
+        guard let tiff = image?.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else {
+            print("couldn't draw \(name)")
+            return
+        }
+        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
         let path = (folder as NSString).appendingPathComponent(name + ".png")
         try? png.write(to: URL(fileURLWithPath: path))
         print(path)

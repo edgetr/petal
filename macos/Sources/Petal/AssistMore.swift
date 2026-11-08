@@ -22,7 +22,7 @@ extension Assist {
     }
 
     static var historyFile: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appending(path: "Petal/ai-history.json")
+        Config.supportFolder.appending(path: "ai-history.json")
     }
 
     func did(_ text: String, undo: Undo? = nil) {

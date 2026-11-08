@@ -16,7 +16,7 @@ enum Personal {
     /// PETAL_PERSONAL_HOME moves all of it elsewhere, and keeps a running Petal from being restarted (for testing).
     nonisolated static let testing = ProcessInfo.processInfo.environment["PETAL_PERSONAL_HOME"]
     nonisolated static let folder = testing.map { URL(fileURLWithPath: $0) }
-        ?? FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Application Support/Petal")
+        ?? Config.supportFolder
     nonisolated static var source: URL { folder.appending(path: "source") }
     nonisolated static var built: URL { source.appending(path: ".git/petal-built/Petal.app") }
     nonisolated static var signing: URL { folder.appending(path: "signing") }
