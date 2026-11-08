@@ -91,7 +91,9 @@ extension NoteDesk {
     }
 
     /// What's in front now, read off the main thread, as one place: `kind` (tab, window, app, file, desktop) or the
-    /// most specific there is (a passage only with a selection).
+    /// most specific there is (a passage only with a selection). An app kept private (`aiNeverLook`) gives no
+    /// passage and no words: its selection is never read for the AI, checked again before the answer goes. A
+    /// selection holding something from the vault isn't stuck to (VaultIndex, as petal_ui hides it).
     private func stickHere(_ paper: PaperNote?, kind: String?, _ done: @escaping @MainActor (NoteStick?) -> Void) {
         let wanted = kind.flatMap(NoteStick.Kind.init(rawValue:))
         if wanted == .desktop {
@@ -103,12 +105,26 @@ extension NoteDesk {
         guard let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return done(nil) }
         let name = running.localizedName ?? ""
         let pid = running.processIdentifier
+        let bundle = running.bundleIdentifier ?? ""
+        let privacy = ClaudePanel.privacy.now
+        let quiet = app.assist.neverLook(bundle)
+        if quiet && wanted == .passage { return done(nil) }
         Self.read(running, mac: local.mac) { scene, read in
             Self.queue.async {
-                let passage = wanted == .passage || wanted == nil ? Self.selection(pid: pid) : nil
+                var passage: (quote: String, before: String, after: String)?
+                if !quiet, wanted == .passage || wanted == nil, let selected = Self.selection(pid: pid) {
+                    // Nothing from the vault goes to the AI: a selection holding a secret isn't a place for it.
+                    let clean = VaultIndex.settled { index in
+                        [selected.quote, selected.before, selected.after].allSatisfy { index.redacted($0) == $0 }
+                    } ?? false
+                    if clean { passage = selected }
+                }
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
-                        let offers = self.places(for: scene, read: read, appName: name, passage: passage)
+                        // Made private (or the private apps changed) while it was read: no passage, no words.
+                        let still = ClaudePanel.privacy.current(privacy) && !self.app.assist.neverLook(bundle)
+                        let offers = self.places(for: scene, read: read, appName: name, passage: still ? passage : nil)
+                            .filter { still || $0.kind != .passage }
                         done(wanted.flatMap { kind in offers.first { $0.kind == kind } } ?? (wanted == nil ? offers.first : nil))
                     }
                 }

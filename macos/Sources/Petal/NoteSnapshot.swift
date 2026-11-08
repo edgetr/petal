@@ -130,5 +130,11 @@ extension Snapshot {
                       place: head.place, notebook: head.notebook, others: head.others, footer: NoteDesk.when(sentence.file.modified))
                 .padding(.top, 100).padding(.leading, 120)
         }
+        // The pin from the sentence's end to the note, as NoteDesk draws it where it knows the sentence's bounds.
+        .overlay(alignment: .topLeading) {
+            PinLine(from: CGPoint(x: 392, y: 140), to: CGPoint(x: width + 26 + 120, y: 128), color: Color(nsColor: app.paper.store.color(of: sentence.notebook)))
+                .frame(width: width + 26 + 120 + 10, height: 200)
+                .allowsHitTesting(false)
+        }
     }
 }

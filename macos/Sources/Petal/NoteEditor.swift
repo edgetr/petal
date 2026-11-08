@@ -472,7 +472,7 @@ final class NoteTextView: NSTextView {
         let words = ((textStorage?.string ?? "") as NSString).substring(with: line).trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FFFC}")))
         if kind.hasPrefix("check"), words.isEmpty {
             // Return on an empty checkbox ends the list: the line becomes words.
-            replace(line: line, with: NSAttributedString(string: "", attributes: NoteRich.attributes("text", style)))
+            replace(line: line, with: NSAttributedString(string: "", attributes: NoteRich.attributes("text", style)), kind: "text")
             return
         }
         super.insertNewline(sender)
@@ -495,14 +495,15 @@ final class NoteTextView: NSTextView {
         changed()
     }
 
-    private func replace(line: NSRange, with text: NSAttributedString) {
+    private func replace(line: NSRange, with text: NSAttributedString, kind: String) {
         var range = line
         if range.length > 0, ((textStorage?.string ?? "") as NSString).character(at: range.location + range.length - 1) == 10 { range.length -= 1 }
         guard shouldChangeText(in: range, replacementString: text.string) else { return }
         textStorage?.replaceCharacters(in: range, with: text)
         didChangeText()
         setSelectedRange(NSRange(location: range.location + text.length, length: 0))
-        typingAttributes = NoteRich.attributes(text.length > 0 ? (text.attribute(NoteRich.line, at: 0, effectiveRange: nil) as? String ?? "text") : "text", style)
+        // What's typed next keeps the line's kind, even on a line left empty ("# " typed alone is an empty heading).
+        typingAttributes = NoteRich.attributes(kind, style)
     }
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
@@ -526,7 +527,7 @@ final class NoteTextView: NSTextView {
         }
         made.append(NSAttributedString(string: rest))
         made.addAttributes(NoteRich.attributes(kind, style), range: NSRange(location: 0, length: made.length))
-        replace(line: line, with: made)
+        replace(line: line, with: made, kind: kind)
         changed()
     }
 
@@ -547,21 +548,38 @@ final class NoteTextView: NSTextView {
     }
 
     /// Pictures on the pasteboard (a screenshot, a crop, image files) saved beside the note, each on its own line.
+    /// The files are read and decoded off the main thread; they go in where the cursor was once they're ready.
     private func pastePictures(_ board: NSPasteboard) -> Bool {
-        var found: [(Data, String, String)] = []
-        let files = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
-        for file in files where ["png", "jpg", "jpeg", "gif", "heic", "tiff", "webp"].contains(file.pathExtension.lowercased()) {
-            if let data = try? Data(contentsOf: file) { found.append((data, file.pathExtension.lowercased(), file.deletingPathExtension().lastPathComponent)) }
-        }
-        if found.isEmpty, files.isEmpty {
-            if let png = board.data(forType: .png) { found.append((png, "png", "")) }
-            else if let tiff = board.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) { found.append((png, "png", "")) }
-        }
-        guard !found.isEmpty, let savePicture else { return false }
-        for (data, ext, caption) in found {
-            guard let saved = savePicture(data, ext) else { continue }
-            if let image = NSImage(data: data) { MainActor.assumeIsolated { NotePictures.shared.preview(saved.file, image) } }
-            insertLine(PictureCell(path: saved.path, file: saved.file, caption: caption), kind: "image")
+        let kinds = ["png", "jpg", "jpeg", "gif", "heic", "tiff", "webp"]
+        let files = (board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [])
+            .filter { kinds.contains($0.pathExtension.lowercased()) }
+        let anyFiles = board.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+        let png = files.isEmpty && !anyFiles ? board.data(forType: .png) : nil
+        let tiff = files.isEmpty && !anyFiles && png == nil ? board.data(forType: .tiff) : nil
+        guard !files.isEmpty || png != nil || tiff != nil, savePicture != nil else { return false }
+        let at = selectedRange()
+        DispatchQueue.global(qos: .userInitiated).async {
+            var found: [(Data, String, String, NSImage?)] = []
+            for file in files {
+                if let data = try? Data(contentsOf: file) { found.append((data, file.pathExtension.lowercased(), file.deletingPathExtension().lastPathComponent, NSImage(data: data))) }
+            }
+            if let png { found.append((png, "png", "", NSImage(data: png))) }
+            if let tiff, let rep = NSBitmapImageRep(data: tiff), let data = rep.representation(using: .png, properties: [:]) {
+                found.append((data, "png", "", NSImage(data: data)))
+            }
+            let ready = found
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { [weak self] in
+                    guard let self, let savePicture = self.savePicture else { return }
+                    let length = self.textStorage?.length ?? 0
+                    self.setSelectedRange(NSRange(location: min(at.location, length), length: 0))
+                    for (data, ext, caption, image) in ready {
+                        guard let saved = savePicture(data, ext) else { continue }
+                        if let image { NotePictures.shared.preview(saved.file, image) }
+                        self.insertLine(PictureCell(path: saved.path, file: saved.file, caption: caption), kind: "image")
+                    }
+                }
+            }
         }
         return true
     }
@@ -594,14 +612,20 @@ struct NoteEditorView: NSViewRepresentable {
     let style: NoteRich.Style
     var focus: Bool
     let height: (CGFloat) -> Void
-    let save: (String) -> Void
+    /// Saves what's typed, made on the given base; returns the next base (nil: it can't be written).
+    let save: (String, String?) -> String?
+    /// Hands the desk a way to save what's typed now (nil once the editor goes).
+    let register: ((() -> Void)?) -> Void
     let picture: (Data, String) -> (path: String, file: URL)?
     let escape: () -> Void
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var saveLater: DispatchWorkItem?
         var key = ""
+        var noteID = ""
         var body = ""
+        /// The note's file as this editor last had it: what its edits are made on.
+        var base: String?
         var parent: NoteEditorView
         init(_ parent: NoteEditorView) { self.parent = parent }
 
@@ -618,7 +642,7 @@ struct NoteEditorView: NSViewRepresentable {
                 let body = NoteBlock.body(NoteRich.blocks(storage))
                 guard body != self.body else { return }
                 self.body = body
-                self.parent.save(body)
+                if let next = self.parent.save(body, self.base) { self.base = next }
             }
             saveLater = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
@@ -689,7 +713,13 @@ struct NoteEditorView: NSViewRepresentable {
             MainActor.assumeIsolated { coordinator.schedule(text) }
         }
         coordinator.key = paper.key
+        coordinator.noteID = paper.noteID
         coordinator.body = paper.file.body
+        coordinator.base = paper.revision
+        register { [weak coordinator, weak text] in
+            guard let coordinator, let text else { return }
+            MainActor.assumeIsolated { coordinator.flush(text) }
+        }
         let base = paper.url.deletingLastPathComponent()
         text.textStorage?.setAttributedString(NoteRich.attributed(NoteBlock.blocks(paper.file.body), base: base, style: style))
         text.typingAttributes = NoteRich.attributes("text", style)
@@ -703,7 +733,12 @@ struct NoteEditorView: NSViewRepresentable {
         coordinator.parent = self
         // Another note in this paper, or the file changed elsewhere while the person isn't typing here: read again.
         let elsewhere = paper.file.body != coordinator.body && text.window?.firstResponder !== text
-        if coordinator.key != paper.key || elsewhere { load(text, coordinator) }
+        if coordinator.key != paper.key, coordinator.noteID == paper.noteID, text.window?.firstResponder === text {
+            // The same note, its file named again on disk while the person types: what's typed stays.
+            coordinator.key = paper.key
+        } else if coordinator.key != paper.key || elsewhere {
+            load(text, coordinator)
+        }
         if focus, let window = text.window, window.firstResponder !== text {
             DispatchQueue.main.async { window.makeFirstResponder(text) }
         }
@@ -711,6 +746,11 @@ struct NoteEditorView: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
-        if let text = scroll.documentView as? NoteTextView { MainActor.assumeIsolated { coordinator.flush(text) } }
+        if let text = scroll.documentView as? NoteTextView {
+            MainActor.assumeIsolated {
+                coordinator.flush(text)
+                coordinator.parent.register(nil)
+            }
+        }
     }
 }

@@ -30,6 +30,11 @@ final class NoteDesk {
     @ObservationIgnored private(set) var frame: CGRect?
     @ObservationIgnored private var front: ClaudePanel.FrontRead?
     @ObservationIgnored private var lines: [String: CGFloat] = [:]
+    /// Each passage found on the window in front: its words' bounds (Accessibility's coordinates).
+    @ObservationIgnored private var passageRects: [String: CGRect] = [:]
+    @ObservationIgnored private var pinPanels: [String: PinPanel] = [:]
+    /// Each open editor's way to save what's typed now (on quit, or as it closes).
+    @ObservationIgnored var flushers: [String: () -> Void] = [:]
     @ObservationIgnored private var looks = 0
     @ObservationIgnored private var lookSoon: DispatchWorkItem?
     @ObservationIgnored private var listening = false
@@ -42,6 +47,9 @@ final class NoteDesk {
     @ObservationIgnored private var fresh: Set<String> = []
 
     nonisolated static let queue = DispatchQueue(label: "petal.notes.look", qos: .userInitiated)
+    /// Narrowing a window for an open note: a newer turn (the note folded, notes off, quitting) makes one still
+    /// waiting stand down.
+    nonisolated static let roomTurn = Generation()
 
     var app: PetalApp { PetalApp.shared }
     var on: Bool { app.config.bool("notes") }
@@ -56,6 +64,8 @@ final class NoteDesk {
     func start() {
         store.use(root: NoteStore.rootFolder(setting: app.config.string("notesFolder")))
         store.onChange = { [weak self] in self?.refresh() }
+        store.onRekey = { [weak self] old, paper in self?.rekey(old, to: paper) }
+        store.onProblem = { [weak self] text in self?.say(text) }
         store.start()
         settingsChanged()
     }
@@ -71,7 +81,10 @@ final class NoteDesk {
         } else if !on && listening {
             listening = false
             WindowEvents.shared.stopListening("papernotes")
+            for flush in flushers.values { flush() }
             hideAll()
+            // Notes off: every window narrowed for one gets its width back (unless the person changed it since).
+            giveBackAll(wait: false)
         }
         for panel in panels.values { panel.refresh() }
         // A browser showing another tab says so only through its title: heard only while a note is on a page.
@@ -99,6 +112,21 @@ final class NoteDesk {
     private func hideAll() {
         for panel in panels.values { panel.orderOut(nil) }
         for panel in tabPanels.values { panel.orderOut(nil) }
+        for panel in pinPanels.values { panel.orderOut(nil) }
+    }
+
+    /// Petal quits: what's typed is saved and written, and narrowed windows get their width back, before it goes.
+    func stop() {
+        for flush in flushers.values { flush() }
+        giveBackAll(wait: true)
+        NoteStore.flush()
+    }
+
+    /// Something couldn't be done to the notes' files: said by the AI button for a moment.
+    private func say(_ text: String) {
+        guard let dock = app.docks.focusedDock else { return }
+        app.tooltips.show(text, over: "claude", in: dock)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.app.tooltips.show(nil, over: "claude", in: dock) }
     }
 
     // MARK: What's in front
@@ -175,6 +203,7 @@ final class NoteDesk {
         if fits != here { here = fits }
         if moved {
             lines = [:]
+            passageRects = [:]
             // Notes that were open on the window left behind fold.
             for (key, face) in faces where face == .open && fits[key] == nil { faces[key] = .folded }
             giveBackWidths()
@@ -184,8 +213,8 @@ final class NoteDesk {
         placeDesktop()
     }
 
-    /// Where each passage stuck on this window is, off the main thread: the one place on the window its words are,
-    /// told apart by the words around it, else none ("passage moved").
+    /// Where each passage stuck on this window is, off the main thread: the one place on the window its whole quote
+    /// is, told apart by the words before and after it, else none ("passage moved").
     private func findPassages(_ scene: NoteScene) {
         guard let window = scene.window else { return }
         let wanted = here.compactMap { key, index -> (String, NoteStick)? in
@@ -196,14 +225,15 @@ final class NoteDesk {
         let pid = scene.pid
         let ticket = looks
         Self.queue.async {
-            let tops = Self.passageTops(pid: pid, window: window, wanted.map { $0.1 })
+            let bounds = Self.passageBounds(pid: pid, window: window, wanted.map { $0.1 })
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard ticket == self.looks, let frame = self.frame else { return }
                     var found: [String: Bool] = [:]
                     for (index, item) in wanted.enumerated() {
-                        if let top = tops[index] { self.lines[item.0] = top - frame.minY } else { self.lines[item.0] = nil }
-                        found[item.0] = tops[index] != nil
+                        self.lines[item.0] = bounds[index].map { $0.minY - frame.minY }
+                        self.passageRects[item.0] = bounds[index]
+                        found[item.0] = bounds[index] != nil
                     }
                     if found != self.found { self.found = found }
                     self.layout()
@@ -212,15 +242,16 @@ final class NoteDesk {
         }
     }
 
-    /// Each passage's top on the screen (Accessibility's coordinates), where the app tells it: the one text element
-    /// of the window holding its words (a text area's own bounds for them), within half a second. Off the main thread.
-    nonisolated static func passageTops(pid: pid_t, window number: CGWindowID, _ passages: [NoteStick]) -> [CGFloat?] {
+    /// Each passage's words' bounds on the screen (Accessibility's coordinates), where the app tells them: among
+    /// the window's texts that hold its whole quote, the one place the words around it fit best (NoteMatch.pick),
+    /// within half a second; a text's own bounds for those words where it gives them, else the text's frame. Off the
+    /// main thread.
+    nonisolated static func passageBounds(pid: pid_t, window number: CGWindowID, _ passages: [NoteStick]) -> [CGRect?] {
         guard Windows.trusted else { return passages.map { _ in nil } }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.2)
         let all: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
         guard let window = all.first(where: { Windows.id(of: $0) == number }) else { return passages.map { _ in nil } }
-        let heads = passages.map { String($0.quote.prefix(40)) }
         var hits: [[(AXUIElement, String)]] = passages.map { _ in [] }
         var queue: [(AXUIElement, Int)] = [(window, 0)]
         var seen = 0
@@ -231,32 +262,31 @@ final class NoteDesk {
             let role: String = Windows.value(element, kAXRoleAttribute) ?? ""
             if role == kAXStaticTextRole as String || role == kAXTextAreaRole as String || role == kAXTextFieldRole as String {
                 if let value: String = Windows.value(element, kAXValueAttribute), !value.isEmpty {
-                    for (index, head) in heads.enumerated() where !head.isEmpty && value.contains(head) { hits[index].append((element, value)) }
+                    for (index, passage) in passages.enumerated() where !passage.quote.isEmpty && value.contains(passage.quote) { hits[index].append((element, value)) }
                 }
             }
             if depth < 60, let children: [AXUIElement] = Windows.value(element, kAXChildrenAttribute) {
                 queue.append(contentsOf: children.map { ($0, depth + 1) })
             }
         }
-        return passages.indices.map { index -> CGFloat? in
+        // The window wasn't read whole in time: whatever was found may not be the only place.
+        let whole = queue.isEmpty
+        return passages.indices.map { index -> CGRect? in
             let passage = passages[index]
-            // More than one element has the words: the one whose own text tells it apart, else none.
-            let candidates = hits[index].filter { NoteMatch.locate(quote: heads[index], before: String(passage.before.suffix(30)), after: "", in: $0.1) != nil }
-            guard candidates.count == 1, let (element, value) = candidates.first else { return nil }
-            if let range = NoteMatch.locate(quote: heads[index], before: String(passage.before.suffix(30)), after: "", in: value) {
-                let ns = NSRange(range, in: value)
-                var cf = CFRange(location: ns.location, length: ns.length)
-                if let axRange = AXValueCreate(.cfRange, &cf) {
-                    var raw: CFTypeRef?
-                    if AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeParameterizedAttribute as CFString, axRange, &raw) == .success,
-                       let raw, CFGetTypeID(raw) == AXValueGetTypeID() {
-                        var rect = CGRect.zero
-                        AXValueGetValue(raw as! AXValue, .cgRect, &rect)
-                        if rect.height > 1 { return rect.minY }
-                    }
+            guard whole, let picked = NoteMatch.pick(quote: passage.quote, before: passage.before, after: passage.after, in: hits[index].map(\.1)) else { return nil }
+            let (element, value) = hits[index][picked.text]
+            let ns = NSRange(picked.range, in: value)
+            var cf = CFRange(location: ns.location, length: ns.length)
+            if let axRange = AXValueCreate(.cfRange, &cf) {
+                var raw: CFTypeRef?
+                if AXUIElementCopyParameterizedAttributeValue(element, kAXBoundsForRangeParameterizedAttribute as CFString, axRange, &raw) == .success,
+                   let raw, CFGetTypeID(raw) == AXValueGetTypeID() {
+                    var rect = CGRect.zero
+                    AXValueGetValue(raw as! AXValue, .cgRect, &rect)
+                    if rect.height > 1 { return rect }
                 }
             }
-            return Windows.frame(of: element)?.minY
+            return Windows.frame(of: element)
         }
     }
 
@@ -276,6 +306,7 @@ final class NoteDesk {
     func layout() {
         guard on, let frame, let scene, scene.window != nil else {
             for panel in tabPanels.values { panel.orderOut(nil) }
+            for panel in pinPanels.values { panel.orderOut(nil) }
             for (key, panel) in panels where !isDesktop(key) { panel.orderOut(nil) }
             return
         }
@@ -321,6 +352,27 @@ final class NoteDesk {
             panel.place(paperFrame: rect)
         }
         for (key, panel) in panels where !isDesktop(key) && !showing.contains(key) { panel.orderOut(nil) }
+        drawPins(showing)
+    }
+
+    /// The sketch's dashed line in the notebook's color from each showing note to its sentence, wherever the
+    /// sentence's bounds are known.
+    private func drawPins(_ showing: [String]) {
+        var keep: Set<String> = []
+        for key in showing {
+            guard let rect = passageRects[key], let paper = store.paper(key), let note = panels[key], note.isVisible else { continue }
+            keep.insert(key)
+            let words = NoteRules.appKitFrame(rect, primaryHeight: primaryHeight)
+            let paperFrame = note.frame.insetBy(dx: PaperLook.margin, dy: PaperLook.margin)
+            let pin = pinPanels[key] ?? PinPanel()
+            pinPanels[key] = pin
+            pin.show(from: CGPoint(x: words.maxX, y: words.midY), to: CGPoint(x: paperFrame.minX, y: paperFrame.maxY - 28),
+                     color: store.color(of: paper.notebook))
+        }
+        for (key, pin) in pinPanels where !keep.contains(key) {
+            pin.orderOut(nil)
+            pinPanels[key] = nil
+        }
     }
 
     /// A notebook's color as the tabs name it.
@@ -390,6 +442,8 @@ final class NoteDesk {
 
     func fold(_ key: String) {
         guard faces[key] == .open || faces[key] == .back else { return }
+        Self.roomTurn.cancel()
+        flushers[key]?()
         faces[key] = .folded
         if keyboard == key { keyboard = nil }
         letGoIfEmpty(key)
@@ -399,6 +453,8 @@ final class NoteDesk {
     }
 
     func hide(_ key: String) {
+        Self.roomTurn.cancel()
+        flushers[key]?()
         faces[key] = nil
         if keyboard == key { keyboard = nil }
         panels[key]?.orderOut(nil)
@@ -437,11 +493,7 @@ final class NoteDesk {
         faces[key] = nil
         panels[key]?.orderOut(nil)
         panels[key] = nil
-        let url = paper.url
-        NoteStore.io.async {
-            try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
-            DispatchQueue.main.async { MainActor.assumeIsolated { self.store.reload() } }
-        }
+        store.trash(paper)
     }
 
     // MARK: Room beside the window
@@ -452,6 +504,7 @@ final class NoteDesk {
               here.keys.contains(where: { faces[$0] == .open && local.spots[store.paper($0)?.noteID ?? ""] == nil }),
               let visible = visible(for: frame), let target = NoteRoom.narrowed(window: frame, visible: visible, note: PaperLook.openWidth) else { return }
         let pid = scene.pid
+        let turn = Self.roomTurn.next()
         Self.queue.async {
             let app = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(app, 0.3)
@@ -460,14 +513,39 @@ final class NoteDesk {
                   NoteRoom.close(now, frame) else { return }
             var settable: DarwinBoolean = false
             guard AXUIElementIsAttributeSettable(element, kAXSizeAttribute as CFString, &settable) == .success, settable.boolValue else { return }
-            let given = Windows.place(element, pid: pid, target) ?? target
+            // The note folded (or notes went off, or Petal is quitting) while this waited: the window stays as it is.
+            guard let given = Windows.place(element, pid: pid, target, live: { Self.roomTurn.current(turn) }) else { return }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.narrowed[number] = (pid, frame, given)
+                    // Folded meanwhile: its width comes back at once.
+                    if !Self.roomTurn.current(turn) || !self.here.keys.contains(where: { self.faces[$0] == .open }) { self.giveBackWidths() }
                     self.lookAgain(after: 0.05)
                 }
             }
         }
+    }
+
+    /// Every narrowed window gets its width back, open notes or not (notes off, Petal quitting). `wait`: before
+    /// returning (on quit).
+    private func giveBackAll(wait: Bool) {
+        Self.roomTurn.cancel()
+        let records = narrowed
+        narrowed = [:]
+        guard !records.isEmpty else { return }
+        let work: @Sendable () -> Void = {
+            for (number, record) in records { Self.giveBack(number, record) }
+        }
+        if wait { Self.queue.sync(execute: work) } else { Self.queue.async(execute: work) }
+    }
+
+    nonisolated private static func giveBack(_ number: CGWindowID, _ record: (pid: pid_t, before: CGRect, given: CGRect)) {
+        let app = AXUIElementCreateApplication(record.pid)
+        AXUIElementSetMessagingTimeout(app, 0.3)
+        let all: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
+        guard let element = all.first(where: { Windows.id(of: $0) == number }), let now = Windows.frame(of: element),
+              let back = NoteRoom.giveBack(before: record.before, given: record.given, now: now) else { return }
+        Windows.place(element, pid: record.pid, back)
     }
 
     /// Windows narrowed for a note that's no longer open get their width back, unless the person moved or resized
@@ -477,14 +555,7 @@ final class NoteDesk {
             let stillOpen = scene?.window == number && here.keys.contains { faces[$0] == .open }
             guard !stillOpen else { continue }
             narrowed[number] = nil
-            Self.queue.async {
-                let app = AXUIElementCreateApplication(record.pid)
-                AXUIElementSetMessagingTimeout(app, 0.3)
-                let all: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
-                guard let element = all.first(where: { Windows.id(of: $0) == number }), let now = Windows.frame(of: element),
-                      let back = NoteRoom.giveBack(before: record.before, given: record.given, now: now) else { return }
-                Windows.place(element, pid: record.pid, back)
-            }
+            Self.queue.async { Self.giveBack(number, record) }
         }
     }
 
@@ -499,17 +570,40 @@ final class NoteDesk {
                               dim: NSColor(white: 0.53, alpha: 1), petal: PaperLook.nsColor(NoteInk.ink(tint)), accent: color)
     }
 
-    func write(_ key: String, body: String) {
-        guard var paper = store.paper(key), paper.file.body != body else { return }
+    /// What the editor typed, made on `base` (the file as the editor last had it). Returns the next base; nil when
+    /// the paper can't be written (read only: one of a conflict's papers).
+    func write(_ key: String, body: String, base: String?) -> String? {
+        guard var paper = store.paper(key) else { return nil }
+        if store.readOnly(paper) {
+            // Typed just as it became one of two papers: kept in the copy beside it, never dropped.
+            if paper.version == nil, paper.file.body != body {
+                paper.file.body = body
+                store.keepAside(paper)
+            }
+            return nil
+        }
+        guard paper.file.body != body else { return base }
         paper.file.body = body
         if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fresh.remove(key) }
-        store.save(paper)
+        return store.save(paper, base: base)
     }
 
     func savePicture(_ data: Data, ext: String, for key: String) -> (path: String, file: URL)? {
-        guard let paper = store.paper(key) else { return nil }
-        let path = store.addPicture(data, ext: ext, to: paper)
-        return (path, paper.resolve(path))
+        guard let paper = store.paper(key), !store.readOnly(paper) else { return nil }
+        return store.addPicture(data, ext: ext, to: paper)
+    }
+
+    /// A note's file got another name on disk than it was shown with: everything showing it follows.
+    private func rekey(_ old: String, to paper: PaperNote) {
+        let new = paper.key
+        if let face = faces.removeValue(forKey: old) { faces[new] = face }
+        if keyboard == old { keyboard = new }
+        if let height = heights.removeValue(forKey: old) { heights[new] = height }
+        if let index = here.removeValue(forKey: old) { here[new] = index }
+        if fresh.remove(old) != nil { fresh.insert(new) }
+        if let line = lines.removeValue(forKey: old) { lines[new] = line }
+        if let flush = flushers.removeValue(forKey: old) { flushers[new] = flush }
+        if let panel = panels.removeValue(forKey: old) { panel.rekey(new); panels[new] = panel }
     }
 
     func keep(_ key: String) {
@@ -605,7 +699,11 @@ final class NoteDesk {
             var s = stick(.tab)
             s.url = tab.url
             s.title = tab.title
+            // Its identity as NoteTab tells tabs apart: its id (Chromium) or its tab-strip button (Safari, Firefox,
+            // Zen, this run of Petal only), and whether it was the one tab with its address.
             s.tabID = tab.id
+            s.tabElement = tab.element
+            s.shared = tab.shared
             offers.append(s)
         }
         if !scene.file.isEmpty {
@@ -946,31 +1044,15 @@ final class NoteDesk {
         let wasShown = faces[key]
         store.move(paper, to: notebook) { moved in
             guard let moved else { return }
-            if let face = wasShown {
-                self.faces[key] = nil
-                self.faces[moved.key] = face
-                if let panel = self.panels.removeValue(forKey: key) { panel.rekey(moved.key); self.panels[moved.key] = panel }
-                if let index = self.here.removeValue(forKey: key) { self.here[moved.key] = index }
-            }
+            _ = wasShown
+            self.rekey(key, to: moved)
             self.remember(moved.notebook, for: moved.file.places.first)
             self.layout()
         }
     }
 
     /// A notebook's color, kept on its cover (made if it has none).
-    func recolor(_ notebook: String, _ value: String) {
-        if let book = store.notebook(notebook), let key = book.cover, var cover = store.paper(key) {
-            cover.file.color = value
-            store.save(cover)
-        } else {
-            var cover = NoteFile(body: "# About this notebook\n\nWhat \(notebook) is for.")
-            cover.cover = true
-            cover.color = value
-            let folder = store.root.appending(path: notebook)
-            NoteStore.io.async { NoteStore.write(cover, to: folder.appending(path: NoteShelf.coverName)) }
-        }
-        store.reload()
-    }
+    func recolor(_ notebook: String, _ value: String) { store.recolor(notebook, value) }
 
     static func swatch(_ color: NSColor) -> NSImage {
         NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
@@ -1152,7 +1234,7 @@ struct NotePanelContent: View {
             PaperView(paper: paper, color: desk.store.color(of: paper.notebook), glass: desk.glass, face: face,
                       place: head.place, notebook: head.notebook, others: head.others, footer: desk.footer(paper),
                       keyboard: desk.keyboard == key, editorHeight: desk.heights[key] ?? 0, desk: desk,
-                      conflict: (desk.store.conflicts[paper.noteID]?.count ?? 0) > 1)
+                      conflict: desk.store.readOnly(paper))
                 .background {
                     // Open, the paper moves by its margins and letterhead's row, never by the writing (the editor
                     // takes its own clicks and drags).
@@ -1244,5 +1326,52 @@ final class EdgeTabPanel: NSPanel {
         guard on != hovering else { return }
         hovering = on
         draw()
+    }
+}
+
+/// The dashed line from an open note to its sentence (the sketch's pin): drawn in a panel the pointer goes through.
+final class PinPanel: NSPanel {
+    private let hosting = NSHostingView(rootView: AnyView(EmptyView()))
+
+    init() {
+        super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        contentView = hosting
+        isFloatingPanel = true
+        level = .floating
+        backgroundColor = .clear
+        isOpaque = false
+        hasShadow = false
+        hidesOnDeactivate = false
+        ignoresMouseEvents = true
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+    }
+
+    override var canBecomeKey: Bool { false }
+
+    /// From the end of the sentence to the note's left edge (AppKit's coordinates).
+    func show(from start: CGPoint, to end: CGPoint, color: NSColor) {
+        let box = CGRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y))
+            .insetBy(dx: -4, dy: -4)
+        guard box.width > 12 else { return orderOut(nil) }
+        let a = CGPoint(x: start.x - box.minX, y: box.maxY - start.y)
+        let b = CGPoint(x: end.x - box.minX, y: box.maxY - end.y)
+        hosting.rootView = AnyView(PinLine(from: a, to: b, color: Color(nsColor: color)).frame(width: box.width, height: box.height))
+        setFrame(box.integral, display: true)
+        if !isVisible { orderFrontRegardless() }
+    }
+}
+
+/// The sketch's pin: a curve, 1.5 points, dashed 3 and 4, at 55%.
+struct PinLine: View {
+    let from: CGPoint
+    let to: CGPoint
+    let color: Color
+
+    var body: some View {
+        Path { path in
+            path.move(to: from)
+            path.addCurve(to: to, control1: CGPoint(x: from.x + 90, y: from.y), control2: CGPoint(x: to.x - 90, y: to.y))
+        }
+        .stroke(color.opacity(0.55), style: StrokeStyle(lineWidth: 1.5, dash: [3, 4]))
     }
 }

@@ -59,9 +59,9 @@ struct PaperView: View {
             strip
         }
         .overlay(alignment: .bottomTrailing) { corner }
-        .background { surface }
         .clipShape(.rect(cornerRadius: 12))
-        .modifier(PaperShadow(glass: glass))
+        // The shadow is the paper's alone: on the whole view SwiftUI would give every letter one too.
+        .background { surface.clipShape(.rect(cornerRadius: 12)).modifier(PaperShadow(glass: glass)) }
         .modifier(PaperScheme(glass: glass))
     }
 
@@ -113,10 +113,13 @@ struct PaperView: View {
                 let titled = NoteBlock.blocks(paper.file.body).first { !$0.words.trimmingCharacters(in: .whitespaces).isEmpty }.map { if case .heading = $0 { true } else { false } } ?? false
                 let title = paper.file.title
                 let preview = paper.file.preview
-                let head = Text(titled ? title + (preview.isEmpty ? "" : "\n") : "").font(.system(size: 14, weight: .bold))
-                let rest = Text(titled ? preview : [title, preview].filter { !$0.isEmpty }.joined(separator: " ")).font(.system(size: 13.5, weight: .medium))
-                Text("\(head)\(rest)")
-                    .lineSpacing(13.5 * 0.32 - 3)
+                // The sketch's folded note: a 14-point bold title, 3 points above 13.5-point medium words at a 1.32 line height.
+                VStack(alignment: .leading, spacing: 3) {
+                    if titled { Text(title).font(.system(size: 14, weight: .bold)).lineLimit(2) }
+                    Text(titled ? preview : [title, preview].filter { !$0.isEmpty }.joined(separator: " "))
+                        .font(.system(size: 13.5, weight: .medium))
+                        .lineSpacing(13.5 * 1.32 - 16.1)
+                }
                     .foregroundStyle(words)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .clipped()
@@ -143,12 +146,14 @@ struct PaperView: View {
             }
             .padding(.bottom, 6)
         }
-        if snapshotting || desk == nil {
+        // One of a conflict's papers is read only, with Keep this one: nothing typed into it could be kept.
+        if snapshotting || desk == nil || conflict {
             NoteBodyView(paper: paper, tint: tint, accent: color, glass: glass).padding(.bottom, 18)
         } else if let desk {
             NoteEditorView(paper: paper, style: desk.style(color, glass: glass), focus: keyboard,
                            height: { desk.measured(paper.key, $0) },
-                           save: { desk.write(paper.key, body: $0) },
+                           save: { desk.write(paper.key, body: $0, base: $1) },
+                           register: { desk.flushers[paper.key] = $0 },
                            picture: { desk.savePicture($0, ext: $1, for: paper.key) },
                            escape: { desk.fold(paper.key) })
                 .frame(height: min(PaperLook.maxOpen - 70, max(PaperLook.minOpen - 70, editorHeight)))
@@ -161,19 +166,13 @@ struct PaperView: View {
             Text("The back of this note").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(words)
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(Array(paper.file.places.enumerated()), id: \.offset) { _, stick in
-                    HStack(alignment: .firstTextBaseline, spacing: 7) {
-                        Text("✓").font(.system(size: 11, weight: .bold)).foregroundStyle(PaperLook.color(NoteInk.mix(tint, 0.7, NoteInk.RGB(r: 0, g: 0, b: 0))))
-                        Text(NoteDesk.describe(stick)).font(.system(size: 12.5)).foregroundStyle(words).lineLimit(2)
-                    }
+                    Text(NoteDesk.describe(stick)).font(.system(size: 12.5)).foregroundStyle(words).lineLimit(2)
                 }
                 if paper.file.places.isEmpty {
                     Text("Not stuck anywhere yet.").font(.system(size: 12.5)).foregroundStyle(glass ? .secondary : PaperLook.footer)
                 }
             }
-            HStack(spacing: 6) {
-                Stamp(text: notebook.uppercased(), tint: tint)
-                if paper.file.places.count > 1 { Stamp(text: "\(paper.file.places.count) PLACES", tint: tint) }
-            }
+            Text("In \(notebook)").font(.system(size: 12.5)).foregroundStyle(words)
             Text("Made \(NoteDesk.when(paper.file.created)) · changed \(NoteDesk.when(paper.file.modified))")
                 .font(.system(size: 11)).foregroundStyle(glass ? .secondary : Color(white: 0.53))
             if let desk {
@@ -305,20 +304,6 @@ struct PictureView: View {
     }
 }
 
-/// A stamp on the back of a note.
-struct Stamp: View {
-    let text: String
-    let tint: NoteInk.RGB
-
-    var body: some View {
-        let ink = PaperLook.color(NoteInk.mix(tint, 0.55, NoteInk.ink))
-        Text(text).font(.system(size: 10, weight: .bold)).tracking(0.4).foregroundStyle(ink)
-            .padding(.vertical, 2).padding(.horizontal, 6)
-            .overlay { RoundedRectangle(cornerRadius: 5).stroke(ink, lineWidth: 1.5) }
-            .rotationEffect(.degrees(-4)).opacity(0.75)
-    }
-}
-
 /// The folded corner: the bottom-right triangle of a 24-point square, its top-left corner rounded.
 struct FoldCorner: Shape {
     func path(in rect: CGRect) -> Path {
@@ -340,13 +325,14 @@ struct PaperScheme: ViewModifier {
 }
 
 /// The sketch's two shadows under paper: a hairline one close by and a soft one below. Glass has macOS's own.
+/// Drawn as one layer's shadow (compositingGroup), so what's inside never gets a shadow of its own.
 struct PaperShadow: ViewModifier {
     let glass: Bool
     func body(content: Content) -> some View {
         if glass {
-            content.shadow(color: .black.opacity(0.14), radius: 13, y: 10)
+            content   // Liquid Glass casts its own; a group around it would flatten the glass
         } else {
-            content.shadow(color: .black.opacity(0.08), radius: 0.5, y: 1).shadow(color: .black.opacity(0.13), radius: 9, y: 8)
+            content.compositingGroup().shadow(color: .black.opacity(0.08), radius: 0.5, y: 1).shadow(color: .black.opacity(0.13), radius: 9, y: 8)
         }
     }
 }
@@ -379,6 +365,7 @@ struct EdgeTabView: View {
                 shape.fill(Color(nsColor: color)).frame(width: 13, height: tab.height)
             }
         }
+        .compositingGroup()
         .shadow(color: .black.opacity(0.18), radius: 2, x: outside ? 1 : -1, y: 1)
         .opacity(tab.faded ? 0.45 : 1)
         .overlay(alignment: outside ? .topTrailing : .topLeading) {

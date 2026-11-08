@@ -56,24 +56,37 @@ struct NoteStick: Equatable, Sendable {
     var pid: Int32? = nil
     var window: UInt32? = nil
     var tabID: String? = nil
+    /// How many of the browser's tabs had its address when it was stuck (Chromium; nil when unknown): only a tab
+    /// that was the one with its address is found again by it after the browser restarts (NoteRules.byAddress).
+    var shared: Int? = nil
+    /// Safari's, Firefox's and Zen's tab: its tab-strip button (NoteTab.element), meaningful only to the Petal that
+    /// saw it, so never written.
+    var tabElement: Int? = nil
     var desktop: Int? = nil
     var mode = ""
-    /// Keys this Petal doesn't know (a later one's, or the person's own), written back as they were.
-    var extra: [(key: String, value: String)] = []
+    /// Keys this Petal doesn't know (a later one's, or the person's own), each with its lines exactly as written
+    /// (nested ones too), written back as they were.
+    var extra: [(key: String, lines: [String])] = []
 
     static func == (a: NoteStick, b: NoteStick) -> Bool {
         a.kind == b.kind && a.app == b.app && a.appName == b.appName && a.url == b.url && a.title == b.title && a.path == b.path
             && a.bookmark == b.bookmark && a.quote == b.quote && a.before == b.before && a.after == b.after && a.mac == b.mac
-            && a.pid == b.pid && a.window == b.window && a.tabID == b.tabID && a.desktop == b.desktop && a.mode == b.mode
-            && a.extra.map(\.key) == b.extra.map(\.key) && a.extra.map(\.value) == b.extra.map(\.value)
+            && a.pid == b.pid && a.window == b.window && a.tabID == b.tabID && a.shared == b.shared && a.tabElement == b.tabElement
+            && a.desktop == b.desktop && a.mode == b.mode
+            && a.extra.map(\.key) == b.extra.map(\.key) && a.extra.map(\.lines) == b.extra.map(\.lines)
     }
+
+    /// The tab as NoteRules knows tabs.
+    var noteTab: NoteTab { NoteTab(id: tabID, element: tabElement, shared: shared, url: url, title: title) }
 
     /// The same place, whatever was learned about it since (a new window number, a title).
     func samePlace(_ other: NoteStick) -> Bool {
         guard kind == other.kind else { return false }
         switch kind {
         case .passage: return quote == other.quote && (url.isEmpty ? path == other.path : NoteRules.sameURL(url, other.url))
-        case .tab: return tabID != nil && tabID == other.tabID ? true : NoteRules.sameURL(url, other.url)
+        case .tab:
+            if mac == other.mac, let a = pid, let b = other.pid { return NoteRules.sameTab(noteTab, pid: a, other.noteTab, pid: b) }
+            return NoteRules.byAddress(noteTab, other.noteTab)
         case .file: return path == other.path
         case .window: return app == other.app && (window != nil && window == other.window && mac == other.mac || title == other.title)
         case .app: return app == other.app
@@ -117,10 +130,13 @@ enum NoteMatch {
             if !stick.url.isEmpty, let tab = scene.tab { return NoteRules.samePage(stick.url, tab.url) }
             return !stick.path.isEmpty && stick.path == scene.file
         case .tab:
+            // NoteTab's rules exactly: its own tab while the browser runs (its id, or its tab-strip button), wherever
+            // it moved and whatever it shows, never another tab on the same address; after the browser restarted
+            // (or on another Mac), a Chromium tab by its address only when it's the one tab of the browser with it,
+            // then and now. Safari's, Firefox's and Zen's tabs never by address.
             guard let now = scene.tab, stick.app.isEmpty || stick.app == scene.app else { return false }
-            // Its own tab while the browser runs (by its id, on this Mac), else its page, by its address.
-            if let id = stick.tabID, stick.mac == scene.mac, stick.pid == scene.pid, let other = now.id { return id == other || NoteRules.sameURL(stick.url, now.url) }
-            return NoteRules.sameURL(stick.url, now.url)
+            let pid = stick.mac == scene.mac ? stick.pid ?? -1 : -1
+            return NoteRules.sameTab(stick.noteTab, pid: pid, now, pid: scene.pid)
         case .file:
             return !stick.path.isEmpty && stick.path == scene.file
         case .window:
@@ -159,6 +175,27 @@ enum NoteMatch {
         }
         let scored = found.map { ($0, score($0)) }.sorted { $0.1 > $1.1 }
         return scored[0].1 > scored[1].1 ? scored[0].0 : nil
+    }
+
+    /// Where a passage is among a window's texts: every place its whole quote is, in any of them, told apart by
+    /// the words before and after it. The one that fits them best, by the number of matching characters; nil when
+    /// it isn't there, or two places fit as well as each other (never a guess: "passage moved").
+    static func pick(quote: String, before: String, after: String, in texts: [String]) -> (text: Int, range: Range<String.Index>)? {
+        guard !quote.isEmpty else { return nil }
+        var found: [(Int, Range<String.Index>, Int)] = []
+        for (index, text) in texts.enumerated() {
+            var from = text.startIndex
+            while from < text.endIndex, let range = text.range(of: quote, range: from..<text.endIndex) {
+                let head = String(text[..<range.lowerBound].suffix(before.count))
+                let tail = String(text[range.upperBound...].prefix(after.count))
+                found.append((index, range, common(suffixOf: head, before) + common(prefixOf: tail, after)))
+                from = text.index(after: range.lowerBound)
+            }
+        }
+        guard !found.isEmpty else { return nil }
+        let sorted = found.sorted { $0.2 > $1.2 }
+        if sorted.count > 1, sorted[0].2 == sorted[1].2 { return nil }
+        return (sorted[0].0, sorted[0].1)
     }
 
     private static func common(suffixOf a: String, _ b: String) -> Int {
@@ -279,11 +316,12 @@ struct NoteFile: Equatable, Sendable {
                 if let pid = place.pid { fields.append(("pid", "\(pid)")) }
                 if let window = place.window { fields.append(("window", "\(window)")) }
                 if let tab = place.tabID { fields.append(("tab", Self.quoted(tab))) }
+                if let shared = place.shared { fields.append(("shared", "\(shared)")) }
                 if let desktop = place.desktop { fields.append(("desktop", "\(desktop)")) }
-                for (key, value) in place.extra { fields.append((key, value)) }
                 for (offset, field) in fields.enumerated() {
                     head.append((offset == 0 ? "  - " : "    ") + "\(field.0): \(field.1)")
                 }
+                for item in place.extra { head.append(contentsOf: item.lines) }
             }
         }
         for item in extra { head.append(contentsOf: item.lines) }
@@ -309,22 +347,43 @@ struct NoteFile: Equatable, Sendable {
         return value
     }
 
+    /// The places list: items ("  - kind: tab"), each field on a line of its own one step in. A field this Petal
+    /// doesn't know keeps its lines exactly as written, and so do the lines nested under it.
     private static func places(_ lines: [String]) -> [NoteStick] {
-        var items: [[(String, String)]] = []
+        func indent(_ line: String) -> Int { line.prefix { $0 == " " }.count }
+        var items: [[(key: String, raw: String, lines: [String])]] = []
+        var fieldIndent = Int.max
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            let isItem = trimmed.hasPrefix("- ")
-            let field = isItem ? String(trimmed.dropFirst(2)) : trimmed
-            if isItem { items.append([]) }
-            guard !items.isEmpty, let colon = field.firstIndex(of: ":") else { continue }
-            items[items.count - 1].append((String(field[..<colon]), String(field[field.index(after: colon)...]).trimmingCharacters(in: .whitespaces)))
+            guard !trimmed.isEmpty else { continue }
+            let at = indent(line)
+            if trimmed.hasPrefix("- ") && at < fieldIndent {
+                // A new item; its first field is on the same line.
+                items.append([])
+                fieldIndent = at + 2
+                let field = String(trimmed.dropFirst(2))
+                if let colon = field.firstIndex(of: ":") {
+                    items[items.count - 1].append((String(field[..<colon]), String(field[field.index(after: colon)...]).trimmingCharacters(in: .whitespaces),
+                                                   [String(repeating: " ", count: fieldIndent) + field]))
+                }
+                continue
+            }
+            guard !items.isEmpty else { continue }
+            if at > fieldIndent, !items[items.count - 1].isEmpty {
+                // Nested under the field before: kept with it, as written.
+                items[items.count - 1][items[items.count - 1].count - 1].lines.append(line)
+            } else if let colon = trimmed.firstIndex(of: ":") {
+                items[items.count - 1].append((String(trimmed[..<colon]), String(trimmed[trimmed.index(after: colon)...]).trimmingCharacters(in: .whitespaces), [line]))
+            }
         }
         return items.compactMap { fields in
-            guard let kind = fields.first(where: { $0.0 == "kind" }).flatMap({ NoteStick.Kind(rawValue: scalar($0.1)) }) else { return nil }
+            guard let kind = fields.first(where: { $0.key == "kind" }).flatMap({ NoteStick.Kind(rawValue: scalar($0.raw)) }) else { return nil }
             var stick = NoteStick(kind: kind)
-            for (key, raw) in fields {
-                let value = scalar(raw)
-                switch key {
+            for field in fields {
+                let value = scalar(field.raw)
+                // A known key with lines nested under it isn't one this Petal wrote: kept as written.
+                if field.lines.count > 1 { stick.extra.append((key: field.key, lines: field.lines)); continue }
+                switch field.key {
                 case "kind": break
                 case "app": stick.app = value
                 case "appName": stick.appName = value
@@ -340,8 +399,9 @@ struct NoteFile: Equatable, Sendable {
                 case "pid": stick.pid = Int32(value)
                 case "window": stick.window = UInt32(value)
                 case "tab": stick.tabID = value
+                case "shared": stick.shared = Int(value)
                 case "desktop": stick.desktop = Int(value)
-                default: stick.extra.append((key: key, value: raw))
+                default: stick.extra.append((key: field.key, lines: field.lines))
                 }
             }
             return stick
@@ -525,6 +585,77 @@ enum NoteShelf {
         var n = 2
         while taken.contains("\(stem) \(n).md".lowercased()) { n += 1 }
         return "\(stem) \(n).md"
+    }
+
+    /// The id of a note whose file has none (written by hand, or by another app): where it is under the notes'
+    /// folder, so two files with one name in two notebooks are never taken for one note. Written into the file the
+    /// first time Petal saves it.
+    static func fallbackID(relativePath: String) -> String { "file:" + relativePath }
+
+    /// A file's path under `root`, or nil when it isn't under it.
+    static func relative(_ path: String, to root: String) -> String? {
+        guard let inside = within(path, root) else { return nil }
+        return inside
+    }
+
+    /// `path` inside `root` (both absolute): the part under it, or nil when it's `root` itself, outside it, or gets
+    /// out with "..". Petal writes, moves and trashes note files only where this says yes (with every part of the
+    /// path checked for a symbolic link first).
+    static func within(_ path: String, _ root: String) -> String? {
+        let parts = (path as NSString).standardizingPath.split(separator: "/", omittingEmptySubsequences: true)
+        let base = (root as NSString).standardizingPath.split(separator: "/", omittingEmptySubsequences: true)
+        guard path.hasPrefix("/"), root.hasPrefix("/"), parts.count > base.count, Array(parts.prefix(base.count)) == base,
+              !parts.contains(".."), !parts.contains(".") else { return nil }
+        return parts.dropFirst(base.count).joined(separator: "/")
+    }
+
+    /// What saving a note does with its file as it is on disk now (`disk`, nil when there's none), when the person's
+    /// edit was made on `base` (the file as Petal last read or wrote it; nil for a new note): write it, or, when
+    /// someone changed the file since (another editor, another Mac), keep both: the edit goes to a copy beside it,
+    /// and the two show as one note's papers until one is kept.
+    enum Save: Equatable { case write, keepBoth }
+
+    static func save(disk: String?, base: String?) -> Save {
+        guard let disk, let base else { return .write }
+        return disk == base ? .write : .keepBoth
+    }
+
+    /// The copy's name for an edit kept beside a file changed elsewhere: "Name (conflicted copy).md", then
+    /// "Name (conflicted copy 2).md", … (iCloud's own words, so it reads as one).
+    static func conflictName(_ stem: String, taken: Set<String>) -> String {
+        var name = "\(stem) (conflicted copy).md"
+        var n = 2
+        while taken.contains(name.lowercased()) {
+            name = "\(stem) (conflicted copy \(n)).md"
+            n += 1
+        }
+        return name
+    }
+
+    /// The notes after a read of the folder that began at `started`: what was read, except notes changed in memory
+    /// since it began (`changed`: key → when, on the same clock), which keep their newer selves, and notes made
+    /// since, which the read can't have seen yet. Removed since (`removed`): left out.
+    static func fenced<T>(read: [T], memory: [T], key: (T) -> String, started: Int, changed: [String: Int], removed: [String: Int]) -> [T] {
+        let newer = { (k: String) in (changed[k] ?? Int.min) >= started }
+        let gone = { (k: String) in (removed[k] ?? Int.min) >= started }
+        let mine = Dictionary(memory.map { (key($0), $0) }, uniquingKeysWith: { a, _ in a })
+        var out: [T] = []
+        var seen: Set<String> = []
+        for item in read {
+            let k = key(item)
+            seen.insert(k)
+            if gone(k) { continue }
+            out.append(newer(k) ? mine[k] ?? item : item)
+        }
+        for item in memory where !seen.contains(key(item)) && newer(key(item)) && !gone(key(item)) { out.append(item) }
+        return out
+    }
+
+    /// A note's pictures' folder, named for the note's id (never its file's name), so it keeps its name wherever the
+    /// note moves and two notes never share one: "<id>.assets".
+    static func assetsFolder(id: String) -> String {
+        let safe = id.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) || $0 == "-" ? String($0) : "-" }.joined()
+        return (safe.isEmpty ? "note" : String(safe.prefix(80))) + assets
     }
 
     /// A copy iCloud Drive made of a file that changed on two Macs at once: "Name 2.md" beside "Name.md" (or

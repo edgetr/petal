@@ -7,7 +7,7 @@ import AppKit
 enum Headless { nonisolated(unsafe) static var on = true }
 final class NoteStore { nonisolated static let io = DispatchQueue(label: "petal.check.notes") }
 @MainActor final class Sites { static let shared = Sites(); func icon(_ id: String) -> NSImage? { nil } }
-struct PaperNote { var file: NoteFile; var url: URL; var key: String { url.path } }
+struct PaperNote { var file: NoteFile; var url: URL; var revision: String? = nil; var key: String { url.path }; var noteID: String { file.id } }
 
 @main
 struct NoteRichCheck {

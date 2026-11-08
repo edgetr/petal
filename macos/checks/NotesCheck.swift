@@ -33,7 +33,7 @@ struct NotesCheck {
         window.mac = "mac-1"
         window.pid = 42
         window.window = 7
-        window.extra = [(key: "later", value: "\"kept\"")]
+        window.extra = [(key: "later", lines: ["    later: \"kept\""]), (key: "watch", lines: ["    watch:", "      every: morning", "      - at: 9"])]
         note.places = [passage, file, window]
         note.chat = "8E1C-chat"
         note.extra = [(key: "watch", lines: ["watch:", "  every: morning"])]
@@ -42,6 +42,10 @@ struct NotesCheck {
         expect(back == note, "a note reads back as it was written", "\n\(text)")
         expect(back.serialized() == text, "and writes the same text again")
         expect(back.places[2].extra.first?.key == "later", "a place's unknown key is kept")
+        expect(back.places[2].extra.last?.lines == ["    watch:", "      every: morning", "      - at: 9"], "and the lines nested under one, exactly", "\(back.places[2].extra)")
+        let nested = NoteFile.parse("---\nid: N\nplaces:\n  - kind: app\n    app: com.example\n    rule:\n      - when: open\n        do: show\n---\nhi", fallbackID: "", fallbackDate: when)
+        expect(nested.places.first?.app == "com.example" && nested.serialized().contains("    rule:\n      - when: open\n        do: show\n"),
+               "a later Petal's nested place block reads back verbatim", nested.serialized())
         expect(text.contains("  every: morning"), "a later Petal's keys are kept as they were")
         expect(back.title == "Talk", "the title is its first heading")
         expect(back.preview.hasPrefix("☐ print the handout ☑ slides example.com"), "a folded note shows its lines after the title", back.preview)
@@ -87,28 +91,89 @@ struct NotesCheck {
                "copy names (a note called \"Day 2\" only counts beside its twin)")
         expect(NoteShelf.freeName("Talk", taken: ["talk.md", "talk 2.md"]) == "Talk 3.md", "a new file never takes another's name")
 
+        // Files with no id of their own: known by where they are, never by their name alone.
+        let todoA = NoteShelf.fallbackID(relativePath: "Work/Todo.md"), todoB = NoteShelf.fallbackID(relativePath: "Home/Todo.md")
+        expect(todoA != todoB && NoteShelf.conflicts([NoteShelf.Copy(id: todoA, file: "Todo.md", modified: when),
+                                                      NoteShelf.Copy(id: todoB, file: "Todo.md", modified: when)]).isEmpty,
+               "two Todo.md in two notebooks are two notes, never a conflict")
+        expect(NoteFile.parse("words", fallbackID: todoA, fallbackDate: when).id == todoA, "a file with no front matter takes its place's id")
+
+        // Saving over a file changed elsewhere keeps both.
+        expect(NoteShelf.save(disk: "A", base: "A") == .write && NoteShelf.save(disk: nil, base: "A") == .write && NoteShelf.save(disk: "B", base: nil) == .write,
+               "a file as the edit began, or none, is written")
+        expect(NoteShelf.save(disk: "B", base: "A") == .keepBoth, "a file changed since the edit began: both are kept")
+        expect(NoteShelf.conflictName("Talk", taken: []) == "Talk (conflicted copy).md"
+               && NoteShelf.conflictName("Talk", taken: ["talk (conflicted copy).md"]) == "Talk (conflicted copy 2).md", "the copy's name")
+        expect(NoteShelf.isCopyName(NoteShelf.conflictName("Talk", taken: [])), "and it reads as a copy")
+
+        // A read of the folder never undoes what changed here since it began.
+        struct Item: Equatable { var key: String; var body: String }
+        let read = [Item(key: "a", body: "A on disk"), Item(key: "b", body: "B on disk"), Item(key: "gone", body: "x")]
+        let memory = [Item(key: "a", body: "A typed"), Item(key: "b", body: "B old"), Item(key: "new", body: "made")]
+        let fenced = NoteShelf.fenced(read: read, memory: memory, key: \.key, started: 10, changed: ["a": 11, "b": 9, "new": 12], removed: ["gone": 13])
+        expect(fenced == [Item(key: "a", body: "A typed"), Item(key: "b", body: "B on disk"), Item(key: "new", body: "made")],
+               "changed since: kept; before: the disk's; made since: kept; removed since: gone", "\(fenced)")
+
+        // Pictures' folders by the note's id: stable through moves, never shared.
+        expect(NoteShelf.assetsFolder(id: "5F3A-1") == "5F3A-1.assets" && NoteShelf.assetsFolder(id: "file:Work/Todo.md") == "file-Work-Todo-md.assets",
+               "a note's pictures' folder")
+
+        // Writes stay inside the notes' folder.
+        expect(NoteShelf.within("/n/Inbox/a.md", "/n") == "Inbox/a.md", "inside")
+        expect(NoteShelf.within("/n2/a.md", "/n") == nil && NoteShelf.within("/n", "/n") == nil && NoteShelf.within("/n/../etc/x", "/n") == nil
+               && NoteShelf.within("relative/a.md", "/n") == nil, "never beside it, the folder itself, out by .., or relative")
+
         // MARK: Which place fits
 
         var scene = NoteScene(mac: "mac-1", app: "com.google.Chrome", pid: 50, window: 9, title: "Guide", titleTwins: 1,
-                              tab: NoteTab(id: "t1", url: "https://example.com/guide#top", title: "Guide"), file: "")
+                              tab: NoteTab(id: "t1", shared: 1, url: "https://example.com/guide#top", title: "Guide"), file: "")
         var tab = NoteStick(kind: .tab)
         tab.app = "com.google.Chrome"
-        tab.url = "https://example.com/guide"
+        tab.url = "https://example.com/guide#top"
+        tab.mac = "mac-1"
+        tab.pid = 50
+        tab.tabID = "t1"
+        tab.shared = 1
         var app = NoteStick(kind: .app)
         app.app = "com.google.Chrome"
         expect(NoteMatch.best([app, tab, passage], scene) == 2, "the passage first, on its page (the fragment doesn't count)")
-        expect(NoteMatch.best([app, tab], scene) == 0, "a tab's note by address counts the fragment (an app's own pages differ by it)")
-        scene.tab?.url = "https://example.com/guide/"
         expect(NoteMatch.best([app, tab], scene) == 1, "then its tab")
         scene.tab?.url = "https://example.com/other"
-        expect(NoteMatch.best([app, tab, passage], scene) == 0, "then its app")
-        var ownTab = tab
-        ownTab.mac = "mac-1"
-        ownTab.pid = 50
-        ownTab.tabID = "t1"
-        expect(NoteMatch.fits(ownTab, scene), "a tab's note follows its own tab to another address")
-        ownTab.mac = "mac-2"
-        expect(!NoteMatch.fits(ownTab, scene), "another Mac's tab id means nothing here")
+        expect(NoteMatch.fits(tab, scene), "a tab's note follows its own tab to another address")
+        expect(NoteMatch.best([app, tab, passage], scene) == 1, "and a passage elsewhere falls back to its tab")
+        // Two tabs on one address are two tabs: never each other's note.
+        let twin = NoteScene(mac: "mac-1", app: "com.google.Chrome", pid: 50, window: 9, tab: NoteTab(id: "t2", shared: 2, url: tab.url, title: "Guide"))
+        expect(!NoteMatch.fits(tab, twin), "a duplicate tab with another id doesn't get its note")
+        expect(NoteMatch.best([app, tab], twin) == 0, "it falls back to the app")
+        // After the browser restarted (new ids, another process): by address only when it's the one tab with it.
+        var browserBack = NoteScene(mac: "mac-1", app: "com.google.Chrome", pid: 77, window: 3, tab: NoteTab(id: "n9", shared: 1, url: tab.url, title: "Guide"))
+        expect(NoteMatch.fits(tab, browserBack), "a Chromium tab found again by its address when it's the only tab with it")
+        browserBack.tab?.shared = 2
+        expect(!NoteMatch.fits(tab, browserBack), "never when two tabs have it")
+        var wasShared = tab
+        wasShared.shared = 2
+        browserBack.tab?.shared = 1
+        expect(!NoteMatch.fits(wasShared, browserBack), "nor when it wasn't the only one when stuck")
+        // Safari, Firefox, Zen: their tab-strip button while the browser runs, never the address.
+        var safari = NoteStick(kind: .tab)
+        safari.app = "com.apple.Safari"
+        safari.url = "https://example.com/a"
+        safari.mac = "mac-1"
+        safari.pid = 60
+        safari.tabElement = 4
+        let strip = NoteScene(mac: "mac-1", app: "com.apple.Safari", pid: 60, window: 2, tab: NoteTab(element: 4, url: "https://example.com/b", title: ""))
+        expect(NoteMatch.fits(safari, strip), "a Safari tab by its button, whatever page it shows")
+        let other = NoteScene(mac: "mac-1", app: "com.apple.Safari", pid: 60, window: 2, tab: NoteTab(element: 5, url: safari.url, title: ""))
+        expect(!NoteMatch.fits(safari, other), "never another Safari tab on the same address")
+        var lost = safari
+        lost.tabElement = nil
+        expect(!NoteMatch.fits(lost, NoteScene(mac: "mac-1", app: "com.apple.Safari", pid: 61, window: 2, tab: NoteTab(element: 1, url: safari.url, title: ""))),
+               "a Safari tab after a restart is never found by address")
+        var elsewhere = tab
+        elsewhere.mac = "mac-2"
+        expect(!NoteMatch.fits(elsewhere, NoteScene(mac: "mac-1", app: "com.google.Chrome", pid: 50, window: 9, tab: NoteTab(id: "t1", shared: 2, url: "https://x.example", title: ""))),
+               "another Mac's tab id means nothing here")
+        expect(tab.samePlace(tab) && !tab.samePlace(NoteStick(kind: .tab)), "a tab is the same place only by its own identity")
         expect(NoteMatch.fits(file, NoteScene(app: "com.apple.Preview", file: "/Users/someone/Booking.pdf")), "a file's note in any app")
         var filePassage = NoteStick(kind: .passage)
         filePassage.path = "/Users/someone/Booking.pdf"
@@ -139,6 +204,15 @@ struct NotesCheck {
         expect(NoteMatch.locate(quote: "a", before: "", after: "", in: twice) == nil, "two alike with nothing to tell them apart: none")
         expect(NoteMatch.locate(quote: "Lunch", before: "", after: "", in: page).map { String(page[$0]) } == "Lunch", "once: there")
         expect(NoteMatch.locate(quote: "Dinner", before: "", after: "", in: page) == nil, "gone: none (passage moved)")
+
+        // The whole quote, told apart across a window's texts by the words before and after it.
+        let texts = ["Registration is in the hall. Doors open at 8. Talks start at 9.", "Day two: Doors open at 8. Lunch at noon."]
+        expect(NoteMatch.pick(quote: "Doors open at 8.", before: "Registration is in the hall. ", after: " Talks start at 9.", in: texts)?.text == 0,
+               "a quote in two texts, the one whose words around it fit")
+        expect(NoteMatch.pick(quote: "Doors open at 8.", before: "", after: "", in: texts) == nil, "nothing to tell them apart: passage moved")
+        expect(NoteMatch.pick(quote: "Doors open at 8. Talks start at 10.", before: "", after: "", in: texts) == nil,
+               "the whole quote, never its first words alone")
+        expect(NoteMatch.pick(quote: "Lunch at noon.", before: "", after: "", in: texts)?.text == 1, "once: there")
 
         // MARK: Edge tabs
 

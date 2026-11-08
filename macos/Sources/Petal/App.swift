@@ -163,6 +163,7 @@ final class PetalApp {
     }
 
     func stop() {
+        paper.stop()   // what's typed in notes is written, and windows narrowed for a note get their width back
         config.flush()
         InstructionsText.flush()
         Chats.flush()
