@@ -4,8 +4,10 @@ import Foundation
 /// which keeps it out of sight. A full-screen app shows macOS's Dock whatever its wait, as the pointer pushes on its
 /// edge; that can't be turned off (slowing its showing left its labels stuck on the screen). Mission Control and App
 /// Exposé show it too, and no Dock setting stops that either, so Petal's dock steps aside there instead (Dock.swift).
-/// It stays on its own edge and size, since macOS minimizes windows toward it. Quitting Petal gives it back exactly
-/// as it was.
+/// It stays on its own edge and size, since macOS minimizes windows toward it. It doesn't bounce (`no-bouncing`): a
+/// hidden Dock still slides out to bounce an app asking for attention, whatever its wait, so a notification or a
+/// launch would bring it onto the screen over Petal's. Petal's own icons bounce from badges, not from the Dock.
+/// Quitting Petal gives it back exactly as it was.
 ///
 /// The Dock's own settings are saved to ~/.config/petal/macos-dock.json before they change, and that file is the
 /// promise to put them back: if Petal crashes, the next launch keeps the saved settings (it doesn't save the hidden
@@ -15,7 +17,7 @@ enum SystemDock {
     private static let backup = Config.folder.appending(path: "macos-dock.json")
     /// What Petal changes, saved first. (`orientation` is only put back: an earlier Petal moved the Dock to a side.)
     private static let keys = [("autohide", "-bool"), ("autohide-delay", "-float"), ("autohide-time-modifier", "-float"),
-                               ("tilesize", "-float"), ("orientation", "-string")]
+                               ("tilesize", "-float"), ("orientation", "-string"), ("no-bouncing", "-bool")]
 
     static var isReplaced: Bool { FileManager.default.fileExists(atPath: backup.path) }
 
@@ -68,6 +70,8 @@ enum SystemDock {
         }
         write("autohide", "-bool", "true")
         write("autohide-delay", "-float", "1000")
+        // A hidden Dock still comes out to bounce an app's icon: it never bounces while Petal is the dock.
+        write("no-bouncing", "-bool", "true")
         // Its own pace (an earlier Petal slowed its showing to a crawl for full screen, which left its labels stuck).
         if let pace = saved["autohide-time-modifier"] as? Double { write("autohide-time-modifier", "-float", "\(pace)") } else { defaults("delete", "com.apple.dock", "autohide-time-modifier") }
         // Its own size (an earlier Petal made it smallest): about as wide as Petal's dock, which holds the same apps,
@@ -96,7 +100,7 @@ enum SystemDock {
 
     private static func read(_ key: String) -> Any? {
         guard let text = defaults("read", "com.apple.dock", key)?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
-        if key == "autohide" { return text == "1" }
+        if key == "autohide" || key == "no-bouncing" { return text == "1" }
         if key == "orientation" { return text }
         return Double(text)
     }

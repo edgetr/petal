@@ -170,6 +170,9 @@ enum DockGuard {
           size="$(plutil -extract tilesize raw -o - "$backup" 2>/dev/null)"
           case "$size" in ''|*[!0-9.]*) defaults delete com.apple.dock tilesize 2>/dev/null ;; *) defaults write com.apple.dock tilesize -float "$size" ;; esac
         fi
+        if grep -q '"no-bouncing"' "$backup"; then
+          if [ "$(plutil -extract no-bouncing raw -o - "$backup" 2>/dev/null)" = "true" ]; then defaults write com.apple.dock no-bouncing -bool true; else defaults delete com.apple.dock no-bouncing 2>/dev/null; fi
+        fi
         rm -f "$backup"
         killall Dock
         """

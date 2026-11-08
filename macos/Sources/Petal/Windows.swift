@@ -618,12 +618,21 @@ final class AXWatcher: @unchecked Sendable {
         perform { [self] in wantsTitles = on }
     }
 
-    /// Watches macOS's Dock again if it isn't watched: Petal restarts it when it hides it, and macOS may not say
-    /// when it's back. Asks Launch Services, so it's on this thread.
+    /// Watches macOS's Dock again if it isn't watched, or if the one watched has gone: Petal restarts it when it
+    /// hides it, and macOS doesn't always say the old one quit, so a watch could stay on a Dock that's gone and
+    /// Mission Control would go unheard. Asks Launch Services, so it's on this thread.
     func watchDock() {
         perform { [self] in
-            guard running, dockPID == 0,
-                  let dock = NSRunningApplication.runningApplications(withBundleIdentifier: Self.dockID).first else { return }
+            guard running,
+                  let dock = NSRunningApplication.runningApplications(withBundleIdentifier: Self.dockID).first(where: { !$0.isTerminated })
+            else { return }
+            let pid = dock.processIdentifier
+            guard pid != dockPID else { return }
+            if dockPID != 0, let old = observers.removeValue(forKey: dockPID) {
+                CFRunLoopRemoveSource(runLoop, AXObserverGetRunLoopSource(old), .defaultMode)
+            }
+            dockPID = 0
+            guard observers[pid] == nil else { dockPID = pid; return }
             observe(dock, attempt: 0, generation: generation)
         }
     }
