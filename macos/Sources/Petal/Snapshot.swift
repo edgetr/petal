@@ -244,6 +244,11 @@ enum Snapshot {
         for section in SettingsSection.allCases {
             views.append(("settings-\(section.rawValue)", AnyView(SettingsView(selection: section)), CGSize(width: 920, height: 700)))
         }
+        // The AI page whole, with the notes changed elsewhere while the person typed: their typing kept, and the
+        // line under the editor to pick theirs or mine.
+        app.instructions.preview(changedElsewhere: true)
+        write(render(AnyView(SettingsView(selection: .claude)), app: app, size: CGSize(width: 920, height: 2400)), name: "settings-claude-conflict", folder: folder)
+        app.instructions.preview(changedElsewhere: false)
         // A vault of 300 logins, whole, and twelve releases' notes.
         VaultModel.shared.preview(vault + BenchTargets.logins(300))
         write(render(AnyView(SettingsView(selection: .vault)), app: app, size: CGSize(width: 920, height: 14000)), name: "settings-vault-300", folder: folder)

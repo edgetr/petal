@@ -16,73 +16,76 @@ if _NSGetExecutablePath(&executableBuffer, &executableSize) == 0 {
     }
 }
 
+// What this process is (PetalProcess.parse, the same parser that tells a dock from the rest): a tool written wrong
+// says how it's written and ends here, before anything starts.
+let launch = PetalProcess.parse(CommandLine.arguments)
+if case .usage(let message) = launch {
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+    exit(2)
+}
+
 // `Petal --mcp`: Claude's Petal tools on stdin and stdout, started by the Claude panel's session. (Not a command
 // `petal run` starts that has --mcp among its own words.)
-if CommandLine.arguments.contains("--mcp") && CommandLine.arguments.dropFirst().first != "run" { MCP.run() }
+if launch == .mcp { MCP.run() }
 
 MainActor.assumeIsolated {
     let app = NSApplication.shared
-    let arguments = CommandLine.arguments
 
-    // `petal <command>` (Petal's executable, linked as ~/.local/bin/petal): the dock from a shell.
-    if arguments.count > 1 && CLI.commands.contains(arguments[1]) {
-        app.setActivationPolicy(.prohibited)
-        CLI.run(Array(arguments.dropFirst()))
-    }
-    // `Petal doctor` and `Petal report`: checking Petal, and telling its maker what went wrong.
-    if arguments.count > 1 && (arguments[1] == "doctor" || arguments[1] == "report") {
-        app.setActivationPolicy(.prohibited)
-        Doctor.command(arguments)
-    }
-    // `Petal --restore-dock` gives macOS's Dock back without Petal running (bin/petal restore-dock).
-    if arguments.contains("--restore-dock") {
+    switch launch {
+    case .command(let words):
+        // `petal <command>` (Petal's executable, linked as ~/.local/bin/petal): the dock from a shell.
+        if CLI.commands.contains(words[0]) {
+            app.setActivationPolicy(.prohibited)
+            CLI.run(words)
+        }
+        // `Petal doctor` and `Petal report`: checking Petal, and telling its maker what went wrong.
+        if words[0] == "doctor" || words[0] == "report" {
+            app.setActivationPolicy(.prohibited)
+            Doctor.command(CommandLine.arguments)
+        }
+        // Anything else typed after `petal` is a command it doesn't know: say so, rather than start a second dock.
+        FileHandle.standardError.write(Data("petal: no command \"\(words[0])\". These are the ones there are:\n\n\(CLI.help)\n".utf8))
+        exit(1)
+    case .help:
+        print(CLI.help)
+        exit(0)
+    case .restoreDock:
+        // `Petal --restore-dock` gives macOS's Dock back without Petal running (bin/petal restore-dock).
         SystemDock.restore()
         exit(0)
-    }
-    // Petal's windows, timed headless on a copy of the settings (SettingsBench.swift).
-    if let index = arguments.firstIndex(of: "--bench-windows-idle"), arguments.count > index + 1 {
+    case .benchWindowsIdle(let name):
+        // Petal's windows, timed headless on a copy of the settings (SettingsBench.swift).
         app.setActivationPolicy(.prohibited)
         SettingsBench.isolate()
-        WindowBench.idle(arguments[index + 1])
-    }
-    if arguments.contains("--bench-windows-child") {
+        WindowBench.idle(name)
+    case .benchWindowsChild(let settingsOnly):
         app.setActivationPolicy(.prohibited)
         SettingsBench.isolate()
-        WindowBench.child(settingsOnly: arguments.contains("settings"))
-    }
-    if arguments.contains("--bench-settings") || arguments.contains("--bench-windows") {
+        WindowBench.child(settingsOnly: settingsOnly)
+    case .benchWindows(let settingsOnly):
         app.setActivationPolicy(.prohibited)
         SettingsBench.isolate()
-        WindowBench.run(arguments, settingsOnly: arguments.contains("--bench-settings"))
-    }
-    if arguments.contains("--bench-dock") {
+        WindowBench.run(CommandLine.arguments, settingsOnly: settingsOnly)
+    case .benchDock:
         app.setActivationPolicy(.prohibited)
         SettingsBench.isolate()
         DockBench.run()
-    }
-    if arguments.contains("--bench") {
+    case .bench:
         app.setActivationPolicy(.prohibited)
         Bench.run()
-    }
-    if arguments.contains("--routines-check") {
+    case .routinesCheck(let ai):
         app.setActivationPolicy(.prohibited)
-        RoutinesCheck.run(ai: arguments.contains("--ai"))
-    }
-    if let index = arguments.firstIndex(of: "--snapshot"), arguments.count > index + 1 {
+        RoutinesCheck.run(ai: ai)
+    case .snapshot(let folder):
         app.setActivationPolicy(.prohibited)
         SettingsBench.isolate()
-        Snapshot.run(to: arguments[index + 1])
+        Snapshot.run(to: folder)
         SettingsBench.cleanUp()
         exit(0)
-    }
-    // Anything else typed after `petal` is a command it doesn't know: say so, rather than start a second dock.
-    // (macOS's own launch arguments start with "-": -NSDocumentRevisionsDebugMode, -psn_…)
-    if let first = arguments.dropFirst().first {
-        if ["-h", "--help", "-help"].contains(first) { print(CLI.help); exit(0) }
-        if !first.hasPrefix("-") {
-            FileHandle.standardError.write(Data("petal: no command \"\(first)\". These are the ones there are:\n\n\(CLI.help)\n".utf8))
-            exit(1)
-        }
+    case .mcp, .usage:
+        exit(0)   // handled above
+    case .dock:
+        break
     }
 
     // One Petal at a time. A restart waits for the old one to finish giving the Dock back. Only docks count: the AI's

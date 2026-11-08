@@ -28,6 +28,41 @@ struct PetalProcessCheck {
         ]
         for argv in others { expect(!PetalProcess.isDock(arguments: argv), "not a dock: \(argv)") }
 
+        // What main.swift starts each as: the same parser, so a process is a dock exactly when it starts as one.
+        typealias L = PetalProcess.Launch
+        let launches: [([String], L)] = [
+            ([petal], .dock), ([petal, "-psn_0_1"], .dock), ([petal, "-NSDocumentRevisionsDebugMode", "YES"], .dock),
+            ([petal, "--mcp"], .mcp), ([petal, "-psn_0_1", "--mcp"], .mcp),
+            ([petal, "run", "--key", "x", "--", "x", "--mcp"], .command(["run", "--key", "x", "--", "x", "--mcp"])),
+            ([petal, "mode", "social"], .command(["mode", "social"])), ([petal, "no-such-command"], .command(["no-such-command"])),
+            ([petal, "-h"], .help), ([petal, "--help"], .help),
+            ([petal, "--restore-dock"], .restoreDock),
+            ([petal, "--snapshot", "/tmp/snap"], .snapshot("/tmp/snap")),
+            ([petal, "--bench-windows-idle", "Settings: AI"], .benchWindowsIdle("Settings: AI")),
+            ([petal, "--bench-windows-child", "settings"], .benchWindowsChild(settingsOnly: true)),
+            ([petal, "--bench-windows-child"], .benchWindowsChild(settingsOnly: false)),
+            ([petal, "--bench-windows", "--runs", "20", "--only", "Chat, 60 messages", "--json", "/tmp/a.json"], .benchWindows(settingsOnly: false)),
+            ([petal, "--bench-settings"], .benchWindows(settingsOnly: true)),
+            ([petal, "--bench-dock"], .benchDock), ([petal, "--bench-dock", "/tmp/strips"], .benchDock), ([petal, "--bench"], .bench),
+            ([petal, "--routines-check", "--ai"], .routinesCheck(ai: true)), ([petal, "--routines-check"], .routinesCheck(ai: false)),
+        ]
+        for (argv, launch) in launches {
+            let parsed = PetalProcess.parse(argv)
+            expect(parsed == launch, "\(argv) starts as \(launch), parsed \(parsed)")
+        }
+        // Written wrong: its usage and a non-zero exit before a dock starts, so never a dock.
+        let malformed: [[String]] = [
+            [petal, "--snapshot"], [petal, "--snapshot", "--ai"], [petal, "--bench-windows-idle"],
+            [petal, "--bench-windows-idle", "--runs"], [petal, "--bench-nope"], [petal, "--benchmark"], [petal, "-psn_0_1", "--bench-x"],
+            [petal, "--bench-windows", "--runs"], [petal, "--bench-windows", "--runs", "many"], [petal, "--bench-settings", "--json"],
+            [petal, "--bench-windows", "--only"],
+        ]
+        for argv in malformed {
+            guard case .usage(let message) = PetalProcess.parse(argv) else { expect(false, "\(argv) is written wrong: \(PetalProcess.parse(argv))"); continue }
+            expect(message.contains("usage: Petal --"), "\(argv) says how it's written: \(message)")
+            expect(!PetalProcess.isDock(arguments: argv), "written wrong, not a dock: \(argv)")
+        }
+
         // This process's own arguments, as sysctl gives them.
         let mine = PetalProcess.arguments(of: getpid())
         expect(mine == CommandLine.arguments, "own arguments read back: \(String(describing: mine)) vs \(CommandLine.arguments)")
@@ -52,6 +87,11 @@ struct PetalProcessCheck {
             ([[petal, "run", "--", "env"], [spaced]], true),
             ([[petal, "-psn_0_1", "--mcp"]], false),
             ([[""]], true),                     // gone before ps read it: unsure, so running
+            ([[petal, "--snapshot"]], false),   // written wrong: it ends before a dock starts
+            ([[petal, "--bench-windows-idle"]], false),
+            ([[petal, "--bench-nope"]], false),
+            ([[petal, "-h"]], false),
+            ([[petal, "-psn_0_1", "--help"]], true),
         ]
         for (processes, running) in cases {
             func quoted(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }

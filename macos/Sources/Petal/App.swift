@@ -160,6 +160,7 @@ final class PetalApp {
 
     func stop() {
         config.flush()
+        InstructionsText.flush()
         Chats.flush()
         Assist.flushHistory()
         AgentGrants.flush()

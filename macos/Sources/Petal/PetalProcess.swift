@@ -10,14 +10,81 @@ enum PetalProcess {
     /// Every benchmark: --bench, --bench-dock, --bench-settings, --bench-windows, --bench-windows-child, -idle.
     static let benchPrefix = "--bench"
 
-    /// Whether a process started with these arguments (argv, its first being the program) is a dock. A first word
-    /// that isn't a flag is a command (`petal mode`, `doctor`, `run`, or one it doesn't know): never a dock.
-    /// macOS's own launch arguments (-psn_…, -NSDocumentRevisionsDebugMode) start with "-" and leave it a dock.
-    static func isDock(arguments: [String]) -> Bool {
-        let words = arguments.dropFirst()
-        if let first = words.first, !first.hasPrefix("-") { return false }
-        return !words.contains { notDockFlags.contains($0) || $0.hasPrefix(benchPrefix) }
+    /// What a process started with these arguments (argv, its first being the program) does: main.swift starts it as
+    /// this, and only `.dock` is a dock. One parser for both, so a process is never told apart differently from how
+    /// it started.
+    enum Launch: Equatable {
+        /// `Petal --mcp`: the AI's tools on stdin and stdout.
+        case mcp
+        /// A first word that isn't a flag: `petal <command>`, `doctor`, `report`, or one Petal doesn't know.
+        case command([String])
+        case help
+        case restoreDock
+        case benchWindowsIdle(String)
+        case benchWindowsChild(settingsOnly: Bool)
+        case benchWindows(settingsOnly: Bool)
+        case benchDock
+        case bench
+        case routinesCheck(ai: Bool)
+        case snapshot(String)
+        /// A tool's flag written wrong (`--snapshot` with no folder, a `--bench…` there isn't): its usage, printed
+        /// before anything starts, and a non-zero exit. Never a dock.
+        case usage(String)
+        case dock
     }
+
+    /// How each tool is written, for `.usage`.
+    static let usages: [String: String] = [
+        "--snapshot": "Petal --snapshot <folder>",
+        "--bench-windows-idle": "Petal --bench-windows-idle <window>",
+        "--bench-windows": "Petal --bench-windows [--runs <n>] [--only <window>] [--json <file>] [--png <folder>]",
+        "--bench-settings": "Petal --bench-settings [--runs <n>] [--only <window>] [--json <file>] [--png <folder>]",
+        "--bench": "Petal --bench | --bench-dock [folder] | --bench-settings | --bench-windows | --bench-windows-child [settings] | --bench-windows-idle <window>",
+    ]
+
+    static func parse(_ arguments: [String]) -> Launch {
+        let words = Array(arguments.dropFirst())
+        let first = words.first
+        // `petal run … --mcp` is a command with --mcp among its own words.
+        if words.contains("--mcp") && first != "run" { return .mcp }
+        if let first, !first.hasPrefix("-") { return .command(words) }
+        /// The word after `flag`, when there is one that isn't itself a flag.
+        func value(after flag: String) -> String? {
+            guard let index = words.firstIndex(of: flag), words.indices.contains(index + 1),
+                  !words[index + 1].hasPrefix("-") else { return nil }
+            return words[index + 1]
+        }
+        func usage(_ flag: String) -> Launch { .usage("usage: " + (usages[flag] ?? usages["--bench"]!)) }
+        if words.contains("--restore-dock") { return .restoreDock }
+        let known: Set<String> = ["--bench", "--bench-dock", "--bench-settings", "--bench-windows", "--bench-windows-child", "--bench-windows-idle"]
+        if let unknown = words.first(where: { $0.hasPrefix(benchPrefix) && !known.contains($0) }) {
+            return .usage("petal: no benchmark \"\(unknown)\"\n" + "usage: " + usages["--bench"]!)
+        }
+        if words.contains("--bench-windows-idle") {
+            guard let name = value(after: "--bench-windows-idle") else { return usage("--bench-windows-idle") }
+            return .benchWindowsIdle(name)
+        }
+        if words.contains("--bench-windows-child") { return .benchWindowsChild(settingsOnly: words.contains("settings")) }
+        if let flag = ["--bench-settings", "--bench-windows"].first(where: words.contains) {
+            for option in ["--runs", "--only", "--json", "--png"] where words.contains(option) {
+                guard let given = value(after: option), option != "--runs" || Int(given).map({ $0 > 0 }) == true else { return usage(flag) }
+            }
+            return .benchWindows(settingsOnly: flag == "--bench-settings")
+        }
+        if words.contains("--bench-dock") { return .benchDock }
+        if words.contains("--bench") { return .bench }
+        if words.contains("--routines-check") { return .routinesCheck(ai: words.contains("--ai")) }
+        if words.contains("--snapshot") {
+            guard let folder = value(after: "--snapshot") else { return usage("--snapshot") }
+            return .snapshot(folder)
+        }
+        // macOS's own launch arguments (-psn_…, -NSDocumentRevisionsDebugMode) start with "-" and leave it a dock.
+        if let first, ["-h", "--help", "-help"].contains(first) { return .help }
+        return .dock
+    }
+
+    /// Whether a process started with these arguments is a dock: exactly what main.swift would start as one.
+    static func isDock(arguments: [String]) -> Bool { parse(arguments) == .dock }
 
     /// Whether the process `pid` is a dock. Arguments that can't be read (it ended, or isn't ours) count as a dock,
     /// as every Petal did before: unsure, Petal keeps to one at a time.
@@ -50,7 +117,8 @@ enum PetalProcess {
     /// The Dock guard's shell test (Setup.swift), the same rules as `isDock(arguments:)`: whether a process named
     /// Petal is running that is a dock. `ps -o comm=` is the program (argv[0], spaces and all), so what follows it in
     /// `ps -o args=` is its words: a first word that isn't a flag is a command (`petal run … -- npm run dev` may run
-    /// for hours, and must never keep macOS's Dock hidden after the dock crashed), and so are the flags above.
+    /// for hours, and must never keep macOS's Dock hidden after the dock crashed), and so are help and the flags
+    /// above (written wrong, they print their usage and end before a dock starts, so they're never one either).
     /// Anything it can't read (the process ended, words that don't follow the program) counts as running: a guard
     /// unsure whether the dock runs leaves the Dock alone.
     static var shellDockRunning: String {
@@ -63,7 +131,7 @@ enum PetalProcess {
             case "$args" in "$prog"*) ;; *) return 0 ;; esac
             case "$words" in ''|' '*) ;; *) return 0 ;; esac
             first="${words# }"; first="${first%% *}"
-            case "$first" in ''|-*) ;; *) continue ;; esac
+            case "$first" in -h|--help|-help) continue ;; ''|-*) ;; *) continue ;; esac
             case "$words " in
               \(flags)) ;;
               *) return 0 ;;

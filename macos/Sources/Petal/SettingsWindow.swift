@@ -995,6 +995,24 @@ struct InstructionsEditor: View {
 
     var body: some View {
         let notes = app.instructions
+        VStack(alignment: .leading, spacing: 6) {
+            editor(notes)
+            // Only when the file changed elsewhere while the person had typing not yet written: neither is dropped
+            // until they pick.
+            if notes.changedElsewhere {
+                HStack(spacing: 8) {
+                    Text("Changed elsewhere since you started typing.").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Button("Use theirs") { notes.useTheirs() }
+                    Button("Keep mine") { notes.keepMine() }
+                }
+                .buttonStyle(.glass)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private func editor(_ notes: InstructionsText) -> some View {
         TextEditor(text: $text)
             .font(.system(size: 12))
             .scrollContentBackground(.hidden)
@@ -1020,14 +1038,23 @@ struct InstructionsEditor: View {
 /// The notes for the AI, kept in memory for the settings window. Read and written off the main thread, on one queue,
 /// in order: a read asked for after a save reads what that save wrote. A read begun before a save, or while the
 /// person is typing, never replaces what they typed. A save never writes over a change made elsewhere that the editor
-/// hasn't shown: the file's version comes into the editor instead, as a change made elsewhere always has.
+/// hasn't shown, and neither side is ever dropped without the person: with typing not yet written, the editor keeps it
+/// and says the file changed elsewhere (`changedElsewhere`), and they pick theirs or mine. With nothing unwritten, a
+/// change made elsewhere just comes into the editor.
 @MainActor @Observable
 final class InstructionsText {
+    /// A file as read: when it was last changed, and what it holds.
+    struct Disk { var stamp: Date?; var text: String }
+
     @ObservationIgnored private(set) var text = ""
     /// Counts reads that changed `text`, so the editor follows a change made elsewhere.
     private(set) var version = 0
     /// Whether the file was read once: until then `text` is no baseline, and the editor takes no typing.
     private(set) var loaded = false
+    /// The file as changed elsewhere while `text` held typing not yet written: the editor keeps the typing until the
+    /// person picks one (`useTheirs`, `keepMine`). Nothing is written meanwhile.
+    private var theirs: Disk?
+    var changedElsewhere: Bool { theirs != nil }
     /// What the file held when `text` was read from it or written to it: a save writes only over this.
     @ObservationIgnored private var base = ""
     /// Counts saves: a read begun before one is older than what's typed, and is dropped.
@@ -1047,15 +1074,17 @@ final class InstructionsText {
         self.file = file
         let asOf = saves
         let known = ifChanged ? seen : nil
-        let read = { () -> (stamp: Date?, text: String)? in
+        let read = { () -> Disk? in
             let stamp = Self.modified(file)
             if ifChanged, stamp == known { return nil }
-            return (stamp, Self.contents(file))
+            return Disk(stamp: stamp, text: Self.contents(file))
         }
-        let apply = { (disk: (stamp: Date?, text: String)?) in
+        let apply = { (disk: Disk?) in
             guard let disk, asOf == self.saves else { return }
+            // Typing not yet written stays, and the file's newer version waits beside it.
+            if self.theirs != nil { self.conflict(disk); return }
             // Typing: theirs stays; the change is read again once they pause (and a save meanwhile doesn't write
-            // over it: it shows the file's version instead).
+            // over it: it says the file changed elsewhere instead).
             guard Date().timeIntervalSince(self.lastSave) >= Self.typing else { return }
             self.show(disk)
         }
@@ -1068,26 +1097,74 @@ final class InstructionsText {
 
     func save(_ new: String, to file: URL) {
         guard new != text else { return }
-        let over = base
+        self.file = file
         text = new
-        base = new   // the next save builds on this one
         saves += 1
         lastSave = Date()
+        // Changed elsewhere and not picked yet: nothing is written; typing theirs exactly settles it.
+        if let theirs {
+            if new == theirs.text { self.theirs = nil; seen = theirs.stamp; base = theirs.text }
+            return
+        }
+        let over = base
+        base = new   // the next save builds on this one
         let saved = saves
         Self.queue.async {
-            // Writes only over what the editor had: a change made elsewhere since then is kept, and shown instead.
+            // Writes only over what the editor had: a change made elsewhere since then is kept, and said.
             let now = Self.contents(file)
             let written = now == over && (try? new.write(to: file, atomically: true, encoding: .utf8)) != nil
-            let disk = (stamp: Self.modified(file), text: written ? new : now)
+            let disk = Disk(stamp: Self.modified(file), text: written ? new : now)
             DispatchQueue.main.async { MainActor.assumeIsolated {
-                guard saved == self.saves else { return }   // a later save decides (and finds the same change)
-                if written { self.seen = disk.stamp } else { self.show(disk) }
+                if written { if saved == self.saves { self.seen = disk.stamp }; return }
+                // Not written: whatever was typed since is unwritten too (it built on this one), so the person picks.
+                self.conflict(disk)
             } }
         }
     }
 
+    /// "Use theirs": the file as it is now comes into the editor; the typing not yet written is dropped.
+    func useTheirs() {
+        guard theirs != nil, let file else { return }
+        saves += 1   // a read or save begun before this is older than what the person picked
+        let asOf = saves
+        Self.queue.async {
+            let disk = Disk(stamp: Self.modified(file), text: Self.contents(file))
+            DispatchQueue.main.async { MainActor.assumeIsolated {
+                guard asOf == self.saves else { return }
+                self.theirs = nil
+                self.show(disk)
+            } }
+        }
+    }
+
+    /// "Keep mine": what's in the editor is written over the file.
+    func keepMine() {
+        guard theirs != nil, let file else { return }
+        let mine = text
+        saves += 1
+        let asOf = saves
+        theirs = nil
+        base = mine
+        Self.queue.async {
+            let written = (try? mine.write(to: file, atomically: true, encoding: .utf8)) != nil
+            let disk = Disk(stamp: Self.modified(file), text: written ? mine : Self.contents(file))
+            DispatchQueue.main.async { MainActor.assumeIsolated {
+                guard asOf == self.saves else { return }
+                if written { self.seen = disk.stamp } else { self.conflict(disk) }
+            } }
+        }
+    }
+
+    /// The file changed elsewhere while the editor held typing not yet written: both kept, the person picks. When the
+    /// file now holds just what's typed, there's nothing to pick.
+    private func conflict(_ disk: Disk) {
+        seen = disk.stamp
+        if disk.text == text { theirs = nil; base = disk.text; return }
+        theirs = disk
+    }
+
     /// The file as read: the editor shows it and builds on it.
-    private func show(_ disk: (stamp: Date?, text: String)) {
+    private func show(_ disk: Disk) {
         seen = disk.stamp
         base = disk.text
         if !loaded { loaded = true }
@@ -1095,6 +1172,14 @@ final class InstructionsText {
         text = disk.text
         version += 1
     }
+
+    /// Snapshots: the editor as it is when the file changed elsewhere while the person typed (false: as before).
+    func preview(changedElsewhere: Bool) {
+        theirs = changedElsewhere ? Disk(stamp: seen, text: base + "\n(changed elsewhere)") : nil
+    }
+
+    /// Waits for the notes' reads and writes to finish (on quit): an edit made just before is on disk.
+    nonisolated static func flush() { queue.sync {} }
 
     /// An editor showing the notes appeared (true) or went (false).
     func watch(_ on: Bool) { watchers = max(0, watchers + (on ? 1 : -1)) }
