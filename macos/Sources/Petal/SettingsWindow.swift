@@ -1203,29 +1203,47 @@ final class InstructionsStore: @unchecked Sendable {
         }
         let now = Self.contents(file)
         guard now == asked.over else { return refused(now) }
-        let temp = file.deletingLastPathComponent().appending(path: ".\(file.lastPathComponent).\(UUID().uuidString).tmp")
-        defer { try? FileManager.default.removeItem(at: temp) }
-        guard (try? asked.text.write(to: temp, atomically: false, encoding: .utf8)) != nil else { return refused(now) }
-        if FileManager.default.fileExists(atPath: file.path) {
-            guard renamex_np(temp.path, file.path, UInt32(RENAME_SWAP)) == 0 else { return refused(now) }
+        // Through a link to the file it names (made if it isn't there yet): the link stays, as the person set it.
+        let target = Self.linked(file)
+        let fm = FileManager.default
+        let existing = (try? fm.attributesOfItem(atPath: target.path))?[.posixPermissions] as? NSNumber
+        let temp = target.deletingLastPathComponent().appending(path: ".\(target.lastPathComponent).\(UUID().uuidString).tmp")
+        defer { try? fm.removeItem(at: temp) }
+        // Private from the start, then the file's own permissions: a private file stays private.
+        guard fm.createFile(atPath: temp.path, contents: Data(asked.text.utf8), attributes: [.posixPermissions: 0o600]) else { return refused(now) }
+        if let existing { try? fm.setAttributes([.posixPermissions: existing], ofItemAtPath: temp.path) }
+        if existing != nil {
+            guard renamex_np(temp.path, target.path, UInt32(RENAME_SWAP)) == 0 else { return refused(now) }
             let displaced = Self.contents(temp)
             if displaced != asked.over {
                 // Saved elsewhere in between: that version goes back in place, and the person is asked.
-                _ = renamex_np(temp.path, file.path, UInt32(RENAME_SWAP))
+                _ = renamex_np(temp.path, target.path, UInt32(RENAME_SWAP))
                 return refused(displaced)
             }
         } else {
             // No file yet: only if none appeared meanwhile.
-            guard renamex_np(temp.path, file.path, UInt32(RENAME_EXCL)) == 0 else { return refused(Self.contents(file)) }
+            guard renamex_np(temp.path, target.path, UInt32(RENAME_EXCL)) == 0 else { return refused(Self.contents(file)) }
         }
         return .wrote(generation: asked.generation, ok: true, NotesDisk(stamp: Self.modified(file), text: asked.text))
+    }
+
+    /// The file a path names, following links (a few deep), whether or not that file is there yet.
+    private static func linked(_ url: URL) -> URL {
+        var url = url
+        for _ in 0..<8 {
+            guard let next = try? FileManager.default.destinationOfSymbolicLink(atPath: url.path) else { break }
+            url = URL(fileURLWithPath: next, relativeTo: url.deletingLastPathComponent()).standardizedFileURL
+        }
+        return url
     }
 
     private func keepDraft() {
         let want = state.draftFile
         guard want != draftOnDisk else { return }
         if let want {
+            // Private, as the notes it holds may be.
             guard (try? want.write(to: draftFile, atomically: true, encoding: .utf8)) != nil else { return }
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: draftFile.path)
         } else {
             try? FileManager.default.removeItem(at: draftFile)
         }
