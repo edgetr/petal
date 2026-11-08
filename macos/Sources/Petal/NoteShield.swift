@@ -25,10 +25,10 @@ enum NoteShield {
     /// The note an agent names (`rows`: each note's id, file path and text, and whether it's a version): its id, its
     /// path or its title, each compared exactly as the tools tell them (NoteTold: derived after redaction), never
     /// the raw text, so naming a guess can't tell whether a secret is in a title or file name.
-    static func find(_ name: String, rows: [(id: String, key: String, body: String, version: Bool)], index: UIMap.SecretIndex) -> Lookup {
+    static func find(_ name: String, rows: [(id: String, key: String, body: String, version: Bool, vouched: Bool)], index: UIMap.SecretIndex) -> Lookup {
         guard !index.unreadable else { return .unreadable }
         let redact = { (text: String) in index.redacted(text) }
-        let shown = rows.map { (id: NoteTold.id($0.id, body: $0.body, redact), key: NoteTold.path($0.key, body: $0.body, redact),
+        let shown = rows.map { (id: NoteTold.id($0.id, redact), key: NoteTold.path($0.key, vouched: $0.vouched, redact),
                                 title: NoteTold.title($0.body, redact), version: $0.version) }
         if let at = shown.firstIndex(where: { !$0.version && $0.id == name }) { return .found(at) }
         if let at = shown.firstIndex(where: { $0.key == name }) { return .found(at) }

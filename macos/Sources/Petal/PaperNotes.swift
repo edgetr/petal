@@ -499,12 +499,36 @@ final class NoteStore {
         return true
     }
 
-    enum Outcome: Equatable { case written, keptBoth(URL), failed, cancelled }
+    /// `notThisNote`: the file there is another note's now (its path reused): a tool's change refused, nothing done.
+    enum Outcome: Equatable { case written, keptBoth(URL), failed, cancelled, notThisNote }
+
+    /// The note id a file's text says: its own, or, for one with none, its path's (as the folder's read knows it).
+    nonisolated static func noteID(of text: String, at url: URL, root: URL) -> String {
+        let fallback = NoteShelf.fallbackID(relativePath: NoteShelf.relative(url.path, to: root.path)
+                                            ?? url.deletingLastPathComponent().lastPathComponent + "/" + url.lastPathComponent)
+        return NoteFile.parse(text, fallbackID: fallback, fallbackDate: Date()).id
+    }
+
+    /// The vault's redaction for file names, set by the app (`VaultIndex`); nil back while the vault can't be read.
+    /// Never a secret in a file name: names are made from titles only after it (`NoteShelf.safeStem`).
+    nonisolated(unsafe) static var nameRedactor: @Sendable (String) -> String? = { _ in nil }
+
+    /// A file name for `text` with nothing of a secret in it: its redacted title, else `fallback`.
+    nonisolated static func safeStem(for text: String, fallback: String) -> String {
+        let body = NoteFile.parse(text, fallbackID: "", fallbackDate: Date()).body
+        return NoteShelf.safeStem(redacted: nameRedactor(body), fallback: fallback)
+    }
+
+    /// The fallback name for a note whose title can't be checked: holds nothing of it.
+    nonisolated static var plainStem: String { "Note " + String(Int(Date().timeIntervalSince1970) % 100_000) }
 
     /// Writes `text` over the file at `url` only while it still says `base` (what the edit was made on); changed
     /// since, the edit goes to a copy beside it instead ("Name (conflicted copy).md"), and both show as the note's
     /// papers. A file that already says `text` is done. Read and written in one coordinated step. Off the main thread.
-    nonisolated static func save(_ text: String, to url: URL, base: String?, root: URL, live: (@Sendable () -> Bool)? = nil) -> Outcome {
+    /// `noteID`: the note this write is for. The file there saying another note (its path reused) is never written:
+    /// a tool's change is refused (`notThisNote`), the person's typing is kept beside it as a copy of its own note.
+    nonisolated static func save(_ text: String, to url: URL, base: String?, root: URL, live: (@Sendable () -> Bool)? = nil,
+                                 noteID: String? = nil) -> Outcome {
         guard safe(url, root: root) else { return .failed }
         var outcome = Outcome.failed
         var error: NSError?
@@ -514,6 +538,10 @@ final class NoteStore {
             if there, disk == nil { return }   // there, but unreadable: never written over
             // A tool's asker gone by now: nothing changes (checked right before the change, inside the coordination).
             if let live, !live() { outcome = .cancelled; return }
+            if let noteID, !NoteShelf.stillNote(found: disk.map { Self.noteID(of: $0, at: url, root: root) }, expected: noteID, missing: true) {
+                outcome = live != nil ? .notThisNote : keepBeside(text, original: url, root: root)
+                return
+            }
             switch NoteShelf.save(disk: disk, text: text, base: base) {
             case .already: outcome = .written
             case .write: outcome = (try? Data(text.utf8).write(to: url, options: .atomic)) != nil ? .written : .failed
@@ -528,12 +556,16 @@ final class NoteStore {
     /// gone, nothing is made.
     nonisolated static func keepBeside(_ text: String, original: URL, root: URL, live: (@Sendable () -> Bool)? = nil) -> Outcome {
         let folder = original.deletingLastPathComponent()
-        let stem = original.deletingPathExtension().lastPathComponent
+        // Named from the copy's own redacted title, never the file it's beside (that name may not be Petal's).
+        let stem = safeStem(for: text, fallback: plainStem)
         for _ in 0..<20 {
             if let live, !live() { return .cancelled }
             let taken = Set(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).map { $0.lowercased() })
             let copy = folder.appending(path: NoteShelf.conflictName(stem, taken: taken))
-            if create(text, at: copy, root: root, live: live) { return .keptBoth(copy) }
+            if create(text, at: copy, root: root, live: live) {
+                NoteNames.vouch(noteID(of: text, at: copy, root: root), copy.lastPathComponent)
+                return .keptBoth(copy)
+            }
         }
         return live.map { $0() } == false ? .cancelled : .failed
     }
@@ -566,7 +598,10 @@ final class NoteStore {
             let name = NoteShelf.freeName(stem, taken: taken)
             let url = folder.appending(path: name)
             if let live, !live() { return nil }
-            if create(text, at: url, root: root, live: live) { return url }
+            if create(text, at: url, root: root, live: live) {
+                NoteNames.vouch(noteID(of: text, at: url, root: root), url.lastPathComponent)
+                return url
+            }
             tried.insert(name.lowercased())
         }
         return nil
@@ -596,14 +631,14 @@ final class NoteStore {
                 state.revision = coordinatedRead(exact)
                 return NoteWorkResult(outcome: .written, url: exact)
             }
-            guard let made = createNamed(text, stem: stem, in: folder, root: root, live: live, own: state.url.path.lowercased()) else {
+            guard let made = createNamed(text, stem: safeStem(for: text, fallback: stem), in: folder, root: root, live: live, own: state.url.path.lowercased()) else {
                 return NoteWorkResult(outcome: live.map { $0() } == false ? .cancelled : .failed)
             }
             state.url = made
             state.revision = text
             return NoteWorkResult(outcome: .written, url: made)
         case .write(let text, let base):
-            let outcome = save(text, to: state.url, base: base, root: root, live: live)
+            let outcome = save(text, to: state.url, base: base, root: root, live: live, noteID: state.noteID)
             if outcome == .written { state.revision = text }
             return NoteWorkResult(outcome: outcome, url: state.url)
         case .keepAside(let text):
@@ -613,6 +648,8 @@ final class NoteStore {
                 return NoteWorkResult(outcome: live.map { $0() } == false ? .cancelled : .failed, url: state.url)
             }
             state.url = target
+            // A note with no id of its own is known by its path: moved, it's known by its new one from now on.
+            if state.noteID.hasPrefix("file:"), let moved = coordinatedRead(target) { state.noteID = noteID(of: moved, at: target, root: root) }
             return NoteWorkResult(outcome: .written, url: target)
         case .pictureBytes(let pictures, let noteID):
             let written = writePictures(pictures, into: state.url.deletingLastPathComponent().appending(path: NoteShelf.assetsFolder(id: noteID)), root: root)
@@ -620,7 +657,12 @@ final class NoteStore {
             return NoteWorkResult(outcome: .written, url: state.url, pictures: written)
         case .trash(let revision):
             // Only while it still says what Petal last saw there, checked inside the coordinated trash.
-            trash(state.url, root: root) { disk in disk == nil || disk == revision || disk == state.revision }
+            let url = state.url, noteID = state.noteID
+            trash(state.url, root: root) { disk in
+                guard let disk else { return true }
+                return NoteShelf.stillNote(found: Self.noteID(of: disk, at: url, root: root), expected: noteID, missing: true)
+                    && (disk == revision || disk == state.revision)
+            }
             return NoteWorkResult(outcome: .written, url: state.url)
         case .keep(let plan):
             return NoteWorkResult(outcome: keep(plan, root: root) ? .written : .failed, url: state.url)
@@ -705,6 +747,12 @@ final class NoteStore {
         let going = { live?() ?? true }   // a tool's asker, checked before each step
         let fm = FileManager.default
         try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        // The file must be this note, before its pictures go and again inside the coordinated move.
+        let isNote = { (url: URL) in
+            NoteShelf.stillNote(found: (try? String(contentsOf: url, encoding: .utf8)).map { Self.noteID(of: $0, at: url, root: root) },
+                                expected: noteID, missing: false)
+        }
+        guard isNote(from) else { return nil }
         let assets = from.deletingLastPathComponent().appending(path: NoteShelf.assetsFolder(id: noteID))
         let newAssets = folder.appending(path: assets.lastPathComponent)
         var movedPictures: [String] = []
@@ -737,6 +785,7 @@ final class NoteStore {
             NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: from, options: .forMoving, writingItemAt: candidate, options: .forReplacing, error: &error) { a, b in
                 guard !fm.fileExists(atPath: b.path) else { return }
                 guard going() else { cancelled = true; return }
+                guard isNote(a) else { cancelled = true; return }
                 moved = (try? fm.moveItem(at: a, to: b)) != nil
             }
             if moved { target = candidate } else if error != nil || cancelled { break }
@@ -746,6 +795,7 @@ final class NoteStore {
             for back in movedPictures { try? fm.moveItem(at: newAssets.appending(path: back), to: assets.appending(path: back)) }
             return nil
         }
+        if NoteNames.vouched(noteID, from.lastPathComponent) { NoteNames.vouch(noteID, target.lastPathComponent) }
         // The old pictures' folder, now empty, goes (to the Trash, never deleted outright).
         if fm.fileExists(atPath: assets.path), ((try? fm.contentsOfDirectory(atPath: assets.path)) ?? []).filter({ !$0.hasPrefix(".") }).isEmpty {
             try? fm.trashItem(at: assets, resultingItemURL: nil)
@@ -925,7 +975,10 @@ final class NoteStore {
         for done in item.done { done(result.outcome) }
         switch item.work {
         case .move, .trash, .keep: reload()
-        default: if case .keptBoth = result.outcome { reload() }
+        default:
+            // A copy made, or the file found to be another note's now: read again (the note is followed by its id).
+            if case .keptBoth = result.outcome { reload() }
+            if result.outcome == .notThisNote { reload() }
         }
         pump(session)
     }
@@ -1111,8 +1164,7 @@ final class NoteStore {
                 if !fm.fileExists(atPath: file.path), (try? picture.data.write(to: file, options: .withoutOverwriting)) == nil { return false }
             }
         }
-        let note = NoteFile.parse(text, fallbackID: noteID, fallbackDate: Date())
-        let stem = NoteText.fileName(note.title.isEmpty ? "Note" : note.title)
+        let stem = safeStem(for: text, fallback: plainStem)
         for n in 0..<100 {
             let file = folder.appending(path: (n == 0 ? stem : "\(stem) \(n + 1)") + ".md")
             if (try? Data(text.utf8).write(to: file, options: .withoutOverwriting)) != nil { return true }
@@ -1229,7 +1281,9 @@ final class NoteStore {
         // are taken: two notes never share a provisional name, so each has its own session and answer.
         let taken = Set(notes.filter { $0.notebook == name }.map { $0.url.lastPathComponent.lowercased() })
             .union(reserved.filter { $0.hasPrefix(folder.path.lowercased() + "/") }.map { ($0 as NSString).lastPathComponent })
-        let stem = NoteText.fileName(file.title.isEmpty ? "Note \(Self.shortDate.string(from: file.created))" : file.title)
+        // Shown at once under a plain name (never its title: the file's name is made on the file queue from the
+        // title after the vault's redaction, NoteStore.safeStem), which is also the name when that can't be checked.
+        let stem = NoteText.fileName("Note \(Self.shortDate.string(from: file.created))")
         let text = file.serialized()
         let paper = PaperNote(file: file, url: folder.appending(path: NoteShelf.freeName(stem, taken: taken)), notebook: name, revision: text)
         let provisional = paper.url.path.lowercased()
@@ -1512,5 +1566,31 @@ enum NoteReservations {
         lock.withLock {
             Set(paths.filter { $0 != own && ($0 as NSString).deletingLastPathComponent == folder }.map { ($0 as NSString).lastPathComponent })
         }
+    }
+}
+
+/// The file names Petal made from a redacted title, by note id (Application Support's notes-named.json): only these
+/// are told to agents as they are; any other name is told opaquely (NoteTold.path). Loaded and saved off the main
+/// thread; read anywhere.
+enum NoteNames {
+    nonisolated private static let lock = NSLock()
+    nonisolated(unsafe) private static var names: [String: Set<String>] = [:]
+    nonisolated private static var file: URL { Config.supportFolder.appending(path: "notes-named.json") }
+
+    nonisolated static func load() {
+        guard let data = try? Data(contentsOf: file), let read = try? JSONDecoder().decode([String: [String]].self, from: data) else { return }
+        lock.withLock { for (id, list) in read { names[id, default: []].formUnion(list.map { $0.lowercased() }) } }
+    }
+
+    nonisolated static func vouch(_ noteID: String, _ name: String) {
+        let all: [String: [String]] = lock.withLock {
+            names[noteID, default: []].insert(name.lowercased())
+            return names.mapValues { Array($0).sorted() }
+        }
+        if let data = try? JSONEncoder().encode(all) { try? data.write(to: file, options: .atomic) }
+    }
+
+    nonisolated static func vouched(_ noteID: String, _ name: String) -> Bool {
+        lock.withLock { names[noteID]?.contains(name.lowercased()) == true }
     }
 }

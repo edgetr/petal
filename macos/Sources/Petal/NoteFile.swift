@@ -947,10 +947,39 @@ enum NoteShelf {
     /// The paper a lookup chose (its file `key` and note `id`), as the notes are now: that same file while it's still
     /// that note's (a path another note now has is refused); gone, followed by its id only when the id names exactly
     /// one paper (never one of a conflict's copies picked for another).
-    static func pick(key: String, id: String, now: [(key: String, id: String)]) -> Int? {
+    /// `unique`: the id named exactly one paper in the snapshot the request started from (else it's never followed
+    /// by id, even when it names one now).
+    static func pick(key: String, id: String, now: [(key: String, id: String)], unique: Bool = true) -> Int? {
         if let at = now.firstIndex(where: { $0.key == key }) { return now[at].id == id ? at : nil }
+        guard unique else { return nil }
         let same = now.indices.filter { now[$0].id == id }
         return same.count == 1 ? same[0] : nil
+    }
+
+    /// Rule for every change to a note's file (a write, a move, a trash, its places): right before it, inside the
+    /// coordinated step, the file must still be that note (`found`: the id its text says now; nil, no file there).
+    /// Another note at that path is never written, moved or trashed. `missing`: whether no file there is all right
+    /// (a write makes it again; a move or trash has nothing to act on).
+    static func stillNote(found: String?, expected: String, missing: Bool) -> Bool {
+        guard let found else { return missing }
+        return found == expected
+    }
+
+    /// Where a paper shows: by the window in front when one of its places fits it, else on the Desktop showing when
+    /// it's stuck there, never both (the window wins).
+    enum Placement: Equatable { case window(Int), desktop, none }
+
+    static func placement(window: Int?, onDesktopShowing: Bool) -> Placement {
+        if let window { return .window(window) }
+        return onDesktopShowing ? .desktop : .none
+    }
+
+    /// A file name for a note's text that holds no secret: its title, made from its text after the vault's
+    /// redaction (`redacted`: nil while the vault can't be read), else `fallback` (one that holds none: a date).
+    static func safeStem(redacted: String?, fallback: String) -> String {
+        guard let redacted else { return NoteText.fileName(fallback) }
+        let title = NoteText.title(redacted)
+        return NoteText.fileName(title.isEmpty ? fallback : title)
     }
 
     /// Notes renamed or moved elsewhere (Finder, another Mac) while Petal holds them: old key → new key, for each id
@@ -1289,14 +1318,23 @@ enum NoteTold {
 
     /// A note's file: its name is made from its title, cut to 60 characters, so while that title holds something
     /// the redaction hides, the name isn't told (part of a secret may be in it).
-    static func path(_ path: String, body: String, _ redact: (String) -> String) -> String {
-        guard NoteText.title(redact(body)) != NoteText.title(body) else { return redact(path) }
-        return redact((path as NSString).deletingLastPathComponent) + "/(hidden).md"
+    /// A note's file: told by its name only when Petal made that name from a redacted title (`vouched`: recorded
+    /// when it made the file); any other name (made elsewhere, or by an older Petal) is told as an opaque one, the
+    /// same for that path every time, since part of a secret may be in it.
+    static func path(_ path: String, vouched: Bool, _ redact: (String) -> String) -> String {
+        if vouched { return redact(path) }
+        return redact((path as NSString).deletingLastPathComponent) + "/" + opaque(path) + ".md"
     }
 
-    /// A note's id: a file's (one with no id of its own) is its path, told as `path` tells it.
-    static func id(_ id: String, body: String, _ redact: (String) -> String) -> String {
-        id.hasPrefix("file:") ? "file:" + path(String(id.dropFirst(5)), body: body, redact) : redact(id)
+    static func opaque(_ text: String) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in text.utf8 { hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
+        return "note-" + String(format: "%016llx", hash)
+    }
+
+    /// A note's id: a file's own (one with no id of its own is known by its path, never made by Petal) told opaquely.
+    static func id(_ id: String, _ redact: (String) -> String) -> String {
+        id.hasPrefix("file:") ? "file:" + opaque(String(id.dropFirst(5))) : redact(id)
     }
 
     /// What a search looks through: the note's whole text and its notebook, each redacted whole.

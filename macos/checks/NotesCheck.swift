@@ -203,6 +203,26 @@ struct NotesCheck {
         expect(NoteShelf.pick(key: "/n/B old.md", id: "B", now: papers) == 2, "renamed, its id on one paper: followed")
         expect(NoteShelf.pick(key: "/n/B.md", id: "C", now: papers) == nil, "its path now another note's: refused")
 
+        // An id that named two papers when the request started is never followed by id, even if it names one now.
+        expect(NoteShelf.pick(key: "/n/B old.md", id: "B", now: papers, unique: false) == nil, "ambiguous at the start: not followed")
+        expect(NoteShelf.pick(key: "/n/B.md", id: "B", now: papers, unique: false) == 2, "its own file, still that note: kept")
+
+        // Every change checks the file is still the note it means.
+        expect(NoteShelf.stillNote(found: "A", expected: "A", missing: false), "the same note: changed")
+        expect(!NoteShelf.stillNote(found: "B", expected: "A", missing: true), "another note at that path: never changed")
+        expect(NoteShelf.stillNote(found: nil, expected: "A", missing: true) && !NoteShelf.stillNote(found: nil, expected: "A", missing: false),
+               "no file there: a write makes it again, a move has nothing to move")
+
+        // One placement per paper: the window in front first, the Desktop only when no window place fits.
+        expect(NoteShelf.placement(window: 0, onDesktopShowing: true) == .window(0), "on a tab and the Desktop, the tab in front: by the window")
+        expect(NoteShelf.placement(window: nil, onDesktopShowing: true) == .desktop, "nothing in front fits: the Desktop")
+        expect(NoteShelf.placement(window: nil, onDesktopShowing: false) == .none, "neither: not shown")
+
+        // File names from redacted titles only.
+        expect(NoteShelf.safeStem(redacted: "# Card (hidden)\nmore", fallback: "Note 1") == "Card (hidden)", "a title holding a secret: named after redaction")
+        expect(NoteShelf.safeStem(redacted: nil, fallback: "Note 1") == "Note 1", "the vault unreadable: a plain name")
+        expect(NoteShelf.safeStem(redacted: "", fallback: "Note 1") == "Note 1", "no title: a plain name")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

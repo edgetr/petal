@@ -66,6 +66,10 @@ final class NoteDesk {
         // Writing a Petal before this one accepted and never saw land: put back first (NoteJournal.recover), from the
         // journal's own queue to the notes' queue.
         let root = NoteStore.rootFolder(setting: app.config.string("notesFolder"))
+        // File names are made from titles only after the vault's redaction (never a secret in a name); while the
+        // vault can't be read, a plain name. And the names Petal made so, known again.
+        NoteStore.nameRedactor = { text in VaultIndex.settled { $0.unreadable ? nil : $0.redacted(text) } ?? nil }
+        NoteStore.io.async { NoteNames.load() }
         NoteJournal.queue.async {
             // The journal as it was, and any recovery a launch before didn't finish: resumed, entry by entry.
             let leftovers = NoteJournal.leftovers()
@@ -108,7 +112,7 @@ final class NoteDesk {
         switch event.kind {
         case .moved, .resized: lookAgain(after: 0.03)
         case .activated, .focused, .closed, .titleChanged, .tabSwitched, .created, .minimized, .unminimized, .shown, .hidden, .quit: lookAgain(after: 0.12)
-        case .space, .screens: lookAgain(after: 0.2); placeDesktop()
+        case .space, .screens: lookAgain(after: 0.2); refreshSpaces()
         case .missionControl: for panel in Array(panels.values) + tabPanels.values.map({ $0 as NSPanel }) { panel.conceal() }
         case .missionControlEnded: lookAgain(after: 0.1)
         default: break
@@ -280,7 +284,7 @@ final class NoteDesk {
                     MainActor.assumeIsolated {
                         var (scene, read) = Self.filtered(scene, read, since: privacy)
                         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
-                        scene.desktop = screen.flatMap { Spaces.desktop(on: $0) }
+                        scene.desktop = Self.desktopShowing(on: screen)
                         done(scene, read)
                     }
                 }
@@ -523,6 +527,8 @@ final class NoteDesk {
         let showing = here.keys.filter { faces[$0] != nil }.sorted { (lines[$0] ?? 0, $0) < (lines[$1] ?? 0, $1) }
         for key in showing {
             let panel = panel(for: key)
+            // Placed by its window (it fits the window in front): not the Desktop's, whatever else it's stuck to.
+            panel.desktop = false
             let size = panel.paperSize
             var rect: CGRect
             if let paper = store.paper(key), let spot = local.spots[paper.noteID] {
@@ -566,7 +572,7 @@ final class NoteDesk {
     private func notebookKey(_ notebook: String) -> String { store.color(of: notebook).hex }
 
     private func isDesktop(_ key: String) -> Bool {
-        store.paper(key)?.file.places.contains { $0.kind == .desktop } == true && here[key] == nil
+        NoteShelf.placement(window: here[key], onDesktopShowing: store.paper(key)?.file.places.contains { $0.kind == .desktop } == true) == .desktop
     }
 
     private func panel(for key: String) -> NotePanel {
@@ -578,13 +584,46 @@ final class NoteDesk {
 
     // MARK: The Desktop
 
-    /// Notes stuck to the Desktop showing now (on each screen's Desktop), where the person left them.
+    /// Which Desktop each screen shows (display UUID → number), read off the main thread (`refreshSpaces`) and used
+    /// from here during layout: the window server is never asked on the main thread.
+    private static var spaces: [String: Int] = [:]
+    @ObservationIgnored private var spacesTurn = 0
+
+    /// The Desktop showing on `screen`, as last read.
+    private static func desktopShowing(on screen: NSScreen?) -> Int? { screen.flatMap(Spaces.screenID).flatMap { spaces[$0] } }
+
+    /// Reads which Desktop each screen shows, off the main thread, then places the Desktop's notes. Skipped while no
+    /// note is on a Desktop.
+    func refreshSpaces() {
+        guard on, !Headless.on, store.notes.contains(where: { $0.file.places.contains { $0.kind == .desktop } }) else {
+            if !Self.spaces.isEmpty { Self.spaces = [:]; placeDesktop() }
+            return
+        }
+        let screens = NSScreen.screens.compactMap(Spaces.screenID)
+        spacesTurn += 1
+        let turn = spacesTurn
+        DispatchQueue.global(qos: .userInitiated).async {
+            let read = Spaces.desktops(screens)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard turn == self.spacesTurn else { return }
+                    if read != Self.spaces { Self.spaces = read }
+                    self.placeDesktop()
+                }
+            }
+        }
+    }
+
+    /// Notes stuck to the Desktop showing now (on each screen's Desktop), where the person left them; never one
+    /// placed by the window in front (NoteShelf.placement: the window wins).
     func placeDesktop() {
         guard on, !Headless.on else { return }
         var showing: Set<String> = []
         for screen in NSScreen.screens {
-            guard let number = Spaces.desktop(on: screen) else { continue }
-            let notes = store.notes.filter { paper in paper.file.places.contains { $0.kind == .desktop && $0.desktop == number } }
+            guard let number = Self.desktopShowing(on: screen) else { continue }
+            let notes = store.notes.filter { paper in
+                NoteShelf.placement(window: here[paper.key], onDesktopShowing: paper.file.places.contains { $0.kind == .desktop && $0.desktop == number }) == .desktop
+            }
             for (index, paper) in notes.enumerated() {
                 showing.insert(paper.key)
                 if faces[paper.key] == nil { faces[paper.key] = .folded }
@@ -1120,7 +1159,7 @@ final class NoteDesk {
         }
         if let scene, stick.kind != .desktop, let index = NoteMatch.best([stick], scene) { here[paper.key] = index }
         open(paper.key)
-        if stick.kind == .desktop { placeDesktop() }
+        if stick.kind == .desktop { refreshSpaces() }
         return paper
     }
 
@@ -1213,7 +1252,7 @@ final class NoteDesk {
                     guard self.on, drop == self.drops else { return }
                     guard let pid, let running = NSRunningApplication(processIdentifier: pid), !running.isTerminated else {
                         var desk = NoteStick(kind: .desktop)
-                        desk.desktop = (NSScreen.screens.first { $0.frame.contains(point) }).flatMap { Spaces.desktop(on: $0) }
+                        desk.desktop = Self.desktopShowing(on: NSScreen.screens.first { $0.frame.contains(point) })
                         desk.mode = self.app.docks.focusedDock?.mode?.id ?? ""
                         self.make(on: desk, at: point)
                         return
@@ -1430,7 +1469,7 @@ final class NoteDesk {
         guard !store.readOnly(paper) else { return say("This note has two versions: keep one first.") }
         guard store.change(key, touch: false, edit: { $0.places = places }) != nil else { return }
         if let scene, let index = NoteMatch.best(places, scene) { here[key] = index } else { here[key] = nil }
-        if places.contains(where: { $0.kind == .desktop }) { faces[key] = .folded; placeDesktop() }
+        if places.contains(where: { $0.kind == .desktop }) { faces[key] = .folded; refreshSpaces() }
         layout()
     }
 
@@ -1530,7 +1569,8 @@ final class NoteDesk {
             let (scene, read) = Self.filtered(scene, front, since: scenePrivacy)
             apply(scene, read: read, scan: false)
         } else { look() }
-        placeDesktop()
+        // From the Spaces last read; read (off the main thread) when none were yet and a note is on a Desktop.
+        if Self.spaces.isEmpty { refreshSpaces() } else { placeDesktop() }
         for panel in panels.values { panel.refresh() }
     }
 

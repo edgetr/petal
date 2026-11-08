@@ -20,6 +20,8 @@ struct NoteStoreCheck {
     static func text(_ url: URL) -> String? { try? String(contentsOf: url, encoding: .utf8) }
 
     @MainActor static func main() {
+        // File names from titles as they are (nothing here is a secret), except where a check says otherwise.
+        NoteStore.nameRedactor = { $0 }
         let fm = FileManager.default
         let top = fm.temporaryDirectory.appending(path: "petal-notes-check-\(UUID().uuidString)")
         let root = top.appending(path: "Notes")
@@ -103,6 +105,7 @@ struct NoteStoreCheck {
         toolCancelled(root: root)
         concurrentMakes(root: root)
         renamedMakes(root: root)
+        identity(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
     }
@@ -113,11 +116,13 @@ struct NoteStoreCheck {
         let work = root.appending(path: "Sessions")
         try? fm.createDirectory(at: work, withIntermediateDirectories: true)
         let item = { (id: Int, w: NoteWork) in NoteSession.Item(id: 1_000_000 + id, work: w, done: []) }   // far from the stores' own numbers
+        // The note a file is (a file with no id of its own is its path's), as a session for it knows it.
+        let idOf = { (url: URL) in NoteStore.noteID(of: text(url) ?? "", at: url, root: root) }
 
         // A write that fails stays first and is tried again; once it lands, the next (made on it) lands too.
         let held = work.appending(path: "Held.md")
         _ = NoteStore.create("v0", at: held, root: root)
-        NoteDisk.states[1] = NoteDisk.State(url: held, noteID: "S1", revision: "v0")
+        NoteDisk.states[1] = NoteDisk.State(url: held, noteID: idOf(held), revision: "v0")
         try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: work.path)
         expect(NoteStore.perform(.write(text: "v1", base: "v0"), session: 1, root: root).outcome == .failed, "a write that can't land fails")
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: work.path)
@@ -130,12 +135,13 @@ struct NoteStoreCheck {
 
         // Picture bytes: a file of their own, the same name again is the same file; the note's Markdown untouched.
         let pictureNote = work.appending(path: "Pictures.md")
-        _ = NoteStore.create("p0", at: pictureNote, root: root)
-        NoteDisk.states[5] = NoteDisk.State(url: pictureNote, noteID: "P5", revision: "p0")
+        let p0 = NoteFile(id: "P5", body: "p0").serialized()
+        _ = NoteStore.create(p0, at: pictureNote, root: root)
+        NoteDisk.states[5] = NoteDisk.State(url: pictureNote, noteID: "P5", revision: p0)
         let bytes = NotePictureBytes(name: "picture-1.png", data: Data("png".utf8), caption: "")
         let first = NoteStore.perform(.pictureBytes([bytes], noteID: "P5"), session: 5, root: root)
         let again = NoteStore.perform(.pictureBytes([bytes], noteID: "P5"), session: 5, root: root)
-        expect(first.outcome == .written && again.outcome == .written && first.pictures.first?.path == again.pictures.first?.path && text(pictureNote) == "p0",
+        expect(first.outcome == .written && again.outcome == .written && first.pictures.first?.path == again.pictures.first?.path && text(pictureNote) == p0,
                "picture bytes written once, idempotent, the note untouched")
 
         // Moving a note with pictures: the pictures go first and come along; one in the way stops it all.
@@ -144,19 +150,20 @@ struct NoteStoreCheck {
         expect(moved != nil && fm.fileExists(atPath: root.appending(path: "Away/\(assetsName)/picture-1.png").path)
                && !fm.fileExists(atPath: work.appending(path: assetsName).path), "a moved note's pictures go with it")
         let blocked = work.appending(path: "Blocked.md")
-        _ = NoteStore.create("b0", at: blocked, root: root)
+        let b0 = NoteFile(id: "B6", body: "b0").serialized()
+        _ = NoteStore.create(b0, at: blocked, root: root)
         let blockedAssets = NoteShelf.assetsFolder(id: "B6")
         try? fm.createDirectory(at: work.appending(path: blockedAssets), withIntermediateDirectories: true)
         try? Data("mine".utf8).write(to: work.appending(path: "\(blockedAssets)/picture-2.png"))
         try? fm.createDirectory(at: root.appending(path: "Away/\(blockedAssets)"), withIntermediateDirectories: true)
         try? Data("other".utf8).write(to: root.appending(path: "Away/\(blockedAssets)/picture-2.png"))
-        expect(NoteStore.move(blocked, noteID: "B6", into: root.appending(path: "Away"), root: root) == nil && text(blocked) == "b0"
+        expect(NoteStore.move(blocked, noteID: "B6", into: root.appending(path: "Away"), root: root) == nil && text(blocked) == b0
                && text(work.appending(path: "\(blockedAssets)/picture-2.png")) == "mine", "another picture in the way: nothing moves, nothing breaks")
 
         // A move, then writes made meanwhile, as quitting drains them: the writing lands where the note landed.
         let moving = work.appending(path: "Moving.md")
         _ = NoteStore.create("m0", at: moving, root: root)
-        NoteDisk.states[2] = NoteDisk.State(url: moving, noteID: "S2", revision: "m0")
+        NoteDisk.states[2] = NoteDisk.State(url: moving, noteID: idOf(moving), revision: "m0")
         NoteStore.drain([(session: 2, items: [item(10, .move(folder: root.appending(path: "Elsewhere"))), item(11, .write(text: "m1", base: "m0"))])], root: root)
         let landed = root.appending(path: "Elsewhere/Moving.md")
         expect(text(landed) == "m1" && !fm.fileExists(atPath: moving.path), "a move and the typing after it, drained at quit", text(landed) ?? "nil")
@@ -165,7 +172,7 @@ struct NoteStoreCheck {
         // queue's next turn (or a secondWrite drain): each piece is done once.
         let once = work.appending(path: "Once.md")
         _ = NoteStore.create("e0", at: once, root: root)
-        NoteDisk.states[7] = NoteDisk.State(url: once, noteID: "E7", revision: "e0")
+        NoteDisk.states[7] = NoteDisk.State(url: once, noteID: idOf(once), revision: "e0")
         let firstWrite = item(30, .write(text: "e1", base: "e0")), secondWrite = item(31, .write(text: "e2", base: "e1"))
         expect(NoteDisk.once(firstWrite, session: 7, root: root)?.outcome == .written, "the queue writes the firstWrite")
         NoteStore.drain([(session: 7, items: [firstWrite, secondWrite])], root: root)
@@ -179,20 +186,21 @@ struct NoteStoreCheck {
         // Writing that still can't land at quit goes to "Unsaved notes" with the pictures it references, laid out as
         // in the notes' folder so its references hold.
         let stuck = work.appending(path: "Stuck.md")
-        _ = NoteStore.create("s0", at: stuck, root: root)
-        NoteDisk.states[3] = NoteDisk.State(url: stuck, noteID: "S3", revision: "s0")
+        let s0 = NoteFile(id: "S3", body: "s0").serialized()
+        _ = NoteStore.create(s0, at: stuck, root: root)
+        NoteDisk.states[3] = NoteDisk.State(url: stuck, noteID: "S3", revision: s0)
         try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: work.path)
         let reference = NoteShelf.assetsFolder(id: "S3") + "/picture-u.png"
         let kept = NoteFile(id: "S3", body: "# Rescued words\nkeep me\n![](\(reference))")
         NoteStore.drain([(session: 3, items: [item(21, .pictureBytes([NotePictureBytes(name: "picture-u.png", data: Data("u".utf8), caption: "")], noteID: "S3")),
-                                              item(20, .write(text: kept.serialized(), base: "s0"))])], root: root)
+                                              item(20, .write(text: kept.serialized(), base: s0))])], root: root)
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: work.path)
         let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
         let rescued = (try? fm.contentsOfDirectory(atPath: unsaved.path)) ?? []
         expect(rescued.contains("Rescued words.md") && text(unsaved.appending(path: "Rescued words.md"))?.contains("keep me") == true,
                "writing that can't land by quit is kept in Unsaved notes", "\(rescued)")
         expect(fm.fileExists(atPath: unsaved.appending(path: reference).path), "with the pictures it references, where its references point")
-        expect(text(stuck) == "s0", "and the file is as it was")
+        expect(text(stuck) == s0, "and the file is as it was")
 
         // Keep this one: checked again inside each coordinated step; a file edited since stops it.
         let keepA = work.appending(path: "Keep.md"), keepB = work.appending(path: "Keep 2.md")
@@ -387,6 +395,50 @@ struct NoteStoreCheck {
         let before = (try? FileManager.default.contentsOfDirectory(atPath: folder.path))?.count
         expect(NoteStore.keepBeside("late", original: original, root: root, live: { false }) == .cancelled
                && (try? FileManager.default.contentsOfDirectory(atPath: folder.path))?.count == before, "a copy for a request that ended: none")
+    }
+
+    /// Every change checks the file is still the note it means: a path another note now has is never written,
+    /// moved, stuck or trashed. And file names are made from titles only after redaction.
+    @MainActor static func identity(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Identity")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        // A's file was renamed elsewhere, and B now has A's old path; A's session still points there.
+        let reused = folder.appending(path: "Reused.md")
+        let theirs = NoteFile(id: "B", body: "# B\nB's words").serialized()
+        _ = NoteStore.create(theirs, at: reused, root: root)
+        NoteDisk.states[901] = NoteDisk.State(url: reused, noteID: "A", revision: theirs)
+        let live: @Sendable () -> Bool = { true }
+        let mine = NoteFile(id: "A", body: "# A\nA's words").serialized()
+        expect(NoteStore.perform(.write(text: mine, base: theirs), session: 901, root: root, live: live).outcome == .notThisNote && text(reused) == theirs,
+               "a tool's write to a reused path: refused, the other note untouched")
+        var stuck = NoteFile.parse(mine, fallbackID: "A", fallbackDate: Date())
+        stuck.places = [NoteStick(kind: .desktop)]
+        expect(NoteStore.perform(.write(text: stuck.serialized(), base: theirs), session: 901, root: root, live: live).outcome == .notThisNote
+               && text(reused) == theirs, "sticking it somewhere (its places written) at a reused path: refused")
+        let person = NoteStore.perform(.write(text: mine, base: theirs), session: 901, root: root)
+        if case .keptBoth(let copy) = person.outcome {
+            expect(text(reused) == theirs && text(copy) == mine, "the person's typing at a reused path: kept beside, the other note untouched")
+        } else { expect(false, "the person's typing at a reused path: kept beside", "\(person.outcome)") }
+        expect(NoteStore.perform(.move(folder: root.appending(path: "Elsewhere")), session: 901, root: root).outcome != .written
+               && text(reused) == theirs && !fm.fileExists(atPath: root.appending(path: "Elsewhere/Reused.md").path), "a move of a reused path: refused, nothing moved")
+        _ = NoteStore.perform(.trash(revision: theirs), session: 901, root: root)
+        expect(text(reused) == theirs, "a trash of a reused path: refused")
+
+        // File names never hold a secret: made from the redacted title; unreadable, a plain name; and recorded.
+        NoteStore.nameRedactor = { $0.replacingOccurrences(of: "4111111111111111", with: "(hidden)") }
+        let card = NoteFile(id: "C1", body: "# Card 4111111111111111 for travel").serialized()
+        let named = NoteStore.createNamed(card, stem: NoteStore.safeStem(for: card, fallback: "Note 1"), in: folder, root: root)
+        expect(named?.lastPathComponent == "Card (hidden) for travel.md" && NoteNames.vouched("C1", named?.lastPathComponent ?? ""),
+               "a title holding a secret: the file named after redaction, and vouched for", named?.lastPathComponent ?? "nil")
+        NoteStore.nameRedactor = { _ in nil }
+        let plain = NoteStore.createNamed(card, stem: NoteStore.safeStem(for: card, fallback: "Note 1"), in: folder, root: root)
+        expect(plain?.lastPathComponent == "Note 1.md", "the vault unreadable: a plain name", plain?.lastPathComponent ?? "nil")
+        if case .keptBoth(let copy) = NoteStore.keepBeside(card, original: reused, root: root) {
+            expect(!copy.lastPathComponent.contains("4111") && !copy.lastPathComponent.contains("Reused"), "a conflict copy named from its own redacted title", copy.lastPathComponent)
+        }
+        expect(!((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).contains { $0.contains("4111") }, "no file name anywhere holds the card number")
+        NoteStore.nameRedactor = { $0 }
     }
 
     @MainActor static func concurrentMakes(root: URL) {

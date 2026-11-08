@@ -51,7 +51,8 @@ struct NoteSelectionCheck {
         expect(NoteShield.search("hotel", in: notes, index: vaultIndex, matches: matches) == [0], "words around it still find the note")
         expect(NoteShield.search("", in: notes, index: vaultIndex, matches: matches) == [0, 1, 2], "an empty search lists them all")
         expect(NoteShield.search("milk", in: notes, index: .unavailable, matches: matches) == nil, "the vault unreadable: no results at all")
-        let rows = [(id: "n1", key: "/n/Card \(card).md", body: "# Card \(card)", version: false), (id: "n2", key: "/n/Door.md", body: "# Door", version: false)]
+        let rows = [(id: "n1", key: "/n/Card \(card).md", body: "# Card \(card)", version: false, vouched: false),
+                    (id: "n2", key: "/n/Door.md", body: "# Door", version: false, vouched: true)]
         expect(NoteShield.find("Card \(card)", rows: rows, index: vaultIndex) == .none && NoteShield.find("/n/Card \(card).md", rows: rows, index: vaultIndex) == .none,
                "naming a guessed secret in a title or file finds nothing")
         expect(NoteShield.find("Card (hidden)", rows: rows, index: vaultIndex) == .found(0) && NoteShield.find("n2", rows: rows, index: vaultIndex) == .found(1),
@@ -72,13 +73,15 @@ struct NoteSelectionCheck {
         passage.url = "https://example.com/\(card)"
         let place = passage.redacted { vaultIndex.redacted($0) }.words
         expect(!place.contains("41") && place.contains("example.com"), "a passage's quote and address cut only after redaction", place)
-        let titled = "# Card \(card)\nmore"
-        expect(NoteTold.path("/n/Inbox/Card 41111111111.md", body: titled) { vaultIndex.redacted($0) } == "/n/Inbox/(hidden).md",
-               "a file named from a title holding a secret: its name not told")
-        expect(NoteTold.path("/n/Inbox/Groceries.md", body: "# Groceries") { vaultIndex.redacted($0) } == "/n/Inbox/Groceries.md", "any other file as it is")
+        let opaque = NoteTold.path("/n/Inbox/Card 41111.md", vouched: false) { vaultIndex.redacted($0) }
+        expect(opaque.hasPrefix("/n/Inbox/note-") && !opaque.contains("41"), "a name Petal can't vouch for is told opaquely", opaque)
+        expect(opaque == NoteTold.path("/n/Inbox/Card 41111.md", vouched: false) { vaultIndex.redacted($0) }, "the same opaque name each time")
+        expect(NoteTold.path("/n/Inbox/Groceries.md", vouched: true) { vaultIndex.redacted($0) } == "/n/Inbox/Groceries.md", "a name Petal made, as it is")
+        expect(NoteTold.id("file:Inbox/Card 41111.md") { vaultIndex.redacted($0) }.hasPrefix("file:note-"), "a path's id told opaquely too")
 
         // A specific conflict copy, named by its file: that copy, never the first paper of its id.
-        let copies = [(id: "A", key: "/n/A.md", body: "# A\nmine", version: false), (id: "A", key: "/n/A (conflicted copy).md", body: "# A\ntheirs", version: false)]
+        let copies = [(id: "A", key: "/n/A.md", body: "# A\nmine", version: false, vouched: true),
+                      (id: "A", key: "/n/A (conflicted copy).md", body: "# A\ntheirs", version: false, vouched: true)]
         expect(NoteShield.find("/n/A (conflicted copy).md", rows: copies, index: vaultIndex) == .found(1), "the copy named is the copy found")
         print("note selection: " + (failures == 0 ? "all checks passed" : "\(failures) failed"))
         if failures > 0 { exit(1) }

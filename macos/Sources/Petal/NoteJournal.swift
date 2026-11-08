@@ -212,7 +212,7 @@ enum NoteJournal {
             guard picturesBeside(note) else { break }
             switch NoteShelf.journalRecovery(disk: disk, base: entry.base, text: entry.text, aside: entry.aside) {
             case .nothing: return true
-            case .write: if NoteStore.save(entry.text, to: note, base: entry.base, root: root) == .written { return true }
+            case .write: if NoteStore.save(entry.text, to: note, base: entry.base, root: root, noteID: entry.noteID) == .written { return true }
             case .copy: if case .keptBoth = NoteStore.keepBeside(entry.text, original: note, root: root) { return true }
             }
         case .separate:
@@ -220,7 +220,9 @@ enum NoteJournal {
             let hint = URL(fileURLWithPath: entry.path)
             let folder = hint.deletingLastPathComponent()
             let note = NoteFile.parse(entry.text, fallbackID: entry.noteID, fallbackDate: Date())
-            let stem = NoteText.fileName(note.title.isEmpty ? hint.deletingPathExtension().lastPathComponent : note.title)
+            // Named from its redacted title (never the old file's name, which may not be Petal's).
+            _ = note
+            let stem = NoteStore.safeStem(for: entry.text, fallback: NoteStore.plainStem)
             if NoteStore.safe(folder, root: root), picturesBeside(hint),
                NoteStore.createNamed(entry.text, stem: entry.base == nil ? stem : stem + " (recovered)", in: folder, root: root) != nil {
                 return true
