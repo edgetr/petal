@@ -1588,6 +1588,9 @@ enum ViewerPDFComments {
         guard document.write(to: temp) else { return .failed("Petal couldn't write the PDF with its notes.") }
         meanwhile?()
         let folder = pdf.deletingLastPathComponent()
+        // Written only beside a file in an allowed root (the path rule), and only into a folder the person can write.
+        guard case .success = ViewerPath.check(pdf.path) else { return .failed(ViewerModel.cantShowText) }
+        guard ViewerPath.writable(folder.path) else { return .failed("The person can't write in the PDF's folder: nothing was written.") }
         var outcome: Outcome = .failed("Petal couldn't write beside the PDF; nothing changed.")
         if !intoOriginal {
             // A new copy beside it: the PDF read (it's still the one the notes were written on), the copy written.

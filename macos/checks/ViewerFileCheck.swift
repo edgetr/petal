@@ -76,11 +76,19 @@ struct ViewerFileCheck {
                "~/ is the home folder; a relative path isn't taken")
         expect(ViewerPath.inside("/Users/someone/Docs/a.pdf", home) && !ViewerPath.inside("/Users/someoneelse/a.pdf", home) && !ViewerPath.inside("/etc/a.pdf", home),
                "inside by components, never by a prefix of characters")
-        func decide(_ destination: String?, regular: Bool = true, owner: UInt32 = 501) -> Result<String, ViewerPath.Refusal> {
-            ViewerPath.decide(destination: destination, home: home, regular: regular, owner: owner, me: 501)
+        func decide(_ destination: String?, regular: Bool = true, owner: UInt32 = 501, readable: Bool = true) -> Result<String, ViewerPath.Refusal> {
+            ViewerPath.decide(destination: destination, home: home, volumes: "/Volumes", regular: regular, owner: owner, me: 501, readable: readable)
         }
+        // Mounted volumes (external drives, network shares): a file the person can read, whoever the disk says owns it.
+        expect(decide("/Volumes/Drive/Report.pdf", owner: 0) == .success("/Volumes/Drive/Report.pdf"), "a file on an external drive the person can read")
+        expect(decide("/Volumes/Share/Team/Deck.pptx", owner: 99) == .success("/Volumes/Share/Team/Deck.pptx"), "on a network share too")
+        expect(decide("/Volumes/Drive/Report.pdf", readable: false) == .failure(.notReadable), "one they can't read: refused")
+        expect(decide("/Volumes/Report.pdf") == .failure(.outsideRoots), "/Volumes itself isn't a volume")
+        expect(decide("/Users/someone/a.pdf", owner: 0, readable: true) == .failure(.notOwned), "in the home folder it must still be their own")
+        expect(decide("/System/Library/a.pdf") == .failure(.outsideRoots) && decide("/Library/a.pdf") == .failure(.outsideRoots)
+               && decide("/Users/someoneelse/a.pdf") == .failure(.outsideRoots), "/System, /Library and other people's homes: refused")
         expect(decide("/Users/someone/a.pdf") == .success("/Users/someone/a.pdf"), "the person's own file in the home folder")
-        expect(decide("/etc/secret.pdf") == .failure(.outsideHome) && decide("/private/tmp/a.pdf") == .failure(.outsideHome), "a destination outside it: refused")
+        expect(decide("/etc/secret.pdf") == .failure(.outsideRoots) && decide("/private/tmp/a.pdf") == .failure(.outsideRoots), "a destination outside it: refused")
         expect(decide("/Users/someone/a.pdf", owner: 0) == .failure(.notOwned), "someone else's file isn't opened")
         expect(decide("/Users/someone/a.pdf", regular: false) == .failure(.notRegular), "a folder or package isn't a file")
         expect(decide(nil) == .failure(.missing), "nothing there")
@@ -108,10 +116,10 @@ struct ViewerFileCheck {
         // ".." after a link out of home goes up from where the link leads (outside): a file there is outside, refused.
         try? FileManager.default.createDirectory(at: base.appending(path: "Docs"), withIntermediateDirectories: true)
         try? Data("%PDF-1.4".utf8).write(to: base.appending(path: "Docs/Report.pdf"))
-        expect(ViewerPath.check(h + "/Away/../Docs/Report.pdf", home: h).failureValue == .outsideHome, "a .. through a link out of home: where it really leads, outside, refused")
-        expect(ViewerPath.check(h + "/Docs/Out.pdf", home: h).failureValue == .outsideHome, "a link out of it: the destination is outside, refused")
-        expect(ViewerPath.check(h + "/Away/Elsewhere.pdf", home: h).failureValue == .outsideHome, "nor through a linked folder")
-        expect(ViewerPath.check(outside.appending(path: "Elsewhere.pdf").path, home: h).failureValue == .outsideHome, "nor named directly")
+        expect(ViewerPath.check(h + "/Away/../Docs/Report.pdf", home: h).failureValue == .outsideRoots, "a .. through a link out of home: where it really leads, outside, refused")
+        expect(ViewerPath.check(h + "/Docs/Out.pdf", home: h).failureValue == .outsideRoots, "a link out of it: the destination is outside, refused")
+        expect(ViewerPath.check(h + "/Away/Elsewhere.pdf", home: h).failureValue == .outsideRoots, "nor through a linked folder")
+        expect(ViewerPath.check(outside.appending(path: "Elsewhere.pdf").path, home: h).failureValue == .outsideRoots, "nor named directly")
         // Other casing (macOS's disks don't care; the canonical path is the file system's own spelling).
         let otherCasing = base.appending(path: "home/docs/REPORT.pdf").path
         expect(FileManager.default.fileExists(atPath: otherCasing), "(a disk that ignores case, as macOS's do)")
@@ -122,7 +130,31 @@ struct ViewerFileCheck {
         expect(ViewerPath.check(h + "/Docs/Folder.pdf", home: h).failureValue == .notRegular, "a folder named like a PDF isn't a file")
         expect(ViewerPath.check(h + "/Docs/Missing.pdf", home: h).failureValue == .missing, "a missing file")
         expect(ViewerPath.check("Docs/Report.pdf", home: h).failureValue == .notAbsolute, "a relative path")
+        // A stand-in for /Volumes: a drive's file the person can read opens, one they can't is refused.
+        let volumes = base.appending(path: "Volumes")
+        try? FileManager.default.createDirectory(at: volumes.appending(path: "Drive"), withIntermediateDirectories: true)
+        let onDrive = volumes.appending(path: "Drive/Report.pdf")
+        try? Data("%PDF-1.4".utf8).write(to: onDrive)
+        expect((try? ViewerPath.check(onDrive.path, home: h, volumes: volumes.path).get()) != nil, "a /Volumes path: a file on a mounted drive opens")
+        let locked = volumes.appending(path: "Drive/Locked.pdf")
+        try? Data("%PDF-1.4".utf8).write(to: locked)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        expect(ViewerPath.check(locked.path, home: h, volumes: volumes.path).failureValue == .notReadable, "one the person can't read: refused")
+        try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: locked.path)
+        expect(ViewerPath.check(outside.appending(path: "Elsewhere.pdf").path, home: h, volumes: volumes.path).failureValue == .outsideRoots,
+               "anywhere else still refused with volumes allowed")
         try? FileManager.default.removeItem(at: base)
+        // The real rule (the person's home folder and /Volumes): a file in /private/tmp is refused.
+        let inTmp = URL(fileURLWithPath: "/private/tmp/petal-viewer-check-\(UUID().uuidString).pdf")
+        try? Data("%PDF-1.4".utf8).write(to: inTmp)
+        if FileManager.default.fileExists(atPath: inTmp.path) {
+            expect(ViewerPath.check(inTmp.path, home: NSHomeDirectory(), volumes: "/Volumes").failureValue == .outsideRoots, "a /private/tmp path: refused")
+            expect(ViewerPath.check("/tmp/" + inTmp.lastPathComponent, home: NSHomeDirectory(), volumes: "/Volumes").failureValue == .outsideRoots,
+                   "and through /tmp, which leads there")
+            try? FileManager.default.removeItem(at: inTmp)
+        } else {
+            expect(false, "a throwaway file in /private/tmp (couldn't be made)")
+        }
 
         // MARK: Notes in the margin
 

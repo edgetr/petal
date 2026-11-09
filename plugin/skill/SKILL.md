@@ -67,8 +67,9 @@ Use, in this order:
    Petal's viewer (macOS, part of Petal Notes) shows a document with the notes on that file in a margin: a PDF
    through PDFKit (notes lined up with their passage, a dashed line to its highlight), Word, PowerPoint, Keynote,
    Excel, Pages and Numbers through macOS's own Quick Look preview (notes per page or slide), Open in <app> one click
-   away. `petal_view` opens one (`path`: a regular file the user owns whose final destination, every link followed,
-   is in their home folder; `page` from 1); it never moves or changes the file. To change a document, try it on copies first:
+   away. `petal_view` opens one (`path`: a file whose final destination, every link followed, is in their home folder
+   and theirs, or on a drive or share mounted under /Volumes and readable by them; `page` from 1); it never moves or
+   changes the file. To change a document, try it on copies first:
    `petal_view_versions` (`path`, `names`) makes a copy per name in a temporary folder and shows them under the
    document with Use this (each version has an `id`; names may repeat); edit the copies (never the file), and
    `petal_view_pick` (`set`, `wait` up to 120 s) says which one the user picked (its `id`, name and path). Change their own file only after they allow it. `petal_note_pdf_comments` writes the

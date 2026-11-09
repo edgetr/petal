@@ -959,7 +959,7 @@ ASSIST_TOOLS = {
                          {"id": {"type": "string"}, "to": {"type": "string", "enum": ["passage", "tab", "window", "app", "file", "desktop"]},
                           "also": {"type": "boolean"}, "remove": {"type": "integer"}}),
     "petal_view": (assist("petal_view"), "Open a document in Petal's viewer (macOS; part of Petal Notes): a PDF through PDFKit, or Word, PowerPoint, Keynote, Excel, Pages, Numbers, text and pictures through macOS's own Quick Look preview. "
-                   "The notes on that file show in the viewer's margin, lined up with their passage, page or slide; the person selects text and presses Note for an exact spot. path: the file's full path (~/ for the home folder); only a regular file the user owns whose final destination (every link followed) is inside their home folder. page: which page or slide to show (a whole number from 1; one the document hasn't is said, and it shows where it was). "
+                   "The notes on that file show in the viewer's margin, lined up with their passage, page or slide; the person selects text and presses Note for an exact spot. path: the file's full path (~/ for the home folder); only a regular file whose final destination (every link followed) is in their home folder and theirs, or on a drive or share mounted under /Volumes and readable by them; anywhere else (/tmp, /System, another user's home) is refused. page: which page or slide to show (a whole number from 1; one the document hasn't is said, and it shows where it was). "
                    "It never moves or changes the file. Says how it's shown and how many pages or slides it has; names are told with saved secrets hidden, and nothing while the vault can't be read.",
                    {"path": {"type": "string"}, "page": {"type": "integer"}}),
     "petal_view_versions": (assist("petal_view_versions"), "Try changes to a document on copies first: makes a copy of the file for each of names (\"Shorter\", \"With numbers\") in a temporary folder and shows their pictures under the document in Petal's viewer, each with Use this. "
@@ -968,7 +968,7 @@ ASSIST_TOOLS = {
     "petal_view_pick": (assist("petal_view_pick"), "Which version the person picked with Use this (from your own petal_view_versions set): its id, name and copy's path, or null while they haven't. wait: seconds to wait for the pick (up to 120).",
                         {"set": {"type": "string"}, "wait": {"type": "integer"}}),
     "petal_note_pdf_comments": (assist("petal_note_pdf_comments"), "Write the user's notes on a PDF into it as comments (a passage's note as a highlight with its words, any other as a sticky note on its page), so they show in Preview, Acrobat and anywhere else. "
-                                "By default into a copy beside it (\"Name (with notes).pdf\"); into_original: true writes into the PDF itself, only after the user allows it, and keeps the original beside it (\"Name (before notes).pdf\"). Saved secrets are never written; nothing is written while the vault can't be read.",
+                                "By default into a copy beside it (\"Name (with notes).pdf\"); into_original: true writes into the PDF itself, only after the user allows it, and keeps the original beside it (\"Name (before notes).pdf\"). Only for a PDF petal_view could open, in a folder the user can write. Saved secrets are never written; nothing is written while the vault can't be read.",
                                 {"path": {"type": "string"}, "into_original": {"type": "boolean"}}),
 }
 

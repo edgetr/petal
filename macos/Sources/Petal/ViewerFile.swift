@@ -46,13 +46,15 @@ enum ViewerKind: Equatable, Sendable {
 
 // MARK: - The path an agent names
 
-/// The one path rule, at every open and every reload or file followed: only a regular file the person owns, of a
-/// kind the viewer shows, whose final destination (every link followed) is inside the home folder, compared by
-/// canonical paths (the file system's own casing) component by component. Where the file is is what matters, not the
-/// way there: a link out and back to a file in the home folder is fine; a destination outside it is refused.
+/// The one path rule, at every open and every reload or file followed: a regular file of a kind the viewer shows,
+/// whose final destination (every link followed) is in an allowed root, compared by canonical paths (the file
+/// system's own casing) component by component: the home folder (the person's own file there), or a volume mounted
+/// under /Volumes, an external drive or a network share (a file the person can read: ownership there is often
+/// ignored). Where the file is is what matters, not the way there: a link out and back to a file in an allowed root
+/// is fine; anywhere else (/tmp, /private, /System, /Library, another person's home) is refused.
 enum ViewerPath {
     enum Refusal: Error, Equatable, CustomStringConvertible {
-        case notAbsolute, missing, notRegular, notOwned, outsideHome, notShown
+        case notAbsolute, missing, notRegular, notOwned, notReadable, outsideRoots, notShown
 
         var description: String {
             switch self {
@@ -60,7 +62,8 @@ enum ViewerPath {
             case .missing: "There's no file there."
             case .notRegular: "That isn't a file Petal's viewer can open (a folder, a package or something else)."
             case .notOwned: "That file isn't the person's own: Petal's viewer opens only their files."
-            case .outsideHome: "That file isn't in the person's home folder: Petal's viewer shows only files there."
+            case .notReadable: "The person can't read that file."
+            case .outsideRoots: "That file isn't in the person's home folder or on a mounted drive: Petal's viewer shows only files there."
             case .notShown: ViewerKind.shows
             }
         }
@@ -68,6 +71,8 @@ enum ViewerPath {
 
     /// The home folder the rule holds to (Petal --viewer-check points it at a throwaway folder).
     nonisolated(unsafe) static var home: String = NSHomeDirectory()
+    /// Where mounted volumes are (external drives and network shares).
+    nonisolated(unsafe) static var volumes: String = "/Volumes"
 
     /// The path as given: "~/" for the home folder; nil when it isn't absolute. Nothing else is done to it by its
     /// words: the destination is resolved by the disk.
@@ -83,15 +88,24 @@ enum ViewerPath {
     static func inside(_ path: String, _ folder: String) -> Bool { components(path).starts(with: components(folder)) }
 
     /// The decision, from what the disk said: `destination` the final destination's canonical path (nil: nothing
-    /// there), `home` the home folder's, and what the file there is.
-    static func decide(destination: String?, home: String, regular: Bool, owner: UInt32, me: UInt32) -> Result<String, Refusal> {
+    /// there), `home` the home folder's and `volumes` the mounted volumes' (canonical), and what the file there is.
+    /// In the home folder the file must be the person's own; on a mounted volume (inside one, never /Volumes itself)
+    /// one they can read.
+    static func decide(destination: String?, home: String, volumes: String = "/Volumes", regular: Bool, owner: UInt32, me: UInt32,
+                       readable: Bool) -> Result<String, Refusal> {
         guard let destination else { return .failure(.missing) }
-        guard inside(destination, home) else { return .failure(.outsideHome) }
+        let inHome = inside(destination, home)
+        let onVolume = !inHome && inside(destination, volumes) && components(destination).count > components(volumes).count + 1
+        guard inHome || onVolume else { return .failure(.outsideRoots) }
         guard regular else { return .failure(.notRegular) }
-        guard owner == me else { return .failure(.notOwned) }
+        if inHome, owner != me { return .failure(.notOwned) }
+        if onVolume, !readable { return .failure(.notReadable) }
         guard ViewerKind.of(destination) != nil else { return .failure(.notShown) }
         return .success(destination)
     }
+
+    /// Whether the person can write in a folder (where a copy beside a file goes).
+    static func writable(_ folder: String) -> Bool { access(folder, W_OK) == 0 }
 
     /// A path's final destination, every link followed, as the file system spells it (its own casing); nil when
     /// nothing's there.
@@ -106,13 +120,15 @@ enum ViewerPath {
     }
 
     /// Checks `given` on the disk (off the main thread): the file it leads to (its canonical path), or why not.
-    static func check(_ given: String, home: String = ViewerPath.home) -> Result<URL, Refusal> {
+    static func check(_ given: String, home: String = ViewerPath.home, volumes: String = ViewerPath.volumes) -> Result<URL, Refusal> {
         guard let path = absolute(given, home: home) else { return .failure(.notAbsolute) }
         let destination = canonical(path)
         var info = stat()
         let found = destination.map { stat($0, &info) == 0 } ?? false
         let regular = found && (info.st_mode & S_IFMT) == S_IFREG
-        let decided = decide(destination: found ? destination : nil, home: canonical(home) ?? home, regular: regular, owner: info.st_uid, me: getuid())
+        let readable = destination.map { access($0, R_OK) == 0 } ?? false
+        let decided = decide(destination: found ? destination : nil, home: canonical(home) ?? home, volumes: canonical(volumes) ?? volumes,
+                             regular: regular, owner: info.st_uid, me: getuid(), readable: readable)
         return decided.map { URL(fileURLWithPath: $0) }
     }
 }
