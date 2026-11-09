@@ -172,6 +172,8 @@ struct NoteHelpCheck {
 
         expect(NoteHelp.repository(url: "https://github.com/edgetr/petal/pull/16") == NoteHelp.Repository(slug: "edgetr/petal", kind: .pull, number: 16), "a pull request")
         expect(NoteHelp.repository(url: "https://github.com/edgetr/petal/issues/3")?.kind == .issue && NoteHelp.repository(url: "https://example.com/a/b") == nil, "an issue; not GitHub")
+        expect(NoteHelp.pullNumber(NoteHelp.repository(url: "https://github.com/edgetr/petal/pull/16")!) == 16, "a pull request starts from its head")
+        expect(NoteHelp.pullNumber(NoteHelp.repository(url: "https://github.com/edgetr/petal/issues/3")!) == nil, "an issue starts from the default branch")
         let config = "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:Edgetr/petal.git\n\tfetch = +refs/heads/*\n[branch \"main\"]\n\tremote = origin"
         expect(NoteHelp.remotes(config: config).map { "\($0.name) \($0.url)" } == ["origin git@github.com:Edgetr/petal.git"], "a git config's remotes, by name")
         expect(NoteHelp.slug(remote: "git@github.com:Edgetr/petal.git") == "edgetr/petal" && NoteHelp.slug(remote: "https://github.com/edgetr/petal") == "edgetr/petal", "remotes' slugs")
@@ -184,47 +186,66 @@ struct NoteHelpCheck {
         let answer = "Opened https://github.com/example/garden/pull/43 into #42.\nProof: run.sh ✓ · diff +4 −2 · PR #43"
         expect(NoteHelp.pullRequest(in: answer) == "https://github.com/example/garden/pull/43" && NoteHelp.proof(in: answer) == ["run.sh ✓", "diff +4 −2", "PR #43"], "the result and its proof")
         expect(NoteHelp.inkText(answer) == "Opened https://github.com/example/garden/pull/43 into #42.", "ink without the proof line")
+        let long = String(repeating: "A long answer. ", count: 200)
+        expect(NoteHelp.inkText(long) == long.trimmingCharacters(in: .whitespaces), "the whole answer is kept (only the paper shortens it)")
         expect(NoteHelp.objections(in: "1. The list in Settings still doesn't sort.\n2. No check covers it.") == 2 && NoteHelp.objections(in: "No objections.") == 0, "objections counted")
         expect(NoteHelp.taskChips([.init(kind: .tab, title: "", target: ""), .init(kind: .tab, title: "", target: ""), .init(kind: .file, title: "", target: "/a/Quote-A.pdf")]) == ["2 tabs", "Quote-A.pdf"], "a task's chips")
 
 
-        // MARK: Rule A: one cancellable operation per run
+        // MARK: Rule A: one token carried by everything a run starts
 
-        var gate = NoteHelp.Gate(id: 7)
-        expect(gate.continues(7) && !gate.continues(6), "a continuation goes on only for its own run")
-        expect(gate.pause() && !gate.continues(7) && gate.paused, "paused: no continuation goes on")
-        expect(gate.ending(answered: true, asking: false) == .paused, "a turn ending while paused is a pause, not an answer")
-        var pausedEnd = gate
-        expect(!pausedEnd.end(.paused) && pausedEnd.paused, "a pause advances nothing and stays paused (Go on)")
-        expect(gate.goOn() && gate.continues(7), "Go on: running again")
-        gate.hold("always:code:/u/garden")
-        var revoked = gate
-        expect(revoked.revoke("always:code:/u/garden") && !revoked.continues(7), "taking back the grant it works under stops it")
-        var other = gate
-        expect(!other.revoke("reply") && other.continues(7), "another grant leaves it running")
-        var stopped = gate
-        stopped.stop()
-        expect(stopped.ending(answered: true, asking: false) == .stopped && !stopped.goOn(), "stopped: its answer counts for nothing, and stays stopped")
-        expect(!stopped.end(.stopped), "a stopped run advances nothing")
-        expect(gate.ending(answered: true, asking: true) == .waitingOnPerson, "asking the person: not done yet")
-        expect(gate.ending(answered: false, asking: false) == .failed, "no answer: failed, nothing advances")
-        var done = gate
-        expect(done.ending(answered: true, asking: false) == .succeeded && done.end(.succeeded), "only a running run with an answer advances")
-        expect(!done.end(.succeeded) && !done.continues(7), "once")
-        // A watcher's look writes back only its own fields, and only under its own generation.
+        let token = RunToken(id: "op-1")
+        final class Killed: @unchecked Sendable { var list: [String] = [] }
+        let stopped = Killed()
+        let lock = NSLock()
+        let kill = { (what: String) in { @Sendable in lock.withLock { stopped.list.append(what) } } }
+        let agentProcess = token.bind(kill("agent"))
+        let gitStep = token.bind(kill("git"))
+        expect(token.admits && agentProcess != nil && gitStep != nil, "a running run admits its turns, calls and git steps")
+        token.unbind(gitStep)
+        expect(token.pause() && !token.admits && token.paused, "paused: nothing of it is admitted")
+        expect(lock.withLock { stopped.list } == ["agent"], "pausing ends what it has running (a finished step isn't touched)", "\(stopped.list)")
+        expect(token.bind(kill("late")) == nil, "a step that starts while it's paused isn't admitted (and stops at once)")
+        expect(token.ending(outcome: .succeeded, asking: false) == .paused && !token.end(.paused) && token.paused,
+               "a turn ending while paused is a pause: nothing advances, and Go on is still there")
+        expect(token.goOn() && token.admits && !token.goOn(), "Go on: admitted again, once")
+        _ = token.bind(kill("brain"))
+        token.hold("always:code:/u/garden")
+        expect(!token.revoke("reply") && token.admits, "another grant taken back leaves it running")
+        expect(token.revoke("always:code:/u/garden") && !token.admits && token.state == .cancelled, "taking back a grant it holds cancels it")
+        expect(lock.withLock { stopped.list }.contains("brain"), "and ends what it has running")
+        expect(!token.goOn() && token.bind(kill("again")) == nil, "cancelled: never admitted again")
+        expect(token.ending(outcome: .succeeded, asking: false) == .stopped && !token.end(.stopped), "a stopped run's answer counts for nothing")
+        // Success only on an explicit successful outcome.
+        let fresh = RunToken()
+        expect(fresh.ending(outcome: nil, asking: false) == .failed, "no outcome (text, but no clean exit): failed")
+        expect(fresh.ending(outcome: .failed, asking: false) == .failed, "an error event or a bad exit: failed")
+        expect(fresh.ending(outcome: .interrupted, asking: false) == .stopped, "interrupted: stopped, nothing advances")
+        expect(fresh.ending(outcome: .succeeded, asking: true) == .waitingOnPerson, "asking the person: not done yet")
+        expect(fresh.ending(outcome: .succeeded, asking: false) == .succeeded && fresh.end(.succeeded) && fresh.state == .finished, "a clean exit with no error: succeeded")
+        expect(!fresh.end(.succeeded) && !fresh.admits && fresh.bind({}) == nil, "finished once, never admitted again")
+        // A watcher's look writes back only its own fields, and only under its own id (a UUID), not paused.
+        let watchID = UUID().uuidString
         var watched: NoteHelp.Watch? = NoteHelp.Watch(every: "1d", line: "under $100", mac: "m", at: "09:00")
-        watched?.gen = 3
-        expect(NoteHelp.applyLook(&watched, gen: 3, shown: "$99", hint: "from", crossed: true, at: now) == true && watched?.last == "$99" && watched?.hit == true,
-               "a look under its own generation: written, newly crossed")
+        watched?.id = watchID
+        expect(NoteFile.parse({ var f = NoteFile(id: "W1", created: now); f.watch = watched; return f.serialized() }(), fallbackID: "x", fallbackDate: now).watch?.id == watchID,
+               "a watcher's id reads back")
+        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$99", hint: "from", crossed: true, at: now) == true && watched?.last == "$99" && watched?.hit == true,
+               "a look under its own id: written, newly crossed (the only thing that says it)")
+        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$98", hint: nil, crossed: true, at: now) == false, "still past the line: not newly crossed, not said again")
+        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$120", hint: nil, crossed: false, at: now) == false && watched?.hit == false, "back over the line")
+        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$90", hint: nil, crossed: true, at: now) == true, "crossed again: said again")
         var pausedWatch = watched
         pausedWatch?.paused = true
-        pausedWatch?.gen = 4
+        pausedWatch?.id = UUID().uuidString
         let before = pausedWatch
-        expect(NoteHelp.applyLook(&pausedWatch, gen: 3, shown: "$80", hint: nil, crossed: true, at: now) == nil && pausedWatch == before,
-               "paused meanwhile: the look writes nothing (Pause stays)")
+        expect(NoteHelp.applyLook(&pausedWatch, id: watchID, shown: "$80", hint: nil, crossed: true, at: now) == nil && pausedWatch == before,
+               "paused meanwhile (a new id): the look writes nothing (Pause stays)")
+        var samePaused = watched
+        samePaused?.paused = true
+        expect(NoteHelp.applyLook(&samePaused, id: watchID, shown: "$80", hint: nil, crossed: true, at: now) == nil, "paused under the same id: nothing either")
         var stoppedWatch: NoteHelp.Watch? = nil
-        expect(NoteHelp.applyLook(&stoppedWatch, gen: 3, shown: "$80", hint: nil, crossed: true, at: now) == nil && stoppedWatch == nil, "stopped meanwhile: nothing comes back")
-        expect(NoteHelp.applyLook(&watched, gen: 3, shown: "$98", hint: nil, crossed: true, at: now) == false, "still under the line: not said again")
+        expect(NoteHelp.applyLook(&stoppedWatch, id: watchID, shown: "$80", hint: nil, crossed: true, at: now) == nil && stoppedWatch == nil, "stopped meanwhile: nothing comes back")
         // Its place: the one in front, else wait for it (never what happens to be in front).
         var tabPlace = NoteStick(kind: .tab)
         tabPlace.url = "https://shop.example/x"
@@ -235,31 +256,61 @@ struct NoteHelpCheck {
         expect(NoteHelp.anchor([deskPlace, tabPlace], here: 0) == .away("shop.example/x"), "shown on a Desktop: still waits for its page")
         expect(NoteHelp.anchor([deskPlace], here: nil) == .free && NoteHelp.anchor([], here: nil) == .free, "only on a Desktop, or nowhere: free")
 
-        // MARK: Rule B: everything told to an AI is shielded first
+        // MARK: Rule B: what a helper tells an AI is Shielded (only NoteShield makes it)
 
         let secret = "4111 1111 1111 1111"
-        let redact = { (text: String) in text.replacingOccurrences(of: secret, with: "(hidden)") }
-        var raw = NoteHelp.Context()
-        raw.ask = "pay with \(secret) please"
-        raw.body = "# Card \(secret) and more words after it, enough that the title would be cut right through the middle of a secret if cut first\nBody \(secret)"
-        raw.notebook = "Book \(secret)"
-        raw.cover = "Remembers \(secret)"
-        raw.place = "The page \(secret)"
-        raw.quote = String(repeating: "x", count: 390) + secret + " tail"
-        raw.extra = "Chained answer \(secret)"
-        raw.answer = "It said \(secret)"
-        raw.labels = ["Label \(secret)"]
-        let shown = NoteHelp.shield(raw, redact: redact)
-        let told = [NoteHelp.brief(shown), NoteHelp.codeBrief(shown), NoteHelp.codeRequest(shown, checkout: "~/g", tree: "/t", branch: "b", from: "", finish: NoteHelp.finishLine(shown.context.ask)),
-                    NoteHelp.reviewRequest(shown, tree: nil), NoteHelp.reviewBrief(shown), NoteHelp.formulaRequest(shown), NoteHelp.awayRequest(shown),
-                    NoteHelp.watchConfirm(shown, line: "under $1", found: "$1", hint: ""), NoteHelp.watchFind(shown, line: "under $1", last: "")]
+        let index = UIMap.SecretIndex([secret])
         let digits = String(secret.prefix(9))
-        expect(told.allSatisfy { !$0.contains(digits) }, "no prompt carries the secret, whole or cut", told.first { $0.contains(digits) } ?? "")
-        expect(NoteHelp.brief(shown).contains("(hidden)") && NoteHelp.brief(shown).contains("Book (hidden)"), "redacted, then said")
-        expect(shown.title.hasPrefix("Card (hidden)"), "the title derived after redaction", shown.title)
-        var nowhere = NoteHelp.Context()
-        nowhere.body = "words"
-        expect(NoteHelp.brief(NoteHelp.shield(nowhere, redact: redact)).contains("isn't on a window now"), "a note on no window is told not to look in front")
+        let raws = ["pay with \(secret) please",
+                     "# Card \(secret) and more words after it, enough that the title would be cut right through the middle of a secret if cut first\nBody \(secret)",
+                     "Book \(secret)", "Remembers \(secret)", "Chained answer \(secret)", "It said \(secret)", "under $1 \(secret)", "$2 \(secret)"]
+        guard let shown = NoteShield.shield(raws, index: index), let labels = NoteShield.shield(["Label \(secret)"], index: index),
+              let paths = NoteShield.shield(["~/g", "/t \(secret)", "b", ""], index: index) else { return expect(false, "shielding") }
+        var stick = NoteStick(kind: .passage)
+        stick.url = "https://shop.example/\(secret.replacingOccurrences(of: " ", with: ""))"
+        stick.appName = "Shop"
+        stick.quote = String(repeating: "x", count: 390) + secret + " tail"
+        guard let place = NoteShield.place(stick, appPrivate: false, index: index) else { return expect(false, "a place") }
+        var told = NoteHelp.Told(ask: shown[0], body: shown[1], notebook: shown[2], cover: shown[3], place: place.words, quote: place.quote, extra: shown[4],
+                                 answer: shown[5], labels: labels, line: shown[6], last: shown[7], paths: paths)
+        let pageWords = told.extra
+        let prompts: [Shielded] = [NoteHelp.brief(told), NoteHelp.codeBrief(told), NoteHelp.codeRequest(told), NoteHelp.reviewRequest(told, tree: told.paths[1]),
+                                   NoteHelp.reviewBrief(told), NoteHelp.formulaRequest(told), NoteHelp.awayRequest(told),
+                                   NoteHelp.watchConfirm(told, found: pageWords.substring(NSRange(location: 0, length: 7)), hint: pageWords.substring(NSRange(location: 8, length: 6))),
+                                   NoteHelp.watchFind(told)]
+        expect(prompts.allSatisfy { !$0.text.contains(digits) }, "no prompt carries the secret, whole or cut", prompts.first { $0.text.contains(digits) }?.text ?? "")
+        expect(NoteHelp.brief(told).text.contains("Book (hidden)") || NoteHelp.brief(told).text.contains("Book "), "redacted, then said")
+        expect(!told.body.title.text.contains(digits), "the title derived after redaction", told.body.title.text)
+        expect(NoteHelp.codeBrief(told).text.contains("read it first") && NoteHelp.reviewBrief(told).text.contains("read it first"), "coding helpers and second opinions read the cover first")
+        // Follow-ups, Go on and watcher fields go through it too: a follow-up's words, the line and last value.
+        guard let follow = NoteShield.shield(["and also \(secret)"], index: index) else { return expect(false, "a follow-up") }
+        expect(!follow[0].text.contains(digits) && !told.line.text.contains(digits) && !told.last.text.contains(digits), "a follow-up and a watcher's line and last value are redacted")
+        // An app kept private: only what the place is, never its words or sentence.
+        var privateStick = NoteStick(kind: .passage)
+        privateStick.app = "com.example.private"
+        privateStick.appName = "Diary"
+        privateStick.title = "My secret window"
+        privateStick.quote = "a private sentence"
+        guard let hidden = NoteShield.place(privateStick, appPrivate: true, index: index) else { return expect(false, "a private place") }
+        expect(!hidden.words.text.contains("secret window") && hidden.quote.isEmpty, "a private app's place: its words and sentence never told", hidden.words.text)
+        expect(NoteShield.shield(["x"], index: .unavailable) == nil && NoteShield.place(stick, appPrivate: false, index: .unavailable) == nil, "the vault unreadable: nothing told")
+        told.place = ""
+        expect(NoteHelp.brief(told).text.contains("isn't on a window now"), "a note on no window is told not to look in front")
+        let literal: Shielded = "Go on where you stopped."
+        expect(literal.text == "Go on where you stopped." && ("a \(literal) \(3)" as Shielded).text == "a Go on where you stopped. 3", "Petal's own words and numbers interpolate")
+
+        // MARK: Privacy: open, private or unknown
+
+        var openCover = NoteFile(id: "C1", created: now)
+        openCover.cover = true
+        var closedCover = openCover
+        closedCover.set("private", .text("true"))
+        expect(NoteHelp.privacy(covers: [openCover]) == .open && NoteHelp.privacy(covers: [closedCover]) == .closed, "a cover read: open or private")
+        expect(NoteHelp.privacy(covers: []) == .unknown, "no cover read (missing, not downloaded): unknown")
+        expect(NoteHelp.privacy(covers: [openCover, closedCover]) == .unknown && NoteHelp.privacy(covers: [openCover, openCover]) == .unknown, "two covers (a conflict): unknown")
+        expect(NoteHelp.mayRead(.open, notebook: "A", asking: nil) && !NoteHelp.mayRead(.unknown, notebook: "A", asking: "B") && !NoteHelp.mayRead(.closed, notebook: "A", asking: nil),
+               "unknown is private from outside")
+        expect(NoteHelp.mayRead(.unknown, notebook: "A", asking: "A") && NoteHelp.mayRead(.closed, notebook: "A", asking: "A"), "a note inside it reads it")
 
         // MARK: Paths, remotes, watcher words, local times, branches
 
@@ -294,7 +345,16 @@ struct NoteHelpCheck {
         expect(NoteHelp.branch(noteID: id, words: "fix the date picker") != NoteHelp.branch(noteID: "8C1D0000-0000-4000-8000-000000000002", words: "fix the date picker"),
                "two notes asking alike: two branches")
         expect(NoteHelp.branch(noteID: id, words: "").hasSuffix("-3f2a9c1d") && NoteHelp.branch(noteID: id, words: "日本語").hasPrefix("petal/note-"), "always the note's key")
-        expect(NoteHelp.worktreeName(checkout: "/Users/someone/garden", noteID: id) == "garden-3f2a9c1d", "one worktree per note")
+        let gardenTree = NoteHelp.worktreeName(checkout: "/Users/someone/garden", noteID: id)
+        expect(gardenTree.hasPrefix("garden-") && gardenTree.hasSuffix("-3f2a9c1d"), "one worktree per note", gardenTree)
+        expect(NoteHelp.worktreeName(checkout: "/Users/someone/Projects/garden", noteID: id) != gardenTree, "two checkouts named alike: two worktrees")
+        expect(NoteHelp.worktreeName(checkout: "/Users/someone/garden/", noteID: id) == gardenTree, "the same checkout, however it's written")
+        expect(NoteHelp.reusable(expectedCommon: "/Users/someone/garden/.git", actualCommon: "/Users/someone/garden/.git/", branch: "petal/x-3f2a9c1d", actualBranch: "petal/x-3f2a9c1d"),
+               "reused when it's that checkout's, on the note's branch")
+        expect(!NoteHelp.reusable(expectedCommon: "/Users/someone/garden/.git", actualCommon: "/Users/someone/Projects/garden/.git", branch: "b", actualBranch: "b"), "never another checkout's")
+        expect(!NoteHelp.reusable(expectedCommon: "/a/.git", actualCommon: "/a/.git", branch: "b", actualBranch: "main") && !NoteHelp.reusable(expectedCommon: "/a/.git", actualCommon: nil, branch: "b", actualBranch: "b"),
+               "never on another branch, or when git couldn't say")
+        expect(NoteHelp.fetchRef("op-1") == "refs/petal/op-1" && NoteHelp.fetchRef("A/B C") != NoteHelp.fetchRef("op-1"), "each run fetches into a ref of its own")
         expect(NoteHelp.noteKey("file:Inbox/a.md").count == 8 && NoteHelp.noteKey("file:Inbox/a.md") != NoteHelp.noteKey("file:Inbox/b.md"), "an id-less note's key is a hash")
         var withTree = NoteFile(id: "W", created: now)
         withTree.worktree = NoteHelp.Worktree(path: "/t/garden-w", branch: "petal/x-w", checkout: "/u/garden", remote: "upstream")

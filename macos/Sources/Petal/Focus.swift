@@ -4,7 +4,7 @@ import AppKit
 /// Haiku; Codex at low effort): one at a time, answers cached.
 @MainActor
 final class Brain {
-    private var queue: [(prompt: String, key: String, done: ([String: Any]?) -> Void)] = []
+    private var queue: [(prompt: String, key: String, token: RunToken?, done: ([String: Any]?) -> Void)] = []
     private var busy = false
     private var cache: [String: [String: Any]] = [:]
 
@@ -76,9 +76,19 @@ final class Brain {
     /// One quick JSON call (answers cached by `key`).
     func ask(_ prompt: String, key: String, done: @escaping ([String: Any]?) -> Void) {
         if let cached = cache[key] { return done(cached) }
-        queue.append((prompt, key, done))
+        queue.append((prompt, key, nil, done))
         next()
     }
+
+    /// A note helper's quick call: only words NoteShield made, admitted only while its run runs (paused, it waits
+    /// in the queue, and a call under way is ended and kept for Go on; stopped, it's dropped and its process ended).
+    func ask(_ prompt: Shielded, key: String, token: RunToken, done: @escaping ([String: Any]?) -> Void) {
+        queue.append((prompt.text, key, token, done))
+        next()
+    }
+
+    /// A run went on (Go on): its calls waiting are admitted again.
+    func resume() { next() }
 
     private func next() {
         guard !busy, !queue.isEmpty else { return }
@@ -98,8 +108,12 @@ final class Brain {
             for job in waiting { job.done(nil) }
             return
         }
+        // Calls of stopped runs go; calls of paused runs wait where they are; the first admitted goes now.
+        for job in queue where job.token.map({ $0.state == .cancelled || $0.state == .finished }) == true { job.done(nil) }
+        queue.removeAll { $0.token.map { $0.state == .cancelled || $0.state == .finished } == true }
+        guard let index = queue.firstIndex(where: { $0.token?.admits ?? true }) else { return }
         busy = true
-        let job = queue.removeFirst()
+        let job = queue.remove(at: index)
         let environment = PetalApp.shared.aiEnvironment(provider)
         let api = PetalApp.shared.usesAPIKey(provider)
         var arguments = provider.quickArguments
@@ -118,7 +132,12 @@ final class Brain {
             process.standardError = FileHandle.nullDevice
             var answer: [String: Any]?
             var spent: Double?
+            var handle: Int?
             if (try? process.run()) != nil {
+                if let token = job.token {
+                    handle = token.bind { [weak process] in process?.terminate() }
+                    if handle == nil { process.terminate() }
+                }
                 input.fileHandleForWriting.write(Data(job.prompt.utf8))
                 try? input.fileHandleForWriting.close()
                 let data = output.fileHandleForReading.readDataToEndOfFile()
@@ -130,11 +149,18 @@ final class Brain {
                     answer = try? JSONSerialization.jsonObject(with: Data(text[start...end].utf8)) as? [String: Any]
                 }
             }
+            job.token?.unbind(handle)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     if let spent { PetalApp.shared.usage.addSpend(spent, for: provider) }
-                    if let answer { self.cache[job.key] = answer }
-                    job.done(answer)
+                    // Paused while it ran: kept, first in line, for Go on (its answer, if any, isn't used).
+                    if job.token?.paused == true {
+                        self.queue.insert(job, at: 0)
+                        self.busy = false
+                        return self.next()
+                    }
+                    if let answer, job.token == nil { self.cache[job.key] = answer }
+                    job.done(job.token.map { $0.admits } == false ? nil : answer)
                     self.busy = false
                     self.next()
                 }

@@ -998,7 +998,9 @@ final class ComputerUse {
         cursor.hide()
         for caller in callers {
             cancelWork(of: caller)
-            if let agent = app.claude.note(withID: caller)?.agent, agent.running { agent.personStopped() }
+            // A note's helper stops through its run (NoteHelpers.stop); a chat is told it was stopped.
+            if let paper = app.claude.note(withID: caller)?.paper { app.paper.helpers.stop(paper) }
+            else if let agent = app.claude.note(withID: caller)?.agent, agent.running { agent.personStopped() }
         }
         keepSweeping()
     }

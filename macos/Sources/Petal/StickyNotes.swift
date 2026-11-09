@@ -1150,7 +1150,8 @@ extension ClaudePanel {
     /// Notes waiting for room start, in order, while fewer than `atOnce` work. Called whenever a run ends or is
     /// ended (a new chat, a chat picked from the list).
     func startWaiting() {
-        for note in notes where !note.agent.waiting.isEmpty && working < Self.atOnce { note.agent.runWaiting() }
+        // A helper's turn starts only while its run admits it (paused: it keeps waiting; stopped: never).
+        for note in notes where !note.agent.waiting.isEmpty && working < Self.atOnce && note.agent.admitted { note.agent.runWaiting() }
     }
 
     func updateReady() {

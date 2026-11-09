@@ -66,7 +66,16 @@ final class Agent {
     var quietly = false
     /// A helper in one of Petal Notes (NoteHelpers): what it's told about its note, the folder it works in (a coding
     /// helper's worktree), the AI and model the person named, and that its chat isn't kept in the Chats list.
-    @ObservationIgnored var helperBrief: String?
+    @ObservationIgnored var helperBrief: Shielded?
+    /// A helper's run (NoteHelpers): its turns are admitted, waited and run only while it runs; pausing or
+    /// cancelling it ends its process.
+    @ObservationIgnored var token: RunToken?
+    /// How its last turn ended: exited cleanly with no error, failed, or was interrupted (stopped, paused).
+    @ObservationIgnored private(set) var outcome: RunToken.Outcome?
+    @ObservationIgnored private var turnErrored = false
+    @ObservationIgnored private var bound: Int?
+    /// The token admits its turns now (an agent with none always does).
+    var admitted: Bool { token?.admits ?? true }
     @ObservationIgnored var folder: URL?
     @ObservationIgnored var pinned: (provider: Provider, model: String)?
     @ObservationIgnored var keeps = true
@@ -85,7 +94,16 @@ final class Agent {
     static let approved = "I approved that. Go ahead and run it, then continue."
 
 
+    /// What the person types in the chat. A helper's agent takes nothing raw: only `send(_: Shielded)`.
     func send(_ text: String) {
+        guard helperBrief == nil else { return }
+        submit(text)
+    }
+
+    /// A helper's turn: words NoteShield made (the note's line, a follow-up, Go on).
+    func send(_ text: Shielded) { submit(text.text) }
+
+    private func submit(_ text: String) {
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
         if running {
@@ -128,10 +146,12 @@ final class Agent {
     /// Runs now, or (with `ClaudePanel.atOnce` other notes working, or messages already waiting) waits its turn.
     /// `index`: where its message is in the chat.
     private func admit(_ prompt: String, from index: Int) {
-        if !waiting.isEmpty || app.claude.working >= ClaudePanel.atOnce {
+        // A helper's run that's stopped admits nothing; paused, its turn waits (Go on restores it).
+        if let token, token.state == .cancelled || token.state == .finished { return }
+        if !waiting.isEmpty || app.claude.working >= ClaudePanel.atOnce || !admitted {
             if waiting.isEmpty {
                 waitingFrom = index
-                messages.append(Message(kind: .step, text: "Waiting: \(ClaudePanel.atOnce) other notes are working. This starts when one is done."))
+                if admitted { messages.append(Message(kind: .step, text: "Waiting: \(ClaudePanel.atOnce) other notes are working. This starts when one is done.")) }
             }
             waiting.append(prompt)
             keep()
@@ -142,7 +162,7 @@ final class Agent {
 
     /// The messages that waited for room, all in one turn (each is in the chat once already).
     func runWaiting() {
-        guard !waiting.isEmpty, !running else { return }
+        guard !waiting.isEmpty, !running, admitted else { return }
         let prompt = waiting.joined(separator: "\n\n")
         waiting = []
         waitingFrom = nil
@@ -184,7 +204,7 @@ final class Agent {
         pendingAsk = []
         messages.append(Message(kind: .step, text: "Not allowed"))
         // What was written meanwhile goes now.
-        if !running, !queued.isEmpty { send(queued.removeFirst()) }
+        if !running, !queued.isEmpty { submit(queued.removeFirst()) }
     }
 
     /// Stops the run (Stop, steering, a new chat): what it was doing in the person's apps stops with it.
@@ -342,6 +362,10 @@ final class Agent {
         // A new turn: nothing the last one started in the person's apps carries on (that turn is closed for good,
         // before the count moves on), and this one asks again.
         app.assist.computer.end(noteID.uuidString)
+        // Its run's token, checked once more as the process starts (bound below: pausing or cancelling ends it).
+        guard admitted else { waiting.append(prompt); return }
+        outcome = nil
+        turnErrored = false
         turn += 1
         activity = ""
         needs = nil
@@ -388,7 +412,13 @@ final class Agent {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard self.runID == id else { return }
+                    self.token?.unbind(self.bound)
+                    self.bound = nil
                     self.running = false
+                    // The turn's outcome, said explicitly: a clean exit with no error event, or not.
+                    let code = finished.terminationStatus
+                    self.outcome = finished.terminationReason == .uncaughtSignal || code == 15 ? .interrupted
+                        : code == 0 && !self.turnErrored && !self.authFailed ? .succeeded : .failed
                     self.activity = ""
                     // The turn is over: its tools can't answer anymore, so nothing it asked of Petal goes ahead.
                     self.app.assist.computer.end(self.noteID.uuidString)
@@ -396,7 +426,7 @@ final class Agent {
                     let more = !self.queued.isEmpty && self.pendingAsk.isEmpty
                     if more {
                         let next = self.queued.removeFirst()
-                        DispatchQueue.main.async { self.send(next) }
+                        DispatchQueue.main.async { self.submit(next) }
                     }
                     self.process = nil
                     let status = finished.terminationStatus
@@ -413,6 +443,12 @@ final class Agent {
             try process.run()
             running = true
             self.process = process
+            // Bound to its run: paused or cancelled, the process ends (and if that happened meanwhile, now).
+            if let token {
+                let handle = token.bind { [weak process] in process?.terminate() }
+                if handle == nil { process.terminate() }
+                bound = handle
+            }
             input.fileHandleForWriting.write(Data(prompt.utf8))
             try? input.fileHandleForWriting.close()
         } catch {
@@ -434,7 +470,9 @@ final class Agent {
         case .denials(let denials):
             pendingAsk = denials
             messages.append(Message(kind: .ask, text: denials.map(\.label).joined(separator: "\n")))
-        case .error(let text): messages.append(Message(kind: .error, text: text))
+        case .error(let text):
+            turnErrored = true
+            messages.append(Message(kind: .error, text: text))
         case .finished: Task { await app.usage.refresh() }
         case .authFailed:
             guard !authFailed, let provider = sessionProvider else { return }
@@ -553,7 +591,7 @@ final class Agent {
         """
         let notes = (try? String(contentsOf: app.config.instructionsFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !notes.isEmpty { prompt += "\n\nThe user's own instructions:\n" + notes }
-        if let helperBrief { prompt += "\n\n" + helperBrief }
+        if let helperBrief { prompt += "\n\n" + helperBrief.text }
         if let place, app.claude.notesOn || helperBrief != nil {
             let mode = app.config.modes.first { $0.id == place.mode }?.name
             let quiet = app.assist.neverLook(place.app)
@@ -947,7 +985,11 @@ final class ClaudePanel {
         finished(note)
     }
 
-    func stopAll() { for note in notes { note.agent.stop() } }
+    func stopAll() {
+        for note in notes {
+            if let paper = note.paper { PetalApp.shared.paper.helpers.stop(paper) } else { note.agent.stop() }
+        }
+    }
 
     func openOptions() {
         open(asking: nil)

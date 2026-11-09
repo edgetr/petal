@@ -46,8 +46,11 @@ struct InkView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(ink.heading).font(.system(size: 11, weight: .semibold)).opacity(0.85)
-            Text(ink.text).font(.system(size: 13.5)).lineSpacing(13.5 * 0.45 - 3).fixedSize(horizontal: false, vertical: true)
+            // The whole answer is kept in the note; only the paper shortens it (dragging it out gives all of it).
+            Text(ink.text).font(.system(size: 13.5)).lineSpacing(13.5 * 0.45 - 3).lineLimit(14).truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
+                .help(ink.text.count > 600 ? "Drag it out for the whole answer" : "")
             if !ink.proof.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(Array(ink.proof.enumerated()), id: \.offset) { _, item in

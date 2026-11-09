@@ -85,6 +85,8 @@ extension ClaudePanel {
 
     /// Stop, from the preview or the note's own panel.
     func stop(_ note: StickyNote) {
+        // A note's helper stops through its run (NoteHelpers.stop), wherever Stop was pressed.
+        if let paper = note.paper { return PetalApp.shared.paper.helpers.stop(paper) }
         if let unsent = note.agent.withdrawWaiting() {
             note.draft = [unsent, note.draft].filter { !$0.isEmpty }.joined(separator: "\n\n")
             return

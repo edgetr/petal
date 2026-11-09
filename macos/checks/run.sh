@@ -27,7 +27,7 @@ swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift check
 swiftc -parse-as-library -O -o "$out/papernotes" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift checks/NotesCheck.swift
 "$out/papernotes"
 # A note's text in the editor and back: the same Markdown, line for line (AppKit, nothing shown).
-swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteMentions.swift Sources/Petal/NoteEditor.swift Sources/Petal/EditMenu.swift checks/NoteRichCheck.swift
+swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteMentions.swift Sources/Petal/NoteEditor.swift Sources/Petal/EditMenu.swift checks/NoteRichCheck.swift
 "$out/noterich"
 # Petal Notes' files on throwaway folders in the temporary folder: saves that keep both, names from the disk, no
 # writes through symbolic links, two notebooks' Todo.md, a renamed file's bookmark, the journal's launch recovery
@@ -35,13 +35,31 @@ swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sour
 # Helpers in notes: what an @ line binds and asks, the helper's front matter (ink, steps, stamps, a watcher, a task, a
 # chain) read back exactly, times and models in words, prices on a page, a notebook's memory, plain arithmetic,
 # chained notes' loops and the person's checkouts (no file, no window, no AI).
-swiftc -parse-as-library -O -o "$out/notehelp" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteHelp.swift checks/NoteHelpCheck.swift
+swiftc -parse-as-library -O -o "$out/notehelp" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift checks/NoteHelpCheck.swift
 "$out/notehelp"
+# The Shielded boundary is the compiler's: what a helper tells an AI can't be made from a raw string. Each of these
+# must fail to compile (a raw string interpolated into a prompt, put into what a helper is told, or made Shielded
+# outside NoteShield), and the shielded way must compile.
+shielded=(Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift)
+boundary() {
+    printf '@main struct B { static func main() {\n let raw = String(CommandLine.arguments.count)\n %s\n } }\n' "$2" > "$out/boundary.swift"
+    if swiftc -parse-as-library -o "$out/boundary" "${shielded[@]}" "$out/boundary.swift" >/dev/null 2>&1; then built=yes; else built=no; fi
+    if [ "$built" != "$1" ]; then echo "Shielded boundary: expected compiling '$2' to be $1"; exit 1; fi
+}
+boundary no 'let p: Shielded = "ask: \(raw)"; print(p)'
+boundary no 'let t = NoteHelp.Told(ask: raw); print(NoteHelp.brief(t))'
+boundary no 'var t = NoteHelp.Told(); t.extra = raw; print(t)'
+boundary no 'print(Shielded(verified: raw))'
+boundary no 'print(NoteHelp.watchFind(raw))'
+boundary yes 'if let s = NoteShield.shield([raw], index: UIMap.SecretIndex([])) { let p: Shielded = "ask: \(s[0]) \(3)"; print(NoteHelp.brief(NoteHelp.Told(ask: p))) }'
+echo "Shielded boundary: a raw string never makes a helper's prompt"
+# A helper's quick calls go through Brain's Shielded overload only (the one that takes its run's token).
+if grep -nE 'brain\.ask\(' Sources/Petal/NoteHelpers.swift | grep -v 'token:'; then echo "NoteHelpers: a Brain call without its Shielded prompt and token"; exit 1; fi
 swiftc -parse-as-library -O -o "$out/notestore" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/PaperNotes.swift Sources/Petal/NoteJournal.swift checks/NoteStoreCheck.swift
 "$out/notestore"
 # A passage for Petal AI follows petal_look's rule for selected text (UIMap.selectionHidden), and what the note tools
 # tell an agent is redacted with the vault's index, or not told while the vault can't be read (NoteShield).
-swiftc -parse-as-library -O -o "$out/noteselection" Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift checks/NoteSelectionCheck.swift
+swiftc -parse-as-library -O -o "$out/noteselection" Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift checks/NoteSelectionCheck.swift
 "$out/noteselection"
 swiftc -parse-as-library -O -o "$out/background" Sources/Petal/Background.swift Sources/Petal/UIMap.swift checks/BackgroundCheck.swift
 "$out/background"
