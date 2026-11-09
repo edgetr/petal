@@ -299,6 +299,94 @@ struct NoteHelpCheck {
         let literal: Shielded = "Go on where you stopped."
         expect(literal.text == "Go on where you stopped." && ("a \(literal) \(3)" as Shielded).text == "a Go on where you stopped. 3", "Petal's own words and numbers interpolate")
 
+        // The helper's whole system prompt: only Shielded parts (no raw window or tab title).
+        var systemTold = told
+        systemTold.place = place.words
+        guard let notes = NoteShield.shield(["Use metric \(secret)", "Likes short answers \(secret)"], index: index) else { return expect(false, "notes") }
+        systemTold.instructions = notes[0]
+        systemTold.memory = notes[1]
+        let system = NoteHelp.system(systemTold, provider: "Claude", computerUse: true, brief: NoteHelp.brief(systemTold))
+        expect(!system.text.contains(digits) && system.text.contains("You are Claude") && system.text.contains("The note is on:") && system.text.contains("Use metric (hidden)"),
+               "the system prompt: shielded place, notes and memory, then the brief", system.text.prefix(300).description)
+        // Checking against a notebook: each note shielded whole, then titled and cut.
+        let longSecretNote = "# Plan \(secret)\n" + String(repeating: "y", count: 1995) + secret + " end"
+        guard let sources = NoteShield.shield([longSecretNote, "# Other\nfine"], index: index), let book = NoteShield.shield(["Trips \(secret)"], index: index) else { return expect(false, "sources") }
+        systemTold.sources = sources
+        systemTold.sourceBook = book[0]
+        let compared = NoteHelp.comparison(systemTold)
+        expect(!compared.text.contains(digits) && !compared.text.contains("4111") && compared.text.contains("## Plan (hidden)") && compared.text.contains("## Other"),
+               "a notebook's notes: shielded whole first, titles and cuts after", compared.text.prefix(200).description)
+        expect(NoteHelp.brief(systemTold).text.contains("The notebook Trips"), "the comparison is in the brief")
+
+        // MARK: Three outcomes, reported once
+
+        let ok = RunToken()
+        expect(ok.complete(.succeeded) && ok.completion == .succeeded && !ok.complete(.failed("late")) && ok.completion == .succeeded, "succeeded, once")
+        let failing = RunToken()
+        let failedStop = Killed()
+        _ = failing.bind { lock.withLock { failedStop.list.append("x") } }
+        expect(failing.complete(.failed("no API key")) && failing.completion == .failed("no API key") && !failing.admits, "failed, with its reason: nothing more admitted")
+        expect(lock.withLock { failedStop.list } == ["x"] && !failing.complete(.succeeded), "failing ends what it has running, and can't succeed after")
+        let pausedRun = RunToken()
+        pausedRun.pause()
+        expect(!pausedRun.complete(.succeeded) && pausedRun.complete(.stopped) && pausedRun.completion == .stopped, "a paused run can't succeed; it can be stopped")
+        // Chains and reviewers consume only succeeded.
+        let chainAfter = NoteHelp.Chain(after: "A", afterTitle: "Research", then: "B", ask: "draft", mac: "m", since: now)
+        expect(!chainAfter.ready(mac: "m", after: NoteHelp.Helper(state: .failed, who: "", step: "no API key", at: now.addingTimeInterval(60))), "a chain ignores a failed note")
+        expect(chainAfter.ready(mac: "m", after: NoteHelp.Helper(state: .done, who: "", step: "", at: now.addingTimeInterval(60))), "and starts on a done one")
+        var failedFile = NoteFile(id: "F", created: now)
+        failedFile.helper = NoteHelp.Helper(state: .failed, who: "✦ Petal", step: "no API key", at: now)
+        expect(NoteFile.parse(failedFile.serialized(), fallbackID: "x", fallbackDate: now).helper?.state == .failed, "failed reads back")
+
+        // MARK: Tokens by what they're for: watcher looks, shared grants, Go on
+
+        let table = TokenTable()
+        let look1 = table.start("watch:A")
+        let look2 = table.start("watch:A")
+        expect(look1.state == .cancelled && look2.admits, "a new look cancels the one before it")
+        table.cancel("watch:A")
+        expect(look2.state == .cancelled && table.token("watch:A") == nil, "pausing, stopping or changing a watcher cancels its look")
+        let runA = table.start("A"), runB = table.start("B"), runC = table.start("C")
+        runA.hold("always:code:/u/garden")
+        runB.hold("always:code:/u/garden")
+        runC.hold("reply")
+        expect(table.revoke("always:code:/u/garden") == ["A", "B"] && runA.state == .cancelled && runB.state == .cancelled && runC.admits,
+               "a shared grant taken back cancels every run holding it, whichever note")
+        table.finish("C", runB)
+        expect(table.token("C") === runC, "finishing another token leaves the current one")
+        expect(NoteHelp.goOn(launched: false, waitingTurn: false, restartable: true) == .restart, "a quick run (no agent) is begun again on Go on")
+        expect(NoteHelp.goOn(launched: false, waitingTurn: false, restartable: false) == .stopped, "one that can't be begun again: Pause stops it")
+        expect(NoteHelp.goOn(launched: true, waitingTurn: true, restartable: true) == .startWaiting && NoteHelp.goOn(launched: true, waitingTurn: false, restartable: false) == .carryOn,
+               "a launched run: its waiting turn starts, or it carries on")
+
+        // MARK: Metadata rebase, place follow, stored branch, the remote's default branch
+
+        var typed = NoteFile(id: "R", created: now, body: "My words")
+        let baseText = typed.serialized()
+        typed.ink = [NoteHelp.Ink(who: "✦ Petal", text: "An answer")]
+        typed.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", at: now)
+        let helperText = typed.serialized()
+        expect(NoteShelf.rebase(editor: baseText, current: helperText, currentBody: typed.body) == helperText,
+               "a helper's metadata write: the person's next save is made on it (no conflict)")
+        expect(NoteShelf.rebase(editor: baseText, current: helperText, currentBody: "Other words") == baseText, "words changed elsewhere: still a conflict")
+        var tabA = NoteStick(kind: .tab)
+        tabA.url = "https://a.example"
+        tabA.mac = "m"; tabA.pid = 5; tabA.tabID = "t1"
+        var tabB = tabA
+        tabB.url = "https://b.example"; tabB.tabID = "t2"
+        var titled = tabA
+        titled.title = "A new title"
+        expect(NoteHelp.placesMoved([tabA], [tabB]) && NoteHelp.placesMoved([tabA], [tabA, tabB]) && NoteHelp.placesMoved([tabA, tabB], [tabA]),
+               "re-stuck, a place added or taken off: followed")
+        expect(!NoteHelp.placesMoved([tabA], [titled]), "the same place with a newer title: not a move")
+        let stored = NoteHelp.Worktree(path: "/t", branch: "petal/first-words-3f2a9c1d", checkout: "/u/garden", remote: "origin")
+        expect(NoteHelp.branch(stored: stored, checkout: "/u/garden/", noteID: "3F2A9C1D-0000-4000-8000-000000000001", words: "different words now") == "petal/first-words-3f2a9c1d",
+               "a follow-up uses the branch stored when the worktree was made")
+        expect(NoteHelp.branch(stored: stored, checkout: "/u/other", noteID: "3F2A9C1D-0000-4000-8000-000000000001", words: "fix it").hasPrefix("petal/fix-it-"), "another checkout: a branch of its own")
+        expect(NoteHelp.defaultBranch(lsRemote: "ref: refs/heads/trunk\tHEAD\nabc123\tHEAD\n") == "trunk", "the default branch, from the remote")
+        expect(NoteHelp.defaultBranch(lsRemote: "abc123\tHEAD\n") == nil && NoteHelp.defaultBranch(lsRemote: "") == nil, "the remote doesn't say: none (nothing is made)")
+        expect(NoteHelp.defaultBranch(lsRemote: "ref: refs/heads/main\trefs/remotes/x\n") == nil, "only HEAD's")
+
         // MARK: Privacy: open, private or unknown
 
         var openCover = NoteFile(id: "C1", created: now)

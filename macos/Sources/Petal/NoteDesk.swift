@@ -1697,6 +1697,7 @@ final class NoteDesk {
             let step = run.sticky?.agent.activity ?? ""
             return run.paused ? "Paused" : step.isEmpty ? "Working" : step
         }
+        if let helper = file.helper, helper.state == .failed { return "Couldn't finish" }
         if let helper = file.helper, helper.state != .done { return helper.step.isEmpty ? "Working" : helper.step }
         if let back = file.back { return NoteHelp.backLine(back, now: Date()) }
         if let watch = file.watch { return watch.foot(thisMac: watch.mac == local.mac) }
@@ -2296,6 +2297,8 @@ final class NoteDesk {
     /// The files changed (here or on another Mac): papers and tabs show what they say now.
     func refresh() {
         guard on else { return }
+        // A running helper follows its note's places when they changed.
+        helpers.placesFollow()
         WindowEvents.shared.titles("papernotes", pagesStuck || windowsStuck)
         // Notes shown on this Mac before it last quit show again.
         for paper in store.notes where local.shown.contains(paper.noteID) && faces[paper.key] == nil { faces[paper.key] = .folded }

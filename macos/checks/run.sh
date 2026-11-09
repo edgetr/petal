@@ -51,10 +51,33 @@ boundary no 'let t = NoteHelp.Told(ask: raw); print(NoteHelp.brief(t))'
 boundary no 'var t = NoteHelp.Told(); t.extra = raw; print(t)'
 boundary no 'print(Shielded(verified: raw))'
 boundary no 'print(NoteHelp.watchFind(raw))'
+boundary no 'print(NoteHelp.system(NoteHelp.Told(), provider: raw, computerUse: false, brief: ""))'
+boundary no 'print(NoteHelp.system(NoteHelp.Told(), provider: "Claude", computerUse: false, brief: "\(raw)"))'
+boundary no 'var t = NoteHelp.Told(); t.place = raw; t.instructions = raw; print(NoteHelp.system(t, provider: "Claude", computerUse: false, brief: ""))'
 boundary yes 'if let s = NoteShield.shield([raw], index: UIMap.SecretIndex([])) { let p: Shielded = "ask: \(s[0]) \(3)"; print(NoteHelp.brief(NoteHelp.Told(ask: p))) }'
 echo "Shielded boundary: a raw string never makes a helper's prompt"
 # A helper's quick calls go through Brain's Shielded overload only (the one that takes its run's token).
 if grep -nE 'brain\.ask\(' Sources/Petal/NoteHelpers.swift | grep -v 'token:'; then echo "NoteHelpers: a Brain call without its Shielded prompt and token"; exit 1; fi
+# Every run ends in one of three outcomes, early exits too: each `return` in a chat turn's start (Agent.run) is a
+# refusal (a failed outcome through agentFinished) or its run's wait; and in the helpers, a bare `return` from a guard
+# about a run only follows a check of that run's token (someone else reported its end).
+perl -0777 -ne '
+    if (/private func run\(_ prompt: String\) \{(.*?)\n    \}\n/s) {
+        my $body = $1; my $n = 0;
+        # The start'"'"'s own statements (eight spaces in; the closures for its output are deeper) and its launch error.
+        while ($body =~ /^( {8}\S.*\breturn\b.*)$/mg) {
+            my $line = $1;
+            next if $line =~ /return refuse\(/ || $line =~ /waiting\.append\(prompt\); return/;
+            print "Agent.run: an early return without an outcome: $line\n"; $n++;
+        }
+        if ($body !~ /\} catch \{[^}]*return refuse\(/s) { print "Agent.run: a launch error without an outcome\n"; $n++ }
+        exit 1 if $n; print "outcomes: every early return of a turn reports one\n";
+    } else { print "Agent.run not found\n"; exit 1 }
+' Sources/Petal/Claude.swift
+perl -ne '
+    if (/\bguard\b.*\brun\b.*else \{ return \}/ && !/live\(|admits|token\.|runs\[/) { print "NoteHelpers:$.: a run guard that returns without an outcome: $_"; $bad++ }
+    END { exit 1 if $bad; print "outcomes: every helper run guard reports one or checks its token\n" }
+' Sources/Petal/NoteHelpers.swift
 swiftc -parse-as-library -O -o "$out/notestore" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/PaperNotes.swift Sources/Petal/NoteJournal.swift checks/NoteStoreCheck.swift
 "$out/notestore"
 # A passage for Petal AI follows petal_look's rule for selected text (UIMap.selectionHidden), and what the note tools

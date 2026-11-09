@@ -66,7 +66,9 @@ final class Agent {
     var quietly = false
     /// A helper in one of Petal Notes (NoteHelpers): what it's told about its note, the folder it works in (a coding
     /// helper's worktree), the AI and model the person named, and that its chat isn't kept in the Chats list.
-    @ObservationIgnored var helperBrief: Shielded?
+    /// A helper's whole system prompt (NoteHelp.system), made only of `Shielded` parts: when it's set, the chat's
+    /// own instructions (with their window and tab titles) are never used.
+    @ObservationIgnored var helperSystem: Shielded?
     /// A helper's run (NoteHelpers): its turns are admitted, waited and run only while it runs; pausing or
     /// cancelling it ends its process.
     @ObservationIgnored var token: RunToken?
@@ -96,7 +98,7 @@ final class Agent {
 
     /// What the person types in the chat. A helper's agent takes nothing raw: only `send(_: Shielded)`.
     func send(_ text: String) {
-        guard helperBrief == nil else { return }
+        guard helperSystem == nil else { return }
         submit(text)
     }
 
@@ -331,19 +333,25 @@ final class Agent {
         return provider
     }
 
+    /// A turn that couldn't start: said in the chat, and ended as a failure through the same path as any turn's end
+    /// (its outcome, then `agentFinished`), so whoever waits on it (a note's helper) hears it.
+    private func refuse(_ reason: String, opensSettings: Bool = false) {
+        messages.append(Message(kind: .error, text: reason, opensSettings: opensSettings))
+        outcome = .failed
+        failure = reason
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.app.claude.agentFinished(self) } }
+    }
+
+    /// Why its last turn failed, when it said.
+    @ObservationIgnored private(set) var failure: String?
+
     private func run(_ prompt: String) {
-        guard let provider = ownProvider ?? app.chatProvider else {
-            messages.append(Message(kind: .error, text: "Choose an AI in Petal's settings first."))
-            return
-        }
-        guard let path = app.paths[provider] else {
-            messages.append(Message(kind: .error, text: "Petal couldn't find \(provider.appName). Set it up in Petal's settings, under AI."))
-            return
-        }
+        failure = nil
+        guard let provider = ownProvider ?? app.chatProvider else { return refuse("Choose an AI in Petal's settings first.") }
+        guard let path = app.paths[provider] else { return refuse("Petal couldn't find \(provider.appName). Set it up in Petal's settings, under AI.") }
         // On an API key with none saved, say so rather than quietly using the subscription.
         guard app.aiReady(provider) else {
-            messages.append(Message(kind: .error, text: "\(provider.name) is set to use an API key, and there isn't one yet. Add it in Settings › AI, or switch back to your subscription.", opensSettings: true))
-            return
+            return refuse("\(provider.name) is set to use an API key, and there isn't one yet. Add it in Settings › AI, or switch back to your subscription.", opensSettings: true)
         }
         if sessionProvider != provider { sessionID = nil; allowed = []; sessionProvider = provider }
         let config = app.config
@@ -434,6 +442,7 @@ final class Agent {
                     if status != 0 && status != 15 && !detail.isEmpty && !self.authFailed {
                         self.messages.append(Message(kind: .error, text: String(detail.suffix(300))))
                     }
+                    if self.outcome == .failed { self.failure = self.messages.last { $0.kind == .error }?.text ?? "It stopped with an error." }
                     // The turn is over (not carried on by a queued message): a note's nudge, and room for one waiting.
                     if !more { self.app.claude.agentFinished(self) }
                 }
@@ -452,7 +461,9 @@ final class Agent {
             input.fileHandleForWriting.write(Data(prompt.utf8))
             try? input.fileHandleForWriting.close()
         } catch {
-            messages.append(Message(kind: .error, text: "Couldn't start \(provider.appName): \(error.localizedDescription)"))
+            token?.unbind(bound)
+            bound = nil
+            return refuse("Couldn't start \(provider.appName): \(error.localizedDescription)")
         }
     }
 
@@ -466,7 +477,7 @@ final class Agent {
         case .step(let text):
             messages.append(Message(kind: .step, text: text))
             activity = text
-            if helperBrief != nil, let note = app.claude.notes.first(where: { $0.agent === self }) { app.paper.helpers.stepped(note) }
+            if helperSystem != nil, let note = app.claude.notes.first(where: { $0.agent === self }) { app.paper.helpers.stepped(note) }
         case .denials(let denials):
             pendingAsk = denials
             messages.append(Message(kind: .ask, text: denials.map(\.label).joined(separator: "\n")))
@@ -568,6 +579,8 @@ final class Agent {
     }
 
     private func instructions(_ provider: Provider) -> String {
+        // A helper's: only its own, all Shielded.
+        if let helperSystem { return helperSystem.text }
         var prompt = """
         You are \(provider.name), running inside Petal, the user's dock on macOS. Your replies show in a small panel above the dock: be brief and friendly, short paragraphs, no big headings. You work in the user's home folder.
 
@@ -591,8 +604,7 @@ final class Agent {
         """
         let notes = (try? String(contentsOf: app.config.instructionsFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !notes.isEmpty { prompt += "\n\nThe user's own instructions:\n" + notes }
-        if let helperBrief { prompt += "\n\n" + helperBrief.text }
-        if let place, app.claude.notesOn || helperBrief != nil {
+        if let place, app.claude.notesOn {
             let mode = app.config.modes.first { $0.id == place.mode }?.name
             let quiet = app.assist.neverLook(place.app)
             let window = quiet || place.title.isEmpty ? "\(place.appName)'s window" : "\(place.appName)'s window “\(place.title)”"

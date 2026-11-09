@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Petal Notes' paper: its sizes, type and colors, as the sketch has them (notes-round2.html). A note is a square
 /// of paper folded at 170 points; open it grows to 360 wide and as tall as its writing. Paper is an opaque warm
@@ -148,7 +149,7 @@ struct PaperView: View {
             }
             HStack(spacing: paper.file.watch != nil ? 4 : 6) {
                 // Something coming (back at a time, a helper at work): the sketch's dot before the line.
-                if !unsaved, paper.file.back != nil || paper.file.helper.map({ $0.state != .done }) == true {
+                if !unsaved, paper.file.back != nil || paper.file.helper.map({ $0.state == .working || $0.state == .waiting }) == true {
                     PulseDot(color: Color(nsColor: color), pulsing: paper.file.helper?.state == .working)
                 }
                 Text(unsaved ? "Not saved yet: trying again" : footer).font(.system(size: 11))
@@ -394,11 +395,9 @@ struct PictureView: View {
         }
         .frame(height: 96).frame(maxWidth: .infinity).clipped()
         .clipShape(.rect(cornerRadius: 9))
-        // Dragged out of the note: the picture's own file.
-        .onDrag {
-            guard let path = NoteShelf.pictureTarget(link, noteFolder: folder.path) else { return NSItemProvider() }
-            return NSItemProvider(contentsOf: URL(fileURLWithPath: path)) ?? NSItemProvider()
-        }
+        // Dragged out of the note: the picture's bytes, read (when dropped) from the file NoteStore.pictureFile allows
+        // (inside the notes' root, through no link), never a path.
+        .onDrag { PictureView.provider(link: link, folder: folder, caption: caption) }
         .overlay { RoundedRectangle(cornerRadius: 9).stroke(.black.opacity(0.15), lineWidth: 0.5) }
         .overlay(alignment: .bottomLeading) {
             if !caption.isEmpty {
@@ -407,6 +406,24 @@ struct PictureView: View {
                     .padding(.leading, 8).padding(.bottom, 6)
             }
         }
+    }
+}
+
+extension PictureView {
+    static func provider(link: String, folder: URL, caption: String) -> NSItemProvider {
+        let provider = NSItemProvider()
+        let name = (link as NSString).lastPathComponent
+        let type = UTType(filenameExtension: (name as NSString).pathExtension) ?? .png
+        provider.suggestedName = caption.isEmpty ? (name as NSString).deletingPathExtension : caption
+        provider.registerDataRepresentation(forTypeIdentifier: type.identifier, visibility: .all) { done in
+            guard let file = NoteStore.pictureFile(link, noteFolder: folder), let data = try? Data(contentsOf: file) else {
+                done(nil, CocoaError(.fileReadNoPermission))
+                return nil
+            }
+            done(data, nil)
+            return nil
+        }
+        return provider
     }
 }
 

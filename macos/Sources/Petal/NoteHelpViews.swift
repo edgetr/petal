@@ -169,7 +169,7 @@ struct HelperBar: View {
         let noteID = paper.noteID
         let run = desk?.helpers.runs[noteID]
         let helper = paper.file.helper
-        let working = run != nil || helper.map { $0.state != .done } == true
+        let working = run != nil || helper.map { $0.state == .working || $0.state == .waiting } == true
         let denials = run?.sticky?.agent.pendingAsk ?? []
         VStack(alignment: .leading, spacing: 8) {
             if working {

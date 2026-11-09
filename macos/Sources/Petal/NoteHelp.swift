@@ -242,7 +242,8 @@ enum NoteHelp {
     /// `helper:`: while one runs (Phase 3 lists "Helpers at work"). `asked`: the line it was last run for, so Return on
     /// it again (adding a line under it) never runs it twice; `mac`: the Mac it runs on.
     struct Helper: Equatable, Sendable {
-        enum State: String, Sendable { case working, waiting, done }
+        /// `failed`: it ended without its answer (the reason is its ink); only `done` advances a chain.
+        enum State: String, Sendable { case working, waiting, done, failed }
         var state: State
         var who: String
         var step: String
@@ -1486,6 +1487,54 @@ final class RunToken: @unchecked Sendable {
         guard ending == .succeeded else { return false }
         return lock.withLock { guard _state == .running else { return false }; _state = .finished; return true }
     }
+
+    /// How a run ends, exactly once: succeeded (a clean exit), failed (with its reason, shown on the paper), or
+    /// stopped. Every way out of a run, an early one too (a missing key, a launch error, a guard), reports one
+    /// of these; only `succeeded` advances anything (a chain, a reviewer, a watcher saying a crossing).
+    enum Completion: Equatable, Sendable { case succeeded, failed(String), stopped }
+
+    private var _completion: Completion?
+    var completion: Completion? { lock.withLock { _completion } }
+
+    /// Reports the run's end: true the first time only. Succeeded only while it runs (a paused or stopped run can't
+    /// succeed); failing or stopping ends what it has running.
+    @discardableResult func complete(_ completion: Completion) -> Bool {
+        lock.lock()
+        guard _completion == nil else { lock.unlock(); return false }
+        if completion == .succeeded, _state != .running { lock.unlock(); return false }
+        _completion = completion
+        let stop = completion == .succeeded ? [] : Array(stoppers.values)
+        if completion != .succeeded { stoppers = [:] }
+        _state = completion == .succeeded ? .finished : .cancelled
+        lock.unlock()
+        for each in stop { each() }
+        return true
+    }
+}
+
+/// Tokens by what they're for (a note's run, a watcher's look): starting one cancels the one before under that key;
+/// taking back a grant cancels every token holding it, whichever note it's for (an Always for a checkout is shared).
+final class TokenTable {
+    private var tokens: [String: RunToken] = [:]
+
+    func start(_ key: String) -> RunToken {
+        tokens[key]?.cancel()
+        let token = RunToken()
+        tokens[key] = token
+        return token
+    }
+
+    func token(_ key: String) -> RunToken? { tokens[key] }
+
+    func cancel(_ key: String) { tokens.removeValue(forKey: key)?.cancel() }
+
+    /// Forgets a token that ended (only if it's still the one there).
+    func finish(_ key: String, _ token: RunToken) { if tokens[key] === token { tokens[key] = nil } }
+
+    /// Every token holding `grant`, cancelled; their keys.
+    @discardableResult func revoke(_ grant: String) -> [String] {
+        tokens.filter { $0.value.revoke(grant) }.map(\.key).sorted()
+    }
 }
 
 extension NoteHelp {
@@ -1531,6 +1580,41 @@ extension NoteHelp {
         return .free
     }
 
+    /// What Go on does for a paused run: its agent's turn waiting starts, a turn the pause ended goes on in the same
+    /// session; a run whose agent never started (a quick run, or one paused during setup) is begun again from its
+    /// line; one that can't be begun again was stopped by Pause (and said so).
+    enum GoOn: Equatable { case startWaiting, carryOn, restart, stopped }
+
+    static func goOn(launched: Bool, waitingTurn: Bool, restartable: Bool) -> GoOn {
+        if launched { return waitingTurn ? .startWaiting : .carryOn }
+        return restartable ? .restart : .stopped
+    }
+
+    /// Whether a note's places changed in a way its helper must follow (re-stuck, taken off, added): its tools then
+    /// look at the new place, and what it read or queued for the old one is dropped.
+    static func placesMoved(_ old: [NoteStick], _ new: [NoteStick]) -> Bool {
+        old.count != new.count || zip(old, new).contains { !$0.samePlace($1) }
+    }
+
+    /// The branch for a note's worktree of `checkout`: the one stored when it was first made (follow-ups are
+    /// verified against it, whatever they say), else a new one.
+    static func branch(stored: Worktree?, checkout: String, noteID: String, words: String) -> String {
+        if let stored, standard(stored.checkout) == standard(checkout), !stored.branch.isEmpty { return stored.branch }
+        return branch(noteID: noteID, words: words)
+    }
+
+    /// The remote's default branch, from `git ls-remote --symref <remote> HEAD` ("ref: refs/heads/main\tHEAD"):
+    /// nil when it doesn't say (then nothing is made; never the checkout's own HEAD instead).
+    static func defaultBranch(lsRemote output: String) -> String? {
+        for line in output.components(separatedBy: "\n") where line.hasPrefix("ref: refs/heads/") {
+            let parts = line.dropFirst(5).components(separatedBy: "\t")
+            guard parts.count == 2, parts[1].trimmingCharacters(in: .whitespaces) == "HEAD" else { continue }
+            let name = String(parts[0].dropFirst("refs/heads/".count))
+            if !name.isEmpty, !name.contains(".."), !name.hasPrefix("-") { return name }
+        }
+        return nil
+    }
+
     /// The pull request to start from: only a pull request's number (an issue starts from the default branch).
     static func pullNumber(_ repo: Repository) -> Int? { repo.kind == .pull ? repo.number : nil }
 
@@ -1561,6 +1645,35 @@ extension NoteHelp {
         var line: Shielded = ""
         var last: Shielded = ""
         var paths: [Shielded] = []
+        /// The person's own notes for the AI, and what Petal remembers about them.
+        var instructions: Shielded = ""
+        var memory: Shielded = ""
+        /// A notebook to check against: its name and each note's whole text, shielded one by one.
+        var sourceBook: Shielded = ""
+        var sources: [Shielded] = []
+    }
+
+    /// A helper's whole system prompt, made only of `Shielded` parts (no window or tab title, no raw text): what it
+    /// is, Petal's tools, its place, the person's notes and memory, then the brief.
+    static func system(_ t: Told, provider: Shielded, computerUse: Bool, brief: Shielded) -> Shielded {
+        var words: Shielded = """
+        You are \(provider), running inside Petal on the user's Mac as a helper in one of their Petal Notes. Petal's tools (the petal MCP server) are yours: petal_look and petal_ui look at the note's own place, petal_act uses it (in the background when it can; when it says the window must be in front, ask the user), petal_apps and petal_windows open and arrange apps, petal_notes and petal_note_read read their notes (a Private notebook's only from inside it), petal_vault fills logins, addresses and cards without you seeing a secret (paying shows the user a Buy card first; never type a password, card or key yourself), petal_trash moves files to the Trash (never delete files any other way). Petal asks the user before what changes things; if they say no, don't find another way.
+        """
+        if computerUse { words = words + "\n\nYou may use the user's apps with petal_ui and petal_act; call petal_ui first and again after anything changes the window." }
+        if !t.place.isEmpty {
+            words = words + "\n\nThe note is on: \(t.place). This, here, this page and this sentence mean that place, even after the user has gone elsewhere."
+        }
+        if !t.instructions.isEmpty { words = words + "\n\nThe user's own instructions:\n\(t.instructions)" }
+        if !t.memory.isEmpty { words = words + "\n\nWhat you remember about this user:\n\(t.memory)" }
+        return words + "\n\n\(brief)"
+    }
+
+    /// "Check this against @Notebook": each of its notes shielded whole first, then its title derived and its words
+    /// cut, and the whole limited.
+    static func comparison(_ t: Told) -> Shielded {
+        guard !t.sources.isEmpty else { return "" }
+        let notes = t.sources.prefix(40).map { source -> Shielded in "## \(source.title)\n\(source.prefix(2000))" }
+        return "The notebook \(t.sourceBook), to check the note against:\n\(Shielded.joined(notes, separator: "\n\n").prefix(30_000))"
     }
 
     /// @Petal's brief: the note, the cover first, where it's stuck (its sentence cut only after redaction).
@@ -1573,6 +1686,7 @@ extension NoteHelp {
             words = words + "\n\nThe note isn't on a window now: don't look at what's in front unless the user's line asks for it."
         }
         if !t.extra.isEmpty { words = words + "\n\n\(t.extra)" }
+        if !t.sources.isEmpty { words = words + "\n\n\(comparison(t))" }
         return words
     }
 
