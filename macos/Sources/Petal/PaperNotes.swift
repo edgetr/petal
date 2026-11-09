@@ -1097,8 +1097,11 @@ final class NoteStore {
                 for picture in pictures { pendingPictures[noteID]?[picture.name] = nil }
                 let names = Set(pictures.map(\.name))
                 NoteJournal.queue.async { NoteJournal.picturesSaved(noteID: noteID, names: names) }
+                // Their files are in: the bytes held for them in memory can go (NotePictures.written).
+                let folder = root.appending(path: NoteShelf.pictureFolder(id: noteID))
+                NotificationCenter.default.post(name: Self.picturesWritten, object: nil, userInfo: ["paths": pictures.map { folder.appending(path: $0.name).path }])
             } else {
-                pictureTrouble[session.key, default: []] += pictures
+                setAside(session.key, pictures)
             }
         }
         for done in item.done { done(result.outcome) }
@@ -1121,20 +1124,32 @@ final class NoteStore {
         enqueue(session, .pictureBytes(pictures, noteID: paper.noteID), done: nil)
     }
 
-    /// Remove: the pictures that couldn't be saved leave the note (their references too) and memory.
-    func dropPictures(_ key: String) {
-        guard let pictures = pictureTrouble.removeValue(forKey: key), let paper = paper(key) else { return }
+    /// Remove: the pictures that couldn't be saved leave the note (their references too) and then memory. Refused
+    /// on a read-only paper; their recovery bytes (in memory and the journal) go only once the note without their
+    /// references has actually landed. False when nothing was done.
+    @discardableResult
+    func dropPictures(_ key: String) -> Bool {
+        guard let paper = paper(key), !readOnly(paper), let pictures = pictureTrouble[key], !pictures.isEmpty else { return false }
         let names = Set(pictures.map(\.name))
-        for name in names { pendingPictures[paper.noteID]?[name] = nil }
         let noteID = paper.noteID
-        NoteJournal.queue.async { NoteJournal.picturesSaved(noteID: noteID, names: names) }
-        change(key) { file in
+        let written = change(key, edit: { file in
             file.body = NoteBlock.blocks(file.body).filter { block in
                 if case .image(let path, _) = block { return !names.contains((path as NSString).lastPathComponent) }
                 return true
             }.map(\.markdown).joined(separator: "\n")
+        }) { outcome in
+            let landed: Bool = switch outcome { case .written, .keptBoth: true; default: false }
+            guard landed else { return }
+            self.pictureTrouble[key] = self.pictureTrouble[key].map { $0.filter { !names.contains($0.name) } }
+            if self.pictureTrouble[key]?.isEmpty == true { self.pictureTrouble[key] = nil }
+            for name in names { self.pendingPictures[noteID]?[name] = nil }
+            NoteJournal.queue.async { NoteJournal.picturesSaved(noteID: noteID, names: names) }
         }
+        return written != nil
     }
+
+    /// Pictures set aside on a paper (their bytes couldn't be written): said with Try again and Remove.
+    func setAside(_ key: String, _ pictures: [NotePictureBytes]) { pictureTrouble[key, default: []] += pictures }
 
     /// Picture bytes accepted and not in their notes' pictures' folders yet, by note id: what each snapshot carries
     /// for the pictures its text references.
@@ -1354,6 +1369,8 @@ final class NoteStore {
     @ObservationIgnored private var watched: URL?
     /// Files under the notes' folder appeared or changed (userInfo "paths"): what makes a missing picture show.
     static let filesChanged = Notification.Name("petal.notesFilesChanged")
+    /// Pictures' files written (userInfo "paths"): their bytes needn't stay in memory for them.
+    static let picturesWritten = Notification.Name("petal.notesPicturesWritten")
 
     private func watch() {
         guard !Headless.on, !switching else { return }

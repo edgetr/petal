@@ -114,6 +114,7 @@ struct NoteStoreCheck {
         moveAfterConflict(root: root)
         picturesStay(root: root)
         pictureLinks(root: root)
+        removeRefusedReadOnly(root: root)
         caseMove(root: root)
         versionGroups(root: root)
         try? fm.removeItem(at: Config.supportFolder)
@@ -653,6 +654,35 @@ struct NoteStoreCheck {
                "a new file at an id-less note's path gets a handle of its own")
         local.rekeyID("file:Inbox/Plain.md", holder: plainHolder, "U2")
         expect(local.handle("U2") == firstLook && local.handles?[plainHolder] == nil, "an id-less note given its id keeps its handle, and its path's is retired")
+    }
+
+    /// Remove (pictures that couldn't be saved) is refused on a read-only paper, its recovery bytes kept; on a
+    /// note that can change, they go only once the note without their references has landed.
+    @MainActor static func removeRefusedReadOnly(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Removal")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let line = "![](\(NoteShelf.pictureLink(id: "RM1", name: "bad.png")))"
+        _ = NoteStore.create(NoteFile(id: "RM1", body: "words\n" + line).serialized(), at: folder.appending(path: "Kept.md"), root: root)
+        _ = NoteStore.create(NoteFile(id: "RM1", body: "other words\n" + line).serialized(), at: folder.appending(path: "Kept (conflicted copy).md"), root: root)
+        let line2 = "![](\(NoteShelf.pictureLink(id: "RM2", name: "bad.png")))"
+        let single = folder.appending(path: "Single.md")
+        _ = NoteStore.create(NoteFile(id: "RM2", body: "words\n" + line2).serialized(), at: single, root: root)
+        let store = NoteStore(root: root)
+        let read = NoteStore.read(root)
+        store.preview(read.notes, notebooks: read.notebooks)
+        let bad = NotePictureBytes(name: "bad.png", data: Data("bytes".utf8), caption: "")
+        guard let conflicted = store.notes.first(where: { $0.noteID == "RM1" && $0.url.lastPathComponent == "Kept.md" }),
+              let changeable = store.notes.first(where: { $0.noteID == "RM2" }) else { return expect(false, "the notes are read") }
+        expect(store.readOnly(conflicted), "a conflict's paper is read only")
+        store.setAside(conflicted.key, [bad])
+        expect(!store.dropPictures(conflicted.key) && store.pictureTrouble[conflicted.key]?.count == 1
+               && text(folder.appending(path: "Kept.md"))?.contains("bad.png") == true, "Remove refused on a read-only paper: nothing dropped")
+        store.setAside(changeable.key, [bad])
+        expect(store.dropPictures(changeable.key) && store.pictureTrouble[changeable.key]?.count == 1, "Remove on a note that can change: its bytes kept until it lands")
+        let until = Date().addingTimeInterval(5)
+        while store.pictureTrouble[changeable.key] != nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        expect(store.pictureTrouble[changeable.key] == nil && text(single)?.contains("bad.png") == false, "landed: the reference gone from the file, then the bytes")
     }
 
     /// The one rule for picture links (NoteStore.pictureFile), journal recovery putting bytes exactly where each saved

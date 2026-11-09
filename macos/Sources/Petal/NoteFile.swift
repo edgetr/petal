@@ -1734,6 +1734,40 @@ enum NoteShelf {
         return lastOther
     }
 
+    /// A paste into the same note keeps a picture line as it is only when the fragment came from this very note in
+    /// this very notes folder (its root, however spelled) and the line points into the note's own folder; anything
+    /// else is taken from its bytes. Its file name when kept.
+    static func keepsOwnPicture(_ link: String, noteFolder: String, noteID: String, fragmentNote: String, fragmentRoot: String) -> String? {
+        guard fragmentNote == noteID, respelled(fragmentRoot) == respelled((noteFolder as NSString).deletingLastPathComponent) else { return nil }
+        return ownPicture(link, noteFolder: noteFolder, noteID: noteID)
+    }
+
+    /// A copied selection's Markdown and pictures within `limit` bytes in all: each picture (by its block's index)
+    /// goes with its bytes while they fit; one without bytes (never loaded, unreadable) or past the limit is copied
+    /// as "(A picture couldn't be copied.)".
+    static func fragmentBody(_ blocks: [NoteBlock], bytes: [Int: Data], limit: Int) -> (markdown: String, pictures: [Data]) {
+        var total = NoteBlock.body(blocks).utf8.count
+        var pictures: [Data] = []
+        let kept = blocks.enumerated().map { index, block -> NoteBlock in
+            guard case .image = block else { return block }
+            guard let data = bytes[index], total + data.count <= limit else { return .text(NoteText.uncopied) }
+            total += data.count
+            pictures.append(data)
+            return block
+        }
+        return (NoteBlock.body(kept), pictures)
+    }
+
+    /// Whether a note counts as "here" for the note tools: placed now, by the window in front or on a Desktop
+    /// showing (the one current-placement rule, placementNow).
+    static func isHere(_ placement: Placement) -> Bool { placement != .none }
+
+    /// A decoded picture's weight in the image cache: its pixels, four bytes each.
+    static func imageCost(width: Int, height: Int) -> Int { max(1, width) * max(1, height) * 4 }
+
+    /// Whether a picture's raw bytes stay held: while its write hasn't landed, or an open editor shows it.
+    static func keepBytes(_ key: String, pending: Set<String>, shown: Set<String>) -> Bool { pending.contains(key) || shown.contains(key) }
+
     /// Which missing pictures to ask for again now: those still on screen whose last try was at least `every` ago.
     /// The retry timer runs only while some missing picture is on screen (`keepTimer`).
     static func pictureRetry(broken: [String: Date], onScreen: Set<String>, now: Date, every: TimeInterval = 10) -> (retry: [String], keepTimer: Bool) {

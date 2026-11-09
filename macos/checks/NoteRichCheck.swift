@@ -8,6 +8,7 @@ enum Headless { nonisolated(unsafe) static var on = true }
 final class NoteStore {
     nonisolated static let io = DispatchQueue(label: "petal.check.notes")
     static let filesChanged = Notification.Name("petal.check.notesFilesChanged")
+    static let picturesWritten = Notification.Name("petal.check.notesPicturesWritten")
     // Where a link leads, as the check says (nil: "not there"); every read is counted.
     nonisolated(unsafe) static var files: [String: URL] = [:]
     nonisolated(unsafe) static var reads = 0
@@ -227,9 +228,15 @@ struct NoteRichCheck {
             return view
         }
         func body(_ view: NoteTextView) -> String { NoteBlock.body(NoteRich.blocks(view.textStorage!)) }
+        func copy(_ view: NoteTextView) -> Bool {
+            var finished = false
+            let ok = view.copySelection(to: board) { finished = true }
+            spin { finished || !ok }
+            return ok
+        }
         let carded = editor("hello\nhttps://example.com/page\nafter", note: "N1", folder: inbox)
         carded.setSelectedRange(NSRange(location: 0, length: 7))   // "hello\n" and the card
-        expect(carded.copySelection(to: board), "words and a card copied")
+        expect(copy(carded), "words and a card copied")
         carded.delete(nil)
         expect(!body(carded).contains("hello") && !body(carded).contains("example.com"), "cut: gone from the note", body(carded))
         expect(board.string(forType: .string) == "hello\nhttps://example.com/page", "another app gets plain text: the words and the address",
@@ -245,7 +252,9 @@ struct NoteRichCheck {
                     ("../\(own)/picture-new\(n).\(item.ext)", URL(fileURLWithPath: "/tmp/petal-rich/\(own)/picture-new\(n).\(item.ext)"), item.caption)
                 }
             }
-            expect(view.pasteNote(from: board), "a note's fragment on the pasteboard")
+            var finished = false
+            expect(view.pasteNote(from: board) { finished = true }, "a note's fragment on the pasteboard")
+            spin { finished }
         }
         let pngData = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?.representation(using: .png, properties: [:]) ?? Data()
@@ -257,7 +266,7 @@ struct NoteRichCheck {
         // Another app gets the words and a picture's caption, never its path.
         let captioned = editor("caption line\n![shot](../Pictures/abc/p.png)", note: "N1", folder: inbox)
         captioned.selectAll(nil)
-        captioned.copySelection(to: board)
+        copy(captioned)
         expect(board.string(forType: .string) == "caption line\nshot", "another app gets plain text, never a picture's path", board.string(forType: .string) ?? "nil")
 
         // A picture just pasted (its file not written yet) is cut and pasted into another note: its bytes travel with
@@ -268,7 +277,7 @@ struct NoteRichCheck {
         let cutFrom = editor("words\n![shot](../\(ownN1)/picture-fresh.png)", note: "N1", folder: inbox)
         cutFrom.selectAll(nil)
         let readsBeforeCopy = NoteStore.reads
-        expect(cutFrom.copySelection(to: board), "copied")
+        expect(copy(cutFrom), "copied")
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         expect(NoteStore.reads == readsBeforeCopy, "copy reads nothing from disk", "\(NoteStore.reads - readsBeforeCopy) reads")
         cutFrom.delete(nil)
@@ -281,18 +290,19 @@ struct NoteRichCheck {
         // Into the same note, a picture already its own keeps its line; nothing is copied.
         let mine = editor("![shot](../\(ownN1)/picture-fresh.png)", note: "N1", folder: work)
         mine.selectAll(nil)
-        mine.copySelection(to: board)
+        copy(mine)
         mine.setSelectedRange(NSRange(location: (mine.string as NSString).length, length: 0))
         accepted = []
         paste(mine)
         expect(body(mine).components(separatedBy: "![shot](../\(ownN1)/picture-fresh.png)").count == 3 && accepted.isEmpty,
                "the same note: its own picture's line again, no copy", body(mine))
 
-        // A picture that never loaded (its bytes not in memory) copies as a line saying so, without waiting.
+        // A picture whose bytes aren't held is read off the main thread for the copy; one that never loaded (nothing to
+        // read) copies as a line saying so.
         let unloaded = editor("before\n![](../\(ownN1)/never-loaded.png)", note: "N1", folder: inbox)
         unloaded.selectAll(nil)
-        unloaded.copySelection(to: board)
-        let unloadedFragment = board.data(forType: NoteRich.fragmentType).flatMap { try? JSONDecoder().decode(NoteRich.Fragment.self, from: $0) }
+        copy(unloaded)
+        let unloadedFragment = board.data(forType: NoteRich.fragmentType).flatMap(NoteRich.decode)
         expect(unloadedFragment?.markdown == "before\n(A picture couldn't be copied.)" && unloadedFragment?.pictures.isEmpty == true,
                "a never-loaded picture: copied as a line saying so", unloadedFragment?.markdown ?? "nil")
         let unloadedTarget = editor("", note: "N2", folder: work)
@@ -307,7 +317,7 @@ struct NoteRichCheck {
         let withPictures = NoteRich.Fragment(markdown: "![a](../Pictures/x/a.png)\nmiddle\n![b](../Pictures/x/b.png)", folder: inbox.path, note: "N9",
                                              pictures: [pngData, pngData])
         board.declareTypes([NoteRich.fragmentType, .string], owner: nil)
-        board.setData(try! JSONEncoder().encode(withPictures), forType: NoteRich.fragmentType)
+        board.setData(NoteRich.encode(withPictures)!, forType: NoteRich.fragmentType)
         undoing.setSelectedRange(NSRange(location: 5, length: 0))
         accepted = []
         paste(undoing)
@@ -324,7 +334,7 @@ struct NoteRichCheck {
         // notifications, one scan each.
         let many = (0..<2000).map { "![](../Pictures/bulk/p\($0).png)" }.joined(separator: "\n")
         board.declareTypes([NoteRich.fragmentType, .string], owner: nil)
-        board.setData(try! JSONEncoder().encode(NoteRich.Fragment(markdown: many, folder: inbox.path, note: "NB", pictures: Array(repeating: pngData, count: 2000))),
+        board.setData(NoteRich.encode(NoteRich.Fragment(markdown: many, folder: inbox.path, note: "NB", pictures: Array(repeating: pngData, count: 2000)))!,
                       forType: NoteRich.fragmentType)
         let bulk = editor("", note: "N2", folder: work)
         accepted = []
@@ -345,6 +355,41 @@ struct NoteRichCheck {
         NotificationCenter.default.removeObserver(bulkCounting)
         expect(bulkArrivals >= 1 && bulkArrivals <= 3 && bulkShown.scans - bulkScans == bulkArrivals,
                "2,000 arrivals: one notification or a few, one scan each", "\(bulkArrivals) arrivals, \(bulkShown.scans - bulkScans) scans")
+
+        // The fragment is offered lazily: nothing encoded when copying, encoded once a note asks for it.
+        let lazySource = editor("lazy words\n![shot](../\(ownN1)/picture-fresh.png)", note: "N1", folder: inbox)
+        lazySource.selectAll(nil)
+        _ = copy(lazySource)
+        let provider = FragmentProvider.current
+        expect(provider?.encodes == 0 && board.string(forType: .string) == "lazy words\nshot", "copied: plain text there, the fragment not encoded yet")
+        let asked = board.data(forType: NoteRich.fragmentType).flatMap(NoteRich.decode)
+        expect(provider?.encodes == 1 && asked?.pictures == [pngData] && asked?.root == "/tmp/petal-rich",
+               "encoded when asked, as a binary property list, with the notes root it came from")
+
+        // Same note, another notes folder (another Mac): its picture lines are never kept; the bytes are taken.
+        board.declareTypes([NoteRich.fragmentType, .string], owner: nil)
+        board.setData(NoteRich.encode(NoteRich.Fragment(markdown: "![s](../\(ownN1)/picture-fresh.png)", folder: "/other/Inbox", note: "N1", root: "/other",
+                                                        pictures: [pngData]))!, forType: NoteRich.fragmentType)
+        let sameNoteElsewhere = editor("", note: "N1", folder: work)
+        accepted = []
+        paste(sameNoteElsewhere)
+        expect(accepted == [[pngData]] && body(sameNoteElsewhere) == "![s](../\(ownN1)/picture-new0.png)", "another root: bytes accepted, never the old line", body(sameNoteElsewhere))
+
+        // Bytes held only while needed: a write not landed, or an open editor showing it; the image cache has a cost limit.
+        let releaseKey = "/tmp/petal-rich/Pictures/rel/p.png"
+        NotePictures.shared.preview(URL(fileURLWithPath: releaseKey), NSImage(data: pngData) ?? NSImage(), data: pngData)
+        let showing = editor("![](../Pictures/rel/p.png)", note: "N2", folder: work)
+        NotePictures.shared.register(showing)
+        expect(NotePictures.shared.bytes(releaseKey) == pngData, "accepted bytes held while their write is pending")
+        NotePictures.shared.written([releaseKey])
+        expect(NotePictures.shared.bytes(releaseKey) == pngData, "written, but an open editor shows it: still held")
+        NotePictures.shared.unregister(showing)
+        expect(NotePictures.shared.bytes(releaseKey) == nil, "written and its editor closed: let go")
+        let otherKey = "/tmp/petal-rich/Pictures/rel/q.png"
+        NotePictures.shared.preview(URL(fileURLWithPath: otherKey), NSImage(data: pngData) ?? NSImage(), data: pngData)
+        NotePictures.shared.written([otherKey])
+        expect(NotePictures.shared.bytes(otherKey) == nil, "written and shown nowhere: let go at once")
+        expect(NotePictures.shared.cacheLimit == 200 * 1024 * 1024, "the image cache's cost limit: about 200 MB of decoded pixels")
 
         // One arrival for a batch of pictures: each editor scans its pictures once.
         let batchFiles = (0..<50).map { (URL(fileURLWithPath: "/tmp/petal-rich/Pictures/batch/p\($0).png"), NSImage(size: NSSize(width: 2, height: 2)), Optional<Data>.none) }

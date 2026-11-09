@@ -1006,7 +1006,7 @@ final class NoteDesk {
 
     /// Where a paper belongs right now (NoteShelf.placementNow): by the window in front, on a Desktop showing now, or
     /// nowhere.
-    private func placementNow(_ key: String) -> NoteShelf.Placement {
+    func placementNow(_ key: String) -> NoteShelf.Placement {
         let desktops = store.paper(key)?.file.places.filter { $0.kind == .desktop }.map(\.desktop) ?? []
         return NoteShelf.placementNow(window: here[key], desktops: desktops, showing: Set(Self.spaces.values))
     }
@@ -1533,7 +1533,9 @@ final class NoteDesk {
 
     /// Remove on a paper: those pictures and waiting files let go.
     func dropPictures(_ key: String) {
-        if let paper = store.paper(key) { store.dropWaiting(paper.noteID) }
+        // Never on a read-only paper (one of a conflict's): its recovery bytes stay until it can be changed.
+        guard let paper = store.paper(key), !store.readOnly(paper) else { return say("This note has two versions: keep one before removing pictures.") }
+        store.dropWaiting(paper.noteID)
         store.dropPictures(key)
     }
 

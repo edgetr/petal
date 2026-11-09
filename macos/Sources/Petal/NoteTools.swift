@@ -28,7 +28,8 @@ extension NoteDesk {
             let onlyHere = args["here"] as? Bool ?? false
             // Searched, filtered by notebook and counted only on what the agent may see of each note (redacted),
             // never its raw text: matching can't be used to guess a secret one character at a time.
-            let papers = store.notes.filter { $0.version == nil && (!onlyHere || here[$0.key] != nil) }
+            // "Here": placed now, by the window in front or on a Desktop showing (the one current-placement rule).
+            let papers = store.notes.filter { $0.version == nil && (!onlyHere || NoteShelf.isHere(placementNow($0.key))) }
             let sources = papers.map { ($0.file.body, $0.notebook) }
             let books = papers.map(\.notebook)
             Self.onShield({ index -> [Int]? in
@@ -246,7 +247,7 @@ extension NoteDesk {
     private func summary(_ paper: PaperNote, text: Bool = false) -> [String: Any] {
         NoteShield.note(handle: handle(paper), body: paper.file.body, notebook: paper.notebook,
                         places: paper.file.places.map { app.assist.neverLook($0.app) ? $0.scrubbed : $0 },
-                        modified: NoteFile.stamp(paper.file.modified), onScreen: here[paper.key] != nil,
+                        modified: NoteFile.stamp(paper.file.modified), onScreen: NoteShelf.isHere(placementNow(paper.key)),
                         text: text, created: text ? NoteFile.stamp(paper.file.created) : nil)
     }
 

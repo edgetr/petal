@@ -722,6 +722,24 @@ struct NotesCheck {
                && NoteShelf.ownPicture("../\(ownN1)/sub/p.png", noteFolder: "/n/Work", noteID: "N1") == nil
                && NoteShelf.ownPicture("../\(ownN1)/p.png", noteFolder: "/n/Work", noteID: "") == nil,
                "another note's, a handwritten one, deeper, or no note: taken from its bytes")
+        // The same note's own picture line is kept only from the same notes root (however spelled).
+        expect(NoteShelf.keepsOwnPicture("../\(ownN1)/p.png", noteFolder: "/n/Work", noteID: "N1", fragmentNote: "N1", fragmentRoot: "/n") == "p.png"
+               && NoteShelf.keepsOwnPicture("../\(ownN1)/p.png", noteFolder: "/private/var/n/Work", noteID: "N1", fragmentNote: "N1", fragmentRoot: "/var/n") == "p.png",
+               "this note, this root: kept")
+        expect(NoteShelf.keepsOwnPicture("../\(ownN1)/p.png", noteFolder: "/n/Work", noteID: "N1", fragmentNote: "N1", fragmentRoot: "/other") == nil
+               && NoteShelf.keepsOwnPicture("../\(ownN1)/p.png", noteFolder: "/n/Work", noteID: "N1", fragmentNote: "N2", fragmentRoot: "/n") == nil,
+               "another root or another note: never kept")
+        // A copied fragment stays within its bound: pictures that don't fit (or have no bytes) become lines saying so.
+        let fitting = NoteShelf.fragmentBody([.text("a"), .image(path: "p1.png", caption: ""), .image(path: "p2.png", caption: ""), .image(path: "p3.png", caption: "")],
+                                             bytes: [1: Data(count: 40), 2: Data(count: 40)], limit: 100)
+        expect(fitting.markdown == "a\n![](p1.png)\n(A picture couldn't be copied.)\n(A picture couldn't be copied.)" && fitting.pictures.count == 1,
+               "past the bound, or no bytes: copied as words", fitting.markdown)
+        // "Here" for the note tools: placed now, by the window in front or on a Desktop showing.
+        expect(NoteShelf.isHere(NoteShelf.placementNow(window: nil, desktops: [3], showing: [3])) && NoteShelf.isHere(NoteShelf.placementNow(window: 7, desktops: [], showing: []))
+               && !NoteShelf.isHere(NoteShelf.placementNow(window: nil, desktops: [3], showing: [2])), "a Desktop note on the Desktop showing is here; one elsewhere isn't")
+        expect(NoteShelf.imageCost(width: 1000, height: 500) == 2_000_000, "an image's cost: its pixels, four bytes each")
+        expect(NoteShelf.keepBytes("a", pending: ["a"], shown: []) && NoteShelf.keepBytes("a", pending: [], shown: ["a"]) && !NoteShelf.keepBytes("a", pending: [], shown: []),
+               "bytes kept while a write is pending or an editor shows them")
         // A paste's range: the selection when it still holds what was selected; else no replacing, at that place.
         expect(NoteShelf.pasteRange(at: 5, length: 7, selected: "REPLACE", text: "keep REPLACE end") == NSRange(location: 5, length: 7), "still there: replaced")
         expect(NoteShelf.pasteRange(at: 5, length: 7, selected: "REPLACE", text: "keep OTHERED end") == NSRange(location: 5, length: 0)
