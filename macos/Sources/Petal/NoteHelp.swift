@@ -1562,9 +1562,32 @@ extension NoteHelp {
     /// its one cover is read.
     enum Privacy: Equatable { case open, closed, unknown }
 
-    static func privacy(covers: [NoteFile]) -> Privacy {
-        guard covers.count == 1 else { return .unknown }
-        return covers[0].coverPrivate ? .closed : .open
+    /// A notebook's cover files, as a read of its folder found them (Phase 3's rule): only "About this notebook.md",
+    /// its iCloud versions and its conflict copies (a name starting "About this notebook" and ending ".md") count;
+    /// `cover: true` in any other file is ignored. `listed`: the folder could be listed; `unread`: cover files not
+    /// downloaded or not readable; `privateFlags`: what each cover read says.
+    struct CoverFiles: Equatable, Sendable {
+        var listed = true
+        var unread = 0
+        var privateFlags: [Bool] = []
+    }
+
+    static func isCoverName(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        return lower.hasPrefix("about this notebook") && lower.hasSuffix(".md")
+    }
+
+    /// iCloud's placeholder for a cover not downloaded (".About this notebook.md.icloud").
+    static func isCoverPlaceholder(_ name: String) -> Bool {
+        name.hasPrefix(".") && name.lowercased().hasSuffix(".icloud") && isCoverName(String(name.dropFirst().dropLast(7)))
+    }
+
+    /// Unknown (so private) only while a cover file is unread, dataless or unreadable, or the folder can't be listed;
+    /// other notes still downloading don't count. Every cover read: private if any says so, else open (no cover at
+    /// all: open).
+    static func privacy(_ covers: CoverFiles) -> Privacy {
+        guard covers.listed, covers.unread == 0 else { return .unknown }
+        return covers.privateFlags.contains(true) ? .closed : .open
     }
 
     /// May a note in `asking` read a notebook with this privacy (its own always)?
@@ -1745,7 +1768,7 @@ extension NoteHelp {
 
     /// Where a follow-up to a coding helper goes: to its run when it names no checkout or the run's own; a new run
     /// (its own checkout choice and Allow) when it names another.
-    enum FollowUpTarget: Equatable { case same, newRun }
+    enum FollowUpTarget: Equatable { case same, newRun, review }
 
     static func followUpTarget(runCheckout: String?, words: String, home: String) -> FollowUpTarget {
         let named = namedPaths(words, home: home)
@@ -1758,6 +1781,8 @@ extension NoteHelp {
     /// another AI or model than the run's (`runProvider`, `runModel`: what it runs on); else a new run (its own
     /// checkout choice and Allow, or "not set up"), never steering the current one.
     static func followUpTarget(runCheckout: String?, runProvider: String, runModel: String, words: String, home: String) -> FollowUpTarget {
+        // "Have <model> look for holes" is its own request: a second opinion (or "not set up"), never steering.
+        if models(words).contains(where: { $0.holes }) { return .review }
         if let runCheckout, followUpTarget(runCheckout: runCheckout, words: words, home: home) == .newRun { return .newRun }
         guard let named = models(words).first(where: { !$0.holes }) else { return .same }
         if named.provider.rawValue != runProvider { return .newRun }
@@ -1777,6 +1802,104 @@ extension NoteHelp {
     static func visibleAfterWait(_ notebooks: [String], privacy: (String) -> Privacy, asking: String?) -> [Bool] {
         notebooks.map { mayRead(privacy($0), notebook: $0, asking: asking) }
     }
+}
+
+// MARK: - Rule C: one admission gate, from what's true now
+
+extension NoteHelp {
+    /// What the gate decides: go, wait (its place or document isn't showing), or fail with a reason (the note gone,
+    /// moved, a source's access lost, its AI gone). Never a fallback, never a substitution.
+    enum Admission: Equatable { case go, wait(String), fail(String) }
+
+    /// Everything the gate re-derives from current state, right before a helper's prompt is admitted to its agent,
+    /// before its process starts and before any tool answers it.
+    struct GateFacts {
+        /// The note's current paper (by its id) is there and writable.
+        var paperFound = true
+        /// Its notebook now, and when the run began (the caller moved meanwhile: what it was told is stale).
+        var notebook = ""
+        var startNotebook = ""
+        var privacy: (String) -> Privacy = { _ in .open }
+        /// The run's own required place (held on the run, independent of `here`) and whether it shows now.
+        var place: String? = nil
+        var placeShowing = true
+        /// A file helper's required document, and the file the window in front shows now.
+        var document: String? = nil
+        var sceneFile = ""
+        /// Each source note it compares against: its notebook now (nil: gone).
+        var sources: [(id: String, notebook: String?)] = []
+        /// The exact AI and model it was pinned to, and what's available now (`models` nil: not known).
+        var provider = ""
+        var model = ""
+        var available: [String] = []
+        var models: [String]? = nil
+    }
+
+    static func admit(_ f: GateFacts) -> Admission {
+        guard f.paperFound else { return .fail("This note isn't here as one paper now (gone, or changed in two places): nothing was sent.") }
+        guard f.notebook == f.startNotebook else { return .fail("This note moved to another notebook while it waited, so what it was told is out of date. Ask again.") }
+        for source in f.sources {
+            guard let book = source.notebook else { return .fail("A note it was checking against is gone. Ask again.") }
+            guard mayRead(f.privacy(book), notebook: book, asking: f.notebook) else { return .fail("A note it was checking against is private now (or its notebook's cover isn't here). Ask again.") }
+        }
+        guard f.available.contains(f.provider) else {
+            return .fail("\(f.provider == "codex" ? "Codex" : "Claude Code") isn't set up in Petal.")
+        }
+        if let models = f.models, !f.model.isEmpty, !models.contains(f.model) { return .fail("\(f.model) isn't available in Petal now.") }
+        if let document = f.document, !documentShowing(placePath: document, sceneFile: f.sceneFile) {
+            return .wait("Waiting for \((document as NSString).lastPathComponent) to be in front.")
+        }
+        if let place = f.place, !f.placeShowing { return .wait("Waiting for \(place) to be in front.") }
+        return .go
+    }
+
+    /// A completion belongs to the run whose token started that turn, and to no other (a retiring agent's late
+    /// completion never ends a replacement run).
+    static func completionMatches(turn: AnyObject?, run: AnyObject) -> Bool { turn === run }
+
+    /// A helper's answer at completion: written to its note when it's there as one writable paper; otherwise held
+    /// in the helpers' journal (a conflict, or the paper gone for now) and applied once it is (after Keep this one).
+    enum AnswerTarget: Equatable { case write, hold }
+    static func answerTarget(papers: Int, readOnly: Bool) -> AnswerTarget { papers == 1 && !readOnly ? .write : .hold }
+
+    /// The keys a helper's answer sets, carried from a held answer onto the note it's applied to.
+    static let answerKeys = ["helper", "ink", "steps"]
+
+    static func applyAnswer(_ held: NoteFile, to file: inout NoteFile) {
+        for key in answerKeys { file.set(key, held.value(key)) }
+    }
+
+    /// A paper's open parts within the screen: the editor, then the helper's ink (scrolling past what fits), with the
+    /// safety controls (Allow, Don't, Buy, Stop, Pause) pinned outside the scroll, always on the screen.
+    static func paperHeights(screen: CGFloat, chrome: CGFloat, editor: CGFloat, ink: CGFloat, controls: CGFloat) -> (editor: CGFloat, ink: CGFloat) {
+        let room = max(0, screen - chrome - controls)
+        let editorShown = min(editor, max(80, room * 0.55))
+        return (editorShown, min(ink, max(0, room - editorShown)))
+    }
+}
+
+/// The helpers' journal: answers held while their note was in conflict (or not here), by note id, as the answer's
+/// front matter, in the notes journal's folder; applied (and let go) once the note is one writable paper again.
+enum HelperJournal {
+    struct Entry: Codable, Equatable {
+        var noteID: String
+        var answer: String
+        var at: Date
+    }
+
+    static func load(_ file: URL) -> [Entry] {
+        guard let data = try? Data(contentsOf: file) else { return [] }
+        return (try? JSONDecoder().decode([Entry].self, from: data)) ?? []
+    }
+
+    static func save(_ entries: [Entry], to file: URL) -> Bool {
+        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(entries) else { return false }
+        return (try? data.write(to: file, options: .atomic)) != nil
+    }
+
+    /// The newest answer per note: a later one replaces the one before.
+    static func adding(_ entry: Entry, to entries: [Entry]) -> [Entry] { entries.filter { $0.noteID != entry.noteID } + [entry] }
 }
 
 /// A value belonging to one run (the command rules Claude was allowed): kept for continuations of that run, empty

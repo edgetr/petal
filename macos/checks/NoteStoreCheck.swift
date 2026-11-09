@@ -117,6 +117,7 @@ struct NoteStoreCheck {
         removeRefusedReadOnly(root: root)
         helperAnswerDrained(root: root)
         carriedOntoCopy(root: root)
+        coverPrivacy(root: root)
         caseMove(root: root)
         versionGroups(root: root)
         try? fm.removeItem(at: Config.supportFolder)
@@ -744,6 +745,46 @@ struct NoteStoreCheck {
         expect(idlessPapers.compactMap { text(idless.appending(path: $0)) }.contains { $0.contains("and more") && $0.contains("NEWID") } && text(handFile) == "Changed elsewhere",
                "the next write is on the copy (its new id); the file keeps what changed elsewhere")
         NoteDisk.states[session] = nil
+    }
+
+    /// Notebook privacy read from cover files only (Phase 3's rule), on real folders: the cover and its conflict copy
+    /// count, `cover: true` in another file doesn't, an unreadable cover makes it unknown, another note doesn't.
+    @MainActor static func coverPrivacy(root outer: URL) {
+        let fm = FileManager.default
+        let root = outer.appending(path: "CoverRoot")
+        let write = { (book: String, name: String, file: NoteFile) in
+            let folder = root.appending(path: book)
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            try? Data(file.serialized().utf8).write(to: folder.appending(path: name))
+        }
+        var privateCover = NoteFile(id: "C1", body: "# About")
+        privateCover.cover = true
+        privateCover.set("private", .text("true"))
+        var openCover = privateCover
+        openCover.set("private", nil)
+        write("Closed", "About this notebook.md", privateCover)
+        write("Open", "About this notebook.md", openCover)
+        write("Open", "Plan.md", NoteFile(id: "N1", body: "words"))
+        write("Copy", "About this notebook.md", openCover)
+        write("Copy", "About this notebook (conflicted copy).md", privateCover)
+        write("Impostor", "About this notebook.md", openCover)
+        write("Impostor", "Secret plan.md", privateCover)   // cover: true and private in another file: ignored
+        write("Unreadable", "About this notebook.md", openCover)
+        write("OtherUnread", "About this notebook.md", openCover)
+        write("OtherUnread", "Locked note.md", NoteFile(id: "N2", body: "x"))
+        let lockedCover = root.appending(path: "Unreadable/About this notebook.md")
+        let lockedNote = root.appending(path: "OtherUnread/Locked note.md")
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: lockedCover.path)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: lockedNote.path)
+        let books = NoteStore.read(root).notebooks
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: lockedCover.path)
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: lockedNote.path)
+        let privacy = { (name: String) in books.first { $0.name == name }.map { NoteHelp.privacy($0.covers) } }
+        expect(privacy("Closed") == .closed && privacy("Open") == .open, "a cover read: private or open")
+        expect(privacy("Copy") == .closed, "a cover's conflict copy counts (one says private: private)")
+        expect(privacy("Impostor") == .open, "cover: true in another file is ignored")
+        expect(privacy("Unreadable") == .unknown, "an unreadable cover: unknown (private)")
+        expect(privacy("OtherUnread") == .open, "another note unreadable doesn't make it unknown")
     }
 
     @MainActor static func removeRefusedReadOnly(root: URL) {

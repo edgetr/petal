@@ -25,15 +25,49 @@ struct HelperFront: View {
     let glass: Bool
     var desk: NoteDesk?
 
+    /// How tall the ink may be on this screen (the rest scrolls); the controls are never inside it.
+    var inkRoom: CGFloat = .infinity
+
     var body: some View {
         let file = paper.file
         VStack(alignment: .leading, spacing: 0) {
-            if !file.task.isEmpty { TaskChips(paper: paper, tint: tint, desk: desk).padding(.vertical, 6) }
-            if let calc = file.calc { CalcLine(calc: calc, body: file.body, tint: tint, glass: glass) }
-            ForEach(Array(file.ink.enumerated()), id: \.offset) { _, ink in InkView(ink: ink, tint: ink.objections == nil ? tint : NoteInk.hex("#a550a7") ?? tint, glass: glass) }
+            // What a helper wrote: scrolls when it's more than the screen has room for.
+            BoundedScroll(maxHeight: inkRoom) {
+                VStack(alignment: .leading, spacing: 0) {
+                    if !file.task.isEmpty { TaskChips(paper: paper, tint: tint, desk: desk).padding(.vertical, 6) }
+                    if let calc = file.calc { CalcLine(calc: calc, body: file.body, tint: tint, glass: glass) }
+                    ForEach(Array(file.ink.enumerated()), id: \.offset) { _, ink in InkView(ink: ink, tint: ink.objections == nil ? tint : NoteInk.hex("#a550a7") ?? tint, glass: glass) }
+                }
+            }
+            // Allow, Don't, Buy, Stop and Pause: pinned outside the scroll, always on the screen.
             HelperBar(paper: paper, tint: tint, glass: glass, desk: desk)
         }
     }
+}
+
+/// Its content as it is when it fits `maxHeight`; scrolled within that height when it doesn't.
+struct BoundedScroll<Content: View>: View {
+    let maxHeight: CGFloat
+    @ViewBuilder let content: () -> Content
+    @State private var height: CGFloat = 0
+
+    var body: some View {
+        let measured = content().fixedSize(horizontal: false, vertical: true)
+            .background(GeometryReader { Color.clear.preference(key: BoundedHeight.self, value: $0.size.height) })
+        Group {
+            if height > maxHeight {
+                ScrollView(.vertical) { measured }.frame(height: maxHeight)
+            } else {
+                measured
+            }
+        }
+        .onPreferenceChange(BoundedHeight.self) { height = $0 }
+    }
+}
+
+struct BoundedHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 /// One block of ink: who wrote it, its words, and a coding helper's proof. Dragged out, it's its words (as text, or

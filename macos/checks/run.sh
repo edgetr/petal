@@ -108,6 +108,25 @@ perl -0777 -ne '
 ' Sources/Petal/NoteTools.swift
 # A file helper's document is revalidated on every placement change.
 grep -q 'NoteHelp.documentShowing(placePath:' Sources/Petal/NoteHelpers.swift || { echo "NoteHelpers: a file helper's document must be revalidated"; exit 1; }
+# Rule C: one admission gate. Every prompt a helper's agent gets goes through NoteHelpers.deliver (which asks
+# admit), every turn's process starts only after the agent asks its gate, every tool answer to a helper goes through
+# admitTool (before the tool, and again right before its answer), and a completion counts only for its own token.
+perl -ne '
+    $func = $1 if /^\s*(?:private |nonisolated |@MainActor )*(?:static )?func (\w+)/;
+    if (/\.send\(/ && $func ne "deliver") { print "NoteHelpers:$.: a prompt sent outside deliver (the admission gate): $_"; $bad++ }
+    $admits++ if $func eq "deliver" && /switch admit\(run\)/;
+    $matches++ if /NoteHelp\.completionMatches\(turn:/;
+    END { exit 1 if $bad || !$admits || !$matches; print "rule C: every prompt goes through admit; completions match their token\n" }
+' Sources/Petal/NoteHelpers.swift
+perl -0777 -ne '
+    unless (/guard admitted else .*?\n\s*if let gate \{\s*switch gate\(\)/s) { print "Agent.run: a turn must ask its gate before its process starts\n"; exit 1 }
+    print "rule C: every turn asks its gate before its process starts\n";
+' Sources/Petal/Claude.swift
+perl -0777 -ne '
+    unless (/reply answer: \@escaping .*?let reply: \@MainActor \(String\) -> Void = \{ \[weak self\] text in\s*if let refusal = self\?\.app\.paper\.helpers\.admitTool\(note\)/s
+            && /if let refusal = app\.paper\.helpers\.admitTool\(note\) \{/) { print "Assist.handle: every tool answer to a helper must go through admitTool\n"; exit 1 }
+    print "rule C: every tool answer to a helper goes through admit\n";
+' Sources/Petal/Assist.swift
 # An automatic approval (an earlier Always, Full access) is registered on the asking helper run's token first.
 perl -0777 -ne '
     unless (/let grant = NoteHelp\.autoGrant\(.*?\) \{\s*return done\(app\.paper\.helpers\.authorized\(owner, grant\)\)/s) { print "Assist.ask: an automatic approval must register on the run first\n"; exit 1 }

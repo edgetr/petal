@@ -184,7 +184,20 @@ final class Assist {
     /// client hangs up, its cards are answered Don't (hungUp) and what it started off the main thread neither asks nor
     /// acts.
     func handle(_ name: String, _ json: String, note: String? = nil, who: AgentAccess.Caller? = nil, request: IPC.Pending? = nil,
-                reply: @escaping @MainActor (String) -> Void) {
+                reply answer: @escaping @MainActor (String) -> Void) {
+        // A note's helper: the admission gate (NoteHelpers.admit), from what's true now, before the tool runs and
+        // again right before its answer goes back (what it waited on may have changed meanwhile).
+        let reply: @MainActor (String) -> Void = { [weak self] text in
+            if let refusal = self?.app.paper.helpers.admitTool(note) {
+                let data = (try? JSONSerialization.data(withJSONObject: ["error": refusal])) ?? Data("{}".utf8)
+                return answer(String(decoding: data, as: UTF8.self))
+            }
+            answer(text)
+        }
+        if let refusal = app.paper.helpers.admitTool(note) {
+            let data = (try? JSONSerialization.data(withJSONObject: ["error": refusal])) ?? Data("{}".utf8)
+            return answer(String(decoding: data, as: UTF8.self))
+        }
         // Read on any thread: the socket's own flag, set the moment its client closes. Every change made for an
         // outside caller reads it on the thread making the change, right before it (`off`, an act's or a vault
         // call's `Acting.Cancel`, a routine's `RoutineStop`), never waiting for the main thread's `hungUp`.

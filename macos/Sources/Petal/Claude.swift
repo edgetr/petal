@@ -85,6 +85,10 @@ final class Agent {
     @ObservationIgnored private(set) var outcome: RunToken.Outcome?
     @ObservationIgnored private var turnErrored = false
     @ObservationIgnored private var bound: Int?
+    /// A helper's admission gate (NoteHelpers.admit): asked right before each turn's process starts.
+    @ObservationIgnored var gate: (() -> NoteHelp.Admission)?
+    /// The run token the last turn was started under (its completion is that run's, and no other's).
+    @ObservationIgnored private(set) var turnToken: RunToken?
     /// The token admits its turns now (an agent with none always does).
     var admitted: Bool { token?.admits ?? true }
     @ObservationIgnored var folder: URL?
@@ -359,6 +363,7 @@ final class Agent {
     /// A turn that couldn't start: said in the chat, and ended as a failure through the same path as any turn's end
     /// (its outcome, then `agentFinished`), so whoever waits on it (a note's helper) hears it.
     private func refuse(_ reason: String, opensSettings: Bool = false) {
+        turnToken = token
         messages.append(Message(kind: .error, text: reason, opensSettings: opensSettings))
         outcome = .failed
         failure = reason
@@ -400,6 +405,16 @@ final class Agent {
         app.assist.computer.end(noteID.uuidString)
         // Its run's token, checked once more as the process starts (bound below: pausing or cancelling ends it).
         guard admitted else { if waiting.isEmpty { waitingToken = token }; waiting.append(prompt); return }
+        // A helper's admission gate (NoteHelpers.admit), from what's true now, right before its process starts:
+        // waiting (its place or document isn't showing) keeps the turn waiting; a failure ends it with its reason.
+        if let gate {
+            switch gate() {
+            case .go: break
+            case .wait: if waiting.isEmpty { waitingToken = token }; waiting.append(prompt); return
+            case .fail(let reason): return refuse(reason, opensSettings: reason.contains("isn't set up"))
+            }
+        }
+        turnToken = token
         outcome = nil
         turnErrored = false
         turn += 1

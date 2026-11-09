@@ -41,6 +41,8 @@ struct Notebook: Identifiable, Equatable {
     var color: String
     var cover: String?
     var count: Int
+    /// Its cover files as the read of its folder found them (NoteHelp.CoverFiles: what its privacy is read from).
+    var covers = NoteHelp.CoverFiles()
     var id: String { name }
 }
 
@@ -438,17 +440,25 @@ final class NoteStore {
         var notebooks: [Notebook] = []
         for folder in folders {
             let name = folder.lastPathComponent
-            let files = ((try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? [])
-                .filter { $0.pathExtension.lowercased() == "md" }
+            // Its cover files (only those named like the cover), for its privacy: unread ones make it unknown.
+            var covers = NoteHelp.CoverFiles()
+            let listing: [URL]
+            do { listing = try fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys, options: []) } catch { listing = []; covers.listed = false }
+            covers.unread += listing.filter { NoteHelp.isCoverPlaceholder($0.lastPathComponent) }.count
+            let files = listing.filter { !$0.lastPathComponent.hasPrefix(".") && $0.pathExtension.lowercased() == "md" }
             var here: [PaperNote] = []
             for url in files {
-                guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isSymbolicLink != true else { continue }
+                let isCover = NoteHelp.isCoverName(url.lastPathComponent)
+                guard let values = try? url.resourceValues(forKeys: Set(keys)) else { if isCover { covers.unread += 1 }; continue }
+                guard values.isSymbolicLink != true else { continue }
                 if values.isUbiquitousItem == true, values.ubiquitousItemDownloadingStatus == .notDownloaded {
+                    if isCover { covers.unread += 1 }
                     try? fm.startDownloadingUbiquitousItem(at: url)
                     continue
                 }
                 let date = values.contentModificationDate ?? Date()
-                guard let text = coordinatedRead(url) else { continue }
+                guard let text = coordinatedRead(url) else { if isCover { covers.unread += 1 }; continue }
+                if isCover { covers.privateFlags.append(NoteFile.parse(text, fallbackID: "", fallbackDate: date).coverPrivate) }
                 // A file with no id of its own is known by where it is under the notes' folder, never its name alone.
                 let fallback = NoteShelf.fallbackID(relativePath: NoteShelf.relative(url.path, to: root.path) ?? name + "/" + url.lastPathComponent)
                 var paper = PaperNote(file: NoteFile.parse(text, fallbackID: fallback, fallbackDate: date), url: url, notebook: name, revision: text)
@@ -458,7 +468,8 @@ final class NoteStore {
                 // The versions iCloud kept from a change made on two Macs at once: each one a paper of its own.
                 if values.ubiquitousItemHasUnresolvedConflicts == true {
                     for version in NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? [] {
-                        guard let text = try? String(contentsOf: version.url, encoding: .utf8) else { continue }
+                        guard let text = try? String(contentsOf: version.url, encoding: .utf8) else { if isCover { covers.unread += 1 }; continue }
+                        if isCover { covers.privateFlags.append(NoteFile.parse(text, fallbackID: "", fallbackDate: date).coverPrivate) }
                         var paper = PaperNote(file: NoteFile.parse(text, fallbackID: fallback, fallbackDate: version.modificationDate ?? date), url: url,
                                               notebook: name, revision: text)
                         paper.version = version.url.lastPathComponent
@@ -472,7 +483,7 @@ final class NoteStore {
             }
             let cover = here.first { $0.file.cover }
             notebooks.append(Notebook(name: name, folder: folder, color: cover?.file.color ?? "", cover: cover?.key,
-                                      count: here.filter { !$0.file.cover }.count))
+                                      count: here.filter { !$0.file.cover }.count, covers: covers))
             notes += here
         }
         return (notes, notebooks)

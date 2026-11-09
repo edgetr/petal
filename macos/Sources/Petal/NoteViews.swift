@@ -167,6 +167,13 @@ struct PaperView: View {
         }
     }
 
+    /// The open paper within the screen (NoteHelp.paperHeights): the editor, then the ink (scrolling past what fits),
+    /// with room always kept for the helper's controls.
+    private var heights: (editor: CGFloat, ink: CGFloat) {
+        let screen = NSScreen.main?.visibleFrame.height ?? 800
+        return NoteHelp.paperHeights(screen: screen, chrome: 110, editor: PaperLook.maxOpen - 70, ink: .greatestFiniteMagnitude, controls: 150)
+    }
+
     @ViewBuilder private var openBody: some View {
         if pictureTrouble > 0, let desk {
             HStack(spacing: 10) {
@@ -195,11 +202,11 @@ struct PaperView: View {
         // One of a conflict's papers is read only, with Keep this one: nothing typed into it could be kept.
         if snapshotting || desk == nil {
             NoteBodyView(paper: paper, tint: tint, accent: color, glass: glass, names: bindable)
-            HelperFront(paper: paper, tint: tint, glass: glass, desk: desk).padding(.bottom, 18)
+            HelperFront(paper: paper, tint: tint, glass: glass, desk: desk, inkRoom: heights.ink).padding(.bottom, 18)
         } else if conflict {
             // Read only, in a scroll view as tall as the editor may be: a long one never runs off the screen.
             ConflictBody(paper: paper, tint: tint, accent: color, glass: glass, resized: { desk?.measured(paper.key, $0) })
-            HelperFront(paper: paper, tint: tint, glass: glass, desk: desk).padding(.bottom, 18)
+            HelperFront(paper: paper, tint: tint, glass: glass, desk: desk, inkRoom: heights.ink).padding(.bottom, 18)
         } else if let desk {
             NoteEditorView(paper: paper, style: desk.style(color, glass: glass), focus: keyboard,
                            height: { desk.measured(paper.key, $0) },
@@ -214,8 +221,8 @@ struct PaperView: View {
                            helperReturn: { desk.helpers.returned(paper.key, line: $0) },
                            names: { desk.helpers.names(for: paper.key) },
                            accent: color, tint: tint)
-                .frame(height: min(PaperLook.maxOpen - 70 - (paper.file.ink.isEmpty ? 0 : 90), max(PaperLook.minOpen - 70, editorHeight)))
-            HelperFront(paper: paper, tint: tint, glass: glass, desk: desk).padding(.bottom, 18)
+                .frame(height: min(heights.editor, max(PaperLook.minOpen - 70, editorHeight)))
+            HelperFront(paper: paper, tint: tint, glass: glass, desk: desk, inkRoom: heights.ink).padding(.bottom, 18)
         }
     }
 

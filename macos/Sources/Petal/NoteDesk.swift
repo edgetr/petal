@@ -2301,6 +2301,8 @@ final class NoteDesk {
     /// The files changed (here or on another Mac): papers and tabs show what they say now.
     func refresh() {
         guard on else { return }
+        // Answers held through a conflict: applied once their note is one writable paper (after Keep this one).
+        helpers.applyHeld()
         WindowEvents.shared.titles("papernotes", pagesStuck || windowsStuck)
         // Notes shown on this Mac before it last quit show again.
         for paper in store.notes where local.shown.contains(paper.noteID) && faces[paper.key] == nil { faces[paper.key] = .folded }

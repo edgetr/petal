@@ -394,9 +394,17 @@ struct NoteHelpCheck {
         openCover.cover = true
         var closedCover = openCover
         closedCover.set("private", .text("true"))
-        expect(NoteHelp.privacy(covers: [openCover]) == .open && NoteHelp.privacy(covers: [closedCover]) == .closed, "a cover read: open or private")
-        expect(NoteHelp.privacy(covers: []) == .unknown, "no cover read (missing, not downloaded): unknown")
-        expect(NoteHelp.privacy(covers: [openCover, closedCover]) == .unknown && NoteHelp.privacy(covers: [openCover, openCover]) == .unknown, "two covers (a conflict): unknown")
+        expect(openCover.coverPrivate == false && closedCover.coverPrivate == true, "a cover's private key, by name")
+        // Phase 3's rule: only files named like the cover count, and unknown only while one of them isn't read.
+        expect(NoteHelp.privacy(NoteHelp.CoverFiles(privateFlags: [false])) == .open && NoteHelp.privacy(NoteHelp.CoverFiles(privateFlags: [true])) == .closed, "a cover read: open or private")
+        expect(NoteHelp.privacy(NoteHelp.CoverFiles()) == .open, "no cover file at all: open (nothing says private)")
+        expect(NoteHelp.privacy(NoteHelp.CoverFiles(unread: 1, privateFlags: [false])) == .unknown, "a cover file unread, dataless or unreadable: unknown")
+        expect(NoteHelp.privacy(NoteHelp.CoverFiles(listed: false)) == .unknown, "the folder couldn't be listed: unknown")
+        expect(NoteHelp.privacy(NoteHelp.CoverFiles(privateFlags: [false, true])) == .closed, "a cover and its conflict copy disagree: private")
+        expect(NoteHelp.isCoverName("About this notebook.md") && NoteHelp.isCoverName("About this notebook (conflicted copy).md") && NoteHelp.isCoverName("about this notebook 2.MD"),
+               "the cover and its copies, by name")
+        expect(!NoteHelp.isCoverName("Plan.md") && !NoteHelp.isCoverName("About this notebook.txt") && !NoteHelp.isCoverName("Notes about this notebook.md"), "nothing else is a cover")
+        expect(NoteHelp.isCoverPlaceholder(".About this notebook.md.icloud") && !NoteHelp.isCoverPlaceholder(".Plan.md.icloud"), "a cover not downloaded (its iCloud placeholder)")
         expect(NoteHelp.mayRead(.open, notebook: "A", asking: nil) && !NoteHelp.mayRead(.unknown, notebook: "A", asking: "B") && !NoteHelp.mayRead(.closed, notebook: "A", asking: nil),
                "unknown is private from outside")
         expect(NoteHelp.mayRead(.unknown, notebook: "A", asking: "A") && NoteHelp.mayRead(.closed, notebook: "A", asking: "A"), "a note inside it reads it")
@@ -579,6 +587,73 @@ struct NoteHelpCheck {
         expect(NoteHelp.visibleAfterWait(lookedUp, privacy: { bookPrivacy[$0] ?? .unknown }, asking: "Diary") == [true, true], "a note inside it still reads it")
         bookPrivacy["Trips"] = nil
         expect(NoteHelp.visibleAfterWait(lookedUp, privacy: { bookPrivacy[$0] ?? .unknown }, asking: nil) == [false, false], "its cover not read now: unknown, not told")
+
+        // MARK: Round seven: the admission gate, answers kept through a conflict, reviewers, bounds, completions
+
+        var facts = NoteHelp.GateFacts()
+        facts.notebook = "Work"; facts.startNotebook = "Work"
+        facts.provider = "claude"; facts.available = ["claude"]
+        expect(NoteHelp.admit(facts) == .go, "all true now: go")
+        var fileHelper = facts
+        fileHelper.document = "/Users/someone/Talk.key"
+        fileHelper.sceneFile = "/Users/someone/Other.key"
+        if case .wait = NoteHelp.admit(fileHelper) { expect(true, "") } else { expect(false, "a file helper with another document showing waits", "\(NoteHelp.admit(fileHelper))") }
+        fileHelper.sceneFile = "/Users/someone/Talk.key"
+        expect(NoteHelp.admit(fileHelper) == .go, "its own document showing: go")
+        var placed = facts
+        placed.place = "a.example"; placed.placeShowing = false
+        if case .wait = NoteHelp.admit(placed) { expect(true, "") } else { expect(false, "its place not in front: waits") }
+        var access = facts
+        var accessPrivacy: [String: NoteHelp.Privacy] = ["Trips": .open]
+        access.sources = [("S1", "Trips")]
+        access.privacy = { accessPrivacy[$0] ?? .unknown }
+        expect(NoteHelp.admit(access) == .go, "its sources readable: go")
+        accessPrivacy["Trips"] = .closed
+        if case .fail = NoteHelp.admit(access) { expect(true, "") } else { expect(false, "a source's notebook made private during the wait: fails") }
+        access.sources = [("S1", nil)]
+        if case .fail = NoteHelp.admit(access) { expect(true, "") } else { expect(false, "a source gone: fails") }
+        var providerGone = facts
+        providerGone.available = ["codex"]
+        expect(NoteHelp.admit(providerGone) == .fail("Claude Code isn't set up in Petal."), "the pinned AI disabled while it waited: fails, never another", "\(NoteHelp.admit(providerGone))")
+        var unmodelled = facts
+        unmodelled.provider = "codex"; unmodelled.available = ["codex"]; unmodelled.model = "gpt-6.1-sol"; unmodelled.models = ["gpt-6"]
+        if case .fail = NoteHelp.admit(unmodelled) { expect(true, "") } else { expect(false, "its pinned model gone: fails") }
+        var moved = facts
+        moved.notebook = "Home"
+        if case .fail = NoteHelp.admit(moved) { expect(true, "") } else { expect(false, "the note moved to another notebook during the wait: fails") }
+        var missing = facts
+        missing.paperFound = false
+        if case .fail = NoteHelp.admit(missing) { expect(true, "") } else { expect(false, "the note not one paper now: fails") }
+        expect(NoteHelp.answerTarget(papers: 1, readOnly: false) == .write && NoteHelp.answerTarget(papers: 2, readOnly: true) == .hold
+               && NoteHelp.answerTarget(papers: 0, readOnly: true) == .hold, "an answer at a conflict (or with the note away) is held, never dropped")
+        var heldAnswer = NoteFile(id: "K1", created: now)
+        heldAnswer.ink = [NoteHelp.Ink(who: "✦ Petal", text: "Kept through the conflict")]
+        heldAnswer.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", at: now)
+        heldAnswer.watch = NoteHelp.Watch(every: "1d", line: "x", mac: "m")
+        var kept = NoteFile(id: "K1", created: now, body: "The person's words")
+        NoteHelp.applyAnswer(NoteFile.parse(heldAnswer.serialized(), fallbackID: "K1", fallbackDate: now), to: &kept)
+        expect(kept.ink.first?.text == "Kept through the conflict" && kept.helper?.state == .done && kept.body == "The person's words" && kept.watch == nil,
+               "applied to the kept paper: only the answer's keys")
+        let journalDir = FileManager.default.temporaryDirectory.appending(path: "petal-helperjournal-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: journalDir) }
+        let journalFile = journalDir.appending(path: "helper-answers.json")
+        let firstHeld = HelperJournal.Entry(noteID: "K1", answer: heldAnswer.serialized(), at: now)
+        let newer = HelperJournal.Entry(noteID: "K1", answer: heldAnswer.serialized() + "\n", at: now.addingTimeInterval(1))
+        let other = HelperJournal.Entry(noteID: "K2", answer: "x", at: now)
+        let entries = HelperJournal.adding(newer, to: HelperJournal.adding(other, to: [firstHeld]))
+        expect(entries.count == 2 && entries.contains(newer) && !entries.contains(firstHeld), "a newer answer for a note replaces the one held")
+        expect(HelperJournal.save(entries, to: journalFile) && HelperJournal.load(journalFile) == entries, "the helpers' journal survives a quit (read back from disk)")
+        expect(NoteHelp.followUpTarget(runCheckout: nil, runProvider: "claude", runModel: "", words: "and have GPT 6.1 Sol look for holes", home: "/u") == .review,
+               "a named reviewer is its own request, never steering the current agent")
+        let bounds = NoteHelp.paperHeights(screen: 700, chrome: 110, editor: 490, ink: 5000, controls: 150)
+        expect(bounds.editor + bounds.ink + 110 + 150 <= 700 && bounds.ink > 0, "the open paper fits the screen, controls kept outside the scroll", "\(bounds)")
+        let small = NoteHelp.paperHeights(screen: 900, chrome: 110, editor: 200, ink: 60, controls: 150)
+        expect(small.editor == 200 && small.ink == 60, "what fits isn't cut")
+        let tiny = NoteHelp.paperHeights(screen: 300, chrome: 110, editor: 490, ink: 400, controls: 150)
+        expect(tiny.editor + tiny.ink <= 300 - 110 - 150 + 80 && tiny.ink >= 0, "even on a short screen the controls keep their room", "\(tiny)")
+        let oldTurn = RunToken(), newRun = RunToken()
+        expect(NoteHelp.completionMatches(turn: newRun, run: newRun) && !NoteHelp.completionMatches(turn: oldTurn, run: newRun) && !NoteHelp.completionMatches(turn: nil, run: newRun),
+               "a completion belongs to the run whose token started that turn")
 
         // MARK: Open all never launches an app or a script (NoteTasks)
 
