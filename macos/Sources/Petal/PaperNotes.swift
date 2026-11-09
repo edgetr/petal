@@ -45,6 +45,8 @@ struct Notebook: Identifiable, Equatable {
     var isPrivate = false
     /// Its view in the Petal Notes window (`view:` on its cover).
     var view: NoteLibrary.View = .grid
+    /// Its cover file is there but wasn't read (not downloaded yet, unreadable): Private until it is, and not changed.
+    var coverUnread = false
     var id: String { name }
 }
 
@@ -474,9 +476,14 @@ final class NoteStore {
                 return a.file.modified > b.file.modified
             }
             let cover = here.first { $0.file.cover }
+            // Private when any version of its cover says so, or while its cover is there but not read yet (not
+            // downloaded, unreadable): never taken for public before Petal knows.
+            let coverFile = folder.appending(path: NoteShelf.coverName)
+            let coverUnread = fm.fileExists(atPath: coverFile.path) && !here.contains { $0.url.lastPathComponent == NoteShelf.coverName }
             notebooks.append(Notebook(name: name, folder: folder, color: cover?.file.color ?? "", cover: cover?.key,
-                                      count: here.filter { !$0.file.cover }.count, isPrivate: cover.map { NoteContract.isPrivate($0.file) } ?? false,
-                                      view: cover.map { NoteContract.view($0.file) } ?? .grid))
+                                      count: here.filter { !$0.file.cover }.count,
+                                      isPrivate: coverUnread || here.contains { $0.file.cover && NoteContract.isPrivate($0.file) },
+                                      view: cover.map { NoteContract.view($0.file) } ?? .grid, coverUnread: coverUnread))
             notes += here
         }
         return (notes, notebooks)
@@ -1860,6 +1867,11 @@ final class NoteStore {
     /// with no cover yet (a folder made elsewhere), a cover made with it, never over one. `book`: the same change on
     /// the notebook in memory, shown at once.
     func setCover(_ notebook: String, _ edit: @escaping (inout NoteFile) -> Void, book: (inout Notebook) -> Void) {
+        // A cover changed in two places at once, or there and not read yet, isn't changed (nor made over).
+        if let found = self.notebook(notebook), found.coverUnread || paper(found.cover ?? "").map(readOnly) == true {
+            onProblem("\(found.name)'s cover can't be changed right now (it changed in two places at once, or isn't downloaded yet). Try again once it's settled.")
+            return
+        }
         if let found = self.notebook(notebook), let key = found.cover, let cover = paper(key), !readOnly(cover) {
             change(key, touch: false, edit: edit)
             if let index = notebooks.firstIndex(where: { $0.name == found.name }) { book(&notebooks[index]) }
@@ -1929,8 +1941,13 @@ extension NoteStore {
             return done(nil)
         }
         let root = self.root, from = book.folder, to = root.appending(path: name)
+        // Its notes' sessions (all idle now): pointed at the new folder in the same step as the move, so anything
+        // queued for them after it lands there (the read that follows rekeys them for good).
+        let prefix = from.standardizedFileURL.path + "/"
+        let moving = sessions.values.filter { $0.key.hasPrefix(prefix) }.map { (id: $0.id, url: to.appending(path: String($0.key.dropFirst(prefix.count)))) }
         Self.io.async {
             let moved = Self.moveFolder(from, to: to, root: root)
+            if moved { for session in moving { NoteDisk.states[session.id]?.url = session.url } }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard moved else {

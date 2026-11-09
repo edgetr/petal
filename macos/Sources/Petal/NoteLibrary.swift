@@ -483,23 +483,56 @@ struct NoteCanvas: Codable, Equatable, Sendable {
 
     init() {}
 
-    /// Unknown keys are left out and missing ones take their defaults: a later Petal's file still reads.
+    /// Missing keys take their defaults; one that's there and can't be read makes the whole file unreadable (never
+    /// taken for empty, so never written over). Keys this Petal doesn't know are kept by `write`.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        version = (try? c.decode(Int.self, forKey: .version)) ?? 1
-        notes = (try? c.decode([String: Spot].self, forKey: .notes)) ?? [:]
-        areas = (try? c.decode([Area].self, forKey: .areas)) ?? []
-        arrows = (try? c.decode([Arrow].self, forKey: .arrows)) ?? []
-        texts = (try? c.decode([Words].self, forKey: .texts)) ?? []
-        zoom = Self.clampZoom((try? c.decode(Double.self, forKey: .zoom)) ?? 1)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        notes = try c.decodeIfPresent([String: Spot].self, forKey: .notes) ?? [:]
+        areas = try c.decodeIfPresent([Area].self, forKey: .areas) ?? []
+        arrows = try c.decodeIfPresent([Arrow].self, forKey: .arrows) ?? []
+        texts = try c.decodeIfPresent([Words].self, forKey: .texts) ?? []
+        zoom = Self.clampZoom(try c.decodeIfPresent(Double.self, forKey: .zoom) ?? 1)
     }
 
     /// What a based write puts in the file now on disk (`disk`, nil when there's none): the edit made on it as it
-    /// is, so moves made elsewhere meanwhile stay. Nil when the file isn't a canvas Petal can read (kept as it is).
+    /// is, so moves made elsewhere meanwhile stay, and everything this Petal doesn't know (a later Petal's keys, on
+    /// the file or on an area, arrow, words or spot) is kept as it was. Nil when the file isn't a canvas Petal can
+    /// read (kept as it is).
     static func write(_ edit: Edit, disk: String?) -> String? {
         guard let canvas = decode(disk) else { return nil }
         let next = canvas.applying(edit)
-        return next == canvas && disk != nil ? disk : next.encoded()
+        if next == canvas, disk != nil { return disk }
+        var raw: [String: Any] = [:]
+        if let disk, !disk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(disk.utf8)) as? [String: Any] else { return nil }
+            raw = object
+        }
+        guard let fresh = try? JSONSerialization.jsonObject(with: Data(next.encoded().utf8)) as? [String: Any] else { return nil }
+        for (key, value) in fresh {
+            switch key {
+            case "notes":
+                let old = raw[key] as? [String: Any] ?? [:]
+                var merged: [String: Any] = [:]
+                for (id, spot) in value as? [String: Any] ?? [:] { merged[id] = keep(old[id], spot) }
+                raw[key] = merged
+            case "areas", "arrows", "texts":
+                let old = Dictionary((raw[key] as? [[String: Any]] ?? []).compactMap { item in (item["id"] as? String).map { ($0, item) } },
+                                     uniquingKeysWith: { a, _ in a })
+                raw[key] = (value as? [[String: Any]] ?? []).map { item in keep((item["id"] as? String).flatMap { old[$0] }, item) }
+            default:
+                raw[key] = value
+            }
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: raw, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else { return nil }
+        return String(decoding: data, as: UTF8.self) + "\n"
+    }
+
+    /// An item as this Petal writes it, over what the file had for it (the keys it doesn't know kept).
+    private static func keep(_ old: Any?, _ new: Any) -> Any {
+        guard var merged = old as? [String: Any], let fields = new as? [String: Any] else { return new }
+        for (key, value) in fields { merged[key] = value }
+        return merged
     }
 
     static let zoomSteps: [Double] = [0.5, 0.67, 0.8, 1, 1.25, 1.5, 2]

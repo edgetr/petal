@@ -98,18 +98,28 @@ final class NotesModel {
         }
     }
 
+    /// An arrow between two notes, by their own ids (each given one first when its file has none).
+    func arrow(from: PaperNote, to: PaperNote) {
+        let notebook = from.notebook
+        withID(from) { [weak self] a in
+            self?.withID(to) { b in self?.edit(notebook, .arrow(.init(id: UUID().uuidString, from: a, to: b))) }
+        }
+    }
+
+    /// A note's own id: at once, or once it's written into a file that had none; never an id-less note's path.
+    private func withID(_ paper: PaperNote, _ then: @escaping @MainActor (String) -> Void) {
+        guard NoteShelf.needsID(paper.noteID) else { return then(paper.noteID) }
+        store.ensureID(paper.key) { id in
+            guard let id, !NoteShelf.needsID(id) else { return }
+            then(id)
+        }
+    }
+
     /// A note's spot moved on the canvas: kept by its own id, given one first when its file has none (nothing lasting
     /// is kept by an id-less note's path).
     func move(_ paper: PaperNote, to spot: NoteCanvas.Spot) {
         let notebook = paper.notebook
-        if NoteShelf.needsID(paper.noteID) {
-            store.ensureID(paper.key) { [weak self] id in
-                guard let self, let id, !NoteShelf.needsID(id) else { return }
-                self.edit(notebook, .move(id, spot))
-            }
-        } else {
-            edit(notebook, .move(paper.noteID, spot))
-        }
+        withID(paper) { [weak self] id in self?.edit(notebook, .move(id, spot)) }
     }
 
     // MARK: Notebooks
@@ -125,11 +135,11 @@ final class NotesModel {
         // Inbox is where notes go first, and Petal makes it again when it's gone: it keeps its name.
         guard !NoteLibrary.same(book.name, NoteShelf.inbox) else { return desk.tell("Inbox keeps its name: it's where notes go first.") }
         guard let name = Self.askWords("Rename \(book.name)", "Its new name:", value: book.name), name != book.name else { return }
-        // What's typed in its notes is saved first; the rename waits for nothing still being written.
+        // What's typed in its notes is saved first, and the rename waits for it (and anything else being written).
         for paper in store.notes where NoteLibrary.same(paper.notebook, book.name) { desk.editors[paper.key]?.flush() }
         let wasDefault = NoteLibrary.same(desk.defaultNotebook, book.name)
         let oldStack = Self.stackPath(book.folder)
-        store.renameNotebook(book.name, to: name) { [weak self] made in
+        whenSettled(book.name) { [weak self] in self?.store.renameNotebook(book.name, to: name) { [weak self] made in
             guard let self, let made else { return }
             let config = PetalApp.shared.config
             if wasDefault { config.set("notesNotebook", made) }
@@ -139,6 +149,15 @@ final class NotesModel {
             }
             self.desk.renamedNotebook(book.name, to: made)
             if case .notebook(let now) = self.shelf, NoteLibrary.same(now, book.name) { self.shelf = .notebook(made) }
+        } }
+    }
+
+    /// `then` once none of a notebook's notes has work under way (looked at again for up to five seconds, never
+    /// waited on); still busy by then, it runs anyway and the store says why it can't.
+    func whenSettled(_ notebook: String, tries: Int = 25, then: @escaping @MainActor () -> Void) {
+        guard tries > 0, store.notebookBusy(notebook) else { return then() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            MainActor.assumeIsolated { self.whenSettled(notebook, tries: tries - 1, then: then) }
         }
     }
 
@@ -186,12 +205,12 @@ final class NotesModel {
             desk.hide(paper.key)
         }
         let path = Self.stackPath(book.folder)
-        store.trashNotebook(book.name) { [weak self] done in
+        whenSettled(book.name) { [weak self] in self?.store.trashNotebook(book.name) { [weak self] done in
             guard let self, done else { return }
             let config = PetalApp.shared.config
             if config.strings("stackFolders").contains(path) { config.set("stackFolders", config.strings("stackFolders").filter { $0 != path }) }
             if case .notebook(let now) = self.shelf, NoteLibrary.same(now, book.name) { self.shelf = .notebook(self.desk.defaultNotebook) }
-        }
+        } }
     }
 
     /// A folder as the dock's stacks name it ("~/…").
@@ -262,8 +281,21 @@ struct NotesWindowView: View {
 
     private var canvasShowing: Bool { model.query.isEmpty && book?.view == .canvas }
 
+    /// Whether a Private notebook's note is showing (its page, a search hit, a view across notebooks): the window is
+    /// kept out of pictures of the screen and screen sharing while it is.
+    private var showingPrivate: Bool {
+        let books = store.privateBooks
+        guard !books.isEmpty else { return false }
+        let all = items
+        let shown: [Int]
+        if !model.query.isEmpty { shown = NoteLibrary.search(model.query, all.map(\.item)) }
+        else if let book { return book.isPrivate }
+        else { shown = NoteLibrary.listed(model.shelf, all.map(\.item), now: now) }
+        return shown.contains { index in books.contains { NoteLibrary.same($0, all[index].paper.notebook) } }
+    }
+
     var body: some View {
-        let showingPrivate = model.query.isEmpty && book?.isPrivate == true
+        let showingPrivate = self.showingPrivate
         HStack(spacing: 0) {
             if model.sidebar || !canvasShowing {
                 sidebar.frame(width: 240)
@@ -554,6 +586,8 @@ struct FlowRows<Item: Identifiable, Content: View>: View {
 /// A notebook's notes as the sketch's grid: 150-point papers, 14 apart, the cover first and two rows tall.
 struct NotesGrid: View {
     @Environment(PetalApp.self) private var app
+    /// The grid's width as laid out (its height follows the columns that fit in it).
+    @State private var width: CGFloat = 900
     let papers: [PaperNote]
     let cover: PaperNote?
     /// Notes from several notebooks (a view, a search): each says its notebook.
@@ -579,11 +613,13 @@ struct NotesGrid: View {
             }
         }
         .frame(height: height)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
     }
 
-    /// The grid's height for the window's width (a generous guess at five columns; GeometryReader lays it out).
+    /// The grid's height: its rows at the columns that fit its width now.
     private var height: CGFloat {
-        let rows = NoteLibrary.gridRows(count: papers.count, columns: 5, cover: cover != nil)
+        let columns = NoteLibrary.columns(width: width, cell: Self.cell, gap: Self.gap)
+        let rows = NoteLibrary.gridRows(count: papers.count, columns: columns, cover: cover != nil)
         return rows == 0 ? 0 : CGFloat(rows) * (Self.cell + Self.gap) - Self.gap + 4
     }
 }
@@ -904,9 +940,7 @@ struct CanvasPaper: View {
                 Button("Open") { GridPaper.open(paper, app: app) }
                 Menu("Draw an arrow to") {
                     ForEach(others, id: \.key) { other in
-                        Button(other.file.title.isEmpty ? "A note" : other.file.title) {
-                            model.edit(paper.notebook, .arrow(.init(id: UUID().uuidString, from: paper.noteID, to: other.noteID)))
-                        }
+                        Button(other.file.title.isEmpty ? "A note" : other.file.title) { model.arrow(from: paper, to: other) }
                     }
                 }
                 let mine = layout.arrows.filter { $0.from == paper.noteID || $0.to == paper.noteID }

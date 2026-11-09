@@ -52,8 +52,9 @@ extension NoteDesk {
 
     /// A note dropped on an app in the dock, used there; never sent.
     func use(_ noteID: String, in bundle: String) {
+        // What's typed and not saved yet goes first, so the note is used as it is now.
+        if let open = store.current(noteID) { editors[open.key]?.flush() }
         guard let paper = store.current(noteID) else { return }
-        editors[paper.key]?.flush()
         let text = NoteDrop.plain(paper.file.body)
         let title = paper.file.title
         switch NoteDrop.action(bundle) {

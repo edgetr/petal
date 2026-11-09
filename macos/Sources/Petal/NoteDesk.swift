@@ -251,6 +251,10 @@ final class NoteDesk {
     }
 
     private func hideAll() {
+        // Notes opened on their own are put away with the rest.
+        for key in standalone.keys { faces[key] = nil }
+        standalone = [:]
+        watchPeople()
         for panel in panels.values { panel.conceal() }
         for panel in tabPanels.values { panel.conceal() }
         for panel in pinPanels.values { panel.conceal() }
@@ -1102,6 +1106,30 @@ final class NoteDesk {
         return panel
     }
 
+    // MARK: Notes on people
+
+    /// Clicking another conversation in a chat app's window says nothing Petal hears (the window is the same, and its
+    /// title may not change): while a note is on a person and a chat app is in front, what's in front is read again
+    /// every second and a half (one read at a time, through the same gate), so a person's note never stays beside
+    /// someone else's conversation.
+    @ObservationIgnored private var peopleTimer: Timer?
+
+    func watchPeople() {
+        let wanted = on && store.notes.contains { $0.file.places.contains { $0.kind == .person } }
+        if wanted, peopleTimer == nil {
+            peopleTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.on, let front = NSWorkspace.shared.frontmostApplication,
+                          PersonRead.isChat(front.bundleIdentifier ?? "") else { return }
+                    self.look()
+                }
+            }
+        } else if !wanted {
+            peopleTimer?.invalidate()
+            peopleTimer = nil
+        }
+    }
+
     // MARK: Notes opened on their own
 
     /// Opens a note on its own, open with the keyboard, its top-left corner at `point` (AppKit's coordinates; else
@@ -1121,6 +1149,7 @@ final class NoteDesk {
 
     /// Shows each note opened on its own where it was opened.
     private func placeStandalone() {
+        guard on else { return }
         for (key, corner) in standalone {
             guard store.paper(key) != nil, faces[key] != nil else { standalone[key] = nil; continue }
             let panel = panel(for: key)
@@ -2396,7 +2425,10 @@ final class NoteDesk {
         } else { look() }
         // From the Spaces last read; read (off the main thread) when none were yet and a note is on a Desktop.
         if Self.spaces.isEmpty { refreshSpaces() } else { placeDesktop() }
+        // Every paper and tab redrawn, and kept out of pictures again if its notebook turned Private (here or elsewhere).
         for panel in panels.values { panel.refresh() }
+        for panel in tabPanels.values { panel.refreshSharing() }
+        watchPeople()
     }
 
     /// For snapshots: Stick here as if a page were in front.

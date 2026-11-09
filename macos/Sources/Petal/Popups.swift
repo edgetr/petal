@@ -287,6 +287,7 @@ final class Popups {
     func closeAll() {
         let wasPreview = kind == "preview"
         panel.hide()
+        panel.sharingType = .readOnly
         kind = nil
         stack = nil
         anchor = nil
@@ -311,6 +312,8 @@ final class Popups {
         if let book = PetalApp.shared.paper.notebook(forStack: folder) {
             PetalApp.shared.signals.opened(folder)
             guard let slot = dock.panel?.screenFrame(of: key) else { return }
+            // A Private notebook's papers never show in pictures of the screen or screen sharing.
+            panel.sharingType = book.isPrivate ? .none : .readOnly
             panel.show(NotebookFanView(book: book, papers: PetalApp.shared.paper.fanned(book)) { [weak self] in self?.closeAll() }, over: slot, dock: dock.panel)
             return
         }

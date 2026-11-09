@@ -177,6 +177,13 @@ struct NoteLibraryCheck {
         expect(merged?.notes["n9"] == .init(x: 300, y: 300) && merged?.notes["n1"] == .init(x: 50, y: 50), "a based write keeps what changed elsewhere")
         expect(NoteCanvas.write(.move("n9", .init(x: 300, y: 300)), disk: elsewhere) == elsewhere, "an edit that changes nothing writes the same")
         expect(NoteCanvas.decode(#"{"notes":{"x":{"x":1,"y":2}},"later":true}"#)?.notes["x"] == .init(x: 1, y: 2), "a later Petal's keys don't stop a read")
+        let later = #"{"areas":[{"id":"a","label":"Beds","x":0,"y":0,"w":10,"h":10,"tint":"green"}],"later":{"k":1},"notes":{"x":{"x":1,"y":2,"pinned":true}}}"#
+        let kept = NoteCanvas.write(.move("y", .init(x: 5, y: 5)), disk: later).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+        expect((kept?["later"] as? [String: Int])?["k"] == 1 && ((kept?["areas"] as? [[String: Any]])?.first?["tint"] as? String) == "green"
+               && ((kept?["notes"] as? [String: [String: Any]])?["x"]?["pinned"] as? Bool) == true && (kept?["notes"] as? [String: Any])?["y"] != nil,
+               "a write keeps what this Petal doesn't know, on the file and on its items")
+        expect(NoteCanvas.decode(#"{"areas":[{"id":"a"}]}"#) == nil && NoteCanvas.write(.move("y", .init(x: 1, y: 1)), disk: #"{"areas":[{"id":"a"}]}"#) == nil,
+               "an area Petal can't read: the file isn't taken for empty, and isn't written")
         let placed = canvas.spots(for: ["n1", "n3", "n4"], columns: 2)
         expect(placed["n1"] == .init(x: 10, y: 20), "a note keeps its spot")
         expect((placed["n3"]?.y ?? 0) >= 300 + NoteCanvas.gap && placed["n3"]?.y == placed["n4"]?.y && placed["n3"] != placed["n4"],
