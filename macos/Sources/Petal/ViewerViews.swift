@@ -26,8 +26,10 @@ enum ViewerLook {
 @MainActor
 final class ViewerWindow: NSWindow, NSWindowDelegate {
     var onClose: (() -> Void)?
+    private let modelID: UUID
 
     init(model: ViewerModel) {
+        modelID = model.id
         super.init(contentRect: NSRect(origin: .zero, size: ViewerLook.size),
                    styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
         isReleasedWhenClosed = false
@@ -49,7 +51,16 @@ final class ViewerWindow: NSWindow, NSWindowDelegate {
         return EditMenu.keyEquivalent(event, window: self, viewsHandled: super.performKeyEquivalent(with: event))
     }
 
-    func windowDidBecomeKey(_ notification: Notification) { PetalApp.shared.paper.viewerFront() }
+    /// With the keyboard, this viewer is the desk's current place (Viewers.front: "here", sticking and ⌃⌥N go to it);
+    /// the notes on the window left behind are hidden.
+    func windowDidBecomeKey(_ notification: Notification) {
+        PetalApp.shared.viewers.keyID = modelID
+        PetalApp.shared.paper.viewerFront()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        if PetalApp.shared.viewers.keyID == modelID { PetalApp.shared.viewers.keyID = nil }
+    }
 
     /// Shown, hidden, covered or minimized: the margin's pictures count as on screen or not (NotePictures' retry).
     func windowDidChangeOcclusionState(_ notification: Notification) { NotePictures.shared.visibilityChanged() }

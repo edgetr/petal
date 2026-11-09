@@ -29,7 +29,7 @@ extension NoteDesk {
             // Searched, filtered by notebook and counted only on what the agent may see of each note (redacted),
             // never its raw text: matching can't be used to guess a secret one character at a time.
             // "Here": placed now, by the window in front or on a Desktop showing (the one current-placement rule).
-            let papers = store.notes.filter { $0.version == nil && (!onlyHere || NoteShelf.isHere(placementNow($0.key))) }
+            let papers = store.notes.filter { $0.version == nil && (!onlyHere || hereNow($0.key)) }
             let sources = papers.map { ($0.file.body, $0.notebook) }
             let books = papers.map(\.notebook)
             Self.onShield({ index -> [Int]? in
@@ -247,7 +247,7 @@ extension NoteDesk {
     private func summary(_ paper: PaperNote, text: Bool = false) -> [String: Any] {
         NoteShield.note(handle: handle(paper), body: paper.file.body, notebook: paper.notebook,
                         places: paper.file.places.map { app.assist.neverLook($0.app) ? $0.scrubbed : $0 },
-                        modified: NoteFile.stamp(paper.file.modified), onScreen: NoteShelf.isHere(placementNow(paper.key)),
+                        modified: NoteFile.stamp(paper.file.modified), onScreen: hereNow(paper.key),
                         text: text, created: text ? NoteFile.stamp(paper.file.created) : nil)
     }
 
@@ -275,6 +275,17 @@ extension NoteDesk {
                     return
                 }
                 done(desk)
+            }
+        }
+        // Petal's viewer with the keyboard: its file, page or slide, and its checked selection are what's here.
+        if let viewer = app.viewers.front {
+            let fileWanted = wanted == nil || wanted == .file || wanted == .passage
+            guard fileWanted else { return done(nil) }
+            return viewer.herePlace(passage: wanted != .file) { stick, refused, used in
+                guard live() else { return }
+                if refused { return wanted == .passage ? done(nil) : viewer.herePlace(passage: false) { plain, _, _ in if live() { done(plain) } } }
+                if wanted == .passage, !used { return done(nil) }
+                done(stick)
             }
         }
         guard let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return done(nil) }

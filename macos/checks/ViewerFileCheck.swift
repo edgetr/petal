@@ -586,6 +586,30 @@ struct ViewerFileCheck {
             }
         } else { expect(false, "a versions store for retiring (set up)") }
 
+        // Twelfth review: cleanup through descriptors only, never a path: a pinned folder moved away and a decoy put at
+        // its old path, emptying the descriptor empties the pinned folder (wherever it is now) and leaves the decoy;
+        // a subfolder swapped for a link is unlinked, never followed.
+        let pinnedAt = gateBase.appending(path: "Pinned")
+        let movedTo = gateBase.appending(path: "Moved away")
+        let outsideFolder = gateBase.appending(path: "Outside")
+        for folder in [pinnedAt.appending(path: "sub/deeper"), outsideFolder] { try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
+        try? Data("a".utf8).write(to: pinnedAt.appending(path: "A.pdf"))
+        try? Data("b".utf8).write(to: pinnedAt.appending(path: "sub/deeper/B.pdf"))
+        try? Data("keep".utf8).write(to: outsideFolder.appending(path: "Keep.pdf"))
+        try? FileManager.default.createSymbolicLink(atPath: pinnedAt.appending(path: "link").path, withDestinationPath: outsideFolder.path)
+        let pinnedFD = Darwin.open(pinnedAt.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        try? FileManager.default.moveItem(at: pinnedAt, to: movedTo)
+        try? FileManager.default.createDirectory(at: pinnedAt, withIntermediateDirectories: true)
+        try? Data("decoy".utf8).write(to: pinnedAt.appending(path: "A.pdf"))
+        try? FileManager.default.createDirectory(at: pinnedAt.appending(path: "sub"), withIntermediateDirectories: true)
+        expect(Set(ViewerVersionStore.names(pinnedFD)) == ["A.pdf", "sub", "link"], "listed through the descriptor: the pinned folder's names, not the decoy's")
+        ViewerVersionStore.empty(pinnedFD)
+        Darwin.close(pinnedFD)
+        expect(((try? FileManager.default.contentsOfDirectory(atPath: movedTo.path)) ?? ["?"]).isEmpty, "the pinned folder emptied wherever it is now, its subfolders too")
+        expect(FileManager.default.fileExists(atPath: pinnedAt.appending(path: "A.pdf").path) && FileManager.default.fileExists(atPath: pinnedAt.appending(path: "sub").path),
+               "the decoy at its old path untouched")
+        expect(FileManager.default.fileExists(atPath: outsideFolder.appending(path: "Keep.pdf").path), "a link inside unlinked, never followed")
+
         // The versions root itself a link: never opened.
         let linkedRoot = gateBase.appending(path: "Linked Versions")
         try? FileManager.default.createSymbolicLink(atPath: linkedRoot.path, withDestinationPath: elsewhere.path)

@@ -191,6 +191,7 @@ enum ViewerCheck {
             failed = !ninth(url, app: app) || failed
             failed = !tenth(url, app: app) || failed
             failed = !eleventh(url, app: app) || failed
+            failed = !twelfth(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -595,6 +596,86 @@ enum ViewerCheck {
         expect(opened != nil && shown(), "still there: it opens")
         for model in app.viewers.open where model.url.lastPathComponent == "Deck.pdf" { app.viewers.closed(model) }
         print("eleventh: " + (ok ? "only the newest versions kept (a picked copy until the viewer closes, all gone then); a cancelled open shows nothing" : "failed"))
+        return ok
+    }
+
+    /// The twelfth review: a corrupt PDF reports its error to whoever waited for the load (never a success with 0
+    /// pages); Petal's viewer with the keyboard is the desk's current place: "here" lists its margin notes,
+    /// `stick: "here"` attaches to its file and page, and ⌃⌥N makes a note in its margin.
+    private static func twelfth(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("twelfth: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let canonical = { (url: URL) in URL(fileURLWithPath: ViewerPath.canonical(url.path) ?? url.path) }
+
+        // A corrupt PDF: its error is there when the load is answered.
+        let broken = home.appending(path: "Broken.pdf")
+        try? Data("%PDF-1.4\nnot a PDF at all".utf8).write(to: broken)
+        let bad = app.viewers.show(canonical(broken), front: false)
+        var answer: (problem: String?, told: [String: Any])?
+        bad.whenLoaded(within: 20) { _ in answer = (bad.problem, app.viewers.told(bad)) }
+        wait(20) { answer != nil }
+        expect(answer?.problem == "Petal can't read this PDF." && answer?.told["note"] as? String == "Petal can't read this PDF."
+               && answer?.told["pages"] == nil && answer?.told["loading"] == nil, "a corrupt PDF: its error told, never 0 pages (\(String(describing: answer?.told)))")
+        app.viewers.closed(bad)
+
+        // The viewer with the keyboard is "here".
+        let guide = home.appending(path: "Guide.pdf")
+        try? FileManager.default.copyItem(at: source, to: guide)
+        let model = app.viewers.show(canonical(guide), front: false)
+        wait(20) { !model.loading }
+        model.go(to: 1)
+        app.viewers.keyID = model.id
+        defer { app.viewers.keyID = nil }
+        // ⌃⌥N: a note on its page, open in its margin.
+        app.paper.newHere()
+        wait(10) { model.openKey != nil }
+        guard let key = model.openKey, let made = app.paper.store.paper(key), let place = made.file.places.first else {
+            expect(false, "⌃⌥N in the viewer makes a margin note"); app.viewers.closed(model); return false
+        }
+        expect(place.kind == .file && place.path == model.url.path && place.page == 2 && !place.fileID.isEmpty && !place.bookmark.isEmpty,
+               "⌃⌥N in the viewer: a note on its file (with its incarnation) and page")
+        model.refreshPlaces()
+        wait(5) { model.shows(key) }
+        expect(model.shows(key) && model.face == .open, "and it opens in the viewer's margin")
+        func notesHere() -> [String: Any]? {
+            var listed: [String: Any]?
+            var refused: String?
+            app.paper.handle("petal_notes", ["here": true], live: { true }, { listed = $0 as? [String: Any] }, { refused = $0 })
+            wait(10) { listed != nil || refused != nil }
+            if let refused { print("twelfth: petal_notes refused: \(refused)") }
+            return listed
+        }
+        let listed = notesHere()
+        expect((listed?["count"] as? Int) == 1 && ((listed?["notes"] as? [[String: Any]])?.first?["onScreen"] as? Bool) == true,
+               "petal_notes here: the viewer's margin note, on screen (\(String(describing: listed?["count"])))")
+        app.viewers.keyID = nil
+        expect((notesHere()?["count"] as? Int) == 0, "the viewer without the keyboard: not here")
+        app.viewers.keyID = model.id
+        // stick: "here" from an agent: attached to the file and page.
+        var wrote: Any?
+        var refused: String?
+        app.paper.handle("petal_note_write", ["text": "Stuck from the viewer twelve", "stick": "here"], live: { true }, { wrote = $0 }, { refused = $0 })
+        wait(20) { wrote != nil || refused != nil }
+        wait(5) { app.paper.store.notes.contains { $0.file.body == "Stuck from the viewer twelve" } }
+        let stuck = app.paper.store.notes.first { $0.file.body == "Stuck from the viewer twelve" }?.file.places.first
+        expect(refused == nil && stuck?.kind == .file && stuck?.path == model.url.path && stuck?.page == 2 && stuck?.fileID.isEmpty == false,
+               "stick: \"here\" attaches to the viewer's file and page (\(refused ?? ""))")
+        // Nothing stuck to a window or tab of Petal's own.
+        var nowhere: Any?
+        app.paper.handle("petal_note_write", ["text": "Not on a window twelve", "stick": "here", "to": "window"], live: { true }, { nowhere = $0 }, { nowhere = $0 })
+        wait(20) { nowhere != nil }
+        expect(app.paper.store.notes.first { $0.file.body == "Not on a window twelve" }?.file.places.isEmpty ?? true, "a window asked for in the viewer: stuck nowhere")
+        // Not left empty for the Trash: the ⌃⌥N note keeps its file.
+        app.paper.fresh.remove(key)
+        app.viewers.closed(model)
+        print("twelfth: " + (ok ? "a corrupt PDF reports its error; the viewer with the keyboard is here (listed, stuck to its file and page, ⌃⌥N in its margin)" : "failed"))
         return ok
     }
 

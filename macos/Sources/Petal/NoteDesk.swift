@@ -1053,6 +1053,12 @@ final class NoteDesk {
 
     private func isDesktop(_ key: String) -> Bool { placementNow(key) == .desktop }
 
+    /// "Here" for the note tools: placed now (placementNow), or in the margin of Petal's viewer while it has the
+    /// keyboard (it's the current place then).
+    func hereNow(_ key: String) -> Bool {
+        NoteShelf.isHere(placementNow(key)) || app.viewers.front?.shows(key) == true
+    }
+
     /// Everything that may not be seen now hidden (NoteShelf.mayShow): every surface while Mission Control is open,
     /// the window's notes while a new front window's read is awaited, and any paper not where its one placement
     /// says it belongs.
@@ -1919,7 +1925,10 @@ final class NoteDesk {
     /// window or Desktop. A selection refused (a secret, a field named for one, an app made private, the window or
     /// tab changed while it was read) makes no note at all: never a note without the check.
     private func noteOnSelection() {
-        guard on, let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return }
+        guard on else { return }
+        // Petal's viewer with the keyboard: a note on its selection (checked), else its page or slide, in its margin.
+        if let viewer = app.viewers.front { return viewer.newNote() }
+        guard let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return }
         let name = running.localizedName ?? ""
         let privacy = ClaudePanel.privacy.now
         let ticket = looks

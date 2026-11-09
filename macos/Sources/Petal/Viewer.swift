@@ -79,6 +79,13 @@ final class Viewers {
         return model
     }
 
+    /// The viewer whose window has the keyboard, by its model's id (ViewerWindow): while it does, it's the desk's
+    /// current place (NoteDesk.hereNow, stickHere, ⌃⌥N).
+    @ObservationIgnored var keyID: UUID?
+
+    /// The viewer that's the desk's current place now: the one with the keyboard, still open.
+    var front: ViewerModel? { keyID.flatMap { id in open.first { $0.id == id } } }
+
     /// The model showing `path` (as opened, or as the disk spells it).
     func model(for path: String) -> ViewerModel? {
         open.first { $0.url.path == path || $0.opened == path }
@@ -86,6 +93,7 @@ final class Viewers {
 
     /// A viewer's window closed (or `--viewer-check` done with it): the model closes and is let go.
     func closed(_ model: ViewerModel) {
+        if keyID == model.id { keyID = nil }
         model.close()
         open.removeAll { $0 === model }
         windows[model.id] = nil
@@ -494,8 +502,10 @@ final class ViewerModel: Identifiable {
             }
         case .live: goLive()
         case .failed(let text):
-            loading = false
+            // What went wrong first, so whoever waits for the load (whenLoaded, petal_view) sees it, never a success
+            // with 0 pages.
             problem = text
+            loading = false
         }
         if watcher == nil { watch() }
     }
@@ -523,8 +533,8 @@ final class ViewerModel: Identifiable {
         live = false
         pageCount = document.pageCount
         current = max(0, keep)
-        loading = false
         problem = nil
+        loading = false
         thumbs = [:]
         renderThumbs(data)
         resolvedFor = nil
@@ -539,8 +549,8 @@ final class ViewerModel: Identifiable {
         text = nil
         live = true
         pageCount = 0
-        loading = false
         problem = nil
+        loading = false
         passages = [:]
     }
 
@@ -861,10 +871,27 @@ final class ViewerModel: Identifiable {
     /// on the file (AXDocument). The page's whole text is checked against the vault before the passage is cut from
     /// it (off the main thread): a selection touching a secret, or a vault that can't be read, makes no note.
     func newNote() {
+        herePlace { stick, refused, usedSelection in
+            if refused { return self.desk.tell("That selection holds something from your vault, or the vault can't be read: Petal makes no note on it.") }
+            guard let stick else { return }
+            if usedSelection { self.selection = nil }
+            self.make(stick)
+        }
+    }
+
+    /// Whether the margin shows `key`'s paper now (the notes on this file).
+    func shows(_ key: String) -> Bool { marginOn && notes.contains { $0.paper.key == key } }
+
+    /// The desk's current place while this viewer has the keyboard (Viewers.front): its file (a file anchor with
+    /// its incarnation and bookmark, made off the main thread), its page or slide, and, with `passage` and a
+    /// selection, that selection as a passage. The selection is checked as petal_look's rule checks a selected
+    /// field's text (Assist.selectionInSecret): the whole text it's in, here its page's, against the vault, before
+    /// anything is cut (ViewerSecrets); a secret touching it, or a vault that can't be read, is `refused` (no place).
+    func herePlace(passage: Bool = true, _ done: @escaping @MainActor (_ stick: NoteStick?, _ refused: Bool, _ usedSelection: Bool) -> Void) {
         var stick = NoteStick(kind: .file)
         stick.path = url.path
         stick.title = name
-        let chosen = selection
+        let chosen = passage ? selection : nil
         if !live, pageCount > 0 {
             if unit == .slide { stick.slide = current + 1 } else { stick.page = current + 1 }
         }
@@ -895,9 +922,8 @@ final class ViewerModel: Identifiable {
             let made = stick
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if refused { return self.desk.tell("That selection holds something from your vault, or the vault can't be read: Petal makes no note on it.") }
-                    if chosen != nil { self.selection = nil }
-                    self.make(made)
+                    if refused { return done(nil, true, false) }
+                    done(made, false, chosen != nil)
                 }
             }
         }
@@ -1020,14 +1046,14 @@ final class ViewerModel: Identifiable {
             } else { failure = .copy }
             let versions = made
             let failed = failure ?? (going() ? .cancelled : nil)
-            // Nothing made shown: whatever was copied goes.
-            if failed != nil { try? FileManager.default.removeItem(at: folder) }
+            // Nothing made shown: whatever was copied goes, through the set's pinned folder (never its path).
+            if failed != nil { store.remove(pin) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     if let failed { return done(.failure(failed)) }
                     // Closed or hung up after the copies were made: they go, and nothing is shown.
                     guard !self.closedNow, live() else {
-                        Viewers.queue.async { try? FileManager.default.removeItem(at: folder) }
+                        Viewers.queue.async { store.remove(pin) }
                         return done(.failure(.cancelled))
                     }
                     // Only the newest set per viewer: the one it replaces is told, its pictures dropped at once, and

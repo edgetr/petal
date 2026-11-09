@@ -58,7 +58,7 @@ Use, in this order:
    searches them (`query`, `notebook`, `here: true` for the ones on what's in front), `petal_note_read` reads one,
    `petal_note_write` writes one (no `id`: a new note, `stick: "here"` sticks it to what's in front; with `id`:
    replaces its words, or `append: true`), `petal_note_move` puts one in another notebook, `petal_note_stick` sticks
-   one to what's in front (`to`: tab, window, app, file or desktop; `also: true` keeps its other places). The tools
+   one to what's in front (with Petal's viewer in front: its file and page, or its selected passage) (`to`: tab, window, app, file or desktop; `also: true` keeps its other places). The tools
    name each note by a handle (`id`), never a file or path (a title works only when one note has it; two alike, the
    answer lists their ids), show its pictures as `![picture N]` (write them back as
    they were to keep them), and hide saved secrets as (hidden). A note is the

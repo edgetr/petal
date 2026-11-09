@@ -215,24 +215,49 @@ final class ViewerVersionStore: @unchecked Sendable {
 
     /// A set's copies removed through its pinned folder (never a folder swapped in for it), all but `keeping` (the
     /// copy picked, still the asker's to read); with nothing kept, the folder itself goes too. What an agent added
-    /// there (a lock file, a folder of its own) goes with them. False when the folder isn't the pinned one.
+    /// there (a lock file, a folder of its own) goes with them. Everything is listed and removed through
+    /// descriptors (`fdopendir`, `unlinkat`, subfolders opened with `openat(O_DIRECTORY | O_NOFOLLOW)`), never an
+    /// absolute path. False when the folder isn't the pinned one.
     @discardableResult
     func remove(_ pin: Pin, keeping: String? = nil) -> Bool {
         guard let dir = openSet(pin) else { return false }
-        defer { close(dir) }
-        let folder = path(pin)
-        for name in (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [] where name != keeping {
-            var info = stat()
-            guard fstatat(dir, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
-            if (info.st_mode & S_IFMT) == S_IFDIR {
-                // Its own folders: never followed through a link (FileManager doesn't), the pinned folder checked above.
-                try? FileManager.default.removeItem(at: folder.appending(path: name))
+        Self.empty(dir, keeping: keeping)
+        close(dir)
+        if keeping == nil { _ = unlinkat(rootFD, pin.name, AT_REMOVEDIR) }
+        return true
+    }
+
+    /// The names in the folder `dir` is open on, listed through its descriptor (a duplicate of it, rewound).
+    static func names(_ dir: Int32) -> [String] {
+        let copy = dup(dir)
+        guard copy >= 0 else { return [] }
+        guard let stream = fdopendir(copy) else { close(copy); return [] }
+        defer { closedir(stream) }
+        rewinddir(stream)
+        var out: [String] = []
+        while let entry = readdir(stream) {
+            let name = withUnsafePointer(to: entry.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(entry.pointee.d_namlen) + 1) { String(cString: $0) }
+            }
+            if name != ".", name != ".." { out.append(name) }
+        }
+        return out
+    }
+
+    /// Everything in the folder `dir` is open on removed through descriptors, all but `keeping`: a file or link
+    /// unlinked where it is (a link never followed), a folder opened with `O_NOFOLLOW`, emptied the same way, then
+    /// removed.
+    static func empty(_ dir: Int32, keeping: String? = nil) {
+        for name in names(dir) where name != keeping {
+            let sub = openat(dir, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+            if sub >= 0 {
+                empty(sub)
+                close(sub)
+                _ = unlinkat(dir, name, AT_REMOVEDIR)
             } else {
                 _ = unlinkat(dir, name, 0)
             }
         }
-        if keeping == nil { _ = unlinkat(rootFD, pin.name, AT_REMOVEDIR) }
-        return true
     }
 
     /// Whether a set left in the versions root is stale: its newest change (the folder or anything directly in it)
@@ -241,28 +266,33 @@ final class ViewerVersionStore: @unchecked Sendable {
         now.timeIntervalSince(newest) > age
     }
 
-    /// Every stale set in the root removed (at launch); a link or a file there is only unlinked, never followed.
-    /// Returns the names removed.
+    /// Every stale set in the root removed (at launch), through descriptors as `remove` does: a link or a file there
+    /// is only unlinked, never followed. Returns the names removed.
     @discardableResult
     func sweep(now: Date = Date(), age: TimeInterval = 24 * 60 * 60) -> [String] {
+        func time(_ info: stat) -> Date {
+            Date(timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec) + TimeInterval(info.st_mtimespec.tv_nsec) / 1e9)
+        }
         var removed: [String] = []
-        for name in (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [] {
+        for name in Self.names(rootFD) {
             var info = stat()
             guard fstatat(rootFD, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
-            func time(_ info: stat) -> Date {
-                Date(timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec) + TimeInterval(info.st_mtimespec.tv_nsec) / 1e9)
-            }
             var newest = time(info)
-            let isFolder = (info.st_mode & S_IFMT) == S_IFDIR
-            if isFolder {
-                let folder = root.appending(path: name)
-                for inner in (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [] {
+            let set = openat(rootFD, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+            if set >= 0 {
+                for inner in Self.names(set) {
                     var innerInfo = stat()
-                    if lstat(folder.appending(path: inner).path, &innerInfo) == 0 { newest = max(newest, time(innerInfo)) }
+                    if fstatat(set, inner, &innerInfo, AT_SYMLINK_NOFOLLOW) == 0 { newest = max(newest, time(innerInfo)) }
                 }
             }
-            guard Self.stale(newest: newest, now: now, age: age) else { continue }
-            if isFolder { try? FileManager.default.removeItem(at: root.appending(path: name)) } else { _ = unlinkat(rootFD, name, 0) }
+            guard Self.stale(newest: newest, now: now, age: age) else { if set >= 0 { close(set) }; continue }
+            if set >= 0 {
+                Self.empty(set)
+                close(set)
+                _ = unlinkat(rootFD, name, AT_REMOVEDIR)
+            } else {
+                _ = unlinkat(rootFD, name, 0)
+            }
             removed.append(name)
         }
         return removed
