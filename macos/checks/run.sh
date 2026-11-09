@@ -161,6 +161,29 @@ grep -q 'if let room { BoundedScroll(maxHeight: room) { fields } } else { fields
     && grep -q 'controls: max(controlsHeight, 40)' Sources/Petal/NoteViews.swift \
     || { echo "forms: buttons must stay outside the scroll, and the paper keep their room"; exit 1; }
 echo "forms: fields scroll, buttons stay on the screen"
+# A second opinion is part of its primary run: it carries the primary's ink, and every outcome of it (an answer,
+# objections, a failure, a stop) is added after the primary through one path (output → opinion), never in its place.
+# A reviewer outside a worktree is bound to the note's place like any run.
+perl -0777 -ne '
+    unless (/run\.primary = primary/ && /private func output\(_ run: Run.*?if let primary = run\.primary \{\s*return opinion\(/s
+            && /private func opinion\(.*?NoteHelp\.withOpinion\(/s && /secondOpinion\(paper, holes, after: run, primary: \[ink\]/
+            && /folder: tree, placed: tree == nil\)/ && /where run\.launched && run\.kind\.placed/ && /= run\.kind\.placed \? NoteHelp\.requirement\(/
+            && /if run\.kind\.placed \{\s*facts\.document/) { print "NoteHelpers: a second opinion must add to its primary and be bound to its place\n"; exit 1 }
+    for my $f (qw(fail stopped)) { unless (/func $f\(.*?\n    \}/s && $& =~ /output\(run,/) { print "NoteHelpers: $f must report through output\n"; exit 1 } }
+    print "helpers: second opinions add to their primary, failures included; reviewers bound to their place\n";
+' Sources/Petal/NoteHelpers.swift
+# An @ line runs once: its receipt (words and position) is checked and kept before anything runs; a bare @Petal is
+# refused before any run is registered, and an empty prompt never reaches an agent.
+perl -0777 -ne '
+    unless (/func returned\(.*?if NoteHelp\.bare\(trimmed\) \{ return hint\(.*?let receipt = NoteHelp\.receipt\(trimmed, occurrence: occurrence\)\s*guard !paper\.file\.answered\.contains\(receipt\) else \{ return \}/s
+            && /func deliver\(.*?guard !prompt\.text\.trimmingCharacters/s) { print "NoteHelpers: receipts and the bare @Petal refusal must come before any run\n"; exit 1 }
+    if (/func returned\(.*?NoteHelp\.bare\(trimmed\)/s && $& =~ /begin\(|ask\(paper/) { print "NoteHelpers: a run begins before a bare @Petal is refused\n"; exit 1 }
+    print "helpers: a line runs once (receipts); a bare \@Petal is refused before a run\n";
+' Sources/Petal/NoteHelpers.swift
+# Helpers read and write a cover only by the cover rule (the file named for it in the notebook's own folder).
+if grep -n 'file\.cover\b' Sources/Petal/NoteHelpers.swift; then echo "NoteHelpers: helpers find covers by name, never by cover: true"; exit 1; fi
+[ "$(grep -c 'coverToChange(paper' Sources/Petal/NoteHelpers.swift)" -ge 4 ] || { echo "NoteHelpers: every cover change goes through coverToChange"; exit 1; }
+echo "helpers: covers by the cover rule; a cover in conflict gets no memory"
 swiftc -parse-as-library -O -o "$out/notestore" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/PaperNotes.swift Sources/Petal/NoteJournal.swift checks/NoteStoreCheck.swift
 "$out/notestore"
 # A passage for Petal AI follows petal_look's rule for selected text (UIMap.selectionHidden), and what the note tools

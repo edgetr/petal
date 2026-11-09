@@ -217,6 +217,12 @@ extension NoteFile {
         set { set("chain", newValue?.value) }
     }
 
+    /// `answered:`: the receipts of the @ lines already taken (NoteHelp.receipt): Return on one runs nothing again.
+    var answered: [String] {
+        get { value("answered")?.items.compactMap(\.string) ?? [] }
+        set { set("answered", newValue.isEmpty ? nil : .list(newValue.suffix(NoteHelp.receiptsKept).map { .text($0) })) }
+    }
+
     /// A cover's `morning:` (when, in words: "8:00") and the Mac that leaves the note (`morningMac`).
     var morning: (time: String, mac: String)? {
         get { value("morning")?.string.flatMap { $0.isEmpty ? nil : ($0, value("morningMac")?.string ?? "") } }
@@ -231,6 +237,7 @@ extension NoteFile {
 
 enum NoteHelp {
     static let stepsKept = 40
+    static let receiptsKept = 200
     /// An ink's link that is Settings › AI (a key or a sign-in to fix), not an address.
     static let settingsLink = "petal:settings/ai"
     static let historyKept = 5
@@ -284,15 +291,21 @@ enum NoteHelp {
         /// finish line the person set is kept apart from it.
         var code = false
         var finish = ""
+        /// A second opinion's (its objections, its answer, or why it couldn't give one): added after its primary's
+        /// ink, never in its place.
+        var opinion = false
 
-        init(who: String, text: String, proof: [String] = [], link: String = "", objections: Int? = nil, code: Bool = false, finish: String = "") {
+        init(who: String, text: String, proof: [String] = [], link: String = "", objections: Int? = nil, code: Bool = false, finish: String = "",
+             opinion: Bool = false) {
             self.who = who; self.text = text; self.proof = proof; self.link = link; self.objections = objections; self.code = code; self.finish = finish
+            self.opinion = opinion || objections != nil
         }
 
         init?(_ value: NoteValue) {
             guard case .map = value else { return nil }
             self.init(who: value.text("who"), text: value.text("text"), proof: value.texts("proof"), link: value.text("link"),
-                      objections: Int(value.text("objections")), code: value.text("code") == "true", finish: value.text("finish"))
+                      objections: Int(value.text("objections")), code: value.text("code") == "true", finish: value.text("finish"),
+                      opinion: value.text("opinion") == "true")
         }
 
         var value: NoteValue {
@@ -302,6 +315,7 @@ enum NoteHelp {
             if let objections { pairs.append(("objections", .text("\(objections)"))) }
             if code { pairs.append(("code", .text("true"))) }
             if !finish.isEmpty { pairs.append(("finish", .text(finish))) }
+            if opinion && objections == nil { pairs.append(("opinion", .text("true"))) }
             return .map(pairs)
         }
 
@@ -647,6 +661,32 @@ enum NoteHelp {
             return name.isEmpty ? nil : (match.range, name)
         }
     }
+
+    // MARK: Receipts: a line runs once
+
+    /// A line as its receipt reads it: its words, spaces collapsed (editing its words makes it another line).
+    static func normalizedLine(_ line: String) -> String {
+        line.replacingOccurrences(of: "\u{FFFC}", with: "").split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    /// Its position in the note: how many lines before it read the same (two alike are two lines).
+    static func occurrence(of line: String, before lines: [String]) -> Int {
+        let words = normalizedLine(line)
+        return lines.filter { normalizedLine($0) == words }.count
+    }
+
+    /// An @ line's receipt: a hash of its words and its position. Kept in the note's `answered` once the line is
+    /// taken; a line runs only when its receipt isn't there. A run that failed or was stopped lets its line go.
+    static func receipt(_ line: String, occurrence: Int) -> String {
+        hash8(normalizedLine(line) + "\u{1F}" + String(occurrence))
+    }
+
+    /// Return on a bare @Petal: nothing asked (refused before any run is registered, with a faint hint).
+    static func bare(_ line: String) -> Bool {
+        if case .ask(let text) = request(line, now: Date()) { return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return false
+    }
+    static let bareHint = "Ask Petal something after @Petal"
 
     /// A note's name as an @ writes it: one word as it is, more in brackets.
     static func mention(_ name: String) -> String {
@@ -1900,6 +1940,35 @@ extension NoteHelp {
     /// in the helpers' journal (a conflict, or the paper gone for now) and applied once it is (after Keep this one).
     enum AnswerTarget: Equatable { case write, hold }
     static func answerTarget(papers: Int, readOnly: Bool) -> AnswerTarget { papers == 1 && !readOnly ? .write : .hold }
+
+    /// A second opinion is part of its primary run: its outcome (objections, an answer, or a failure) is added after
+    /// the primary's ink, never in its place. Built on the latest held answer's ink when there is one, else on the
+    /// primary the run carries (its ink, PR link and proof); an earlier opinion of the same reviewer is replaced.
+    static func withOpinion(_ ink: Ink, held: [Ink]?, primary: [Ink]) -> [Ink] {
+        var added = ink
+        added.opinion = true
+        let base = held.flatMap { $0.contains { !$0.opinion } ? $0 : nil } ?? primary
+        return base.filter { !($0.opinion && $0.who == ink.who) } + [added]
+    }
+
+    /// The cover helpers read and write, by the same rule as privacy: a file named "About this notebook*.md" in the
+    /// notebook's own folder. One, writable: that one. None: no cover. Two or more (iCloud's copies or versions), or
+    /// one read only: the cover needs a choice first. One not downloaded yet: not here.
+    enum CoverChoice: Equatable { case one(String), none, conflict, notHere }
+    struct CoverCandidate: Equatable {
+        var key: String
+        var name: String
+        var inFolder: Bool
+        var version = false
+        var readOnly = false
+    }
+
+    static func coverChoice(_ candidates: [CoverCandidate], unread: Int) -> CoverChoice {
+        let covers = candidates.filter { $0.inFolder && isCoverName($0.name) }
+        if covers.count > 1 || covers.contains(where: { $0.version || $0.readOnly }) || (!covers.isEmpty && unread > 0) { return .conflict }
+        if unread > 0 { return .notHere }
+        return covers.first.map { .one($0.key) } ?? .none
+    }
 
     /// The keys a helper's answer sets, carried from a held answer onto the note it's applied to.
     static let answerKeys = ["helper", "ink", "steps"]

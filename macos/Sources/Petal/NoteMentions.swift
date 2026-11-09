@@ -91,7 +91,7 @@ extension NoteTextView {
     }
 
     /// The line the cursor ends, when Return there asks a helper: the cursor at its very end, nothing selected.
-    func helperLine() -> String? {
+    func helperLine() -> (words: String, occurrence: Int)? {
         let text = string as NSString
         let selection = selectedRange()
         guard selection.length == 0 else { return nil }
@@ -101,7 +101,10 @@ extension NoteTextView {
         guard selection.location == end else { return nil }
         let words = text.substring(with: NSRange(location: line.location, length: end - line.location))
             .replacingOccurrences(of: "\u{FFFC}", with: "").trimmingCharacters(in: .whitespaces)
-        return NoteHelp.calls(words) ? words : nil
+        guard NoteHelp.calls(words) else { return nil }
+        // Its position: how many lines above it read the same (its receipt, NoteHelp.receipt).
+        let above = text.substring(to: line.location).components(separatedBy: "\n")
+        return (words, NoteHelp.occurrence(of: words, before: above))
     }
 
     // MARK: The @ menu

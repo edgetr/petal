@@ -226,7 +226,7 @@ struct PaperView: View {
                            sameNote: { desk.store.sameNote($0, instance: $1, $2) },
                            say: { desk.tell($0) },
                            acceptPictures: { desk.acceptCopiedPictures(paper.key, $0) },
-                           helperReturn: { desk.helpers.returned(paper.key, line: $0) },
+                           helperReturn: { desk.helpers.returned(paper.key, line: $0, occurrence: $1) },
                            names: { desk.helpers.names(for: paper.key) },
                            accent: color, tint: tint)
                 .frame(height: min(heights.editor, max(PaperLook.minOpen - 70, editorHeight)))

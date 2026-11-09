@@ -846,7 +846,7 @@ final class NoteTextView: NSTextView {
     var changed: () -> Void = {}
     /// Helpers (NoteHelpers): Return at the end of a line that calls one runs it; the names the @ menu offers and
     /// chips bind to; the notebook's color the mentions are drawn in. The @ menu and the chips' state.
-    var helperReturn: (String) -> Void = { _ in }
+    var helperReturn: (String, Int) -> Void = { _, _ in }
     var mentionNames: () -> (notes: [String], notebooks: [String], place: String) = { ([], [], "") }
     var tint = NoteInk.RGB(r: 0, g: 0.48, b: 1)
     let mentions = MentionState()
@@ -1078,7 +1078,7 @@ final class NoteTextView: NSTextView {
             if let calling {
                 flushNow()
                 let ask = helperReturn
-                DispatchQueue.main.async { ask(calling) }
+                DispatchQueue.main.async { ask(calling.words, calling.occurrence) }
             }
         }
         let kind = lineKind
@@ -1380,7 +1380,7 @@ struct NoteEditorView: NSViewRepresentable {
     /// Pictures pasted as bytes (a copy from a note): taken by the screenshot paste's path.
     var acceptPictures: ([(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? = { _ in nil }
     /// Return at the end of a line that calls a helper (@Petal): the line.
-    var helperReturn: (String) -> Void = { _ in }
+    var helperReturn: (String, Int) -> Void = { _, _ in }
     /// What the @ menu offers and the chips bind to.
     var names: () -> (notes: [String], notebooks: [String], place: String) = { ([], [], "") }
     var accent: NSColor = .controlAccentColor

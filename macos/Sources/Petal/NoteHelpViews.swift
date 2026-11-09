@@ -36,7 +36,7 @@ struct HelperFront: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if !file.task.isEmpty { TaskChips(paper: paper, tint: tint, desk: desk).padding(.vertical, 6) }
                     if let calc = file.calc { CalcLine(calc: calc, body: file.body, tint: tint, glass: glass) }
-                    ForEach(Array(file.ink.enumerated()), id: \.offset) { _, ink in InkView(ink: ink, tint: ink.objections == nil ? tint : NoteInk.hex("#a550a7") ?? tint, glass: glass) }
+                    ForEach(Array(file.ink.enumerated()), id: \.offset) { _, ink in InkView(ink: ink, tint: !ink.opinion ? tint : NoteInk.hex("#a550a7") ?? tint, glass: glass) }
                 }
             }
             // Allow, Don't, Buy, Stop and Pause: pinned outside the scroll, always on the screen.
@@ -229,6 +229,10 @@ struct HelperBar: View {
         let working = run != nil || helper.map { $0.state == .working || $0.state == .waiting } == true
         let denials = run?.sticky?.agent.pendingAsk ?? []
         VStack(alignment: .leading, spacing: 8) {
+            // A faint word (a bare @Petal asks nothing).
+            if let hint = desk?.helpers.hints[noteID] {
+                Text(hint).font(.system(size: 11)).foregroundStyle(glass ? Color.secondary.opacity(0.7) : PaperLook.footer.opacity(0.7))
+            }
             if working {
                 HStack(spacing: 7) {
                     PulseDot(color: PaperLook.color(tint), pulsing: run.map { !$0.paused } ?? (helper?.state == .working))
@@ -261,7 +265,7 @@ struct HelperBar: View {
                     .environment(\.colorScheme, .light)
             }
         }
-        .padding(.top, working || !denials.isEmpty ? 6 : 0)
+        .padding(.top, working || !denials.isEmpty || desk?.helpers.hints[noteID] != nil ? 6 : 0)
     }
 
     private func line(run: NoteHelpers.Run?, helper: NoteHelp.Helper?) -> String {

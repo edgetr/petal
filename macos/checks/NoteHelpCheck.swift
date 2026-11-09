@@ -681,6 +681,60 @@ struct NoteHelpCheck {
             expect(room >= 60 && (screen < 334 || room + 230 + 44 <= screen), "a form's fields scroll; its buttons stay on the screen (\(screen))", "\(room)")
         }
 
+        // MARK: Round nine: second opinions add to their primary, receipts, the helper cover rule, a bare @Petal
+
+        let primaryInk = NoteHelp.Ink(who: "✦ Petal · Codex", text: "Fixed it.", proof: ["tests pass"], link: "https://github.com/o/r/pull/7", code: true)
+        let objectionsInk = NoteHelp.Ink(who: "GPT 6.1 Sol", text: "1. Is the week view covered?", objections: 1)
+        let added = NoteHelp.withOpinion(objectionsInk, held: nil, primary: [primaryInk])
+        expect(added.count == 2 && added[0] == primaryInk && added[1].opinion && added[1].objections == 1,
+               "a second opinion's objections are added after the primary it carries (ink, PR link, proof)", "\(added)")
+        let failed = NoteHelp.withOpinion(NoteHelp.Ink(who: "GPT 6.1 Sol", text: "No second opinion: Codex isn't set up in Petal.", link: NoteHelp.settingsLink),
+                                          held: nil, primary: [primaryInk])
+        expect(failed.count == 2 && failed[0] == primaryInk && failed[1].opinion && failed[1].link == NoteHelp.settingsLink,
+               "a second opinion that fails (not set up, sign-in, launch) is added too, never in the primary's place")
+        let heldInk = [primaryInk, NoteHelp.Ink(who: "Opus 5.5", text: "1. One more?", objections: 1)]
+        let again = NoteHelp.withOpinion(NoteHelp.Ink(who: "GPT 6.1 Sol", text: "No objections.", objections: 0), held: heldInk, primary: [])
+        expect(again.count == 3 && again[0] == primaryInk && again[1].who == "Opus 5.5" && again[2].objections == 0,
+               "built on the latest held answer: the primary and another reviewer's opinion stay", "\(again)")
+        let redo = NoteHelp.withOpinion(NoteHelp.Ink(who: "Opus 5.5", text: "No objections.", objections: 0), held: heldInk, primary: [])
+        expect(redo.count == 2 && redo[0] == primaryInk && redo[1].objections == 0, "the same reviewer again replaces only its own opinion")
+        let onlyOpinions = NoteHelp.withOpinion(objectionsInk, held: [NoteHelp.Ink(who: "Opus 5.5", text: "x", objections: 1)], primary: [primaryInk])
+        expect(onlyOpinions.first == primaryInk, "a held answer without the primary: the carried primary is the base")
+        var opinionFile = NoteFile(id: "OP1", created: now)
+        opinionFile.ink = failed
+        let opinionBack = NoteFile.parse(opinionFile.serialized(), fallbackID: "OP1", fallbackDate: now).ink
+        expect(opinionBack == failed, "a failed opinion stays an opinion through the front matter", "\(opinionBack)")
+
+        let lineA = "@Petal summarize this page"
+        let rA = NoteHelp.receipt(lineA, occurrence: 0)
+        expect(rA == NoteHelp.receipt("@Petal   summarize this page ", occurrence: 0), "a receipt reads the words, spaces collapsed")
+        expect(rA != NoteHelp.receipt(lineA, occurrence: 1), "two lines alike are two lines (their position)")
+        expect(rA != NoteHelp.receipt("@Petal summarize this page again", occurrence: 0), "editing a line's words makes it new")
+        expect(NoteHelp.occurrence(of: lineA, before: ["intro", lineA, "@Petal other", " @Petal  summarize this page"]) == 2, "its position counts the lines above that read the same")
+        var receipts = NoteFile(id: "RC1", created: now)
+        receipts.answered = [rA]
+        let rB = NoteHelp.receipt("@Petal remember the side door", occurrence: 0)
+        receipts.answered += [rB]
+        let receiptsBack = NoteFile.parse(receipts.serialized(), fallbackID: "RC1", fallbackDate: now)
+        expect(receiptsBack.answered == [rA, rB] && receiptsBack.answered.contains(rA),
+               "after another request is answered, the first line's receipt is still there: Return on it runs nothing again")
+
+        let coverHere = NoteHelp.CoverCandidate(key: "/n/Trips/About this notebook.md", name: "About this notebook.md", inFolder: true)
+        let flagged = NoteHelp.CoverCandidate(key: "/n/Trips/Plan.md", name: "Plan.md", inFolder: true)
+        let nested = NoteHelp.CoverCandidate(key: "/n/Trips/Old/About this notebook.md", name: "About this notebook.md", inFolder: false)
+        expect(NoteHelp.coverChoice([flagged, coverHere], unread: 0) == .one(coverHere.key), "the cover is the file named for it in the notebook's own folder")
+        expect(NoteHelp.coverChoice([flagged], unread: 0) == .none && NoteHelp.coverChoice([nested], unread: 0) == .none,
+               "a note saying cover: true, or a cover file elsewhere, is no cover for helpers")
+        let copyCover = NoteHelp.CoverCandidate(key: "/n/Trips/About this notebook (conflicted copy).md", name: "About this notebook (conflicted copy).md", inFolder: true)
+        expect(NoteHelp.coverChoice([coverHere, copyCover], unread: 0) == .conflict, "a cover with a conflict copy needs a choice first: no memory written")
+        var versioned = coverHere; versioned.version = true
+        expect(NoteHelp.coverChoice([coverHere, versioned], unread: 0) == .conflict, "a cover with an iCloud version needs a choice first")
+        expect(NoteHelp.coverChoice([], unread: 1) == .notHere && NoteHelp.coverChoice([coverHere], unread: 1) == .conflict,
+               "a cover not downloaded yet is not here; one beside it read makes two")
+
+        expect(NoteHelp.bare("@Petal") && NoteHelp.bare("@Petal   ") && NoteHelp.bare("  @petal"), "a bare @Petal asks nothing: refused before a run")
+        expect(!NoteHelp.bare("@Petal summarize this") && !NoteHelp.bare("@Petal remember the door code is on the card"), "a request isn't bare")
+
         // MARK: Open all never launches an app or a script (NoteTasks)
 
         let scratch = FileManager.default.temporaryDirectory.appending(path: "petal-notetasks-\(UUID().uuidString)")
