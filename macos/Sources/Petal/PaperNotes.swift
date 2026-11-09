@@ -333,17 +333,13 @@ final class NoteStore {
                     }
                     var merged = NoteShelf.fenced(read: read.notes, memory: self.notes, key: \.key, started: started,
                                                   changed: changed, removed: self.removedAt)
-                    // A Safari, Firefox or Zen tab's button is never written: it stays with the note while Petal runs.
+                    // A Safari, Firefox or Zen tab's button is never written: it stays with the note while Petal runs, but
+                    // only on an anchor that's unchanged and matches exactly one (NoteShelf.carryTabElements), never by
+                    // its position among the note's places.
                     let before = Dictionary(self.notes.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
                     for index in merged.indices {
                         guard let old = before[merged[index].key] else { continue }
-                        for place in merged[index].file.places.indices where place < old.file.places.count {
-                            let was = old.file.places[place]
-                            if merged[index].file.places[place].kind == .tab, was.kind == .tab, merged[index].file.places[place].pid == was.pid,
-                               merged[index].file.places[place].mac == was.mac {
-                                merged[index].file.places[place].tabElement = was.tabElement
-                            }
-                        }
+                        merged[index].file.places = NoteShelf.carryTabElements(from: old.file.places, to: merged[index].file.places)
                     }
                     self.changedAt = self.changedAt.filter { $0.value >= started }
                     self.removedAt = self.removedAt.filter { $0.value >= started }

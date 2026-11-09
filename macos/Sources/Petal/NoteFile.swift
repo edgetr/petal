@@ -1766,6 +1766,28 @@ enum NoteShelf {
     /// showing (the one current-placement rule, placementNow).
     static func isHere(_ placement: Placement) -> Bool { placement != .none }
 
+    /// A tab's runtime identity (its tab-strip button, never saved) carried from a note's places in memory to the
+    /// same note just read: only onto a tab anchor that's unchanged (the same kind and saved fields) and matches
+    /// exactly one old anchor, itself matched by exactly one new one; when uncertain it's dropped. Never by position.
+    static func carryTabElements(from old: [NoteStick], to new: [NoteStick]) -> [NoteStick] {
+        func saved(_ place: NoteStick) -> NoteStick {
+            var place = place
+            place.tabElement = nil
+            return place
+        }
+        var out = new
+        for index in new.indices where new[index].kind == .tab {
+            let anchor = saved(new[index])
+            let olds = old.indices.filter { old[$0].kind == .tab && saved(old[$0]) == anchor }
+            let news = new.indices.filter { saved(new[$0]) == anchor }
+            out[index].tabElement = olds.count == 1 && news.count == 1 ? old[olds[0]].tabElement : nil
+        }
+        return out
+    }
+
+    /// Notes turned on: what's in front read again, and the Desktops read and placed again (Desktop notes show at once).
+    static func onEnable() -> (look: Bool, desktops: Bool) { (true, true) }
+
     /// What a picture's read came to: an image; gone (no file, refused, or not a picture: confirmed, the broken
     /// mark); or unreadable for now (the file is there but couldn't be read: the old image kept, tried again).
     enum ReadOutcome: Equatable { case image, gone, transient }

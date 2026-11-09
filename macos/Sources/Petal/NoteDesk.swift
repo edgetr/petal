@@ -163,7 +163,10 @@ final class NoteDesk {
         if on && !listening {
             listening = true
             WindowEvents.shared.listen("papernotes") { [weak self] event in self?.event(event) }
-            look()
+            // Turned on: what's in front read again, and the Desktops read and placed (NoteShelf.onEnable).
+            let enable = NoteShelf.onEnable()
+            if enable.look { look() }
+            if enable.desktops { refreshSpaces() }
         } else if !on && listening {
             listening = false
             WindowEvents.shared.stopListening("papernotes")

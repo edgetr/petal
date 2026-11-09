@@ -739,6 +739,25 @@ struct NotesCheck {
         expect(!NoteShelf.isHere(NoteShelf.placementNow(window: 7, desktops: [], showing: [], windowValid: false))
                && NoteShelf.placementNow(window: 7, desktops: [3], showing: [3], windowValid: false) == .desktop,
                "a window placement awaiting a fresh read isn't here (a Desktop showing still is)")
+        // A tab's runtime identity carried on a reload only to the same, unchanged anchor that matches once.
+        func tabStick(_ address: String, _ element: Int? = nil) -> NoteStick {
+            var stick = NoteStick(kind: .tab)
+            stick.url = address
+            stick.tabElement = element
+            return stick
+        }
+        let firstTab = tabStick("https://a.example/one", 5), secondTab = tabStick("https://b.example/two", 9)
+        let afterRemoval = NoteShelf.carryTabElements(from: [firstTab, secondTab], to: [tabStick("https://b.example/two")])
+        expect(afterRemoval.map(\.tabElement) == [9], "an earlier anchor removed: the remaining tab keeps its own identity, never the removed one's",
+               "\(afterRemoval.map(\.tabElement))")
+        let reordered = NoteShelf.carryTabElements(from: [firstTab, secondTab], to: [tabStick("https://b.example/two"), tabStick("https://a.example/one")])
+        expect(reordered.map(\.tabElement) == [9, 5], "reordered: each keeps its own")
+        expect(NoteShelf.carryTabElements(from: [firstTab], to: [tabStick("https://a.example/changed")]).map(\.tabElement) == [nil], "changed: dropped")
+        expect(NoteShelf.carryTabElements(from: [tabStick("https://a.example/one", 5), tabStick("https://a.example/one", 6)],
+                                          to: [tabStick("https://a.example/one")]).map(\.tabElement) == [nil], "two alike before: uncertain, dropped")
+        expect(NoteShelf.carryTabElements(from: [firstTab], to: [tabStick("https://a.example/one"), tabStick("https://a.example/one")]).map(\.tabElement) == [nil, nil],
+               "two alike now: uncertain, dropped")
+        expect(NoteShelf.onEnable() == (true, true), "notes turned on: what's in front read, and the Desktops read and placed")
         // A failed read: gone (no file, or not a picture) or unreadable for now (there, but couldn't be read).
         expect(NoteShelf.readOutcome(exists: true, read: true, picture: true) == .image && NoteShelf.readOutcome(exists: false, read: false, picture: false) == .gone
                && NoteShelf.readOutcome(exists: true, read: true, picture: false) == .gone && NoteShelf.readOutcome(exists: true, read: false, picture: false) == .transient,
