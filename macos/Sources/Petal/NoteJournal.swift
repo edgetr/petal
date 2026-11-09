@@ -97,6 +97,20 @@ enum NoteJournal {
         snapshot(entry, in: folder)
     }
 
+    /// A snapshot of typing that was undone back to what's saved (`current`): gone, unless it still carries a picture's
+    /// bytes or a paste's sources not stored yet, which stay (on the note as it is now, marked landed).
+    nonisolated static func retire(noteID: String, current: String?, in folder: URL = folder) {
+        let url = file(noteID, in: folder)
+        guard var entry = read(url) else { return }
+        guard let current, !entry.pictures.isEmpty || !(entry.imports ?? []).isEmpty else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        entry.text = current
+        entry.landed = true
+        snapshot(entry, in: folder)
+    }
+
     /// Pictures saved into the note's folder (or removed by the person): out of its snapshot; a snapshot whose text
     /// landed goes once none of its pictures is left.
     nonisolated static func picturesSaved(noteID: String, names: Set<String>, in folder: URL = folder) {

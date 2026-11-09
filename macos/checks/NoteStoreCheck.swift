@@ -2581,18 +2581,18 @@ struct NoteStoreCheck {
         guard let lands = store.notes.first(where: { $0.noteID == "LATE-1" }), let blocked = store.notes.first(where: { $0.noteID == "LATE-2" }) else {
             return expect(false, "the notes are read")
         }
-        expect(!store.drainLate(key: lands.key, body: "x", base: lands.revision), "in the folder in use, a save isn't the drain's: it goes through the note")
+        expect(store.drainLate(key: lands.key, body: "x", base: lands.revision) == nil, "in the folder in use, a save isn't the drain's: it goes through the note")
         var away = false
         store.switchRoot(to: rootB) { away = true }
         // The switch has begun: the store refuses a change from outside, and the text goes to the old folder's drain.
         let refusedByStore = store.change(lands.key, edit: { $0.body = "late words" }) == nil
-        let taken = store.drainLate(key: lands.key, body: "late words", base: lands.revision)
+        let taken = store.drainLate(key: lands.key, body: "late words", base: lands.revision) != nil
         // Its file can't take the text (a folder stands where it was): the drain rescues it.
         try? fm.removeItem(at: blockedFile)
         try? fm.createDirectory(at: blockedFile, withIntermediateDirectories: true)
-        let takenToo = store.drainLate(key: blocked.key, body: "late and blocked", base: blocked.revision)
+        let takenToo = store.drainLate(key: blocked.key, body: "late and blocked", base: blocked.revision) != nil
         expect(refusedByStore && taken && takenToo, "a save after the switch began: refused by the store, taken by its folder's drain")
-        expect(!store.drainLate(key: "/nowhere/None.md", body: "x", base: nil), "a note no ended session holds: refused, the editor keeps it")
+        expect(store.drainLate(key: "/nowhere/None.md", body: "x", base: nil) == nil, "a note no ended session holds: refused, the editor keeps it")
         let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
         func rescued(_ words: String) -> Bool {
             ((fm.enumerator(atPath: unsaved.path)?.allObjects as? [String]) ?? []).contains { $0.hasSuffix(".md") && (text(unsaved.appending(path: $0)) ?? "").contains(words) }

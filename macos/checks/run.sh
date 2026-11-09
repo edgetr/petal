@@ -38,10 +38,20 @@ swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sour
 # after a hang, and a cancelled tool write leaving nothing (never the Trash).
 swiftc -parse-as-library -O -o "$out/notestore" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/PaperNotes.swift Sources/Petal/NoteJournal.swift checks/NoteStoreCheck.swift
 "$out/notestore"
+# Selection changes never read text on the main thread: PDFKit's selection string isn't read anywhere in the viewer's
+# views (the words come from ViewerText's read off it).
+if grep -nE '(currentSelection|selection)[?]?\.(string|attributedString)' Sources/Petal/ViewerViews.swift; then
+  echo "viewer: a selection's text read on the main thread (ViewerViews.swift)"; exit 1
+fi
+echo "viewer: no selection text read on the main thread"
 # A passage for Petal AI follows petal_look's rule for selected text (UIMap.selectionHidden), and what the note tools
 # tell an agent is redacted with the vault's index, or not told while the vault can't be read (NoteShield).
 swiftc -parse-as-library -O -o "$out/noteselection" Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift checks/NoteSelectionCheck.swift
 "$out/noteselection"
+# Petal's viewer: a file anchor's page, slide and passage, the path an agent names (on throwaway folders in the
+# temporary folder), the margin's layout, a preview cut into pages, copies' names and comments (no window, no PDF).
+swiftc -parse-as-library -O -o "$out/viewer" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/ViewerFile.swift checks/ViewerFileCheck.swift
+"$out/viewer"
 swiftc -parse-as-library -O -o "$out/background" Sources/Petal/Background.swift Sources/Petal/UIMap.swift checks/BackgroundCheck.swift
 "$out/background"
 swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Petal/UIMap.swift checks/VaultCheck.swift

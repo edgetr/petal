@@ -48,8 +48,16 @@ struct PaperView: View {
     var unsaved = false
     /// Pictures whose bytes couldn't be saved: said on the paper, with Try again and Remove.
     var pictureTrouble = 0
+    /// Open, its width (Petal's viewer's margin is narrower than the room beside a window).
+    var width: CGFloat = PaperLook.openWidth
+    /// Turned over and folded by its holder when it isn't the desk (Petal's viewer's margin).
+    var flipped: (() -> Void)? = nil
+    var folded: (() -> Void)? = nil
 
     @Environment(\.snapshotting) private var snapshotting
+    /// This paper's editor, as the desk knows it: only its own going away clears its registration (the same note
+    /// opening in Petal's viewer as it closes here never loses the viewer's).
+    @State private var editorToken = UUID()
 
     private var tint: NoteInk.RGB { PaperLook.rgb(color) }
     private var words: Color { glass ? .primary : PaperLook.words }
@@ -57,7 +65,7 @@ struct PaperView: View {
     var body: some View {
         content
             .padding(.top, face == .open ? 16 : 15).padding(.horizontal, face == .open ? 18 : 14).padding(.bottom, face == .open ? 14 : 12)
-            .frame(width: face == .folded ? PaperLook.folded : PaperLook.openWidth,
+            .frame(width: face == .folded ? PaperLook.folded : width,
                    height: face == .folded ? PaperLook.folded : nil, alignment: .topLeading)
             // The strip is the paper's width, whatever room the paper is offered.
             .overlay(alignment: .top) { strip }
@@ -90,7 +98,7 @@ struct PaperView: View {
             Text("@").font(.system(size: 13, weight: .semibold)).foregroundStyle(glass ? Color.primary.opacity(0.22) : Color.black.opacity(0.22))
                 .padding(.trailing, 8).padding(.bottom, 9)
                 .help("@ for a helper, a note or a place (coming soon)")
-            Button { desk?.flip(paper.key) } label: { FoldCorner().fill(Color.black.opacity(0.13)).frame(width: 24, height: 24).contentShape(.rect) }
+            Button { if let flipped { flipped() } else { desk?.flip(paper.key) } } label: { FoldCorner().fill(Color.black.opacity(0.13)).frame(width: 24, height: 24).contentShape(.rect) }
                 .buttonStyle(.plain)
                 .help(face == .back ? "Turn it back over" : "Turn it over")
         }
@@ -174,13 +182,18 @@ struct PaperView: View {
         } else if let desk {
             NoteEditorView(paper: paper, style: desk.style(color, glass: glass), focus: keyboard,
                            height: { desk.measured(paper.key, $0) },
-                           save: { desk.write(paper.key, body: $0, base: $1) },
-                           register: { desk.editorRegistered(paper.key, $0) },
+                           // Saved through the note's identity: renamed or moved meanwhile, it lands on that note.
+                           save: { desk.write(paper.key, noteID: paper.noteID, instance: paper.instance, body: $0, base: $1) },
+                           register: { [editorToken] in desk.editorRegistered(paper.key, $0, token: editorToken) },
                            importPictures: { desk.importPictures($0, into: paper.key) },
                            idle: { desk.store.takeDeferred(paper.key) },
                            sameNote: { desk.store.sameNote($0, instance: $1, $2) },
                            say: { desk.tell($0) },
-                           acceptPictures: { desk.acceptCopiedPictures(paper.key, $0) })
+                           acceptPictures: { desk.acceptCopiedPictures(paper.key, $0) },
+                           // In a paper's own panel, Escape goes up to the panel (handled once there); in Petal's viewer's
+                           // margin there's no such panel, so it folds the note there.
+                           escape: folded,
+                           settled: { desk.settleUnsaved(paper.key, noteID: paper.noteID, instance: paper.instance, saved: $0) })
                 .frame(height: min(PaperLook.maxOpen - 70, max(PaperLook.minOpen - 70, editorHeight)))
                 .padding(.bottom, 18)
         }

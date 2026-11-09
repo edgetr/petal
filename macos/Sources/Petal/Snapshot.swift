@@ -155,6 +155,8 @@ enum Snapshot {
         // The Petal Notes window (grid, canvas, a Private notebook), a notebook's stack in the dock, a note on a person
         // (NoteLibrarySnapshot.swift).
         notesLibrary(app: app, folder: folder)
+        // Petal's viewer: a PDF with margin notes and highlights, a deck with notes per slide, versions on copies.
+        viewer(app: app, folder: folder)
         views.append(("site-icons", AnyView(HStack(spacing: 14) {
             ForEach(["https://github.com", "https://www.figma.com", "https://example.invalid"], id: \.self) { SiteIcon(id: $0, size: 64) }
         }.padding(14)), nil))

@@ -62,8 +62,9 @@ final class NoteDesk {
     /// What was in front when the quick question opened, for Stick here.
     private(set) var captured: (scene: NoteScene, read: ClaudePanel.FrontRead, url: String, name: String, privacy: Int)?
     @ObservationIgnored private var ghost: NSPanel?
-    /// Made just now and still empty: let go of if it's put away empty.
-    @ObservationIgnored private var fresh: Set<String> = []
+    /// Made just now and still empty: let go of if it's put away empty (folded or hidden; never when it's only
+    /// handed to its other editor, `handOff`).
+    @ObservationIgnored var fresh: Set<String> = []
     /// Notes opened on their own (from the Petal Notes window or a notebook's stack), by paper key: one record each,
     /// everything about it together, so it moves with its paper as one (`rekey`). Never kept past this run.
     @ObservationIgnored private(set) var standalone: [String: Standalone] = [:]
@@ -83,13 +84,19 @@ final class NoteDesk {
     var app: PetalApp { PetalApp.shared }
     var on: Bool { ready && app.config.bool("notes") }
 
-    /// Notes take a change from the person or a tool (a new note, an editor, a paste, a move, a tool's call) only once
-    /// they're ready: this Mac's state and the folder in, and the store's `notesReady` (no switch under way, the
-    /// folder's recovery done, its first read in), as at launch. Else nothing is done, and it's said plainly.
+    /// Notes take a change from the person or a tool (a new note, an editor, a paste, a move, a tool's call), on a
+    /// paper's own panel, in the Petal Notes window and in Petal's viewer alike, only once they're ready: the store's
+    /// `notesReady` (its folder entered: the old one drained, this Mac's journal put back, its first read in, what was
+    /// pending replayed), at launch as on every switch. Else nothing is done, and it's said plainly.
     func takesChanges() -> Bool {
-        guard ready, store.notesReady else { say(NoteStore.gettingReady); return false }
+        guard acceptsChanges else { say(NoteStore.gettingReady); return false }
         return true
     }
+
+    /// The same, asked without saying anything (what a view shows as read only meanwhile: Petal's viewer's margin).
+    /// The store's readiness is the whole of it: its folder is entered only after this Mac's notes state and the
+    /// folder were resolved (`ready`), so nothing more is asked here.
+    var acceptsChanges: Bool { store.notesReady }
     var glass: Bool { app.config.string("notesLook") == "glass" }
     var defaultNotebook: String {
         let name = app.config.string("notesNotebook")
@@ -97,6 +104,24 @@ final class NoteDesk {
     }
 
     // MARK: Starting
+
+    /// How a note's file and identity changing reach everything that shows or holds it (the desk's panels and
+    /// records, Petal's viewer's margins: `rekey`, `identityChanged`), and what's kept by an id becomes lasting.
+    /// Part of `start`; `Petal --viewer-check` installs these alone (it starts nothing else).
+    func hookStore() {
+        store.onRekey = { [weak self] old, paper in self?.rekey(old, to: paper) }
+        // An id now in its file: what's kept by it is lasting (written to disk) from now on.
+        store.onIDLanded = { [weak self] _ in
+            guard let self else { return }
+            self.local.save(pending: self.store.pendingIDs)
+        }
+        store.onIdentity = { [weak self] old, holder, new in
+            guard let self else { return }
+            self.identityChanged(holder: holder, new)
+            self.local.rekeyID(old, holder: holder, new)
+            self.local.save(pending: self.store.pendingIDs)
+        }
+    }
 
     func start() {
         // Writing a Petal before this one accepted and never saw land: put back first (NoteJournal.recover), from the
@@ -108,17 +133,7 @@ final class NoteDesk {
         watchApps()
         // The one visibility signal for missing pictures: papers revealed and open now.
         NotePictures.shared.visible = { [weak self] in self?.picturesOnScreen() ?? [] }
-        store.onRekey = { [weak self] old, paper in self?.rekey(old, to: paper) }
-        // An id now in its file: what's kept by it is lasting (written to disk) from now on.
-        store.onIDLanded = { [weak self] _ in
-            guard let self else { return }
-            self.local.save(pending: self.store.pendingIDs)
-        }
-        store.onIdentity = { [weak self] old, holder, new in
-            guard let self else { return }
-            self.local.rekeyID(old, holder: holder, new)
-            self.local.save(pending: store.pendingIDs)
-        }
+        hookStore()
         store.onProblem = { [weak self] text in self?.say(text) }
         // Which Desktop each screen shows, followed on Space and screen changes whether or not Accessibility is
         // allowed (those notifications don't need it; WindowEvents' stop with the permission): NoteShelf.spaceSignals.
@@ -162,7 +177,10 @@ final class NoteDesk {
                     // then what was pending replayed, each step started by the one before. Notes take no change, and
                     // no tool reads them, until the last (`takesChanges`).
                     self.ready = true
+                    // Petal's viewer's margins are read only until the folder is entered, as on every switch.
+                    self.app.viewers.folderSwitching(true)
                     self.store.switchRoot(to: root, launch: true) {
+                        self.app.viewers.folderSwitching(false)
                         self.look()
                         self.followFolderSetting()
                     }
@@ -175,6 +193,8 @@ final class NoteDesk {
     /// `notes`, `notesLook` or `notesFolder` changed (or any setting did).
     func settingsChanged() {
         followFolderSetting()
+        // Petal's viewer: its margin and the editor open there go with notes off, and come back with notes on.
+        app.viewers.notesChanged()
         // Mission Control from the shared watcher, needed while notes are on (whichever dock is chosen).
         MissionControlWatch.shared.subscribe("notes") { [weak self] open in self?.missionControl(open) }
         MissionControlWatch.shared.need("notes", on && !Headless.on)
@@ -362,8 +382,11 @@ final class NoteDesk {
         lookSoon?.cancel()
         looks += 1
         giveBackAll {}
-        // Every editor of the old folder sealed first: its composition committed, its text no longer editable, what's
-        // typed saved into the folder it was typed in. Nothing can change after it.
+        // Petal's viewer first: what's typed in a margin is saved and its editor closed before the store stops taking
+        // changes, and the margin stays read only until the new folder is ready.
+        app.viewers.folderSwitching(true)
+        // Every editor of the old folder sealed: its composition committed, its text no longer editable, what's typed
+        // saved into the folder it was typed in. Nothing can change after it.
         for editor in editors.values { editor.seal() }
         editors = [:]
         for panel in panels.values { panel.conceal() }
@@ -377,6 +400,7 @@ final class NoteDesk {
         keyboard = nil
         fresh = []
         store.switchRoot(to: root) { [weak self] in
+            self?.app.viewers.folderSwitching(false)
             self?.look()
             self?.followFolderSetting()
         }
@@ -413,7 +437,7 @@ final class NoteDesk {
         guard reads.request() else { return }
         looks += 1
         let ticket = looks
-        Self.read(running, mac: local.mac, tabs: pagesStuck, ticket: ticket) { scene, read in
+        Self.read(running, mac: local.mac, tabs: pagesStuck, ticket: ticket, anchors: fileAnchors) { scene, read in
             self.activate(scene, read: read, ticket: ticket)
             if self.reads.finished() {
                 self.reads = NoteShelf.ReadGate()
@@ -438,6 +462,12 @@ final class NoteDesk {
     /// Some note is on a window: its title is followed (NoteShelf.followedTitle), so titles changing are heard.
     private var windowsStuck: Bool { store.notes.contains { $0.file.places.contains { $0.kind == .window } } }
 
+    /// The notes' places that name a file, each once: what a read of what's in front resolves (NoteScene.onFile).
+    var fileAnchors: [NoteStick] {
+        var seen: Set<String> = []
+        return store.notes.flatMap { $0.file.places.filter(ViewerFiles.namesFile) }.filter { seen.insert($0.fileKey).inserted }
+    }
+
     /// Some note is on a page (a tab, or a sentence on a page): browsers' tabs are worth reading.
     private var pagesStuck: Bool {
         store.notes.contains { $0.file.places.contains { $0.kind == .tab || ($0.kind == .passage && !$0.url.isEmpty) } }
@@ -452,7 +482,9 @@ final class NoteDesk {
     /// here, off the main thread.
     /// `ticket`: the look it's for; gone by the time the app's window would be read further, nothing more is asked of
     /// the app (the answer is stale, and refused when it's used).
-    static func read(_ running: NSRunningApplication, mac: String, tabs: Bool = true, ticket: Int? = nil,
+    /// `anchors`: the notes' places that name a file (`fileAnchors`): which of them are the file in front is worked out
+    /// here, off the main thread, by the one file resolver (NoteScene.onFile).
+    static func read(_ running: NSRunningApplication, mac: String, tabs: Bool = true, ticket: Int? = nil, anchors: [NoteStick] = [],
                      _ done: @escaping @MainActor (NoteScene, ClaudePanel.FrontRead) -> Void) {
         let pid = running.processIdentifier
         let app = running.bundleIdentifier ?? ""
@@ -474,6 +506,7 @@ final class NoteDesk {
                 let desktop: Int? = read.window == nil && read.none ? screen.flatMap { Spaces.desktops([$0])[$0] } : nil
                 var file = ""
                 var bookmark = ""
+                var fileID = ""
                 var twins: Int?
                 var person = ""
                 var handle = ""
@@ -485,6 +518,9 @@ final class NoteDesk {
                        let document: String = Windows.value(window, kAXDocumentAttribute), let url = URL(string: document), url.isFileURL {
                         file = url.path
                         bookmark = (try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))?.base64EncodedString() ?? ""
+                        // The file's own identity too: a note on it, or a sentence in it, is found again wherever it
+                        // goes, and a new file at its path is never it (ViewerFiles).
+                        fileID = ViewerFileID.of(url.path)?.record(mac: mac) ?? ""
                     }
                     if !read.title.isEmpty { twins = all.filter { (Windows.value($0, kAXTitleAttribute) as String?) == read.title }.count }
                     // The person in a chat app's conversation (never an app kept private): one person or none.
@@ -496,6 +532,14 @@ final class NoteDesk {
                 made.fileBookmark = bookmark
                 made.person = person
                 made.personHandle = handle
+                made.fileID = fileID
+                // Which notes' places are this very file (a path another file took since is never it; a renamed one is).
+                if !file.isEmpty, let front = ViewerFileID.of(file) {
+                    made.onFile = ViewerFiles.on(front, anchors, mac: mac, follow: ViewerLoader.follow)
+                }
+                // Worked out for these places (or, the file unreadable, by path for them): a place added since makes
+                // it stale (NoteScene.resolves).
+                made.resolved = Set(anchors.map(\.fileKey))
                 let scene = made
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
@@ -704,8 +748,10 @@ final class NoteDesk {
         let anchored = store.notes.filter { paper in
             paper.version == nil && !store.readOnly(paper) && paper.file.places.contains { !$0.bookmark.isEmpty && ($0.kind == .file || $0.kind == .passage) }
         }
+        // Followed unless a note here is on this very file by its identity (a path that matches while the identity
+        // doesn't is no reason not to follow).
         guard !anchored.isEmpty, !here.contains(where: { key, index in
-            store.paper(key).flatMap { $0.file.places.indices.contains(index) ? $0.file.places[index].path : nil } == scene.file
+            store.paper(key).map { $0.file.places.indices.contains(index) && NoteMatch.onFrontFile($0.file.places[index], scene) } ?? false
         }) else { return }
         let files = anchored.map { ($0.key, $0.file, $0.revision) }
         Self.queue.async {
@@ -1063,9 +1109,10 @@ final class NoteDesk {
     /// The pictures on screen: those of papers whose panel is revealed (not hidden by going clear) and open
     /// (NoteShelf.picturesOnScreen), editors and read-only papers alike.
     func picturesOnScreen() -> Set<String> {
+        // The desk's papers, and those open in a margin of Petal's viewer whose window is on screen.
         NoteShelf.picturesOnScreen(panels.compactMap { key, panel in
             store.paper(key).map { (panel.unveiled, faces[key] == .open, $0.url.deletingLastPathComponent().path, $0.file.body) }
-        })
+        } + app.viewers.picturesShown())
     }
 
     /// The sketch's dashed line in the notebook's color from each showing note to its sentence, wherever the
@@ -1103,6 +1150,12 @@ final class NoteDesk {
     }
 
     private func isDesktop(_ key: String) -> Bool { placementNow(key) == .desktop }
+
+    /// "Here" for the note tools: placed now (placementNow), or in the margin of Petal's viewer while it has the
+    /// keyboard (it's the current place then).
+    func hereNow(_ key: String) -> Bool {
+        NoteShelf.isHere(placementNow(key)) || app.viewers.front?.shows(key) == true
+    }
 
     /// Everything that may not be seen now hidden (NoteShelf.mayShow): every surface while Mission Control is open,
     /// the window's notes while a new front window's read is awaited, and any paper not where its one placement
@@ -1327,6 +1380,8 @@ final class NoteDesk {
     /// A paper opened for writing (its editor): only once notes take changes.
     func open(_ key: String, expecting: NoteShelf.KeyboardRequests.Target? = nil) {
         guard takesChanges(), let paper = store.paper(key) else { return }
+        // Open in Petal's viewer's margin: closed there first (one editor per note).
+        releaseFromViewer(paper)
         faces[key] = .open
         keyboard = key
         local.shown = Array(Set(local.shown + [paper.noteID]))
@@ -1368,6 +1423,18 @@ final class NoteDesk {
         letGoIfEmpty(key)
         faceChanged(key)
         if hadKeyboard { giveKeyboardBack() }
+    }
+
+    /// The paper open on the desk handed to Petal's viewer's margin (its other editor): what's typed saved, the
+    /// desk's paper folded, and never let go of (an empty new note stays: it's open there now).
+    func handOff(_ key: String) {
+        keyboardWanted.cancel(key)
+        guard faces[key] == .open || faces[key] == .back else { return }
+        Self.roomTurn.cancel()
+        editors[key]?.flush()
+        faces[key] = .folded
+        if keyboard == key { keyboard = nil }
+        faceChanged(key)
     }
 
     /// The last app other than Petal the person brought forward (kept as apps activate).
@@ -1427,6 +1494,7 @@ final class NoteDesk {
     }
 
     func flip(_ key: String) {
+        if let paper = store.paper(key) { releaseFromViewer(paper) }
         faces[key] = faces[key] == .back ? .open : .back
         if faces[key] == .open { wantKeyboard(key) }
         panels[key]?.refit()
@@ -1456,8 +1524,28 @@ final class NoteDesk {
 
     private func isDesktopNote(_ key: String) -> Bool { store.paper(key)?.file.places.contains { $0.kind == .desktop } == true }
 
+    /// Notes open for writing in Petal's viewer's margin, by the note's identity (its holder key, NoteShelf.holderKey:
+    /// an id-less note's is its path id with its file's instance): told to fold before the desk opens one, so a note
+    /// is never open in two editors. An id given to an id-less note moves its entry (`identityChanged`).
+    @ObservationIgnored var heldByViewer: [String: () -> Void] = [:]
+
+    /// A note open in a viewer's margin folded there first (before the desk opens or turns it).
+    func releaseFromViewer(_ paper: PaperNote) {
+        heldByViewer.removeValue(forKey: paper.holder)?()
+    }
+
+    /// Phase 1's identity change (`store.onIdentity`): an id-less note got its own id; what's held by its old
+    /// identity follows it.
+    func identityChanged(holder: String, _ new: String) {
+        heldByViewer = NoteShelf.rekeyed(heldByViewer, holder, new)
+    }
+
+    /// Petal's viewer came to the front: the notes on the window left behind hide, as for any other app coming
+    /// forward, until a fresh read of what's in front after it.
+    func viewerFront() { concealWindowNotes() }
+
     /// A note made just now and put away with nothing written goes (to the Trash: never deleted outright).
-    private func letGoIfEmpty(_ key: String) {
+    func letGoIfEmpty(_ key: String) {
         guard fresh.contains(key), let paper = store.paper(key), faces[key] != .open,
               NoteShelf.mayTrash(bodyEmpty: paper.file.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, picturesPending: store.picturesPending(key),
                                  importing: store.importing(key))
@@ -1506,7 +1594,8 @@ final class NoteDesk {
             return CGRect(x: v[0], y: v[1], width: v[2], height: v[3])
         }
         for row in rows {
-            guard let number = (row["window"] as? Double).map({ CGWindowID($0) }), let pid = (row["pid"] as? Double).map({ pid_t($0) }),
+            // Numbers from a file: only those a window number and a process id can be (a broken file never traps).
+            guard let number = (row["window"] as? Double).flatMap({ CGWindowID(exactly: $0) }), let pid = (row["pid"] as? Double).flatMap({ pid_t(exactly: $0) }),
                   let before = rect(row["before"]), let given = rect(row["given"]) else { continue }
             ledger[number] = (pid, before, given)
             // What couldn't be given back yet (its app not answering) stays, tried again with every change.
@@ -1598,28 +1687,68 @@ final class NoteDesk {
                               dim: NSColor(white: 0.53, alpha: 1), petal: PaperLook.nsColor(NoteInk.ink(tint)), accent: color)
     }
 
-    /// What the editor typed, made on `base` (the file as the editor last had it): saved through the note (the next
-    /// base), kept somewhere safe (beside a paper that turned read only; or, when its folder is being switched away
-    /// from or is no longer the one in use, in that folder's own drain: NoteStore.drainLate), or refused, and then
-    /// the editor keeps it as typed and not saved. Typed text is never dropped.
-    func write(_ key: String, body: String, base: String?) -> NoteShelf.SaveAnswer {
-        if store.notesReady, let paper = store.paper(key) {
-            if store.readOnly(paper) {
-                // Typed just as it became one of two papers: kept in the copy beside it, never dropped.
-                if paper.version == nil, paper.file.body != body { store.keepAside(key, body: body) }
-                return .kept
+    /// What the editor typed, made on `base` (the file as the editor last had it). Returns the next base; nil when
+    /// it's refused, and then the editor keeps it as typed and not saved, and tries again. Typed text is never
+    /// dropped: saved through the note; kept beside a paper that turned read only; when its folder is being switched
+    /// away from or is no longer the one in use, handed to that folder's own drain (NoteStore.drainLate: stored there,
+    /// or in Unsaved notes); else journaled under its note's id for the next launch (NoteStore.journalUnsaved).
+    func write(_ key: String, body: String, base: String?) -> String? {
+        write(key, noteID: nil, instance: "", body: body, base: base)
+    }
+
+    /// `noteID` and `instance`: the note the editor was typed in. Its file renamed or moved while the editor was open
+    /// (Petal's viewer's margin, a final save as it closes), the save goes to that note as it is now, by its identity
+    /// (NoteShelf.saveTarget, NoteStore.currentID): never lost to a key that's gone, never a guess.
+    func write(_ key: String, noteID: String?, instance: String, body: String, base: String?) -> String? {
+        let papers = store.notes.map { (key: $0.key, id: $0.noteID, instance: $0.instance, version: $0.version) }
+        // With the note it was typed in known, only a paper that is that note (never another note that took its key).
+        let target = noteID.map { id in NoteShelf.saveTarget(key: key, noteID: id, instance: instance, papers: papers, current: store.currentID) } ?? key
+        guard let target, let paper = store.paper(target) else {
+            // Its folder switched away from (the note is in a session that ended): to that folder's drain.
+            if let late = store.drainLate(key: key, body: body, base: base) { return late }
+            // Refused (the paper gone, or no paper is surely that note): the typing goes into the journal under the
+            // note it was typed in, at once.
+            if let noteID {
+                store.journalUnsaved(noteID: noteID, path: key, base: base,
+                                     text: NoteShelf.unsavedText(current: nil, base: base, noteID: noteID, body: body, now: Date()))
             }
-            // Petal's own changes since (a place followed or added) don't make this a conflict; words changed do.
-            let base = NoteShelf.rebase(editor: base, current: paper.revision, currentBody: paper.file.body)
-            guard paper.file.body != body else { return .saved(base: base) }
-            if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fresh.remove(key) }
-            // Links the person typed (an address alone on a line): their pages' titles may be fetched; a link already
-            // in the note (from sync) never is.
-            let links = { (text: String) in Set(NoteBlock.blocks(text).compactMap { if case .link(let url) = $0 { url } else { nil } }) }
-            for url in links(body).subtracting(links(paper.file.body)) { LinkPreviews.shared.requested(url) }
-            if let next = store.change(key, base: base, edit: { $0.body = body }) { return .saved(base: next) }
+            return nil
         }
-        return store.drainLate(key: key, body: body, base: base) ? .kept : .refused
+        let key = target
+        if store.readOnly(paper) {
+            // Typed just as it became one of two papers: kept in the copy beside it, never dropped (handled: the
+            // editor doesn't keep it as unsaved).
+            if paper.version == nil, paper.file.body != body { store.keepAside(key, body: body) }
+            return paper.revision ?? base ?? ""
+        }
+        // Petal's own changes since (a place followed or added) don't make this a conflict; words changed do.
+        let base = NoteShelf.rebase(editor: base, current: paper.revision, currentBody: paper.file.body)
+        guard paper.file.body != body else { return base }
+        if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fresh.remove(key) }
+        // Links the person typed (an address alone on a line): their pages' titles may be fetched; a link already
+        // in the note (from sync) never is.
+        let links = { (text: String) in Set(NoteBlock.blocks(text).compactMap { if case .link(let url) = $0 { url } else { nil } }) }
+        for url in links(body).subtracting(links(paper.file.body)) { LinkPreviews.shared.requested(url) }
+        let next = store.change(key, base: base) { $0.body = body }
+        // Refused (the notes' folder switching or not ready yet, a drain): to the drain of the folder it was typed in
+        // when that session has ended; else the typing goes into the journal under its note's id at once, made on
+        // what the editor had (put back at the next launch if it never lands).
+        if next == nil, let late = store.drainLate(key: key, body: body, base: base) { return late }
+        if next == nil {
+            store.journalUnsaved(noteID: paper.noteID, path: paper.url.path, base: base ?? paper.revision,
+                                 text: NoteShelf.unsavedText(current: paper.file, base: base, noteID: paper.noteID, body: body, now: Date()))
+        }
+        return next
+    }
+
+    /// An editor back at what's saved after a refused save (the person undid it): the journal's snapshot of that
+    /// refused typing replaced by the note as it is (what's still waiting to be written kept), or retired when
+    /// nothing differs, keeping any picture or paste recovery still pending.
+    func settleUnsaved(_ key: String, noteID: String, instance: String, saved: String?) {
+        let papers = store.notes.map { (key: $0.key, id: $0.noteID, instance: $0.instance, version: $0.version) }
+        // No paper surely that note: nothing of another note's is read for it (only what the editor saved).
+        let target = NoteShelf.saveTarget(key: key, noteID: noteID, instance: instance, papers: papers, current: store.currentID)
+        store.settleUnsaved(target, noteID: noteID, saved: saved)
     }
 
     /// Pictures pasted or dropped on a note: their bytes read and decoded first (a file that's slow or not downloaded
@@ -1832,17 +1961,31 @@ final class NoteDesk {
         anchors = NoteShelf.rekeyed(anchors, old, new)
         lost = NoteShelf.rekeyed(lost, old, new)
         editors = NoteShelf.rekeyed(editors, old, new)
+        editorTokens = NoteShelf.rekeyed(editorTokens, old, new)
         pinPanels = NoteShelf.rekeyed(pinPanels, old, new)
         if let tab = tabPanels.removeValue(forKey: old) { tab.conceal() }
         if let panel = panels.removeValue(forKey: old) { panel.rekey(new); panels[new] = panel }
+        app.viewers.rekeyed(old, new)
     }
 
     /// An editor came or went: gone (folded, closed), the folder is read again, so a version that arrived while it
     /// was open shows.
-    func editorRegistered(_ key: String, _ handle: NoteEditorHandle?) {
-        editors[key] = handle
-        if handle == nil { store.reload() }
+    /// `token`: the paper the editor is in; a going-away clears only that paper's own registration (a note can close
+    /// on the desk as it opens in Petal's viewer, in either order).
+    func editorRegistered(_ key: String, _ handle: NoteEditorHandle?, token: UUID? = nil) {
+        if let handle {
+            editors[key] = handle
+            editorTokens[key] = token
+        } else {
+            guard token == nil || editorTokens[key] == nil || editorTokens[key] == token else { return }
+            editors[key] = nil
+            editorTokens[key] = nil
+            store.reload()
+        }
     }
+
+    /// Which paper each registered editor is in (by paper key), for `editorRegistered`.
+    @ObservationIgnored private var editorTokens: [String: UUID] = [:]
 
     func keep(_ key: String) {
         guard let paper = store.paper(key) else { return }
@@ -1929,8 +2072,11 @@ final class NoteDesk {
             s.after = String(passage.after.prefix(80))
             s.url = scene.tab?.url ?? ""
             s.path = scene.tab == nil ? scene.file : ""
-            // A sentence in a file follows the file through its bookmark, as a file's note does.
-            if scene.tab == nil { s.bookmark = scene.fileBookmark }
+            // A sentence in a file follows the file through its bookmark and its own identity, as a file's note does.
+            if scene.tab == nil {
+                s.bookmark = scene.fileBookmark
+                s.fileID = scene.fileID
+            }
             offers.append(s)
         }
         // A tab Petal can tell from the others (its id, or its tab-strip button): Safari's only tab, with no strip,
@@ -1951,6 +2097,7 @@ final class NoteDesk {
             s.path = scene.file
             s.title = (scene.file as NSString).lastPathComponent
             s.bookmark = scene.fileBookmark   // made with the read, off the main thread
+            s.fileID = scene.fileID
             offers.append(s)
         }
         // The person in a chat's conversation: their note shows beside their conversation in any chat app.
@@ -1992,8 +2139,9 @@ final class NoteDesk {
     @discardableResult
     /// `window`: the frame (Accessibility's coordinates) of the window it's made on, when that isn't the one in
     /// front (a drop on a window behind): its spot is recorded against that window.
+    /// `open` false: made without opening it on the desk (Petal's viewer opens it in its margin).
     func make(on stick: NoteStick, body: String = "", chat: String = "", at point: CGPoint? = nil, window: CGRect? = nil,
-              expecting: NoteShelf.KeyboardRequests.Target? = nil) -> PaperNote? {
+              expecting: NoteShelf.KeyboardRequests.Target? = nil, open opening: Bool = true) -> PaperNote? {
         var file = NoteFile(body: body)
         file.places = [stick]
         file.chat = chat
@@ -2008,6 +2156,7 @@ final class NoteDesk {
                 local.spots[paper.noteID] = NoteSpot.stick(panel: rect, window: NoteRules.appKitFrame(frame, primaryHeight: primaryHeight))
             }
         }
+        guard opening else { return paper }
         if let scene, stick.kind != .desktop, let index = NoteMatch.best([stick], scene) { here[paper.key] = index }
         open(paper.key, expecting: expecting)
         if stick.kind == .desktop { refreshSpaces() }
@@ -2026,12 +2175,16 @@ final class NoteDesk {
     /// window or Desktop. A selection refused (a secret, a field named for one, an app made private, the window or
     /// tab changed while it was read) makes no note at all: never a note without the check.
     private func noteOnSelection() {
-        guard on, let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return }
+        guard on else { return }
+        // Petal's viewer with the keyboard: a note on its selection (checked), else its page or slide, in its margin
+        // (through the same readiness gate, in the viewer's own way of making a note).
+        if let viewer = app.viewers.front { return viewer.newNote() }
+        guard let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return }
         guard takesChanges() else { return }
         let name = running.localizedName ?? ""
         let privacy = ClaudePanel.privacy.now
         let ticket = looks
-        Self.read(running, mac: local.mac) { scene, read in
+        Self.read(running, mac: local.mac, anchors: fileAnchors) { scene, read in
             // A read refused (stale, or its app no longer in front): no note.
             guard self.activate(scene, read: read, ticket: ticket) else { return self.say(Self.frontChanged) }
             self.passage(in: scene, privacy: privacy) { selected in
@@ -2178,7 +2331,7 @@ final class NoteDesk {
         let pid = running.processIdentifier
         // The private apps as they were when the read began: filtered again after the last wait.
         let privacy = ClaudePanel.privacy.now
-        Self.read(running, mac: local.mac) { scene, read in
+        Self.read(running, mac: local.mac, anchors: fileAnchors) { scene, read in
             guard self.on, drop == self.drops, !running.isTerminated, let number else { return }
             // Another window than the one read: the person in it is read from that window itself (never the front
             // window's), and only in a chat app that isn't kept private; else none.
@@ -2332,7 +2485,7 @@ final class NoteDesk {
         let privacy = ClaudePanel.privacy.now
         // This opening's own capture: one from an earlier opening, arriving late, is dropped (NoteShelf.captureCurrent).
         let generation = captures
-        Self.read(running, mac: local.mac) { scene, read in
+        Self.read(running, mac: local.mac, anchors: fileAnchors) { scene, read in
             guard NoteShelf.captureCurrent(generation, latest: self.captures) else { return }
             self.captured = (scene, read, read.tab?.url ?? "", name, privacy)
         }
@@ -2381,31 +2534,31 @@ final class NoteDesk {
         menu.addItem(header)
         for (index, stick) in paper.file.places.enumerated() {
             let item = NSMenuItem(title: Self.describe(stick), action: nil, keyEquivalent: "")
-            item.state = here[key] == index ? .on : .off
-            if paper.file.places.count > 1 {
-                let sub = NSMenu()
-                sub.addItem(ActionItem("Take it off here") { [weak self] in self?.unstick(key, index) })
-                item.submenu = sub
+            item.representedObject = index
+            let sub = NSMenu()
+            // A file's note: the file in Petal's viewer, at its page or slide, with its notes in the margin.
+            if ViewerFiles.offersViewer(stick) {
+                sub.addItem(ActionItem("Open in Petal's viewer") { [weak self] in self?.openInViewer(stick) })
             }
+            if paper.file.places.count > 1 { sub.addItem(ActionItem("Take it off here") { [weak self] in self?.unstick(key, index) }) }
+            if !sub.items.isEmpty { item.submenu = sub }
             menu.addItem(item)
         }
-        if let cached = scene, let cachedRead = front, cached.window != nil {
-            // Cached from the last look: filtered again, an app made private since gives nothing of itself.
-            let (scene, front) = Self.filtered(cached, cachedRead, since: scenePrivacy)
-            let name = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
-            let offers = places(for: scene, read: front, appName: name).filter { offer in !paper.file.places.contains { $0.samePlace(offer) } }
-            if !offers.isEmpty {
-                menu.addItem(.separator())
-                let title = NSMenuItem(title: "Stick it here instead", action: nil, keyEquivalent: "")
-                title.isEnabled = false
-                menu.addItem(title)
-                for offer in offers where offer.kind != .passage { menu.addItem(ActionItem(Self.describe(offer)) { [weak self] in self?.restick(key, [offer]) }) }
-                let also = NSMenuItem(title: "Also stick it to", action: nil, keyEquivalent: "")
-                let sub = NSMenu()
-                for offer in offers where offer.kind != .passage { sub.addItem(ActionItem(Self.describe(offer)) { [weak self] in self?.restick(key, paper.file.places + [offer]) }) }
-                also.submenu = sub
-                menu.addItem(also)
-            }
+        // The place it shows at now, checked: the key viewer's margin, else the last look's window.
+        let showing = shownIndex(key)
+        for item in menu.items { if let index = item.representedObject as? Int { item.state = showing == index ? .on : .off } }
+        let offers = stickOffers(key)
+        if !offers.isEmpty {
+            menu.addItem(.separator())
+            let title = NSMenuItem(title: "Stick it here instead", action: nil, keyEquivalent: "")
+            title.isEnabled = false
+            menu.addItem(title)
+            for offer in offers { menu.addItem(ActionItem(Self.describe(offer)) { [weak self] in self?.restick(key, [offer]) }) }
+            let also = NSMenuItem(title: "Also stick it to", action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            for offer in offers { sub.addItem(ActionItem(Self.describe(offer)) { [weak self] in self?.restick(key, paper.file.places + [offer]) }) }
+            also.submenu = sub
+            menu.addItem(also)
         }
         menu.addItem(.separator())
         // The Desktop the note's screen shows, read when chosen (off the main thread): only with its number is the note
@@ -2421,8 +2574,62 @@ final class NoteDesk {
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
-    private func restick(_ key: String, _ places: [NoteStick]) {
-        guard let paper = store.paper(key) else { return }
+    /// What "Stick it here instead" offers a note, from the current place (the one rule for "here"): Petal's viewer
+    /// with the keyboard, its file at the page or slide shown (ViewerModel.fileAnchor), never the last scene outside
+    /// it; else what the last look found in front (filtered again for privacy). Never a passage, nor a place the note
+    /// already has.
+    func stickOffers(_ key: String) -> [NoteStick] {
+        guard let paper = store.paper(key) else { return [] }
+        let offers: [NoteStick]
+        if let viewer = app.viewers.front {
+            // Only once its file's identity is in: nothing to offer until then.
+            offers = viewer.fileAnchor().map { [$0] } ?? []
+        } else if let cached = scene, let cachedRead = front, cached.window != nil {
+            // Cached from the last look: filtered again, an app made private since gives nothing of itself.
+            let (scene, front) = Self.filtered(cached, cachedRead, since: scenePrivacy)
+            let name = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
+            offers = places(for: scene, read: front, appName: name)
+        } else {
+            offers = []
+        }
+        return offers.filter { offer in offer.kind != .passage && !paper.file.places.contains { $0.samePlace(offer) } }
+    }
+
+    /// Which of a note's places it shows at now: in the key viewer's margin, else by the window in front.
+    func shownIndex(_ key: String) -> Int? {
+        if let viewer = app.viewers.front {
+            guard let paper = store.paper(key), let shown = viewer.notes.first(where: { $0.paper.key == key })?.place else { return nil }
+            return paper.file.places.firstIndex { $0.samePlace(shown) }
+        }
+        return here[key]
+    }
+
+    /// A file's place opened in Petal's viewer: its file found by the one resolver the margin and comments use
+    /// (ViewerFiles: its own file wherever it went, else its bookmark's, else its path's), off the main thread, then
+    /// checked as any file the viewer opens. A place whose bookmark finds nothing opens nothing (never its old path).
+    /// `done`: whether it opened.
+    func openInViewer(_ stick: NoteStick, done: @escaping @MainActor (Bool) -> Void = { _ in }) {
+        let mac = local.mac
+        Self.queue.async {
+            let found = ViewerFiles.locate(stick, mac: mac, follow: ViewerLoader.follow)?.path
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let found else {
+                        self.say("Petal can't find that file any more (it was moved somewhere it can't follow, or deleted).")
+                        return done(false)
+                    }
+                    self.app.viewers.open(path: found, page: stick.page ?? stick.slide) { result in
+                        if case .failure(let refusal) = result { self.say(refusal.description) }
+                        done((try? result.get()) != nil)
+                    }
+                }
+            }
+        }
+    }
+
+    func restick(_ key: String, _ places: [NoteStick]) {
+        // The letterhead's menu, on a paper's own panel and in Petal's viewer's margin alike.
+        guard takesChanges(), let paper = store.paper(key) else { return }
         guard !store.readOnly(paper) else { return say("This note has two versions: keep one first.") }
         guard store.change(key, touch: false, edit: { $0.places = places }) != nil else { return }
         if let scene, let index = NoteMatch.best(places, scene) { here[key] = index } else { here[key] = nil }
@@ -2556,6 +2763,9 @@ final class NoteDesk {
         if let scene, let front {
             let (scene, read) = Self.filtered(scene, front, since: scenePrivacy)
             apply(scene, read: read, scan: false, fresh: false)
+            // A note's file places changed since the file in front was resolved (one synced onto it, another
+            // Mac's record, an older bookmark): it's read again, through the same gate as every look.
+            if !scene.resolves(fileAnchors) { look() }
         } else { look() }
         // From the Spaces last read; read (off the main thread) when none were yet and a note is on a Desktop.
         if Self.spaces.isEmpty { refreshSpaces() } else { placeDesktop() }
@@ -2567,6 +2777,16 @@ final class NoteDesk {
     }
 
     /// For snapshots: Stick here as if a page were in front.
+    /// For `Petal --viewer-check` only: notes on, with made-up notes and no folder read (the tools answer).
+    func previewReady() { ready = true }
+
+    /// For `Petal --viewer-check` only: the last look as if `scene` had been read in front (nothing read).
+    func previewScene(_ scene: NoteScene, read: ClaudePanel.FrontRead = ClaudePanel.FrontRead()) {
+        self.scene = scene
+        front = read
+        scenePrivacy = ClaudePanel.privacy.now
+    }
+
     func previewCapture() {
         ready = true   // snapshots: nothing to load
         var tab = NoteTab(url: "https://guide.example/day-one", title: "Day one")

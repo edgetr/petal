@@ -67,6 +67,8 @@ final class PetalApp {
     let paper = NoteDesk()
     /// The Petal Notes window: every note, its notebooks, their grid and canvas (NotesWindow.swift).
     @ObservationIgnored let notesWindow = NotesWindow()
+    /// Petal's viewer: documents with their notes in a margin (Viewer.swift).
+    let viewers = Viewers()
     /// Reading and closing browser tabs (Browsers.swift).
     @ObservationIgnored let browsers = Browsers()
     /// Where each AI app is installed, when it is.

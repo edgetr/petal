@@ -519,14 +519,15 @@ final class NoteStore {
     /// What was typed in a note of a folder whose session has ended (an editor's save that arrives after the switch
     /// began), handed to that folder's drain: journaled on this Mac first (the pictures' bytes and pastes its
     /// snapshot held are kept), then written on the files' queue as the drain writes everything (`drain`: a based
-    /// write, a copy beside the file when it changed, "Unsaved notes" when it can't land). False when no ended
-    /// session holds the note: the editor keeps its text.
-    func drainLate(key: String, body: String, base: String?) -> Bool {
+    /// write, a copy beside the file when it changed, "Unsaved notes" when it can't land). Returns the text handed
+    /// over (the editor's next base); nil when no ended session holds the note: the save is refused, and the editor
+    /// keeps its text (journaled under its note's id: `journalUnsaved`).
+    func drainLate(key: String, body: String, base: String?) -> String? {
         let ended = [session, previous].compactMap { $0 }.filter(\.ended)
         guard let from = ended.first(where: { held in held.notes.contains { $0.key == key && $0.version == nil } }),
-              let index = from.notes.firstIndex(where: { $0.key == key && $0.version == nil }) else { return false }
+              let index = from.notes.firstIndex(where: { $0.key == key && $0.version == nil }) else { return nil }
         var paper = from.notes[index]
-        guard paper.file.body != body else { return true }
+        guard paper.file.body != body else { return paper.revision ?? base ?? "" }
         let since = NoteShelf.rebase(editor: base, current: paper.revision, currentBody: paper.file.body) ?? paper.revision
         paper.file.body = body
         paper.file.modified = Date()
@@ -554,7 +555,7 @@ final class NoteStore {
                 NoteDisk.states[sessionID] = nil
             }
         }
-        return true
+        return text
     }
 
     /// A read of the folder taken in: what it found merged with what changed here since it began, then everything
@@ -1535,6 +1536,40 @@ final class NoteStore {
     /// Picture bytes accepted and not in their notes' pictures' folders yet, by note id: what each snapshot carries
     /// for the pictures its text references.
     private var pendingPictures: [String: [String: Data]] { get { session.pendingPictures } set { session.pendingPictures = newValue } }
+
+    /// Typing a change refused (the notes' folder switching, a drain, the paper gone): its whole snapshot in the
+    /// journal at once, under its note's id, made on `base` (what the editor had), with the bytes of the pictures it
+    /// references that aren't saved yet. A save that lands later replaces and clears it as any snapshot; a close or a
+    /// quit before that leaves it for the next launch's recovery (into that note while it says `base`, else beside
+    /// it: an id-less note's path id never puts it into another file that took the path).
+    func journalUnsaved(noteID: String, path: String, base: String?, text: String) {
+        let loading = (importsLoading[noteID] ?? [:]).sorted { $0.key < $1.key }.flatMap(\.value)
+        let entry = Self.unsavedEntry(noteID: noteID, path: path, base: base, text: text, pending: pendingPictures[noteID] ?? [:], loading: loading)
+        NoteJournal.queue.async { NoteJournal.snapshot(entry) }
+    }
+
+    /// A refused save's snapshot, as the ordinary snapshot path makes one: the pictures it references not saved yet
+    /// (their bytes), and the pastes still being read for the note (their sources), so a quit loses neither.
+    nonisolated static func unsavedEntry(noteID: String, path: String, base: String?, text: String, pending: [String: Data],
+                                         loading: [NoteJournal.Import]) -> NoteJournal.Entry {
+        let pictures = NoteShelf.journalPictures(text: text, pending: Array(pending.keys)).compactMap { name in
+            pending[name].map { NoteJournal.Picture(name: name, data: $0) }
+        }
+        var entry = NoteJournal.Entry(noteID: noteID, path: path, base: base, text: text, pictures: pictures)
+        if !loading.isEmpty { entry.imports = loading }
+        return entry
+    }
+
+    /// A refused save's snapshot settled (the editor is back at what's saved): with writing still waiting for the
+    /// note, the journal holds the note as it is now (its own snapshot, as every change makes); else the refused
+    /// typing goes, leaving only picture or paste recovery still pending (NoteJournal.retire).
+    func settleUnsaved(_ key: String?, noteID: String, saved: String?) {
+        if let key, let paper = paper(key), let session = session(for: key), let revision = paper.revision, !session.pending.isEmpty {
+            return snapshot(paper, text: revision, session: session)
+        }
+        let current = key.flatMap { paper($0)?.revision } ?? saved
+        NoteJournal.queue.async { NoteJournal.retire(noteID: noteID, current: current) }
+    }
 
     /// The journal's whole snapshot of a note as the person has it now: its text, the base of its oldest write not
     /// landed yet, and the bytes of the pictures that text references and that aren't in its folder yet.
@@ -2535,6 +2570,10 @@ final class NoteStore {
         if hex.isEmpty || hex == "accent" { return NSColor.controlAccentColor.usingColorSpace(.sRGB) ?? .systemBlue }
         return NSColor(hex: hex) ?? NSColor.controlAccentColor
     }
+
+    /// For `Petal --viewer-check` only: as while the notes' folder is being entered (`true`: notes take no change from
+    /// outside), and entered again (`false`).
+    func previewEntering(_ entering: Bool) { session.ready = !entering }
 
     /// For snapshots: notes as given, nothing read or written.
     func preview(_ notes: [PaperNote], notebooks: [Notebook]) {

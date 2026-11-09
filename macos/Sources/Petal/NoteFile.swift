@@ -29,7 +29,9 @@ struct NoteStick: Equatable, Sendable {
         /// A browser tab: its own id (Chromium) or its tab-strip button (Safari, Firefox, Zen) while the browser
         /// runs, and its page (url) after.
         case tab
-        /// A file open in any app: its path (AXDocument), kept with a bookmark so moves and renames follow.
+        /// A file open in any app: its path (AXDocument), kept with a bookmark so moves and renames follow. In Petal's
+        /// viewer it may also say where in the file: a page or slide (`page`, `slide`), and on a PDF's page a passage
+        /// (`quote`, `before`, `after` and its `bounds` on the page). In other apps it's the file, as before.
         case file
         /// One window: its number while its app runs; after, its app and title when only one window has it.
         case window
@@ -84,6 +86,14 @@ struct NoteStick: Equatable, Sendable {
     var contact = ""
     /// A person's address in their chat (an email or phone number), when the app shows one.
     var handle = ""
+    /// Where in a file (Petal's viewer): its page or slide, counted from 1, and a PDF passage's bounds on that page
+    /// (x, y, width, height in the page's points, from its bottom-left corner).
+    var page: Int? = nil
+    var slide: Int? = nil
+    var bounds: [Double]? = nil
+    /// The file it was made on, as the disk knew it then ("device:inode"; ViewerFileID): a file and a sentence in one
+    /// are found again by it wherever the file went, and a new file that took its old path is never it.
+    var fileID = ""
     /// Keys this Petal doesn't know (a later one's, or the person's own), each with its lines exactly as written
     /// (nested ones too), written back as they were.
     var extra: [(key: String, lines: [String])] = []
@@ -93,6 +103,7 @@ struct NoteStick: Equatable, Sendable {
             && a.bookmark == b.bookmark && a.quote == b.quote && a.before == b.before && a.after == b.after && a.mac == b.mac
             && a.pid == b.pid && a.window == b.window && a.tabID == b.tabID && a.shared == b.shared && a.tabElement == b.tabElement
             && a.desktop == b.desktop && a.mode == b.mode && a.contact == b.contact && a.handle == b.handle
+            && a.page == b.page && a.slide == b.slide && a.bounds == b.bounds && a.fileID == b.fileID
             && a.extra.map(\.key) == b.extra.map(\.key) && a.extra.map(\.lines) == b.extra.map(\.lines)
     }
 
@@ -114,15 +125,34 @@ struct NoteStick: Equatable, Sendable {
     /// The tab as NoteRules knows tabs.
     var noteTab: NoteTab { NoteTab(id: tabID, element: tabElement, shared: shared, url: url, title: title) }
 
-    /// The same place, whatever was learned about it since (a new window number, a title).
+    /// The same passage: its words and the words around them (the same words twice on one page are two passages,
+    /// told apart only by what's before and after). Two with no words are the same (a whole file or page).
+    func samePassage(_ other: NoteStick) -> Bool {
+        quote == other.quote && before == other.before && after == other.after
+    }
+
+    /// The same file, as the one file resolver knows files: by the incarnation recorded with each place (`fileID`:
+    /// both have it and it's the same), else, with neither recorded, by the very same bookmark at the same path. A
+    /// path alone never proves it (another file may have taken it), and what can't be proven the same file is
+    /// another one: kept, never merged or replaced. A place is always on its own file.
+    func sameFile(_ other: NoteStick) -> Bool {
+        // A place is always on its own file, recorded or not.
+        if self == other { return true }
+        if !fileID.isEmpty || !other.fileID.isEmpty { return fileID == other.fileID }
+        return !bookmark.isEmpty && bookmark == other.bookmark && path == other.path
+    }
+
+    /// The same place, whatever was learned about it since (a new window number, a title). A file's place, or a
+    /// sentence in a file, is the same only as the same file (`sameFile`) at the same position; the one equality
+    /// every place is deduplicated or replaced by.
     func samePlace(_ other: NoteStick) -> Bool {
         guard kind == other.kind else { return false }
         switch kind {
-        case .passage: return quote == other.quote && (url.isEmpty ? path == other.path : NoteRules.sameURL(url, other.url))
+        case .passage: return samePassage(other) && (url.isEmpty ? sameFile(other) : NoteRules.sameURL(url, other.url))
         case .tab:
             if mac == other.mac, let a = pid, let b = other.pid { return NoteRules.sameTab(noteTab, pid: a, other.noteTab, pid: b) }
             return NoteRules.byAddress(noteTab, other.noteTab)
-        case .file: return path == other.path
+        case .file: return sameFile(other) && page == other.page && slide == other.slide && samePassage(other)
         case .window: return NoteShelf.sameWindow(self, other)
         case .app: return app == other.app
         case .desktop: return desktop == other.desktop
@@ -151,7 +181,13 @@ struct NoteStick: Equatable, Sendable {
             let quote = "“" + self.quote.prefix(60) + (self.quote.count > 60 ? "…”" : "”")
             return quote + " on " + (url.isEmpty ? (path as NSString).lastPathComponent : NoteText.shortAddress(url))
         case .tab: return "The page " + (NoteText.shortAddress(url).isEmpty ? title : NoteText.shortAddress(url))
-        case .file: return "The file " + (path as NSString).lastPathComponent + (appName.isEmpty ? "" : " (in any app)")
+        case .file:
+            let name = (path as NSString).lastPathComponent
+            if !self.quote.isEmpty {
+                let quote = "“" + self.quote.prefix(60) + (self.quote.count > 60 ? "…”" : "”")
+                return quote + " on " + name + (spot.isEmpty ? "" : ", " + spot)
+            }
+            return "The file " + name + (spot.isEmpty ? "" : ", " + spot) + (appName.isEmpty ? "" : " (in any app)")
         case .window: return "A window of \(appName.isEmpty ? app : appName)" + (title.isEmpty ? "" : ": “\(title)”")
         case .app: return "Every window of \(appName.isEmpty ? app : appName)"
         case .desktop: return "Desktop \(desktop.map(String.init) ?? "")" + (mode.isEmpty ? "" : " (\(mode))")
@@ -159,17 +195,50 @@ struct NoteStick: Equatable, Sendable {
         }
     }
 
+    /// A place that names a file as the one file resolver keys it (ViewerFiles): everything it goes by.
+    var fileKey: String { [path, bookmark, fileID].joined(separator: "\u{1}") }
+
+    /// Where in its file (Petal's viewer): "slide 3", "page 3", or nothing.
+    var spot: String {
+        if let slide { return "slide \(slide)" }
+        if let page { return "page \(page)" }
+        return ""
+    }
+
     /// What the letterhead says for this place, in a few words.
     func label(found: Bool = true) -> String {
         switch kind {
         case .passage: return found ? "this sentence" : "passage moved"
         case .tab: return NoteText.shortAddress(url).isEmpty ? (title.isEmpty ? "a tab" : title) : NoteText.shortAddress(url)
-        case .file: return (path as NSString).lastPathComponent.isEmpty ? "a file" : (path as NSString).lastPathComponent
+        case .file:
+            let name = (path as NSString).lastPathComponent.isEmpty ? "a file" : (path as NSString).lastPathComponent
+            return spot.isEmpty ? name : name + " · " + spot
         case .window: return title.isEmpty ? (appName.isEmpty ? "a window" : "\(appName) window") : title
         case .app: return "all of \(appName.isEmpty ? app : appName)"
         case .desktop: return desktop.map { "Desktop \($0)" } ?? "the Desktop"
         case .person: return title.isEmpty ? "a person" : title
         }
+    }
+}
+
+/// A spot in a file as a file anchor writes it (Petal's viewer): a PDF passage's bounds on its page, "x y width
+/// height" in the page's points. Only numbers a page can have (within a million points either way: PDF pages are at
+/// most 14,400) with a positive size; anything else is no bounds, kept in the file as it was written.
+enum ViewerSpots {
+    static let reach = 1_000_000.0
+
+    static func boundsText(_ bounds: [Double]) -> String? {
+        guard bounds.count == 4, bounds.allSatisfy({ $0.isFinite && abs($0) <= reach }), bounds[2] > 0, bounds[3] > 0 else { return nil }
+        return bounds.map { value in
+            let rounded = (value * 100).rounded() / 100
+            return rounded == rounded.rounded() ? String(Int(rounded)) : String(rounded)
+        }.joined(separator: " ")
+    }
+
+    static func bounds(_ text: String) -> [Double]? {
+        let parts = text.split(separator: " ").compactMap { Double($0) }
+        guard parts.count == 4, text.split(separator: " ").count == 4, boundsText(parts) != nil else { return nil }
+        return parts
     }
 }
 
@@ -187,12 +256,29 @@ struct NoteScene: Equatable, Sendable {
     var file = ""
     /// A bookmark to `file` (base64), made with the read off the main thread, for a note stuck to it.
     var fileBookmark = ""
+    /// `file` as the disk knows it (its incarnation on this Mac, ViewerFileID's record), read with it.
+    var fileID = ""
+    /// Which notes' places name the file in front (by `NoteStick.fileKey`), as the one file resolver says off the main
+    /// thread (ViewerFiles: each place's own file by its incarnation, else its bookmark's, else its path's); nil when
+    /// it wasn't worked out (then a file's place fits by its path, Phase 1's rule).
+    var onFile: Set<String>? = nil
+    /// The places (by `fileKey`) `onFile` was worked out for: a place it never saw (a note synced onto the file in
+    /// front, a place changed) means it's stale, and the file in front is read again (`resolves`).
+    var resolved: Set<String> = []
     var desktop: Int? = nil
     /// The person in the conversation in front (PersonRead), never read from an app kept private: their name, their
     /// vault contact when exactly one contact has it, and their address when the chat shows one.
     var person = ""
     var personContact = ""
     var personHandle = ""
+}
+
+extension NoteScene {
+    /// Whether this scene's file membership covers every file place the notes have now: true with no file in front
+    /// (nothing to work out); else every anchor's key was among those resolved with it.
+    func resolves(_ anchors: [NoteStick]) -> Bool {
+        file.isEmpty || anchors.allSatisfy { resolved.contains($0.fileKey) }
+    }
 }
 
 extension NoteScene {
@@ -208,6 +294,8 @@ extension NoteScene {
         s.person = ""
         s.personContact = ""
         s.personHandle = ""
+        s.fileID = ""
+        s.onFile = nil
         return s
     }
 
@@ -224,6 +312,10 @@ extension NoteScene {
         s.tab = nil
         s.file = ""
         s.fileBookmark = ""
+        // The file in front is the read window's too: its identity and which notes are on it go with it.
+        s.fileID = ""
+        s.onFile = nil
+        s.resolved = []
         s.person = person?.name ?? ""
         s.personHandle = person?.handle ?? ""
         s.personContact = ""
@@ -337,7 +429,7 @@ enum NoteMatch {
         switch stick.kind {
         case .passage:
             if !stick.url.isEmpty, let tab = scene.tab { return NoteRules.samePage(stick.url, tab.url) }
-            return !stick.path.isEmpty && stick.path == scene.file
+            return onFrontFile(stick, scene)
         case .tab:
             // NoteTab's rules exactly: its own tab while the browser runs (its id, or its tab-strip button), wherever
             // it moved and whatever it shows, never another tab on the same address; after the browser restarted
@@ -347,7 +439,7 @@ enum NoteMatch {
             let pid = stick.mac == scene.mac ? stick.pid ?? -1 : -1
             return NoteRules.sameTab(stick.noteTab, pid: pid, now, pid: scene.pid)
         case .file:
-            return !stick.path.isEmpty && stick.path == scene.file
+            return onFrontFile(stick, scene)
         case .window:
             guard !stick.app.isEmpty, stick.app == scene.app, scene.window != nil else { return false }
             if stick.mac == scene.mac, let pid = stick.pid, pid == scene.pid { return stick.window == scene.window }
@@ -361,6 +453,16 @@ enum NoteMatch {
             // Their conversation in any chat app, by what tells them apart (their contact or address), never a name alone.
             return scene.window != nil && PersonRead.matches(stick, scene)
         }
+    }
+
+    /// A file's place (or a sentence in a file) on the file in front: by the one file resolver's answer when it was
+    /// worked out (a path another file took since is never it, and a file renamed is), else by its path.
+    static func onFrontFile(_ stick: NoteStick, _ scene: NoteScene) -> Bool {
+        guard !scene.file.isEmpty, stick.url.isEmpty else { return false }
+        // Made from this very read (the same incarnation, recorded with it): that file.
+        if !stick.fileID.isEmpty, stick.fileID == scene.fileID { return true }
+        if let onFile = scene.onFile { return onFile.contains(stick.fileKey) }
+        return !stick.path.isEmpty && stick.path == scene.file
     }
 
     /// The most specific of a note's places that fits what's in front (its index), or nil. Two places of one rank
@@ -523,7 +625,8 @@ struct NoteFile: Equatable, Sendable {
                 var fields: [(String, String)] = [("kind", place.kind.rawValue)]
                 let strings: [(String, String)] = [("app", place.app), ("appName", place.appName), ("url", place.url), ("title", place.title),
                                                    ("path", place.path), ("bookmark", place.bookmark), ("quote", place.quote),
-                                                   ("before", place.before), ("after", place.after), ("mac", place.mac), ("mode", place.mode)]
+                                                   ("before", place.before), ("after", place.after), ("mac", place.mac), ("mode", place.mode),
+                                                   ("fileID", place.fileID)]
                 for (key, value) in strings where !value.isEmpty { fields.append((key, Self.quoted(value))) }
                 if let pid = place.pid { fields.append(("pid", "\(pid)")) }
                 if let window = place.window { fields.append(("window", "\(window)")) }
@@ -532,6 +635,9 @@ struct NoteFile: Equatable, Sendable {
                 if let desktop = place.desktop { fields.append(("desktop", "\(desktop)")) }
                 if !place.contact.isEmpty { fields.append(("contact", Self.quoted(place.contact))) }
                 if !place.handle.isEmpty { fields.append(("handle", Self.quoted(place.handle))) }
+                if let page = place.page { fields.append(("page", "\(page)")) }
+                if let slide = place.slide { fields.append(("slide", "\(slide)")) }
+                if let bounds = place.bounds, let text = ViewerSpots.boundsText(bounds) { fields.append(("bounds", Self.quoted(text))) }
                 for (offset, field) in fields.enumerated() {
                     head.append((offset == 0 ? "  - " : "    ") + "\(field.0): \(field.1)")
                 }
@@ -610,6 +716,7 @@ struct NoteFile: Equatable, Sendable {
                 case "after": stick.after = value
                 case "mac": stick.mac = value
                 case "mode": stick.mode = value
+                case "fileID": stick.fileID = value
                 case "pid": stick.pid = Int32(value)
                 case "window": stick.window = UInt32(value)
                 case "tab": stick.tabID = value
@@ -617,6 +724,10 @@ struct NoteFile: Equatable, Sendable {
                 case "desktop": stick.desktop = Int(value)
                 case "contact": stick.contact = value
                 case "handle": stick.handle = value
+                // A spot this Petal can't read is kept as written, never dropped.
+                case "page" where (Int(value) ?? 0) > 0: stick.page = Int(value)
+                case "slide" where (Int(value) ?? 0) > 0: stick.slide = Int(value)
+                case "bounds" where ViewerSpots.bounds(value) != nil: stick.bounds = ViewerSpots.bounds(value)
                 default: stick.extra.append((key: field.key, lines: field.lines))
                 }
             }
@@ -1497,26 +1608,16 @@ enum NoteShelf {
         }
 
         /// Its save ran: true to take the version that waited.
-        mutating func saved() -> Bool {
+        mutating func saved() -> Bool { saved(landed: true) }
+
+        /// Its save ran and landed (`landed`), or was refused (the notes' folder switching, a drain under way, the
+        /// paper gone): refused, it stays dirty (what's typed is still only in the editor, tried again, and no other
+        /// version replaces it); landed, clean, and true to take the version that waited.
+        mutating func saved(landed: Bool) -> Bool {
+            guard landed else { return false }
             dirty = false
             defer { deferred = false }
             return deferred
-        }
-    }
-
-    /// What an editor's save came to: saved through the note (the base its next edit is made on), kept somewhere
-    /// safe that isn't the note as the editor has it (a copy beside a paper turned read only, or the drain of the
-    /// folder it was typed in), or refused (nothing took the text).
-    enum SaveAnswer: Equatable { case saved(base: String?), kept, refused }
-
-    /// An editor after its save ran: what it counts as saved (`body`), what its next edit is made on (`base`), and
-    /// whether its typing is saved now. Only an accepted save advances `body` or clears the dirty marker; a refused
-    /// one leaves both, so the text is still to be saved, and is tried again.
-    static func afterSave(body: String, base: String?, typed: String, answer: SaveAnswer) -> (body: String, base: String?, accepted: Bool) {
-        switch answer {
-        case .saved(let next): return (typed, next ?? base, true)
-        case .kept: return (typed, base, true)
-        case .refused: return (body, base, false)
         }
     }
 
@@ -1657,6 +1758,33 @@ enum NoteShelf {
     static func placement(window: Int?, onDesktopShowing: Bool) -> Placement {
         if let window { return .window(window) }
         return onDesktopShowing ? .desktop : .none
+    }
+
+    /// What a refused save puts in the journal: the whole note, as a normal save writes it (its front matter, its
+    /// id, places and dates, everything) with the edited body: the note as the store has it (`current`), else as the
+    /// editor last had its file (`base`). A note with no id of its own (known by its path) has no front matter to
+    /// keep: its text is its body, as its file is.
+    static func unsavedText(current: NoteFile?, base: String?, noteID: String, body: String, now: Date) -> String {
+        if needsID(noteID) { return body }
+        var file = current ?? base.map { NoteFile.parse($0, fallbackID: noteID, fallbackDate: now) } ?? NoteFile(id: noteID, created: now)
+        file.body = body
+        file.modified = now
+        return file.serialized()
+    }
+
+    /// Where an editor's save goes: the paper it was typed in, when the paper at that key is still that note (its
+    /// identity, by holder keys: an id given since followed from that very file, and an id-less note's path id only
+    /// with its own file); else (renamed or moved while the editor was open) the one paper of that note now. nil
+    /// when no paper, or more than one, is that note, and when another note took its key: never a guess, never the
+    /// key alone (the typing is then journaled under the note it was typed in).
+    static func saveTarget(key: String, noteID: String, instance: String, papers: [(key: String, id: String, instance: String, version: String?)],
+                           current: (String, String) -> String) -> String? {
+        let id = current(noteID, instance)
+        let holder = id == noteID ? holderKey(id: noteID, instance: instance) : id
+        let isNote = { (paper: (key: String, id: String, instance: String, version: String?)) in holderKey(id: paper.id, instance: paper.instance) == holder }
+        if let atKey = papers.first(where: { $0.key == key }), isNote(atKey) { return key }
+        let found = papers.filter { $0.version == nil && isNote($0) }
+        return found.count == 1 ? found[0].key : nil
     }
 
     /// A file name for a note's text that holds no secret: its title, made from its text after the vault's
