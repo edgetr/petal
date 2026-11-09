@@ -1017,6 +1017,25 @@ struct NoteHelpCheck {
                && noAI?.last == "$130" && noAI?.unconfirmed == "$95" && noAI?.hit == false,
                "no AI: a crossing shows its number faintly, couldn't confirm, never a hit (so it never opens the note)")
 
+        // MARK: Round seventeen: fail, don't hold; steps shielded at the boundary; a first unconfirmed reading
+
+        let stepKey = "saved-vault-key-Zr81LmQx55vNpTt2Wq"
+        let stepIndex = UIMap.SecretIndex([stepKey])
+        guard let stepShown = NoteShield.shield(["Reading .env: ANTHROPIC_API_KEY=\(stepKey)"], index: stepIndex)?.first else { return expect(false, "a step") }
+        var stepFile = NoteFile(id: "ST1", created: now)
+        stepFile.helper = NoteHelp.Helper(state: .working, who: "✦ Petal", step: stepShown.text, at: now)
+        guard let stepMade = NoteHelp.shielded(Said(who: "✦ Petal", text: "Done.", steps: ["Reading .env: ANTHROPIC_API_KEY=\(stepKey)"]), index: stepIndex) else { return expect(false, "steps") }
+        stepFile.steps = stepMade.steps.map(\.text)
+        expect(!stepShown.text.contains("Zr81LmQx") && !stepFile.serialized().contains("Zr81LmQx"),
+               "a step echoing a saved key is redacted where the bar, the previews (the agent's Shielded activity), the back and the file read it", stepFile.serialized())
+        expect(NoteShield.shield(["a step"], index: .unavailable) == nil && NoteHelp.shielded(Said(who: "x", text: "y"), index: .unavailable) == nil,
+               "the vault unreadable: nothing can be shielded, so a run can't start and output arriving fails it (nothing held)")
+        let firstUnsure: NoteHelp.Watch = { var w = NoteHelp.Watch(every: "1d", line: "under $100", mac: "m"); w.unconfirmed = "$95"; return w }()
+        let corner = NoteHelp.corner(firstUnsure)
+        expect(corner != nil && corner?.number == nil && corner?.faint == "$95 · couldn't confirm",
+               "a first reading that couldn't be confirmed: the corner is drawn, its number faint, “· couldn't confirm”")
+        expect(NoteHelp.corner(NoteHelp.Watch(every: "1d", line: "under $100", mac: "m")) == nil, "nothing read yet: no corner")
+
         // MARK: Open all never launches an app or a script (NoteTasks)
 
         let scratch = FileManager.default.temporaryDirectory.appending(path: "petal-notetasks-\(UUID().uuidString)")

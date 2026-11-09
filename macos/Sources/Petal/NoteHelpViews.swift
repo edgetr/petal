@@ -271,7 +271,7 @@ struct HelperBar: View {
     private func line(run: NoteHelpers.Run?, helper: NoteHelp.Helper?) -> String {
         if let run {
             if run.paused { return "\(run.who) · paused" }
-            let step = run.sticky?.agent.activity ?? ""
+            let step = run.sticky?.agent.activity.text ?? ""
             return run.who + " · " + (step.isEmpty ? "working" : step)
         }
         guard let helper else { return "" }
@@ -372,15 +372,18 @@ struct WatchCorner: View {
     let glass: Bool
 
     var body: some View {
+        let corner = NoteHelp.corner(watch)
         VStack(alignment: .trailing, spacing: 0) {
-            Text(watch.last).font(.system(size: 24, weight: .bold)).tracking(-0.48)
-                .foregroundStyle(glass ? Color.primary : HelperLook.number(tint)).lineLimit(1).minimumScaleFactor(0.6)
+            if let number = corner?.number {
+                Text(number).font(.system(size: 24, weight: .bold)).tracking(-0.48)
+                    .foregroundStyle(glass ? Color.primary : HelperLook.number(tint)).lineLimit(1).minimumScaleFactor(0.6)
+            }
             if !watch.history.isEmpty {
                 Text(watch.history.prefix(2).joined(separator: " · ")).font(.system(size: 11)).strikethrough().foregroundStyle(Color(white: 0.6)).lineLimit(1)
             }
-            // A reading that couldn't be confirmed: the last accepted value stays, and the corner says so faintly.
-            if !watch.unconfirmed.isEmpty {
-                Text(watch.unconfirmed + " · couldn't confirm").font(.system(size: 10.5)).foregroundStyle(Color(white: 0.6)).lineLimit(1)
+            // A crossing that couldn't be confirmed: its number, faint; the last accepted value stays above it.
+            if let faint = corner?.faint {
+                Text(faint).font(.system(size: 10.5)).foregroundStyle(Color(white: 0.6)).lineLimit(1)
             }
         }
     }

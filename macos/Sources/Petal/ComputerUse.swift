@@ -743,7 +743,9 @@ final class ComputerUse {
         sessions[job.caller]?.last = Date()
         if let error = stale(job) { job.fail(error); return finished() }
         let map = maps[job.caller] ?? job.map
-        agent(job.caller)?.activity = job.caption
+        // What it's doing, said as its activity only once shielded (the same boundary as the agent's own steps).
+        let caller = job.caller
+        NoteHelpers.shield([job.caption]) { [weak self] shown in self?.agent(caller)?.activity = shown?.first ?? "" }
         guard map.ownPlace else { return show(job, map) }
         decide(job, map, since: Date())
     }

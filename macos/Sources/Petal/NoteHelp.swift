@@ -1780,6 +1780,14 @@ extension NoteHelp {
     /// that very value (its exact amount landed in the note).
     static func delivered(_ watch: Watch, amount: Double, cornerShowing: Bool) -> Bool { cornerShowing && watch.amount == amount }
 
+    /// What a watcher's corner shows: its last accepted value (big), and a crossing that couldn't be confirmed (faint,
+    /// "· couldn't confirm"). Drawn, and its room kept, when either has a value: a first reading that couldn't be
+    /// confirmed shows too.
+    static func corner(_ watch: Watch?) -> (number: String?, faint: String?)? {
+        guard let watch, !(watch.last.isEmpty && watch.unconfirmed.isEmpty) else { return nil }
+        return (watch.last.isEmpty ? nil : watch.last, watch.unconfirmed.isEmpty ? nil : watch.unconfirmed + " · couldn't confirm")
+    }
+
     /// The person was shown a crossing (its note on the screen, the number in its corner): `hit` is kept, while the
     /// watcher is still that one and its newest value still past the line.
     static func told(_ watch: inout Watch?, id: String) -> Bool {
@@ -1894,8 +1902,7 @@ struct FollowUpQueue<Line> {
 
     /// A run's completion, the one place what was asked of it is settled: once its answer is accepted and shown
     /// (`succeeded`), the second opinion asked meanwhile is handed on with its line; otherwise (it failed or was
-    /// stopped, or its answer never got shown) nothing is, and every line asked of it is given back. A run whose
-    /// answer waits for the vault isn't complete yet: nothing here is settled until it is.
+    /// stopped) nothing is, and every line asked of it is given back.
     mutating func settle(note: String, token: RunToken, succeeded: Bool) -> (review: (model: NoteHelp.Model, asked: String, line: Line?)?, dropped: [Line]) {
         let review = succeeded ? self.review(note: note, current: token) : nil
         clear(token)
@@ -2264,8 +2271,8 @@ struct QuickQueue<Job, AI> {
 }
 
 /// What a helper said, as it arrived (an answer and its steps, a second opinion, an error, a quick call's line): it's
-/// written nowhere, not the note and not the journal's note-bound entries, until it's shielded whole
-/// (`NoteHelp.shielded`). While the vault can't be read it waits, unshown, in the helpers' journal on this Mac.
+/// written nowhere, not the note and not the journal, until it's shielded whole (`NoteHelp.shielded`). While the vault
+/// can't be read nothing is held: the run fails, and the output is dropped unshown.
 struct Said: Codable, Equatable, Sendable {
     enum Form: String, Codable, Sendable { case answer, code, opinion, failure, words }
     var who: String
@@ -2276,21 +2283,6 @@ struct Said: Codable, Equatable, Sendable {
     var asked = ""
     /// A failure Settings › AI fixes: its button on the ink.
     var settings = false
-}
-
-/// A helper's output that couldn't be shown yet (the vault unreadable): kept on this Mac only, never in the note,
-/// until it can be shielded; what it ends as (done, failed, cleared, or a turn on the way that keeps the line).
-struct Unshown: Codable, Equatable {
-    enum End: String, Codable { case done, failed, keep, clear }
-    var noteID: String
-    var said: Said
-    var end: End
-    var asked: String
-    var at: Date
-    var opinion = false
-    /// The run whose answer this is (its completion waits for it while Petal runs); nil for a turn on the way or a
-    /// failure, and after a restart (shown on its own then).
-    var runID: String? = nil
 }
 
 extension NoteHelp {
@@ -2312,18 +2304,6 @@ extension NoteHelp {
     }
 }
 
-extension HelperJournal {
-    static func loadUnshown(_ file: URL) -> [Unshown] {
-        guard let data = try? Data(contentsOf: file) else { return [] }
-        return (try? JSONDecoder().decode([Unshown].self, from: data)) ?? []
-    }
-
-    static func saveUnshown(_ entries: [Unshown], to file: URL) -> Bool {
-        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        guard let data = try? JSONEncoder().encode(entries) else { return false }
-        return (try? data.write(to: file, options: .atomic)) != nil
-    }
-}
 
 /// A value belonging to one run (the command rules Claude was allowed): kept for continuations of that run, empty
 /// for any other (a new run on the same note starts with none).

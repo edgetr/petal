@@ -40,7 +40,7 @@ extension ClaudePanel {
         let asking = PetalApp.shared.assist.pending.flatMap { $0.owner == note.id.uuidString ? $0.title : nil }
         let waiting = !agent.running && !agent.waiting.isEmpty
         return NoteStatus.Facts(running: agent.running || waiting, ready: note.ready, asking: asking, needs: agent.needs,
-                                activity: waiting ? "Waiting for another note to finish" : agent.activity)
+                                activity: waiting ? "Waiting for another note to finish" : agent.activity.text)
     }
 
     /// The notes the preview shows, waiting for the person first.
@@ -220,7 +220,7 @@ struct NoteActivityLine: View {
                 }
             } else {
                 Image(systemName: "moon.zzz").font(.system(size: 10)).foregroundStyle(.secondary)
-                Text("In the background · " + NoteStatus.step(agent.activity)).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Text("In the background · " + NoteStatus.step(agent.activity.text)).font(.system(size: 11.5)).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 0)
             }

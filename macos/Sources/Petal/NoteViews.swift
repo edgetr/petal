@@ -171,7 +171,7 @@ struct PaperView: View {
     private var heights: (editor: CGFloat, ink: CGFloat) {
         let screen = NSScreen.main?.visibleFrame.height ?? 800
         // (The watcher's corner, when it has one, takes its room above the words.)
-        let corner: CGFloat = paper.file.watch.map { $0.last.isEmpty ? 0 : 44 } ?? 0
+        let corner: CGFloat = NoteHelp.corner(paper.file.watch) == nil ? 0 : 44
         return NoteHelp.paperHeights(screen: screen, chrome: 110 + corner, editor: PaperLook.maxOpen - 70, ink: .greatestFiniteMagnitude, controls: max(controlsHeight, 40))
     }
 
@@ -184,7 +184,7 @@ struct PaperView: View {
     /// A watcher's newest value in the corner, the old ones struck (the sketch's .num): on the open paper as on the
     /// folded one, so a crossing it's told is seen whichever face shows.
     @ViewBuilder private var watchCorner: some View {
-        if let watch = paper.file.watch, !watch.last.isEmpty {
+        if let watch = paper.file.watch, NoteHelp.corner(watch) != nil {
             WatchCorner(watch: watch, tint: tint, glass: glass).frame(maxWidth: .infinity, alignment: .trailing).padding(.top, -4).padding(.bottom, 2)
         }
     }

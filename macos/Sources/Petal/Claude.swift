@@ -63,8 +63,13 @@ final class Agent {
     @ObservationIgnored private var runID = UUID()   // a stopped run's late lines don't belong to the next chat
     /// Counts the runs (each reply is one): what Petal AI may use in an app lasts one reply (ComputerUse.swift).
     @ObservationIgnored private(set) var turn = 0
-    /// What it's doing now, in plain words (its latest step): the AI button's preview and the note say it.
-    var activity = ""
+    /// What it's doing now, in plain words (its latest step): the AI button's preview and the note say it. Only ever
+    /// `Shielded`: every event is shielded the moment it arrives (`Agent.shield`, the boundary), before anything reads it.
+    var activity: Shielded = ""
+    /// Events are shielded in order, on a queue of their own, before they reach the main thread (`ingest`).
+    @ObservationIgnored private let ingest = DispatchQueue(label: "tech.edgetr.petal.agent.ingest")
+    /// A helper's run whose events can't be shielded (the vault unreadable): it's failed, and its later events dropped.
+    @ObservationIgnored private var dropping = false
     /// What it needs the person for (Background.Reason.status: its window in front, its tab showing), until it acts
     /// again, its next turn starts, or the person opens it after it's done.
     var needs: String?
@@ -437,12 +442,22 @@ final class Agent {
         let buffer = LineBuffer()
         let id = UUID()
         runID = id
+        dropping = false
+        // The boundary: every event shielded whole as it arrives, in order, before anything reads it (a helper's text,
+        // steps, errors and the labels of what it asks to run; any chat's step, which its preview shows). A helper's
+        // event that can't be shielded (the vault unreadable) fails its run; nothing raw goes on.
+        let helper = helperSystem != nil
+        let ingest = self.ingest
         let deliver = { (lines: [String]) in
             guard !lines.isEmpty else { return }
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard self.runID == id else { return }
-                    for line in lines { for event in provider.events(line) { self.apply(event) } }
+            ingest.async {
+                let shown = Agent.shield(lines.flatMap { provider.events($0) }, helper: helper)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard self.runID == id, !self.dropping else { return }
+                        guard let shown else { return self.vaultLost() }
+                        for (event, words) in shown { self.apply(event, words: words) }
+                    }
                 }
             }
         }
@@ -460,7 +475,8 @@ final class Agent {
             output.fileHandleForReading.readabilityHandler = nil
             error.fileHandleForReading.readabilityHandler = nil
             deliver(buffer.lines(adding: output.fileHandleForReading.readDataToEndOfFile() + Data("\n".utf8)))
-            DispatchQueue.main.async {
+            // After every event before it (they pass the same queue).
+            ingest.async { DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard self.runID == id else { return }
                     self.token?.unbind(self.bound)
@@ -483,14 +499,17 @@ final class Agent {
                     self.process = nil
                     let status = finished.terminationStatus
                     let detail = self.errorText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if status != 0 && status != 15 && !detail.isEmpty && !self.authFailed {
+                    // (A helper's stderr isn't kept raw: its reason goes to its run's failure, shielded there before it's shown.)
+                    if status != 0 && status != 15 && !detail.isEmpty && !self.authFailed && !helper {
                         self.messages.append(Message(kind: .error, text: String(detail.suffix(300))))
                     }
-                    if self.outcome == .failed, !self.authFailed { self.failure = self.messages.last { $0.kind == .error }?.text ?? "It stopped with an error." }
+                    if self.outcome == .failed, !self.authFailed {
+                        self.failure = helper && status != 0 && !detail.isEmpty ? String(detail.suffix(300)) : self.messages.last { $0.kind == .error }?.text ?? "It stopped with an error."
+                    }
                     // The turn is over (not carried on by a queued message): a note's nudge, and room for one waiting.
                     if !more { self.app.claude.agentFinished(self) }
                 }
-            }
+            } }
         }
         do {
             try process.run()
@@ -511,7 +530,37 @@ final class Agent {
         }
     }
 
-    private func apply(_ event: Event) {
+    /// Events shielded whole (the vault's redaction `petal_ui` uses), off the main thread: a helper's every text; any
+    /// chat's step as its `activity`. Nil when a helper's can't be (the vault unreadable): its run fails. A chat's
+    /// events go on as they were, its step saying nothing then.
+    nonisolated static func shield(_ events: [Event], helper: Bool) -> [(Event, Shielded?)]? {
+        let made = VaultIndex.settled { index -> [(Event, Shielded?)]? in
+            guard !index.unreadable else { return nil }
+            func one(_ text: String) -> Shielded { NoteShield.shield([text], index: index)?.first ?? "" }
+            return events.map { event in
+                switch event {
+                case .step(let text):
+                    let words = one(text)
+                    return (helper ? .step(words.text) : event, words)
+                case .text(let text) where helper: return (.text(one(text).text), nil)
+                case .error(let text) where helper: return (.error(one(text).text), nil)
+                case .denials(let denials) where helper: return (.denials(denials.map { Denial(tool: $0.tool, label: one($0.label).text, rules: $0.rules) }), nil)
+                default: return (event, nil)
+                }
+            }
+        } ?? nil
+        if let made { return made }
+        return helper ? nil : events.map { event in if case .step = event { (event, Shielded("")) } else { (event, nil) } }
+    }
+
+    /// A helper's event arrived while the vault can't be read: its run fails (`end`, Petal's own words), what it said
+    /// dropped unshown, and its later events too.
+    private func vaultLost() {
+        dropping = true
+        if let note = app.claude.notes.first(where: { $0.agent === self }) { app.paper.helpers.vaultLost(note) }
+    }
+
+    private func apply(_ event: Event, words: Shielded? = nil) {
         switch event {
         case .session(let id):
             if sessionID != id { sessionID = id; keep() }
@@ -520,7 +569,7 @@ final class Agent {
             if !trimmed.isEmpty { messages.append(Message(kind: .claude, text: trimmed)) }
         case .step(let text):
             messages.append(Message(kind: .step, text: text))
-            activity = text
+            activity = words ?? ""
             if helperSystem != nil, let note = app.claude.notes.first(where: { $0.agent === self }) { app.paper.helpers.stepped(note) }
         case .denials(let denials):
             pendingAsk = denials

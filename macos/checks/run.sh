@@ -221,8 +221,7 @@ perl -0777 -ne '
 # completed; every other reply is a faint word that leaves the note's ink and helper line as they are.
 perl -0777 -ne '
     my $done = () = /state: \.done/g;
-    my $doneEnds = () = /end: \.done/g;
-    unless ($done == 2 && $doneEnds == 1 && /private func complete\(_ run: Run, made:.*?run\.token\.complete\(\.succeeded\).*?state: \.done/s
+    unless ($done == 1 && /private func complete\(_ run: Run, made:.*?run\.token\.complete\(\.succeeded\).*?state: \.done/s
             && /private func reply\(_ noteID: String, giveBack line: NoteLine\?.*?\{\s*line\?\.again\(\)\s*guard !parts\.isEmpty else \{ return hint\(noteID, words\(\[\]\)\) \}/s) {
         print "NoteHelpers: only a succeeded run writes done; replies stay faint\n"; exit 1 }
     print "helpers: only a succeeded run writes done; replies are faint\n";
@@ -332,7 +331,7 @@ grep -q 'let value = current.amount, crossed(value, line: current.line)' Sources
 echo "helpers: watchers decide on exact values and are told on any face with the corner"
 # Everything a helper produces is shielded whole as it arrives (answers, steps, opinions, proof, links, errors, a
 # quick call's line, a watcher's words, a formula, a stamp's label): ink can only be made from Shielded, steps go on
-# only as Shielded, the vault unreadable holds it unshown on this Mac; stamps keep an opaque rules id.
+# only as Shielded; while the vault can't be read nothing is held (the run fails); stamps keep an opaque rules id.
 perl -0777 -ne '
     unless (/init\(who: String, text: Shielded, proof: \[Shielded\] = \[\], link: Shielded = "",/ && /private init\(stored who: String/
             && /static func codeInk\(who: String, answer: Shielded, finish: Shielded\?\)/ && /static func rulesGrant\(.*?hash8\(/s
@@ -340,18 +339,41 @@ perl -0777 -ne '
     print "helpers: ink only from Shielded; rules never in a stamp\n";
 ' Sources/Petal/NoteHelp.swift
 perl -0777 -ne '
-    unless (/private func post\(_ noteID: String, _ ink: \[NoteHelp\.Ink\]\?, steps: \[Shielded\]\?/ && /private func publish\(.*?Self\.shieldSaid\(said\) \{ made in\s*guard let made else \{\s*self\.unshown\.append/s
-            && /case \.succeeded\(let said\):\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*guard !look, let said else \{ return complete\(run, made: nil\) \}\s*Self\.shieldSaid\(said\) \{ made in.*?guard let made else \{ return self\.holdForVault\(run, said\) \}.*?self\.complete\(run, made: made\)/s
-            && /func showUnshown\(\) \{.*?if let said = run\.waitingForVault \{ end\(run, \.succeeded\(said\)\) \}/s && !/private func holdForVault\((?:(?!\n    \}).)*token\.complete/s && /case \.failed\(let reason, let settings\):.*?publish\(noteID, said, end: \.failed/s
-            && /publish\(noteID, Said\(who: run\.who, text: answer, steps: steps/ && /private func stamp\(.*?Self\.shield\(\[label\]\)/s
-            && /grantedRules\[grant\] = rules/ && /Self\.shield\(\[calc\.formula, calc\.label\]\)/ && /Self\.shield\(\[reply\?\["before"\]/ && /showUnshown\(\)/) {
+    unless (/private func post\(_ noteID: String, _ ink: \[NoteHelp\.Ink\]\?, steps: \[Shielded\]\?/
+            && /case \.succeeded\(let said\):.*?Self\.shieldSaid\(said\) \{ made in.*?guard let made else \{ return self\.end\(run, \.failed\(Self\.vaultWords\.text\)\) \}.*?self\.complete\(run, made: made\)/s
+            && /private func turnOutput\(.*?guard let made else \{ return self\.end\(run, \.failed\(Self\.vaultWords\.text\)\) \}/s
+            && /case \.failed\(let reason, let settings\):.*?failureOutput\(run, Said\(/s && /turnOutput\(run, Said\(who: run\.who, text: answer, steps: steps/
+            && /private func stamp\(.*?Self\.shield\(\[label\]\)/s && /grantedRules\[grant\] = rules/ && /Self\.shield\(\[calc\.formula, calc\.label\]\)/
+            && /Self\.shield\(\[reply\?\["before"\]/) {
         print "NoteHelpers: every helper output is shielded whole as it arrives\n"; exit 1 }
-    print "helpers: every output shielded whole as it arrives, held unshown while the vault can.t be read\n";
+    # Fail, do not hold: nothing kept unshown, no retry; a leftover file of an earlier Petal deleted, locally.
+    if (/waitingForVault|showUnshown|holdForVault|saveUnshown|Unshown\(/) { print "NoteHelpers: nothing is held unshown\n"; exit 1 }
+    unless (/NoteJournal\.queue\.async \{ try\? FileManager\.default\.removeItem\(at: leftover\) \}/ && /leftoverUnshown: URL \{ NoteJournal\.folder\.appending/) {
+        print "NoteHelpers: a leftover held file is deleted on launch\n"; exit 1 }
+    # A run starts only when the vault is readable: a line (before it is taken) and a chain (before it fires).
+    unless (/func returned\(.*?Self\.vaultReady \{ ready in\s*guard ready else \{ return self\.reply\(noteID, giveBack: nil\) \{ _ in Self\.vaultWords \} \}.*?self\.take\(paper, trimmed, at: ticket\)/s
+            && /private func take\(_ paper: PaperNote, _ trimmed: String, at ticket: NoteLine\) \{\s*let noteID = paper\.noteID\s*ticket\.take\(\)/
+            && /private func fire\(.*?Self\.vaultReady \{ ready in.*?self\.fireNow\(paper\)/s && /func vaultLost\(_ sticky: StickyNote\) \{.*?end\(run, \.failed\(Self\.vaultWords\.text\)\)/s) {
+        print "NoteHelpers: a run starts only with the vault readable; output while it is not fails the run\n"; exit 1 }
+    print "helpers: every output shielded as it arrives; fail, never hold; nothing starts while the vault can.t be read\n";
 ' Sources/Petal/NoteHelpers.swift
+! grep -rn 'Unshown\|helper-unshown' Sources/Petal/NoteHelp.swift || { echo "NoteHelp: nothing is held unshown"; exit 1; }
+# The agent's boundary: every provider event shielded in order on its own queue before anything reads it; activity
+# is Shielded for every agent (a chat's and an AI note's previews too); a helper's event the vault can't shield fails it.
+perl -0777 -ne '
+    unless (/var activity: Shielded = ""/ && /ingest\.async \{\s*let shown = Agent\.shield\(lines\.flatMap \{ provider\.events\(\$0\) \}, helper: helper\)/
+            && /guard let shown else \{ return self\.vaultLost\(\) \}\s*for \(event, words\) in shown \{ self\.apply\(event, words: words\) \}/
+            && /ingest\.async \{ DispatchQueue\.main\.async \{/ && /activity = words \?\? ""/ && !/for event in provider\.events\(line\) \{ self\.apply\(event\) \}/) {
+        print "Agent: every event is shielded at the boundary before anything reads it\n"; exit 1 }
+    print "agent: every event shielded at the boundary; activity is Shielded\n";
+' Sources/Petal/Claude.swift
+grep -q 'NoteHelpers.shield(\[job.caption\])' Sources/Petal/ComputerUse.swift || { echo "ComputerUse: its caption goes on as activity only once shielded"; exit 1; }
+grep -q 'if let watch = paper.file.watch, NoteHelp.corner(watch) != nil' Sources/Petal/NoteViews.swift && grep -q 'NoteHelp.corner(paper.file.watch) == nil ? 0 : 44' Sources/Petal/NoteViews.swift \
+    || { echo "watchers: the corner is drawn, and its room kept, when either value is there"; exit 1; }
 # A watcher decides on its exact value: a refuted or unconfirmed reading never becomes the shown value; nothing about
 # its value is rounded but the drawing.
 ! grep -n 'Int(\$0.rounded())' Sources/Petal/NoteHelpers.swift && grep -q 'guard let shown, verdict != .refuted, verdict != .unconfirmed else' Sources/Petal/NoteHelp.swift \
-    && grep -q 'if !watch.unconfirmed.isEmpty' Sources/Petal/NoteHelpViews.swift && grep -q 'current.unconfirmed = verdict == .unconfirmed ? (shown ?? "") : ""' Sources/Petal/NoteHelp.swift \
+    && grep -q 'if let faint = corner?.faint' Sources/Petal/NoteHelpViews.swift && grep -q 'current.unconfirmed = verdict == .unconfirmed ? (shown ?? "") : ""' Sources/Petal/NoteHelp.swift \
     && grep -q 'if newly.value, let value { self.tellHit' Sources/Petal/NoteHelpers.swift || { echo "watchers: exact values; rejected readings never shown; an unconfirmed crossing faint, never opening the note"; exit 1; }
 echo "helpers: rejected readings keep the last accepted value; only drawing rounds"
 # A cover that can't be read yet is waited for (iCloud asked), then refused; never skipped.
@@ -362,7 +384,7 @@ perl -0777 -ne '
 ' Sources/Petal/NoteHelpers.swift
 # Every reviewer output, its turns on the way included, goes through opinion (output).
 perl -0777 -ne '
-    if (/Something said meanwhile.*?\n\s*return\n/s && $& !~ /publish\(noteID, Said\(who: run\.who, text: answer, steps: steps, form: run\.carried == nil \? \.answer : \.opinion\).*?opinion: run\.carried != nil, carried: run\.carried\)/s) { print "NoteHelpers: a reviewer turn must go through output\n"; exit 1 }
+    if (/Something said meanwhile.*?\n\s*return\n/s && $& !~ /turnOutput\(run, Said\(who: run\.who, text: answer, steps: steps, form: run\.carried == nil \? \.answer : \.opinion\)\)/) { print "NoteHelpers: a reviewer turn must go through output\n"; exit 1 }
     print "helpers: every reviewer output goes through opinion\n";
 ' Sources/Petal/NoteHelpers.swift
 # Helpers read and write a cover only by the cover rule (the file named for it in the notebook's own folder).

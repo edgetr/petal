@@ -1704,7 +1704,7 @@ final class NoteDesk {
     func footer(_ paper: PaperNote) -> String {
         let file = paper.file
         if let run = helpers.runs[paper.noteID] {
-            let step = run.sticky?.agent.activity ?? ""
+            let step = run.sticky?.agent.activity.text ?? ""
             return run.paused ? "Paused" : step.isEmpty ? "Working" : step
         }
         if let helper = file.helper, helper.state == .failed { return "Couldn't finish" }
