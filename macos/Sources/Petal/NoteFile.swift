@@ -1565,8 +1565,8 @@ enum NoteShelf {
     /// Where a paper shows right now (its one placement): by the window in front when one of its places fits it, else
     /// on a Desktop showing now that it's stuck to (`desktops`: its Desktop places' numbers; `showing`: the Desktops the
     /// screens show), else nowhere.
-    static func placementNow(window: Int?, desktops: [Int?], showing: Set<Int>) -> Placement {
-        placement(window: window, onDesktopShowing: desktops.contains { $0.map(showing.contains) ?? false })
+    static func placementNow(window: Int?, desktops: [Int?], showing: Set<Int>, windowValid: Bool = true) -> Placement {
+        placement(window: windowValid ? window : nil, onDesktopShowing: desktops.contains { $0.map(showing.contains) ?? false })
     }
 
     /// Whether a paper may be seen now: never while Mission Control is open (every surface hidden until it ends);
@@ -1743,20 +1743,24 @@ enum NoteShelf {
     }
 
     /// A copied selection's Markdown and pictures within `limit` bytes in all: each picture (by its block's index)
-    /// goes with its bytes while they fit; one without bytes (never loaded, unreadable) or past the limit is copied
-    /// as "(A picture couldn't be copied.)".
-    static func fragmentBody(_ blocks: [NoteBlock], bytes: [Int: Data], limit: Int) -> (markdown: String, pictures: [Data]) {
+    /// goes with its bytes; one without bytes (not loaded yet) is copied as "(A picture couldn't be copied.)"; past
+    /// the limit, nil.
+    static func fragmentBody(_ blocks: [NoteBlock], bytes: [Int: Data], limit: Int) -> (markdown: String, pictures: [Data])? {
         var total = NoteBlock.body(blocks).utf8.count
         var pictures: [Data] = []
         let kept = blocks.enumerated().map { index, block -> NoteBlock in
             guard case .image = block else { return block }
-            guard let data = bytes[index], total + data.count <= limit else { return .text(NoteText.uncopied) }
+            guard let data = bytes[index] else { return .text(NoteText.uncopied) }
             total += data.count
             pictures.append(data)
             return block
         }
-        return (NoteBlock.body(kept), pictures)
+        // Past the bound, the whole copy is refused (nothing written, a cut deletes nothing).
+        return total > limit ? nil : (NoteBlock.body(kept), pictures)
     }
+
+    /// The pixels a picture is decoded at: what it's shown at (the paper's width) at the screen's scale.
+    static func shownPixels(width: CGFloat, scale: CGFloat) -> Int { Int((width * max(1, scale)).rounded(.up)) }
 
     /// Whether a note counts as "here" for the note tools: placed now, by the window in front or on a Desktop
     /// showing (the one current-placement rule, placementNow).

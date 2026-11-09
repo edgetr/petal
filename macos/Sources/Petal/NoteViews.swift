@@ -180,6 +180,7 @@ struct PaperView: View {
                            escape: { desk.fold(paper.key) },
                            idle: { desk.store.takeDeferred(paper.key) },
                            sameNote: { desk.store.sameNote($0, instance: $1, $2) },
+                           say: { desk.tell($0) },
                            acceptPictures: { desk.acceptCopiedPictures(paper.key, $0) })
                 .frame(height: min(PaperLook.maxOpen - 70, max(PaperLook.minOpen - 70, editorHeight)))
                 .padding(.bottom, 18)

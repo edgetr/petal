@@ -730,11 +730,16 @@ struct NotesCheck {
                && NoteShelf.keepsOwnPicture("../\(ownN1)/p.png", noteFolder: "/n/Work", noteID: "N1", fragmentNote: "N2", fragmentRoot: "/n") == nil,
                "another root or another note: never kept")
         // A copied fragment stays within its bound: pictures that don't fit (or have no bytes) become lines saying so.
-        let fitting = NoteShelf.fragmentBody([.text("a"), .image(path: "p1.png", caption: ""), .image(path: "p2.png", caption: ""), .image(path: "p3.png", caption: "")],
-                                             bytes: [1: Data(count: 40), 2: Data(count: 40)], limit: 100)
-        expect(fitting.markdown == "a\n![](p1.png)\n(A picture couldn't be copied.)\n(A picture couldn't be copied.)" && fitting.pictures.count == 1,
-               "past the bound, or no bytes: copied as words", fitting.markdown)
+        let blocksToCopy: [NoteBlock] = [.text("a"), .image(path: "p1.png", caption: ""), .image(path: "p2.png", caption: "")]
+        let fitting = NoteShelf.fragmentBody(blocksToCopy, bytes: [1: Data(count: 40)], limit: 100)
+        expect(fitting?.markdown == "a\n![](p1.png)\n(A picture couldn't be copied.)" && fitting?.pictures.count == 1,
+               "a picture not loaded yet: copied as words; the rest with their bytes", fitting?.markdown ?? "nil")
+        expect(NoteShelf.fragmentBody(blocksToCopy, bytes: [1: Data(count: 40), 2: Data(count: 40)], limit: 100) == nil, "past the bound: the whole copy refused")
         // "Here" for the note tools: placed now, by the window in front or on a Desktop showing.
+        expect(!NoteShelf.isHere(NoteShelf.placementNow(window: 7, desktops: [], showing: [], windowValid: false))
+               && NoteShelf.placementNow(window: 7, desktops: [3], showing: [3], windowValid: false) == .desktop,
+               "a window placement awaiting a fresh read isn't here (a Desktop showing still is)")
+        expect(NoteShelf.shownPixels(width: 360, scale: 2) == 720 && NoteShelf.shownPixels(width: 360, scale: 0) == 360, "decoded at the shown width × scale")
         expect(NoteShelf.isHere(NoteShelf.placementNow(window: nil, desktops: [3], showing: [3])) && NoteShelf.isHere(NoteShelf.placementNow(window: 7, desktops: [], showing: []))
                && !NoteShelf.isHere(NoteShelf.placementNow(window: nil, desktops: [3], showing: [2])), "a Desktop note on the Desktop showing is here; one elsewhere isn't")
         expect(NoteShelf.imageCost(width: 1000, height: 500) == 2_000_000, "an image's cost: its pixels, four bytes each")

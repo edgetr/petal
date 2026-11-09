@@ -353,6 +353,9 @@ final class NoteDesk {
     }
 
     /// Something couldn't be done to the notes' files: said by the AI button for a moment.
+    /// Said on the paper from its editor (a copy refused).
+    func tell(_ text: String) { say(text) }
+
     private func say(_ text: String) {
         // Said by the AI button of the dock under the pointer (never a window-list lookup on the main thread); with
         // macOS's Dock chosen there's no button to say it by.
@@ -1008,7 +1011,10 @@ final class NoteDesk {
     /// nowhere.
     func placementNow(_ key: String) -> NoteShelf.Placement {
         let desktops = store.paper(key)?.file.places.filter { $0.kind == .desktop }.map(\.desktop) ?? []
-        return NoteShelf.placementNow(window: here[key], desktops: desktops, showing: Set(Self.spaces.values))
+        // A window placement counts only once it's fresh: never while a read is awaited (permission lost, focus
+        // changed) or its tab is being read again.
+        return NoteShelf.placementNow(window: here[key], desktops: desktops, showing: Set(Self.spaces.values),
+                                      windowValid: !awaitingRead && !hiddenForTab(key))
     }
 
     private func isDesktop(_ key: String) -> Bool { placementNow(key) == .desktop }
@@ -1449,7 +1455,7 @@ final class NoteDesk {
                 }
             }
             // Their images made here, off the main thread, to be shown as one batch.
-            let ready = read, unread = waiting, readyImages = read.map { NSImage(data: $0.data) ?? NSImage() }
+            let ready = read, unread = waiting
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // The note's id as it is now (one given its own meanwhile is followed: store.currentID).
@@ -1496,7 +1502,8 @@ final class NoteDesk {
                     case .accepted: break
                     }
                     guard let (nowKey, accepted) = taken else { return }
-                    NotePictures.shared.previewBatch(accepted.enumerated().map { ($1.file, readyImages[$0], ready[$0].data) })
+                    // Their bytes held until written; their images decoded off the main thread when drawn.
+                    NotePictures.shared.accepted(accepted.enumerated().map { ($1.file, ready[$0].data) })
                     self.fresh.remove(nowKey)
                     if self.insertPictures(nowKey, accepted, at: items.at, length: items.length, selected: items.selected) {
                         // Into the note now (and its snapshot), not a moment later.
@@ -1536,7 +1543,15 @@ final class NoteDesk {
         // Never on a read-only paper (one of a conflict's): its recovery bytes stay until it can be changed.
         guard let paper = store.paper(key), !store.readOnly(paper) else { return say("This note has two versions: keep one before removing pictures.") }
         store.dropWaiting(paper.noteID)
-        store.dropPictures(key)
+        // With its editor open, Remove is an edit there, saved like any typing (never a write under it that its
+        // unsaved typing would undo); without one, a based write.
+        if let editor = editors[key] {
+            guard let names = store.retirePictures(key, write: false) else { return }
+            editor.removePictures(names)
+            editor.flush()
+        } else {
+            store.retirePictures(key, write: true)
+        }
     }
 
     /// How many pictures the paper says couldn't be saved (or read yet).
@@ -1564,9 +1579,7 @@ final class NoteDesk {
     /// journaled at once (their files written through the note's session), and shown at once.
     func acceptCopiedPictures(_ key: String, _ items: [(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? {
         guard let accepted = store.acceptPictures(key, items) else { return nil }
-        NotePictures.shared.previewBatch(accepted.enumerated().compactMap { n, picture in
-            NSImage(data: items[n].data).map { (picture.file, $0, items[n].data) }
-        })
+        NotePictures.shared.accepted(accepted.enumerated().map { ($1.file, items[$0].data) })
         return accepted
     }
 

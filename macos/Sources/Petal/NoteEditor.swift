@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import Observation
 import SwiftUI
 
@@ -79,13 +80,17 @@ final class LinkPreviews {
 /// broken) is said with `arrived`, so the editors showing it lay it out and draw it again. A missing picture is read
 /// again when the notes' folder watcher says a file it leads to appeared or changed, and on a 10-second timer that
 /// runs only while a missing picture is on screen (NoteShelf.pictureRetry); drawing never asks again by itself.
-/// Images live in a cache with a cost limit (their decoded pixels, `costLimit`); one evicted is read again when it's
-/// drawn. Raw bytes are held only while something needs them: a write not landed yet (a paste's or an import's), or
-/// an open editor showing that picture; they're let go once the file is written and no editor shows it.
+/// Images are decoded off the main thread at the size they're shown (the paper's width at the screen's scale), and
+/// live in a cache with a cost limit (`costLimit`); one evicted is read again when it's drawn, and since its size is
+/// known that only draws its cell again (`redraw`: no layout, no arrival). Raw bytes follow one rule
+/// (NoteShelf.keepBytes), weighed at every event: held while the picture's write is pending, or an open editor
+/// contains it; a read checks it before keeping its bytes.
 @MainActor @Observable
 final class NotePictures {
     static let shared = NotePictures()
     static let arrived = Notification.Name("petal.notePictureArrived")
+    /// A picture read again after its image was evicted: its cell is drawn again, nothing laid out.
+    static let redraw = Notification.Name("petal.notePictureRedraw")
     /// About 200 MB of decoded pixels.
     static let costLimit = 200 * 1024 * 1024
     @ObservationIgnored private let cache: NSCache<NSString, NSImage> = {
@@ -95,8 +100,9 @@ final class NotePictures {
     }()
     /// Bumped whenever a picture comes in or turns broken, so views drawing pictures are drawn again.
     private(set) var version = 0
-    /// Every picture put in the cache (it may have been evicted since): what the folder watcher reads again.
-    @ObservationIgnored private var known: Set<String> = []
+    /// Every picture put in the cache (it may have been evicted since), and its size: what the folder watcher reads
+    /// again, and how big its cell is while its image is evicted.
+    @ObservationIgnored private var sizes: [String: CGSize] = [:]
     var cacheLimit: Int { cache.totalCostLimit }
 
     func cached(_ key: String) -> NSImage? {
@@ -104,12 +110,31 @@ final class NotePictures {
         return cache.object(forKey: key as NSString)
     }
 
+    /// A picture's size as last decoded (its cell keeps it while the image is evicted).
+    func size(_ key: String) -> CGSize? { sizes[key] }
+
+    /// For checks: the cache let go of one image, as under memory pressure.
+    func evict(_ key: String) { cache.removeObject(forKey: key as NSString) }
+
     private func put(_ image: NSImage, _ key: String) {
         let pixels = image.representations.map { CGSize(width: $0.pixelsWide, height: $0.pixelsHigh) }.max { $0.width * $0.height < $1.width * $1.height }
             ?? image.size
         cache.setObject(image, forKey: key as NSString, cost: NoteShelf.imageCost(width: Int(pixels.width), height: Int(pixels.height)))
-        known.insert(key)
+        sizes[key] = image.size
     }
+
+    /// The pixels a picture is decoded at: the paper's width at the screen's scale.
+    nonisolated static var shownPixels: Int { NoteShelf.shownPixels(width: 360, scale: 2) }
+
+    /// A picture decoded at most `maxPixels` on its longer side (never its full size in memory), off the main thread.
+    nonisolated static func downsample(_ data: Data, maxPixels: Int) -> NSImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true,
+                                        kCGImageSourceShouldCacheImmediately: true, kCGImageSourceThumbnailMaxPixelSize: maxPixels]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+    }
+
     /// Broken, and when it was last tried.
     private(set) var broken: [String: Date] = [:]
     @ObservationIgnored private var asked: Set<String> = []
@@ -122,8 +147,8 @@ final class NotePictures {
     @ObservationIgnored private(set) var retrying = false
     @ObservationIgnored private var reconsidering = false
     @ObservationIgnored private var watching: NSObjectProtocol?
-
     @ObservationIgnored private var writes: NSObjectProtocol?
+    @ObservationIgnored private var retired: NSObjectProtocol?
 
     init() {
         watching = NotificationCenter.default.addObserver(forName: NoteStore.filesChanged, object: nil, queue: .main) { [weak self] note in
@@ -134,6 +159,10 @@ final class NotePictures {
             guard let paths = note.userInfo?["paths"] as? [String] else { return }
             MainActor.assumeIsolated { self?.written(paths) }
         }
+        retired = NotificationCenter.default.addObserver(forName: NoteStore.picturesRetired, object: nil, queue: .main) { [weak self] note in
+            guard let paths = note.userInfo?["paths"] as? [String] else { return }
+            MainActor.assumeIsolated { self?.written(paths) }
+        }
     }
 
     /// Where a link leads from a note's folder, by the words alone: nil never reads anything.
@@ -141,9 +170,14 @@ final class NotePictures {
 
     func image(_ link: String, in folder: URL) -> NSImage? {
         guard let key = Self.target(link, in: folder) else { return nil }
-        // Recorded first, even for a picture already in memory (a paste's preview): the watcher reads it again from it.
+        // Recorded first, even for a picture already in memory (a paste's): the watcher reads it again from it.
         sources[key] = (link, folder)
-        if let image = cached(key) { return image }
+        if let image = cached(key) {
+            // Shown by an open editor whose bytes aren't held yet (its image came from the cache): read once, off the
+            // main thread, so a copy has them; its size is known, so that only draws its cell again.
+            if held[key] == nil, holds(key) { read(key) }
+            return image
+        }
         // Broken: asked again only by the watcher or the retry timer, never by drawing (which would loop).
         guard broken[key] == nil else { return nil }
         read(key)
@@ -152,53 +186,92 @@ final class NotePictures {
 
     func isBroken(_ link: String, in folder: URL) -> Bool { Self.target(link, in: folder).map { broken[$0] != nil } ?? true }
 
+    /// A picture shown from an image already made (the sketch's, checks).
     func preview(_ file: URL, _ image: NSImage, data: Data? = nil) { previewBatch([(file, image, data)]) }
+
+    // MARK: Raw bytes: one holding rule
 
     /// A picture's bytes while they're held, by where its link leads: what a copy carries without the disk.
     func bytes(_ key: String) -> Data? { held[key] }
     @ObservationIgnored private var held: [String: Data] = [:]
-    /// Pictures whose files aren't written yet (accepted bytes): held until their write lands.
+    /// Pictures whose files aren't written yet (accepted bytes): held until their write lands or is retired.
     @ObservationIgnored private var pendingWrites: Set<String> = []
-    /// Open editors (weak): the pictures they show keep their bytes.
+    /// Open editors (weak); the pictures they contain, worked out again only after they change.
     @ObservationIgnored private let editors = NSHashTable<NSView>.weakObjects()
+    @ObservationIgnored private var shownCache: Set<String>?
 
-    func register(_ editor: NSView) { editors.add(editor) }
+    private var shown: Set<String> {
+        if let shownCache { return shownCache }
+        var keys: Set<String> = []
+        for case let editor as NoteTextView in editors.allObjects { keys.formUnion(editor.pictureKeys) }
+        shownCache = keys
+        return keys
+    }
+
+    /// The holding rule (NoteShelf.keepBytes): its write pending, or an open editor contains it.
+    func holds(_ key: String) -> Bool { NoteShelf.keepBytes(key, pending: pendingWrites, shown: shown) }
+
+    /// Every held byte weighed again by the rule.
+    func release() { held = held.filter { holds($0.key) } }
+
+    /// An editor opened.
+    func register(_ editor: NSView) {
+        editors.add(editor)
+        editorChanged()
+    }
 
     /// An editor closed: the bytes nothing needs any more go.
     func unregister(_ editor: NSView) {
         editors.remove(editor)
+        editorChanged()
+    }
+
+    /// An open editor's text changed (pictures may have come or gone).
+    func editorChanged() {
+        shownCache = nil
         release()
     }
 
-    /// Files written (their write landed): their bytes go unless an open editor shows them.
+    /// Files written, or pictures removed for good (their write retired): the bytes held for them go unless an open
+    /// editor contains them.
     func written(_ paths: [String]) {
         pendingWrites.subtract(paths)
         release()
     }
 
-    /// Keeps only the bytes something needs (NoteShelf.keepBytes): a write not landed, or an open editor showing it.
-    func release() {
-        var shown: Set<String> = []
-        for case let editor as NoteTextView in editors.allObjects { shown.formUnion(editor.pictureKeys) }
-        held = held.filter { NoteShelf.keepBytes($0.key, pending: pendingWrites, shown: shown) }
+    /// Bytes accepted for pictures whose files aren't written yet (a paste, an import): held until their write
+    /// lands; their images decoded from these bytes off the main thread when they're drawn.
+    func accepted(_ items: [(file: URL, data: Data)]) {
+        for item in items {
+            held[item.file.path] = item.data
+            pendingWrites.insert(item.file.path)
+            broken[item.file.path] = nil
+        }
     }
 
     var heldCount: Int { held.count }
 
-    /// Read (again) what `key` was asked for with; an image already shown stays until the new one is in.
+    /// Read (again) what `key` was asked for with, decoded at the size it's shown: from its bytes when they're held,
+    /// else from its file through the one link rule. An image already shown stays until the new one is in.
     private func read(_ key: String) {
         guard let source = sources[key], !asked.contains(key) else { return }
         asked.insert(key)
+        let inMemory = held[key], pixels = Self.shownPixels
         NoteStore.io.async {
-            // The one rule for a picture link (NoteStore.pictureFile): inside the notes' root, no symbolic link.
-            let data = NoteStore.pictureFile(source.link, noteFolder: source.folder).flatMap { NoteStore.coordinatedData($0) }
+            let data = inMemory ?? NoteStore.pictureFile(source.link, noteFolder: source.folder).flatMap { NoteStore.coordinatedData($0) }
+            let image = data.flatMap { Self.downsample($0, maxPixels: pixels) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.asked.remove(key)
-                    if let data, let image = NSImage(data: data) {
-                        // Read because something shows it: held while an open editor does (release lets it go).
-                        self.held[key] = data
-                        self.store(image, key)
+                    if let data, let image {
+                        // Its bytes kept only by the rule (an open editor contains it, or its write is pending).
+                        if self.holds(key) { self.held[key] = data } else { self.held[key] = nil }
+                        let known = self.sizes[key] == image.size
+                        self.put(image, key)
+                        self.broken[key] = nil
+                        self.version += 1
+                        // Its size already known (read again after eviction): only its cell drawn again.
+                        if known { NotificationCenter.default.post(name: Self.redraw, object: nil, userInfo: ["targets": [key]]) } else { self.announce([key]) }
                     } else if self.cached(key) == nil {
                         // Said once, when it turns broken: a redraw never asks again by itself.
                         let fresh = self.broken[key] == nil
@@ -210,13 +283,6 @@ final class NotePictures {
                 }
             }
         }
-    }
-
-    private func store(_ image: NSImage, _ key: String) {
-        put(image, key)
-        broken[key] = nil
-        version += 1
-        announce([key])
     }
 
     /// Arrivals said together: every one that comes within a short while (imports finishing one by one, reads)
@@ -238,12 +304,11 @@ final class NotePictures {
         }
     }
 
-    /// Many pictures in at once (a paste, an import), their images made off the main thread: stored together and
-    /// said with one arrival, so each editor scans its pictures once for all of them.
+    /// Images already made (the sketch's, checks), stored together and said with one arrival. Bytes given with them
+    /// are accepted bytes (held until written).
     func previewBatch(_ items: [(file: URL, image: NSImage, data: Data?)]) {
         guard !items.isEmpty else { return }
         for item in items {
-            // Accepted bytes: held until their file is written.
             if let data = item.data {
                 held[item.file.path] = data
                 pendingWrites.insert(item.file.path)
@@ -257,7 +322,7 @@ final class NotePictures {
 
     /// Files that appeared or changed under the notes' folder: every picture they touch is read again.
     func filesChanged(_ paths: [String]) {
-        for key in NoteShelf.picturesTouched(events: paths, keys: Array(known.union(broken.keys))) where sources[key] != nil { read(key) }
+        for key in NoteShelf.picturesTouched(events: paths, keys: Array(Set(sizes.keys).union(broken.keys))) where sources[key] != nil { read(key) }
     }
 
     /// A paper was revealed, hidden, opened or folded: the retry timer weighed again on the next turn (once for
@@ -448,8 +513,8 @@ enum NoteRich {
         var pictures: [Data] = []
     }
 
-    /// About 100 MB: past it, pictures are copied as lines saying they couldn't be.
-    static let fragmentLimit = 100 * 1024 * 1024
+    /// About 100 MB: past it, the copy is refused (a cut deletes nothing). Lowered by checks.
+    nonisolated(unsafe) static var fragmentLimit = 100 * 1024 * 1024
 
     nonisolated static func encode(_ fragment: Fragment) -> Data? {
         let encoder = PropertyListEncoder()
@@ -707,9 +772,10 @@ final class PictureCell: NSTextAttachmentCell {
     private var picture: NSImage? { MainActor.assumeIsolated { NotePictures.shared.image(path, in: folder) } }
 
     private func size(width: CGFloat) -> NSSize {
-        let image = picture
-        guard let image, image.size.width > 0 else { return NSSize(width: width, height: 96) }
-        return NSSize(width: width, height: min(200, max(60, width * image.size.height / image.size.width)))
+        // The image, or its size as last decoded while it's evicted (so a re-read never changes the layout).
+        let known = picture?.size ?? leadsTo.flatMap { key in MainActor.assumeIsolated { NotePictures.shared.size(key) } }
+        guard let known, known.width > 0 else { return NSSize(width: width, height: 96) }
+        return NSSize(width: width, height: min(200, max(60, width * known.height / known.width)))
     }
 
     override func cellFrame(for textContainer: NSTextContainer, proposedLineFragment lineFrag: NSRect, glyphPosition position: NSPoint,
@@ -785,6 +851,33 @@ final class NoteTextView: NSTextView {
     func replaceFromOutside(_ text: NSAttributedString) {
         textStorage?.setAttributedString(text)
         history.removeAllActions()
+        MainActor.assumeIsolated { NotePictures.shared.editorChanged() }
+    }
+
+    /// Typed, pasted, undone: the pictures it contains may have changed (the holding rule weighs them again).
+    override func didChangeText() {
+        super.didChangeText()
+        MainActor.assumeIsolated { NotePictures.shared.editorChanged() }
+    }
+
+    /// Remove on the paper, while this editor is open: those pictures' attachments deleted here, as an edit saved
+    /// like any typing (so nothing typed and not saved yet brings them back). Returns how many it removed.
+    @discardableResult
+    func removePictures(named names: Set<String>) -> Int {
+        guard let storage = textStorage else { return 0 }
+        var lines: [NSRange] = []
+        let ns = storage.string as NSString
+        storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            guard let cell = (value as? NSTextAttachment)?.attachmentCell as? PictureCell, names.contains((cell.path as NSString).lastPathComponent) else { return }
+            lines.append(ns.lineRange(for: range))
+        }
+        // From the end, so earlier ranges stay where they are; each as an ordinary, undoable change.
+        for line in lines.reversed() where shouldChangeText(in: line, replacementString: "") {
+            storage.replaceCharacters(in: line, with: "")
+            didChangeText()
+        }
+        if !lines.isEmpty { changed() }
+        return lines.count
     }
 
     /// Every picture laid out and drawn again (its folder changed); the paper measured again.
@@ -806,12 +899,25 @@ final class NoteTextView: NSTextView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if let pictureObserver { NotificationCenter.default.removeObserver(pictureObserver) }
+        if let redrawObserver { NotificationCenter.default.removeObserver(redrawObserver) }
         pictureObserver = nil
+        redrawObserver = nil
         guard window != nil else { return }
         pictureObserver = NotificationCenter.default.addObserver(forName: NotePictures.arrived, object: nil, queue: .main) { [weak self] note in
             guard let targets = note.userInfo?["targets"] as? [String] else { return }
             MainActor.assumeIsolated { _ = self?.pictureArrived(Set(targets)) }
         }
+        redrawObserver = NotificationCenter.default.addObserver(forName: NotePictures.redraw, object: nil, queue: .main) { [weak self] note in
+            guard let targets = note.userInfo?["targets"] as? [String] else { return }
+            MainActor.assumeIsolated { self?.pictureRedrawn(Set(targets)) }
+        }
+    }
+    private var redrawObserver: NSObjectProtocol?
+
+    /// Pictures read again after eviction: their cells drawn again only (their size is known; nothing laid out).
+    func pictureRedrawn(_ targets: Set<String>) {
+        guard let storage = textStorage, let layoutManager else { return }
+        for range in NoteRich.pictureRanges(in: storage, targets: targets) { layoutManager.invalidateDisplay(forCharacterRange: range) }
     }
 
     /// A picture this editor shows arrived (or turned out broken): its attachment laid out, measured and drawn again,
@@ -959,64 +1065,51 @@ final class NoteTextView: NSTextView {
     /// The note this editor shows (its id): whether a pasted picture is already its own.
     var noteID = ""
 
-    /// The selection, written as the note's own fragment and as plain text for other apps, with no disk access on
-    /// the main thread: each picture's bytes as held in memory; any not held are read off the main thread first (only
-    /// through the one link rule), and one that can't be (or past the size bound) is copied as a line saying so. The
-    /// fragment itself is offered lazily (FragmentProvider): encoded only when a note pastes it. False with nothing
-    /// selected (nothing written). `done`: once the pasteboard has it.
+    /// What a copy did: written, nothing selected, or refused (its pictures past the size bound: nothing written,
+    /// and a cut deletes nothing).
+    enum CopyResult: Equatable { case copied, nothing, tooMany }
+
+    /// Said on the paper when a copy is refused.
+    static let tooManyPictures = "Too many pictures to copy at once."
+    var say: (String) -> Void = { _ in }
+
+    /// The selection, written at once as the note's own fragment and as plain text for other apps, with no disk
+    /// access: each picture's bytes as held (an open editor holds those of every picture it contains once loaded);
+    /// one not loaded yet is copied as "(A picture couldn't be copied.)". Past the size bound, nothing is written.
+    /// The fragment is offered lazily (FragmentProvider), encoded from these bytes only when a note pastes it.
     @discardableResult
-    func copySelection(to board: NSPasteboard, done: (() -> Void)? = nil) -> Bool {
+    func copySelection(to board: NSPasteboard) -> CopyResult {
         let range = selectedRange()
-        guard range.length > 0, let storage = textStorage, NSMaxRange(range) <= storage.length else { return false }
+        guard range.length > 0, let storage = textStorage, NSMaxRange(range) <= storage.length else { return .nothing }
         let blocks = NoteRich.blocks(storage.attributedSubstring(from: range))
-        let plain = NoteRich.plainText(blocks)
-        let folder = noteFolder, note = noteID
         var bytes: [Int: Data] = [:]
-        var missing: [(index: Int, link: String)] = []
         for (index, block) in blocks.enumerated() {
-            guard case .image(let path, _) = block else { continue }
-            if let key = NotePictures.target(path, in: folder), let held = MainActor.assumeIsolated({ NotePictures.shared.bytes(key) }) { bytes[index] = held }
-            else { missing.append((index, path)) }
+            guard case .image(let path, _) = block, let key = NotePictures.target(path, in: noteFolder),
+                  let held = MainActor.assumeIsolated({ NotePictures.shared.bytes(key) }) else { continue }
+            bytes[index] = held
         }
-        let write = { (bytes: [Int: Data]) in
-            let body = NoteShelf.fragmentBody(blocks, bytes: bytes, limit: NoteRich.fragmentLimit)
-            let fragment = NoteRich.Fragment(markdown: body.markdown, folder: folder.path, note: note,
-                                             root: folder.deletingLastPathComponent().path, pictures: body.pictures)
-            FragmentProvider.offer(fragment, plain: plain, on: board)
-            done?()
-        }
-        guard !missing.isEmpty else {
-            write(bytes)
-            return true
-        }
-        // Pictures not held (evicted, never loaded): read off the main thread, then the pasteboard written, unless
-        // something else was copied meanwhile.
-        let count = board.changeCount
-        DispatchQueue.global(qos: .userInitiated).async {
-            var read = bytes
-            for picture in missing {
-                if let data = NoteStore.pictureFile(picture.link, noteFolder: folder).flatMap({ NoteStore.coordinatedData($0) }), NSImage(data: data) != nil {
-                    read[picture.index] = data
-                }
-            }
-            let all = read
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard board.changeCount == count else { done?(); return }
-                    write(all)
-                }
-            }
-        }
-        return true
+        guard let body = NoteShelf.fragmentBody(blocks, bytes: bytes, limit: NoteRich.fragmentLimit) else { return .tooMany }
+        let fragment = NoteRich.Fragment(markdown: body.markdown, folder: noteFolder.path, note: noteID,
+                                         root: noteFolder.deletingLastPathComponent().path, pictures: body.pictures)
+        FragmentProvider.offer(fragment, plain: NoteRich.plainText(blocks), on: board)
+        return .copied
     }
 
     override func copy(_ sender: Any?) {
-        if !copySelection(to: .general) { super.copy(sender) }
+        switch copySelection(to: .general) {
+        case .copied: break
+        case .tooMany: say(Self.tooManyPictures)
+        case .nothing: super.copy(sender)
+        }
     }
 
     override func cut(_ sender: Any?) {
-        // Written first, then the selection deleted as an undoable change.
-        if copySelection(to: .general) { delete(sender) } else { super.cut(sender) }
+        // Written, then the selection deleted, in the same step; refused, nothing is deleted.
+        switch copySelection(to: .general) {
+        case .copied: delete(sender)
+        case .tooMany: say(Self.tooManyPictures)
+        case .nothing: super.cut(sender)
+        }
     }
 
     /// How pictures pasted as bytes are taken by this note: the screenshot paste's path (the desk's accept: in
@@ -1025,25 +1118,19 @@ final class NoteTextView: NSTextView {
     /// Saves what's here now (and its journal snapshot), not a moment later.
     var flushNow: () -> Void = {}
 
-    /// A note's fragment on the pasteboard: decoded off the main thread, then put in on it over the selection (if
-    /// that text is unchanged; else at its place), as one undoable change: its words, cards and pictures. Into the
-    /// same note from the same notes folder, a picture line already pointing into this note's own folder stays as it
-    /// is (NoteShelf.keepsOwnPicture); every other picture is taken from its bytes by the screenshot paste's path.
-    /// Undo takes it out like any text; redo puts it back. False when there's no fragment. `done`: once it's in.
+    /// A note's fragment on the pasteboard, decoded (a binary property list of at most the size bound: its picture
+    /// bytes are copied, not decoded) and put in at once over the selection, as one undoable change: its words,
+    /// cards and pictures. Into the same note from the same notes folder, a picture line already pointing into this
+    /// note's own folder stays as it is (NoteShelf.keepsOwnPicture); every other picture is taken from its bytes by
+    /// the screenshot paste's path; their images are decoded off the main thread when drawn. Undo takes it out like
+    /// any text; redo puts it back. False when there's no fragment.
     @discardableResult
-    func pasteNote(from board: NSPasteboard, done: (() -> Void)? = nil) -> Bool {
-        guard board.types?.contains(NoteRich.fragmentType) == true, let data = board.data(forType: NoteRich.fragmentType) else { return false }
+    func pasteNote(from board: NSPasteboard) -> Bool {
+        guard board.types?.contains(NoteRich.fragmentType) == true, let data = board.data(forType: NoteRich.fragmentType),
+              let fragment = NoteRich.decode(data) else { return false }
         let range = selectedRange()
         let selected = NSMaxRange(range) <= (string as NSString).length ? (string as NSString).substring(with: range) : ""
-        DispatchQueue.global(qos: .userInitiated).async {
-            let fragment = NoteRich.decode(data)
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    if let fragment { self.insertFragment(fragment, range: range, selected: selected) }
-                    done?()
-                }
-            }
-        }
+        insertFragment(fragment, range: range, selected: selected)
         return true
     }
 
@@ -1154,6 +1241,8 @@ final class NoteEditorHandle {
     /// Typed and not saved yet: the note is fenced against a read of the folder only then (NoteShelf.fenceEditor).
     var busy: () -> Bool = { false }
     var insert: (String, URL, String, Int, Int, String) -> Bool = { _, _, _, _, _, _ in false }
+    /// Remove on the paper while this editor is open: those pictures deleted here, as typing is.
+    var removePictures: (Set<String>) -> Void = { _ in }
 }
 
 /// The editor in SwiftUI: the note's lines in, the note's lines out (saved a moment after the person stops typing).
@@ -1174,6 +1263,8 @@ struct NoteEditorView: NSViewRepresentable {
 
     /// Whether two note ids are the same note now (an id-less note given its own is followed: NoteShelf.editorKeeps).
     var sameNote: (String, String, String) -> Bool = { a, _, b in a == b }
+    /// Said on the paper (a copy refused).
+    var say: (String) -> Void = { _ in }
     /// Pictures pasted as bytes (a copy from a note): taken by the screenshot paste's path.
     var acceptPictures: ([(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? = { _ in nil }
 
@@ -1302,6 +1393,11 @@ struct NoteEditorView: NSViewRepresentable {
             guard let text else { return false }
             return MainActor.assumeIsolated { text.insertPicture(path: path, file: file, caption: caption, at: at, length: length, selected: selected) }
         }
+        handle.removePictures = { [weak text] names in
+            guard let text else { return }
+            MainActor.assumeIsolated { _ = text.removePictures(named: names) }
+        }
+        text.say = say
         text.flushNow = { [weak coordinator, weak text] in
             guard let coordinator, let text else { return }
             MainActor.assumeIsolated { coordinator.flush(text) }

@@ -678,11 +678,26 @@ struct NoteStoreCheck {
         store.setAside(conflicted.key, [bad])
         expect(!store.dropPictures(conflicted.key) && store.pictureTrouble[conflicted.key]?.count == 1
                && text(folder.appending(path: "Kept.md"))?.contains("bad.png") == true, "Remove refused on a read-only paper: nothing dropped")
-        store.setAside(changeable.key, [bad])
-        expect(store.dropPictures(changeable.key) && store.pictureTrouble[changeable.key]?.count == 1, "Remove on a note that can change: its bytes kept until it lands")
+
+        // A picture whose bytes can't be written (its folder is a file): set aside, its recovery bytes kept.
+        let blocker = root.appending(path: NoteShelf.pictureFolder(id: "RM2"))
+        try? fm.createDirectory(at: blocker.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? Data("not a folder".utf8).write(to: blocker)
+        guard let refs = store.acceptPictures(changeable.key, [("png", Data("bytes".utf8), "")]) else { return expect(false, "accepted") }
+        let name = refs[0].file.lastPathComponent
         let until = Date().addingTimeInterval(5)
-        while store.pictureTrouble[changeable.key] != nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-        expect(store.pictureTrouble[changeable.key] == nil && text(single)?.contains("bad.png") == false, "landed: the reference gone from the file, then the bytes")
+        while store.pictureTrouble[changeable.key] == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        expect(store.pictureTrouble[changeable.key]?.map(\.name) == [name] && store.keepsBytes("RM2", name), "set aside, its bytes kept for recovery")
+        // Remove with an editor open: off the paper at once, no write of its own; the bytes go only when the editor's
+        // save without the picture lands.
+        let refLine = "![](\(refs[0].path))"
+        _ = store.change(changeable.key) { $0.body += "\n" + refLine }
+        let names = store.retirePictures(changeable.key, write: false)
+        expect(names == [name] && store.pictureTrouble[changeable.key] == nil && store.keepsBytes("RM2", name), "Remove: off the paper, the bytes kept until it lands")
+        _ = store.change(changeable.key) { $0.body = $0.body.replacingOccurrences(of: "\n" + refLine, with: "") }   // the editor's save
+        while store.keepsBytes("RM2", name) && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        expect(!store.keepsBytes("RM2", name) && text(single)?.contains(name) == false, "the save without it landed: the reference gone from the file, then the bytes")
+        try? fm.removeItem(at: blocker)
     }
 
     /// The one rule for picture links (NoteStore.pictureFile), journal recovery putting bytes exactly where each saved

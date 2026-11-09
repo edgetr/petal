@@ -1104,6 +1104,12 @@ final class NoteStore {
                 setAside(session.key, pictures)
             }
         }
+        // A write that landed without the references of pictures being removed (Remove): their recovery bytes go
+        // now, never before (in memory, the journal, and NotePictures' pending writes).
+        if case .write(let text, _) = item.work, let removing = retiring[noteID], !removing.isEmpty {
+            let landed: Bool = switch result.outcome { case .written, .keptBoth: true; default: false }
+            if landed { finishRetiring(noteID, text: text) }
+        }
         for done in item.done { done(result.outcome) }
         switch item.work {
         case .move, .trash, .keep: reload()
@@ -1124,29 +1130,50 @@ final class NoteStore {
         enqueue(session, .pictureBytes(pictures, noteID: paper.noteID), done: nil)
     }
 
-    /// Remove: the pictures that couldn't be saved leave the note (their references too) and then memory. Refused
-    /// on a read-only paper; their recovery bytes (in memory and the journal) go only once the note without their
-    /// references has actually landed. False when nothing was done.
+    /// Remove, the paper's button: the pictures that couldn't be saved leave the note. Refused on a read-only
+    /// paper. Off the paper at once; their recovery bytes (in memory, the journal, NotePictures' pending writes) go
+    /// only once a write of the note without their references has landed (`finishRetiring`). With an editor open,
+    /// the removal is an edit there, saved like any typing (the desk's); else a based write here (`write: true`).
+    /// Their names, or nil when nothing was done.
     @discardableResult
-    func dropPictures(_ key: String) -> Bool {
-        guard let paper = paper(key), !readOnly(paper), let pictures = pictureTrouble[key], !pictures.isEmpty else { return false }
+    func retirePictures(_ key: String, write: Bool) -> Set<String>? {
+        guard let paper = paper(key), !readOnly(paper), let pictures = pictureTrouble[key], !pictures.isEmpty else { return nil }
         let names = Set(pictures.map(\.name))
-        let noteID = paper.noteID
-        let written = change(key, edit: { file in
-            file.body = NoteBlock.blocks(file.body).filter { block in
-                if case .image(let path, _) = block { return !names.contains((path as NSString).lastPathComponent) }
-                return true
-            }.map(\.markdown).joined(separator: "\n")
-        }) { outcome in
-            let landed: Bool = switch outcome { case .written, .keptBoth: true; default: false }
-            guard landed else { return }
-            self.pictureTrouble[key] = self.pictureTrouble[key].map { $0.filter { !names.contains($0.name) } }
-            if self.pictureTrouble[key]?.isEmpty == true { self.pictureTrouble[key] = nil }
-            for name in names { self.pendingPictures[noteID]?[name] = nil }
-            NoteJournal.queue.async { NoteJournal.picturesSaved(noteID: noteID, names: names) }
+        pictureTrouble[key] = nil
+        retiring[paper.noteID, default: []].formUnion(names)
+        if write {
+            change(key) { file in
+                file.body = NoteBlock.blocks(file.body).filter { block in
+                    if case .image(let path, _) = block { return !names.contains((path as NSString).lastPathComponent) }
+                    return true
+                }.map(\.markdown).joined(separator: "\n")
+            }
         }
-        return written != nil
+        return names
     }
+
+    /// Kept for the paper's Remove without an editor (a based write).
+    @discardableResult
+    func dropPictures(_ key: String) -> Bool { retirePictures(key, write: true) != nil }
+
+    /// Pictures being removed, by note id: their recovery bytes go once a write without their references lands.
+    @ObservationIgnored private var retiring: [String: Set<String>] = [:]
+
+    private func finishRetiring(_ noteID: String, text: String) {
+        guard let removing = retiring[noteID] else { return }
+        let referenced = Set(NoteShelf.referencedPictures(text).map { ($0 as NSString).lastPathComponent })
+        let gone = removing.subtracting(referenced)
+        guard !gone.isEmpty else { return }
+        retiring[noteID] = removing.subtracting(gone)
+        if retiring[noteID]?.isEmpty == true { retiring[noteID] = nil }
+        for name in gone { pendingPictures[noteID]?[name] = nil }
+        NoteJournal.queue.async { NoteJournal.picturesSaved(noteID: noteID, names: gone) }
+        let folder = root.appending(path: NoteShelf.pictureFolder(id: noteID))
+        NotificationCenter.default.post(name: Self.picturesRetired, object: nil, userInfo: ["paths": gone.map { folder.appending(path: $0).path }])
+    }
+
+    /// Whether a picture's recovery bytes are still kept for a note (for checks).
+    func keepsBytes(_ noteID: String, _ name: String) -> Bool { pendingPictures[noteID]?[name] != nil }
 
     /// Pictures set aside on a paper (their bytes couldn't be written): said with Try again and Remove.
     func setAside(_ key: String, _ pictures: [NotePictureBytes]) { pictureTrouble[key, default: []] += pictures }
@@ -1371,6 +1398,8 @@ final class NoteStore {
     static let filesChanged = Notification.Name("petal.notesFilesChanged")
     /// Pictures' files written (userInfo "paths"): their bytes needn't stay in memory for them.
     static let picturesWritten = Notification.Name("petal.notesPicturesWritten")
+    /// Pictures removed for good (userInfo "paths"): their pending writes are retired.
+    static let picturesRetired = Notification.Name("petal.notesPicturesRetired")
 
     private func watch() {
         guard !Headless.on, !switching else { return }

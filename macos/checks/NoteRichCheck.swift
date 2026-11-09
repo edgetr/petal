@@ -9,6 +9,7 @@ final class NoteStore {
     nonisolated static let io = DispatchQueue(label: "petal.check.notes")
     static let filesChanged = Notification.Name("petal.check.notesFilesChanged")
     static let picturesWritten = Notification.Name("petal.check.notesPicturesWritten")
+    static let picturesRetired = Notification.Name("petal.check.notesPicturesRetired")
     // Where a link leads, as the check says (nil: "not there"); every read is counted.
     nonisolated(unsafe) static var files: [String: URL] = [:]
     nonisolated(unsafe) static var reads = 0
@@ -228,12 +229,8 @@ struct NoteRichCheck {
             return view
         }
         func body(_ view: NoteTextView) -> String { NoteBlock.body(NoteRich.blocks(view.textStorage!)) }
-        func copy(_ view: NoteTextView) -> Bool {
-            var finished = false
-            let ok = view.copySelection(to: board) { finished = true }
-            spin { finished || !ok }
-            return ok
-        }
+        // Copy is synchronous: the pasteboard has it when it returns.
+        func copy(_ view: NoteTextView) -> Bool { view.copySelection(to: board) == .copied }
         let carded = editor("hello\nhttps://example.com/page\nafter", note: "N1", folder: inbox)
         carded.setSelectedRange(NSRange(location: 0, length: 7))   // "hello\n" and the card
         expect(copy(carded), "words and a card copied")
@@ -252,9 +249,8 @@ struct NoteRichCheck {
                     ("../\(own)/picture-new\(n).\(item.ext)", URL(fileURLWithPath: "/tmp/petal-rich/\(own)/picture-new\(n).\(item.ext)"), item.caption)
                 }
             }
-            var finished = false
-            expect(view.pasteNote(from: board) { finished = true }, "a note's fragment on the pasteboard")
-            spin { finished }
+            // Paste is synchronous: in when it returns.
+            expect(view.pasteNote(from: board), "a note's fragment on the pasteboard")
         }
         let pngData = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?.representation(using: .png, properties: [:]) ?? Data()
@@ -390,6 +386,90 @@ struct NoteRichCheck {
         NotePictures.shared.written([otherKey])
         expect(NotePictures.shared.bytes(otherKey) == nil, "written and shown nowhere: let go at once")
         expect(NotePictures.shared.cacheLimit == 200 * 1024 * 1024, "the image cache's cost limit: about 200 MB of decoded pixels")
+
+        // Synchronous cut: refused past the size bound, with nothing written and nothing deleted, and said.
+        let oversize = editor("big\n![](../\(ownN1)/picture-fresh.png)", note: "N1", folder: inbox)
+        var told: [String] = []
+        oversize.say = { told.append($0) }
+        oversize.selectAll(nil)
+        let countBefore = board.changeCount
+        let limitBefore = NoteRich.fragmentLimit
+        NoteRich.fragmentLimit = 10
+        expect(oversize.copySelection(to: board) == .tooMany && board.changeCount == countBefore, "past the bound: refused, nothing written")
+        oversize.cut(nil)
+        NoteRich.fragmentLimit = limitBefore
+        expect(body(oversize) == "big\n![](../\(ownN1)/picture-fresh.png)" && told == [NoteTextView.tooManyPictures], "a refused cut deletes nothing, and says why", body(oversize))
+
+        // The holding rule, at each event: bytes held while their write is pending or an open editor contains them.
+        func holdKey(_ name: String) -> String { "/tmp/petal-rich/Pictures/hold/\(name).png" }
+        let image2 = NSImage(data: pngData) ?? NSImage()
+        NotePictures.shared.preview(URL(fileURLWithPath: holdKey("a")), image2, data: pngData)                 // accepted: write pending
+        expect(NotePictures.shared.bytes(holdKey("a")) == pngData, "accepted: held (write pending)")
+        NotePictures.shared.written([holdKey("a")])                                                            // write lands, no editor
+        expect(NotePictures.shared.bytes(holdKey("a")) == nil, "written, no editor contains it: let go")
+        let holder = editor("![](../Pictures/hold/b.png)", note: "N2", folder: work)
+        NotePictures.shared.register(holder)                                                                   // editor opens
+        NotePictures.shared.preview(URL(fileURLWithPath: holdKey("b")), image2, data: pngData)
+        NotePictures.shared.written([holdKey("b")])
+        expect(NotePictures.shared.bytes(holdKey("b")) == pngData, "written, but an open editor contains it: held")
+        holder.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("no pictures now"), folder: holder.folderRef, style: style))   // its text changes
+        expect(NotePictures.shared.bytes(holdKey("b")) == nil, "its editor no longer contains it: let go")
+        holder.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("![](../Pictures/hold/c.png)"), folder: holder.folderRef, style: style))
+        NotePictures.shared.preview(URL(fileURLWithPath: holdKey("c")), image2, data: pngData)
+        NotePictures.shared.written([holdKey("c")])
+        NotePictures.shared.unregister(holder)                                                                 // editor closes
+        expect(NotePictures.shared.bytes(holdKey("c")) == nil, "its editor closed: let go")
+        NotePictures.shared.preview(URL(fileURLWithPath: holdKey("d")), image2, data: pngData)
+        NotificationCenter.default.post(name: NoteStore.picturesRetired, object: nil, userInfo: ["paths": [holdKey("d")]])   // a removal lands
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        expect(NotePictures.shared.bytes(holdKey("d")) == nil, "its removal landed: the pending write retired, let go")
+        // A read completing keeps its bytes only by the rule.
+        let readFile = FileManager.default.temporaryDirectory.appending(path: "petal-rich-read-\(UUID().uuidString).png")
+        try? pngData.write(to: readFile)
+        NoteStore.files["/tmp/petal-rich/Pictures/hold/e.png"] = readFile
+        NoteStore.files["/tmp/petal-rich/Pictures/hold/f.png"] = readFile
+        _ = NotePictures.shared.image("../Pictures/hold/e.png", in: work)                                     // nobody contains it
+        let reader = editor("![](../Pictures/hold/f.png)", note: "N2", folder: work)
+        NotePictures.shared.register(reader)
+        _ = NotePictures.shared.image("../Pictures/hold/f.png", in: work)                                     // an open editor contains it
+        spin { NotePictures.shared.cached(holdKey("e")) != nil && NotePictures.shared.cached(holdKey("f")) != nil }
+        expect(NotePictures.shared.bytes(holdKey("e")) == nil && NotePictures.shared.bytes(holdKey("f")) == pngData,
+               "a read keeps its bytes only for a picture an open editor contains")
+
+        // Evicted and read again: only its cell drawn again (no arrival, no layout), and no loop.
+        var evictArrivals = 0, redraws = 0
+        let arrivalWatch = NotificationCenter.default.addObserver(forName: NotePictures.arrived, object: nil, queue: nil) { _ in evictArrivals += 1 }
+        let redrawWatch = NotificationCenter.default.addObserver(forName: NotePictures.redraw, object: nil, queue: nil) { _ in redraws += 1 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        evictArrivals = 0
+        NotePictures.shared.evict(holdKey("e"))
+        let readsBeforeEviction = NoteStore.reads
+        expect(NotePictures.shared.size(holdKey("e")) != nil, "its size is known while it's evicted")
+        _ = NotePictures.shared.image("../Pictures/hold/e.png", in: work)
+        spin { NotePictures.shared.cached(holdKey("e")) != nil }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        for _ in 0..<5 { _ = NotePictures.shared.image("../Pictures/hold/e.png", in: work) }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        NotificationCenter.default.removeObserver(arrivalWatch)
+        NotificationCenter.default.removeObserver(redrawWatch)
+        expect(NoteStore.reads - readsBeforeEviction == 1 && evictArrivals == 0 && redraws == 1,
+               "read again once, its cell redrawn, no arrival, no loop", "\(NoteStore.reads - readsBeforeEviction) reads, \(evictArrivals) arrivals, \(redraws) redraws")
+        NotePictures.shared.unregister(reader)
+        try? FileManager.default.removeItem(at: readFile)
+        // Decoded at the size it's shown, never full size.
+        let large = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 3000, pixelsHigh: 1500, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                     colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?.representation(using: .png, properties: [:]) ?? Data()
+        let small = NotePictures.downsample(large, maxPixels: NotePictures.shownPixels)
+        expect(small.map { max($0.size.width, $0.size.height) <= CGFloat(NotePictures.shownPixels) } == true && NotePictures.shownPixels == 720,
+               "a 3000-pixel picture decoded at the shown 720", "\(String(describing: small?.size))")
+
+        // Remove with an editor open (typing not saved yet): an edit in that editor, the typing kept.
+        let dirty = editor("typed and not saved\n![](../Pictures/x/bad.png)\nmore", note: "N2", folder: work)
+        dirty.delegate = undoDelegate
+        dirty.allowsUndo = true
+        let removed = dirty.removePictures(named: ["bad.png"])
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        expect(removed == 1 && body(dirty) == "typed and not saved\nmore" && dirty.history.canUndo, "Remove in the open editor: the picture gone, the typing kept, undoable", body(dirty))
 
         // One arrival for a batch of pictures: each editor scans its pictures once.
         let batchFiles = (0..<50).map { (URL(fileURLWithPath: "/tmp/petal-rich/Pictures/batch/p\($0).png"), NSImage(size: NSSize(width: 2, height: 2)), Optional<Data>.none) }
