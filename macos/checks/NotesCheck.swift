@@ -397,6 +397,23 @@ struct NotesCheck {
         expect(!NoteShelf.mayBecomeActive(.look, ticket: 7, current: 7, readPID: 10, frontPID: 20), "a late read of the app left behind: refused")
         expect(!NoteShelf.mayBecomeActive(.look, ticket: 7, current: 7, readPID: 10, frontPID: nil), "no app known in front: refused")
 
+        // The rest of a partly recovered entry continues where its first part landed (unless that's the note itself).
+        expect(NoteShelf.continuation(landedAt: "/n/Inbox/T.md", notePaths: ["/n/Inbox/T.md"]) == nil, "landed in the note: found by its id as usual")
+        expect(NoteShelf.continuation(landedAt: "/support/Unsaved notes/T.md", notePaths: ["/n/Inbox/T.md"]) == "/support/Unsaved notes/T.md",
+               "landed in Unsaved notes: continues there")
+        expect(NoteShelf.continuation(landedAt: "/n/Inbox/T (conflicted copy).md", notePaths: ["/n/Inbox/T.md"]) == "/n/Inbox/T (conflicted copy).md",
+               "landed in a copy beside it: continues there")
+        expect(NoteShelf.continueAt("/support/Unsaved notes/T.md", exists: true) && !NoteShelf.continueAt("/support/Unsaved notes/T.md", exists: false)
+               && !NoteShelf.continueAt(nil, exists: true), "only while that file is there; gone, found as usual")
+
+        // A note is made only from a read that became active and is still active after the selection read.
+        expect(NoteShelf.mayCreate(activated: true, activePID: 10, activeWindow: 5, readPID: 10, readWindow: 5, frontPID: 10), "still in front: made")
+        expect(!NoteShelf.mayCreate(activated: false, activePID: 10, activeWindow: 5, readPID: 10, readWindow: 5, frontPID: 10), "the read was refused: no note")
+        expect(!NoteShelf.mayCreate(activated: true, activePID: 20, activeWindow: 7, readPID: 10, readWindow: 5, frontPID: 20),
+               "another app came in front during the selection read: no note")
+        expect(!NoteShelf.mayCreate(activated: true, activePID: 10, activeWindow: 6, readPID: 10, readWindow: 5, frontPID: 10), "another window of it: no note")
+        expect(NoteShelf.mayTakeKeyboard(shown: true) && !NoteShelf.mayTakeKeyboard(shown: false), "the keyboard only for a paper layout showed")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

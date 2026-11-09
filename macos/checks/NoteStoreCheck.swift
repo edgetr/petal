@@ -262,7 +262,7 @@ struct NoteStoreCheck {
         expect(waiting.isEmpty && withPicture.pictures.count == 1 && withPicture.base == pastedText
                && withPicture.text.contains(NoteShelf.assetsFolder(id: "JI") + "/" + (withPicture.pictures.first?.name ?? "?")),
                "read at the next launch: a picture and its line, on the text that was there")
-        expect(NoteJournal.recoverEntry(withPicture, notes: NoteStore.read(root).notes, root: root)
+        expect(NoteJournal.recoverEntry(withPicture, notes: NoteStore.read(root).notes, root: root) != nil
                && text(pasted) == withPicture.text
                && fm.fileExists(atPath: notes.appending(path: NoteShelf.assetsFolder(id: "JI") + "/" + (withPicture.pictures.first?.name ?? "?")).path),
                "put back: the note has the picture", text(pasted) ?? "nil")
@@ -305,7 +305,7 @@ struct NoteStoreCheck {
         let waitingOne = NoteJournal.Import(token: 9, path: notDownloaded.path, ext: "png")
         both.imports = [NoteJournal.Import(token: 9, path: source.path, ext: "png", caption: "source"), waitingOne]
         NoteJournal.snapshot(both, in: journal)
-        let (stored, left, landedText) = NoteJournal.putIn(both, token: 9, root: root)
+        let (stored, left, landedText, _) = NoteJournal.putIn(both, token: 9, root: root)
         expect(stored && left == [waitingOne] && text(partial)?.contains(NoteShelf.assetsFolder(id: "JQ")) == true && landedText == text(partial),
                "the read file goes in, the waiting one is said, and what landed in the note too", "\(left)")
         // The snapshot advances to what landed, keeping only the waiting file.
@@ -331,6 +331,36 @@ struct NoteStoreCheck {
         NoteJournal.importsDone(noteID: "JQ", token: 9, in: journal)
         NoteJournal.forget(noteID: "JQ", in: journal)
         expect(!fm.fileExists(atPath: NoteJournal.file("JQ", in: journal).path), "once it's in (or removed): out")
+
+        // A partial recovery that could only land in Unsaved notes: the rest continues there, with every picture's
+        // bytes kept until it's stored there too (never assumed to be in the notes' folder).
+        let lockedNotes = root.appending(path: "Unwritable")
+        try? fm.createDirectory(at: lockedNotes, withIntermediateDirectories: true)
+        let lockedNote = lockedNotes.appending(path: "Trip.md")
+        let tripText = NoteFile(id: "JU", body: "trip").serialized()
+        _ = NoteStore.create(tripText, at: lockedNote, root: root)
+        let later = root.appending(path: "later-pic.png")
+        try? Data("not downloaded".utf8).write(to: later)
+        var trip = NoteJournal.Entry(noteID: "JU", path: lockedNote.path, base: nil, text: tripText)
+        trip.landed = true
+        trip.imports = [NoteJournal.Import(token: 1, path: source.path, ext: "png"), NoteJournal.Import(token: 1, path: later.path, ext: "png")]
+        let holding = Config.supportFolder.appending(path: "Notes journal, recovering 1")
+        try? fm.createDirectory(at: holding, withIntermediateDirectories: true)
+        NoteJournal.snapshot(trip, in: holding)
+        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: lockedNotes.path)
+        NoteJournal.recover(holding, root: root)
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: lockedNotes.path)
+        let rest = NoteJournal.read(NoteJournal.file("JU", in: holding))
+        let unsavedFolder = Config.supportFolder.appending(path: "Unsaved notes")
+        expect(rest?.landedAt?.contains("Unsaved notes") == true && rest?.pictures.count == 1 && rest?.imports?.count == 1 && text(lockedNote) == tripText,
+               "landed in Unsaved notes: the rest continues there, the first picture's bytes kept", "\(String(describing: rest?.landedAt))")
+        try? png?.write(to: later)
+        NoteJournal.recover(holding, root: root)
+        let continued = rest?.landedAt.flatMap { text(URL(fileURLWithPath: $0)) } ?? ""
+        let pictureFiles = (try? fm.contentsOfDirectory(atPath: unsavedFolder.appending(path: NoteShelf.assetsFolder(id: "JU")).path)) ?? []
+        expect(continued.components(separatedBy: "![").count == 3 && pictureFiles.count == 2 && text(lockedNote) == tripText,
+               "the rest continues in that same file, both pictures beside it, the note untouched", "\(pictureFiles) \(continued)")
+        expect(!fm.fileExists(atPath: NoteJournal.file("JU", in: holding).path), "and the entry goes once it's all there")
 
         // A text that landed while a picture it references failed: the snapshot stays with that picture's bytes,
         // and goes once the picture is saved.

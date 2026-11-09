@@ -1450,8 +1450,14 @@ final class NoteDesk {
         let privacy = ClaudePanel.privacy.now
         let ticket = looks
         Self.read(running, mac: local.mac) { scene, read in
-            self.activate(scene, read: read, ticket: ticket)
+            // A read refused (stale, or its app no longer in front): no note.
+            guard self.activate(scene, read: read, ticket: ticket) else { return self.say(Self.frontChanged) }
             self.passage(in: scene, privacy: privacy) { selected in
+                // Checked again after the selection read: still the active scene, its app still in front.
+                guard NoteShelf.mayCreate(activated: true, activePID: self.scene?.pid, activeWindow: self.scene?.window, readPID: scene.pid,
+                                          readWindow: scene.window, frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) else {
+                    return self.say(Self.frontChanged)
+                }
                 let passage: (quote: String, before: String, after: String)?
                 switch selected {
                 case .refused: return self.say("Petal doesn't keep that selection in a note.")
@@ -1974,9 +1980,10 @@ final class NotePanel: NSPanel {
         return NoteShelf.wholeOnScreen(rect, visible: screen.visibleFrame)
     }
 
+    /// The keyboard, only for a paper layout already showed (NoteShelf.mayTakeKeyboard): never unveiled here.
     func takeKeyboard() {
         refit()
-        unveil()
+        guard NoteShelf.mayTakeKeyboard(shown: unveiled) else { return }
         makeKeyAndOrderFront(nil)
     }
 

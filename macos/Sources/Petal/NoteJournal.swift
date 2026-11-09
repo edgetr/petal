@@ -27,6 +27,9 @@ enum NoteJournal {
         /// Pictures pasted or dropped and still being read when it was taken: their sources (a file's path, or the
         /// pasteboard's bytes), put in at the next launch when a quit came first.
         var imports: [Import]? = nil
+        /// Where its text already landed when part of it was put back and the rest waits (the note, a copy beside
+        /// it, a file of its own, or one in "Unsaved notes"): the rest continues there, never somewhere else.
+        var landedAt: String? = nil
     }
 
     /// A paste or drop not read yet: a file (`path`) or bytes from the pasteboard (`data`, TIFF turned into PNG
@@ -177,13 +180,13 @@ enum NoteJournal {
             let url = holding.appending(path: name)
             guard let kept = read(url) else { try? fm.removeItem(at: url); continue }
             let (entry, waiting) = readImports(kept)
-            guard recoverEntry(entry, notes: notes, root: root) else { continue }
+            guard let at = land(entry, notes: notes, root: root) else { continue }
             if waiting.isEmpty { try? fm.removeItem(at: url); continue }
-            // Put back, but a paste's file couldn't be read yet (iCloud still downloading it): its source stays,
-            // on what was just put back, for the next launch.
-            var rest = Entry(noteID: entry.noteID, path: entry.path, base: nil, text: entry.text)
-            rest.landed = true
-            rest.imports = waiting
+            // Put back, but a paste's file couldn't be read yet (iCloud still downloading it): the rest continues
+            // where this landed (NoteShelf.continuation), on what landed there, with the bytes of every picture its
+            // text references kept until they're stored there too.
+            let notePaths = notes.filter { $0.noteID == entry.noteID && $0.version == nil }.map(\.url.path)
+            let rest = continuation(entry, at: NoteShelf.continuation(landedAt: at.path, notePaths: notePaths), waiting: waiting)
             if let data = try? JSONEncoder().encode(rest) { try? data.write(to: url, options: .atomic) }
         }
         if (((try? fm.contentsOfDirectory(atPath: holding.path)) ?? []).filter { $0.hasSuffix(".json") }).isEmpty { try? fm.removeItem(at: holding) }
@@ -195,24 +198,29 @@ enum NoteJournal {
     /// now, whatever the rest do).
     /// `landed`: the text now in the note itself when it went there (not into a copy beside it or a file of its own):
     /// what the journal's snapshot advances to (`advance`).
-    nonisolated static func putIn(_ entry: Entry, token: Int, root: URL) -> (stored: Bool, waiting: [Import], landed: String?) {
-        guard let mine = entry.imports?.filter({ $0.token == token }), !mine.isEmpty else { return (false, [], nil) }
+    nonisolated static func putIn(_ entry: Entry, token: Int, root: URL) -> (stored: Bool, waiting: [Import], landed: String?, at: URL?) {
+        guard let mine = entry.imports?.filter({ $0.token == token }), !mine.isEmpty else { return (false, [], nil, nil) }
         var one = Entry(noteID: entry.noteID, path: entry.path, base: entry.base, text: entry.text)
         one.landed = entry.landed
         one.imports = mine
         let (ready, waiting) = readImports(one)
-        guard !ready.pictures.isEmpty else { return (false, waiting, nil) }
+        guard !ready.pictures.isEmpty else { return (false, waiting, nil, nil) }
         let notes = NoteStore.read(root).notes
-        guard recoverEntry(ready, notes: notes, root: root) else { return (false, waiting, nil) }
-        let found = notes.filter { $0.noteID == entry.noteID && $0.version == nil }
-        let landed = found.count == 1 && NoteStore.coordinatedRead(found[0].url) == ready.text ? ready.text : nil
-        return (true, waiting, landed)
+        var placed = ready
+        placed.landedAt = entry.landedAt
+        guard let at = land(placed, notes: notes, root: root) else { return (false, waiting, nil, nil) }
+        // What's in that file now, when it's what was put there: the snapshot advances to it, continuing at that
+        // file unless it's the note itself (NoteShelf.continuation).
+        let there = NoteShelf.within(at.path, root.path) != nil ? NoteStore.coordinatedRead(at) : (try? String(contentsOf: at, encoding: .utf8))
+        let notePaths = notes.filter { $0.noteID == entry.noteID && $0.version == nil }.map(\.url.path)
+        let continues = NoteShelf.continuation(landedAt: at.path, notePaths: notePaths).map { URL(fileURLWithPath: $0) }
+        return (true, waiting, there == ready.text ? ready.text : nil, continues)
     }
 
     /// Part of a paste put into its note: the snapshot's whole text (and base) advance to what landed, with only the
     /// sources still waiting, while it's still the snapshot that put-in was made from (NoteShelf.advancedSnapshot);
     /// a newer snapshot keeps its text and only loses this paste's sources that went in.
-    nonisolated static func advance(noteID: String, from used: String, to landed: String, token: Int, keeping: [Import], in folder: URL = folder) {
+    nonisolated static func advance(noteID: String, from used: String, to landed: String, at: URL? = nil, token: Int, keeping: [Import], in folder: URL = folder) {
         let url = file(noteID, in: folder)
         guard var entry = read(url) else { return }
         guard let next = NoteShelf.advancedSnapshot(current: entry.text, used: used, landed: landed) else {
@@ -221,13 +229,65 @@ enum NoteJournal {
         entry.text = next
         entry.base = nil
         entry.landed = true
+        // The rest continues at the file it landed in (its pictures' bytes kept until stored there).
+        if let at { entry.landedAt = at.path }
         let rest = (entry.imports ?? []).filter { $0.token != token } + keeping
         entry.imports = rest.isEmpty ? nil : rest
         settle(entry, at: url, in: folder)
     }
 
-    /// One entry put back somewhere safe: true once it's written and said so.
-    nonisolated static func recoverEntry(_ entry: Entry, notes: [PaperNote], root: URL) -> Bool {
+    /// What's left of an entry put back in part: its text as it landed at `at`, the sources still waiting, and every
+    /// picture's bytes it had (they're stored again where it continues, never assumed to be).
+    nonisolated static func continuation(_ entry: Entry, at: String?, waiting: [Import]) -> Entry {
+        var rest = Entry(noteID: entry.noteID, path: entry.path, base: nil, text: entry.text)
+        rest.landed = true
+        rest.imports = waiting.isEmpty ? nil : waiting
+        rest.pictures = entry.pictures
+        rest.landedAt = at
+        return rest
+    }
+
+    /// An entry put back: where it continues when part of it landed before (`landedAt`), else found as usual
+    /// (`recoverEntry`). The file its text is in now, or nil when it couldn't be written.
+    nonisolated static func land(_ entry: Entry, notes: [PaperNote], root: URL) -> URL? {
+        if NoteShelf.continueAt(entry.landedAt, exists: entry.landedAt.map { FileManager.default.fileExists(atPath: $0) } ?? false), let at = entry.landedAt {
+            return continueAt(entry, URL(fileURLWithPath: at), root: root)
+        }
+        return recoverEntry(entry, notes: notes, root: root)
+    }
+
+    /// The rest of an entry, at the file where its first part landed: its pictures beside that file (the notes'
+    /// folder's pictures' folder, or "Unsaved notes"' laid out the same), then its text over that file while it
+    /// still says what landed there (`base`) or already says it; changed since, a copy beside it (in the notes'
+    /// folder) or a new file in "Unsaved notes".
+    nonisolated static func continueAt(_ entry: Entry, _ file: URL, root: URL) -> URL? {
+        let fm = FileManager.default
+        let pictures = entry.pictures.map { NotePictureBytes(name: $0.name, data: $0.data, caption: "") }
+        let assets = file.deletingLastPathComponent().appending(path: NoteShelf.assetsFolder(id: entry.noteID))
+        if NoteShelf.within(file.path, root.path) != nil {
+            guard pictures.isEmpty || NoteStore.writePictures(pictures, into: assets, root: root).count == pictures.count else { return nil }
+            switch NoteStore.save(entry.text, to: file, base: entry.base, root: root, noteID: entry.noteID) {
+            case .written: return file
+            case .keptBoth(let copy): return copy
+            default: return nil
+            }
+        }
+        // In "Unsaved notes" (outside the notes' folder): the same, by hand.
+        try? fm.createDirectory(at: assets, withIntermediateDirectories: true)
+        for picture in pictures {
+            let into = assets.appending(path: picture.name)
+            if !fm.fileExists(atPath: into.path), (try? picture.data.write(to: into, options: .withoutOverwriting)) == nil { return nil }
+        }
+        let disk = try? String(contentsOf: file, encoding: .utf8)
+        if disk == nil || disk == entry.base || disk == entry.text {
+            return (try? Data(entry.text.utf8).write(to: file, options: .atomic)) != nil ? file : nil
+        }
+        return NoteStore.rescued(entry.text, noteID: entry.noteID, pictures: pictures)
+    }
+
+    /// One entry put back somewhere safe: the file it's in now once it's written and said so (the note, a copy
+    /// beside it, a file of its own, or one in "Unsaved notes"); nil when nothing could take it.
+    nonisolated static func recoverEntry(_ entry: Entry, notes: [PaperNote], root: URL) -> URL? {
         let found = notes.filter { $0.noteID == entry.noteID && $0.version == nil }.map(\.url.path)
         let pictures = entry.pictures.map { NotePictureBytes(name: $0.name, data: $0.data, caption: "") }
         func picturesBeside(_ note: URL) -> Bool {
@@ -240,9 +300,9 @@ enum NoteJournal {
             let disk = NoteStore.coordinatedRead(note)
             guard picturesBeside(note) else { break }
             switch NoteShelf.journalRecovery(disk: disk, base: entry.base, text: entry.text, aside: entry.aside) {
-            case .nothing: return true
-            case .write: if NoteStore.save(entry.text, to: note, base: entry.base, root: root, noteID: entry.noteID) == .written { return true }
-            case .copy: if case .keptBoth = NoteStore.keepBeside(entry.text, original: note, root: root) { return true }
+            case .nothing: return note
+            case .write: if NoteStore.save(entry.text, to: note, base: entry.base, root: root, noteID: entry.noteID) == .written { return note }
+            case .copy: if case .keptBoth(let copy) = NoteStore.keepBeside(entry.text, original: note, root: root) { return copy }
             }
         case .separate:
             // A file of its own in the notebook it was in: never into a note that isn't it.
@@ -253,10 +313,10 @@ enum NoteJournal {
             _ = note
             let stem = NoteStore.safeStem(for: entry.text, fallback: NoteStore.plainStem)
             if NoteStore.safe(folder, root: root), picturesBeside(hint),
-               NoteStore.createNamed(entry.text, stem: entry.base == nil ? stem : stem + " (recovered)", in: folder, root: root) != nil {
-                return true
+               let made = NoteStore.createNamed(entry.text, stem: entry.base == nil ? stem : stem + " (recovered)", in: folder, root: root) {
+                return made
             }
         }
-        return NoteStore.rescue(entry.text, noteID: entry.noteID, pictures: pictures)
+        return NoteStore.rescued(entry.text, noteID: entry.noteID, pictures: pictures)
     }
 }

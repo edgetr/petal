@@ -1189,7 +1189,10 @@ final class NoteStore {
     /// pictures in a pictures' folder beside it laid out as in the notes' folder, so its references hold. True once
     /// the text and every picture are written there.
     @discardableResult
-    nonisolated static func rescue(_ text: String, noteID: String, pictures: [NotePictureBytes]) -> Bool {
+    nonisolated static func rescue(_ text: String, noteID: String, pictures: [NotePictureBytes]) -> Bool { rescued(text, noteID: noteID, pictures: pictures) != nil }
+
+    /// The same, saying the file it wrote.
+    nonisolated static func rescued(_ text: String, noteID: String, pictures: [NotePictureBytes]) -> URL? {
         let fm = FileManager.default
         let folder = Config.supportFolder.appending(path: "Unsaved notes")
         try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -1198,15 +1201,15 @@ final class NoteStore {
             try? fm.createDirectory(at: assets, withIntermediateDirectories: true)
             for picture in pictures {
                 let file = assets.appending(path: picture.name)
-                if !fm.fileExists(atPath: file.path), (try? picture.data.write(to: file, options: .withoutOverwriting)) == nil { return false }
+                if !fm.fileExists(atPath: file.path), (try? picture.data.write(to: file, options: .withoutOverwriting)) == nil { return nil }
             }
         }
         let stem = safeStem(for: text, fallback: plainStem)
         for n in 0..<100 {
             let file = folder.appending(path: (n == 0 ? stem : "\(stem) \(n + 1)") + ".md")
-            if (try? Data(text.utf8).write(to: file, options: .withoutOverwriting)) != nil { return true }
+            if (try? Data(text.utf8).write(to: file, options: .withoutOverwriting)) != nil { return file }
         }
-        return false
+        return nil
     }
 
     // MARK: Watching
@@ -1524,19 +1527,20 @@ final class NoteStore {
             Self.io.async {
                 var stored = false
                 var landed: String?
+                var landedAt: URL?
                 var waiting: [NoteJournal.Import] = entry?.imports?.filter { $0.token == token } ?? []
                 if var entry {
                     // Its text already in its note (the folder switch's drain wrote it): the base its lines go on.
                     let found = NoteStore.read(root).notes.filter { $0.noteID == noteID && $0.version == nil }
                     if found.count == 1, NoteStore.coordinatedRead(found[0].url) == entry.text { entry.landed = true }
-                    (stored, waiting, landed) = NoteJournal.putIn(entry, token: token, root: root)
+                    (stored, waiting, landed, landedAt) = NoteJournal.putIn(entry, token: token, root: root)
                 }
                 // Out of the journal: what went in; a file not read yet stays for its own next try. Landed in the note,
                 // the snapshot's text advances to it (never a newer one's), so that try builds on it.
-                let keeping = waiting, used = entry?.text, now = landed
+                let keeping = waiting, used = entry?.text, now = landed, at = landedAt
                 if stored {
                     NoteJournal.queue.async {
-                        if let used, let now { NoteJournal.advance(noteID: noteID, from: used, to: now, token: token, keeping: keeping) }
+                        if let used, let now { NoteJournal.advance(noteID: noteID, from: used, to: now, at: at, token: token, keeping: keeping) }
                         else { NoteJournal.importsDone(noteID: noteID, token: token, keeping: keeping) }
                     }
                 }

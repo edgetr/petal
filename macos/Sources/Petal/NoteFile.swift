@@ -1133,6 +1133,15 @@ enum NoteShelf {
         return groups.values.filter { $0.count > 1 }.map { $0.sorted() }.sorted { $0[0] < $1[0] }
     }
 
+    /// Where the rest of a partly recovered entry continues: nowhere special when its first part landed in the note
+    /// itself (the note is found by its id, wherever it is then); else at that very file (a copy beside it, a file of
+    /// its own, one in "Unsaved notes"), while that file is still there; gone, found as usual.
+    static func continuation(landedAt: String, notePaths: [String]) -> String? {
+        notePaths.contains(landedAt) ? nil : landedAt
+    }
+
+    static func continueAt(_ landedAt: String?, exists: Bool) -> Bool { landedAt != nil && exists }
+
     /// A journal snapshot after part of a paste was put into its note: its text becomes what landed (so a later
     /// recovery of what's still waiting builds on it, never a competing version), but only while the snapshot is
     /// still the one that recovery was made from (`used`); a newer one is never overwritten (nil).
@@ -1146,6 +1155,17 @@ enum NoteShelf {
     static func mayBecomeActive(_ source: SceneSource, ticket: Int, current: Int, readPID: Int32, frontPID: Int32?) -> Bool {
         source == .look && ticket == current && readPID == frontPID
     }
+
+    /// Making a note from what's in front: only when its read became the active scene, and, after the selection was
+    /// read, while that scene is still the active one and its app still in front (NoteShelf.mayBecomeActive's rule,
+    /// checked again); else no note at all.
+    static func mayCreate(activated: Bool, activePID: Int32?, activeWindow: UInt32?, readPID: Int32, readWindow: UInt32?, frontPID: Int32?) -> Bool {
+        activated && activePID == readPID && activeWindow == readWindow && frontPID == readPID
+    }
+
+    /// A paper takes the keyboard only once layout showed it (its place validated through the same gate); nothing
+    /// unveils a paper on its own.
+    static func mayTakeKeyboard(shown: Bool) -> Bool { shown }
 
     /// Whether a focus change hides the notes of the window shown now, at once (until the new front window's read is
     /// validated): another app activated; another window focused; or the shown window closed, minimized or hidden,
