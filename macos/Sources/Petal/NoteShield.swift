@@ -125,6 +125,21 @@ struct Shielded: Equatable, Sendable, CustomStringConvertible, ExpressibleByStri
     /// The line without its @Petal.
     var spoken: Shielded { Shielded(verified: NoteHelp.spoken(text)) }
 
+    /// The note's labelled numbers ("Flights: 412"), read only from its redacted text: a row any part of which was
+    /// redacted (it held a secret, or part of one) is left out, never cut down to what's left of it.
+    var rows: [(label: Shielded, value: Double)] {
+        text.components(separatedBy: "\n").filter { !$0.contains(UIMap.hidden) }
+            .flatMap { NoteHelp.values($0) }.map { (Shielded(verified: $0.label), $0.value) }
+    }
+
+    /// What a watcher in these (redacted) words watches for, and when.
+    var watch: (every: String, at: String, line: Shielded)? {
+        NoteHelp.watchWords(text).map { ($0.every, $0.at, Shielded(verified: $0.line)) }
+    }
+
+    /// What a chain in these (redacted) words asks once its note is done.
+    var chainAsk: Shielded? { NoteHelp.chainWords(text).map { Shielded(verified: $0.ask) } }
+
     /// A range of the redacted text (a value found on a shielded page, and the words before it).
     func substring(_ range: NSRange) -> Shielded {
         let ns = text as NSString

@@ -265,7 +265,7 @@ struct NoteHelpCheck {
         let raws = ["pay with \(secret) please",
                      "# Card \(secret) and more words after it, enough that the title would be cut right through the middle of a secret if cut first\nBody \(secret)",
                      "Book \(secret)", "Remembers \(secret)", "Chained answer \(secret)", "It said \(secret)", "under $1 \(secret)", "$2 \(secret)"]
-        guard let shown = NoteShield.shield(raws, index: index), let labels = NoteShield.shield(["Label \(secret)"], index: index),
+        guard let shown = NoteShield.shield(raws, index: index), let labels = NoteShield.shield(["Tab \(secret)"], index: index),
               let paths = NoteShield.shield(["~/g", "/t \(secret)", "b", ""], index: index) else { return expect(false, "shielding") }
         var stick = NoteStick(kind: .passage)
         stick.url = "https://shop.example/\(secret.replacingOccurrences(of: " ", with: ""))"
@@ -273,7 +273,7 @@ struct NoteHelpCheck {
         stick.quote = String(repeating: "x", count: 390) + secret + " tail"
         guard let place = NoteShield.place(stick, appPrivate: false, index: index) else { return expect(false, "a place") }
         var told = NoteHelp.Told(ask: shown[0], body: shown[1], notebook: shown[2], cover: shown[3], place: place.words, quote: place.quote, extra: shown[4],
-                                 answer: shown[5], labels: labels, line: shown[6], last: shown[7], paths: paths)
+                                 answer: shown[5], titles: labels, line: shown[6], last: shown[7], paths: paths)
         let pageWords = told.extra
         let prompts: [Shielded] = [NoteHelp.brief(told), NoteHelp.codeBrief(told), NoteHelp.codeRequest(told), NoteHelp.reviewRequest(told, tree: told.paths[1]),
                                    NoteHelp.reviewBrief(told), NoteHelp.formulaRequest(told), NoteHelp.awayRequest(told),
@@ -821,6 +821,33 @@ struct NoteHelpCheck {
 
         expect(NoteHelp.bare("@Petal") && NoteHelp.bare("@Petal   ") && NoteHelp.bare("  @petal"), "a bare @Petal asks nothing: refused before a run")
         expect(!NoteHelp.bare("@Petal summarize this") && !NoteHelp.bare("@Petal remember the door code is on the card"), "a request isn't bare")
+
+        // MARK: Round thirteen: derived only from redacted text; follow-ups checked against any run's checkout
+
+        let saved = "Q7m!a2Z:91"
+        let savedIndex = UIMap.SecretIndex([saved])
+        let fragment = "Q7m!a2Z"
+        guard let ledger = NoteShield.shield(["# Trip\nFlights: 412\n\(saved)\nHotel: 300\nCode \(saved) total: 5"], index: savedIndex) else { return expect(false, "a ledger") }
+        let rows = ledger[0].rows
+        expect(rows.map(\.label.text) == ["Flights", "Hotel"], "the formula's inputs are read from the redacted body; a row that held a secret is left out", "\(rows.map(\.label.text))")
+        let formula = NoteHelp.formulaRequest(NoteHelp.Told(body: ledger[0]))
+        expect(!formula.text.contains(fragment) && !formula.text.contains("Q7m"), "no fragment of a saved secret reaches the formula prompt", formula.text)
+        expect(NoteHelp.values("\(saved)\nFlights: 412").contains { $0.label == fragment }, "(parsed before redaction, the fragment would have been a label)")
+        guard let spokenLines = NoteShield.shield(["@Petal check this every morning, tell me when it's under $300 \(saved)",
+                                                   "@Petal when @Research is done, email \(saved) to the team",
+                                                   "@Petal summarize \(saved)"], index: savedIndex) else { return expect(false, "lines") }
+        let watchedLine = spokenLines[0].spoken.watch
+        expect(watchedLine != nil && !(watchedLine?.line.text.contains("Q7m") ?? true), "a watcher's line is derived from the redacted words", watchedLine?.line.text ?? "nil")
+        let chained = spokenLines[1].spoken.chainAsk
+        expect(chained != nil && !(chained?.text.contains("Q7m") ?? true), "a chain's request is derived from the redacted words", chained?.text ?? "nil")
+        expect(!spokenLines[2].spoken.text.contains("@Petal") && !spokenLines[2].spoken.text.contains("Q7m"), "the line without its @Petal, derived after redaction")
+        expect(NoteHelp.followUpTarget(runCheckout: nil, runProvider: "claude", runModel: "", words: "@Petal check it in ~/checkout-b instead", home: "/u") == .newRun,
+               "a run with no checkout of its own (a chat helper, a second opinion outside a worktree) never takes a path named in a follow-up")
+        expect(NoteHelp.followUpTarget(runCheckout: "/u/checkout-a", runProvider: "claude", runModel: "", words: "@Petal check it in ~/checkout-b instead", home: "/u") == .newRun,
+               "a reviewer keeping its verified checkout: another one named starts its own run")
+        expect(NoteHelp.followUpTarget(runCheckout: "/u/checkout-a", runProvider: "claude", runModel: "", words: "@Petal and look at ~/checkout-a/README", home: "/u") == .newRun
+               || NoteHelp.followUpTarget(runCheckout: "/u/checkout-a", runProvider: "claude", runModel: "", words: "@Petal check it in ~/checkout-a", home: "/u") == .same,
+               "its own checkout named: it goes to the run")
 
         // MARK: Open all never launches an app or a script (NoteTasks)
 

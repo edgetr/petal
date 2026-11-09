@@ -1907,7 +1907,9 @@ extension NoteHelp {
     static func followUpTarget(runCheckout: String?, runProvider: String, runModel: String, words: String, home: String) -> FollowUpTarget {
         // "Have <model> look for holes" is its own request: a second opinion (or "not set up"), never steering.
         if models(words).contains(where: { $0.holes }) { return .review }
-        if let runCheckout, followUpTarget(runCheckout: runCheckout, words: words, home: home) == .newRun { return .newRun }
+        // Any path named is checked against the run's own checkout (a run with none, a chat helper or a second opinion
+        // outside a worktree, never takes one).
+        if followUpTarget(runCheckout: runCheckout, words: words, home: home) == .newRun { return .newRun }
         guard let named = models(words).first(where: { !$0.holes }) else { return .same }
         if named.provider.rawValue != runProvider { return .newRun }
         return named.id.isEmpty || named.id == runModel ? .same : .newRun
@@ -2168,7 +2170,8 @@ extension NoteHelp {
         var quote: Shielded = ""
         var extra: Shielded = ""
         var answer: Shielded = ""
-        var labels: [Shielded] = []
+        /// Whole sources a quick helper lists (a put-away window's tab titles, a file's path), each shielded whole.
+        var titles: [Shielded] = []
         var line: Shielded = ""
         var last: Shielded = ""
         var paths: [Shielded] = []
@@ -2251,7 +2254,8 @@ extension NoteHelp {
     static func reviewBrief(_ t: Told) -> Shielded { "You're a second opinion in one of the user's Petal Notes, in their notebook “\(t.notebook)”.\(context(t))" }
 
     static func formulaRequest(_ t: Told) -> Shielded {
-        let labels = Shielded.joined(t.labels.map { "[\($0)]" }, separator: ", ")
+        // Only from the note's redacted text: a row that held a secret is left out (Shielded.rows).
+        let labels = Shielded.joined(t.body.rows.map { "[\($0.label)]" }, separator: ", ")
         return """
         A note has these labelled numbers: \(labels).
         The person asked: "\(t.ask)". Propose one formula that keeps the note's total (or what they asked for) current.
@@ -2262,7 +2266,7 @@ extension NoteHelp {
 
     static func awayRequest(_ t: Told) -> Shielded {
         """
-        Someone put a task away for later. What was open: \(Shielded.joined(t.labels, separator: "; ")). Their note is titled "\(t.body.title)".
+        Someone put a task away for later. What was open: \(Shielded.joined(t.titles, separator: "; ")). Their note is titled "\(t.body.title)".
         In under 30 words, say where they stopped and what's next, as a note to themselves ("You were …. Next: …").
         Reply with ONLY JSON: {"line": "<the words>"}
         """

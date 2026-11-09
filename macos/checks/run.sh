@@ -166,10 +166,10 @@ echo "forms: fields scroll, buttons stay on the screen"
 # A reviewer outside a worktree is bound to the note's place like any run.
 perl -0777 -ne '
     unless (/run\.carried = carried/ && /private func output\(_ run: Run.*?if let carried = run\.carried \{\s*return opinion\(/s
-            && /private func opinion\(.*?NoteHelp\.withOpinion\(/s && /secondOpinion\(paper, holes, asked: run\.asked, tree: run\.tree, carried: \[ink\]/
+            && /private func opinion\(.*?NoteHelp\.withOpinion\(/s && /secondOpinion\(paper, holes, asked: run\.asked, tree: run\.tree, carried: carried/
             && /folder: tree, placed: tree == nil\)/ && /where run\.launched && run\.kind\.placed/ && /= run\.kind\.placed \? NoteHelp\.requirement\(/
             && /if run\.kind\.placed \{\s*facts\.document/) { print "NoteHelpers: a second opinion must add to its primary and be bound to its place\n"; exit 1 }
-    for my $f (qw(fail stopped)) { unless (/func $f\(.*?\n    \}/s && $& =~ /output\(run,/) { print "NoteHelpers: $f must report through output\n"; exit 1 } }
+    for my $f (qw(fail stopped)) { unless (/func $f\([^\n]*end\(run, \./) { print "NoteHelpers: $f must end through end\n"; exit 1 } }
     print "helpers: second opinions add to their primary, failures included; reviewers bound to their place\n";
 ' Sources/Petal/NoteHelpers.swift
 # Return runs a line only as the person wrote or edited it: the editor hands only a runnable line (its identity, a
@@ -178,7 +178,7 @@ perl -0777 -ne '
 # before the line is taken or any run registered; control requests come before follow-up routing; a follow-up's line
 # goes with it through delivery; an empty prompt never reaches an agent.
 perl -0777 -ne '
-    unless (/func returned\(_ key: String, line: String, at ticket: NoteLine\) \{.*?if NoteHelp\.bare\(trimmed\) \{ return hint\(.*?guard NoteShelf\.lasting\(noteID, pending: desk\.store\.pendingIDs\) else \{\s*return desk\.store\.ensureID\(.*?ticket\.take\(\).*?if NoteHelp\.isControl\(request\) \{ return control\(.*?NoteHelp\.followUpTarget\(/s
+    unless (/func returned\(_ key: String, line: String, at ticket: NoteLine\) \{.*?if NoteHelp\.bare\(trimmed\) \{ return reply\(noteID, NoteHelp\.bareHint.*?guard NoteShelf\.lasting\(noteID, pending: desk\.store\.pendingIDs\) else \{\s*return desk\.store\.ensureID\(.*?ticket\.take\(\).*?if NoteHelp\.isControl\(request\) \{ return control\(.*?NoteHelp\.followUpTarget\(/s
             && /func deliver\(.*?guard !prompt\.text\.trimmingCharacters/s && /func letGo\(.*?run\.line\?\.again\(\)/s
             && /followUps\.add\(told\.ask, note: noteID, token: run\.token, line: ticket\)/ && /followUp\(run, next\.text, line: next\.line\)/
             && /private func followUp\(_ run: Run, _ words: Shielded, line: NoteLine\?\) \{\s*if let line \{ run\.line = line \}/) {
@@ -217,23 +217,50 @@ perl -0777 -ne '
         print "Brain: each call picks its own AI before checking it is ready\n"; exit 1 }
     print "brain: each call picks its own AI first\n";
 ' Sources/Petal/Focus.swift
-# Only a run that succeeded writes `done` (what chains and morning notes wait for): Petal's own words write no helper
-# line, a refusal is a faint word that leaves the note as it is.
+# Only a run that succeeded writes `done` (what chains and morning notes wait for), inside `end` once its token
+# completed; every other reply is a faint word that leaves the note's ink and helper line as they are.
 perl -0777 -ne '
     my $done = () = /state: \.done/g;
-    unless ($done == 2 && /private func succeeded\(_ run: Run.*?guard run\.token\.completion == \.succeeded else \{ return \}/s
-            && /private func say\(.*?NoteHelp\.HelperChange\.clear\.apply/s && /private func refuse\(.*?taking\?\.again\(\)\s*hint\(noteID, text\)\s*\}/s
-            && !/func answer\(/) { print "NoteHelpers: only a succeeded run writes done; refusals stay faint\n"; exit 1 }
-    print "helpers: only a succeeded run writes done; refusals are faint\n";
+    unless ($done == 1 && /case \.succeeded\(let ink, let who, let steps\):\s*guard run\.token\.complete\(\.succeeded\) else \{ return \}.*?state: \.done/s
+            && /private func reply\(_ noteID: String, _ text: String, giveBack line: NoteLine\?\) \{\s*line\?\.again\(\)\s*hint\(noteID, text\)\s*\}/s) {
+        print "NoteHelpers: only a succeeded run writes done; replies stay faint\n"; exit 1 }
+    print "helpers: only a succeeded run writes done; replies are faint\n";
 ' Sources/Petal/NoteHelpers.swift
 # A second opinion goes through the same checkout choice as a primary request, and one asked while a run works rides
 # with its line (the same queue as follow-ups: given back if that run doesn't succeed, held by the reviewer until it does).
 perl -0777 -ne '
     unless (/private func review\(.*?NoteHelp\.reviewCheckout\(current: current, words: asked.*?followUps\.addReview\(model, asked: asked, note: paper\.noteID, token: run\.token, line: taking\)/s
-            && /if let asked = followUps\.review\(note: noteID, current: run\.token\) \{\s*taking = asked\.line/) {
+            && /if let asked = followUps\.review\(note: (?:run\.)?noteID, current: run\.token\) \{\s*taking = asked\.line/) {
         print "NoteHelpers: reviews choose their checkout and carry their line\n"; exit 1 }
     print "helpers: reviews choose their checkout like a request and carry their line\n";
 ' Sources/Petal/NoteHelpers.swift
+# One end for every run kind: only `end` completes a run's token (and `halt`, which only `end` and a run begun again
+# use), only `release` takes one out of `runs` or the looks; success hands on what was asked of it. One reply that
+# isn't a run's end (`reply`, a faint word): no `say`, no `refuse`, nothing else shows a hint.
+perl -0777 -ne '
+    my @completes = /(\w+)\(_ run: Run[^)]*\) \{(?:(?!\n    \}).)*?token\.complete\(/sg;
+    my $direct = () = /token\.complete\(/g;
+    my $nil = () = /runs\[[^\]]*\] = nil/g;
+    my $hints = () = /(?<!\.)\bhint\(/g;
+    unless ($direct == 3 && $nil == 1 && /private func end\(_ run: Run, _ ending: Ending\).*?handOn\(run\)\s*dropFollowUps\(run\.token\)/s
+            && /private func release\(_ run: Run\) \{\s*if runs\[run\.noteID\] === run \{\s*runs\[run\.noteID\] = nil/
+            && !/func say\(|func refuse\(|func succeeded\(|func answer\(|desk\.tell\(/ && $hints == 2
+            && /end\(run, \.succeeded\(ink: \[\]\)\)/ && /self\.end\(run, \.succeeded\(ink: \[NoteHelp\.Ink\(who: who, text: line\)\], who: who\)\)/
+            && /self\.end\(run, \.succeeded\(ink: \[NoteHelp\.Ink\(who: run\.who, text: words\)\], who: Self\.petalWho\)\)/
+            && /run\.kind == \.quick \{\s*return reply\(paper\.noteID, "A quick helper/) {
+        print "NoteHelpers: every run kind must end through end, every reply through reply ($direct completes, $nil removals, $hints hints)\n"; exit 1 }
+    print "helpers: one end for every run kind, one reply\n";
+' Sources/Petal/NoteHelpers.swift
+# What a helper is told comes from whole sources: nothing cut or parsed out of note text before it's shielded.
+perl -ne '
+    if (/\braw\.\w+ = / && /spoken\(|\.values\(|prefix\(|components\(|watchWords|chainWords|lastPathComponent|suffix\(/) { print "NoteHelpers:$.: cut before shielding: $_"; $bad++ }
+    $raw++ if /var titles: \[String\] = \[\]/;
+    END { exit 1 if $bad || !$raw; print "helpers: only whole sources are shielded; what is needed is derived after\n" }
+' Sources/Petal/NoteHelpers.swift
+grep -q 'Told(ask: shown\[0\].spoken' Sources/Petal/NoteHelpers.swift && grep -q 't.body.rows.map' Sources/Petal/NoteHelp.swift \
+    && grep -q 'guard let words = told.ask.watch else' Sources/Petal/NoteHelpers.swift && grep -q 'guard let ask = told.ask.chainAsk?.text else' Sources/Petal/NoteHelpers.swift \
+    && grep -q 'run.checkout = checkout' Sources/Petal/NoteHelpers.swift \
+    || { echo "NoteHelpers: derivations after redaction, and a reviewer keeping its checkout"; exit 1; }
 # Every reviewer output, its turns on the way included, goes through opinion (output).
 perl -0777 -ne '
     if (/Something said meanwhile.*?\n\s*return\n/s && $& !~ /output\(run,/) { print "NoteHelpers: a reviewer turn must go through output\n"; exit 1 }
