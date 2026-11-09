@@ -130,7 +130,7 @@ final class NoteDesk {
         }
         for panel in panels.values { panel.refresh() }
         // A browser showing another tab says so only through its title: heard only while a note is on a page.
-        WindowEvents.shared.titles("papernotes", on && pagesStuck)
+        WindowEvents.shared.titles("papernotes", on && (pagesStuck || windowsStuck))
     }
 
     private func event(_ event: WindowEvents.Event) {
@@ -151,6 +151,12 @@ final class NoteDesk {
         // app and window Petal is bringing forward for it.
         if event.kind == .activated || event.kind == .focused, event.pid != getpid() {
             keyboardWanted.focusMoved(pid: event.pid, window: event.window)
+        }
+        // Another tab in the browser window shown: its tab and passage notes hide at once, until its tab is read again.
+        if NoteShelf.tabReread(switched: event.kind == .tabSwitched || event.kind == .titleChanged, eventPID: event.pid, eventWindow: event.window,
+                               shownPID: scene?.pid, shownWindow: scene?.window, browser: scene?.tab != nil) {
+            awaitingTab = true
+            layout()
         }
         switch event.kind {
         case .moved, .resized: lookAgain(after: 0.03)
@@ -312,6 +318,9 @@ final class NoteDesk {
         return true
     }
 
+    /// Some note is on a window: its title is followed (NoteShelf.followedTitle), so titles changing are heard.
+    private var windowsStuck: Bool { store.notes.contains { $0.file.places.contains { $0.kind == .window } } }
+
     /// Some note is on a page (a tab, or a sentence on a page): browsers' tabs are worth reading.
     private var pagesStuck: Bool {
         store.notes.contains { $0.file.places.contains { $0.kind == .tab || ($0.kind == .passage && !$0.url.isEmpty) } }
@@ -378,7 +387,10 @@ final class NoteDesk {
     /// `scan`: look for the passages again (not when only the files changed: the person typing in a note).
     /// `fresh`: a new read of what's in front (it ends a wait after a focus change); false for one kept from before.
     private func apply(_ scene: NoteScene, read: ClaudePanel.FrontRead, scan: Bool = true, fresh: Bool = true) {
-        if fresh { awaitingRead = false }
+        if fresh {
+            awaitingRead = false
+            awaitingTab = false
+        }
         let moved = self.scene?.window != scene.window || self.scene?.pid != scene.pid
         let (scene, read) = Self.filtered(scene, read, since: ClaudePanel.privacy.now)
         self.scene = scene
@@ -394,6 +406,7 @@ final class NoteDesk {
             }
         }
         if fits != here { here = fits }
+        followTitles(scene, fits)
         followTabs(scene)
         followFiles(scene)
         if moved {
@@ -406,6 +419,28 @@ final class NoteDesk {
         layout()
         if scan || moved { findPassages(scene) }
         placeDesktop()
+    }
+
+    /// A browser window's tab switching: its tab and passage notes stay hidden until a fresh read of it is applied.
+    @ObservationIgnored private var awaitingTab = false
+
+    /// The paper's place on the window in front, when its kind is one hidden while a tab is reread.
+    private func hiddenForTab(_ key: String) -> Bool {
+        guard awaitingTab, let index = here[key], let paper = store.paper(key), paper.file.places.indices.contains(index) else { return false }
+        return NoteShelf.hiddenDuringTabRead(paper.file.places[index].kind)
+    }
+
+    /// Window anchors confirmed by live identity take the window's current title (NoteShelf.followedTitle), written
+    /// through the note's session fenced by its revision, without touching when it was last edited.
+    private func followTitles(_ scene: NoteScene, _ fits: [String: Int]) {
+        guard !app.assist.neverLook(scene.app) else { return }
+        for (key, index) in fits {
+            guard let paper = store.paper(key), !store.readOnly(paper), paper.file.places.indices.contains(index),
+                  let title = NoteShelf.followedTitle(paper.file.places[index], scene: scene) else { continue }
+            store.change(key, expect: paper.revision, touch: false) { file in
+                if file.places.indices.contains(index), file.places[index].kind == .window { file.places[index].title = title }
+            }
+        }
     }
 
     /// Notes found on the tab in front by its address alone (a Chromium tab after its browser restarted), decided
@@ -747,8 +782,9 @@ final class NoteDesk {
             return
         }
         let now = Date()
+        // While a browser's tab is read again, its tab and passage notes stay hidden (tabs, papers and pins).
         let edgeNotes = here.keys.sorted().compactMap { key -> EdgeNote? in
-            guard let paper = store.paper(key) else { return nil }
+            guard let paper = store.paper(key), !hiddenForTab(key) else { return nil }
             return EdgeNote(id: key, line: lines[key], color: notebookKey(paper.notebook), faded: NoteShelf.faded(modified: paper.file.modified, now: now))
         }
         let tabs = EdgeLayout.tabs(edgeNotes, height: frame.height)
@@ -769,7 +805,7 @@ final class NoteDesk {
         }
         // The notes showing on this window, stacked down its right side where nobody moved them.
         var placed: [CGRect] = []
-        let showing = here.keys.filter { faces[$0] != nil }.sorted { (lines[$0] ?? 0, $0) < (lines[$1] ?? 0, $1) }
+        let showing = here.keys.filter { faces[$0] != nil && !hiddenForTab($0) }.sorted { (lines[$0] ?? 0, $0) < (lines[$1] ?? 0, $1) }
         for key in showing {
             let panel = panel(for: key)
             // Placed by its window (it fits the window in front): not the Desktop's, whatever else it's stuck to.
@@ -1627,7 +1663,9 @@ final class NoteDesk {
     /// A note's handle for tools (made the first time; saved a moment later, once for many).
     func noteHandle(_ noteID: String) -> String {
         let had = local.handles?[noteID] != nil
-        let made = local.handle(noteID)
+        // Checked against the vault's redaction when its index is at hand (never read from the Keychain here).
+        let index = VaultIndex.cached()
+        let made = local.handle(noteID, redact: index.map { index in { index.redacted($0) } })
         if !had, !handlesSaving {
             handlesSaving = true
             DispatchQueue.main.async { self.handlesSaving = false; self.local.save(pending: self.store.pendingIDs) }
@@ -1935,7 +1973,7 @@ final class NoteDesk {
     /// The files changed (here or on another Mac): papers and tabs show what they say now.
     func refresh() {
         guard on else { return }
-        WindowEvents.shared.titles("papernotes", pagesStuck)
+        WindowEvents.shared.titles("papernotes", pagesStuck || windowsStuck)
         // Notes shown on this Mac before it last quit show again.
         for paper in store.notes where local.shown.contains(paper.noteID) && faces[paper.key] == nil { faces[paper.key] = .folded }
         for (key, panel) in panels where store.paper(key) == nil {

@@ -602,6 +602,7 @@ struct NoteStoreCheck {
         var local = NoteLocal()
         let handle = local.handle("H1")
         expect(handle.hasPrefix("n") && !handle.contains("H1") && local.handle("H1") == handle, "a note's handle: a token, the same each time")
+        expect(handle.dropFirst().allSatisfy { $0.isLetter }, "a handle is letters only", handle)
         let plainHolder = NoteShelf.holderKey(id: "file:Inbox/Plain.md", instance: "1:10")
         let firstLook = local.handle(plainHolder)
         expect(local.handle(NoteShelf.holderKey(id: "file:Inbox/Plain.md", instance: "1:22")) != firstLook,

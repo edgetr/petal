@@ -30,6 +30,9 @@ enum NoteShield {
     static func find(_ name: String, rows: [(handle: String, body: String, version: Bool)], index: UIMap.SecretIndex) -> Lookup {
         guard !index.unreadable else { return .unreadable }
         if let at = rows.firstIndex(where: { $0.handle == name }) { return .found(at) }
+        // A handle told as the redaction showed it (an older one it changed): accepted when it names exactly one.
+        let shownAs = rows.indices.filter { index.redacted(rows[$0].handle) == name && rows[$0].handle != name }
+        if shownAs.count == 1 { return .found(shownAs[0]) }
         // A conflict's copy named by its handle after the conflict was settled: the note's one paper now.
         if let dot = name.firstIndex(of: ".") {
             let base = String(name[..<dot])

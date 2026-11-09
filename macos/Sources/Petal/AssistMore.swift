@@ -177,6 +177,13 @@ enum VaultIndex {
     /// The index for the vault and what Petal typed as they are now: made again (a few times at most) while a save,
     /// a removal or a secret Petal is about to type changed them under it, so no reader gets one that misses it.
     /// `unavailable` when the vault can't be read, or kept changing.
+    /// The index if it's already made (never reads the Keychain): for a check that may run on the main thread.
+    static func cached() -> UIMap.SecretIndex? {
+        lock.lock()
+        defer { lock.unlock() }
+        return index
+    }
+
     static func current() -> UIMap.SecretIndex {
         lock.lock()
         if let index { lock.unlock(); return index }

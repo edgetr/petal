@@ -1379,6 +1379,50 @@ enum NoteShelf {
         return found == expected
     }
 
+    /// A tool handle's letters: lowercase letters only (never digits, so no code, PIN or card number can be in one),
+    /// `count` of them from `random` (0...25 each).
+    static func handleLetters(_ count: Int, random: () -> Int) -> String {
+        String((0..<count).map { _ in Character(UnicodeScalar(UInt8(97 + abs(random()) % 26))) })
+    }
+
+    /// A new handle kept only when the vault's redaction leaves it as it is (`redact`); else another is made.
+    static func handleSurvives(_ handle: String, redact: (String) -> String) -> Bool { redact(handle) == handle }
+
+    /// A window anchor confirmed by live identity (this Mac, its process and window number) takes the window's title
+    /// as it is now (an "Untitled" document saved since), so finding it again after its app restarts works; never an
+    /// empty title (a private app's isn't read).
+    static func followedTitle(_ place: NoteStick, scene: NoteScene) -> String? {
+        guard place.kind == .window, place.mac == scene.mac, place.pid == scene.pid, place.window != nil, place.window == scene.window,
+              !scene.title.isEmpty, place.title != scene.title else { return nil }
+        return scene.title
+    }
+
+    /// A browser window in front showing another tab (its tab switched, or its title changed): its tab and passage
+    /// notes (and pins) hide at once, until the fresh read of its tab is in; its window's and app's notes stay.
+    static func hiddenDuringTabRead(_ kind: NoteStick.Kind) -> Bool { kind == .tab || kind == .passage }
+
+    static func tabReread(switched: Bool, eventPID: Int32, eventWindow: UInt32?, shownPID: Int32?, shownWindow: UInt32?, browser: Bool) -> Bool {
+        guard switched, browser, let shownPID, eventPID == shownPID else { return false }
+        return eventWindow == nil || eventWindow == shownWindow
+    }
+
+    /// The Accessibility permission is polled (every second) while anyone listens to windows' events, whichever of
+    /// them (the dock, Petal Notes, the Mission Control watcher): granting it takes effect without Petal's dock.
+    static func permissionPoll(consumers: Set<String>) -> Bool { !consumers.isEmpty }
+
+    /// The Mission Control watcher's safety net: still open while macOS's Dock shows a window of Mission Control's own
+    /// (any on-screen Dock window but its bar, "Dock"), or its bar while Petal is the one keeping it hidden (it comes
+    /// out only for Mission Control then); never longer than `missionControlLimit` seconds since it was last said
+    /// open. With macOS's Dock showing as usual, its bar alone says nothing.
+    static let missionControlLimit: TimeInterval = 60
+
+    static func missionControlOpen(dockWindows: [(name: String, onScreen: Bool)], barHiddenByPetal: Bool, lastOpened: Date, now: Date) -> Bool {
+        guard now.timeIntervalSince(lastOpened) < missionControlLimit else { return false }
+        return dockWindows.contains { window in
+            window.onScreen && (window.name != "Dock" || barHiddenByPetal)
+        }
+    }
+
     /// Who needs a shared watcher (Mission Control's): it runs while anyone does, whichever of them.
     struct TrackerUsers: Equatable {
         private(set) var users: Set<String> = []

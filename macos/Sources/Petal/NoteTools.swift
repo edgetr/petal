@@ -236,7 +236,8 @@ extension NoteDesk {
         guard (store.conflicts[paper.key]?.count ?? 0) > 1 else { return base }
         let copyKey = NoteShelf.copyKey(noteID: paper.noteID, notebook: paper.notebook, fileName: paper.url.lastPathComponent, version: paper.version)
         let had = local.copies?[copyKey] != nil
-        let copy = local.copyHandle(copyKey)
+        let index = VaultIndex.cached()
+        let copy = local.copyHandle(copyKey, redact: index.map { index in { index.redacted($0) } })
         if !had { local.save(pending: store.pendingIDs) }
         return base + "." + copy
     }

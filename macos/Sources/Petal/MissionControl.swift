@@ -12,6 +12,8 @@ final class MissionControlWatch {
     private var users = NoteShelf.TrackerUsers()
     private var subscribers: [String: @MainActor (Bool) -> Void] = [:]
     private var check: Timer?
+    /// When it was last said open: the safety net never keeps it open longer than a minute past that.
+    private var lastOpened = Date.distantPast
     nonisolated private static let queue = DispatchQueue(label: "petal.missioncontrol", qos: .utility)
 
     /// `who` is told every change (and, subscribing while it's open, at once).
@@ -29,7 +31,9 @@ final class MissionControlWatch {
         if users.listening {
             WindowEvents.shared.listen("missioncontrol") { [weak self] event in
                 switch event.kind {
-                case .missionControl: self?.set(true)
+                case .missionControl:
+                    self?.lastOpened = Date()
+                    self?.set(true)
                 case .missionControlEnded: self?.set(false)
                 default: break
                 }
@@ -47,9 +51,16 @@ final class MissionControlWatch {
         check = nil
         if on {
             check = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-                Self.queue.async {
-                    let up = Self.systemDockOnScreen()
-                    DispatchQueue.main.async { MainActor.assumeIsolated { if !up { self?.set(false) } } }
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    // Petal keeps macOS's Dock hidden while its own dock shows: then the bar coming out is Mission Control.
+                    let barHidden = PetalApp.shared.docks?.shown ?? false
+                    let since = self.lastOpened
+                    Self.queue.async {
+                        let windows = Self.dockWindows()
+                        let open = NoteShelf.missionControlOpen(dockWindows: windows, barHiddenByPetal: barHidden, lastOpened: since, now: Date())
+                        DispatchQueue.main.async { MainActor.assumeIsolated { if !open { self.set(false) } } }
+                    }
                 }
             }
             check?.tolerance = 0.3
@@ -57,11 +68,12 @@ final class MissionControlWatch {
         for handler in subscribers.values { handler(on) }
     }
 
-    /// Whether macOS's Dock has a window on the screen: it does while Mission Control is open. Asks the window
-    /// server: off the main thread.
-    nonisolated private static func systemDockOnScreen() -> Bool {
+    /// macOS's Dock's windows (their names, and whether they're on the screen): its bar is "Dock"; Mission Control's
+    /// own are the others. Asks the window server: off the main thread.
+    nonisolated private static func dockWindows() -> [(name: String, onScreen: Bool)] {
         guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first,
-              let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else { return false }
-        return windows.contains { $0[kCGWindowOwnerPID as String] as? pid_t == dock.processIdentifier }
+              let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else { return [] }
+        return windows.filter { $0[kCGWindowOwnerPID as String] as? pid_t == dock.processIdentifier }
+            .map { ($0[kCGWindowName as String] as? String ?? "", true) }
     }
 }

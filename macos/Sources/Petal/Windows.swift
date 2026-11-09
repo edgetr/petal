@@ -450,6 +450,7 @@ final class WindowEvents {
     func listen(_ key: String, _ handler: @escaping (Event) -> Void) {
         listeners[key] = handler
         checkPermission()
+        pollPermission()
     }
 
     func stopListening(_ key: String) {
@@ -457,6 +458,25 @@ final class WindowEvents {
         titleListeners.remove(key)
         AXWatcher.shared.titles(!titleListeners.isEmpty)
         checkPermission()
+        pollPermission()
+    }
+
+    /// Accessibility allowed (or taken away) in System Settings takes effect within a second, for whoever listens
+    /// (the dock, Petal Notes, the Mission Control watcher), whichever dock is chosen: polled here while anyone
+    /// listens (NoteShelf.permissionPoll), never only on the dock's own timer.
+    private var permissionTimer: Timer?
+
+    private func pollPermission() {
+        guard NoteShelf.permissionPoll(consumers: Set(listeners.keys)) else {
+            permissionTimer?.invalidate()
+            permissionTimer = nil
+            return
+        }
+        guard permissionTimer == nil else { return }
+        permissionTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkPermission() }
+        }
+        permissionTimer?.tolerance = 0.2
     }
 
     private var titleListeners: Set<String> = []
@@ -470,7 +490,7 @@ final class WindowEvents {
     }
 
     /// Starts the observers once Accessibility is allowed and someone listens, and stops them when it's taken away or
-    /// nobody does. The dock asks on its timer, so permission granted in System Settings takes effect within a second.
+    /// nobody does. Asked every second while anyone listens (`pollPermission`).
     func checkPermission() {
         let wanted = !listeners.isEmpty && Windows.trusted
         if wanted != live { wanted ? start() : stop() }

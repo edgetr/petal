@@ -101,6 +101,12 @@ struct NoteSelectionCheck {
         expect(NoteShield.find("naaa.f00d", rows: [(handle: "naaa", body: "# A", version: false)], index: vaultIndex) == .found(0),
                "a copy's handle after its conflict was settled names the note's one paper")
 
+        // A handle the redaction changed (an older one holding a card's digits) is still accepted as shown, when it names one.
+        let digitHandles = [(handle: "n41111111xyz", body: "# One", version: false), (handle: "nqrstuvwxyzab", body: "# Two", version: false)]
+        let shownHandle = vaultIndex.redacted("n41111111xyz")
+        expect(shownHandle != "n41111111xyz" && NoteShield.find(shownHandle, rows: digitHandles, index: vaultIndex) == .found(0),
+               "a handle told as \(shownHandle) still names its note")
+
         // A specific conflict copy, named by its own handle: that copy, never the first paper of its id.
         let copies = [(handle: "nabc.1f2e", body: "# A\nmine", version: false), (handle: "nabc.9d8c", body: "# A\ntheirs", version: false)]
         expect(NoteShield.find("nabc.9d8c", rows: copies, index: vaultIndex) == .found(1), "the copy named is the copy found")

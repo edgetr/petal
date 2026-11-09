@@ -504,6 +504,50 @@ struct NotesCheck {
         users.need("notes", false)
         expect(!users.listening, "nobody needs it: stopped")
 
+        // Accessibility is polled while anyone listens to windows: the notes or the Mission Control watcher alone too.
+        expect(NoteShelf.permissionPoll(consumers: ["notes"]) && NoteShelf.permissionPoll(consumers: ["missioncontrol"]) && !NoteShelf.permissionPoll(consumers: []),
+               "polled for whoever listens, without Petal's dock")
+
+        // A window anchor confirmed by live identity takes the window's title as it is now.
+        var untitled = NoteStick(kind: .window); untitled.mac = "m"; untitled.pid = 9; untitled.window = 31; untitled.title = "Untitled"; untitled.app = "com.apple.TextEdit"
+        var saved = NoteScene(mac: "m", app: "com.apple.TextEdit", pid: 9, window: 31, title: "Trip plan.rtf")
+        expect(NoteShelf.followedTitle(untitled, scene: saved) == "Trip plan.rtf", "saved since: the anchor takes its new title")
+        saved.window = 32
+        expect(NoteShelf.followedTitle(untitled, scene: saved) == nil, "another window (titled anything): never")
+        saved.window = 31; saved.title = ""
+        expect(NoteShelf.followedTitle(untitled, scene: saved) == nil, "no title read (a private app): never")
+        var remembered = untitled; remembered.window = nil
+        expect(NoteShelf.followedTitle(remembered, scene: NoteScene(mac: "m", app: "com.apple.TextEdit", pid: 9, window: 31, title: "X")) == nil,
+               "an anchor not confirmed by its window number: never")
+
+        // A tab switching in the browser window shown hides its tab and passage notes until the tab is read again.
+        expect(NoteShelf.hiddenDuringTabRead(.tab) && NoteShelf.hiddenDuringTabRead(.passage) && !NoteShelf.hiddenDuringTabRead(.window)
+               && !NoteShelf.hiddenDuringTabRead(.app), "tab and passage notes hide; the window's and the app's stay")
+        expect(NoteShelf.tabReread(switched: true, eventPID: 5, eventWindow: 7, shownPID: 5, shownWindow: 7, browser: true), "its tab switched: hidden")
+        expect(!NoteShelf.tabReread(switched: true, eventPID: 5, eventWindow: 8, shownPID: 5, shownWindow: 7, browser: true)
+               && !NoteShelf.tabReread(switched: true, eventPID: 5, eventWindow: 7, shownPID: 5, shownWindow: 7, browser: false)
+               && !NoteShelf.tabReread(switched: false, eventPID: 5, eventWindow: 7, shownPID: 5, shownWindow: 7, browser: true),
+               "another window, not a browser, or not a switch: nothing hides")
+
+        // Handles: letters only, and made again when the redaction would change one.
+        var turn = 0
+        let letters = NoteShelf.handleLetters(12) { turn += 1; return turn * 7 }
+        expect(letters.count == 12 && letters.allSatisfy { $0.isLetter && $0.isLowercase }, "letters only, never digits", letters)
+        expect(NoteShelf.handleSurvives("nabcdef", redact: { $0 }) && !NoteShelf.handleSurvives("nab737", redact: { $0.replacingOccurrences(of: "737", with: "(hidden)") }),
+               "one the redaction changes is made again")
+
+        // The Mission Control safety net: Mission Control's own Dock windows, or the bar while Petal hides it; never past a minute.
+        let opened = Date(timeIntervalSince1970: 1_000)
+        expect(!NoteShelf.missionControlOpen(dockWindows: [("Dock", true)], barHiddenByPetal: false, lastOpened: opened, now: opened.addingTimeInterval(3)),
+               "macOS's Dock showing as usual (its bar): Mission Control closed")
+        expect(NoteShelf.missionControlOpen(dockWindows: [("Dock", true)], barHiddenByPetal: true, lastOpened: opened, now: opened.addingTimeInterval(3)),
+               "Petal hides macOS's Dock and its bar came out: Mission Control")
+        expect(NoteShelf.missionControlOpen(dockWindows: [("Dock", true), ("", true)], barHiddenByPetal: false, lastOpened: opened, now: opened.addingTimeInterval(3)),
+               "a Dock window that isn't its bar: Mission Control")
+        expect(!NoteShelf.missionControlOpen(dockWindows: [("", true)], barHiddenByPetal: true, lastOpened: opened, now: opened.addingTimeInterval(61)),
+               "a minute without a fresh opening: taken as closed")
+        expect(!NoteShelf.missionControlOpen(dockWindows: [], barHiddenByPetal: true, lastOpened: opened, now: opened.addingTimeInterval(3)), "no Dock window: closed")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

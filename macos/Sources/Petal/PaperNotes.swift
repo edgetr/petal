@@ -1743,17 +1743,28 @@ struct NoteLocal: Codable, Equatable {
     /// left (NoteShield.find).
     var copies: [String: String]? = nil
 
-    mutating func copyHandle(_ key: String) -> String {
+    mutating func copyHandle(_ key: String, redact: ((String) -> String)? = nil) -> String {
         if let made = copies?[key] { return made }
-        let made = String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(6).lowercased())
+        let made = Self.fresh(6, redact: redact)
         copies = (copies ?? [:]).merging([key: made]) { a, _ in a }
         return made
     }
 
     /// The note's handle, made the first time it's asked for.
-    mutating func handle(_ noteID: String) -> String {
+    /// Letters only, and checked against the vault's redaction when it's at hand (`redact`): made again until it
+    /// passes untouched (NoteShelf.handleSurvives), so a handle is never told as "(hidden)".
+    static func fresh(_ count: Int, prefix: String = "", redact: ((String) -> String)?) -> String {
+        var made = ""
+        for _ in 0..<8 {
+            made = prefix + NoteShelf.handleLetters(count) { Int.random(in: 0..<26) }
+            if NoteShelf.handleSurvives(made, redact: redact ?? { $0 }) { break }
+        }
+        return made
+    }
+
+    mutating func handle(_ noteID: String, redact: ((String) -> String)? = nil) -> String {
         if let made = handles?[noteID] { return made }
-        let made = "n" + UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(12).lowercased()
+        let made = Self.fresh(12, prefix: "n", redact: redact)
         handles = (handles ?? [:]).merging([noteID: made]) { a, _ in a }
         return made
     }
