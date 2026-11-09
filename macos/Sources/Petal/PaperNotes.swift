@@ -220,6 +220,9 @@ final class NoteStore {
     /// Bumped by every drain: a canvas write's completion from before one touches nothing.
     @ObservationIgnored var canvasGeneration = 0
     @ObservationIgnored var canvasFailures: [String: Int] = [:]
+    /// The last canvas Petal read or wrote for each notebook, by its folder (volume and inode): what a canvas edit's
+    /// whole snapshot starts from (CanvasEntry.snapshot), so a rescue keeps the whole canvas.
+    @ObservationIgnored var lastCanvas: [String: NoteCanvas] = [:]
     /// Papers whose work keeps failing: the paper says it isn't saved yet.
     private(set) var failed: Set<String> = []
     @ObservationIgnored private(set) var root: URL
@@ -1961,20 +1964,17 @@ final class NoteStore {
     /// the notebook in memory, shown at once.
     func setCover(_ notebook: String, fields: [String: String]) {
         let name = self.notebook(notebook)?.name ?? ensureNotebook(notebook, color: "")
-        guard let book = self.notebook(name) else { return }
-        // Bound to this root and to the notebook's cover id or folder, never its name.
-        // Its cover's id only once it's landed and its own (not one shared with a duplicated notebook): else its folder.
-        let landedID = book.cover.flatMap { paper($0) }.map(\.noteID).flatMap { id in
-            NoteShelf.lasting(id, pending: pendingIDs) && renewing[name] == nil
-                && notes.filter({ $0.noteID == id && $0.version == nil && NoteLibrary.isCanonicalCover($0.url.lastPathComponent) }).count == 1 ? id : nil
-        }
-        let bound = CoverFields(notebook: name, root: root.path, coverID: landedID ?? "", folderID: book.instance)
-        guard !bound.coverID.isEmpty || !bound.folderID.isEmpty else {
+        // Bound to this root and to the notebook (NotebookBinding: its cover id, path and folder), never its name;
+        // changes already waiting for this notebook are added to.
+        guard let binding = binding(name) else {
             return onProblem("Petal couldn't tell which notebook \(name) is on disk yet, so nothing was changed. Try again in a moment.")
         }
-        var pending = coverPending[bound.key] ?? bound
+        let places = notebookPlaces
+        let waiting = coverPending.values.first { $0.target(root: root.path, places: places) == name }
+        var pending = waiting ?? CoverFields(notebook: name, root: root.path, coverID: binding.coverID, folderID: binding.instance, path: binding.path)
         for (field, value) in fields where CoverFields.names.contains(field) { pending.set(field, value) }
-        coverPending[bound.key] = pending
+        coverPending[pending.key] = pending
+        let bound = pending
         // Journaled on this Mac at once (a quit before it lands loses nothing), and shown at once.
         NoteJournal.queue.async { NoteJournal.keepCover(pending) }
         showCovers()
@@ -1996,9 +1996,33 @@ final class NoteStore {
         }
     }
 
-    /// The notebooks as cover changes find them (name, cover id, folder).
-    private var coverTargets: [(name: String, coverID: String, folderID: String)] {
-        notebooks.map { book in (book.name, book.cover.flatMap { paper($0) }.map(\.noteID) ?? "", book.instance) }
+    /// The notebooks as pending work finds them (NoteShelf.notebookFor).
+    var notebookPlaces: [NotebookPlace] { Self.places(notes: notes, notebooks: notebooks) }
+
+    /// Each notebook's name, folder path, folder (volume and inode) and cover id (its one canonical cover's own id;
+    /// "" when it has none, or one with no id in its file). Off the main thread too (recovery at launch).
+    nonisolated static func places(notes: [PaperNote], notebooks: [Notebook]) -> [NotebookPlace] {
+        notebooks.map { book in
+            let covers = notes.filter {
+                $0.version == nil && NoteLibrary.isCanonicalCover($0.url.lastPathComponent) && NoteLibrary.same($0.notebook, book.name)
+                    && !NoteShelf.needsID($0.noteID)
+            }
+            return NotebookPlace(name: book.name, path: book.folder.lastPathComponent, instance: book.instance,
+                                 coverID: covers.count == 1 ? covers[0].noteID : "")
+        }
+    }
+
+    /// What pending work for a notebook is bound to now: its cover's id (once landed), its folder's path and its
+    /// folder itself; nil while its folder isn't read.
+    func binding(_ notebook: String) -> NotebookBinding? {
+        guard let book = self.notebook(notebook), !book.instance.isEmpty else { return nil }
+        let id = notebookPlaces.first { $0.name == book.name }?.coverID ?? ""
+        return NotebookBinding(coverID: NoteShelf.lasting(id, pending: pendingIDs) ? id : "", path: book.folder.lastPathComponent, instance: book.instance)
+    }
+
+    /// The one rule (NoteShelf.notebookFor), against the notebooks as read now.
+    func resolve(_ binding: NotebookBinding) -> NoteShelf.BindingResult {
+        NoteShelf.notebookFor(binding, places: notebookPlaces, complete: readComplete)
     }
 
     /// The fields waiting under `key`, made on their notebook's cover as it is now through the cover's session (a
@@ -2007,7 +2031,7 @@ final class NoteStore {
     /// leave the journal.
     private func landCover(_ key: String) {
         guard let pending = coverPending[key], !pending.isEmpty, !coverLanding.contains(key), !switching,
-              let name = pending.target(root: root.path, notebooks: coverTargets), let found = notebook(name) else { return }
+              let name = pending.target(root: root.path, places: notebookPlaces), let found = notebook(name) else { return }
         if found.cover == nil, !found.coverUnread { return ensureCover(name) }
         // Never onto a cover not read, or in conflict (its versions read only until one is kept).
         // Not while its id is being written (a duplicated cover renewed); an id-less cover gets its id through `change`.
@@ -2094,6 +2118,9 @@ final class NoteStore {
         pendingIDs.insert(new)
         session.idPending = new
         let notebook = paper.notebook
+        // A cover's renewal moves what's pending for its folder in the same step (the queue and the journal), so a
+        // duplicate that kept the old id never inherits it.
+        if NoteLibrary.isCanonicalCover(paper.url.lastPathComponent) { rebind(notebook, to: new) }
         renewing[notebook] = new
         enqueue(session, .write(text: text, base: base), done: { outcome in
             if self.renewing[notebook] == new { self.renewing[notebook] = nil }
@@ -2101,6 +2128,23 @@ final class NoteStore {
             self.reload()
         })
         snapshot(paper, text: text, session: session)
+    }
+
+    /// Everything pending bound to a notebook's folder (canvas edits, cover fields) takes its cover's new id, in
+    /// memory and in the journal.
+    private func rebind(_ notebook: String, to new: String) {
+        let places = notebookPlaces
+        for (key, entry) in canvasWaiting {
+            let next = NoteShelf.renewing(entry.bound, folder: notebook, to: new, places: places)
+            guard next != entry.bound else { continue }
+            canvasWaiting[key]?.binding = next
+            journalCanvas(key)
+        }
+        for (key, pending) in coverPending where pending.target(root: root.path, places: places) == notebook {
+            coverPending[key]?.coverID = new
+            let now = coverPending[key]!
+            NoteJournal.queue.async { NoteJournal.keepCover(now) }
+        }
     }
 
     /// A notebook whose cover is getting its own id counts as Private (unknown) until it lands.
@@ -2115,9 +2159,9 @@ final class NoteStore {
     /// Every notebook as shown: what its cover says, with only the fields still waiting for it (in this root) over it;
     /// an unknown cover counts as Private.
     private func showCovers() {
-        let targets = coverTargets
+        let places = notebookPlaces
         for pending in coverPending.values {
-            guard let name = pending.target(root: root.path, notebooks: targets), let index = notebooks.firstIndex(where: { $0.name == name }) else { continue }
+            guard let name = pending.target(root: root.path, places: places), let index = notebooks.firstIndex(where: { $0.name == name }) else { continue }
             let book = notebooks[index]
             let shown = pending.shown(isPrivate: book.isPrivate, unknown: book.privacyUnknown, color: book.color, view: book.view)
             notebooks[index].isPrivate = shown.isPrivate
@@ -2243,11 +2287,12 @@ extension NoteStore {
                 MainActor.assumeIsolated {
                     if ok {
                         // Its cover's waiting fields go with it (journal too): the ones bound to its cover or its folder.
-                        let target = self.coverTargets.first { $0.name == book.name }
-                        for (key, pending) in self.coverPending where pending.target(root: self.root.path, notebooks: target.map { [$0] } ?? []) != nil {
+                        let places = self.notebookPlaces
+                        for (key, pending) in self.coverPending where pending.target(root: self.root.path, places: places) == book.name {
                             self.coverPending[key] = nil
-                            var cleared = pending
-                            cleared.fields = [:]
+                            var emptied = pending
+                            emptied.fields = [:]
+                            let cleared = emptied
                             NoteJournal.queue.async { NoteJournal.keepCover(cleared) }
                         }
                         let gone = self.notes.filter { NoteLibrary.same($0.notebook, book.name) }.map(\.key)
@@ -2289,37 +2334,28 @@ extension NoteStore {
     /// A notebook's canvas file.
     nonisolated static let canvasName = ".canvas.json"
 
-    /// A notebook's cover id, when its cover has one of its own in its file (what its canvas edits are kept by).
+    /// A notebook's cover id, when its cover has one of its own in its file and no other notebook's cover has it.
     func coverID(_ notebook: String) -> String? {
-        guard let book = self.notebook(notebook), renewing[book.name] == nil, let key = book.cover, let cover = paper(key),
-              NoteShelf.lasting(cover.noteID, pending: pendingIDs),
-              coverTargetsForCanvas.filter({ $0.id == cover.noteID }).map({ $0.notebook.lowercased() }).uniqued().count == 1 else { return nil }
-        return cover.noteID
+        guard let book = self.notebook(notebook), renewing[book.name] == nil else { return nil }
+        let places = notebookPlaces
+        guard let id = places.first(where: { $0.name == book.name })?.coverID, !id.isEmpty, NoteShelf.lasting(id, pending: pendingIDs),
+              places.filter({ $0.coverID == id }).count == 1 else { return nil }
+        return id
     }
 
-    /// The notebook whose cover has `id` now (followed through renames), or nil when it's gone.
-    /// The key a notebook's canvas edits are kept by: its cover's id once it has one, else its folder itself
-    /// (`folder:` and its volume and inode); nil when neither is known yet (its folder not read).
+    /// The canvas entry a notebook's edits go into: the one waiting whose binding finds this notebook, else a new
+    /// one keyed by its folder; nil while its folder isn't read.
     func canvasKey(_ notebook: String) -> String? {
-        // Always the notebook's own folder (its volume and inode: the same through a rename, never another notebook's,
-        // whatever happens to cover ids), never its cover's id, which a duplicated notebook's renewal can move.
-        guard let book = self.notebook(notebook), !book.instance.isEmpty else { return nil }
-        return CanvasQueue.folderKey(book.instance)
+        guard let book = self.notebook(notebook), let binding = binding(book.name) else { return nil }
+        if let key = canvasKeys(book.name).first { return key }
+        let key = CanvasQueue.folderKey(binding.instance)
+        // A key whose entry is bound elsewhere (never expected: folders are unique) isn't shared.
+        return canvasWaiting[key] == nil ? key : key + ":" + UUID().uuidString
     }
 
-    /// The notebook a canvas key names now: by its cover's id, or its folder (followed through renames), or nil.
-    func notebook(canvasKey key: String) -> Notebook? {
-        CanvasQueue.notebook(key: key, covers: coverTargetsForCanvas, folders: notebooks.map { (instance: $0.instance, notebook: $0.name) })
-            .flatMap { notebook($0) }
-    }
-
-    private var coverTargetsForCanvas: [(id: String, notebook: String)] {
-        notes.filter { $0.file.cover && $0.version == nil }.map { (id: $0.noteID, notebook: $0.notebook) }
-    }
-
-    func notebook(coverID id: String) -> Notebook? {
-        let covers = notes.filter { $0.file.cover && $0.version == nil }.map { (id: $0.noteID, notebook: $0.notebook) }
-        return CanvasQueue.notebook(coverID: id, covers: covers).flatMap { notebook($0) }
+    /// Every canvas entry waiting whose binding finds this notebook now.
+    private func canvasKeys(_ notebook: String) -> [String] {
+        canvasWaiting.filter { resolve($0.value.bound) == .found(notebook) }.keys.sorted()
     }
 
     /// A notebook's canvas as it is (the file merged with the versions iCloud kept of it, and the edits still waiting
@@ -2328,11 +2364,14 @@ extension NoteStore {
     func canvas(_ notebook: String, _ done: @escaping @MainActor (NoteCanvas?) -> Void) {
         guard let book = self.notebook(notebook) else { return done(NoteCanvas()) }
         let file = book.folder.appending(path: Self.canvasName), root = self.root
-        let name = book.name
+        let name = book.name, instance = book.instance
         Self.io.async {
             let read = Self.readCanvas(file, root: root)
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { done(read.map { $0.applyingMerged(self.canvasPending(name)) }) }
+                MainActor.assumeIsolated {
+                    if let read, !instance.isEmpty { self.lastCanvas[instance] = read }
+                    done(read.map { $0.applyingMerged(self.canvasPending(name)) })
+                }
             }
         }
     }
@@ -2354,13 +2393,15 @@ extension NoteStore {
             onProblem("Waiting for \(book.name) to download: its canvas can be changed once it's here.")
             return done(nil)
         }
-        queueCanvas(key, notebook: book.name, NoteCanvas.Stamped(edit, at: at), done)
+        queueCanvas(key, notebook: book, NoteCanvas.Stamped(edit, at: at), done)
     }
 
-    private func queueCanvas(_ id: String, notebook: String, _ stamped: NoteCanvas.Stamped, _ done: @escaping @MainActor (NoteCanvas?) -> Void) {
-        var entry = canvasWaiting[id] ?? CanvasEntry(coverID: id, notebook: notebook, edits: [])
-        entry.notebook = notebook
+    private func queueCanvas(_ id: String, notebook book: Notebook, _ stamped: NoteCanvas.Stamped, _ done: @escaping @MainActor (NoteCanvas?) -> Void) {
+        var entry = canvasWaiting[id] ?? CanvasEntry(coverID: id, notebook: book.name, edits: [], binding: binding(book.name))
+        entry.notebook = book.name
         entry.edits.append(stamped)
+        // The whole canvas these edits make: the last one read for the notebook (else the snapshot kept), with them.
+        entry.snapshot = (lastCanvas[book.instance] ?? entry.snapshot ?? NoteCanvas()).applyingMerged(entry.edits)
         canvasWaiting[id] = entry
         canvasDone[id, default: []].append(done)
         journalCanvas(id)
@@ -2373,24 +2414,24 @@ extension NoteStore {
         NoteJournal.queue.async { NoteJournal.keepCanvas(entry) }
     }
 
-    /// The edits of a notebook's canvas not saved yet.
+    /// The edits of a notebook's canvas not saved yet (every entry whose binding finds it).
     func canvasPending(_ notebook: String) -> [NoteCanvas.Stamped] {
-        guard let key = canvasKey(notebook) else { return [] }
-        return canvasWaiting[key]?.edits ?? []
+        guard let name = self.notebook(notebook)?.name else { return [] }
+        return canvasKeys(name).flatMap { canvasWaiting[$0]?.edits ?? [] }
     }
 
-    /// Whether a notebook's canvas can take an edit now (its cover id or folder known), else it says it's waiting.
-    func canvasEditable(_ notebook: String) -> Bool { canvasKey(notebook) != nil }
+    /// Whether a notebook's canvas can take an edit now (its folder read), else it says it's waiting.
+    func canvasEditable(_ notebook: String) -> Bool { binding(notebook) != nil }
 
 
     private func pumpCanvas(_ id: String) {
         guard !canvasWriting.contains(id), !switching, !draining, let entry = canvasWaiting[id], !entry.edits.isEmpty, loaded else { return }
-        guard let book = notebook(canvasKey: id) else {
-            // Not found while the folder isn't read completely (a cover still downloading could be it): it waits for
-            // the next read.
-            guard CanvasQueue.gone(found: false, complete: readComplete),
-                  !CanvasQueue.ambiguous(key: id, covers: coverTargetsForCanvas) else { return }
-            // Its notebook is gone (trashed, or its cover with it): rescued into Unsaved notes, never dropped.
+        let found = resolve(entry.bound)
+        guard case .found(let name) = found, let book = notebook(name) else {
+            // Not found surely (two candidates, or the folder not read completely: a cover still downloading could be
+            // it): it waits for the next read. Rescued only when nothing matches by folder, path or id.
+            guard found == .gone else { return }
+            // Its notebook is gone (trashed): rescued into Unsaved notes with the whole canvas, never dropped.
             canvasWaiting[id] = nil
             canvasDone[id] = nil
             canvasWriting.insert(id)
@@ -2430,6 +2471,7 @@ extension NoteStore {
                         // Only the exact edits it wrote leave the journal (by id); newer ones stay there.
                         NoteJournal.queue.async { NoteJournal.ackCanvas(id, wrote: wrote) }
                         self.canvasFailures[id] = nil
+                        if !book.instance.isEmpty { self.lastCanvas[book.instance] = saved }
                         if self.canvasUnsaved.contains(book.name) { self.canvasUnsaved.remove(book.name) }
                         let shown = saved.applyingMerged(self.canvasWaiting[id]?.edits ?? [])
                         for callback in callbacks { callback(shown) }
@@ -2461,6 +2503,7 @@ extension NoteStore {
         canvasGeneration += 1
         canvasWaiting = [:]
         canvasDone = [:]
+        lastCanvas = [:]
     }
 
     /// The canvas file merged with iCloud's versions of it; with `resolve`, versions there are merged into the file

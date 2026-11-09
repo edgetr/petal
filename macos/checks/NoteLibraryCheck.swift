@@ -311,9 +311,6 @@ struct NoteLibraryCheck {
                                                  NoteCanvas.Stamped(.move("n2", .init(x: 2, y: 2)), at: 70)])
         expect(at(retried.notes["n1"], 9, 9) && retried.areas.isEmpty && at(retried.notes["n2"], 2, 2) && retried.zoom == newerThere.zoom,
                "a waiting edit goes through the merge: older than what's there, it doesn't win (nor bring back what was removed later)")
-        expect(CanvasQueue.notebook(coverID: "c", covers: [("c", "Trip"), ("c", "Trip"), ("d", "Work")]) == "Trip"
-               && CanvasQueue.notebook(coverID: "c", covers: [("c", "Trip"), ("c", "Work")]) == nil && CanvasQueue.notebook(coverID: "x", covers: []) == nil,
-               "an entry's notebook by its cover id; gone or in two notebooks: none (rescued)")
 
         expect(NoteCanvas.zoomIn(1) == 1.25 && NoteCanvas.zoomOut(1) == 0.8 && NoteCanvas.zoomIn(2) == 2 && NoteCanvas.zoomOut(0.5) == 0.5, "zoom steps")
 
@@ -424,8 +421,6 @@ struct NoteLibraryCheck {
                "the cover's name matched as the file system does, case-insensitive")
         expect(NoteDrop.waitForPictures(saving: false, importing: 1) && NoteDrop.waitForPictures(saving: true, importing: 0) && !NoteDrop.waitForPictures(saving: false, importing: 0),
                "Mail waits for pictures being saved and pictures still being read in")
-        expect(CanvasQueue.ambiguous(key: "SAME", covers: [("SAME", "Trip"), ("SAME", "Trip copy")]) && !CanvasQueue.ambiguous(key: "SAME", covers: [("SAME", "Trip")]),
-               "a cover id two notebooks share: canvas edits wait, never rescued as gone")
 
         // Cover conflicts are per notebook folder, by file name, never by id.
         let coverPapers: [(id: String, path: String)] = [("SAME", "/n/A/About this notebook.md"), ("SAME", "/n/B/About this notebook.md"),
@@ -469,25 +464,57 @@ struct NoteLibraryCheck {
         expect(!NotePrivacy.mayCapture(window: 11, excluded: excluded) && NotePrivacy.mayCapture(window: 12, excluded: excluded) && NotePrivacy.mayCapture(window: 99, excluded: excluded),
                "no picture of one of them; any other window may be pictured")
 
-        // Cover changes bound to their root and their cover id or folder, never the name.
-        let bound = CoverFields(notebook: "Same", root: "/A", coverID: "cov-1", folderID: "1:100", fields: ["private": "true"])
-        let inA: [(name: String, coverID: String, folderID: String)] = [("Same renamed", "cov-1", "1:100"), ("Other", "cov-2", "1:200")]
-        let inB: [(name: String, coverID: String, folderID: String)] = [("Same", "cov-9", "2:100")]
-        expect(bound.target(root: "/A", notebooks: inA) == "Same renamed", "in its own root: its notebook by cover id, whatever its name now")
-        expect(bound.target(root: "/B", notebooks: inB) == nil, "another root's notebook of the same name: never")
-        let coverless = CoverFields(notebook: "Bare", root: "/A", folderID: "1:300", fields: ["private": "true"])
-        expect(coverless.target(root: "/A", notebooks: [("Bare now", "cov-new", "1:300")]) == "Bare now", "no cover id: its folder")
-        expect(coverless.target(root: "/A", notebooks: [("Bare", "", "1:301")]) == nil, "a folder of the same name that isn't it: never")
-        expect(bound.key != CoverFields(notebook: "Same", root: "/B", coverID: "cov-1").key, "kept per root")
+        // What pending work is bound to (NoteShelf.notebookFor): the folder first, else the same path with its cover
+        // id or its renewal, else the cover id where the path or folder matches too; never a guess, gone only when
+        // nothing matches after a complete read.
+        func place(_ name: String, _ instance: String, _ id: String) -> NotebookPlace { NotebookPlace(name: name, path: name, instance: instance, coverID: id) }
+        let trip = NotebookBinding(coverID: "X", path: "Trip", instance: "1:10")
+        expect(NoteShelf.notebookFor(trip, places: [place("Trip renamed", "1:10", "X"), place("Trip", "1:11", "Y")], complete: true) == .found("Trip renamed"),
+               "by its folder first, whatever its name now")
+        expect(NoteShelf.notebookFor(trip, places: [place("Trip", "1:99", "X")], complete: true) == .found("Trip"),
+               "its folder replaced (a new inode at the same path): by its path and cover id")
+        let renewedTrip = NoteLibrary.renewedID("X", folder: "Trip")
+        expect(NoteShelf.notebookFor(trip, places: [place("Trip", "1:99", renewedTrip), place("Alpha", "1:20", "X")], complete: true) == .found("Trip"),
+               "replaced and renewed: by its path and the renewal of its id, never the duplicate that kept the old id")
+        expect(NoteShelf.notebookFor(trip, places: [place("Alpha", "1:20", "X")], complete: true) == .wait,
+               "only a duplicate with its id, elsewhere: it waits, never goes there and is never gone")
+        expect(NoteShelf.notebookFor(trip, places: [place("Trip", "1:99", "OTHER")], complete: true) == .wait,
+               "another notebook at its path: it waits")
+        expect(NoteShelf.notebookFor(trip, places: [place("Work", "1:30", "W")], complete: true) == .gone
+               && NoteShelf.notebookFor(trip, places: [place("Work", "1:30", "W")], complete: false) == .wait,
+               "gone only when nothing matches by folder, path or id, after a complete read")
+        expect(NoteShelf.notebookFor(trip, places: [place("Trip", "1:10", "X"), place("trip", "1:10", "X")], complete: true) == .wait
+               && NoteShelf.notebookFor(NotebookBinding(coverID: "X", path: "Trip", instance: ""), places: [place("Trip", "1:1", "X"), place("trip", "1:2", "X")], complete: true) == .wait,
+               "two candidates: it waits, never picks")
+        expect(NoteShelf.notebookFor(NotebookBinding(coverID: "", path: "Bare", instance: "1:40"), places: [place("Bare", "1:41", "")], complete: true) == .found("Bare")
+               && NoteShelf.notebookFor(NotebookBinding(coverID: "", path: "Bare", instance: "1:40"), places: [place("Bare", "1:41", "COV")], complete: true) == .wait,
+               "no cover id recorded: the same path with no cover id either")
+        // A renewal moves what's bound to that folder, never what's bound to the duplicate.
+        let dupPlaces = [place("Alpha", "1:20", "X"), place("Zed", "1:30", "X")]
+        let zedBinding = NotebookBinding(coverID: "X", path: "Zed", instance: "1:30"), alphaBinding = NotebookBinding(coverID: "X", path: "Alpha", instance: "1:20")
+        let zedRenewed = NoteLibrary.renewedID("X", folder: "Zed")
+        expect(NoteShelf.renewing(zedBinding, folder: "Zed", to: zedRenewed, places: dupPlaces).coverID == zedRenewed
+               && NoteShelf.renewing(alphaBinding, folder: "Zed", to: zedRenewed, places: dupPlaces) == alphaBinding,
+               "a renewal rewrites the bindings of its own folder only")
+        // Cover changes use the same binding, in their own root, preferring the original folder.
+        var zedPrivate = CoverFields(notebook: "Zed", root: "/A", coverID: "X", folderID: "1:30", path: "Zed")
+        zedPrivate.set("private", "true")
+        let afterRenewal = [place("Alpha", "1:20", "X"), place("Zed", "1:30", zedRenewed)]
+        expect(zedPrivate.target(root: "/A", places: afterRenewal) == "Zed" && zedPrivate.target(root: "/A", places: [place("Alpha", "1:20", "X"), place("Zed", "1:31", zedRenewed)]) == "Zed",
+               "a Private change for the original: there after the duplicate's renewal, its folder replaced or not, never the duplicate")
+        expect(zedPrivate.target(root: "/B", places: afterRenewal) == nil, "another root's notebook: never")
+        var rebound = zedPrivate
+        rebound.coverID = zedRenewed
+        expect(rebound.key == zedPrivate.key && zedPrivate.key != CoverFields(notebook: "Zed", root: "/B", coverID: "X", folderID: "1:30").key,
+               "its key fixed through a renewal, and kept per root")
+        let legacy = try? JSONDecoder().decode(CoverFields.self, from: Data(#"{"notebook":"Old","root":"/A","coverID":"c1","fields":{"private":"true"}}"#.utf8))
+        expect(legacy?.key == "/A|c1", "an entry an earlier build wrote keeps its key")
+        expect(CanvasEntry(coverID: CanvasQueue.folderKey("1:9"), notebook: "Old", edits: []).bound == NotebookBinding(coverID: "", path: "Old", instance: "1:9"),
+               "a canvas entry an earlier build wrote: bound by its folder")
         // A note held in memory whose notebook the latest read didn't find: unknown, so Private, never readable.
         let counted = NotePrivacy.privateBooks(notebooks: [("Health", true), ("Garden", false)], held: ["Garden", "Gone", "health"])
         expect(counted.contains("Gone") && counted.contains("Health") && !counted.contains("Garden"), "a held note's missing notebook counts as Private", "\(counted)")
         expect(!NotePrivacy.readable(notebook: "Gone", privateBooks: counted, asker: nil), "and its notes aren't readable from outside it")
-        // Canvas keys: by cover id, else the notebook's folder; a folder key follows the folder, never a name.
-        expect(CanvasQueue.notebook(key: CanvasQueue.folderKey("1:42"), covers: [], folders: [("1:42", "Trip renamed"), ("1:43", "Trip")]) == "Trip renamed"
-               && CanvasQueue.notebook(key: CanvasQueue.folderKey("1:44"), covers: [], folders: [("1:42", "Trip")]) == nil
-               && CanvasQueue.notebook(key: "cov", covers: [("cov", "Work")], folders: []) == "Work",
-               "a canvas entry's notebook by its cover id, or its folder while the cover id isn't known")
         // A picture leaves Petal only from the notes' Pictures folder, as an image that decodes: never another note, a
         // cover or a file beside a note that a picture link reaches.
         let exportRoot = FileManager.default.temporaryDirectory.appending(path: "petal-export-\(UUID().uuidString)")
@@ -520,8 +547,6 @@ struct NoteLibraryCheck {
         try? FileManager.default.removeItem(at: stageFolder)
         expect(NoteDrop.missingWords(0) == nil && NoteDrop.missingWords(1) == "1 picture couldn't be attached." && NoteDrop.missingWords(2) == "2 pictures couldn't be attached.",
                "what's said when pictures couldn't go along")
-        expect(!CanvasQueue.gone(found: false, complete: false) && CanvasQueue.gone(found: false, complete: true) && !CanvasQueue.gone(found: true, complete: true),
-               "a canvas entry is rescued only when its notebook isn't found in a folder read completely")
 
         // Cover fields, one by one: a field never carries an old value of another.
         var synced = NoteFile(id: "C2", body: "")

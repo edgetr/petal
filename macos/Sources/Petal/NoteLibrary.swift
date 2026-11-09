@@ -649,6 +649,10 @@ struct CoverFields: Codable, Equatable, Sendable {
     var root = ""
     var coverID = ""
     var folderID = ""
+    /// Its notebook's folder path under the notes' folder when it was made.
+    var path = ""
+    /// Its journal key, fixed when it's made (a renewal rewrites its cover id, never its key).
+    var storedKey = ""
     /// Each field's value ("" takes `private` or `view` off).
     var fields: [String: String] = [:]
     /// When each field was set (seconds since 1970): copies of one change merge newest per field.
@@ -656,7 +660,7 @@ struct CoverFields: Codable, Equatable, Sendable {
 
     var isEmpty: Bool { fields.isEmpty }
 
-    enum CodingKeys: String, CodingKey { case notebook, root, coverID, folderID, fields, times }
+    enum CodingKeys: String, CodingKey { case notebook, root, coverID, folderID, path, storedKey, fields, times }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -664,8 +668,12 @@ struct CoverFields: Codable, Equatable, Sendable {
         root = try c.decodeIfPresent(String.self, forKey: .root) ?? ""
         coverID = try c.decodeIfPresent(String.self, forKey: .coverID) ?? ""
         folderID = try c.decodeIfPresent(String.self, forKey: .folderID) ?? ""
+        path = try c.decodeIfPresent(String.self, forKey: .path) ?? ""
+        storedKey = try c.decodeIfPresent(String.self, forKey: .storedKey) ?? ""
         fields = try c.decodeIfPresent([String: String].self, forKey: .fields) ?? [:]
         times = try c.decodeIfPresent([String: Double].self, forKey: .times) ?? [:]
+        // An entry an earlier build wrote keeps the key its file has.
+        if storedKey.isEmpty { storedKey = root + "|" + (coverID.isEmpty ? "folder:" + folderID : coverID) }
     }
 
     /// One field set now (or at `at`).
@@ -684,28 +692,27 @@ struct CoverFields: Codable, Equatable, Sendable {
         return out
     }
 
-    /// Its key, the same through renames: its root, then its cover id, else its folder.
-    var key: String { root + "|" + (coverID.isEmpty ? "folder:" + folderID : coverID) }
+    /// Its key, the same through renames and renewals.
+    var key: String { storedKey }
 
-    init(notebook: String, root: String = "", coverID: String = "", folderID: String = "", fields: [String: String] = [:]) {
+    /// What it's bound to (NoteShelf.notebookFor).
+    var binding: NotebookBinding { NotebookBinding(coverID: coverID, path: path.isEmpty ? notebook : path, instance: folderID) }
+
+    init(notebook: String, root: String = "", coverID: String = "", folderID: String = "", path: String = "", fields: [String: String] = [:]) {
         self.notebook = notebook
         self.root = root
         self.coverID = coverID
         self.folderID = folderID
+        self.path = path
         self.fields = fields
+        self.storedKey = root + "|folder:" + folderID + (coverID.isEmpty ? "" : "|" + coverID)
     }
 
-    /// The notebook it's for in `root` now: the one whose cover has its id, else the one that is its folder; nil when
-    /// it's another root's, or neither is found (or found twice: never a guess).
-    func target(root now: String, notebooks: [(name: String, coverID: String, folderID: String)]) -> String? {
-        guard root == now else { return nil }
-        if !coverID.isEmpty {
-            let byCover = notebooks.filter { $0.coverID == coverID }
-            if byCover.count == 1 { return byCover[0].name }
-        }
-        guard !folderID.isEmpty else { return nil }
-        let byFolder = notebooks.filter { $0.folderID == folderID }
-        return byFolder.count == 1 ? byFolder[0].name : nil
+    /// The notebook it's for in `root` now (NoteShelf.notebookFor: its folder first, so the original over a
+    /// duplicate); nil when it's another root's, not found, or found twice (never a guess).
+    func target(root now: String, places: [NotebookPlace]) -> String? {
+        guard root == now, case .found(let name) = NoteShelf.notebookFor(binding, places: places, complete: false) else { return nil }
+        return name
     }
 
     static let names: Set<String> = ["private", "color", "view"]
@@ -1186,14 +1193,96 @@ struct NoteCanvas: Codable, Equatable, Sendable {
     }
 }
 
+// MARK: - What pending work is bound to
+
+/// The notebook something pending was made for (canvas edits, their journal, cover field changes like Private): its
+/// cover's id then, its folder's path under the notes' folder, and the folder itself (volume and inode). Resolved
+/// against the notebooks as they are now by one rule (`NoteShelf.notebookFor`): an inode doesn't survive iCloud
+/// replacing a folder, and a cover id doesn't survive the notebook being duplicated, so neither is trusted alone.
+struct NotebookBinding: Codable, Equatable, Hashable, Sendable {
+    var coverID: String
+    var path: String
+    var instance: String
+}
+
+/// A notebook as a binding is resolved against: its name, its folder's path under the notes' folder, its folder
+/// itself, and its cover's id ("" when it has none).
+struct NotebookPlace: Equatable, Sendable {
+    var name: String
+    var path: String
+    var instance: String
+    var coverID: String
+}
+
+extension NoteShelf {
+    enum BindingResult: Equatable { case found(String), wait, gone }
+
+    /// The one rule for finding the notebook pending work was made for:
+    /// 1. the same folder (inode), when exactly one has it;
+    /// 2. else the same path whose cover id is the recorded one or its renewal (NoteLibrary.renewedID; none recorded:
+    ///    a notebook there with no cover id either);
+    /// 3. else the recorded cover id, when exactly one notebook has it and its path or folder matches too.
+    /// Two candidates at any step: it waits, never picks. Gone only when nothing matches by folder, path or id, after a
+    /// complete read of the notes' folder (`complete`); else it waits.
+    static func notebookFor(_ binding: NotebookBinding, places: [NotebookPlace], complete: Bool) -> BindingResult {
+        func samePath(_ place: NotebookPlace) -> Bool { place.path.compare(binding.path, options: .caseInsensitive) == .orderedSame }
+        func idMatches(_ place: NotebookPlace) -> Bool {
+            !binding.coverID.isEmpty && (place.coverID == binding.coverID || place.coverID == NoteLibrary.renewedID(binding.coverID, folder: place.path))
+        }
+        if !binding.instance.isEmpty {
+            let byFolder = places.filter { $0.instance == binding.instance }
+            if byFolder.count == 1 { return .found(byFolder[0].name) }
+            if byFolder.count > 1 { return .wait }
+        }
+        // The same path whose cover id is the recorded one (none recorded: none there either) or its renewal.
+        let byPath = places.filter { samePath($0) && ($0.coverID == binding.coverID || idMatches($0)) }
+        if byPath.count == 1 { return .found(byPath[0].name) }
+        if byPath.count > 1 { return .wait }
+        if !binding.coverID.isEmpty {
+            let byID = places.filter { $0.coverID == binding.coverID }
+            if byID.count == 1, samePath(byID[0]) || (!binding.instance.isEmpty && byID[0].instance == binding.instance) { return .found(byID[0].name) }
+        }
+        let anything = places.contains { (!binding.instance.isEmpty && $0.instance == binding.instance) || samePath($0) || idMatches($0) }
+        return complete && !anything ? .gone : .wait
+    }
+
+    /// The one rule applied to a cover id renewed on a folder: every pending binding that resolves to that folder now
+    /// takes the new id, so a duplicate that kept the old id never inherits it.
+    static func renewing(_ binding: NotebookBinding, folder: String, to newID: String, places: [NotebookPlace]) -> NotebookBinding {
+        guard notebookFor(binding, places: places, complete: false) == .found(folder) else { return binding }
+        var next = binding
+        next.coverID = newID
+        return next
+    }
+}
+
 /// A notebook's canvas edits not saved yet, as the notes journal keeps them on this Mac's own disk: by the notebook's
 /// cover id (never its name, so a renamed notebook keeps them), with its name when they were made (for a rescue's
 /// file name), in order with their own times.
 struct CanvasEntry: Codable, Equatable, Sendable {
-    /// Its key: the notebook's cover id, or, while that isn't known, its folder (CanvasQueue.folderKey).
+    /// Its key (its journal file's name), fixed when it's made: never how its notebook is found (that's `binding`).
     var coverID: String
     var notebook: String
     var edits: [NoteCanvas.Stamped]
+    /// The notebook it was made for (NoteShelf.notebookFor); nil only for an entry an earlier build wrote.
+    var binding: NotebookBinding? = nil
+    /// The whole canvas these edits made (the last one Petal read with them merged in): what a rescue keeps.
+    var snapshot: NoteCanvas? = nil
+
+    init(coverID: String, notebook: String, edits: [NoteCanvas.Stamped], binding: NotebookBinding? = nil, snapshot: NoteCanvas? = nil) {
+        self.coverID = coverID
+        self.notebook = notebook
+        self.edits = edits
+        self.binding = binding
+        self.snapshot = snapshot
+    }
+
+    /// Its binding, or for an entry an earlier build wrote, one made from its key.
+    var bound: NotebookBinding {
+        if let binding { return binding }
+        if CanvasQueue.isFolderKey(coverID) { return NotebookBinding(coverID: "", path: notebook, instance: String(coverID.dropFirst("folder:".count))) }
+        return NotebookBinding(coverID: coverID, path: notebook, instance: "")
+    }
 }
 
 /// A notebook's canvas edits not saved yet: kept in memory in order, journaled, written together on the next try,
@@ -1212,35 +1301,10 @@ enum CanvasQueue {
         return out
     }
 
-    /// Whether a canvas key's cover id is in two notebooks at once (a duplicated notebook, until one cover gets its
-    /// own id): never taken for gone, it waits.
-    static func ambiguous(key: String, covers: [(id: String, notebook: String)]) -> Bool {
-        !isFolderKey(key) && Set(covers.filter { $0.id == key }.map { $0.notebook.lowercased() }).count > 1
-    }
-
-    /// Whether a canvas entry's notebook is gone, to be rescued: only when no notebook's cover has its id and the
-    /// notes' folder was read completely (no cover still downloading or unreadable, which could be it).
-    static func gone(found: Bool, complete: Bool) -> Bool { !found && complete }
-
-    /// A notebook's folder as a canvas key (its volume and inode): while its cover's id isn't known.
+    /// A canvas entry's key (its journal file's name), made from the notebook's folder when the entry is made; how
+    /// the entry finds its notebook is its binding (NoteShelf.notebookFor), never this key.
     static func folderKey(_ instance: String) -> String { "folder:" + instance }
     static func isFolderKey(_ key: String) -> Bool { key.hasPrefix("folder:") }
-
-    /// Where a canvas entry goes now: by its cover id, or (a folder key) the one notebook that is that folder.
-    static func notebook(key: String, covers: [(id: String, notebook: String)], folders: [(instance: String, notebook: String)]) -> String? {
-        guard isFolderKey(key) else { return notebook(coverID: key, covers: covers) }
-        let instance = String(key.dropFirst("folder:".count))
-        let found = folders.filter { !instance.isEmpty && $0.instance == instance }
-        return found.count == 1 ? found[0].notebook : nil
-    }
-
-    /// Where a canvas entry goes now: the one notebook whose cover has its id (a cover's conflict copies are in one
-    /// notebook), else nil: the notebook is gone and its edits are rescued.
-    static func notebook(coverID: String, covers: [(id: String, notebook: String)]) -> String? {
-        let found = Set(covers.filter { $0.id == coverID }.map { $0.notebook.lowercased() })
-        guard found.count == 1 else { return nil }
-        return covers.first { $0.id == coverID }?.notebook
-    }
 
     /// After a write: what's still waiting. Only the exact edits it wrote go (by id): the ones added meanwhile, and
     /// everything when it failed, stay.
