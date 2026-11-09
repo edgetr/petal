@@ -75,7 +75,7 @@ final class AppStripView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = false
-        registerForDraggedTypes([.fileURL])
+        registerForDraggedTypes([.fileURL, .petalNote])
         dock.strip = self
         bounced = PetalApp.shared.signals.bounces
     }
@@ -492,7 +492,10 @@ final class AppStripView: NSView {
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        let target = app.config.bool("dropToOpen") ? tile(at: convert(sender.draggingLocation, from: nil)).flatMap { $0.item == nil ? nil : $0.id } : nil
+        // A note (Petal Notes) goes to any app; files only with dropToOpen.
+        let note = sender.draggingPasteboard.types?.contains(.petalNote) == true
+        let target = note || app.config.bool("dropToOpen")
+            ? tile(at: convert(sender.draggingLocation, from: nil)).flatMap { $0.item == nil || (note && Sites.isWeb($0.id)) ? nil : $0.id } : nil
         setFileOver(target)
         return target == nil ? [] : .copy
     }
@@ -502,6 +505,10 @@ final class AppStripView: NSView {
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         let target = fileOver
         setFileOver(nil)
+        if let target, let id = sender.draggingPasteboard.data(forType: .petalNote).map({ String(decoding: $0, as: UTF8.self) }) {
+            app.paper.use(id, in: target)
+            return true
+        }
         let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
         guard let target, !urls.isEmpty else { return false }
         app.docks.launch(target, files: urls)

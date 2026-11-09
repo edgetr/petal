@@ -307,6 +307,13 @@ final class Popups {
         openDock = dock
         anchor = key
         dock.openPopup = key
+        // A notebook of Petal Notes: its papers fan up.
+        if let book = PetalApp.shared.paper.notebook(forStack: folder) {
+            PetalApp.shared.signals.opened(folder)
+            guard let slot = dock.panel?.screenFrame(of: key) else { return }
+            panel.show(NotebookFanView(book: book, papers: PetalApp.shared.paper.fanned(book)) { [weak self] in self?.closeAll() }, over: slot, dock: dock.panel)
+            return
+        }
         let contents = StackContents(folder: folder)
         stack = contents
         PetalApp.shared.signals.opened(folder)

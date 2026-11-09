@@ -117,6 +117,8 @@ struct NoteStoreCheck {
         removeRefusedReadOnly(root: root)
         caseMove(root: root)
         versionGroups(root: root)
+        canvasFile(root: root)
+        notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
     }
@@ -1069,6 +1071,56 @@ struct NoteStoreCheck {
         let until = Date().addingTimeInterval(5)
         while answers.count < 2 && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         expect(Set(answers) == ["Same title.md", "Same title 2.md"], "two at once: two files, two answers", "\(answers)")
+    }
+
+    /// A notebook's canvas file: each edit made on the file as it is (another Mac's move meanwhile stays), written
+    /// atomically; a file Petal can't read as a canvas, or one reached through a symbolic link, is never written.
+    static func canvasFile(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Canvas")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: NoteStore.canvasName)
+        let first = NoteStore.writeCanvas(.move("n1", .init(x: 10, y: 10)), to: file, root: root)
+        expect(first?.notes["n1"] == .init(x: 10, y: 10) && NoteCanvas.decode(text(file)) == first, "the first edit makes the file")
+        // Another Mac moved another note meanwhile.
+        let elsewhere = NoteCanvas.decode(text(file))!.applying(.move("n2", .init(x: 70, y: 70)))
+        try? Data(elsewhere.encoded().utf8).write(to: file)
+        let second = NoteStore.writeCanvas(.move("n1", .init(x: 20, y: 20)), to: file, root: root)
+        expect(second?.notes["n1"] == .init(x: 20, y: 20) && second?.notes["n2"] == .init(x: 70, y: 70), "what moved elsewhere stays")
+        try? Data("the person's own words".utf8).write(to: file)
+        expect(NoteStore.writeCanvas(.move("n1", .init(x: 1, y: 1)), to: file, root: root) == nil && text(file) == "the person's own words",
+               "a file that isn't a canvas is left as it is")
+        let outside = root.deletingLastPathComponent().appending(path: "Outside-\(UUID().uuidString)")
+        try? fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        let link = root.appending(path: "Linked")
+        try? fm.createSymbolicLink(at: link, withDestinationURL: outside)
+        expect(NoteStore.writeCanvas(.move("n1", .init(x: 1, y: 1)), to: link.appending(path: NoteStore.canvasName), root: root) == nil
+               && !fm.fileExists(atPath: outside.appending(path: NoteStore.canvasName).path), "never through a symbolic link")
+        try? fm.removeItem(at: link)
+        try? fm.removeItem(at: outside)
+        expect(NoteStore.writeCanvas(.move("n1", .init(x: 1, y: 1)), to: root.appending(path: "Never made \(UUID().uuidString)/\(NoteStore.canvasName)"), root: root) == nil,
+               "no notebook folder: nothing made")
+    }
+
+    /// A notebook's folder renamed: its notes and canvas go with it, never over another notebook, only inside the
+    /// notes' folder; a change of case only is the same folder.
+    static func notebookFolders(root: URL) {
+        let fm = FileManager.default
+        let from = root.appending(path: "Trip")
+        try? fm.createDirectory(at: from, withIntermediateDirectories: true)
+        _ = NoteStore.create("a note", at: from.appending(path: "One.md"), root: root)
+        _ = NoteStore.writeCanvas(.move("n1", .init(x: 1, y: 1)), to: from.appending(path: NoteStore.canvasName), root: root)
+        let to = root.appending(path: "Holiday")
+        expect(NoteStore.moveFolder(from, to: to, root: root) && text(to.appending(path: "One.md")) == "a note"
+               && fm.fileExists(atPath: to.appending(path: NoteStore.canvasName).path) && !fm.fileExists(atPath: from.path), "renamed, everything in it along")
+        let other = root.appending(path: "Other")
+        try? fm.createDirectory(at: other, withIntermediateDirectories: true)
+        expect(!NoteStore.moveFolder(to, to: other, root: root) && fm.fileExists(atPath: to.appending(path: "One.md").path), "never over another notebook")
+        let lower = root.appending(path: "holiday")
+        expect(NoteStore.moveFolder(to, to: lower, root: root) && ((try? fm.contentsOfDirectory(atPath: root.path)) ?? []).contains("holiday"),
+               "a change of case only", "\((try? fm.contentsOfDirectory(atPath: root.path)) ?? [])")
+        expect(!NoteStore.moveFolder(lower, to: root.deletingLastPathComponent().appending(path: "Out-\(UUID().uuidString)"), root: root),
+               "never out of the notes' folder")
     }
 
     /// A tool's change whose asker went: nothing in memory, nothing on disk.

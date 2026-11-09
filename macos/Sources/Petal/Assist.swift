@@ -223,7 +223,7 @@ final class Assist {
             app.routines.handle(name, args, send, fail, caller: note, live: live, stop: stop)
         case _ where NoteDesk.tools.contains(name):
             // Its asker hanging up stops what's still to come: each change checks `live` right before it's made.
-            app.paper.handle(name, args, live: live, send, fail)
+            app.paper.handle(name, args, asker: note, live: live, send, fail)
         case "petal_memories":
             let mode = args["mode"] as? String
             send(["memories": memories.filter { mode == nil || $0.mode == mode || $0.mode.isEmpty }.map(record)])

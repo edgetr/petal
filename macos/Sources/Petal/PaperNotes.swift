@@ -41,6 +41,10 @@ struct Notebook: Identifiable, Equatable {
     var color: String
     var cover: String?
     var count: Int
+    /// A Private notebook (`private: true` on its cover): kept out of pictures, previews and other notebooks' memory.
+    var isPrivate = false
+    /// Its view in the Petal Notes window (`view:` on its cover).
+    var view: NoteLibrary.View = .grid
     var id: String { name }
 }
 
@@ -190,6 +194,8 @@ final class NoteStore {
     /// each paper's whole group (NoteShelf.conflictGroups).
     private(set) var conflicts: [String: [PaperNote]] = [:]
     private(set) var loaded = false
+    /// Counts reads of the folder: anything else kept in it (a notebook's canvas) is read again after each.
+    private(set) var reads = 0
     /// Papers whose work keeps failing: the paper says it isn't saved yet.
     private(set) var failed: Set<String> = []
     @ObservationIgnored private(set) var root: URL
@@ -348,6 +354,7 @@ final class NoteStore {
                     self.regroup()
                     self.rebindSessions()
                     self.loaded = true
+                    self.reads += 1
                     // Places that followed their files' bookmarks: written back through each note's session, only
                     // while the note is still what was read.
                     for paper in merged where paper.followed {
@@ -468,7 +475,8 @@ final class NoteStore {
             }
             let cover = here.first { $0.file.cover }
             notebooks.append(Notebook(name: name, folder: folder, color: cover?.file.color ?? "", cover: cover?.key,
-                                      count: here.filter { !$0.file.cover }.count))
+                                      count: here.filter { !$0.file.cover }.count, isPrivate: cover.map { NoteContract.isPrivate($0.file) } ?? false,
+                                      view: cover.map { NoteContract.view($0.file) } ?? .grid))
             notes += here
         }
         return (notes, notebooks)
@@ -1845,16 +1853,28 @@ final class NoteStore {
 
     /// A notebook's color, kept on its cover (made where there's none).
     func recolor(_ notebook: String, _ value: String) {
-        if let book = self.notebook(notebook), let key = book.cover, let cover = paper(key), !readOnly(cover) {
-            change(key, touch: false) { $0.color = value }
-            if let index = notebooks.firstIndex(where: { $0.name == book.name }) { notebooks[index].color = value }
+        setCover(notebook, { $0.color = value }) { $0.color = value }
+    }
+
+    /// Something kept on a notebook's cover (its color, `private`, `view`): changed through the cover's session, or,
+    /// with no cover yet (a folder made elsewhere), a cover made with it, never over one. `book`: the same change on
+    /// the notebook in memory, shown at once.
+    func setCover(_ notebook: String, _ edit: @escaping (inout NoteFile) -> Void, book: (inout Notebook) -> Void) {
+        if let found = self.notebook(notebook), let key = found.cover, let cover = paper(key), !readOnly(cover) {
+            change(key, touch: false, edit: edit)
+            if let index = notebooks.firstIndex(where: { $0.name == found.name }) { book(&notebooks[index]) }
             return
         }
-        if self.notebook(notebook) == nil { ensureNotebook(notebook, color: value); return }
+        if self.notebook(notebook) == nil {
+            let made = ensureNotebook(notebook, color: "")
+            if let key = self.notebook(made)?.cover { change(key, touch: false, edit: edit) }
+            if let index = notebooks.firstIndex(where: { $0.name == made }) { book(&notebooks[index]) }
+            return
+        }
         // A notebook with no cover yet (a folder made elsewhere): its cover, through a session, never over one.
         var cover = NoteFile(body: "# About this notebook\n\nWhat \(notebook) is for.")
         cover.cover = true
-        cover.color = value
+        edit(&cover)
         let folder = root.appending(path: notebook)
         let url = folder.appending(path: NoteShelf.coverName)
         let paper = PaperNote(file: cover, url: url, notebook: notebook, revision: cover.serialized())
@@ -1876,6 +1896,153 @@ final class NoteStore {
         self.notebooks = notebooks
         regroup()
         loaded = true
+    }
+}
+
+// MARK: - Notebooks as a whole (the Petal Notes window)
+
+extension NoteStore {
+    /// The Private notebooks' names.
+    var privateBooks: Set<String> { Set(notebooks.filter(\.isPrivate).map(\.name)) }
+
+    /// A notebook's notes busy now (a write, a move, pictures, a paste on the way): a rename or trash waits for them.
+    func notebookBusy(_ name: String) -> Bool {
+        let keysHere = Set(notes.filter { NoteLibrary.same($0.notebook, name) }.map(\.key))
+        return sessions.values.contains { keysHere.contains($0.key) && $0.busy }
+            || notes.contains { NoteLibrary.same($0.notebook, name) && (importsLoading[$0.noteID]?.isEmpty == false) }
+    }
+
+    /// Renames a notebook's folder (its notes, cover and canvas go with it), coordinated, on the files' queue, only
+    /// while none of its notes has work under way and no other notebook has the name. Its notes are followed to
+    /// their new paths by id on the read that follows (`followRenamed`), with their editors, panels and sessions.
+    /// `done`: the name it has now, or nil (nothing changed, said why through `onProblem`).
+    func renameNotebook(_ old: String, to wanted: String, then done: @escaping @MainActor (String?) -> Void) {
+        let name = NoteShelf.folderName(wanted)
+        guard !switching, let book = notebook(old), !name.isEmpty else { return done(nil) }
+        guard book.name != name else { return done(name) }
+        if let other = notebook(name), other.name != book.name {
+            onProblem("There's already a notebook called \(other.name).")
+            return done(nil)
+        }
+        guard !notebookBusy(book.name) else {
+            onProblem("A note in \(book.name) is still being saved. Try again in a moment.")
+            return done(nil)
+        }
+        let root = self.root, from = book.folder, to = root.appending(path: name)
+        Self.io.async {
+            let moved = Self.moveFolder(from, to: to, root: root)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard moved else {
+                        self.onProblem("Petal couldn't rename \(book.name). Nothing was changed.")
+                        return done(nil)
+                    }
+                    self.reload()
+                    done(name)
+                }
+            }
+        }
+    }
+
+    /// A notebook to the Trash, all of it (its notes, cover and canvas), never deleted: only while none of its notes
+    /// has work under way. Petal's pictures stay where they are (a note trashed leaves its pictures alone).
+    func trashNotebook(_ name: String, then done: @escaping @MainActor (Bool) -> Void) {
+        guard !switching, let book = notebook(name) else { return done(false) }
+        guard !notebookBusy(book.name) else {
+            onProblem("A note in \(book.name) is still being saved. Try again in a moment.")
+            return done(false)
+        }
+        let root = self.root, folder = book.folder
+        Self.io.async {
+            var ok = false
+            if Self.safe(folder, root: root), folder.deletingLastPathComponent().standardizedFileURL.path == root.standardizedFileURL.path {
+                var error: NSError?
+                NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: folder, options: .forDeleting, error: &error) { url in
+                    ok = Self.toTrash(url)
+                }
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if ok {
+                        let gone = self.notes.filter { NoteLibrary.same($0.notebook, book.name) }.map(\.key)
+                        for key in gone { self.gone(key) }
+                        self.notes.removeAll { NoteLibrary.same($0.notebook, book.name) }
+                        self.notebooks.removeAll { $0.name == book.name }
+                        self.regroup()
+                    } else {
+                        self.onProblem("Petal couldn't move \(book.name) to the Trash. Nothing was changed.")
+                    }
+                    self.reload()
+                    done(ok)
+                }
+            }
+        }
+    }
+
+    /// Moves a notebook's folder inside the notes' folder, coordinated, through no symbolic link, never over another
+    /// folder (a change of case only is the same folder). Off the main thread.
+    nonisolated static func moveFolder(_ from: URL, to: URL, root: URL) -> Bool {
+        let fm = FileManager.default
+        guard safe(from, root: root), safe(to, root: root),
+              to.deletingLastPathComponent().standardizedFileURL.path == root.standardizedFileURL.path,
+              from.deletingLastPathComponent().standardizedFileURL.path == root.standardizedFileURL.path else { return false }
+        let caseOnly = from.lastPathComponent.compare(to.lastPathComponent, options: .caseInsensitive) == .orderedSame
+        if fm.fileExists(atPath: to.path), !caseOnly { return false }
+        var ok = false
+        var error: NSError?
+        NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: from, options: .forMoving, writingItemAt: to, options: .forReplacing,
+                                                         error: &error) { source, destination in
+            if fm.fileExists(atPath: destination.path), !caseOnly { return }
+            ok = (try? fm.moveItem(at: source, to: destination)) != nil
+        }
+        return ok
+    }
+
+    // MARK: Canvas
+
+    /// A notebook's canvas file.
+    nonisolated static let canvasName = ".canvas.json"
+
+    /// A notebook's canvas as it is on disk, read off the main thread (nil: a file Petal can't read as a canvas).
+    func canvas(_ notebook: String, _ done: @escaping @MainActor (NoteCanvas?) -> Void) {
+        guard let book = self.notebook(notebook) else { return done(NoteCanvas()) }
+        let file = book.folder.appending(path: Self.canvasName), root = self.root
+        Self.io.async {
+            let text = Self.safe(file, root: root) && FileManager.default.fileExists(atPath: file.path) ? Self.coordinatedRead(file) : nil
+            let canvas = NoteCanvas.decode(text)
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(canvas) } }
+        }
+    }
+
+    /// One change to a notebook's canvas, made on the file as it is right then, inside one coordinated write
+    /// (`NoteCanvas.write`: a based write, so what another Mac moved meanwhile stays) and written atomically; a file
+    /// that isn't a canvas Petal can read is never written over. `done`: the canvas now, or nil.
+    func editCanvas(_ notebook: String, _ edit: NoteCanvas.Edit, then done: @escaping @MainActor (NoteCanvas?) -> Void = { _ in }) {
+        guard !switching, let book = self.notebook(notebook) else { return done(nil) }
+        let file = book.folder.appending(path: Self.canvasName), root = self.root
+        Self.io.async {
+            let canvas = Self.writeCanvas(edit, to: file, root: root)
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(canvas) } }
+        }
+    }
+
+    /// The canvas edit on the file at `file`, coordinated and atomic. Off the main thread.
+    nonisolated static func writeCanvas(_ edit: NoteCanvas.Edit, to file: URL, root: URL) -> NoteCanvas? {
+        guard safe(file, root: root), safe(file.deletingLastPathComponent(), root: root),
+              FileManager.default.fileExists(atPath: file.deletingLastPathComponent().path) else { return nil }
+        var result: NoteCanvas?
+        var error: NSError?
+        NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: file, options: .forMerging, error: &error) { url in
+            let disk = FileManager.default.fileExists(atPath: url.path) ? (try? String(contentsOf: url, encoding: .utf8)) : nil
+            // A file there that can't be read is never taken for no file.
+            if FileManager.default.fileExists(atPath: url.path), disk == nil { return }
+            guard let text = NoteCanvas.write(edit, disk: disk) else { return }
+            if text != disk {
+                guard (try? Data(text.utf8).write(to: url, options: .atomic)) != nil else { return }
+            }
+            result = NoteCanvas.decode(text)
+        }
+        return result
     }
 }
 

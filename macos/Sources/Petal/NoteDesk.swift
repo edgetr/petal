@@ -64,6 +64,9 @@ final class NoteDesk {
     @ObservationIgnored private var ghost: NSPanel?
     /// Made just now and still empty: let go of if it's put away empty.
     @ObservationIgnored private var fresh: Set<String> = []
+    /// Notes opened on their own (from the Petal Notes window or a notebook's stack), by paper key: where the paper's
+    /// top-left corner is (AppKit's coordinates). Never kept past this run.
+    @ObservationIgnored private(set) var standalone: [String: CGPoint] = [:]
 
     nonisolated static let queue = DispatchQueue(label: "petal.notes.look", qos: .userInitiated)
     /// Narrowing a window for an open note: a newer turn (the note folded, notes off, quitting) makes one still
@@ -432,6 +435,7 @@ final class NoteDesk {
                      _ done: @escaping @MainActor (NoteScene, ClaudePanel.FrontRead) -> Void) {
         let pid = running.processIdentifier
         let app = running.bundleIdentifier ?? ""
+        let appName = running.localizedName ?? ""
         let privacy = ClaudePanel.privacy.now
         let quiet = PetalApp.shared.assist.neverLook(app)
         // The screen under the pointer, for the Desktop it shows (read below, off the main thread, when the app has
@@ -450,6 +454,7 @@ final class NoteDesk {
                 var file = ""
                 var bookmark = ""
                 var twins: Int?
+                var person = ""
                 if let number = read.window, Windows.trusted {
                     let element = AXUIElementCreateApplication(pid)
                     AXUIElementSetMessagingTimeout(element, 0.3)
@@ -460,9 +465,14 @@ final class NoteDesk {
                         bookmark = (try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))?.base64EncodedString() ?? ""
                     }
                     if !read.title.isEmpty { twins = all.filter { (Windows.value($0, kAXTitleAttribute) as String?) == read.title }.count }
+                    // The person in a chat app's conversation (never an app kept private): one person or none.
+                    if !quiet, PersonRead.isChat(app), ClaudePanel.privacy.current(privacy), let window = all.first(where: { Windows.id(of: $0) == number }) {
+                        person = PersonRead.person(app: app, appName: appName, title: read.title, headings: Self.headings(window)) ?? ""
+                    }
                 }
                 var made = NoteScene(mac: mac, app: app, pid: pid, window: read.window, title: read.title, titleTwins: twins, tab: read.tab, file: file)
                 made.fileBookmark = bookmark
+                made.person = person
                 let scene = made
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
@@ -473,6 +483,36 @@ final class NoteDesk {
                 }
             }
         }
+    }
+
+    /// A chat window's header, for the person in it: its Accessibility headings and its toolbar's words, in order,
+    /// read breadth first within a small budget (a few hundred elements, a third of a second). Off the main thread.
+    nonisolated static func headings(_ window: AXUIElement) -> [String] {
+        var out: [String] = []
+        var queue: [(AXUIElement, Int, Bool)] = [(window, 0, false)]
+        var seen = 0
+        let deadline = Date().addingTimeInterval(0.33)
+        while !queue.isEmpty, seen < 400, Date() < deadline, out.count < 6 {
+            let (element, depth, inToolbar) = queue.removeFirst()
+            AXUIElementSetMessagingTimeout(element, 0.2)
+            seen += 1
+            let role: String = Windows.value(element, kAXRoleAttribute) ?? ""
+            let text = { () -> String in
+                for attribute in [kAXValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute] {
+                    if let words: String = Windows.value(element, attribute), !words.trimmingCharacters(in: .whitespaces).isEmpty { return words }
+                }
+                return ""
+            }
+            if role == "AXHeading" || (inToolbar && role == kAXStaticTextRole as String) {
+                let words = text()
+                if !words.isEmpty { out.append(words) }
+                continue
+            }
+            guard depth < 9 else { continue }
+            let children: [AXUIElement] = Windows.value(element, kAXChildrenAttribute) ?? []
+            for child in children.prefix(60) { queue.append((child, depth + 1, inToolbar || role == kAXToolbarRole as String)) }
+        }
+        return out
     }
 
     /// The one final privacy filter, wherever a read of what's in front is used (as it arrives, and again when a
@@ -909,6 +949,8 @@ final class NoteDesk {
 
     /// The tabs on the window in front, and its notes that are showing beside it.
     func layout() {
+        // Notes opened on their own show where they were opened, whatever is in front.
+        if !missionControlOpen { placeStandalone() }
         // Mission Control open, or the front window changed and its read isn't in yet: nothing shows meanwhile.
         if missionControlOpen || awaitingRead { return concealUnplaced() }
         defer { reconcileRoom() }
@@ -944,7 +986,7 @@ final class NoteDesk {
         }
         // The notes showing on this window, stacked down its right side where nobody moved them.
         var placed: [CGRect] = []
-        let showing = here.keys.filter { faces[$0] != nil && !hiddenForTab($0) }.sorted { (lines[$0] ?? 0, $0) < (lines[$1] ?? 0, $1) }
+        let showing = here.keys.filter { faces[$0] != nil && !hiddenForTab($0) && standalone[$0] == nil }.sorted { (lines[$0] ?? 0, $0) < (lines[$1] ?? 0, $1) }
         for key in showing {
             let panel = panel(for: key)
             // Placed by its window (it fits the window in front): not the Desktop's, whatever else it's stuck to.
@@ -966,7 +1008,7 @@ final class NoteDesk {
             shown(key, panel)
         }
         // Shown only where its one placement says it belongs now; every other paper hidden.
-        for (key, panel) in panels where !showing.contains(key) && placementNow(key) != .desktop { panel.conceal() }
+        for (key, panel) in panels where !showing.contains(key) && placementNow(key) != .desktop && placementNow(key) != .standalone { panel.conceal() }
         drawPins(showing)
         reconcilePassages()
     }
@@ -1020,7 +1062,7 @@ final class NoteDesk {
         // A window placement counts only once it's fresh: never while a read is awaited (permission lost, focus
         // changed) or its tab is being read again.
         return NoteShelf.placementNow(window: here[key], desktops: desktops, showing: Set(Self.spaces.values),
-                                      windowValid: !awaitingRead && !hiddenForTab(key))
+                                      windowValid: !awaitingRead && !hiddenForTab(key), standalone: standalone[key] != nil)
     }
 
     private func isDesktop(_ key: String) -> Bool { placementNow(key) == .desktop }
@@ -1058,6 +1100,48 @@ final class NoteDesk {
         let panel = NotePanel(desk: self, key: key)
         panels[key] = panel
         return panel
+    }
+
+    // MARK: Notes opened on their own
+
+    /// Opens a note on its own, open with the keyboard, its top-left corner at `point` (AppKit's coordinates; else
+    /// near the middle of the screen under the pointer): from the Petal Notes window or a notebook's stack. It shows
+    /// through layout like every paper, and folding it or clicking away puts it away.
+    func openStandalone(_ key: String, at point: CGPoint? = nil) {
+        guard on, store.paper(key) != nil else { return }
+        let mouse = NSEvent.mouseLocation
+        let screen = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame ?? .zero
+        let corner = point ?? CGPoint(x: screen.midX - PaperLook.openWidth / 2, y: screen.midY + 220)
+        standalone[key] = corner
+        faces[key] = .open
+        keyboard = key
+        layout()
+        wantKeyboard(key)
+    }
+
+    /// Shows each note opened on its own where it was opened.
+    private func placeStandalone() {
+        for (key, corner) in standalone {
+            guard store.paper(key) != nil, faces[key] != nil else { standalone[key] = nil; continue }
+            let panel = panel(for: key)
+            panel.desktop = false
+            let size = panel.paperSize
+            panel.place(paperFrame: CGRect(x: corner.x, y: corner.y - size.height, width: size.width, height: size.height))
+            shown(key, panel)
+        }
+    }
+
+    /// A note opened on its own, put away: what's typed is saved, and the Petal Notes window (when it's open) has
+    /// the keyboard again.
+    private func closeStandalone(_ key: String) {
+        keyboardWanted.cancel(key)
+        editors[key]?.flush()
+        standalone[key] = nil
+        faces[key] = nil
+        if keyboard == key { keyboard = nil }
+        panels[key]?.conceal()
+        layout()
+        if let window = app.notesWindow.window, window.isVisible { window.makeKeyAndOrderFront(nil) }
     }
 
     // MARK: The Desktop
@@ -1101,7 +1185,7 @@ final class NoteDesk {
             guard let number = Self.desktopShowing(on: screen) else { continue }
             // The validated placement (placementNow's rule): a stale window placement never keeps a note off it.
             let notes = store.notes.filter { paper in
-                NoteShelf.onDesktop(window: here[paper.key], desktops: paper.file.places.filter { $0.kind == .desktop }.map(\.desktop), screenDesktop: number,
+                standalone[paper.key] == nil && NoteShelf.onDesktop(window: here[paper.key], desktops: paper.file.places.filter { $0.kind == .desktop }.map(\.desktop), screenDesktop: number,
                                     windowValid: !awaitingRead && !hiddenForTab(paper.key))
             }
             for (index, paper) in notes.enumerated() {
@@ -1163,6 +1247,8 @@ final class NoteDesk {
     }
 
     func fold(_ key: String) {
+        // A note opened on its own has nowhere to rest: folding it puts it away.
+        if standalone[key] != nil { return closeStandalone(key) }
         keyboardWanted.cancel(key)
         guard faces[key] == .open || faces[key] == .back else { return }
         Self.roomTurn.cancel()
@@ -1212,6 +1298,7 @@ final class NoteDesk {
     }
 
     func hide(_ key: String) {
+        standalone[key] = nil
         keyboardWanted.cancel(key)
         Self.roomTurn.cancel()
         editors[key]?.flush()
@@ -1619,6 +1706,7 @@ final class NoteDesk {
         found = NoteShelf.rekeyed(found, old, new)
         if fresh.remove(old) != nil { fresh.insert(new) }
         lines = NoteShelf.rekeyed(lines, old, new)
+        standalone = NoteShelf.rekeyed(standalone, old, new)
         passageRects = NoteShelf.rekeyed(passageRects, old, new)
         anchors = NoteShelf.rekeyed(anchors, old, new)
         lost = NoteShelf.rekeyed(lost, old, new)
@@ -1648,7 +1736,10 @@ final class NoteDesk {
     /// A note moved by the person: it stays there on its window (by the window's nearest corner) or the Desktop.
     func moved(_ key: String, to rect: CGRect) {
         guard let paper = store.paper(key) else { return }
-        if isDesktop(key) {
+        if standalone[key] != nil {
+            standalone[key] = CGPoint(x: rect.minX, y: rect.maxY)
+            return
+        } else if isDesktop(key) {
             local.desk[paper.noteID] = [rect.minX, rect.maxY]
         } else if let frame {
             local.spots[paper.noteID] = NoteSpot.stick(panel: rect, window: NoteRules.appKitFrame(frame, primaryHeight: primaryHeight))
@@ -1666,7 +1757,9 @@ final class NoteDesk {
         let place = places.indices.contains(index) ? places[index].label(found: found[paper.key] ?? true) : "not stuck anywhere"
         let rest = places.indices.filter { $0 != index }
         let others = rest.count == 1 ? places[rest[0]].label() : rest.isEmpty ? "" : "\(rest.count) places"
-        return (place, paper.notebook, others)
+        // A person's note says where it shows: beside them in any chat app.
+        let person = places.indices.contains(index) && places[index].kind == .person
+        return (place, person ? "any chat app · " + paper.notebook : paper.notebook, others)
     }
 
     func footer(_ paper: PaperNote) -> String { Self.when(paper.file.modified) }
@@ -1739,6 +1832,12 @@ final class NoteDesk {
             s.bookmark = scene.fileBookmark   // made with the read, off the main thread
             offers.append(s)
         }
+        // The person in a chat's conversation: their note shows beside their conversation in any chat app.
+        if !scene.person.isEmpty {
+            var s = NoteStick(kind: .person)
+            s.title = scene.person
+            offers.append(s)
+        }
         offers.append(stick(.window))
         offers.append(stick(.app))
         return offers
@@ -1781,6 +1880,7 @@ final class NoteDesk {
             }
         }
         if let scene, stick.kind != .desktop, let index = NoteMatch.best([stick], scene) { here[paper.key] = index }
+        if stick.kind == .person { linkContact(paper.key) }
         open(paper.key, expecting: expecting)
         if stick.kind == .desktop { refreshSpaces() }
         return paper
@@ -2174,6 +2274,7 @@ final class NoteDesk {
         guard let paper = store.paper(key) else { return }
         guard !store.readOnly(paper) else { return say("This note has two versions: keep one first.") }
         guard store.change(key, touch: false, edit: { $0.places = places }) != nil else { return }
+        if places.contains(where: { $0.kind == .person && $0.contact.isEmpty }) { linkContact(key) }
         if let scene, let index = NoteMatch.best(places, scene) { here[key] = index } else { here[key] = nil }
         if places.contains(where: { $0.kind == .desktop }) { faces[key] = .folded; refreshSpaces() }
         layout()
@@ -2235,6 +2336,24 @@ final class NoteDesk {
 
     /// A notebook's color, kept on its cover (made if it has none).
     func recolor(_ notebook: String, _ value: String) { store.recolor(notebook, value) }
+
+    /// A notebook renamed in the Petal Notes window: what this Mac remembers by its name follows it.
+    func renamedNotebook(_ old: String, to new: String) {
+        local.lastNotebook = local.lastNotebook.mapValues { NoteLibrary.same($0, old) ? new : $0 }
+        local.save(pending: store.pendingIDs)
+    }
+
+    /// Every paper drawn again (a notebook turned Private or back: whether pictures of the screen may show it).
+    func refreshPanels() {
+        for panel in panels.values { panel.refresh() }
+        for panel in tabPanels.values { panel.refreshSharing() }
+    }
+
+    /// Whether a paper's notebook is Private.
+    func isPrivate(_ key: String) -> Bool {
+        guard let paper = store.paper(key) else { return false }
+        return store.notebook(paper.notebook)?.isPrivate == true
+    }
 
     static func swatch(_ color: NSColor) -> NSImage {
         NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
@@ -2348,6 +2467,8 @@ final class NotePanel: NSPanel {
 
     func refresh() {
         guard let desk else { return }
+        // A Private notebook's paper never shows in pictures of the screen or screen sharing.
+        sharingType = desk.isPrivate(key) ? .none : .readOnly
         hosting.rootView = AnyView(NotePanelContent(desk: desk, key: key, panel: self).environment(PetalApp.shared))
     }
 
@@ -2506,8 +2627,15 @@ final class EdgeTabPanel: NSPanel {
         unveil()
     }
 
+    /// A tab whose notes include a Private notebook's never shows in pictures of the screen (its hover says its title).
+    func refreshSharing() {
+        guard let tab = edgeTab, let desk else { return }
+        sharingType = tab.ids.contains(where: desk.isPrivate) ? .none : .readOnly
+    }
+
     private func draw() {
         guard let tab = edgeTab, let desk else { return }
+        refreshSharing()
         let label = hovering ? (desk.store.paper(tab.ids[0]).map { $0.file.title.isEmpty ? "Empty note" : $0.file.title } ?? "") + (tab.count > 1 ? "  +\(tab.count - 1)" : "") : ""
         let view = EdgeTabView(tab: tab, colors: [:], outside: outside, hovering: hovering, label: String(label.prefix(60)))
             .padding(.vertical, 8).padding(.horizontal, 8)

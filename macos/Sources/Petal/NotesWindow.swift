@@ -1,0 +1,1071 @@
+import AppKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+extension UTType {
+    /// A note dragged out of the Petal Notes window or a notebook's stack: its id (declared in build.sh's Info.plist).
+    static let petalNote = UTType(exportedAs: "tech.edgetr.petal.note")
+}
+
+extension NSPasteboard.PasteboardType {
+    static let petalNote = NSPasteboard.PasteboardType(UTType.petalNote.identifier)
+}
+
+/// A note as something to drag: its id, and its words for anything else that takes text.
+@MainActor
+enum NoteDrag {
+    static func provider(_ paper: PaperNote) -> NSItemProvider {
+        let provider = NSItemProvider()
+        let id = Data(paper.noteID.utf8)
+        provider.registerDataRepresentation(forTypeIdentifier: UTType.petalNote.identifier, visibility: .ownProcess) { done in
+            done(id, nil)
+            return nil
+        }
+        return provider
+    }
+}
+
+/// The Petal Notes window: every note, by notebook (its cover first, then a grid of its notes, or its canvas), the
+/// views across notebooks (Coming back, Watching, Helpers at work) and search. A window of Liquid Glass like the
+/// settings, opened from the menu bar's mark and from a notebook's stack in the dock. Everything it changes goes
+/// through the notes' own paths (each note's session, the one move, a notebook's cover); nothing here writes a file.
+@MainActor
+final class NotesWindow {
+    private(set) var window: NSWindow?
+    let model = NotesModel()
+
+    var isOpen: Bool { window?.isVisible ?? false }
+
+    func show(_ shelf: NoteLibrary.Shelf? = nil) {
+        if let shelf { model.shelf = shelf }
+        let window = self.window ?? make()
+        if !window.isVisible { window.setGlassContent(NotesWindowView(model: model).environment(PetalApp.shared)) }
+        PetalWindow.bringForward(window)
+    }
+
+    /// Shown in pictures of the screen and screen sharing only while no Private notebook is showing.
+    func showingPrivate(_ hidden: Bool) {
+        window?.sharingType = hidden ? .none : .readOnly
+    }
+
+    private func make() -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1220, height: 748),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 820, height: 560)
+        window.title = "Petal Notes"
+        window.center()
+        window.letContentGoWhenClosed()
+        self.window = window
+        return window
+    }
+}
+
+/// What the window shows: which shelf, the search, and the notebook's canvas as last read.
+@MainActor @Observable
+final class NotesModel {
+    var shelf: NoteLibrary.Shelf = .notebook(NoteShelf.inbox)
+    var query = ""
+    /// The canvas showing (its notebook and what its file says), read off the main thread.
+    var canvas: (notebook: String, layout: NoteCanvas?)?
+    /// While a note, area or words are dragged: where they are now, not written until the drag ends.
+    var dragging: [String: NoteCanvas.Spot] = [:]
+    /// The sidebar, hidden in a canvas to give it the whole window.
+    var sidebar = true
+
+    var desk: NoteDesk { PetalApp.shared.paper }
+    var store: NoteStore { desk.store }
+
+    /// The canvas of `notebook`, read again (after any read of the notes' folder: another Mac may have moved things).
+    func loadCanvas(_ notebook: String) {
+        store.canvas(notebook) { [weak self] layout in
+            guard let self, case .notebook(let now) = self.shelf, NoteLibrary.same(now, notebook) else { return }
+            self.canvas = (notebook, layout)
+        }
+    }
+
+    /// One change to the canvas, made on its file as it is then (NoteStore.editCanvas); shown at once.
+    func edit(_ notebook: String, _ edit: NoteCanvas.Edit) {
+        if let current = canvas, NoteLibrary.same(current.notebook, notebook), let layout = current.layout {
+            canvas = (notebook, layout.applying(edit))
+        }
+        store.editCanvas(notebook, edit) { [weak self] saved in
+            guard let self, let saved, let current = self.canvas, NoteLibrary.same(current.notebook, notebook) else { return }
+            self.canvas = (notebook, saved)
+        }
+    }
+
+    /// A note's spot moved on the canvas: kept by its own id, given one first when its file has none (nothing lasting
+    /// is kept by an id-less note's path).
+    func move(_ paper: PaperNote, to spot: NoteCanvas.Spot) {
+        let notebook = paper.notebook
+        if NoteShelf.needsID(paper.noteID) {
+            store.ensureID(paper.key) { [weak self] id in
+                guard let self, let id, !NoteShelf.needsID(id) else { return }
+                self.edit(notebook, .move(id, spot))
+            }
+        } else {
+            edit(notebook, .move(paper.noteID, spot))
+        }
+    }
+
+    // MARK: Notebooks
+
+    func newNotebook() {
+        guard let name = Self.askWords("New notebook", "What's it for? Its name:", value: "") else { return }
+        let colors = ["#a550a7", "#f74f9e", "#f7821b", "#ffc600", "#62ba46", "#8c8c8c", "#007aff"]
+        let made = store.ensureNotebook(name, color: colors[store.notebooks.count % colors.count])
+        shelf = .notebook(made)
+    }
+
+    func rename(_ book: Notebook) {
+        // Inbox is where notes go first, and Petal makes it again when it's gone: it keeps its name.
+        guard !NoteLibrary.same(book.name, NoteShelf.inbox) else { return desk.tell("Inbox keeps its name: it's where notes go first.") }
+        guard let name = Self.askWords("Rename \(book.name)", "Its new name:", value: book.name), name != book.name else { return }
+        // What's typed in its notes is saved first; the rename waits for nothing still being written.
+        for paper in store.notes where NoteLibrary.same(paper.notebook, book.name) { desk.editors[paper.key]?.flush() }
+        let wasDefault = NoteLibrary.same(desk.defaultNotebook, book.name)
+        let oldStack = Self.stackPath(book.folder)
+        store.renameNotebook(book.name, to: name) { [weak self] made in
+            guard let self, let made else { return }
+            let config = PetalApp.shared.config
+            if wasDefault { config.set("notesNotebook", made) }
+            let stacks = config.strings("stackFolders")
+            if stacks.contains(oldStack) {
+                config.set("stackFolders", stacks.map { $0 == oldStack ? Self.stackPath(self.store.root.appending(path: made)) : $0 })
+            }
+            self.desk.renamedNotebook(book.name, to: made)
+            if case .notebook(let now) = self.shelf, NoteLibrary.same(now, book.name) { self.shelf = .notebook(made) }
+        }
+    }
+
+    func makeDefault(_ book: Notebook) { PetalApp.shared.config.set("notesNotebook", book.name) }
+
+    func setPrivate(_ book: Notebook, _ on: Bool) {
+        store.setCover(book.name, { $0.setScalar("private", on ? "true" : nil) }) { $0.isPrivate = on }
+        desk.refreshPanels()
+    }
+
+    func setView(_ book: Notebook, _ view: NoteLibrary.View) {
+        store.setCover(book.name, { $0.setScalar("view", view == .canvas ? "canvas" : nil) }) { $0.view = view }
+        if view == .canvas { loadCanvas(book.name) }
+    }
+
+    /// In the dock as a stack: the notebook's folder among the dock's folder stacks (the setting every stack uses).
+    func inDock(_ book: Notebook) -> Bool { PetalApp.shared.config.strings("stackFolders").contains(Self.stackPath(book.folder)) }
+
+    func toggleDock(_ book: Notebook) {
+        let config = PetalApp.shared.config
+        let path = Self.stackPath(book.folder)
+        var stacks = config.strings("stackFolders")
+        if stacks.contains(path) { stacks.removeAll { $0 == path } } else {
+            stacks.append(path)
+            if !config.bool("stacks") { config.set("stacks", true) }
+        }
+        config.set("stackFolders", stacks)
+    }
+
+    /// Asked first; all of it to the Trash (never deleted), its notes put away first. The default notebook stays.
+    func trash(_ book: Notebook) {
+        guard !NoteLibrary.same(desk.defaultNotebook, book.name), !NoteLibrary.same(book.name, NoteShelf.inbox) else {
+            return desk.tell(NoteLibrary.same(book.name, NoteShelf.inbox) ? "Inbox stays: it's where notes go first."
+                             : "\(book.name) is your default notebook: make another the default first.")
+        }
+        NSApp.activate()
+        let alert = NSAlert()
+        alert.messageText = "Move “\(book.name)” to the Trash?"
+        alert.informativeText = book.count == 0 ? "It has no notes." : "Its \(book.count == 1 ? "note goes" : "\(book.count) notes go") with it. You can put it back from the Trash."
+        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        for paper in store.notes where NoteLibrary.same(paper.notebook, book.name) {
+            desk.editors[paper.key]?.flush()
+            desk.hide(paper.key)
+        }
+        let path = Self.stackPath(book.folder)
+        store.trashNotebook(book.name) { [weak self] done in
+            guard let self, done else { return }
+            let config = PetalApp.shared.config
+            if config.strings("stackFolders").contains(path) { config.set("stackFolders", config.strings("stackFolders").filter { $0 != path }) }
+            if case .notebook(let now) = self.shelf, NoteLibrary.same(now, book.name) { self.shelf = .notebook(self.desk.defaultNotebook) }
+        }
+    }
+
+    /// A folder as the dock's stacks name it ("~/…").
+    static func stackPath(_ folder: URL) -> String {
+        let path = folder.standardizedFileURL.path, home = NSHomeDirectory()
+        return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+    }
+
+    static func askWords(_ title: String, _ message: String, value: String) -> String? {
+        NSApp.activate()
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.stringValue = value
+        alert.accessoryView = field
+        alert.addButton(withTitle: value.isEmpty ? "Make" : "Rename")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        let name = alert.runModal() == .alertFirstButtonReturn ? field.stringValue.trimmingCharacters(in: .whitespaces) : ""
+        return name.isEmpty ? nil : name
+    }
+}
+
+// MARK: - The look
+
+/// The window's colors: the sketch's in light, their dark counterparts in dark. Paper stays paper.
+struct NotesLook {
+    let dark: Bool
+    var sidebar: Color { dark ? Color(white: 0.16) : Color(.sRGB, red: 0xf1 / 255.0, green: 0xf1 / 255.0, blue: 0xf4 / 255.0) }
+    var main: Color { dark ? Color(white: 0.11) : .white }
+    var line: Color { dark ? Color(white: 0.24) : Color(.sRGB, red: 0xe2 / 255.0, green: 0xe2 / 255.0, blue: 0xe6 / 255.0) }
+    var text: Color { dark ? Color(white: 0.9) : Color(white: 0.2) }
+    var dim: Color { dark ? Color(white: 0.55) : Color(white: 0.6) }
+    var header: Color { dark ? Color(white: 0.5) : Color(.sRGB, red: 0x8a / 255.0, green: 0x8a / 255.0, blue: 0x8f / 255.0) }
+    var field: Color { dark ? Color(white: 0.22) : Color(.sRGB, red: 0xe4 / 255.0, green: 0xe4 / 255.0, blue: 0xe9 / 255.0) }
+    var picked: Color { dark ? Color.white.opacity(0.09) : Color.black.opacity(0.07) }
+    var toggle: Color { dark ? Color(white: 0.2) : Color(.sRGB, red: 0xec / 255.0, green: 0xec / 255.0, blue: 0xf0 / 255.0) }
+    var toggleOn: Color { dark ? Color(white: 0.34) : .white }
+    var canvas: Color { dark ? Color(white: 0.13) : Color(.sRGB, red: 0xfa / 255.0, green: 0xfa / 255.0, blue: 0xfa / 255.0) }
+    var dots: Color { dark ? Color(white: 0.24) : Color(.sRGB, red: 0xdc / 255.0, green: 0xdc / 255.0, blue: 0xe2 / 255.0) }
+    var faded: Color { dark ? Color.white.opacity(0.06) : Color.black.opacity(0.05) }
+}
+
+// MARK: - The window's view
+
+struct NotesWindowView: View {
+    @Environment(PetalApp.self) private var app
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.snapshotting) private var snapshotting
+    let model: NotesModel
+    var now = Date()
+    /// Snapshots: where the files live, as words (live: the notes' folder).
+    var rootPath: String? = nil
+
+    private var look: NotesLook { NotesLook(dark: scheme == .dark) }
+    private var store: NoteStore { app.paper.store }
+
+    /// Every note as the window weighs them (iCloud's other versions left out: their paper shows them).
+    private var items: [(paper: PaperNote, item: NoteLibrary.Item)] {
+        store.notes.filter { $0.version == nil }.map { ($0, NoteLibrary.Item(notebook: $0.notebook, file: $0.file)) }
+    }
+
+    private var book: Notebook? {
+        guard case .notebook(let name) = model.shelf else { return nil }
+        return store.notebook(name) ?? store.notebook(app.paper.defaultNotebook) ?? store.notebooks.first
+    }
+
+    private var canvasShowing: Bool { model.query.isEmpty && book?.view == .canvas }
+
+    var body: some View {
+        let showingPrivate = model.query.isEmpty && book?.isPrivate == true
+        HStack(spacing: 0) {
+            if model.sidebar || !canvasShowing {
+                sidebar.frame(width: 240)
+                Rectangle().fill(look.line).frame(width: 1)
+            }
+            main
+        }
+        .background(look.main)
+        .ignoresSafeArea()
+        .onAppear { app.notesWindow.showingPrivate(showingPrivate) }
+        .onChange(of: showingPrivate) { _, on in app.notesWindow.showingPrivate(on) }
+        .onChange(of: store.reads) { _, _ in if canvasShowing, let book { model.loadCanvas(book.name) } }
+        .onChange(of: book?.name) { _, name in if canvasShowing, let name { model.loadCanvas(name) } }
+        .onChange(of: canvasShowing) { _, on in if on, let book { model.loadCanvas(book.name) } }
+        .onAppear { if canvasShowing, let book { model.loadCanvas(book.name) } }
+    }
+
+    // MARK: Sidebar
+
+    private var sidebar: some View {
+        let all = items
+        let files = all.map(\.item)
+        let books = store.notebooks
+        return VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 7) {
+                Image(systemName: "magnifyingglass").font(.system(size: 11.5)).foregroundStyle(look.dim)
+                if snapshotting {
+                    Text(model.query.isEmpty ? "Search every note" : model.query).font(.system(size: 12.5)).foregroundStyle(look.dim)
+                    Spacer(minLength: 0)
+                } else {
+                    TextField("Search every note", text: Bindable(model).query).textFieldStyle(.plain).font(.system(size: 12.5))
+                }
+            }
+            .padding(.horizontal, 10).frame(height: 30)
+            .background(look.field, in: .rect(cornerRadius: 8))
+            .padding(.bottom, 4)
+
+            header("Coming up")
+            shelfRow(.comingBack, symbol: "alarm", title: "Coming back", count: NoteLibrary.listed(.comingBack, files, now: now).count)
+            shelfRow(.watching, symbol: "smallcircle.filled.circle", title: "Watching", count: NoteLibrary.listed(.watching, files, now: now).count)
+            shelfRow(.helpers, symbol: "sparkle", title: "Helpers at work", count: NoteLibrary.listed(.helpers, files, now: now).count)
+
+            header("Notebooks")
+            ForEach(books) { book in notebookRow(book) }
+            Button { model.newNotebook() } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "plus").font(.system(size: 11, weight: .medium)).frame(width: 10)
+                    Text("Notebook")
+                    Spacer()
+                }
+                .font(.system(size: 13.5)).foregroundStyle(look.dim)
+                .padding(.horizontal, 8).padding(.vertical, 6).contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            Spacer(minLength: 0)
+        }
+        .padding(.top, 50).padding(.horizontal, 12).padding(.bottom, 12)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(look.sidebar.opacity(snapshotting ? 1 : 0.62))
+    }
+
+    private func header(_ text: String) -> some View {
+        Text(text.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(look.header)
+            .padding(.top, 12).padding(.horizontal, 8).padding(.bottom, 5)
+    }
+
+    private func shelfRow(_ shelf: NoteLibrary.Shelf, symbol: String, title: String, count: Int) -> some View {
+        let on = model.query.isEmpty && model.shelf == shelf
+        return Button { model.query = ""; model.shelf = shelf } label: {
+            HStack(spacing: 9) {
+                Image(systemName: symbol).font(.system(size: 11.5)).frame(width: 14)
+                Text(title).fontWeight(on ? .semibold : .regular)
+                Spacer(minLength: 4)
+                if count > 0 { Text("\(count)").foregroundStyle(look.dim) }
+            }
+            .font(.system(size: 13.5)).foregroundStyle(look.text)
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .background(on ? look.picked : .clear, in: .rect(cornerRadius: 7))
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func notebookRow(_ book: Notebook) -> some View {
+        let on = model.query.isEmpty && model.shelf == .notebook(book.name)
+        let isDefault = NoteLibrary.same(app.paper.defaultNotebook, book.name)
+        return Button { model.query = ""; model.shelf = .notebook(book.name) } label: {
+            HStack(spacing: 9) {
+                RoundedRectangle(cornerRadius: 3).fill(Color(nsColor: store.color(of: book.name))).frame(width: 10, height: 10)
+                Text(book.name).fontWeight(on ? .semibold : .regular).lineLimit(1)
+                if isDefault { Text("default").font(.system(size: 11)).foregroundStyle(look.dim) }
+                if book.isPrivate { Text("private").font(.system(size: 11)).foregroundStyle(look.dim) }
+                Spacer(minLength: 4)
+                Text("\(book.count)").foregroundStyle(look.dim)
+            }
+            .font(.system(size: 13.5)).foregroundStyle(look.text)
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .background(on ? look.picked : .clear, in: .rect(cornerRadius: 7))
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .modifier(NoteDropTarget(on: !snapshotting) { drop($0, into: book.name) })
+        .contextMenu { notebookMenu(book) }
+    }
+
+    @ViewBuilder private func notebookMenu(_ book: Notebook) -> some View {
+        Button("Rename…") { model.rename(book) }.disabled(NoteLibrary.same(book.name, NoteShelf.inbox))
+        Menu("Color") {
+            ForEach(NotesColors.choices, id: \.value) { choice in
+                Button(choice.name) { app.paper.recolor(book.name, choice.value) }
+            }
+        }
+        Button(book.view == .canvas ? "Show as a grid" : "Show as a canvas") { model.setView(book, book.view == .canvas ? .grid : .canvas) }
+        Divider()
+        Button("Make it the default") { model.makeDefault(book) }.disabled(NoteLibrary.same(app.paper.defaultNotebook, book.name))
+        Toggle("Private", isOn: Binding(get: { book.isPrivate }, set: { model.setPrivate(book, $0) }))
+        Toggle("In the dock as a stack", isOn: Binding(get: { model.inDock(book) }, set: { _ in model.toggleDock(book) }))
+        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([book.folder]) }
+        Divider()
+        Button("Move to Trash…") { model.trash(book) }
+            .disabled(NoteLibrary.same(app.paper.defaultNotebook, book.name) || NoteLibrary.same(book.name, NoteShelf.inbox))
+    }
+
+    /// Notes dropped on a notebook: each moved there (the one move: what's typed goes along).
+    private func drop(_ providers: [NSItemProvider], into notebook: String) {
+        for provider in providers {
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.petalNote.identifier) { data, _ in
+                guard let data else { return }
+                let id = String(decoding: data, as: UTF8.self)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let paper = app.paper.store.current(id) else { return }
+                        app.paper.move(paper.key, to: notebook)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Main
+
+    @ViewBuilder private var main: some View {
+        if !model.query.isEmpty {
+            let all = items
+            let hits = NoteLibrary.search(model.query, all.map(\.item)).map { all[$0].paper }
+            page(title: "Search", subtitle: hits.count == 1 ? "1 note" : "\(hits.count) notes", book: nil, papers: hits, cover: nil, across: true)
+        } else if let book {
+            let all = items
+            let listed = NoteLibrary.listed(.notebook(book.name), all.map(\.item), now: now).map { all[$0].paper }
+            let cover = book.cover.flatMap { store.paper($0) }
+            if book.view == .canvas {
+                NotesCanvasView(model: model, book: book, papers: listed, look: look)
+            } else {
+                page(title: book.name, subtitle: subtitle(book), book: book, papers: listed, cover: cover, across: false)
+            }
+        } else {
+            let all = items
+            let listed = NoteLibrary.listed(model.shelf, all.map(\.item), now: now).map { all[$0].paper }
+            let (title, empty) = shelfWords
+            page(title: title, subtitle: listed.isEmpty ? empty : listed.count == 1 ? "1 note" : "\(listed.count) notes", book: nil, papers: listed, cover: nil, across: true)
+        }
+    }
+
+    private var shelfWords: (String, String) {
+        switch model.shelf {
+        case .comingBack: ("Coming back", "Nothing is coming back. Ask @Petal in a note to bring it back at a time.")
+        case .watching: ("Watching", "Nothing is being watched.")
+        case .helpers: ("Helpers at work", "No helper is at work.")
+        case .notebook(let name): (name, "")
+        }
+    }
+
+    private func subtitle(_ book: Notebook) -> String {
+        var parts = [book.count == 1 ? "1 note" : "\(book.count) notes",
+                     NoteLibrary.whereWords(root: rootPath ?? store.root.path, notebook: book.name, home: NSHomeDirectory())]
+        if model.inDock(book) { parts.append("in the dock as a stack") }
+        if book.isPrivate { parts.append("private: kept out of pictures, previews and other notebooks") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func page(title: String, subtitle: String, book: Notebook?, papers: [PaperNote], cover: PaperNote?, across: Bool) -> some View {
+        let fresh = papers.filter { !NoteShelf.faded(modified: $0.file.modified, now: now) }
+        let faded = papers.filter { NoteShelf.faded(modified: $0.file.modified, now: now) }
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(title).font(.system(size: 26, weight: .bold)).tracking(-0.26).foregroundStyle(look.dark ? Color.white : Color(white: 0.11))
+                    Text(subtitle).font(.system(size: 13)).foregroundStyle(look.dim).lineLimit(1)
+                }
+                Spacer()
+                if let book { viewToggle(book) }
+            }
+            .padding(.top, 38).padding(.horizontal, 36).padding(.trailing, -16)
+            Scroll {
+                VStack(alignment: .leading, spacing: 14) {
+                    NotesGrid(papers: fresh, cover: cover, across: across, now: now)
+                    if !faded.isEmpty {
+                        FlowRows(items: faded, width: 150, gap: 14) { paper in
+                            FadedLine(paper: paper, look: look)
+                        }
+                    }
+                    if papers.isEmpty && cover == nil {
+                        Text("No notes here yet.").font(.system(size: 13)).foregroundStyle(look.dim).padding(.top, 20)
+                    }
+                }
+                .padding(.horizontal, 36).padding(.top, 20).padding(.bottom, 30)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func viewToggle(_ book: Notebook) -> some View {
+        NotesViewToggle(view: book.view, look: look) { model.setView(book, $0) }.padding(.top, 4)
+    }
+}
+
+/// The colors a notebook can have (the sketch's, and the Mac's accent).
+enum NotesColors {
+    static let choices: [(name: String, value: String)] = [("Mac's accent color", "accent"), ("Blue", "#007aff"), ("Purple", "#a550a7"), ("Pink", "#f74f9e"),
+                                                           ("Orange", "#f7821b"), ("Yellow", "#ffc600"), ("Green", "#62ba46"), ("Graphite", "#8c8c8c")]
+}
+
+/// Grid | Canvas, as the sketch's small toggle.
+struct NotesViewToggle: View {
+    let view: NoteLibrary.View
+    let look: NotesLook
+    let pick: (NoteLibrary.View) -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach([NoteLibrary.View.grid, .canvas], id: \.self) { option in
+                Button { pick(option) } label: {
+                    Text(option == .grid ? "Grid" : "Canvas").font(.system(size: 12))
+                        .foregroundStyle(view == option ? (look.dark ? Color.white : Color(white: 0.07)) : look.dim)
+                        .padding(.horizontal, 10).padding(.vertical, 4)
+                        .background {
+                            if view == option {
+                                RoundedRectangle(cornerRadius: 6).fill(look.toggleOn).shadow(color: .black.opacity(0.12), radius: 1, y: 1)
+                            }
+                        }
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2)
+        .background(look.toggle, in: .rect(cornerRadius: 8))
+    }
+}
+
+/// A note dragged out (to a notebook in the sidebar, or an app in the dock).
+struct NoteDragSource: ViewModifier {
+    let paper: PaperNote
+    let on: Bool
+
+    func body(content: Content) -> some View {
+        if on { content.onDrag { NoteDrag.provider(paper) } } else { content }
+    }
+}
+
+/// Notes dropped here (a notebook in the sidebar). Left out of snapshots, which can't draw a drop target.
+struct NoteDropTarget: ViewModifier {
+    let on: Bool
+    let dropped: ([NSItemProvider]) -> Void
+
+    func body(content: Content) -> some View {
+        if on { content.onDrop(of: [.petalNote], isTargeted: nil) { dropped($0); return true } } else { content }
+    }
+}
+
+/// Rows of fixed-width items, wrapping.
+struct FlowRows<Item: Identifiable, Content: View>: View {
+    let items: [Item]
+    let width: CGFloat
+    let gap: CGFloat
+    @ViewBuilder let content: (Item) -> Content
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: width, maximum: width), spacing: gap, alignment: .leading)], alignment: .leading, spacing: 6) {
+            ForEach(items) { content($0) }
+        }
+    }
+}
+
+// MARK: - The grid
+
+/// A notebook's notes as the sketch's grid: 150-point papers, 14 apart, the cover first and two rows tall.
+struct NotesGrid: View {
+    @Environment(PetalApp.self) private var app
+    let papers: [PaperNote]
+    let cover: PaperNote?
+    /// Notes from several notebooks (a view, a search): each says its notebook.
+    let across: Bool
+    let now: Date
+
+    static let cell: CGFloat = 150
+    static let gap: CGFloat = 14
+
+    var body: some View {
+        GeometryReader { geometry in
+            let columns = NoteLibrary.columns(width: geometry.size.width, cell: Self.cell, gap: Self.gap)
+            let slots = NoteLibrary.gridSlots(count: papers.count, columns: columns, cover: cover != nil)
+            ZStack(alignment: .topLeading) {
+                if let cover {
+                    CoverPaper(paper: cover).frame(width: Self.cell, height: Self.cell * 2 + Self.gap)
+                }
+                ForEach(Array(papers.enumerated()), id: \.element.key) { index, paper in
+                    let slot = slots[index]
+                    GridPaper(paper: paper, across: across, now: now)
+                        .offset(x: CGFloat(slot.column) * (Self.cell + Self.gap), y: CGFloat(slot.row) * (Self.cell + Self.gap))
+                }
+            }
+        }
+        .frame(height: height)
+    }
+
+    /// The grid's height for the window's width (a generous guess at five columns; GeometryReader lays it out).
+    private var height: CGFloat {
+        let rows = NoteLibrary.gridRows(count: papers.count, columns: 5, cover: cover != nil)
+        return rows == 0 ? 0 : CGFloat(rows) * (Self.cell + Self.gap) - Self.gap + 4
+    }
+}
+
+/// One note in the grid: its words on its notebook's paper, and the one line of what's coming or where it's stuck.
+/// Clicking it opens it on its own; it can be dragged to another notebook or onto an app in the dock.
+struct GridPaper: View {
+    @Environment(PetalApp.self) private var app
+    let paper: PaperNote
+    var across = false
+    let now: Date
+    var size: CGFloat = NotesGrid.cell
+    /// Before it opens on its own (a stack's fan closes).
+    var opening: () -> Void = {}
+    /// Dragged out to another notebook or an app in the dock (not on a canvas, where dragging moves it).
+    var draggable = true
+
+    var body: some View {
+        let color = app.paper.store.color(of: paper.notebook)
+        let tint = PaperLook.rgb(color)
+        let watch = NoteContract.watch(paper.file)
+        let footer = NoteLibrary.footer(paper.file, place: Self.place(paper), now: now)
+        let titled = NoteBlock.blocks(paper.file.body).first { !$0.words.trimmingCharacters(in: .whitespaces).isEmpty }.map { if case .heading = $0 { true } else { false } } ?? false
+        VStack(alignment: .leading, spacing: 0) {
+            if across {
+                Text(paper.notebook).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
+                    .lineLimit(1).padding(.bottom, 7)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                if titled { Text(paper.file.title).font(.system(size: 14, weight: .bold)).lineLimit(2) }
+                Text(titled ? paper.file.preview : [paper.file.title, paper.file.preview].filter { !$0.isEmpty }.joined(separator: " "))
+                    .font(.system(size: 12.5, weight: .medium))
+            }
+            .foregroundStyle(PaperLook.words)
+            .padding(.top, watch == nil ? 0 : watch?.history.isEmpty == false ? 46 : 34)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .clipped()
+            HStack(spacing: 6) {
+                if footer.dot { Circle().fill(Color(nsColor: color)).frame(width: 7, height: 7).opacity(footer.working ? 0.6 : 1) }
+                Text(footer.text).font(.system(size: 11)).foregroundStyle(PaperLook.footer).lineLimit(1)
+            }
+        }
+        .padding(.top, 15).padding(.horizontal, 14).padding(.bottom, 12)
+        .frame(width: size, height: size, alignment: .topLeading)
+        .overlay(alignment: .topTrailing) { if let watch { WatchNumber(watch: watch, tint: tint).padding(14) } }
+        .overlay(alignment: .top) { Rectangle().fill(Color(nsColor: color)).frame(height: 5) }
+        .clipShape(.rect(cornerRadius: 12))
+        .background { PaperLook.color(NoteInk.paper(tint)).clipShape(.rect(cornerRadius: 12)).modifier(PaperShadow(glass: false)) }
+        .environment(\.colorScheme, .light)
+        .contentShape(.rect(cornerRadius: 12))
+        .onTapGesture { opening(); Self.open(paper, app: app) }
+        .modifier(NoteDragSource(paper: paper, on: draggable))
+    }
+
+    /// Opens it on its own, its corner by the pointer.
+    static func open(_ paper: PaperNote, app: PetalApp) {
+        let mouse = NSEvent.mouseLocation
+        app.paper.openStandalone(paper.key, at: CGPoint(x: mouse.x - 60, y: mouse.y + 60))
+    }
+
+    /// Where it's stuck, as the grid says it (its first place: a site, a file, a person, a Desktop).
+    static func place(_ paper: PaperNote) -> String? {
+        guard let first = paper.file.places.first else { return nil }
+        switch first.kind {
+        case .desktop: return first.desktop.map { "On Desktop \($0)" } ?? "On the Desktop"
+        case .window: return first.appName.isEmpty ? first.label() : first.appName + (first.title.isEmpty ? "" : " · " + first.title)
+        case .person: return first.title + " · any chat app"
+        default: return NoteText.site(first.label())
+        }
+    }
+}
+
+/// A watcher's newest number, with the older ones struck (the sketch's corner).
+struct WatchNumber: View {
+    let watch: NoteContract.Watch
+    let tint: NoteInk.RGB
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 0) {
+            Text(watch.last.isEmpty ? "…" : watch.last).font(.system(size: 24, weight: .bold)).tracking(-0.48)
+                .foregroundStyle(PaperLook.color(NoteInk.mix(tint, 0.65, NoteInk.black)))
+            if !watch.history.isEmpty {
+                Text(watch.history.prefix(2).joined(separator: " · ")).font(.system(size: 11)).strikethrough().foregroundStyle(Color(white: 0.6))
+            }
+        }
+    }
+}
+
+/// The notebook's cover, first and taller: what it's for, what Petal remembers there.
+struct CoverPaper: View {
+    @Environment(PetalApp.self) private var app
+    let paper: PaperNote
+
+    var body: some View {
+        let color = app.paper.store.color(of: paper.notebook)
+        let tint = PaperLook.rgb(color)
+        let parts = NoteLibrary.cover(paper.file.body)
+        VStack(alignment: .leading, spacing: 0) {
+            Text("About this notebook").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
+                .padding(.bottom, 9)
+            Text(parts.about.isEmpty ? "What this notebook is for." : parts.about).font(.system(size: 12.5)).foregroundStyle(PaperLook.words)
+                .lineLimit(6)
+            Text("PETAL REMEMBERS").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color(white: 0.47)).padding(.top, 10).padding(.bottom, 2)
+            if parts.remembers.isEmpty {
+                Text("Nothing yet.").font(.system(size: 11.5)).foregroundStyle(Color(white: 0.55)).padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading).overlay(alignment: .top) { Rectangle().fill(.black.opacity(0.07)).frame(height: 1) }
+            }
+            ForEach(Array(parts.remembers.prefix(6).enumerated()), id: \.offset) { _, memory in
+                Text(memory).font(.system(size: 11.5)).foregroundStyle(PaperLook.words).lineLimit(1).padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .overlay(alignment: .top) { Rectangle().fill(.black.opacity(0.07)).frame(height: 1) }
+            }
+            Spacer(minLength: 6)
+            Text("Helpers read this first. Edit it like any note.").font(.system(size: 11)).foregroundStyle(Color(white: 0.53))
+                .padding(.trailing, 20)
+        }
+        .padding(.top, 15).padding(.horizontal, 14).padding(.bottom, 12)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .overlay(alignment: .top) { Rectangle().fill(Color(nsColor: color)).frame(height: 5) }
+        .overlay(alignment: .bottomTrailing) { FoldCorner().fill(Color.black.opacity(0.13)).frame(width: 24, height: 24) }
+        .clipShape(.rect(cornerRadius: 12))
+        .background { PaperLook.color(NoteInk.paper(tint)).clipShape(.rect(cornerRadius: 12)).modifier(PaperShadow(glass: false)) }
+        .environment(\.colorScheme, .light)
+        .contentShape(.rect(cornerRadius: 12))
+        .onTapGesture { GridPaper.open(paper, app: app) }
+    }
+}
+
+/// A note untouched for a month: a faint line with its first words (still there; clicking opens it).
+struct FadedLine: View {
+    @Environment(PetalApp.self) private var app
+    let paper: PaperNote
+    let look: NotesLook
+
+    var body: some View {
+        Text(paper.file.title.isEmpty ? "A note" : paper.file.title).font(.system(size: 11)).foregroundStyle(look.dim).lineLimit(1)
+            .padding(.horizontal, 9).frame(width: 150, height: 22, alignment: .leading)
+            .background(look.faded, in: .rect(cornerRadius: 6))
+            .contentShape(.rect)
+            .onTapGesture { GridPaper.open(paper, app: app) }
+            .onDrag { NoteDrag.provider(paper) }
+    }
+}
+
+// MARK: - Canvas
+
+/// A notebook's canvas: the same notes laid out freely, labeled areas, arrows between notes and words written on
+/// it, zoomed with − 100% +. Every change is one edit on the notebook's `.canvas.json` (NotesModel.edit).
+struct NotesCanvasView: View {
+    @Environment(PetalApp.self) private var app
+    @Environment(\.snapshotting) private var snapshotting
+    let model: NotesModel
+    let book: Notebook
+    let papers: [PaperNote]
+    let look: NotesLook
+
+    private var layout: NoteCanvas? {
+        guard let canvas = model.canvas, NoteLibrary.same(canvas.notebook, book.name) else { return snapshotting ? NoteCanvas() : nil }
+        return canvas.layout
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                HStack(spacing: 10) {
+                    Button { model.sidebar.toggle() } label: { Image(systemName: "sidebar.left").font(.system(size: 13)) }
+                        .buttonStyle(.plain).foregroundStyle(look.dim).padding(.leading, model.sidebar ? 16 : 84)
+                    Text(book.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(look.text)
+                    Spacer()
+                }
+                NotesViewToggle(view: .canvas, look: look) { model.setView(book, $0) }
+            }
+            .frame(height: 44)
+            if let layout {
+                CanvasBoard(model: model, book: book, papers: papers, layout: layout, look: look)
+            } else if model.canvas != nil {
+                Text("Petal can't read this notebook's canvas file, so it leaves it as it is.").font(.system(size: 13)).foregroundStyle(look.dim)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                look.canvas.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+}
+
+/// The board itself: dots, areas, arrows, words and papers, scrolled and zoomed.
+struct CanvasBoard: View {
+    @Environment(PetalApp.self) private var app
+    let model: NotesModel
+    let book: Notebook
+    let papers: [PaperNote]
+    let layout: NoteCanvas
+    let look: NotesLook
+
+    var body: some View {
+        let ids = papers.map(\.noteID)
+        let spots = layout.spots(for: ids, columns: 6).merging(model.dragging) { _, dragged in dragged }
+        let zoom = CGFloat(layout.zoom)
+        let extent = extent(spots)
+        let tint = app.paper.store.color(of: book.name)
+        ZStack(alignment: .bottomTrailing) {
+            Scroll2D {
+                ZStack(alignment: .topLeading) {
+                    CanvasDots(color: look.dots).frame(width: extent.width, height: extent.height)
+                        .contentShape(.rect)
+                        .contextMenu { boardMenu() }
+                    ForEach(layout.areas) { area in
+                        CanvasArea(area: area, color: tint, look: look, model: model, book: book, notes: layout.inside(area, spots: spots), spots: spots)
+                    }
+                    CanvasArrows(arrows: layout.arrows, spots: spots).allowsHitTesting(false)
+                    ForEach(layout.texts) { words in
+                        CanvasWords(words: words, look: look, model: model, book: book)
+                    }
+                    ForEach(papers, id: \.key) { paper in
+                        if let spot = spots[paper.noteID] {
+                            CanvasPaper(paper: paper, spot: spot, model: model, others: papers.filter { $0.noteID != paper.noteID }, layout: layout)
+                        }
+                    }
+                }
+                .frame(width: extent.width, height: extent.height, alignment: .topLeading)
+                .scaleEffect(zoom, anchor: .topLeading)
+                .frame(width: extent.width * zoom, height: extent.height * zoom, alignment: .topLeading)
+            }
+            .background(look.canvas)
+            HStack(spacing: 12) {
+                Button { model.edit(book.name, .zoom(NoteCanvas.zoomOut(layout.zoom))) } label: { Text("−") }.buttonStyle(.plain)
+                Text("\(Int((layout.zoom * 100).rounded()))%").monospacedDigit()
+                Button { model.edit(book.name, .zoom(NoteCanvas.zoomIn(layout.zoom))) } label: { Text("+") }.buttonStyle(.plain)
+            }
+            .font(.system(size: 12)).foregroundStyle(Color(white: 0.53))
+            .padding(.horizontal, 10).padding(.vertical, 4)
+            .background(look.dark ? Color(white: 0.2) : .white, in: .rect(cornerRadius: 8))
+            .overlay { RoundedRectangle(cornerRadius: 8).stroke(.black.opacity(0.15), lineWidth: 0.5) }
+            .padding(.trailing, 20).padding(.bottom, 18)
+        }
+    }
+
+    private func extent(_ spots: [String: NoteCanvas.Spot]) -> CGSize {
+        var width = 1200.0, height = 760.0
+        for spot in spots.values { width = max(width, spot.x + NoteCanvas.cell + 80); height = max(height, spot.y + NoteCanvas.cell + 80) }
+        for area in layout.areas { width = max(width, area.x + area.w + 80); height = max(height, area.y + area.h + 80) }
+        for words in layout.texts { width = max(width, words.x + 300); height = max(height, words.y + 80) }
+        return CGSize(width: width, height: height)
+    }
+
+    @ViewBuilder private func boardMenu() -> some View {
+        Button("Add an area") {
+            guard let label = NotesModel.askWords("A new area", "What does it hold?", value: "") else { return }
+            let x = 60 + Double(layout.areas.count % 3) * 40, y = 50 + Double(layout.areas.count % 3) * 40
+            model.edit(book.name, .area(.init(id: UUID().uuidString, label: label, x: x, y: y, w: 520, h: 330)))
+        }
+        Button("Write on the canvas") {
+            guard let text = NotesModel.askWords("Write on the canvas", "Your words:", value: "") else { return }
+            model.edit(book.name, .words(.init(id: UUID().uuidString, text: text, x: 80, y: 40 + Double(layout.texts.count) * 30)))
+        }
+    }
+}
+
+/// Scrolls both ways; a plain stack while snapshotting.
+struct Scroll2D<Content: View>: View {
+    @Environment(\.snapshotting) private var snapshotting
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        // Its content never sizes the view (it's larger than the window): what fits shows, the rest is cut off.
+        if snapshotting { Color.clear.overlay(alignment: .topLeading) { content }.clipped() }
+        else { ScrollView([.horizontal, .vertical]) { content } }
+    }
+}
+
+/// The canvas's dotted paper: a dot every 22 points.
+struct CanvasDots: View {
+    let color: Color
+
+    var body: some View {
+        Canvas { context, size in
+            let step: CGFloat = 22
+            var y: CGFloat = step / 2
+            while y < size.height {
+                var x: CGFloat = step / 2
+                while x < size.width {
+                    context.fill(Path(ellipseIn: CGRect(x: x - 0.5, y: y - 0.5, width: 1, height: 1)), with: .color(color))
+                    x += step
+                }
+                y += step
+            }
+        }
+    }
+}
+
+/// A note on the canvas: dragged to move it (written when the drag ends), turned a little as the sketch has them,
+/// clicked to open it on its own. Its menu draws or takes away arrows to other notes.
+struct CanvasPaper: View {
+    @Environment(PetalApp.self) private var app
+    let paper: PaperNote
+    let spot: NoteCanvas.Spot
+    let model: NotesModel
+    let others: [PaperNote]
+    let layout: NoteCanvas
+    @State private var start: NoteCanvas.Spot?
+
+    var body: some View {
+        GridPaper(paper: paper, now: Date(), draggable: false)
+            .rotationEffect(.degrees(Self.turn(paper.noteID)))
+            .offset(x: spot.x, y: spot.y)
+            .gesture(DragGesture(minimumDistance: 3, coordinateSpace: .global)
+                .onChanged { value in
+                    let from = start ?? spot
+                    if start == nil { start = spot }
+                    let zoom = layout.zoom
+                    model.dragging[paper.noteID] = .init(x: max(0, from.x + value.translation.width / zoom), y: max(0, from.y + value.translation.height / zoom))
+                }
+                .onEnded { _ in
+                    if let moved = model.dragging.removeValue(forKey: paper.noteID) { model.move(paper, to: moved) }
+                    start = nil
+                })
+            .contextMenu {
+                Button("Open") { GridPaper.open(paper, app: app) }
+                Menu("Draw an arrow to") {
+                    ForEach(others, id: \.key) { other in
+                        Button(other.file.title.isEmpty ? "A note" : other.file.title) {
+                            model.edit(paper.notebook, .arrow(.init(id: UUID().uuidString, from: paper.noteID, to: other.noteID)))
+                        }
+                    }
+                }
+                let mine = layout.arrows.filter { $0.from == paper.noteID || $0.to == paper.noteID }
+                if !mine.isEmpty {
+                    Menu("Take an arrow away") {
+                        ForEach(mine) { arrow in
+                            let other = arrow.from == paper.noteID ? arrow.to : arrow.from
+                            Button(others.first { $0.noteID == other }?.file.title ?? "A note") { model.edit(paper.notebook, .removeArrow(arrow.id)) }
+                        }
+                    }
+                }
+            }
+    }
+
+    /// The sketch's papers lie a little turned: by their id, so each keeps its own.
+    static func turn(_ id: String) -> Double { [-2, 1.5, -1, 1, -1.5][id.unicodeScalars.reduce(0) { ($0 &+ Int($1.value)) % 5 }] }
+}
+
+/// An area: a dashed rounded frame in the notebook's color with its label on its edge; dragged by its label (its
+/// notes come along), resized from its corner.
+struct CanvasArea: View {
+    let area: NoteCanvas.Area
+    let color: NSColor
+    let look: NotesLook
+    let model: NotesModel
+    let book: Notebook
+    let notes: [String]
+    let spots: [String: NoteCanvas.Spot]
+    @State private var moving: (dx: Double, dy: Double) = (0, 0)
+    @State private var start: [String: NoteCanvas.Spot] = [:]
+    @State private var sizing: (dw: Double, dh: Double) = (0, 0)
+
+    var body: some View {
+        let tint = PaperLook.rgb(color)
+        let w = max(160, area.w + sizing.dw), h = max(100, area.h + sizing.dh)
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 18)
+                .fill(PaperLook.color(tint).opacity(0.05))
+                .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(PaperLook.color(tint).opacity(0.35), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])) }
+                .frame(width: w, height: h)
+                .allowsHitTesting(false)
+            Text(area.label).font(.system(size: 13, weight: .semibold)).foregroundStyle(Color(white: 0.33))
+                .padding(.horizontal, 6).background(look.canvas)
+                .offset(x: 14, y: -9)
+                .gesture(DragGesture(coordinateSpace: .global)
+                    .onChanged { value in
+                        if start.isEmpty { start = spots.filter { notes.contains($0.key) } }
+                        moving = (value.translation.width / model.canvasZoom, value.translation.height / model.canvasZoom)
+                        for (id, spot) in start { model.dragging[id] = .init(x: max(0, spot.x + moving.dx), y: max(0, spot.y + moving.dy)) }
+                    }
+                    .onEnded { _ in
+                        var moved = area
+                        moved.x = max(0, area.x + moving.dx)
+                        moved.y = max(0, area.y + moving.dy)
+                        model.edit(book.name, .area(moved))
+                        // Notes with an id of their own only (nothing lasting is kept by an id-less note's path).
+                        for id in start.keys {
+                            if let spot = model.dragging.removeValue(forKey: id), !NoteShelf.needsID(id) { model.edit(book.name, .move(id, spot)) }
+                        }
+                        start = [:]
+                        moving = (0, 0)
+                    })
+                .contextMenu {
+                    Button("Rename…") {
+                        guard let label = NotesModel.askWords("Rename the area", "What does it hold?", value: area.label) else { return }
+                        var renamed = area
+                        renamed.label = label
+                        model.edit(book.name, .area(renamed))
+                    }
+                    Button("Remove the area") { model.edit(book.name, .removeArea(area.id)) }
+                }
+            Image(systemName: "arrow.down.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(PaperLook.color(tint).opacity(0.5))
+                .frame(width: 18, height: 18).contentShape(.rect)
+                .offset(x: w - 20, y: h - 20)
+                .gesture(DragGesture(coordinateSpace: .global)
+                    .onChanged { value in sizing = (value.translation.width / model.canvasZoom, value.translation.height / model.canvasZoom) }
+                    .onEnded { _ in
+                        var sized = area
+                        sized.w = w
+                        sized.h = h
+                        model.edit(book.name, .area(sized))
+                        sizing = (0, 0)
+                    })
+        }
+        .offset(x: area.x + moving.dx, y: area.y + moving.dy)
+    }
+}
+
+/// Words written on the canvas.
+struct CanvasWords: View {
+    let words: NoteCanvas.Words
+    let look: NotesLook
+    let model: NotesModel
+    let book: Notebook
+    @State private var moving: (dx: Double, dy: Double) = (0, 0)
+
+    var body: some View {
+        Text(words.text).font(.custom("Georgia", size: 15).italic()).foregroundStyle(look.dark ? Color(white: 0.75) : Color(white: 0.33))
+            .fixedSize()
+            .offset(x: words.x + moving.dx, y: words.y + moving.dy)
+            .gesture(DragGesture(coordinateSpace: .global)
+                .onChanged { value in moving = (value.translation.width / model.canvasZoom, value.translation.height / model.canvasZoom) }
+                .onEnded { _ in
+                    var moved = words
+                    moved.x = max(0, words.x + moving.dx)
+                    moved.y = max(0, words.y + moving.dy)
+                    model.edit(book.name, .words(moved))
+                    moving = (0, 0)
+                })
+            .contextMenu {
+                Button("Edit…") {
+                    guard let text = NotesModel.askWords("Edit the words", "Your words:", value: words.text) else { return }
+                    var edited = words
+                    edited.text = text
+                    model.edit(book.name, .words(edited))
+                }
+                Button("Remove") { model.edit(book.name, .removeWords(words.id)) }
+            }
+    }
+}
+
+/// Arrows between notes: a gentle curve from one paper's edge to the other's, with a head.
+struct CanvasArrows: View {
+    let arrows: [NoteCanvas.Arrow]
+    let spots: [String: NoteCanvas.Spot]
+
+    var body: some View {
+        Canvas { context, _ in
+            let half = NoteCanvas.cell / 2
+            for arrow in arrows {
+                guard let a = spots[arrow.from], let b = spots[arrow.to] else { continue }
+                let from = CGPoint(x: a.x + half, y: a.y + half), to = CGPoint(x: b.x + half, y: b.y + half)
+                let start = Self.edge(from, toward: to), end = Self.edge(to, toward: from)
+                var path = Path()
+                path.move(to: start)
+                let mid = CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 - 20)
+                path.addQuadCurve(to: end, control: mid)
+                let style = StrokeStyle(lineWidth: 1.6, lineCap: .round, dash: arrow.dashed ? [5, 5] : [])
+                context.stroke(path, with: .color(Color(white: 0.33)), style: style)
+                let angle = atan2(end.y - mid.y, end.x - mid.x)
+                var head = Path()
+                head.move(to: end)
+                head.addLine(to: CGPoint(x: end.x - 9 * cos(angle - 0.45), y: end.y - 9 * sin(angle - 0.45)))
+                head.addLine(to: CGPoint(x: end.x - 9 * cos(angle + 0.45), y: end.y - 9 * sin(angle + 0.45)))
+                head.closeSubpath()
+                context.fill(head, with: .color(Color(white: 0.33)))
+            }
+        }
+    }
+
+    /// Where the line from a paper's middle toward `other` leaves the paper.
+    static func edge(_ middle: CGPoint, toward other: CGPoint) -> CGPoint {
+        let half = NoteCanvas.cell / 2 + 6
+        let dx = other.x - middle.x, dy = other.y - middle.y
+        let scale = half / max(abs(dx), abs(dy), 0.001)
+        return CGPoint(x: middle.x + dx * min(1, scale), y: middle.y + dy * min(1, scale))
+    }
+}
+
+extension NotesModel {
+    var canvasZoom: Double { canvas?.layout?.zoom ?? 1 }
+}
