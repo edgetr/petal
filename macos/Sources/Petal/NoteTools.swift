@@ -281,11 +281,17 @@ extension NoteDesk {
         if let viewer = app.viewers.front {
             let fileWanted = wanted == nil || wanted == .file || wanted == .passage
             guard fileWanted else { return done(nil) }
-            return viewer.herePlace(passage: wanted != .file) { stick, refused, used in
+            return viewer.herePlace(passage: wanted != .file) { outcome in
                 guard live() else { return }
-                if refused { return wanted == .passage ? done(nil) : viewer.herePlace(passage: false) { plain, _, _ in if live() { done(plain) } } }
-                if wanted == .passage, !used { return done(nil) }
-                done(stick)
+                switch outcome {
+                case .place(let stick, let used): done(wanted == .passage && !used ? nil : stick)
+                // A selection kept out of notes: the file and page instead, unless a passage was asked for.
+                case .refused where wanted != .passage: viewer.herePlace(passage: false) { plain in
+                    guard live() else { return }
+                    if case .place(let stick, _) = plain { done(stick) } else { done(nil) }
+                }
+                case .refused, .changed: done(nil)
+                }
             }
         }
         guard let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return done(nil) }

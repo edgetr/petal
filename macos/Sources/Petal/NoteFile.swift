@@ -225,7 +225,18 @@ struct NoteScene: Equatable, Sendable {
     /// thread (ViewerFiles: each place's own file by its incarnation, else its bookmark's, else its path's); nil when
     /// it wasn't worked out (then a file's place fits by its path, Phase 1's rule).
     var onFile: Set<String>? = nil
+    /// The places (by `fileKey`) `onFile` was worked out for: a place it never saw (a note synced onto the file in
+    /// front, a place changed) means it's stale, and the file in front is read again (`resolves`).
+    var resolved: Set<String> = []
     var desktop: Int? = nil
+}
+
+extension NoteScene {
+    /// Whether this scene's file membership covers every file place the notes have now: true with no file in front
+    /// (nothing to work out); else every anchor's key was among those resolved with it.
+    func resolves(_ anchors: [NoteStick]) -> Bool {
+        file.isEmpty || anchors.allSatisfy { resolved.contains($0.fileKey) }
+    }
 }
 
 extension NoteScene {

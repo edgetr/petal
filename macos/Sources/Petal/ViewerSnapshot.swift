@@ -192,6 +192,7 @@ enum ViewerCheck {
             failed = !tenth(url, app: app) || failed
             failed = !eleventh(url, app: app) || failed
             failed = !twelfth(url, app: app) || failed
+            failed = !thirteenth(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -676,6 +677,83 @@ enum ViewerCheck {
         app.paper.fresh.remove(key)
         app.viewers.closed(model)
         print("twelfth: " + (ok ? "a corrupt PDF reports its error; the viewer with the keyboard is here (listed, stuck to its file and page, ⌃⌥N in its margin)" : "failed"))
+        return ok
+    }
+
+    /// The thirteenth review: the letterhead's "Stick it here" in Petal's viewer offers the viewer's own file and page,
+    /// never the last document seen in another app; ⌃⌥N right after a selection waits for its passage (and its
+    /// vault check); a place made for a selection that changed, or a viewer that closed, is never used.
+    private static func thirteenth(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("thirteenth: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let canonical = { (url: URL) in URL(fileURLWithPath: ViewerPath.canonical(url.path) ?? url.path) }
+        let other = home.appending(path: "Document A.pdf")
+        let shown = home.appending(path: "Document B.pdf")
+        try? FileManager.default.copyItem(at: source, to: other)
+        try? FileManager.default.copyItem(at: source, to: shown)
+        let model = app.viewers.show(canonical(shown), front: false)
+        wait(20) { !model.loading }
+        app.viewers.keyID = model.id
+        defer { app.viewers.keyID = nil }
+        let notesNow = { app.paper.store.notes.count }
+
+        // The letterhead's menu: B's own file and page, never A seen before in another app.
+        var onA = NoteStick(kind: .file)
+        onA.path = canonical(other).path
+        app.paper.previewScene(NoteScene(mac: app.paper.local.mac, app: "com.apple.Preview", pid: 4242, window: 77, title: "Document A.pdf", file: canonical(other).path))
+        var first = NoteStick(kind: .file)
+        first.path = model.url.path
+        first.page = 1
+        guard let paper = app.paper.make(on: first, body: "On B", open: false) else { expect(false, "a note on B (set up)"); return false }
+        model.go(to: 1)
+        let offers = app.paper.stickOffers(paper.key)
+        expect(offers.count == 1 && offers[0].kind == .file && offers[0].path == model.url.path && offers[0].page == 2 && !offers[0].fileID.isEmpty,
+               "the viewer with the keyboard: Stick it here offers its own file and page (\(offers.map { "\($0.kind) \($0.path) \($0.spot)" }))")
+        expect(!offers.contains { $0.path == onA.path || $0.kind == .window || $0.kind == .app }, "never the document, window or app seen before in another app")
+        app.viewers.keyID = nil
+        expect(app.paper.stickOffers(paper.key).contains { $0.path == onA.path }, "without the viewer in front: what the last look found")
+        app.viewers.keyID = model.id
+        model.go(to: 0)
+
+        // ⌃⌥N straight after selecting: waits for the passage, never a page note.
+        let pageText = PDFDocument(url: canonical(shown))?.page(at: 0)?.string ?? ""
+        let word = (pageText as NSString).range(of: "sample")
+        guard word.location != NSNotFound else { expect(false, "a word to select (set up)"); return false }
+        model.selected(page: 0, bounds: CGRect(x: 72, y: 700, width: 60, height: 14), range: word, anchor: .zero)
+        expect(model.selectionPending, "a selection being read is pending, not none")
+        app.paper.newHere()
+        wait(10) { model.openKey != nil }
+        let made = model.openKey.flatMap { app.paper.store.paper($0) }
+        expect(made?.file.places.first?.quote == "sample", "⌃⌥N right after selecting: a note on the passage, its words checked (\(made?.file.places.first?.quote ?? "none"))")
+        if let made {
+            app.paper.fresh.remove(made.key)
+            model.close(made.key, .transfer)
+        }
+
+        // A selection replaced while its place was being made: nothing made.
+        model.selected(page: 0, bounds: CGRect(x: 72, y: 700, width: 60, height: 14), range: word, anchor: .zero)
+        wait(5) { model.selection != nil }
+        var before = notesNow()
+        model.newNote()
+        model.unselected()
+        wait(1.5) { false }
+        expect(notesNow() == before, "the selection gone while its place was made: no note")
+        // The viewer closed meanwhile: nothing made, nothing opened.
+        model.selected(page: 0, bounds: CGRect(x: 72, y: 700, width: 60, height: 14), range: word, anchor: .zero)
+        wait(5) { model.selection != nil }
+        before = notesNow()
+        model.newNote()
+        app.viewers.closed(model)
+        wait(1.5) { false }
+        expect(notesNow() == before && model.openKey == nil, "the viewer closed while its place was made: no note")
+        print("thirteenth: " + (ok ? "Stick it here from the viewer's own file and page; a pending selection waited for; a changed selection or closed viewer makes nothing" : "failed"))
         return ok
     }
 

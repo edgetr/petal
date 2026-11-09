@@ -417,6 +417,9 @@ struct ViewerTurns {
     }
 
     func isLatest(_ key: String, _ turn: Int) -> Bool { latest[key] == turn }
+
+    /// The latest turn of `key` (0 before any).
+    func current(_ key: String) -> Int { latest[key] ?? 0 }
 }
 
 /// A file as the disk knows it, whatever path spells it (a link, another spelling): one incarnation of it, its

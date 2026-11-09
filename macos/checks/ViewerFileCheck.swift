@@ -610,6 +610,19 @@ struct ViewerFileCheck {
                "the decoy at its old path untouched")
         expect(FileManager.default.fileExists(atPath: outsideFolder.appending(path: "Keep.pdf").path), "a link inside unlinked, never followed")
 
+        // Thirteenth review: a scene's file membership is stale once a note has a file place it never resolved.
+        var onB = NoteStick(kind: .file)
+        onB.path = "/Users/someone/B.pdf"
+        var synced = onB
+        synced.fileID = "OTHER-MAC|vol|42|1000"
+        var frontScene = NoteScene(mac: "M", app: "com.apple.Preview", pid: 1, window: 2, title: "B.pdf", file: "/Users/someone/B.pdf")
+        frontScene.onFile = [onB.fileKey]
+        frontScene.resolved = [onB.fileKey]
+        expect(frontScene.resolves([onB]), "every file place resolved with the read: current")
+        expect(!frontScene.resolves([onB, synced]), "a place synced from another Mac since (its own fileID): stale, read again")
+        frontScene.file = ""
+        expect(frontScene.resolves([onB, synced]), "no file in front: nothing to resolve")
+
         // The versions root itself a link: never opened.
         let linkedRoot = gateBase.appending(path: "Linked Versions")
         try? FileManager.default.createSymbolicLink(atPath: linkedRoot.path, withDestinationPath: elsewhere.path)

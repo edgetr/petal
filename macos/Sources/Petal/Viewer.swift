@@ -702,6 +702,8 @@ final class ViewerModel: Identifiable {
         defer { NotePictures.shared.visibilityChanged() }
         closedNow = true
         closing.on = true
+        // Whoever waits for a selection goes on, and finds the viewer closed.
+        settleSelection()
         watcher = nil
         versionWatch = nil
         lensSoon?.cancel()
@@ -779,15 +781,19 @@ final class ViewerModel: Identifiable {
         // The selection before is gone at once (its Note with it); the new one is offered only once its read is in.
         let turn = turns.begin("selection")
         if selection != nil { selection = nil }
-        guard let source = text else { return }
+        guard let source = text else { return settleSelection() }
+        // Being read: never taken for no selection (herePlace waits for it).
+        selectionPending = true
         let lens = lensKey != nil
         source.read(page: page, selected: range, paragraph: { text in
             guard lens, NSMaxRange(range) <= (text as NSString).length, let swift = Range(range, in: text) else { return nil }
             return NSRange(ViewerLens.paragraph(text, around: swift), in: text)
         }) { pageText, words, box in
+            // A newer selection (or none) took over: that one settles it.
+            guard self.turns.isLatest("selection", turn) else { return }
+            defer { self.settleSelection() }
             // Only words offer a Note: whitespace alone is no selection.
-            guard self.turns.isLatest("selection", turn), source === self.text, let pageText, !words.isEmpty,
-                  NSMaxRange(range) <= (pageText as NSString).length else { return }
+            guard source === self.text, let pageText, !words.isEmpty, NSMaxRange(range) <= (pageText as NSString).length else { return }
             self.selection = ViewerSelection(page: page, bounds: bounds, quote: words, pageText: pageText, range: range, anchor: anchor)
             // The reading lens: the paragraph the selection is in, for the note that follows it.
             if lens, let swift = Range(range, in: pageText) {
@@ -801,6 +807,40 @@ final class ViewerModel: Identifiable {
     func unselected() {
         _ = turns.begin("selection")
         if selection != nil { selection = nil }
+        settleSelection()
+    }
+
+    /// A selection being read (its page's text, off the main thread): what's here waits for it.
+    @ObservationIgnored private(set) var selectionPending = false
+    @ObservationIgnored private var selectionWaiters: [@MainActor () -> Void] = []
+
+    /// The selection's read is in (or replaced by none, or the viewer closed): whoever waited goes on.
+    private func settleSelection() {
+        selectionPending = false
+        let waiting = selectionWaiters
+        selectionWaiters = []
+        for wait in waiting { wait() }
+    }
+
+    /// `then` once no selection is being read: at once, or when the newest selection's read is in.
+    func whenSelectionSettled(_ then: @escaping @MainActor () -> Void) {
+        guard selectionPending, !closedNow else { return then() }
+        selectionWaiters.append(then)
+    }
+
+    /// What a place made here was made for: this document (its load) and this selection (its turn). Anything else by
+    /// the time the place is ready (the viewer closed, the file reloaded, another selection or none) and it's not used.
+    struct HereContext: Equatable { var load: Int; var selection: Int }
+    var hereContext: HereContext { HereContext(load: loads, selection: turns.current("selection")) }
+
+    /// What `herePlace` found.
+    enum HereOutcome {
+        /// The place, and whether it's the selection's passage.
+        case place(NoteStick, selection: Bool)
+        /// The selection holds something from the vault, or the vault can't be read: no place.
+        case refused
+        /// The viewer closed, its document reloaded or its selection changed meanwhile: nothing used.
+        case changed
     }
 
     /// A paper's file got another name: what's kept about it here follows.
@@ -871,65 +911,79 @@ final class ViewerModel: Identifiable {
     /// on the file (AXDocument). The page's whole text is checked against the vault before the passage is cut from
     /// it (off the main thread): a selection touching a secret, or a vault that can't be read, makes no note.
     func newNote() {
-        herePlace { stick, refused, usedSelection in
-            if refused { return self.desk.tell("That selection holds something from your vault, or the vault can't be read: Petal makes no note on it.") }
-            guard let stick else { return }
-            if usedSelection { self.selection = nil }
-            self.make(stick)
+        herePlace { outcome in
+            switch outcome {
+            case .refused: self.desk.tell("That selection holds something from your vault, or the vault can't be read: Petal makes no note on it.")
+            case .changed: if !self.closedNow { self.desk.tell("What's in the viewer changed while Petal looked, so no note was made.") }
+            case .place(let stick, let used):
+                if used { self.selection = nil }
+                self.make(stick)
+            }
         }
+    }
+
+    /// This viewer's file as a note's place: a file anchor with the incarnation and bookmark its latest read made,
+    /// at the page or slide shown. The one place the viewer offers as "here" (herePlace, the letterhead's menu).
+    func fileAnchor() -> NoteStick {
+        var stick = NoteStick(kind: .file)
+        stick.path = url.path
+        stick.title = name
+        if !live, pageCount > 0 {
+            if unit == .slide { stick.slide = current + 1 } else { stick.page = current + 1 }
+        }
+        stick.bookmark = bookmark?.base64EncodedString() ?? ""
+        stick.fileID = fileID?.record(mac: desk.local.mac) ?? ""
+        return stick
     }
 
     /// Whether the margin shows `key`'s paper now (the notes on this file).
     func shows(_ key: String) -> Bool { marginOn && notes.contains { $0.paper.key == key } }
 
-    /// The desk's current place while this viewer has the keyboard (Viewers.front): its file (a file anchor with
-    /// its incarnation and bookmark, made off the main thread), its page or slide, and, with `passage` and a
-    /// selection, that selection as a passage. The selection is checked as petal_look's rule checks a selected
-    /// field's text (Assist.selectionInSecret): the whole text it's in, here its page's, against the vault, before
-    /// anything is cut (ViewerSecrets); a secret touching it, or a vault that can't be read, is `refused` (no place).
-    func herePlace(passage: Bool = true, _ done: @escaping @MainActor (_ stick: NoteStick?, _ refused: Bool, _ usedSelection: Bool) -> Void) {
-        var stick = NoteStick(kind: .file)
-        stick.path = url.path
-        stick.title = name
-        let chosen = passage ? selection : nil
-        if !live, pageCount > 0 {
-            if unit == .slide { stick.slide = current + 1 } else { stick.page = current + 1 }
+    /// The desk's current place while this viewer has the keyboard (Viewers.front): its file anchor (`fileAnchor`)
+    /// and, with `passage` and a selection, that selection as a passage. A selection still being read is waited for,
+    /// never taken for none. The selection is checked as petal_look's rule checks a selected field's text
+    /// (Assist.selectionInSecret): the whole text it's in, here its page's, against the vault, before anything is cut
+    /// (ViewerSecrets), off the main thread; a secret touching it, or a vault that can't be read, is `refused`. The
+    /// place is used only while the viewer is open with the same document and selection it was made for
+    /// (`hereContext`); else `changed`.
+    func herePlace(passage: Bool = true, _ done: @escaping @MainActor (HereOutcome) -> Void) {
+        whenSelectionSettled {
+            guard !self.closedNow else { return done(.changed) }
+            self.placeNow(passage: passage, done)
         }
-        let url = url
-        let mac = desk.local.mac
+    }
+
+    private func placeNow(passage: Bool, _ done: @escaping @MainActor (HereOutcome) -> Void) {
+        var stick = fileAnchor()
+        let context = hereContext
+        guard let chosen = passage ? selection : nil else { return done(.place(stick, selection: false)) }
         Viewers.queue.async {
-            // A bookmark and the file's own incarnation on this Mac, so the note follows the file when it's moved or
-            // renamed and a new file at its path is never it (made off the main thread).
-            stick.bookmark = ViewerLoader.bookmark(url)?.base64EncodedString() ?? ""
-            stick.fileID = ViewerFileID.of(url.path)?.record(mac: mac) ?? ""
-            var refused = false
-            if let chosen {
-                let cut = VaultIndex.settled { index -> (quote: String, before: String, after: String)? in
-                    guard !index.unreadable else { return nil }
-                    return ViewerSecrets.passage(chosen.pageText, range: chosen.range, secrets: index.spans(chosen.pageText))
-                } ?? nil
-                if let cut {
-                    stick.page = chosen.page + 1
-                    stick.slide = nil
-                    stick.bounds = [chosen.bounds.minX, chosen.bounds.minY, chosen.bounds.width, chosen.bounds.height]
-                    stick.quote = cut.quote
-                    stick.before = cut.before
-                    stick.after = cut.after
-                } else {
-                    refused = true
-                }
+            let cut = VaultIndex.settled { index -> (quote: String, before: String, after: String)? in
+                guard !index.unreadable else { return nil }
+                return ViewerSecrets.passage(chosen.pageText, range: chosen.range, secrets: index.spans(chosen.pageText))
+            } ?? nil
+            let refused = cut == nil
+            if let cut {
+                stick.page = chosen.page + 1
+                stick.slide = nil
+                stick.bounds = [chosen.bounds.minX, chosen.bounds.minY, chosen.bounds.width, chosen.bounds.height]
+                stick.quote = cut.quote
+                stick.before = cut.before
+                stick.after = cut.after
             }
             let made = stick
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if refused { return done(nil, true, false) }
-                    done(made, false, chosen != nil)
+                    // Made for this viewer as it was: closed, reloaded or another selection since, nothing is used.
+                    guard !self.closedNow, self.hereContext == context else { return done(.changed) }
+                    done(refused ? .refused : .place(made, selection: true))
                 }
             }
         }
     }
 
     private func make(_ stick: NoteStick) {
+        guard !closedNow else { return }
         guard desk.on else { return desk.tell("Petal Notes is off.") }
         guard marginEditable else { return desk.tell("Your notes' folder is being switched: try again in a moment.") }
         guard let paper = desk.make(on: stick, open: false) else { return }

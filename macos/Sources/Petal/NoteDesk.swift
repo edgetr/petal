@@ -488,6 +488,9 @@ final class NoteDesk {
                 if !file.isEmpty, let front = ViewerFileID.of(file) {
                     made.onFile = ViewerFiles.on(front, anchors, mac: mac, follow: ViewerLoader.follow)
                 }
+                // Worked out for these places (or, the file unreadable, by path for them): a place added since makes
+                // it stale (NoteScene.resolves).
+                made.resolved = Set(anchors.map(\.fileKey))
                 let scene = made
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
@@ -2260,7 +2263,7 @@ final class NoteDesk {
         menu.addItem(header)
         for (index, stick) in paper.file.places.enumerated() {
             let item = NSMenuItem(title: Self.describe(stick), action: nil, keyEquivalent: "")
-            item.state = here[key] == index ? .on : .off
+            item.representedObject = index
             let sub = NSMenu()
             // A file's note: the file in Petal's viewer, at its page or slide, with its notes in the margin.
             if ViewerFiles.offersViewer(stick) {
@@ -2270,23 +2273,21 @@ final class NoteDesk {
             if !sub.items.isEmpty { item.submenu = sub }
             menu.addItem(item)
         }
-        if let cached = scene, let cachedRead = front, cached.window != nil {
-            // Cached from the last look: filtered again, an app made private since gives nothing of itself.
-            let (scene, front) = Self.filtered(cached, cachedRead, since: scenePrivacy)
-            let name = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
-            let offers = places(for: scene, read: front, appName: name).filter { offer in !paper.file.places.contains { $0.samePlace(offer) } }
-            if !offers.isEmpty {
-                menu.addItem(.separator())
-                let title = NSMenuItem(title: "Stick it here instead", action: nil, keyEquivalent: "")
-                title.isEnabled = false
-                menu.addItem(title)
-                for offer in offers where offer.kind != .passage { menu.addItem(ActionItem(Self.describe(offer)) { [weak self] in self?.restick(key, [offer]) }) }
-                let also = NSMenuItem(title: "Also stick it to", action: nil, keyEquivalent: "")
-                let sub = NSMenu()
-                for offer in offers where offer.kind != .passage { sub.addItem(ActionItem(Self.describe(offer)) { [weak self] in self?.restick(key, paper.file.places + [offer]) }) }
-                also.submenu = sub
-                menu.addItem(also)
-            }
+        // The place it shows at now, checked: the key viewer's margin, else the last look's window.
+        let showing = shownIndex(key)
+        for item in menu.items { if let index = item.representedObject as? Int { item.state = showing == index ? .on : .off } }
+        let offers = stickOffers(key)
+        if !offers.isEmpty {
+            menu.addItem(.separator())
+            let title = NSMenuItem(title: "Stick it here instead", action: nil, keyEquivalent: "")
+            title.isEnabled = false
+            menu.addItem(title)
+            for offer in offers { menu.addItem(ActionItem(Self.describe(offer)) { [weak self] in self?.restick(key, [offer]) }) }
+            let also = NSMenuItem(title: "Also stick it to", action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            for offer in offers { sub.addItem(ActionItem(Self.describe(offer)) { [weak self] in self?.restick(key, paper.file.places + [offer]) }) }
+            also.submenu = sub
+            menu.addItem(also)
         }
         menu.addItem(.separator())
         // The Desktop the note's screen shows, read when chosen (off the main thread): only with its number is the note
@@ -2300,6 +2301,35 @@ final class NoteDesk {
             }
         })
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    /// What "Stick it here instead" offers a note, from the current place (the one rule for "here"): Petal's viewer
+    /// with the keyboard, its file at the page or slide shown (ViewerModel.fileAnchor), never the last scene outside
+    /// it; else what the last look found in front (filtered again for privacy). Never a passage, nor a place the note
+    /// already has.
+    func stickOffers(_ key: String) -> [NoteStick] {
+        guard let paper = store.paper(key) else { return [] }
+        let offers: [NoteStick]
+        if let viewer = app.viewers.front {
+            offers = [viewer.fileAnchor()]
+        } else if let cached = scene, let cachedRead = front, cached.window != nil {
+            // Cached from the last look: filtered again, an app made private since gives nothing of itself.
+            let (scene, front) = Self.filtered(cached, cachedRead, since: scenePrivacy)
+            let name = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
+            offers = places(for: scene, read: front, appName: name)
+        } else {
+            offers = []
+        }
+        return offers.filter { offer in offer.kind != .passage && !paper.file.places.contains { $0.samePlace(offer) } }
+    }
+
+    /// Which of a note's places it shows at now: in the key viewer's margin, else by the window in front.
+    func shownIndex(_ key: String) -> Int? {
+        if let viewer = app.viewers.front {
+            guard let paper = store.paper(key), let shown = viewer.notes.first(where: { $0.paper.key == key })?.place else { return nil }
+            return paper.file.places.firstIndex { $0.samePlace(shown) }
+        }
+        return here[key]
     }
 
     /// A file's place opened in Petal's viewer: its file found by the one resolver the margin and comments use
@@ -2429,6 +2459,9 @@ final class NoteDesk {
         if let scene, let front {
             let (scene, read) = Self.filtered(scene, front, since: scenePrivacy)
             apply(scene, read: read, scan: false, fresh: false)
+            // A note's file places changed since the file in front was resolved (one synced onto it, another
+            // Mac's record, an older bookmark): it's read again, through the same gate as every look.
+            if !scene.resolves(fileAnchors) { look() }
         } else { look() }
         // From the Spaces last read; read (off the main thread) when none were yet and a note is on a Desktop.
         if Self.spaces.isEmpty { refreshSpaces() } else { placeDesktop() }
@@ -2438,6 +2471,13 @@ final class NoteDesk {
     /// For snapshots: Stick here as if a page were in front.
     /// For `Petal --viewer-check` only: notes on, with made-up notes and no folder read (the tools answer).
     func previewReady() { ready = true }
+
+    /// For `Petal --viewer-check` only: the last look as if `scene` had been read in front (nothing read).
+    func previewScene(_ scene: NoteScene, read: ClaudePanel.FrontRead = ClaudePanel.FrontRead()) {
+        self.scene = scene
+        front = read
+        scenePrivacy = ClaudePanel.privacy.now
+    }
 
     func previewCapture() {
         ready = true   // snapshots: nothing to load
