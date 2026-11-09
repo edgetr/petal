@@ -141,6 +141,7 @@ struct NoteStoreCheck {
         folderReplaced(root: root)
         deletedNotebookRescue(root: root)
         ambiguousRescue(root: root)
+        ambiguousCovers(root: root)
         notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -1943,6 +1944,66 @@ struct NoteStoreCheck {
                && rescued("Launch unsure")?.notes["l1"] != nil && rescued("Launch unsure")?.areas.first?.id == "kept",
                "at recovery, still ambiguous: rescued whole, never written into a notebook")
         for f in [folder, copy] { try? fm.removeItem(at: f) }
+    }
+
+    /// Cover changes that can't tell which notebook they're for: a Private one makes every candidate Private (fails
+    /// closed) and is dropped and said after the limit over complete reads, or at once when a launch recovered it; one
+    /// making a notebook public waits without changing anything.
+    @MainActor static func ambiguousCovers(root: URL) {
+        let fm = FileManager.default
+        let here = root.appending(path: "Maybe"), there = root.appending(path: "Maybe elsewhere"), locked = root.appending(path: "Locked")
+        for (folder, id, isPrivate) in [(here, "COVER-MAYBE", false), (there, "COVER-LOST", false), (locked, "COVER-LOCKED", true)] {
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            var cover = NoteFile(id: id, body: "# About this notebook")
+            cover.cover = true
+            if isPrivate { cover.setScalar("private", "true") }
+            _ = NoteStore.create(cover.serialized(), at: folder.appending(path: NoteShelf.coverName), root: root)
+        }
+        let store = NoteStore(root: root)
+        var said: [String] = []
+        store.onProblem = { said.append($0) }
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        store.reload()
+        settle(1)
+        expect(store.notebook("Locked")?.isPrivate == true && store.notebook("Maybe")?.isPrivate == false, "the covers as written")
+        // Made for a notebook whose folder is gone: another notebook now at its path, its cover id in a copy elsewhere.
+        var privately = CoverFields(notebook: "Maybe", root: store.root.path, coverID: "COVER-LOST", folderID: "0:1", path: "Maybe")
+        privately.set("private", "true")
+        store.coverPending[privately.key] = privately
+        NoteJournal.queue.async { NoteJournal.keepCover(privately) }
+        // Making the Private one public, equally unsure.
+        var publicly = CoverFields(notebook: "Locked", root: store.root.path, coverID: "COVER-LOCKED-OLD", folderID: "0:2", path: "Locked")
+        publicly.set("private", "")
+        store.coverPending[publicly.key] = publicly
+        store.reload()
+        settle(1.5)
+        let books = store.privateBooks
+        expect(store.notebook("Maybe")?.isPrivate == true && store.notebook("Maybe elsewhere")?.isPrivate == true
+               && books.contains("Maybe") && books.contains("Maybe elsewhere")
+               && !NotePrivacy.readable(notebook: "Maybe elsewhere", privateBooks: books, asker: nil),
+               "an ambiguous Private change: every notebook it could mean is Private for everything Private covers")
+        func privateOnDisk(_ folder: URL) -> Bool { text(folder.appending(path: NoteShelf.coverName)).map { NoteContract.isPrivate(NoteFile.parse($0, fallbackID: "", fallbackDate: Date())) } == true }
+        expect(!privateOnDisk(here) && !privateOnDisk(there) && store.coverPending[privately.key] != nil && said.isEmpty,
+               "written to neither, and it waits")
+        expect(store.notebook("Locked")?.isPrivate == true && privateOnDisk(locked) && store.coverPending[publicly.key] != nil,
+               "an ambiguous change making one public waits and changes nothing")
+        // Ten minutes of complete reads later: dropped, said plainly, out of the journal, and the candidates as written.
+        store.coverAmbiguousSince[privately.key] = Date().addingTimeInterval(-NoteShelf.ambiguityLimit - 1)
+        store.reload()
+        settle(1.5)
+        NoteJournal.queue.sync {}
+        expect(store.coverPending[privately.key] == nil && said.contains("Petal couldn't tell which notebook to make Private. Set it again.")
+               && !fm.fileExists(atPath: NoteJournal.coverFile(privately.key).path)
+               && store.notebook("Maybe")?.isPrivate == false && store.notebook("Maybe elsewhere")?.isPrivate == false && !privateOnDisk(here),
+               "still ambiguous after the limit: dropped and said, never applied", "\(said)")
+        // A launch recovering one that's still ambiguous: dropped on its first complete read, and its copy goes.
+        said = []
+        let waiting = store.recoverCovers([privately])
+        settle(1)
+        expect(store.coverPending[privately.key] == nil && said.contains("Petal couldn't tell which notebook to make Private. Set it again.")
+               && waiting.allSatisfy(\.isEmpty), "recovered at launch and still ambiguous: dropped and said at once", "\(said)")
+        store.coverPending[publicly.key] = nil
+        for folder in [here, there, locked] { try? fm.removeItem(at: folder) }
     }
 
     /// Making a notebook Private: shown at once, and written through its cover's session, also when it has no cover

@@ -227,6 +227,11 @@ final class NoteStore {
     @ObservationIgnored var canvasAmbiguousSince: [String: Date] = [:]
     /// Entries with a look again scheduled for when their ambiguity runs out.
     @ObservationIgnored var canvasAmbiguityTimers: Set<String> = []
+    /// The same for cover changes waiting (by their key), and the ones a launch recovered (dropped when ambiguous on
+    /// its first complete read).
+    @ObservationIgnored var coverAmbiguousSince: [String: Date] = [:]
+    @ObservationIgnored var coverAmbiguityTimers: Set<String> = []
+    @ObservationIgnored var coversFromLaunch: Set<String> = []
     /// Papers whose work keeps failing: the paper says it isn't saved yet.
     private(set) var failed: Set<String> = []
     @ObservationIgnored private(set) var root: URL
@@ -2164,6 +2169,14 @@ final class NoteStore {
     /// an unknown cover counts as Private.
     private func showCovers() {
         let places = notebookPlaces
+        // A Private change that can't tell which notebook it's for: every notebook it could mean is Private until it
+        // resolves or is dropped (privacy fails closed).
+        for pending in coverPending.values where pending.root == root.path {
+            for name in pending.failClosed(places: places) {
+                guard let index = notebooks.firstIndex(where: { $0.name == name }) else { continue }
+                notebooks[index].isPrivate = true
+            }
+        }
         for pending in coverPending.values {
             guard let name = pending.target(root: root.path, places: places), let index = notebooks.firstIndex(where: { $0.name == name }) else { continue }
             let book = notebooks[index]
@@ -2178,8 +2191,56 @@ final class NoteStore {
     /// After a read of the folder (its conflicts rebuilt): what's waiting shown over what the covers say, and landed
     /// where a cover is ready.
     private func settleCovers() {
+        judgeCovers()
         showCovers()
         for key in coverPending.keys { landCover(key) }
+    }
+
+    /// Every cover change waiting in this root, after a read: found, it lands (`landCover`); ambiguous for the limit over
+    /// complete reads (or on the first complete read after the launch that recovered it), dropped and said, out of the
+    /// journal; its notebook gone after a complete read, dropped (nothing left to change). Never applied by a guess.
+    private func judgeCovers() {
+        let places = notebookPlaces
+        for (key, pending) in coverPending where pending.root == root.path {
+            switch NoteShelf.notebookFor(pending.binding, places: places, complete: readComplete) {
+            case .found:
+                coverAmbiguousSince[key] = nil
+                coversFromLaunch.remove(key)
+            case .ambiguous:
+                guard readComplete else { continue }
+                let since = coverAmbiguousSince[key] ?? Date()
+                coverAmbiguousSince[key] = since
+                if coversFromLaunch.contains(key) || NoteShelf.ambiguityExpired(since: since, now: Date(), complete: true) {
+                    dropCover(key, say: pending.droppedWords)
+                } else if !coverAmbiguityTimers.contains(key) {
+                    coverAmbiguityTimers.insert(key)
+                    let left = max(1, NoteShelf.ambiguityLimit - Date().timeIntervalSince(since) + 1)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + left) {
+                        MainActor.assumeIsolated {
+                            self.coverAmbiguityTimers.remove(key)
+                            if self.coverPending[key] != nil { self.reload() }
+                        }
+                    }
+                }
+            case .gone:
+                dropCover(key, say: nil)
+            case .wait:
+                break
+            }
+        }
+    }
+
+    /// A cover change waiting given up: out of memory and the journal, its notebooks shown as their covers say again
+    /// (a read follows), and the person told when there's something to set again.
+    private func dropCover(_ key: String, say words: String?) {
+        guard var pending = coverPending.removeValue(forKey: key) else { return }
+        coverAmbiguousSince[key] = nil
+        coversFromLaunch.remove(key)
+        pending.fields = [:]
+        let cleared = pending
+        NoteJournal.queue.async { NoteJournal.keepCover(cleared) }
+        if let words { onProblem(words) }
+        reload()
     }
 
     /// Cover fields a launch before kept (NoteJournal.coverLeftovers), of every root: waiting again, each only for its
@@ -2194,7 +2255,16 @@ final class NoteStore {
             coverPending[entry.key] = pending
         }
         let keys = Set(entries.map(\.key))
-        out = coverPending.filter { keys.contains($0.key) }.map(\.value)
+        coversFromLaunch.formUnion(keys)
+        if loaded { judgeCovers() }
+        // One dropped already (ambiguous at this launch) goes back to the journal empty, so its moved-aside copy goes.
+        out = keys.sorted().compactMap { key in
+            if let waiting = coverPending[key] { return waiting }
+            guard var dropped = entries.first(where: { $0.key == key }) else { return nil }
+            dropped.fields = [:]
+            dropped.times = [:]
+            return dropped
+        }
         showCovers()
         if loaded { for key in coverPending.keys { landCover(key) } }
         return out

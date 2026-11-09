@@ -717,6 +717,23 @@ struct CoverFields: Codable, Equatable, Sendable {
 
     static let names: Set<String> = ["private", "color", "view"]
 
+    /// While a change making a notebook Private can't tell which notebook it's for (ambiguous), every notebook it
+    /// could mean counts as Private: privacy fails closed. Making one public, or any other field, changes nothing
+    /// until it's found.
+    func failClosed(places: [NotebookPlace]) -> [String] {
+        guard fields["private"] == "true", NoteShelf.notebookFor(binding, places: places, complete: false) == .ambiguous else { return [] }
+        return NoteShelf.candidates(binding, places: places)
+    }
+
+    /// What the person is told when a change still ambiguous after the limit (or at the next launch) is dropped.
+    var droppedWords: String {
+        switch fields["private"] {
+        case "true": return "Petal couldn't tell which notebook to make Private. Set it again."
+        case "": return "Petal couldn't tell which notebook to make public. Set it again."
+        default: return "Petal couldn't tell which notebook to change. Set it again."
+        }
+    }
+
     /// The cover with these fields made on it, and nothing else.
     static func apply(_ fields: [String: String], to file: inout NoteFile) {
         for (field, value) in fields {
@@ -1254,8 +1271,17 @@ extension NoteShelf {
             let byID = places.filter { $0.coverID == binding.coverID }
             if byID.count == 1, samePath(byID[0]) || (!binding.instance.isEmpty && byID[0].instance == binding.instance) { return .found(byID[0].name) }
         }
-        let anything = places.contains { (!binding.instance.isEmpty && $0.instance == binding.instance) || samePath($0) || idMatches($0) }
+        let anything = !candidates(binding, places: places).isEmpty
         return anything ? .ambiguous : complete ? .gone : .wait
+    }
+
+    /// Every notebook a binding could mean: each matching it by folder, path or cover id (or its renewal).
+    static func candidates(_ binding: NotebookBinding, places: [NotebookPlace]) -> [String] {
+        places.filter { place in
+            (!binding.instance.isEmpty && place.instance == binding.instance)
+                || place.path.compare(binding.path, options: .caseInsensitive) == .orderedSame
+                || (!binding.coverID.isEmpty && (place.coverID == binding.coverID || place.coverID == NoteLibrary.renewedID(binding.coverID, folder: place.path)))
+        }.map(\.name)
     }
 
     /// The one rule applied to a cover id renewed on a folder: every pending binding that resolves to that folder now

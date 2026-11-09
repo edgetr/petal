@@ -514,6 +514,21 @@ struct NoteLibraryCheck {
         rebound.coverID = zedRenewed
         expect(rebound.key == zedPrivate.key && zedPrivate.key != CoverFields(notebook: "Zed", root: "/B", coverID: "X", folderID: "1:30").key,
                "its key fixed through a renewal, and kept per root")
+        // An ambiguous "make Private": every notebook it could mean counts as Private; making one public changes nothing.
+        var unsurePrivate = CoverFields(notebook: "Zed", root: "/A", coverID: "GONE", folderID: "1:99", path: "Zed")
+        unsurePrivate.set("private", "true")
+        let unsurePlaces = [place("Zed", "1:50", "OTHER"), place("Zed elsewhere", "1:51", "GONE"), place("Work", "1:52", "W")]
+        expect(Set(unsurePrivate.failClosed(places: unsurePlaces)) == ["Zed", "Zed elsewhere"] && unsurePrivate.target(root: "/A", places: unsurePlaces) == nil,
+               "an ambiguous Private change: every candidate is Private, and it's applied to none")
+        expect(zedPrivate.failClosed(places: afterRenewal).isEmpty, "found: only its own notebook, as it lands")
+        var unsurePublic = unsurePrivate
+        unsurePublic.set("private", "")
+        expect(unsurePublic.failClosed(places: unsurePlaces).isEmpty, "an ambiguous change making one public: no candidate changes")
+        var unsureColor = unsurePrivate
+        unsureColor.fields = ["color": "#ff0000"]
+        expect(unsurePrivate.droppedWords == "Petal couldn't tell which notebook to make Private. Set it again."
+               && unsurePublic.droppedWords.contains("make public") && unsureColor.droppedWords == "Petal couldn't tell which notebook to change. Set it again.",
+               "what's said when an ambiguous change is dropped")
         let legacy = try? JSONDecoder().decode(CoverFields.self, from: Data(#"{"notebook":"Old","root":"/A","coverID":"c1","fields":{"private":"true"}}"#.utf8))
         expect(legacy?.key == "/A|c1", "an entry an earlier build wrote keeps its key")
         expect(CanvasEntry(coverID: CanvasQueue.folderKey("1:9"), notebook: "Old", edits: []).bound == NotebookBinding(coverID: "", path: "Old", instance: "1:9"),
