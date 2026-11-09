@@ -173,7 +173,8 @@ final class NoteDesk {
                             for holding in canvases { NoteJournal.recoverCanvas(holding, root: root) }
                         }
                     }
-                    self.store.switchRoot(to: root)
+                    // The launch recovers the whole journal itself (above), so this first switch doesn't.
+                    self.store.switchRoot(to: root, recover: false)
                     self.ready = true
                     // Read and watched only once the first folder is settled: the switch starts the store itself
                     // when it's done (and after every later switch).

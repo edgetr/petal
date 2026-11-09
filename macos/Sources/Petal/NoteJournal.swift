@@ -177,6 +177,28 @@ enum NoteJournal {
         return NoteShelf.journalFolders(names).map { parent.appending(path: $0) }
     }
 
+    /// A switch back to a notes' folder, on the journal's queue: that folder's note entries (by where each note was)
+    /// move aside into a "recovering" folder of their own, as a launch's do, so new snapshots never mix with them; the
+    /// session puts them back (`recover`) before it reads the folder. Entries of other folders stay where they are.
+    /// Nil when there are none.
+    nonisolated static func leftovers(forRoot root: URL, in folder: URL = folder) -> URL? {
+        let fm = FileManager.default
+        let names = ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".json") }.sorted()
+        // The folder however its path is spelled (/var and /private/var are one folder).
+        let spellings = Set([root.path, root.standardizedFileURL.path, root.resolvingSymlinksInPath().path])
+        let mine = names.filter { name in
+            guard let entry = read(folder.appending(path: name)) else { return false }
+            let paths = [entry.path, URL(fileURLWithPath: entry.path).resolvingSymlinksInPath().path]
+            return paths.contains { path in spellings.contains { NoteShelf.within(path, $0) != nil } }
+        }
+        guard !mine.isEmpty else { return nil }
+        let stamp = String(format: "%.0f", Date().timeIntervalSince1970 * 1000)
+        let holding = folder.deletingLastPathComponent().appending(path: "Notes journal, recovering \(stamp)")
+        try? fm.createDirectory(at: holding, withIntermediateDirectories: true)
+        for name in mine { _ = try? fm.moveItem(at: folder.appending(path: name), to: holding.appending(path: name)) }
+        return holding
+    }
+
     // MARK: Recovery (on the notes' queue)
 
     /// Puts back each entry of a recovering folder, one at a time: found by its note's id in the notes' folder as it

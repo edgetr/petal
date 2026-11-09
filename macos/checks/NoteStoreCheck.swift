@@ -148,6 +148,7 @@ struct NoteStoreCheck {
         renewalSkipsOtherRoot(root: root)
         trashAfterSwitch(root: root)
         renewalAcrossSwitch(root: root)
+        picturesSurviveSwitch(root: root)
         notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -2319,6 +2320,87 @@ struct NoteStoreCheck {
                && onDisk("Aaa round")?.id == "COVER-ROUND-DUP" && onDisk("Aaa round")?.color == "#112233" && !onDisk("Aaa round").map(NoteContract.isPrivate)!,
                "back after a switch during a renewal: the renewal is on disk, and cover changes save on the right notebooks")
         for name in ["Aaa round", "Zed round"] { try? fm.removeItem(at: root.appending(path: name)) }
+        try? fm.removeItem(at: rootB)
+    }
+
+    /// A picture pasted while its folder in Pictures can't be written, the notes folder switched away and back, and
+    /// the note edited: the fresh session first puts back that folder's journal entries as a launch does, so the
+    /// picture's bytes survive (the note in Unsaved notes with its picture, or landed once writable), never replaced
+    /// by a snapshot without them.
+    @MainActor static func picturesSurviveSwitch(root: URL) {
+        let fm = FileManager.default
+        let rootB = root.deletingLastPathComponent().appending(path: "petal-root-B-\(UUID().uuidString)")
+        try? fm.createDirectory(at: rootB, withIntermediateDirectories: true)
+        let folder = root.appending(path: "Pics")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        _ = NoteStore.create(NoteFile(id: "PX-SWITCH", body: "words").serialized(), at: folder.appending(path: "Picture note.md"), root: root)
+        // Its folder in Pictures can't be written: a file stands where it would be.
+        let blocker = root.appending(path: NoteShelf.pictureFolder(id: "PX-SWITCH"))
+        try? fm.createDirectory(at: blocker.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? Data("not a folder".utf8).write(to: blocker)
+        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        func switchTo(_ next: URL) {
+            var done = false
+            store.switchRoot(to: next) { done = true }
+            let until = Date().addingTimeInterval(10)
+            while (!done || !store.loaded) && Date() < until { settle(0.05) }
+            settle(0.5)
+        }
+        store.reload()
+        settle(1)
+        let bytes = Data("px-switch-bytes".utf8)
+        guard let paper = store.notes.first(where: { $0.noteID == "PX-SWITCH" }),
+              let refs = store.acceptPictures(paper.key, [("png", bytes, "")]) else { return expect(false, "the picture accepted") }
+        let name = refs[0].file.lastPathComponent
+        _ = store.change(paper.key) { $0.body += "\n![](\(refs[0].path))" }
+        var until = Date().addingTimeInterval(6)
+        while store.pictureTrouble[paper.key] == nil && Date() < until { settle(0.05) }
+        NoteJournal.queue.sync {}
+        expect(store.pictureTrouble[paper.key] != nil && NoteJournal.read(NoteJournal.file("PX-SWITCH"))?.pictures.contains { $0.data == bytes } == true,
+               "the picture couldn't be saved: set aside, its bytes in the journal")
+        switchTo(rootB)
+        switchTo(root)
+        // Edited after coming back.
+        guard let back = store.notes.first(where: { $0.noteID == "PX-SWITCH" && $0.version == nil }) else { return expect(false, "the note is back") }
+        _ = store.change(back.key) { $0.body += "\nmore words" }
+        settle(1)
+        NoteJournal.queue.sync {}
+        // Where its bytes are now: in Unsaved notes with the note, in the journal (live or being recovered), or landed.
+        let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
+        func rescuedWithNote() -> Bool {
+            let all = (fm.enumerator(atPath: unsaved.path)?.allObjects as? [String]) ?? []
+            for path in all where (path as NSString).lastPathComponent == name {
+                guard (try? Data(contentsOf: unsaved.appending(path: path))) == bytes else { continue }
+                // The note beside it in the same rescue, its link to the picture in it.
+                let rescue = String(path.split(separator: "/").first ?? "")
+                let notes = all.filter { $0.hasPrefix(rescue + "/") && $0.hasSuffix(".md") }
+                if notes.contains(where: { (text(unsaved.appending(path: $0)) ?? "").contains(name) }) { return true }
+            }
+            return false
+        }
+        func inJournal() -> Bool {
+            let parent = NoteJournal.folder.deletingLastPathComponent()
+            let folders = [NoteJournal.folder] + NoteShelf.journalFolders((try? fm.contentsOfDirectory(atPath: parent.path)) ?? []).map { parent.appending(path: $0) }
+            return folders.contains { dir in
+                ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).contains { file in
+                    NoteJournal.read(dir.appending(path: file))?.pictures.contains { $0.name == name && $0.data == bytes } == true
+                }
+            }
+        }
+        let landed = root.appending(path: NoteShelf.pictureFolder(id: "PX-SWITCH")).appending(path: name)
+        expect(rescuedWithNote() || inJournal(), "after the switch back and an edit, the picture's bytes survive (Unsaved notes with the note, or the journal)")
+        // Writable again: what the journal still holds lands at the next launch's recovery; a rescue already holds it.
+        try? fm.removeItem(at: blocker)
+        if !rescuedWithNote() {
+            let leftovers = NoteJournal.queue.sync { NoteJournal.leftovers() }
+            for holding in leftovers { NoteJournal.recover(holding, root: root) }
+        }
+        until = Date().addingTimeInterval(4)
+        while !(rescuedWithNote() || (try? Data(contentsOf: landed)) == bytes) && Date() < until { settle(0.1) }
+        expect(rescuedWithNote() || (try? Data(contentsOf: landed)) == bytes,
+               "the picture's bytes land once writable, or the note is in Unsaved notes with its picture")
+        try? fm.removeItem(at: folder)
         try? fm.removeItem(at: rootB)
     }
 

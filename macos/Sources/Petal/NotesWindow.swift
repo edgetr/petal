@@ -179,17 +179,53 @@ final class NotesModel {
     // MARK: Notebooks
 
     func newNotebook() {
-        guard let name = Self.askWords("New notebook", "What's it for? Its name:", value: "") else { return }
-        let colors = ["#a550a7", "#f74f9e", "#f7821b", "#ffc600", "#62ba46", "#8c8c8c", "#007aff"]
-        let made = store.ensureNotebook(name, color: colors[store.notebooks.count % colors.count])
-        shelf = .notebook(made)
+        words(about: nil, "New notebook", "What's it for? Its name:", value: "") { name, _ in
+            let colors = ["#a550a7", "#f74f9e", "#f7821b", "#ffc600", "#62ba46", "#8c8c8c", "#007aff"]
+            let made = self.store.ensureNotebook(name, color: colors[self.store.notebooks.count % colors.count])
+            self.shelf = .notebook(made)
+        }
+    }
+
+    /// What a dialog was opened about: the notes' folder's session it was opened in, and the notebook (its binding
+    /// then, and its name now) when it's about one.
+    struct Asked {
+        let session: RootSession
+        let binding: NotebookBinding?
+        let notebook: String
+    }
+
+    /// The one way the window asks the person anything (every dialog, alert or sheet): the folder's session and the
+    /// notebook's binding are captured before it opens, and its answer is applied only while both still hold (the
+    /// same folder in use, and the binding still finding that notebook, by its name now); else nothing is done, and
+    /// the person is told. A notebook not read yet asks nothing.
+    func dialog<Answer>(about notebook: String?, _ show: () -> Answer?, then apply: (Answer, Asked) -> Void) {
+        let session = store.session
+        let binding = notebook.flatMap { store.binding($0) }
+        if let notebook, binding == nil { return desk.tell("\(notebook) isn't read yet. Try again in a moment.") }
+        guard let answer = show() else { return }
+        guard store.current(session) else { return desk.tell("The notes folder changed meanwhile, so nothing was done.") }
+        guard let binding, let notebook else { return apply(answer, Asked(session: session, binding: nil, notebook: "")) }
+        guard case .found(let now) = store.resolve(binding) else {
+            return desk.tell("\(notebook) changed meanwhile (it isn't the same notebook now), so nothing was done.")
+        }
+        apply(answer, Asked(session: session, binding: binding, notebook: now))
+    }
+
+    /// A few words asked for, through `dialog`.
+    func words(about notebook: String?, _ title: String, _ message: String, value: String, then apply: (String, Asked) -> Void) {
+        dialog(about: notebook, { Self.askWords(title, message, value: value) }, then: apply)
     }
 
     func rename(_ book: Notebook) {
         // Inbox is where notes go first, and Petal makes it again when it's gone: it keeps its name.
         guard !NoteLibrary.same(book.name, NoteShelf.inbox) else { return desk.tell("Inbox keeps its name: it's where notes go first.") }
-        let captured = capture(book.name)
-        guard let name = Self.askWords("Rename \(book.name)", "Its new name:", value: book.name), name != book.name else { return }
+        words(about: book.name, "Rename \(book.name)", "Its new name:", value: book.name) { name, asked in
+            guard name != book.name, let binding = asked.binding else { return }
+            self.renameAsked(book, to: name, as: (asked.session, binding))
+        }
+    }
+
+    private func renameAsked(_ book: Notebook, to name: String, as captured: (session: RootSession, binding: NotebookBinding)) {
         // What's typed in its notes is saved first, and the rename waits for it (and anything else being written).
         for paper in store.notes where NoteLibrary.same(paper.notebook, book.name) { desk.editors[paper.key]?.flush() }
         let wasDefault = NoteLibrary.same(desk.defaultNotebook, book.name)
@@ -217,10 +253,6 @@ final class NotesModel {
         settle(notebook, captured.binding, captured.session, tries: 25, then: then)
     }
 
-    /// The notebook as it is now, before anything is asked or waited for.
-    func capture(_ notebook: String) -> (session: RootSession, binding: NotebookBinding)? {
-        store.binding(notebook).map { (store.session, $0) }
-    }
 
     private func settle(_ notebook: String, _ binding: NotebookBinding, _ captured: RootSession, tries: Int,
                         then: @escaping @MainActor (String, NotebookBinding) -> Void) {
@@ -266,14 +298,13 @@ final class NotesModel {
                              : "\(book.name) is your default notebook: make another the default first.")
         }
         // The notebook as the person sees it now: what's confirmed is this one, in this notes folder.
-        let captured = capture(book.name)
-        NSApp.activate()
-        let alert = NSAlert()
-        alert.messageText = "Move “\(book.name)” to the Trash?"
-        alert.informativeText = book.count == 0 ? "It has no notes." : "Its \(book.count == 1 ? "note goes" : "\(book.count) notes go") with it. You can put it back from the Trash."
-        alert.addButton(withTitle: "Move to Trash")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        dialog(about: book.name, { Self.confirmTrash(book) }) { _, asked in
+            guard let binding = asked.binding else { return }
+            self.trashAsked(book, as: (asked.session, binding))
+        }
+    }
+
+    private func trashAsked(_ book: Notebook, as captured: (session: RootSession, binding: NotebookBinding)) {
         for paper in store.notes where NoteLibrary.same(paper.notebook, book.name) {
             desk.editors[paper.key]?.flush()
             desk.hide(paper.key)
@@ -293,7 +324,19 @@ final class NotesModel {
         return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
     }
 
-    static func askWords(_ title: String, _ message: String, value: String) -> String? {
+    /// Only through `dialog`: never opened on its own. True when the person said Move to Trash.
+    private static func confirmTrash(_ book: Notebook) -> Bool? {
+        NSApp.activate()
+        let alert = NSAlert()
+        alert.messageText = "Move “\(book.name)” to the Trash?"
+        alert.informativeText = book.count == 0 ? "It has no notes." : "Its \(book.count == 1 ? "note goes" : "\(book.count) notes go") with it. You can put it back from the Trash."
+        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn ? true : nil
+    }
+
+    /// Only through `words` (and so `dialog`): never opened on its own.
+    private static func askWords(_ title: String, _ message: String, value: String) -> String? {
         NSApp.activate()
         let alert = NSAlert()
         alert.messageText = title
@@ -977,13 +1020,15 @@ struct CanvasBoard: View {
 
     @ViewBuilder private func boardMenu() -> some View {
         Button("Add an area") {
-            guard let label = NotesModel.askWords("A new area", "What does it hold?", value: "") else { return }
-            let x = 60 + Double(layout.areas.count % 3) * 40, y = 50 + Double(layout.areas.count % 3) * 40
-            model.edit(book.name, .area(.init(id: UUID().uuidString, label: label, x: x, y: y, w: 520, h: 330)))
+            model.words(about: book.name, "A new area", "What does it hold?", value: "") { label, asked in
+                let x = 60 + Double(layout.areas.count % 3) * 40, y = 50 + Double(layout.areas.count % 3) * 40
+                model.edit(asked.notebook, .area(.init(id: UUID().uuidString, label: label, x: x, y: y, w: 520, h: 330)))
+            }
         }
         Button("Write on the canvas") {
-            guard let text = NotesModel.askWords("Write on the canvas", "Your words:", value: "") else { return }
-            model.edit(book.name, .words(.init(id: UUID().uuidString, text: text, x: 80, y: 40 + Double(layout.texts.count) * 30)))
+            model.words(about: book.name, "Write on the canvas", "Your words:", value: "") { text, asked in
+                model.edit(asked.notebook, .words(.init(id: UUID().uuidString, text: text, x: 80, y: 40 + Double(layout.texts.count) * 30)))
+            }
         }
     }
 }
@@ -1115,10 +1160,11 @@ struct CanvasArea: View {
                     })
                 .contextMenu {
                     Button("Rename…") {
-                        guard let label = NotesModel.askWords("Rename the area", "What does it hold?", value: area.label) else { return }
-                        var renamed = area
-                        renamed.label = label
-                        model.edit(book.name, .area(renamed))
+                        model.words(about: book.name, "Rename the area", "What does it hold?", value: area.label) { label, asked in
+                            var renamed = area
+                            renamed.label = label
+                            model.edit(asked.notebook, .area(renamed))
+                        }
                     }
                     Button("Remove the area") { model.edit(book.name, .removeArea(area.id)) }
                 }
@@ -1162,10 +1208,11 @@ struct CanvasWords: View {
                 })
             .contextMenu {
                 Button("Edit…") {
-                    guard let text = NotesModel.askWords("Edit the words", "Your words:", value: words.text) else { return }
-                    var edited = words
-                    edited.text = text
-                    model.edit(book.name, .words(edited))
+                    model.words(about: book.name, "Edit the words", "Your words:", value: words.text) { text, asked in
+                        var edited = words
+                        edited.text = text
+                        model.edit(asked.notebook, .words(edited))
+                    }
                 }
                 Button("Remove") { model.edit(book.name, .removeWords(words.id)) }
             }

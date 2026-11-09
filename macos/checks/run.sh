@@ -65,6 +65,17 @@ swiftc -parse-as-library -O -o "$out/ipc" Sources/Petal/IPC.swift Sources/Petal/
 # thread, with the main thread blocked (IPC.Pending, no socket).
 swiftc -parse-as-library -O -o "$out/cancel" Sources/Petal/ActingCancel.swift Sources/Petal/IPC.swift Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/CancelCheck.swift
 "$out/cancel"
+# The Petal Notes window opens a dialog only through NotesModel.dialog, which captures the notes folder's session and
+# the notebook's binding first and checks both before applying the answer: every alert, sheet or panel in it is made
+# inside one of the private functions only `dialog` calls (askWords, confirmTrash).
+perl -ne '
+    $func = $1 if /\bfunc (\w+)/;
+    if (/runModal|NSAlert\(|\.sheet\(|NSOpenPanel|NSSavePanel|beginSheet|\.alert\(|confirmationDialog|\.fileImporter\(/ && $func !~ /^(askWords|confirmTrash)$/) {
+        print "$ARGV:$.: a dialog outside NotesModel.dialog (in $func)\n"; $bad++
+    }
+    $private++ if /private static func (askWords|confirmTrash)\(/;
+    END { if ($bad || $private != 2) { print "notes window dialogs: not all through dialog\n"; exit 1 } print "notes window dialogs: all through dialog\n" }
+' Sources/Petal/NotesWindow.swift
 # Every card Petal AI's tools put up says whose it is (Assist.ask's `owner`), so a chat's Stop or an agent hanging up
 # answers it Don't: the parameter has no default, and every call to it (a string first: the card's kind) names it.
 perl -0777 -ne '

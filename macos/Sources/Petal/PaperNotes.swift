@@ -236,6 +236,10 @@ final class RootSession {
     var importTrouble: [String: [Int: [NoteJournal.Import]]] = [:]
     @ObservationIgnored var renewing: [String: String] = [:]
 
+    /// Its folder's journal entries being put back (a switch back to it): nothing is read yet, and snapshots wait.
+    @ObservationIgnored var recovering = false
+    @ObservationIgnored var heldSnapshots: [String: NoteJournal.Entry] = [:]
+
     init(root: URL) { self.root = root }
 
     /// Ends it: nothing it started acts again; names it reserved are free; anyone waiting for an id it was writing is
@@ -398,7 +402,11 @@ final class NoteStore {
 
     /// Another notes folder: the old one's work is drained off the main thread (what can't be written goes to
     /// "Unsaved notes"), then its notes go and the new folder's come. Nothing new starts in the old folder meanwhile.
-    func switchRoot(to newRoot: URL, then done: @escaping @MainActor () -> Void = {}) {
+    /// `recover`: the new folder's session first puts back this Mac's journal entries for that folder's notes, as a
+    /// launch does (NoteJournal.leftovers(forRoot:), then `recover`: journalRecovery, restorePictures, pastes read
+    /// in), before it reads the folder or takes a fresh snapshot. The launch's own switch passes false: the launch
+    /// recovers the whole journal itself.
+    func switchRoot(to newRoot: URL, recover: Bool = true, then done: @escaping @MainActor () -> Void = {}) {
         guard newRoot != root, !switching else { return }
         switching = true
         stopWatching()
@@ -417,11 +425,33 @@ final class NoteStore {
             NoteDisk.claimed = []
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    self.session = RootSession(root: newRoot)
+                    let fresh = RootSession(root: newRoot)
+                    self.session = fresh
                     self.switching = false
-                    self.start()
-                    self.adoptJournal()
-                    done()
+                    guard recover else {
+                        self.start()
+                        self.adoptJournal()
+                        return done()
+                    }
+                    // Phase 1's recovery for this folder's notes first: the entries move aside on the journal's queue
+                    // (after everything the drain told it), so no fresh snapshot can replace one, and are put back on
+                    // the notes' queue; only then is the folder read and a snapshot taken.
+                    fresh.recovering = true
+                    NoteJournal.queue.async {
+                        let holding = NoteJournal.leftovers(forRoot: newRoot)
+                        Self.io.async {
+                            if let holding { NoteJournal.recover(holding, root: newRoot) }
+                            self.onMain(fresh) {
+                                fresh.recovering = false
+                                let held = Array(fresh.heldSnapshots.values)
+                                fresh.heldSnapshots = [:]
+                                NoteJournal.queue.async { for entry in held { NoteJournal.snapshot(entry) } }
+                                self.start()
+                                self.adoptJournal()
+                                done()
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -456,7 +486,7 @@ final class NoteStore {
 
     /// Reads the whole folder again, off the main thread; a newer read wins, and changes made here meanwhile stay.
     func reload() {
-        guard !switching else { return }
+        guard !switching, !session.recovering else { return }
         generation += 1
         let mine = generation
         clock += 1
@@ -1438,6 +1468,8 @@ final class NoteStore {
             // Nothing waiting to be written: this text is the file's already.
             if firstBase == nil, text == paper.revision { entry.landed = true }
         }
+        // While the session's recovery runs, held (the newest per note) and journaled once it's done.
+        if self.session.recovering { self.session.heldSnapshots[NoteJournal.file(entry.noteID, aside: entry.aside).lastPathComponent] = entry; return }
         NoteJournal.queue.async { NoteJournal.snapshot(entry) }
     }
 
