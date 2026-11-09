@@ -208,10 +208,12 @@ enum ViewerCheck {
             failed = !sixteenth(url, app: app) || failed
             failed = !seventeenth(url, app: app) || failed
             failed = !eighteenth(url, app: app) || failed
+            failed = !nineteenth(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
             failed = !cleanup(url) || failed
+            failed = !closingMidExport(url, app: PetalApp.shared) || failed
         }
         failed = !remote() || failed
         try? FileManager.default.removeItem(at: trashed)
@@ -1158,6 +1160,92 @@ enum ViewerCheck {
                "the superseded pass stopped, the newest drew every page (\(passes.map { "load \($0.key): \($0.value)" }))")
         app.viewers.closed(big)
         print("eighteenth: " + (ok ? "one load at a time: ten changes during a slow load make one follow-up; a superseded thumbnail pass stops" : "failed"))
+        return ok
+    }
+
+    /// Names seen from other threads, in order.
+    final class Seen: @unchecked Sendable {
+        private let lock = NSLock()
+        private var names: [String] = []
+        func add(_ name: String) { lock.withLock { names.append(name) } }
+        var all: [String] { lock.withLock { names } }
+    }
+
+    /// Round 19: a set of versions reads its copies one load at a time, as the document does: saves of a slow copy
+    /// while it's read make at most one follow-up, which shows the copy as it ended up, and an unchanged copy isn't
+    /// read again.
+    private static func nineteenth(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("nineteenth: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let deck = URL(fileURLWithPath: ViewerPath.canonical(home.path) ?? home.path).appending(path: "Deck.pdf")
+        try? pages(1, from: source)?.write(to: deck)
+        let model = app.viewers.show(deck, front: false)
+        wait(20) { !model.loading }
+        var made: ViewerVersionSet?
+        model.makeVersions(["One", "Two"], asker: "check") { if case .success(let set) = $0 { made = set } }
+        wait(20) { made != nil }
+        guard let set = made else { expect(false, "versions made (set up)"); return false }
+        wait(10) { set.versions.allSatisfy { model.versionPageCount($0.id) == 1 } }
+        let one = set.versions[0]
+        let read = Seen()
+        let slow = HangUp()
+        ViewerModel.versionRead = { name in
+            read.add(name)
+            if !slow.gone { slow.gone = true; Thread.sleep(forTimeInterval: 1.0) }
+        }
+        defer { ViewerModel.versionRead = nil }
+        let before = set.loads.started
+        for save in 2...11 {
+            try? pages(save, from: source)?.write(to: one.url)
+            model.refreshVersions(set)
+        }
+        wait(20) { model.versionPageCount(one.id) == 11 }
+        wait(1.5) { false }
+        expect(set.loads.started - before <= 2, "ten saves of a slow copy: at most one follow-up (\(set.loads.started - before) loads)")
+        expect(model.versionPageCount(one.id) == 11, "the follow-up shows the copy as it ended up")
+        expect(!read.all.contains(set.versions[1].url.lastPathComponent), "the copy that didn't change isn't read again (\(read.all))")
+        app.viewers.closed(model)
+        print("nineteenth: " + (ok ? "a set's copies read one load at a time: saves of a slow copy make one follow-up; an unchanged copy isn't read again" : "failed"))
+        return ok
+    }
+
+    /// Round 19: closing a viewer while a version's copy is in Quick Look stops its set at the next step: the
+    /// other copy isn't exported and nothing goes on to WebKit.
+    private static func closingMidExport(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("closing: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let deck = folder.appending(path: "Deck.\(source.pathExtension)")
+        try? FileManager.default.copyItem(at: source, to: deck)
+        let model = ViewerModel(url: URL(fileURLWithPath: ViewerPath.canonical(deck.path) ?? deck.path), kind: ViewerKind.of(deck.path) ?? .quickLook(.slide))
+        model.load()
+        wait(60) { !model.loading }
+        let exported = Seen()
+        // As the first copy goes to Quick Look, the viewer closes (on the main thread, while the export runs).
+        ViewerModel.versionExport = { name in
+            exported.add(name)
+            if exported.all.count == 1 {
+                DispatchQueue.main.async { MainActor.assumeIsolated { model.close() } }
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+        }
+        defer { ViewerModel.versionExport = nil }
+        var made: ViewerVersionSet?
+        model.makeVersions(["One", "Two"], asker: "check") { if case .success(let set) = $0 { made = set } }
+        wait(20) { made != nil || !exported.all.isEmpty }
+        wait(60) { !exported.all.isEmpty }
+        wait(15) { false }
+        expect(exported.all.count == 1, "closed mid-export: the next copy never goes to Quick Look (\(exported.all.count) exports)")
+        expect(made.map { set in set.versions.allSatisfy { $0.thumb == nil } } ?? true, "and nothing of it drawn")
+        print("closing: " + (ok ? "a set closed mid-export stops at its next step" : "failed"))
         return ok
     }
 

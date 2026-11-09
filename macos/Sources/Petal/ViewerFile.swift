@@ -199,6 +199,16 @@ final class ViewerVersionStore: @unchecked Sendable {
         return (try? handle.readToEnd()) ?? Data()
     }
 
+    /// A copy's state through the pinned folder (its inode, size and time; never followed through a link): nil when
+    /// the folder isn't the pinned one or the copy isn't a regular file there.
+    func state(_ pin: Pin, file name: String) -> Made? {
+        guard !name.contains("/"), let dir = openSet(pin) else { return nil }
+        defer { close(dir) }
+        var info = stat()
+        guard fstatat(dir, name, &info, AT_SYMLINK_NOFOLLOW) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+        return Made(name: name, info)
+    }
+
     /// What Petal wrote into a set, as it left it: each copy's name and, read with fstat right after writing, its
     /// inode, size and modification time (nanoseconds). Kept in the set's folder (`manifest`). A file still exactly
     /// so is Petal's own, untouched, and may be removed; anything else there (a copy someone edited or replaced, a

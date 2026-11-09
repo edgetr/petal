@@ -225,6 +225,10 @@ final class ViewerVersionSet {
     var closed = false
     /// Its folder, pinned when it was made (ViewerVersionStore): every copy is read through it, never by its path.
     var pin: ViewerVersionStore.Pin?
+    /// Its copies read one load at a time (the document's own lifecycle); closed when the set is retired.
+    @ObservationIgnored let loads = ViewerLoads()
+    /// Each copy as it was when last read (by version id): unchanged, it isn't read again.
+    @ObservationIgnored var seen: [String: ViewerVersionStore.Made] = [:]
 
     init(id: String, asker: String, folder: URL, versions: [ViewerVersion]) {
         self.id = id
@@ -451,10 +455,6 @@ final class ViewerModel: Identifiable {
     /// file is kept from the load before as anchor state: no identity, bookmark or selection until this load's own
     /// checked read is in. The pages already shown stay on screen meanwhile.
     func load() {
-        loads += 1
-        // The newest request, as work off the main thread sees it: a read, an export, a retry or a thumbnail pass
-        // for an older one stops at its next step.
-        generation.value = loads
         // Watched before anything is read: the read starts only once the watch is armed (ViewerWatch.whenArmed),
         // so a change while it loads always starts a reload.
         if watcher == nil { watch() }
@@ -464,35 +464,30 @@ final class ViewerModel: Identifiable {
         fileID = nil
         bookmark = nil
         unselected()
-        // One read at a time per viewer (Phase 1's ScanGate): changes while one runs make exactly one follow-up,
-        // which reads the file as it is then.
-        guard loadGate.request() else { return }
-        read()
+        // One read at a time per viewer (ViewerLoads, Phase 1's ScanGate): changes while one runs make exactly one
+        // follow-up, which reads the file as it is then; an older one's work stops at its next step.
+        loads = documentLoads.request { [weak self] ticket, current, finished in
+            self?.read(ticket, current: current, finished: finished)
+        }
     }
 
-    @ObservationIgnored private var loadGate = NoteShelf.ScanGate()
+    /// The document's loads, one at a time (the same lifecycle each set of versions has).
+    @ObservationIgnored private let documentLoads = ViewerLoads()
     /// Petal --viewer-check only: told as each thumbnail is drawn, with the load it's for.
     nonisolated(unsafe) static var thumbnailDrawn: ((Int) -> Void)?
-    /// `loads` as work off the main thread reads it.
-    @ObservationIgnored private let generation = ViewerGeneration()
     /// Reads started (Petal --viewer-check: changes during a slow load make at most one follow-up).
-    @ObservationIgnored private(set) var readsStarted = 0
+    var readsStarted: Int { documentLoads.started }
 
-    private func read() {
-        readsStarted += 1
-        let ticket = loads
-        let generation = generation
-        let current: @Sendable () -> Bool = { generation.value == ticket }
+    private func read(_ ticket: Int, current: @escaping @Sendable () -> Bool, finished: @escaping @MainActor () -> Void) {
         let url = url
         let kind = kind
         let finish: @Sendable (ViewerLoader.Read?) -> Void = { read in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    let again = self.loadGate.finished()
                     if !self.closedNow, ticket == self.loads {
                         if let read { self.loaded(read, ticket: ticket) } else { self.cantShow() }
                     }
-                    if again, !self.closedNow { self.read() }
+                    finished()
                 }
             }
         }
@@ -553,7 +548,7 @@ final class ViewerModel: Identifiable {
         case .web(let preview):
             // Quick Look's HTML preview made into pages: WebKit lays it out (out of process), the pages are cut
             // off the main thread.
-            ViewerWeb.pages(preview) { data in
+            ViewerWeb.pages(preview, current: documentLoads.token.current(ticket)) { data in
                 guard ticket == self.loads, !self.closedNow else { return }
                 if let data { self.show(data, ticket: ticket) } else { self.goLive() }
             }
@@ -593,7 +588,8 @@ final class ViewerModel: Identifiable {
         resolvedFor = nil
         resolvePassages()
         // The PDF view is bound to the new document by ViewerPDF (rebinding), which goes to `current` itself.
-        versions.map { refreshVersions($0) }
+        // The copies are their own files: only their pictures of the page shown are drawn again.
+        versions.map { drawVersions($0) }
     }
 
     private func goLive() {
@@ -610,13 +606,13 @@ final class ViewerModel: Identifiable {
     /// The pages' thumbnails from a copy of the document of their own, off the main thread, a few at a time.
     private func renderThumbs(_ data: Data) {
         let ticket = loads
-        let generation = generation
+        let current = documentLoads.token.current(ticket)
         Viewers.queue.async {
             guard let document = PDFDocument(data: data) else { return }
             var batch: [Int: NSImage] = [:]
             for index in 0..<min(document.pageCount, 400) {
-                // A newer load since: this pass stops between pages.
-                guard generation.value == ticket else { return }
+                // A newer load since, or the viewer closed: this pass stops between pages.
+                guard current() else { return }
                 guard let page = document.page(at: index) else { continue }
                 ViewerModel.thumbnailDrawn?(ticket)
                 batch[index] = page.thumbnail(of: CGSize(width: 300, height: 170), for: .cropBox)
@@ -762,6 +758,8 @@ final class ViewerModel: Identifiable {
         defer { NotePictures.shared.visibilityChanged() }
         closedNow = true
         closing.on = true
+        // Whatever the document's loads still have going stops at its next step.
+        documentLoads.close()
         // Whoever waits for a selection or the file's identity goes on, and finds the viewer closed.
         settleSelection()
         identified()
@@ -1252,6 +1250,8 @@ final class ViewerModel: Identifiable {
     /// Returns whether a picked copy was kept.
     @discardableResult
     func retire(_ set: ViewerVersionSet, keepPick: Bool) -> Bool {
+        // Whatever reading of its copies is under way stops at its next step, and none starts.
+        set.loads.close()
         set.closed = true
         set.settle(nil)
         let picked = keepPick ? set.picked.flatMap { id in set.versions.first { $0.id == id } } : nil
@@ -1293,60 +1293,98 @@ final class ViewerModel: Identifiable {
     /// stand down; each picture drawn is fenced by its version's latest drawing (`turns`), which always uses the
     /// newest pages, and by the page shown.
     @ObservationIgnored private var versionPages: [String: Data] = [:]
-    @ObservationIgnored private var versionReads = 0
 
     /// Each copy read again (through the same loader: Quick Look for decks), off the main thread, then its picture
     /// of the page shown drawn.
     func refreshVersions(_ set: ViewerVersionSet) {
-        versionReads += 1
-        let turn = versionReads
+        // One read of the copies at a time per set (ViewerLoads, the document's own lifecycle): saves while one
+        // runs make one follow-up; a set closed or retired stops at its next step.
+        set.loads.request { [weak self, weak set] _, current, finished in
+            guard let self, let set else { return finished() }
+            self.readVersions(set, current: current, finished: finished)
+        }
+    }
+
+    /// Off the main thread, each copy whose file changed since it was last read (its inode, size and time through
+    /// the set's pinned folder): its bytes read, then its pages (a PDF's as they are; anything else through Quick
+    /// Look from a copy of those bytes, never the path in the set, then WebKit), `current` checked before each read,
+    /// each export and the WebKit conversion. `finished` once all of it is in, or it stopped.
+    private func readVersions(_ set: ViewerVersionSet, current: @escaping @Sendable () -> Bool, finished: @escaping @MainActor () -> Void) {
         let kind = kind
         let pin = set.pin
-        for version in set.versions {
-            Viewers.queue.async {
+        let versions = set.versions.map { (id: $0.id, name: $0.url.lastPathComponent) }
+        let seen = set.seen
+        Viewers.queue.async {
+            var results: [(id: String, made: ViewerVersionStore.Made?, pages: ViewerLoader.Pages?)] = []
+            for version in versions {
+                guard current() else { break }
                 // Every read through the set's pinned folder (ViewerVersionStore): the folder still the one made, the
-                // copy a regular file there, never a link; else nothing of it is read.
-                guard let pin, let store = ViewerVersionStore.shared, let bytes = store.read(pin, file: version.url.lastPathComponent) else {
-                    return DispatchQueue.main.async {
-                        MainActor.assumeIsolated {
-                            guard turn == self.versionReads, set === self.versions,
-                                  let index = set.versions.firstIndex(where: { $0.id == version.id }) else { return }
-                            self.versionPages[version.id] = nil
+                // copy a regular file there, never a link; else nothing of it is read ("can't be shown").
+                guard let pin, let store = ViewerVersionStore.shared, let made = store.state(pin, file: version.name) else {
+                    results.append((version.id, nil, nil))
+                    continue
+                }
+                // Unchanged since it was last read: nothing to do.
+                if seen[version.id] == made { continue }
+                ViewerModel.versionRead?(version.name)
+                guard let bytes = store.read(pin, file: version.name) else {
+                    results.append((version.id, nil, nil))
+                    continue
+                }
+                if kind == .pdf {
+                    results.append((version.id, made, PDFDocument(data: bytes) != nil ? .pdf(bytes) : .failed("Petal can't read this PDF.")))
+                } else {
+                    guard current() else { break }
+                    ViewerModel.versionExport?(version.name)
+                    let holder = ViewerExport()
+                    let own = holder.folder.appending(path: version.name)
+                    let pages = (try? bytes.write(to: own)) != nil ? ViewerQuickLook.export(own, unit: kind.unit) : .failed("")
+                    withExtendedLifetime(holder) {}
+                    results.append((version.id, made, pages))
+                }
+            }
+            let read = results
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard current(), set === self.versions else { return finished() }
+                    var waiting = 0
+                    let done = { waiting -= 1; if waiting == 0 { finished() } }
+                    let keep: @MainActor (String, Data?) -> Void = { id, data in
+                        guard current(), set === self.versions else { return }
+                        self.versionPages[id] = data
+                        self.drawVersion(set, id)
+                    }
+                    for result in read {
+                        guard let index = set.versions.firstIndex(where: { $0.id == result.id }) else { continue }
+                        guard let made = result.made, let pages = result.pages else {
+                            set.seen[result.id] = nil
+                            self.versionPages[result.id] = nil
                             set.versions[index].thumb = nil
                             set.versions[index].refused = true
+                            continue
+                        }
+                        set.seen[result.id] = made
+                        set.versions[index].refused = false
+                        switch pages {
+                        case .pdf(let data): keep(result.id, data)
+                        case .web(let preview):
+                            waiting += 1
+                            ViewerWeb.pages(preview, current: current) { data in
+                                keep(result.id, data)
+                                done()
+                            }
+                        default: keep(result.id, nil)
                         }
                     }
-                }
-                // Its pages from those bytes: a PDF's as they are; anything else through Quick Look, from a copy of those
-                // bytes in an export folder of Petal's own (never the path in the set).
-                let pages: ViewerLoader.Pages
-                if kind == .pdf {
-                    pages = PDFDocument(data: bytes) != nil ? .pdf(bytes) : .failed("Petal can't read this PDF.")
-                } else {
-                    let holder = ViewerExport()
-                    let own = holder.folder.appending(path: version.url.lastPathComponent)
-                    pages = (try? bytes.write(to: own)) != nil ? ViewerQuickLook.export(own, unit: kind.unit) : .failed("")
-                    withExtendedLifetime(holder) {}
-                }
-                let read = ViewerLoader.Read(pages: pages, stamp: nil, appName: "", appURL: nil)
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        if let index = set.versions.firstIndex(where: { $0.id == version.id }), set === self.versions { set.versions[index].refused = false }
-                        let keep: @MainActor (Data?) -> Void = { data in
-                            guard turn == self.versionReads, set === self.versions else { return }
-                            self.versionPages[version.id] = data
-                            self.drawVersion(set, version.id)
-                        }
-                        switch read.pages {
-                        case .pdf(let data): keep(data)
-                        case .web(let preview): ViewerWeb.pages(preview) { keep($0) }
-                        default: keep(nil)
-                        }
-                    }
+                    if waiting == 0 { finished() }
                 }
             }
         }
     }
+
+    /// Petal --viewer-check only: told as a version's copy is read, and as it goes to Quick Look (its name).
+    nonisolated(unsafe) static var versionRead: ((String) -> Void)?
+    nonisolated(unsafe) static var versionExport: ((String) -> Void)?
 
     /// Every copy's picture of the page shown now (another page shown: drawn again from what was read).
     private func drawVersions(_ set: ViewerVersionSet) {
@@ -1396,13 +1434,58 @@ enum ViewerCopyError: Error, CustomStringConvertible {
 }
 
 /// A flag work on another thread reads (the viewer closed).
-/// A number work on another thread reads (the newest load asked for).
-final class ViewerGeneration: @unchecked Sendable {
+/// The newest load asked for and whether its owner closed, as work on another thread reads them.
+final class ViewerLoadToken: @unchecked Sendable {
     private let lock = NSLock()
-    private var stored = 0
-    var value: Int {
-        get { lock.withLock { stored } }
-        set { lock.withLock { stored = newValue } }
+    private var newest = 0
+    private var shut = false
+
+    var generation: Int { lock.withLock { newest } }
+    var closed: Bool { lock.withLock { shut } }
+    func bump() -> Int { lock.withLock { newest += 1; return newest } }
+    func close() { lock.withLock { shut = true } }
+
+    /// Whether load `generation` is still wanted: the newest asked for, and its owner open. Checked by work off
+    /// the main thread before each step (a read, a retry, an export, WebKit's conversion, a thumbnail).
+    func current(_ generation: Int) -> @Sendable () -> Bool { { [self] in lock.withLock { !shut && newest == generation } } }
+}
+
+/// One load at a time for one thing the viewer shows (the document, a set of versions; the same lifecycle for
+/// both): each request is a generation; one asked for while another runs is coalesced into exactly one follow-up
+/// (Phase 1's `NoteShelf.ScanGate`), which runs once that load calls `finished`, with the newest request's work.
+/// Closing marks the token closed, so whatever's under way stops at its next step and nothing more starts.
+@MainActor
+final class ViewerLoads {
+    typealias Run = @MainActor (_ generation: Int, _ current: @escaping @Sendable () -> Bool, _ finished: @escaping @MainActor () -> Void) -> Void
+
+    let token = ViewerLoadToken()
+    private var gate = NoteShelf.ScanGate()
+    private var run: Run?
+    /// Loads started (not requests): Petal --viewer-check counts them.
+    private(set) var started = 0
+
+    /// A new request: its generation. `run` starts now, or as the one follow-up after the load under way.
+    @discardableResult
+    func request(_ run: @escaping Run) -> Int {
+        let generation = token.bump()
+        self.run = run
+        if gate.request() { start() }
+        return generation
+    }
+
+    func close() {
+        token.close()
+        run = nil
+    }
+
+    private func start() {
+        guard let run, !token.closed else { gate = NoteShelf.ScanGate(); return }
+        started += 1
+        let generation = token.generation
+        run(generation, token.current(generation)) { [weak self] in
+            guard let self else { return }
+            if self.gate.finished() { self.start() }
+        }
     }
 }
 
@@ -1614,12 +1697,17 @@ final class ViewerWeb: NSObject, WKNavigationDelegate {
     private let preview: Preview
     private var web: WKWebView?
     private let done: @MainActor (Data?) -> Void
+    /// Still wanted (its load the newest, its owner open): checked before it starts, after the page is laid out,
+    /// after it's drawn and before it's cut; not, it stops there with nothing.
+    private let current: @Sendable () -> Bool
     private var finished = false
     private static var running: Set<ViewerWeb> = []
 
     /// `localOnly` false only for the check that proves the rule list matters (Petal --viewer-check).
-    static func pages(_ preview: Preview, localOnly: Bool = true, done: @escaping @MainActor (Data?) -> Void) {
-        let job = ViewerWeb(preview, done: done)
+    static func pages(_ preview: Preview, localOnly: Bool = true, current: @escaping @Sendable () -> Bool = { true },
+                      done: @escaping @MainActor (Data?) -> Void) {
+        guard current() else { return done(nil) }
+        let job = ViewerWeb(preview, current: current, done: done)
         running.insert(job)
         guard localOnly else { return job.start(rules: nil) }
         rules { list in
@@ -1649,14 +1737,16 @@ final class ViewerWeb: NSObject, WKNavigationDelegate {
         }
     }
 
-    private init(_ preview: Preview, done: @escaping @MainActor (Data?) -> Void) {
+    private init(_ preview: Preview, current: @escaping @Sendable () -> Bool, done: @escaping @MainActor (Data?) -> Void) {
         self.preview = preview
+        self.current = current
         self.done = done
         super.init()
     }
 
     private func start(rules: WKContentRuleList?) {
         guard !finished else { return }
+        guard current() else { return finish(nil) }
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = false
@@ -1674,6 +1764,7 @@ final class ViewerWeb: NSObject, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard current() else { return finish(nil) }
         let measure = preview.slides
             // A slide with no background of its own is white, as in its app (not Quick Look's grey page).
             ? "Array.from(document.querySelectorAll('div.slide')).map(function(e){if(getComputedStyle(e).backgroundColor==='rgba(0, 0, 0, 0)'){e.style.backgroundColor='white';}var r=e.getBoundingClientRect();return [r.left+window.scrollX,r.top+window.scrollY,r.width,r.height];})"
@@ -1693,7 +1784,7 @@ final class ViewerWeb: NSObject, WKNavigationDelegate {
     static let tallest: CGFloat = 400_000
 
     private func measured(_ value: Any) {
-        guard let web else { return finish(nil) }
+        guard let web, current() else { return finish(nil) }
         var boxes: [CGRect] = []
         var size = CGSize(width: preview.width, height: preview.height)
         var bottoms: [CGFloat] = []
@@ -1723,12 +1814,13 @@ final class ViewerWeb: NSObject, WKNavigationDelegate {
         let pageHeight = preview.slides ? 0 : CGFloat(preview.width > 0 ? size.width * preview.height / preview.width : size.height)
         web.createPDF(configuration: configuration) { [weak self] result in
             guard let self else { return }
-            guard case .success(let whole) = result else { return self.finish(nil) }
+            guard case .success(let whole) = result, self.current() else { return self.finish(nil) }
             let slides = boxes
             let ends = bottoms
             let total = size
+            let current = self.current
             Viewers.queue.async {
-                let data = ViewerWeb.cut(whole, slides: slides, bottoms: ends, size: total, pageHeight: pageHeight)
+                let data = current() ? ViewerWeb.cut(whole, slides: slides, bottoms: ends, size: total, pageHeight: pageHeight) : nil
                 DispatchQueue.main.async { MainActor.assumeIsolated { self.finish(data) } }
             }
         }
