@@ -378,6 +378,20 @@ struct NoteLibraryCheck {
         expect(CanvasQueue.groupMove(["a", "file:n.md"], resolved: ["file:n.md": "N1"]) == ["a": "a", "file:n.md": "N1"], "an id-less note moves by the id it was given")
         expect(CanvasQueue.groupMove(["a", "file:n.md"], resolved: [:]) == nil && CanvasQueue.groupMove(["file:n.md"], resolved: ["file:n.md": "file:n.md"]) == nil,
                "one without an id: the whole group's move is refused")
+        expect(CanvasQueue.groupMove(["P1"], resolved: [:], pending: ["P1"]) == nil && CanvasQueue.groupMove(["P1"], resolved: ["P1": "P1"], pending: []) == ["P1": "P1"],
+               "an id still being written is waited for, and used once it lands")
+        // Gestures keep their own time through any wait: the later gesture wins, whichever lands first.
+        let firstGesture = NoteCanvas.Stamped(.move("n1", .init(x: 1, y: 1)), at: 10)
+        let laterGesture = NoteCanvas.Stamped(.move("n1", .init(x: 2, y: 2)), at: 20)
+        let landedLateFirst = NoteCanvas().applyingMerged([laterGesture, firstGesture])
+        expect(landedLateFirst.notes["n1"]?.x == 2, "a gesture that waited for an id lands after a later one: the later one still wins")
+        expect(NoteShelf.copyStem(original: NoteShelf.coverName, title: "Health") == "About this notebook" && NoteShelf.copyStem(original: "Trip.md", title: "Trip") == "Trip",
+               "a cover's copy is named for the cover; others from their title")
+        var strayCover = NoteFile(id: "S", body: "")
+        strayCover.cover = true
+        strayCover.setScalar("private", "true")
+        expect(NoteLibrary.strayPrivateCover(fileName: "Health.md", file: strayCover) && !NoteLibrary.strayPrivateCover(fileName: NoteShelf.coverName, file: strayCover),
+               "a private cover-flagged note without a cover's name is a warning sign")
         expect(NoteLibrary.coverUnknown(fileThere: true, fileRead: true, versionsUnread: true)
                && NoteLibrary.privateNotebook(covers: [publicCover], unread: NoteLibrary.coverUnknown(fileThere: true, fileRead: true, versionsUnread: true)),
                "a cover version not read: unknown, so Private, even when the file read says public")

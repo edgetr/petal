@@ -93,13 +93,14 @@ final class NotesModel {
     }
 
     /// One change to the canvas, made on its file as it is then (NoteStore.editCanvas); shown at once.
-    func edit(_ notebook: String, _ edit: NoteCanvas.Edit) {
+    /// `at`: when the person made it (kept through any wait for a note's id).
+    func edit(_ notebook: String, _ edit: NoteCanvas.Edit, at: Double = Date().timeIntervalSince1970) {
         // A notebook not here yet (its folder not read): nothing changes on screen that couldn't be kept.
         guard store.canvasEditable(notebook) else { return desk.tell("Waiting for \(notebook) to download: its canvas can be changed once it's here.") }
         if let current = canvas, NoteLibrary.same(current.notebook, notebook), let layout = current.layout {
-            canvas = (notebook, layout.applying(edit))
+            canvas = (notebook, layout.applyingMerged([NoteCanvas.Stamped(edit, at: at)]))
         }
-        store.editCanvas(notebook, edit) { [weak self] saved in
+        store.editCanvas(notebook, edit, at: at) { [weak self] saved in
             guard let self, let saved, let current = self.canvas, NoteLibrary.same(current.notebook, notebook) else { return }
             self.canvas = (notebook, saved)
         }
@@ -110,15 +111,17 @@ final class NotesModel {
     func moveGroup(_ notebook: String, area: NoteCanvas.Area, notes moves: [String: NoteCanvas.Spot]) {
         final class Waiting { var resolved: [String: String] = [:]; var left = 0 }
         let waiting = Waiting()
-        let idless = moves.keys.filter(NoteShelf.needsID)
+        let at = Date().timeIntervalSince1970   // the gesture's own time, kept through the wait
+        // Any id not landed in its file yet (none, being written, or its write failed) is waited for.
+        let idless = moves.keys.filter { !NoteShelf.lasting($0, pending: store.pendingIDs) }
         let finish = { [weak self] in
             guard let self else { return }
             for id in moves.keys { self.dragging[id] = nil }
-            guard let ids = CanvasQueue.groupMove(Array(moves.keys), resolved: waiting.resolved) else {
+            guard let ids = CanvasQueue.groupMove(Array(moves.keys), resolved: waiting.resolved, pending: self.store.pendingIDs) else {
                 return self.desk.tell("Petal couldn't give every note in that area an id of its own yet, so the area stayed where it was.")
             }
-            self.edit(notebook, .area(area))
-            for (old, spot) in moves { if let id = ids[old] { self.edit(notebook, .move(id, spot)) } }
+            self.edit(notebook, .area(area), at: at)
+            for (old, spot) in moves { if let id = ids[old] { self.edit(notebook, .move(id, spot), at: at) } }
         }
         guard !idless.isEmpty else { return finish() }
         waiting.left = idless.count
@@ -136,14 +139,16 @@ final class NotesModel {
     /// An arrow between two notes, by their own ids (each given one first when its file has none).
     func arrow(from: PaperNote, to: PaperNote) {
         let notebook = from.notebook
+        let at = Date().timeIntervalSince1970   // the gesture's own time, kept through the waits
         withID(from) { [weak self] a in
-            self?.withID(to) { b in self?.edit(notebook, .arrow(.init(id: UUID().uuidString, from: a, to: b))) }
+            self?.withID(to) { b in self?.edit(notebook, .arrow(.init(id: UUID().uuidString, from: a, to: b)), at: at) }
         }
     }
 
-    /// A note's own id: at once, or once it's written into a file that had none; never an id-less note's path.
+    /// A note's own id once it's in its file: at once when it is, else after `ensureID` (an id-less note given one, or
+    /// an id still being written, or whose write failed, waited for until it lands); never an id-less note's path.
     private func withID(_ paper: PaperNote, _ then: @escaping @MainActor (String) -> Void) {
-        guard NoteShelf.needsID(paper.noteID) else { return then(paper.noteID) }
+        guard !NoteShelf.lasting(paper.noteID, pending: store.pendingIDs) else { return then(paper.noteID) }
         store.ensureID(paper.key) { id in
             guard let id, !NoteShelf.needsID(id) else { return }
             then(id)
@@ -154,7 +159,8 @@ final class NotesModel {
     /// is kept by an id-less note's path).
     func move(_ paper: PaperNote, to spot: NoteCanvas.Spot) {
         let notebook = paper.notebook
-        withID(paper) { [weak self] id in self?.edit(notebook, .move(id, spot)) }
+        let at = Date().timeIntervalSince1970   // the gesture's own time: a later move always wins, whatever waited
+        withID(paper) { [weak self] id in self?.edit(notebook, .move(id, spot), at: at) }
     }
 
     // MARK: Notebooks

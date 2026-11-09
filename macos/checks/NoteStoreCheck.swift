@@ -127,6 +127,8 @@ struct NoteStoreCheck {
         coverRoots(top: root.deletingLastPathComponent())
         listingErrors(root: root)
         notebookUncertain(root: root)
+        coverConflictNames(root: root)
+        keepPromotes(root: root)
         rekeyKeepsSource(root: root)
         canvasByFolder(root: root)
         notebookFolders(root: root)
@@ -1361,9 +1363,15 @@ struct NoteStoreCheck {
         try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: other.path)
         var pretender = NoteFile(id: "PRETEND", body: "not a cover")
         pretender.cover = true
-        pretender.setScalar("private", "true")
         _ = NoteStore.create(pretender.serialized(), at: folder.appending(path: "Pretender.md"), root: root)
-        expect(NoteStore.read(root).notebooks.first { $0.name == "Uncertain" }?.isPrivate == false, "another note's `cover: true` and `private: true` count for nothing")
+        expect(NoteStore.read(root).notebooks.first { $0.name == "Uncertain" }?.isPrivate == false, "another note's `cover: true` counts for nothing")
+        // But a note saying `cover: true` and `private: true` without a cover's name is a cover that lost its name:
+        // unknown, so Private, until the person resolves it.
+        pretender.setScalar("private", "true")
+        try? Data(pretender.serialized().utf8).write(to: folder.appending(path: "Pretender.md"))
+        let warned = NoteStore.read(root).notebooks.first { $0.name == "Uncertain" }
+        expect(warned?.isPrivate == true && warned?.privacyUnknown == true, "a stray private cover makes the notebook unknown, so Private")
+        try? fm.removeItem(at: folder.appending(path: "Pretender.md"))
         try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: folder.path)
         expect(NoteStore.read(root).notebooks.first { $0.name == "Uncertain" }?.isPrivate == true, "a folder that can't be listed: unknown, so Private")
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
@@ -1407,6 +1415,66 @@ struct NoteStoreCheck {
         NoteJournal.rejournalCovers([], sources: [], holding: [held], in: journal)
         expect(!fm.fileExists(atPath: held.path), "the folder goes once every file in it was read and rewritten")
         try? fm.removeItem(at: journal)
+    }
+
+    /// A cover's copy kept beside it (a conflict, a recovery) keeps the cover's name, never its heading's.
+    static func coverConflictNames(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Named")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var cover = NoteFile(id: "COVER-NAMED", body: "# Health things\nPrivate stuff")
+        cover.cover = true
+        cover.setScalar("private", "true")
+        let coverURL = folder.appending(path: NoteShelf.coverName)
+        _ = NoteStore.create(cover.serialized(), at: coverURL, root: root)
+        let kept = NoteStore.keepBeside(cover.serialized(), original: coverURL, root: root)
+        guard case .keptBoth(let copy) = kept else { expect(false, "a cover's copy is kept beside it", "\(kept)"); return }
+        expect(copy.lastPathComponent == "About this notebook (conflicted copy).md" && NoteLibrary.isCoverName(copy.lastPathComponent),
+               "a cover's conflict copy keeps the cover's name", copy.lastPathComponent)
+        let again = NoteStore.keepBeside(cover.serialized(), original: coverURL, root: root)
+        if case .keptBoth(let second) = again { expect(second.lastPathComponent == "About this notebook (conflicted copy 2).md", "numbered when needed", second.lastPathComponent) }
+        let plain = folder.appending(path: "Trip.md")
+        _ = NoteStore.create("# Trip\nwords", at: plain, root: root)
+        if case .keptBoth(let other) = NoteStore.keepBeside("# Trip\nother words", original: plain, root: root) {
+            expect(other.lastPathComponent.hasPrefix("Trip"), "any other note's copy is named from its title", other.lastPathComponent)
+        }
+        try? fm.removeItem(at: folder)
+    }
+
+    /// Keep this one on a cover's conflict promotes the chosen version to "About this notebook.md" (written and read
+    /// back) before the others are trashed.
+    @MainActor static func keepPromotes(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Promote")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var cover = NoteFile(id: "COVER-PROMOTE", body: "# About this notebook\nOne side")
+        cover.cover = true
+        let coverURL = folder.appending(path: NoteShelf.coverName)
+        _ = NoteStore.create(cover.serialized(), at: coverURL, root: root)
+        var chosen = cover
+        chosen.body = "# About this notebook\nThe side to keep"
+        chosen.setScalar("private", "true")
+        let copyURL = folder.appending(path: "About this notebook (conflicted copy).md")
+        _ = NoteStore.create(chosen.serialized(), at: copyURL, root: root)
+        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        store.reload()
+        let readBy = Date().addingTimeInterval(8)
+        while store.notes.first(where: { $0.url.lastPathComponent == copyURL.lastPathComponent && $0.notebook == "Promote" }) == nil && Date() < readBy { settle(0.1) }
+        guard let copyPaper = store.notes.first(where: { $0.url.lastPathComponent == copyURL.lastPathComponent && $0.notebook == "Promote" }) else {
+            expect(false, "the conflict copy is read", "\(store.notes.filter { $0.notebook == "Promote" }.map(\.url.path))"); return
+        }
+        expect(store.conflict(of: copyPaper)?.count == 2, "a cover and its copy are one conflict")
+        store.keep(copyPaper)
+        let until = Date().addingTimeInterval(5)
+        while fm.fileExists(atPath: copyURL.path) && Date() < until { settle(0.1) }
+        let landed = (try? String(contentsOf: coverURL, encoding: .utf8)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) }
+        expect(landed?.body.contains("The side to keep") == true && landed.map(NoteContract.isPrivate) == true && !fm.fileExists(atPath: copyURL.path),
+               "the kept copy is now the cover file itself, and only then the copy goes")
+        expect(NoteShelf.keepTarget(chosen: "/n/B/About this notebook (conflicted copy).md", group: ["/n/B/About this notebook.md", "/n/B/About this notebook (conflicted copy).md"])
+               == "/n/B/About this notebook.md" && NoteShelf.keepTarget(chosen: "/n/B/Trip (conflicted copy).md", group: ["/n/B/Trip.md", "/n/B/Trip (conflicted copy).md"])
+               == "/n/B/Trip (conflicted copy).md", "a cover's Keep lands on the cover's name; another note's where it's chosen")
+        try? fm.removeItem(at: folder)
     }
 
     /// A folder that can't be listed is never taken for an empty one: the read isn't complete.

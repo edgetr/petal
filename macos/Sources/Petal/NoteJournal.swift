@@ -334,7 +334,8 @@ enum NoteJournal {
             let note = NoteFile.parse(entry.text, fallbackID: entry.noteID, fallbackDate: Date())
             // Named from its redacted title (never the old file's name, which may not be Petal's).
             _ = note
-            let stem = NoteStore.safeStem(for: entry.text, fallback: NoteStore.plainStem)
+            // A cover's recovery keeps the cover's name (NoteShelf.copyStem), so it's still a cover.
+            let stem = NoteShelf.copyStem(original: hint.lastPathComponent, title: NoteStore.safeStem(for: entry.text, fallback: NoteStore.plainStem))
             if NoteStore.safe(folder, root: root), picturesBeside(hint),
                let made = NoteStore.createNamed(entry.text, stem: entry.base == nil ? stem : stem + " (recovered)", in: folder, root: root) {
                 return made

@@ -486,6 +486,8 @@ final class NoteStore {
             let files = (inFolder ?? []).filter { $0.pathExtension.lowercased() == "md" }
             var here: [PaperNote] = []
             var coverVersionUnread = false
+            // A note saying `cover: true` and `private: true` that isn't cover-named: privacy unknown until resolved.
+            var strayPrivate = false
             // Cover files here that weren't read (`NoteLibrary.isCoverName`: the cover, a conflict copy, a version of it):
             // while there's one, or the folder couldn't be listed, its privacy is unknown. Other notes don't count.
             var unreadCovers = 0
@@ -505,7 +507,8 @@ final class NoteStore {
                 let fallback = NoteShelf.fallbackID(relativePath: NoteShelf.relative(url.path, to: root.path) ?? name + "/" + url.lastPathComponent)
                 var paper = PaperNote(file: NoteFile.parse(text, fallbackID: fallback, fallbackDate: date), url: url, notebook: name, revision: text)
                 // A cover by its name only (front matter or not); another note's own `cover: true` is kept as written,
-                // never taken for one.
+                // never taken for one, but with `private: true` it makes the notebook's privacy unknown.
+                if NoteLibrary.strayPrivateCover(fileName: url.lastPathComponent, file: paper.file) { strayPrivate = true }
                 NoteLibrary.coverFlag(&paper.file, fileName: url.lastPathComponent)
                 paper.instance = instance(of: url)
                 paper.followed = followBookmarks(&paper.file)
@@ -523,6 +526,7 @@ final class NoteStore {
                                               notebook: name, revision: text)
                         paper.version = version.url.lastPathComponent
                         // The cover's own versions are the cover too, front matter or not: its privacy counts across all.
+                        if NoteLibrary.strayPrivateCover(fileName: url.lastPathComponent, file: paper.file) { strayPrivate = true }
                         NoteLibrary.coverFlag(&paper.file, fileName: url.lastPathComponent)
                         here.append(paper)
                     }
@@ -541,7 +545,7 @@ final class NoteStore {
                                                        fileRead: here.contains { $0.url.lastPathComponent == NoteShelf.coverName && $0.version == nil },
                                                        versionsUnread: coverVersionUnread)
             // Privacy unknown (so Private) while the folder couldn't be listed or any cover file wasn't read.
-            let privacyUnknown = coverUnread || NoteLibrary.notebookUnknown(listed: inFolder != nil, unreadCovers: unreadCovers)
+            let privacyUnknown = coverUnread || strayPrivate || NoteLibrary.notebookUnknown(listed: inFolder != nil, unreadCovers: unreadCovers)
             notebooks.append(Notebook(name: name, folder: folder, color: cover?.file.color ?? "", cover: cover?.key,
                                       count: here.filter { !$0.file.cover }.count,
                                       isPrivate: NoteLibrary.privateNotebook(covers: here.filter { $0.file.cover }.map(\.file), unread: privacyUnknown),
@@ -719,8 +723,9 @@ final class NoteStore {
     /// gone, nothing is made.
     nonisolated static func keepBeside(_ text: String, original: URL, root: URL, live: (@Sendable () -> Bool)? = nil) -> Outcome {
         let folder = original.deletingLastPathComponent()
-        // Named from the copy's own redacted title, never the file it's beside (that name may not be Petal's).
-        let stem = safeStem(for: text, fallback: plainStem)
+        // Named from the copy's own redacted title, never the file it's beside (that name may not be Petal's); a cover's
+        // copy keeps the cover's name, so it's still a cover (NoteShelf.copyStem).
+        let stem = NoteShelf.copyStem(original: original.lastPathComponent, title: safeStem(for: text, fallback: plainStem))
         for _ in 0..<20 {
             if let live, !live() { return .cancelled }
             let taken = Set(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).map { $0.lowercased() })
@@ -1920,10 +1925,15 @@ final class NoteStore {
         guard let (snapshot, ids) = NoteShelf.keepSnapshot(papers: shown.map { ($0.url.path, $0.version, $0.revision) }, current: current) else {
             return onProblem("Petal couldn't check that note's file as it is now, so nothing was kept or removed. Try again in a moment.")
         }
-        var plan = NoteKeep(snapshot: snapshot, kept: kept.url, keptText: kept.version == nil ? nil : kept.file.serialized(),
+        // A cover's conflict lands on "About this notebook.md": the kept text written there and read back first, then
+        // the others trashed (NoteShelf.keepTarget).
+        let target = URL(fileURLWithPath: NoteShelf.keepTarget(chosen: kept.url.path, group: shown.map(\.url.path)))
+        let promote = target.path != kept.url.path
+        var plan = NoteKeep(snapshot: snapshot, kept: target,
+                            keptText: promote ? (kept.revision ?? kept.file.serialized()) : kept.version == nil ? nil : kept.file.serialized(),
                             files: Array(Set(shown.map(\.url))))
         plan.ids = ids
-        let key = kept.url.path
+        let key = target.path
         let session = sessionAt(key, noteID: kept.noteID) ?? makeSession(key: key, url: kept.url, noteID: kept.noteID, revision: kept.revision)
         enqueue(session, .keep(plan), done: nil)
     }
@@ -2225,7 +2235,10 @@ extension NoteStore {
     /// coordinated, atomic write (`writeCanvas`). A write that fails keeps them and tries again (2 s, doubling, at
     /// most a minute), the canvas saying "Not saved yet"; its notebook gone, they're rescued into "Unsaved notes".
     /// A notebook whose cover has no id of its own yet gets one first. `done`: the canvas once saved.
-    func editCanvas(_ notebook: String, _ edit: NoteCanvas.Edit, then done: @escaping @MainActor (NoteCanvas?) -> Void = { _ in }) {
+    /// `at`: when the person made the change (a gesture that waited for a note's id keeps its own time, so a later
+    /// gesture always wins).
+    func editCanvas(_ notebook: String, _ edit: NoteCanvas.Edit, at: Double = Date().timeIntervalSince1970,
+                    then done: @escaping @MainActor (NoteCanvas?) -> Void = { _ in }) {
         guard !switching, !draining, let book = self.notebook(notebook) else { return done(nil) }
         // Journaled at once, by its cover's id or, while that isn't known (a cover still downloading, or none yet), by
         // its folder; re-keyed by cover id once it is (`rekeyCanvas`). Only a notebook whose folder isn't read yet
@@ -2234,7 +2247,7 @@ extension NoteStore {
             onProblem("Waiting for \(book.name) to download: its canvas can be changed once it's here.")
             return done(nil)
         }
-        queueCanvas(key, notebook: book.name, NoteCanvas.Stamped(edit), done)
+        queueCanvas(key, notebook: book.name, NoteCanvas.Stamped(edit, at: at), done)
     }
 
     private func queueCanvas(_ id: String, notebook: String, _ stamped: NoteCanvas.Stamped, _ done: @escaping @MainActor (NoteCanvas?) -> Void) {

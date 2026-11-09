@@ -340,6 +340,12 @@ extension NoteLibrary {
 
     static func isCover(fileName: String, file: NoteFile) -> Bool { isCoverName(fileName) }
 
+    /// A note that isn't cover-named but says `cover: true` and `private: true`: a sign a cover lost its name (a copy
+    /// named from its heading, a rename). Its notebook's privacy is unknown, so Private, until the person resolves it.
+    static func strayPrivateCover(fileName: String, file: NoteFile) -> Bool {
+        file.cover && !isCoverName(fileName) && NoteContract.isPrivate(file)
+    }
+
     /// A note as read: a cover by its name only. Another note's own `cover: true` is kept as written (as a key this
     /// Petal doesn't use), never taken for a cover.
     static func coverFlag(_ file: inout NoteFile, fileName: String) {
@@ -414,6 +420,21 @@ extension NotePrivacy {
 }
 
 extension NoteShelf {
+    /// The name stem of a copy kept beside a note (a conflicted copy, a recovery): a cover's is always "About this
+    /// notebook", so it stays a cover by its name; any other note's comes from its own title.
+    static func copyStem(original fileName: String, title: String) -> String {
+        NoteLibrary.isCoverName(fileName) ? "About this notebook" : title
+    }
+
+    /// Where Keep this one writes the version kept: a cover's conflict always lands on "About this notebook.md" (the
+    /// kept text written there and read back before anything is trashed), so the notebook never loses its cover;
+    /// any other note's, where the chosen paper is.
+    static func keepTarget(chosen: String, group: [String]) -> String {
+        guard group.contains(where: { NoteLibrary.isCoverName(($0 as NSString).lastPathComponent) }),
+              let canonical = group.first(where: { ($0 as NSString).lastPathComponent == NoteShelf.coverName }) else { return chosen }
+        return canonical
+    }
+
     /// A note opened on its own, with every paper of its conflict (iCloud's versions, a conflicted copy) beside it:
     /// the note first, then the others in the group's order.
     static func standaloneGroup(_ key: String, group: [String]) -> [String] {
@@ -1097,11 +1118,12 @@ struct CanvasEntry: Codable, Equatable, Sendable {
 enum CanvasQueue {
     /// A group of notes moved together (an area and the notes in it): each note's own id for the move, an id-less one by
     /// the id it was given (`resolved`); nil, and the whole move refused, when any couldn't get one.
-    static func groupMove(_ ids: [String], resolved: [String: String]) -> [String: String]? {
+    /// `pending`: ids still being written (or whose write failed): waited for like an id-less note's.
+    static func groupMove(_ ids: [String], resolved: [String: String], pending: Set<String> = []) -> [String: String]? {
         var out: [String: String] = [:]
         for id in ids {
-            if !NoteShelf.needsID(id) { out[id] = id; continue }
-            guard let real = resolved[id], !NoteShelf.needsID(real) else { return nil }
+            if NoteShelf.lasting(id, pending: pending) { out[id] = id; continue }
+            guard let real = resolved[id], NoteShelf.lasting(real, pending: pending) else { return nil }
             out[id] = real
         }
         return out
