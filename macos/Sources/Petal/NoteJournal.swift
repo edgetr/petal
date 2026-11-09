@@ -412,6 +412,21 @@ extension NoteJournal {
         queue.asyncAfter(deadline: .now() + 2) { moveCanvas(target, from: old, ids: ids, in: folder, attempt: attempt + 1) }
     }
 
+    /// Every canvas entry the journal holds now (one that can't be read is left out, and left there).
+    nonisolated static func canvasEntries(in folder: URL = folder) -> [CanvasEntry] {
+        let dir = canvasFolder(in: folder)
+        return ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasSuffix(".json") }.sorted()
+            .compactMap { readCanvas(dir.appending(path: $0)) }
+    }
+
+    /// Every cover entry the journal holds now (one that can't be read is left out, and left there).
+    nonisolated static func coverEntries(in folder: URL = folder) -> [CoverFields] {
+        let dir = coverFolder(in: folder)
+        return ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).sorted().compactMap { name in
+            (try? Data(contentsOf: dir.appending(path: name))).flatMap { try? JSONDecoder().decode(CoverFields.self, from: $0) }
+        }
+    }
+
     nonisolated static func readCanvas(_ url: URL) -> CanvasEntry? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(CanvasEntry.self, from: data)

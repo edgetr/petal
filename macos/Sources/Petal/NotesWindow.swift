@@ -78,8 +78,13 @@ final class NotesWindow {
 final class NotesModel {
     var shelf: NoteLibrary.Shelf = .notebook(NoteShelf.inbox)
     var query = ""
-    /// The canvas showing (its notebook and what its file says), read off the main thread.
-    var canvas: (notebook: String, layout: NoteCanvas?)?
+    /// The canvas showing (its notebook and what its file says), read off the main thread: only while the folder's
+    /// session it was read in is the one in use (a switch shows nothing of another folder's canvas).
+    private var shownCanvas: (session: RootSession, notebook: String, layout: NoteCanvas?)?
+    var canvas: (notebook: String, layout: NoteCanvas?)? {
+        get { shownCanvas.flatMap { store.current($0.session) ? ($0.notebook, $0.layout) : nil } }
+        set { shownCanvas = newValue.map { (store.session, $0.notebook, $0.layout) } }
+    }
     /// While a note, area or words are dragged: where they are now, not written until the drag ends.
     var dragging: [String: NoteCanvas.Spot] = [:]
     /// The sidebar, hidden in a canvas to give it the whole window.
@@ -90,8 +95,9 @@ final class NotesModel {
 
     /// The canvas of `notebook`, read again (after any read of the notes' folder: another Mac may have moved things).
     func loadCanvas(_ notebook: String) {
+        let captured = store.session
         store.canvas(notebook) { [weak self] layout in
-            guard let self, case .notebook(let now) = self.shelf, NoteLibrary.same(now, notebook) else { return }
+            guard let self, self.store.current(captured), case .notebook(let now) = self.shelf, NoteLibrary.same(now, notebook) else { return }
             self.canvas = (notebook, layout)
         }
     }
@@ -104,8 +110,9 @@ final class NotesModel {
         if let current = canvas, NoteLibrary.same(current.notebook, notebook), let layout = current.layout {
             canvas = (notebook, layout.applyingMerged([NoteCanvas.Stamped(edit, at: at)]))
         }
+        let captured = store.session
         store.editCanvas(notebook, edit, at: at) { [weak self] saved in
-            guard let self, let saved, let current = self.canvas, NoteLibrary.same(current.notebook, notebook) else { return }
+            guard let self, self.store.current(captured), let saved, let current = self.canvas, NoteLibrary.same(current.notebook, notebook) else { return }
             self.canvas = (notebook, saved)
         }
     }
@@ -118,8 +125,9 @@ final class NotesModel {
         let at = Date().timeIntervalSince1970   // the gesture's own time, kept through the wait
         // Any id not landed in its file yet (none, being written, or its write failed) is waited for.
         let idless = moves.keys.filter { !NoteShelf.lasting($0, pending: store.pendingIDs) }
+        let captured = store.session
         let finish = { [weak self] in
-            guard let self else { return }
+            guard let self, self.store.current(captured) else { return }
             for id in moves.keys { self.dragging[id] = nil }
             guard let ids = CanvasQueue.groupMove(Array(moves.keys), resolved: waiting.resolved, pending: self.store.pendingIDs) else {
                 return self.desk.tell("Petal couldn't give every note in that area an id of its own yet, so the area stayed where it was.")
@@ -153,8 +161,9 @@ final class NotesModel {
     /// an id still being written, or whose write failed, waited for until it lands); never an id-less note's path.
     private func withID(_ paper: PaperNote, _ then: @escaping @MainActor (String) -> Void) {
         guard !NoteShelf.lasting(paper.noteID, pending: store.pendingIDs) else { return then(paper.noteID) }
-        store.ensureID(paper.key) { id in
-            guard let id, !NoteShelf.needsID(id) else { return }
+        let captured = store.session
+        store.ensureID(paper.key) { [weak self] id in
+            guard let self, self.store.current(captured), let id, !NoteShelf.needsID(id) else { return }
             then(id)
         }
     }
@@ -179,12 +188,13 @@ final class NotesModel {
     func rename(_ book: Notebook) {
         // Inbox is where notes go first, and Petal makes it again when it's gone: it keeps its name.
         guard !NoteLibrary.same(book.name, NoteShelf.inbox) else { return desk.tell("Inbox keeps its name: it's where notes go first.") }
+        let captured = capture(book.name)
         guard let name = Self.askWords("Rename \(book.name)", "Its new name:", value: book.name), name != book.name else { return }
         // What's typed in its notes is saved first, and the rename waits for it (and anything else being written).
         for paper in store.notes where NoteLibrary.same(paper.notebook, book.name) { desk.editors[paper.key]?.flush() }
         let wasDefault = NoteLibrary.same(desk.defaultNotebook, book.name)
         let oldStack = Self.stackPath(book.folder)
-        whenSettled(book.name) { [weak self] in self?.store.renameNotebook(book.name, to: name) { [weak self] made in
+        whenSettled(book.name, as: captured) { [weak self] now, binding in self?.store.renameNotebook(now, to: name, binding: binding) { [weak self] made in
             guard let self, let made else { return }
             let config = PetalApp.shared.config
             if wasDefault { config.set("notesNotebook", made) }
@@ -198,11 +208,28 @@ final class NotesModel {
     }
 
     /// `then` once none of a notebook's notes has work under way (looked at again for up to five seconds, never
-    /// waited on); still busy by then, it runs anyway and the store says why it can't.
-    func whenSettled(_ notebook: String, tries: Int = 25, then: @escaping @MainActor () -> Void) {
-        guard tries > 0, store.notebookBusy(notebook) else { return then() }
+    /// waited on); still busy by then, it runs anyway and the store says why it can't. The notebook is captured as
+    /// it is now (the folder's session and its NotebookBinding): if the folder in use or the notebook's identity
+    /// changes meanwhile, nothing is done, and the person is told.
+    func whenSettled(_ notebook: String, as captured: (session: RootSession, binding: NotebookBinding)?,
+                     then: @escaping @MainActor (String, NotebookBinding) -> Void) {
+        guard let captured else { return desk.tell("\(notebook) isn't read yet. Try again in a moment.") }
+        settle(notebook, captured.binding, captured.session, tries: 25, then: then)
+    }
+
+    /// The notebook as it is now, before anything is asked or waited for.
+    func capture(_ notebook: String) -> (session: RootSession, binding: NotebookBinding)? {
+        store.binding(notebook).map { (store.session, $0) }
+    }
+
+    private func settle(_ notebook: String, _ binding: NotebookBinding, _ captured: RootSession, tries: Int,
+                        then: @escaping @MainActor (String, NotebookBinding) -> Void) {
+        guard store.current(captured), case .found(let now) = store.resolve(binding) else {
+            return desk.tell("\(notebook) changed meanwhile (another notes folder, or it isn't the same notebook), so nothing was done.")
+        }
+        guard tries > 0, store.notebookBusy(now) else { return then(now, binding) }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            MainActor.assumeIsolated { self.whenSettled(notebook, tries: tries - 1, then: then) }
+            MainActor.assumeIsolated { self.settle(notebook, binding, captured, tries: tries - 1, then: then) }
         }
     }
 
@@ -238,6 +265,8 @@ final class NotesModel {
             return desk.tell(NoteLibrary.same(book.name, NoteShelf.inbox) ? "Inbox stays: it's where notes go first."
                              : "\(book.name) is your default notebook: make another the default first.")
         }
+        // The notebook as the person sees it now: what's confirmed is this one, in this notes folder.
+        let captured = capture(book.name)
         NSApp.activate()
         let alert = NSAlert()
         alert.messageText = "Move “\(book.name)” to the Trash?"
@@ -250,7 +279,7 @@ final class NotesModel {
             desk.hide(paper.key)
         }
         let path = Self.stackPath(book.folder)
-        whenSettled(book.name) { [weak self] in self?.store.trashNotebook(book.name) { [weak self] done in
+        whenSettled(book.name, as: captured) { [weak self] now, binding in self?.store.trashNotebook(now, binding: binding) { [weak self] done in
             guard let self, done else { return }
             let config = PetalApp.shared.config
             if config.strings("stackFolders").contains(path) { config.set("stackFolders", config.strings("stackFolders").filter { $0 != path }) }

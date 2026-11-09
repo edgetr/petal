@@ -146,6 +146,8 @@ struct NoteStoreCheck {
         canvasOtherRoot(root: root)
         switchBackSavesCover(root: root)
         renewalSkipsOtherRoot(root: root)
+        trashAfterSwitch(root: root)
+        renewalAcrossSwitch(root: root)
         notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -2082,10 +2084,24 @@ struct NoteStoreCheck {
         while (!switched || !store.loaded) && Date() < until { settle(0.1) }
         store.reload()
         settle(1.5)
-        expect(store.canvasWaiting[key] != nil && store.canvasAmbiguousSince[key] != nil && NoteCanvas.decode(text(canvasB))?.notes["s1"] == nil,
-               "after a switch: never written into the other folder's notebook of the same name and cover, it waits")
-        store.canvasAmbiguousSince[key] = Date().addingTimeInterval(-NoteShelf.ambiguityLimit - 1)
+        NoteJournal.queue.sync {}
+        expect(store.canvasWaiting[key] == nil && NoteCanvas.decode(text(canvasB))?.notes["s1"] == nil
+               && NoteJournal.readCanvas(NoteJournal.canvasFile(key))?.edits.count == 1,
+               "after a switch: the old folder's session is gone, the edit waits in the journal, never written into the other folder's notebook of the same name and cover")
+        // Back in its own folder: a fresh session takes it from the journal, and it lands once the canvas can be written.
+        var home = false
+        store.switchRoot(to: root) { home = true }
+        until = Date().addingTimeInterval(8)
+        while (!home || !store.loaded) && Date() < until { settle(0.1) }
+        settle(0.5)
+        expect(store.canvasWaiting[key]?.edits.count == 1, "back in its folder: a fresh session takes it from the journal")
+        try? fm.removeItem(at: canvasA)
         store.reload()
+        until = Date().addingTimeInterval(10)
+        while NoteCanvas.decode(text(canvasA))?.notes["s1"] == nil && Date() < until { settle(0.2) }
+        NoteJournal.queue.sync {}
+        expect(NoteCanvas.decode(text(canvasA))?.notes["s1"]?.x == 5 && !fm.fileExists(atPath: NoteJournal.canvasFile(key).path)
+               && NoteCanvas.decode(text(canvasB))?.notes["s1"] == nil, "and lands in its own notebook, never the other folder's")
         let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
         func rescued(_ name: String) -> NoteCanvas? {
             for dir in (try? fm.contentsOfDirectory(at: unsaved, includingPropertiesForKeys: nil)) ?? [] {
@@ -2093,12 +2109,6 @@ struct NoteStoreCheck {
             }
             return nil
         }
-        until = Date().addingTimeInterval(8)
-        while rescued("Shared") == nil && Date() < until { settle(0.2) }
-        NoteJournal.queue.sync {}
-        expect(rescued("Shared")?.notes["s1"]?.x == 5 && NoteCanvas.decode(text(canvasB))?.notes["s1"] == nil && store.canvasWaiting[key] == nil
-               && !fm.fileExists(atPath: NoteJournal.canvasFile(key).path),
-               "still in another folder after the limit: rescued whole, out of the journal, never applied to the other folder")
         // At a launch whose notes' folder is another: rescued, never written there.
         let read = NoteStore.read(rootB)
         let entry = CanvasEntry(coverID: "folder:launch", notebook: "Launch shared", edits: [NoteCanvas.Stamped(.move("l2", .init(x: 2, y: 2)))],
@@ -2107,10 +2117,6 @@ struct NoteStoreCheck {
                                       complete: read.complete, root: rootB)
                && rescued("Launch shared")?.notes["l2"] != nil && NoteCanvas.decode(text(canvasB))?.notes["l2"] == nil,
                "recovered at a launch in another notes folder: rescued, never written there")
-        var back = false
-        store.switchRoot(to: root) { back = true }
-        until = Date().addingTimeInterval(8)
-        while !back && Date() < until { settle(0.1) }
         try? fm.removeItem(at: rootB)
         try? fm.removeItem(at: root.appending(path: "Shared"))
     }
@@ -2188,9 +2194,9 @@ struct NoteStoreCheck {
         while idOnDisk(rootB.appending(path: "Twin")) != renewed && Date() < until { settle(0.1); store.reload() }
         settle(0.5)
         NoteJournal.queue.sync {}
-        expect(idOnDisk(rootB.appending(path: "Twin")) == renewed && store.canvasWaiting[key]?.bound.coverID == "COVER-TWIN"
+        expect(idOnDisk(rootB.appending(path: "Twin")) == renewed && store.canvasWaiting[key] == nil
                && NoteJournal.readCanvas(NoteJournal.canvasFile(key))?.binding?.coverID == "COVER-TWIN",
-               "a root A entry is never renewed by a notebook in root B, in memory or in the journal")
+               "a root A entry is never renewed by a notebook in root B: not in B's session, and unchanged in the journal")
         var back = false
         store.switchRoot(to: root) { back = true }
         until = Date().addingTimeInterval(8)
@@ -2198,6 +2204,121 @@ struct NoteStoreCheck {
         store.drainCanvas()
         NoteJournal.ackCanvas(key, wrote: Set(NoteJournal.readCanvas(NoteJournal.canvasFile(key))?.edits.map(\.id) ?? []))
         try? fm.removeItem(at: root.appending(path: "Twin"))
+        try? fm.removeItem(at: rootB)
+    }
+
+    /// A Trash confirmed for a notebook, the notes folder switched while it waits: the other folder's notebook of the
+    /// same name is untouched (the session and binding were captured before the wait). And a notebook replaced on disk
+    /// between the request and the Trash itself: untouched too (checked inside the coordinated step).
+    @MainActor static func trashAfterSwitch(root: URL) {
+        let fm = FileManager.default
+        let rootB = root.deletingLastPathComponent().appending(path: "petal-root-B-\(UUID().uuidString)")
+        for base in [root, rootB] {
+            let folder = base.appending(path: "Doomed")
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            var cover = NoteFile(id: base == root ? "COVER-DOOMED-A" : "COVER-DOOMED-B", body: "# About this notebook")
+            cover.cover = true
+            _ = NoteStore.create(cover.serialized(), at: folder.appending(path: NoteShelf.coverName), root: base)
+            _ = NoteStore.create("keep me", at: folder.appending(path: "Kept.md"), root: base)
+        }
+        let store = NoteStore(root: root)
+        var said: [String] = []
+        store.onProblem = { said.append($0) }
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        store.reload()
+        settle(1)
+        // Confirmed in A: what NotesModel captures before asking and waiting.
+        let session = store.session
+        guard let binding = store.binding("Doomed") else { return expect(false, "the notebook's binding") }
+        var done = false
+        store.switchRoot(to: rootB) { done = true }
+        var until = Date().addingTimeInterval(8)
+        while (!done || !store.loaded) && Date() < until { settle(0.05) }
+        settle(0.5)
+        expect(!store.current(session) && store.notebook("Doomed") != nil, "after the switch: the session it was confirmed in is over")
+        var trashed: Bool?
+        store.trashNotebook("Doomed", binding: binding) { trashed = $0 }
+        settle(0.5)
+        expect(trashed == false && fm.fileExists(atPath: rootB.appending(path: "Doomed/Kept.md").path) && fm.fileExists(atPath: root.appending(path: "Doomed/Kept.md").path),
+               "the other folder's notebook of the same name is untouched, and so is the one confirmed (in a folder not in use)", "\(said)")
+        // Replaced on disk between the request and the Trash: the binding is checked inside the coordinated step.
+        let inB = store.binding("Doomed")!
+        let hold = DispatchSemaphore(value: 0)
+        NoteStore.io.async { hold.wait() }
+        trashed = nil
+        store.trashNotebook("Doomed", binding: inB) { trashed = $0 }
+        let doomedB = rootB.appending(path: "Doomed")
+        try? fm.removeItem(at: doomedB)
+        try? fm.createDirectory(at: doomedB, withIntermediateDirectories: true)
+        var other = NoteFile(id: "COVER-SOMEONE-ELSE", body: "# About this notebook")
+        other.cover = true
+        _ = NoteStore.create(other.serialized(), at: doomedB.appending(path: NoteShelf.coverName), root: rootB)
+        _ = NoteStore.create("someone else's", at: doomedB.appending(path: "Theirs.md"), root: rootB)
+        hold.signal()
+        until = Date().addingTimeInterval(5)
+        while trashed == nil && Date() < until { settle(0.05) }
+        expect(trashed == false && fm.fileExists(atPath: doomedB.appending(path: "Theirs.md").path),
+               "another notebook there by the time the Trash runs: untouched")
+        var back = false
+        store.switchRoot(to: root) { back = true }
+        until = Date().addingTimeInterval(8)
+        while !back && Date() < until { settle(0.05) }
+        try? fm.removeItem(at: root.appending(path: "Doomed"))
+        try? fm.removeItem(at: rootB)
+    }
+
+    /// A switch while a duplicated cover's new id is being written, and back: the fresh session finds the renewal on
+    /// disk (or makes it again), nothing from the old session blocks it, and cover changes save.
+    @MainActor static func renewalAcrossSwitch(root: URL) {
+        let fm = FileManager.default
+        let rootB = root.deletingLastPathComponent().appending(path: "petal-root-B-\(UUID().uuidString)")
+        try? fm.createDirectory(at: rootB, withIntermediateDirectories: true)
+        for name in ["Aaa round", "Zed round"] {
+            let folder = root.appending(path: name)
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            var cover = NoteFile(id: "COVER-ROUND-DUP", body: "# About this notebook")
+            cover.cover = true
+            _ = NoteStore.create(cover.serialized(), at: folder.appending(path: NoteShelf.coverName), root: root)
+        }
+        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        func switchTo(_ next: URL) {
+            var done = false
+            store.switchRoot(to: next) { done = true }
+            let until = Date().addingTimeInterval(8)
+            while (!done || !store.loaded) && Date() < until { settle(0.05) }
+            settle(1)
+        }
+        // The folder switches in the same turn the read starts the renewal: its write's completion never comes back.
+        var underWay = false, done = false
+        store.onChange = {
+            guard !underWay, !store.renewing.isEmpty else { return }
+            underWay = true
+            store.switchRoot(to: rootB) { done = true }
+        }
+        store.reload()
+        var until = Date().addingTimeInterval(5)
+        while !underWay && Date() < until { settle(0.05) }
+        store.onChange = {}
+        expect(underWay, "a renewal under way when the folder switches")
+        until = Date().addingTimeInterval(8)
+        while (!done || !store.loaded) && Date() < until { settle(0.05) }
+        expect(store.renewing.isEmpty && store.pendingIDs.isEmpty && store.coverLanding.isEmpty, "the new folder's session starts with nothing in flight")
+        switchTo(root)
+        let renewed = NoteLibrary.renewedID("COVER-ROUND-DUP", folder: "Zed round")
+        func onDisk(_ name: String) -> NoteFile? {
+            text(root.appending(path: name).appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) }
+        }
+        until = Date().addingTimeInterval(8)
+        while onDisk("Zed round")?.id != renewed && Date() < until { settle(0.2); store.reload() }
+        store.setCover("Zed round", fields: ["private": "true"])
+        store.setCover("Aaa round", fields: ["color": "#112233"])
+        until = Date().addingTimeInterval(10)
+        while (onDisk("Zed round").map(NoteContract.isPrivate) != true || onDisk("Aaa round")?.color != "#112233") && Date() < until { settle(0.2); store.reload() }
+        expect(onDisk("Zed round")?.id == renewed && onDisk("Zed round").map(NoteContract.isPrivate) == true
+               && onDisk("Aaa round")?.id == "COVER-ROUND-DUP" && onDisk("Aaa round")?.color == "#112233" && !onDisk("Aaa round").map(NoteContract.isPrivate)!,
+               "back after a switch during a renewal: the renewal is on disk, and cover changes save on the right notebooks")
+        for name in ["Aaa round", "Zed round"] { try? fm.removeItem(at: root.appending(path: name)) }
         try? fm.removeItem(at: rootB)
     }
 
