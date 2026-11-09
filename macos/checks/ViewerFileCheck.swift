@@ -118,10 +118,40 @@ struct ViewerFileCheck {
         other.path = "/Users/someone/Other.pdf"
         var tab = NoteStick(kind: .tab)
         tab.url = "https://example.com"
-        expect(ViewerMatch.place([tab, plain, paged, passage], path: "/Users/someone/Report.pdf") == 3, "a passage first, then a page, then the file")
-        expect(ViewerMatch.place([tab, plain, paged], path: "/Users/someone/Report.pdf") == 2, "a page before the file")
-        expect(ViewerMatch.place([tab, other], path: "/Users/someone/Report.pdf") == nil, "a note on another file isn't in this margin")
-        expect(ViewerMatch.place([other], path: "/private/var/x.pdf", also: ["/Users/someone/Other.pdf"]) == 0, "the file under the path it was opened by")
+        let onReport = { (stick: NoteStick) in stick.path == "/Users/someone/Report.pdf" }
+        expect(ViewerMatch.place([tab, plain, paged, passage], onFile: onReport) == 3, "a passage first, then a page, then the file")
+        expect(ViewerMatch.place([tab, plain, paged], onFile: onReport) == 2, "a page before the file")
+        expect(ViewerMatch.place([tab, other], onFile: onReport) == nil, "a note on another file isn't in this margin")
+        expect(ViewerMatch.place([tab], onFile: { _ in true }) == nil, "a tab never names a file")
+        var sentence = NoteStick(kind: .passage)
+        sentence.path = "/Users/someone/Report.pdf"
+        sentence.quote = "Growth held steady"
+        var pageSentence = NoteStick(kind: .passage)
+        pageSentence.url = "https://example.com/report"
+        pageSentence.quote = "Growth held steady"
+        expect(ViewerFiles.namesFile(sentence) && !ViewerFiles.namesFile(pageSentence) && ViewerFiles.namesFile(plain) && !ViewerFiles.namesFile(tab),
+               "Phase 1's sentence in a file names it; a sentence on a page doesn't")
+        expect(ViewerMatch.place([plain, sentence], onFile: onReport) == 1, "a Preview sentence is a passage in the margin")
+
+        // MARK: The one file resolver
+
+        let one = ViewerFileID(device: 1, inode: 10), two = ViewerFileID(device: 1, inode: 20)
+        expect(ViewerFiles.target(recorded: one, recordedAlive: true, hasBookmark: true, bookmarkTarget: two, pathTarget: two) == one,
+               "its own file, wherever it went: a new file at its path (or a bookmark that found that one) is never it")
+        expect(ViewerFiles.target(recorded: one, recordedAlive: false, hasBookmark: true, bookmarkTarget: two, pathTarget: two) == two,
+               "its own file gone (a save made a new one): the file its bookmark finds")
+        expect(ViewerFiles.target(recorded: nil, recordedAlive: false, hasBookmark: true, bookmarkTarget: nil, pathTarget: two) == nil,
+               "a bookmark that finds nothing is never replaced by the path alone")
+        expect(ViewerFiles.target(recorded: nil, recordedAlive: false, hasBookmark: false, bookmarkTarget: nil, pathTarget: two) == two,
+               "a place with only a path (written by hand): the file there")
+        expect(ViewerFileID("16777234:370023497") == ViewerFileID(device: 16777234, inode: 370023497) && ViewerFileID("1:x") == nil
+               && ViewerFileID(device: 3, inode: 4).text == "3:4", "a file's identity as a place writes it")
+        var withID = plain
+        withID.fileID = "16777234:370023497"
+        var idNote = NoteFile(id: "V9", created: when, body: "")
+        idNote.places = [withID]
+        expect(NoteFile.parse(idNote.serialized(), fallbackID: "x", fallbackDate: when).places[0].fileID == withID.fileID, "kept in the file")
+        expect(!ViewerClose.transfer.letsGoIfEmpty && ViewerClose.fold.letsGoIfEmpty, "a note handed to its other editor is never let go of")
         expect(ViewerMatch.pageIndex(paged, count: 5) == 1 && ViewerMatch.pageIndex(paged, count: 1) == nil && ViewerMatch.pageIndex(plain, count: 5) == nil,
                "a page the document has, counted from 1")
         let order = ViewerMatch.order([("file", nil, 0), ("p3", 2, 100), ("p1b", 0, 400), ("p1a", 0, 100)], current: 0)
@@ -275,9 +305,33 @@ struct ViewerFileCheck {
         try? Data("%PDF-1.4".utf8).write(to: aliasBase.appending(path: "Real/Other.pdf"))
         try? FileManager.default.createSymbolicLink(atPath: aliasBase.appending(path: "Link.pdf").path, withDestinationPath: realPDF.path)
         try? FileManager.default.createSymbolicLink(atPath: aliasBase.appending(path: "Folder").path, withDestinationPath: aliasBase.appending(path: "Real").path)
-        let candidates = ["Real/Report.pdf", "Link.pdf", "Folder/Report.pdf", "Real/Other.pdf", "Missing.pdf"].map { aliasBase.appending(path: $0).path }
-        let found = ViewerFileID.of(realPDF.path).map { ViewerFileID.aliases(of: $0, candidates, identify: ViewerFileID.of) } ?? []
-        expect(found == Set(candidates.prefix(3)), "a note's path through a link is the same file; another file isn't", "\(found.map { ($0 as NSString).lastPathComponent })")
+        func onDisk(_ path: String, recorded: Bool = false) -> NoteStick {
+            var stick = NoteStick(kind: .file)
+            stick.path = aliasBase.appending(path: path).path
+            if recorded {
+                stick.bookmark = (try? URL(fileURLWithPath: stick.path).bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))?.base64EncodedString() ?? ""
+                stick.fileID = ViewerFileID.of(stick.path)?.text ?? ""
+            }
+            return stick
+        }
+        let follow = { (data: Data) -> URL? in
+            var stale = false
+            return try? URL(resolvingBookmarkData: data, options: [.withoutUI, .withoutMounting], relativeTo: nil, bookmarkDataIsStale: &stale)
+        }
+        let byHand = ["Real/Report.pdf", "Link.pdf", "Folder/Report.pdf", "Real/Other.pdf", "Missing.pdf"].map { onDisk($0) }
+        if let report = ViewerFileID.of(realPDF.path) {
+            let found = ViewerFiles.on(report, byHand, follow: follow)
+            expect(found == Set(byHand.prefix(3).map(ViewerFiles.key)), "a note's path through a link is the same file; another file isn't", "\(found.count)")
+            expect(ViewerFileID(report.text)?.path().map { ViewerFileID.of($0) == report } == true, "a file found again by its identity")
+            // Renamed: its notes follow it; a new file at the old path gets none of them.
+            let made = onDisk("Real/Report.pdf", recorded: true)
+            try? FileManager.default.moveItem(at: realPDF, to: aliasBase.appending(path: "Real/Renamed.pdf"))
+            expect(ViewerFiles.on(report, [made], follow: follow) == [ViewerFiles.key(made)], "renamed: still on it")
+            try? Data("%PDF-1.4 new".utf8).write(to: realPDF)
+            let reused = ViewerFileID.of(realPDF.path)
+            expect(reused != nil && reused != report && ViewerFiles.on(reused!, [made], follow: follow).isEmpty
+                   && ViewerFiles.on(report, [made], follow: follow).count == 1, "a reused path never attaches notes; they stay on the renamed file")
+        } else { expect(false, "a throwaway file") }
         try? FileManager.default.removeItem(at: aliasBase)
 
         print("viewer: \(passed) passed" + (failures > 0 ? ", \(failures) failed" : ""))

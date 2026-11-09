@@ -235,9 +235,12 @@ final class ViewerModel: Identifiable {
     }
     /// The page or slide asked for (from 1), shown once the document is read and only if it has it.
     @ObservationIgnored var wantedPage: Int?
-    /// Every path this file goes by among the notes' places (its own two spellings, links to it), by the file's
-    /// identity, never by spelling (ViewerFileID).
-    private(set) var aliases: Set<String> = []
+    /// The notes' places that name this file (by ViewerFiles.key), each resolved on its own by the one resolver (its
+    /// own file wherever it went, else its bookmark's, else its path's: never a path's spelling alone), and the file
+    /// they were resolved for.
+    private(set) var onFile: Set<String> = []
+    /// Snapshots only: made-up places taken as on this file (nothing on disk to resolve).
+    @ObservationIgnored var previewOnFile: ((NoteStick) -> Bool)?
     /// What a page's text is read from, off the main thread (ViewerText), for the pages shown now.
     @ObservationIgnored private(set) var text: ViewerText?
     /// Selections read and pictures drawn, the latest of each kept.
@@ -561,35 +564,32 @@ final class ViewerModel: Identifiable {
     /// The notes on this file, every paper of each (one of a conflict's papers too), and where each is (its place),
     /// most specific place first.
     var notes: [(paper: PaperNote, place: NoteStick)] {
-        desk.store.notes.compactMap { paper in
-            guard let index = ViewerMatch.place(paper.file.places, path: url.path, also: [opened] + aliases) else { return nil }
+        let on = previewOnFile ?? { [onFile] in onFile.contains(ViewerFiles.key($0)) }
+        return desk.store.notes.compactMap { paper in
+            guard let index = ViewerMatch.place(paper.file.places, onFile: on) else { return nil }
             return (paper, paper.file.places[index])
         }
     }
 
-    /// The notes' file places, by path and bookmark: what `aliases` is worked out from.
+    /// The notes' places that name a file: what `onFile` is worked out from, again whenever they or the file change.
     var anchorSignature: String {
-        let paths = Set(desk.store.notes.flatMap { $0.file.places.filter { $0.kind == .file }.map(\.path) })
-        return url.path + "\u{1}" + paths.sorted().joined(separator: "\u{1}")
+        let keys = Set(desk.store.notes.flatMap { $0.file.places.filter(ViewerFiles.namesFile).map(ViewerFiles.key) })
+        return url.path + "\u{2}" + (stamp.map { "\($0.inode)" } ?? "") + "\u{2}" + keys.sorted().joined(separator: "\u{2}")
     }
 
-    /// Which of the notes' file paths are this file, by its identity (off the main thread): a note made through a link,
-    /// or the document opened through one, still shows. A path gone from the disk is found by its bookmark.
-    func refreshAliases() {
+    /// Which of the notes' places name this file, each resolved on its own off the main thread (ViewerFiles): a
+    /// note made through a link, on a file since renamed, or a sentence noted in Preview shows; a note on a file
+    /// whose path this one took doesn't.
+    func refreshPlaces() {
         let file = url
-        let candidates = Array(Set(desk.store.notes.flatMap { $0.file.places.filter { $0.kind == .file }.map { ($0.path, $0.bookmark) } }
-            .map { "\($0.0)\u{1}\($0.1)" }))
+        let places = desk.store.notes.flatMap { $0.file.places.filter(ViewerFiles.namesFile) }
         Viewers.queue.async {
             guard let id = ViewerFileID.of(file.path) else { return }
-            let pairs = candidates.map { $0.components(separatedBy: "\u{1}") }
-            let marks = Dictionary(pairs.map { ($0[0], $0.count > 1 ? $0[1] : "") }, uniquingKeysWith: { a, _ in a })
-            let found = ViewerFileID.aliases(of: id, Array(marks.keys)) { path in
-                ViewerFileID.of(path) ?? Data(base64Encoded: marks[path] ?? "").flatMap(ViewerLoader.follow).flatMap { ViewerFileID.of($0.path) }
-            }
+            let found = ViewerFiles.on(id, places, follow: ViewerLoader.follow)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard file == self.url, found != self.aliases else { return }
-                    self.aliases = found
+                    guard file == self.url, found != self.onFile else { return }
+                    self.onFile = found
                     self.resolvePassages()
                 }
             }
@@ -599,8 +599,10 @@ final class ViewerModel: Identifiable {
     /// A selection made in PDFKit's view: its page's text read off the main thread (ViewerText), then offered as a
     /// Note; an older selection's answer, or one from pages since replaced, is dropped.
     func selected(page: Int, bounds: CGRect, words: String, range: NSRange, anchor: CGPoint) {
-        guard let source = text else { return }
+        // The selection before is gone at once (its Note with it); the new one is offered only once its read is in.
         let turn = turns.begin("selection")
+        if selection != nil { selection = nil }
+        guard let source = text else { return }
         let lens = lensKey != nil
         source.read(page: page, paragraph: { text in
             guard lens, NSMaxRange(range) <= (text as NSString).length, let swift = Range(range, in: text) else { return nil }
@@ -636,15 +638,17 @@ final class ViewerModel: Identifiable {
     /// desk opens it (`heldByViewer`).
     func openPaper(_ paper: PaperNote) {
         if let key = openKey, key != paper.key { fold(key) }
-        // Open in another viewer (a note on two files): closed there first.
+        // Open in another viewer (a note on two files) or on the desk: handed over from there, never let go of (a
+        // transfer, not a fold: an empty new note stays).
         desk.releaseFromViewer(paper)
-        if desk.faces[paper.key] == .open || desk.faces[paper.key] == .back { desk.fold(paper.key) }
+        if desk.faces[paper.key] == .open || desk.faces[paper.key] == .back { desk.handOff(paper.key) }
         openKey = paper.key
         face = .open
-        // Held by the note's identity, which follows an id given to an id-less note (NoteDesk.identityChanged).
+        // Held by the note's identity, which follows an id given to an id-less note (NoteDesk.identityChanged); the
+        // desk taking it is a transfer too.
         desk.heldByViewer[paper.holder] = { [weak self] in
             guard let self, let key = self.openKey else { return }
-            self.fold(key)
+            self.close(key, .transfer)
         }
         if let item = notes.first(where: { $0.paper.key == paper.key }), let index = spot(item.paper, item.place).page, index != current {
             go(to: index)
@@ -652,12 +656,16 @@ final class ViewerModel: Identifiable {
     }
 
     /// Folds the paper open here: what's typed saved first, and a note made here and left empty let go of.
-    func fold(_ key: String) {
+    func fold(_ key: String) { close(key, .fold) }
+
+    /// The paper open here stops being open here: what's typed saved first; folded, a note made here and left empty
+    /// is let go of; handed to its other editor (`.transfer`), never (ViewerClose).
+    func close(_ key: String, _ how: ViewerClose) {
         guard key == openKey else { return }
         desk.editors[key]?.flush()
         if let paper = desk.store.paper(key) { desk.heldByViewer[paper.holder] = nil }
         openKey = nil
-        desk.letGoIfEmpty(key)
+        if how.letsGoIfEmpty { desk.letGoIfEmpty(key) }
     }
 
     func flip() { face = face == .back ? .open : .back }
@@ -676,8 +684,10 @@ final class ViewerModel: Identifiable {
         }
         let url = url
         Viewers.queue.async {
-            // A bookmark, so the note follows the file when it's moved or renamed (made off the main thread).
+            // A bookmark and the file's own identity, so the note follows the file when it's moved or renamed and a
+            // new file at its path is never it (made off the main thread).
             stick.bookmark = ViewerLoader.bookmark(url)?.base64EncodedString() ?? ""
+            stick.fileID = ViewerFileID.of(url.path)?.text ?? ""
             var refused = false
             if let chosen {
                 let cut = VaultIndex.settled { index -> (quote: String, before: String, after: String)? in
@@ -1313,17 +1323,18 @@ enum ViewerPDFComments {
     static let changed = "The PDF changed while Petal was writing its notes into it: nothing was written. Try again."
     static let hungUp = "The request ended before this was done: nothing was written."
 
-    /// `meanwhile`: for Petal --viewer-check only, between reading the PDF and writing (a change made then).
+    /// `meanwhile` and `lastMoment`: for Petal --viewer-check only, between reading the PDF and writing, and right
+    /// before the last check ahead of each final change (the person's edit, or a hang-up, then).
     static func write(_ pdf: URL, comments: [Comment], intoOriginal: Bool, author: String, live: @escaping @Sendable () -> Bool = { true },
-                      meanwhile: (@Sendable () -> Void)? = nil, _ done: @escaping @MainActor (Outcome) -> Void) {
+                      meanwhile: (@Sendable () -> Void)? = nil, lastMoment: (@Sendable () -> Void)? = nil, _ done: @escaping @MainActor (Outcome) -> Void) {
         Viewers.queue.async {
-            let outcome = make(pdf, comments: comments, intoOriginal: intoOriginal, author: author, live: live, meanwhile: meanwhile)
+            let outcome = make(pdf, comments: comments, intoOriginal: intoOriginal, author: author, live: live, meanwhile: meanwhile, lastMoment: lastMoment)
             DispatchQueue.main.async { MainActor.assumeIsolated { done(outcome) } }
         }
     }
 
     private static func make(_ pdf: URL, comments: [Comment], intoOriginal: Bool, author: String, live: @Sendable () -> Bool,
-                             meanwhile: (@Sendable () -> Void)?) -> Outcome {
+                             meanwhile: (@Sendable () -> Void)?, lastMoment: (@Sendable () -> Void)?) -> Outcome {
         guard !comments.isEmpty else { return .failed("No notes are on this PDF yet.") }
         guard live() else { return .failed(hungUp) }
         // Each note's words redacted whole, before anything is cut from them.
@@ -1384,6 +1395,9 @@ enum ViewerPDFComments {
                 case .hungUp: outcome = .failed(hungUp)
                 case .changed: outcome = .failed(changed)
                 case .land:
+                    // Its asker checked again after the blocking read of the PDF, right before the copy is made.
+                    lastMoment?()
+                    guard live() else { outcome = .failed(hungUp); return }
                     guard !FileManager.default.fileExists(atPath: writable.path), (try? FileManager.default.moveItem(at: temp, to: writable)) != nil else { return }
                     outcome = .wrote(writable, written)
                 }
@@ -1400,6 +1414,14 @@ enum ViewerPDFComments {
                 let backup = folder.appending(path: ViewerCopies.beforeNotes(original: pdf.lastPathComponent, taken: names))
                 do {
                     try FileManager.default.copyItem(at: writable, to: backup)
+                    // Its asker checked again after the backup, right before the PDF itself changes; gone, the backup
+                    // Petal just made goes and the PDF is as it was.
+                    lastMoment?()
+                    guard live() else {
+                        try? FileManager.default.removeItem(at: backup)
+                        outcome = .failed(hungUp)
+                        return
+                    }
                     _ = try FileManager.default.replaceItemAt(writable, withItemAt: temp)
                     outcome = .wrote(pdf, written)
                 } catch {

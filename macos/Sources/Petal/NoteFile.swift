@@ -82,6 +82,9 @@ struct NoteStick: Equatable, Sendable {
     var page: Int? = nil
     var slide: Int? = nil
     var bounds: [Double]? = nil
+    /// The file it was made on, as the disk knew it then ("device:inode"; ViewerFileID): a file and a sentence in one
+    /// are found again by it wherever the file went, and a new file that took its old path is never it.
+    var fileID = ""
     /// Keys this Petal doesn't know (a later one's, or the person's own), each with its lines exactly as written
     /// (nested ones too), written back as they were.
     var extra: [(key: String, lines: [String])] = []
@@ -90,7 +93,7 @@ struct NoteStick: Equatable, Sendable {
         a.kind == b.kind && a.app == b.app && a.appName == b.appName && a.url == b.url && a.title == b.title && a.path == b.path
             && a.bookmark == b.bookmark && a.quote == b.quote && a.before == b.before && a.after == b.after && a.mac == b.mac
             && a.pid == b.pid && a.window == b.window && a.tabID == b.tabID && a.shared == b.shared && a.tabElement == b.tabElement
-            && a.desktop == b.desktop && a.mode == b.mode && a.page == b.page && a.slide == b.slide && a.bounds == b.bounds
+            && a.desktop == b.desktop && a.mode == b.mode && a.page == b.page && a.slide == b.slide && a.bounds == b.bounds && a.fileID == b.fileID
             && a.extra.map(\.key) == b.extra.map(\.key) && a.extra.map(\.lines) == b.extra.map(\.lines)
     }
 
@@ -213,6 +216,8 @@ struct NoteScene: Equatable, Sendable {
     var file = ""
     /// A bookmark to `file` (base64), made with the read off the main thread, for a note stuck to it.
     var fileBookmark = ""
+    /// `file` as the disk knows it ("device:inode"), read with it.
+    var fileID = ""
     var desktop: Int? = nil
 }
 
@@ -226,6 +231,7 @@ extension NoteScene {
         s.tab = nil
         s.file = ""
         s.fileBookmark = ""
+        s.fileID = ""
         return s
     }
 }
@@ -519,7 +525,8 @@ struct NoteFile: Equatable, Sendable {
                 var fields: [(String, String)] = [("kind", place.kind.rawValue)]
                 let strings: [(String, String)] = [("app", place.app), ("appName", place.appName), ("url", place.url), ("title", place.title),
                                                    ("path", place.path), ("bookmark", place.bookmark), ("quote", place.quote),
-                                                   ("before", place.before), ("after", place.after), ("mac", place.mac), ("mode", place.mode)]
+                                                   ("before", place.before), ("after", place.after), ("mac", place.mac), ("mode", place.mode),
+                                                   ("fileID", place.fileID)]
                 for (key, value) in strings where !value.isEmpty { fields.append((key, Self.quoted(value))) }
                 if let pid = place.pid { fields.append(("pid", "\(pid)")) }
                 if let window = place.window { fields.append(("window", "\(window)")) }
@@ -607,6 +614,7 @@ struct NoteFile: Equatable, Sendable {
                 case "after": stick.after = value
                 case "mac": stick.mac = value
                 case "mode": stick.mode = value
+                case "fileID": stick.fileID = value
                 case "pid": stick.pid = Int32(value)
                 case "window": stick.window = UInt32(value)
                 case "tab": stick.tabID = value

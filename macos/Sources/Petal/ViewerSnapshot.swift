@@ -18,6 +18,9 @@ extension Snapshot {
         // A PDF: notes lined up with their passages, a dashed line to each highlight.
         let pdf = ViewerModel(url: URL(fileURLWithPath: "/Users/someone/Documents/Field guide.pdf"), kind: .pdf)
         pdf.preview(pages: (0..<6).map { samplePage($0) }, current: 0)
+        // Made-up places, nothing on disk to resolve: taken as on the file by their path (snapshots only).
+        let pdfPath = pdf.url.path
+        pdf.previewOnFile = { $0.path == pdfPath }
         func file(_ model: ViewerModel, page: Int? = nil, slide: Int? = nil, bounds: [Double]? = nil, quote: String = "") -> NoteStick {
             var stick = NoteStick(kind: .file)
             stick.path = model.url.path
@@ -49,6 +52,8 @@ extension Snapshot {
         // A slide deck through Quick Look: notes per slide, the one shown open.
         let deck = ViewerModel(url: URL(fileURLWithPath: "/Users/someone/Documents/Quarterly plan.pptx"), kind: .quickLook(.slide))
         deck.preview(pages: (0..<9).map { sampleSlide($0) }, current: 2, app: "PowerPoint")
+        let deckPath = deck.url.path
+        deck.previewOnFile = { $0.path == deckPath }
         var three = NoteFile(id: "D1", created: day, body: "Make the title shorter and give the chart room\n> Two versions are below the slide, made on copies.")
         three.places = [file(deck, slide: 3)]
         var five = NoteFile(id: "D2", created: day, body: "The chart still has last quarter's figures")
@@ -170,8 +175,10 @@ enum ViewerCheck {
             if !done { print("\(file): timed out"); failed = true }
         }
         if let pdf = files.first(where: { ViewerKind.of($0) == .pdf }), case .success(let url) = ViewerPath.check(pdf) {
+            let app = PetalApp()
             failed = !writes(url) || failed
-            failed = !window(url) || failed
+            failed = !places(url, app: app) || failed
+            failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
             failed = !cleanup(url) || failed
@@ -269,9 +276,11 @@ enum ViewerCheck {
         let notes = comments(pdf, document)
         var ok = true
         func expect(_ condition: Bool, _ what: String) { if !condition { print("writes: FAIL \(what)"); ok = false } }
-        func run(original: Bool, live: @escaping @Sendable () -> Bool = { true }, meanwhile: (@Sendable () -> Void)? = nil) -> ViewerPDFComments.Outcome? {
+        func run(original: Bool, live: @escaping @Sendable () -> Bool = { true }, meanwhile: (@Sendable () -> Void)? = nil,
+                 lastMoment: (@Sendable () -> Void)? = nil) -> ViewerPDFComments.Outcome? {
             var outcome: ViewerPDFComments.Outcome?
-            ViewerPDFComments.write(pdf, comments: notes, intoOriginal: original, author: "Petal check", live: live, meanwhile: meanwhile) { outcome = $0 }
+            ViewerPDFComments.write(pdf, comments: notes, intoOriginal: original, author: "Petal check", live: live, meanwhile: meanwhile,
+                                    lastMoment: lastMoment) { outcome = $0 }
             wait(20) { outcome != nil }
             return outcome
         }
@@ -293,6 +302,15 @@ enum ViewerCheck {
         let flag = HangUp()
         expect(run(original: true, live: { !flag.gone }, meanwhile: { flag.gone = true }) == .failed(ViewerPDFComments.hungUp) && names() == ["Report.pdf"],
                "hung up mid-way: nothing written")
+        // Hung up at the last moment: after the PDF was read again and checked (and, into the original, its backup
+        // made), right before the change: still nothing written, the backup Petal made gone.
+        let unchanged = try? Data(contentsOf: pdf)
+        let late = HangUp()
+        expect(run(original: true, live: { !late.gone }, lastMoment: { late.gone = true }) == .failed(ViewerPDFComments.hungUp)
+               && names() == ["Report.pdf"] && (try? Data(contentsOf: pdf)) == unchanged, "hung up after the backup: the PDF as it was, no backup left")
+        let later = HangUp()
+        expect(run(original: false, live: { !later.gone }, lastMoment: { later.gone = true }) == .failed(ViewerPDFComments.hungUp) && names() == ["Report.pdf"],
+               "hung up after the check: no copy made")
         // Unchanged: into the original, the original kept beside it.
         let before = try? Data(contentsOf: pdf)
         if case .wrote(_, let count)? = run(original: true) {
@@ -304,6 +322,77 @@ enum ViewerCheck {
     }
 
     final class HangUp: @unchecked Sendable { var gone = false }
+
+    /// The one file resolver, on throwaway copies: a note on a file whose path a new file took isn't on the new one;
+    /// a sentence noted in Preview (Phase 1's passage on a file) is in the margin and the comments; a note on a file
+    /// renamed since is exported with it.
+    private static func places(_ source: URL, app: PetalApp) -> Bool {
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("places: FAIL \(what)"); ok = false } }
+        let a = folder.appending(path: "A.pdf")
+        try? FileManager.default.copyItem(at: source, to: a)
+        /// A place as Petal makes one: its path, bookmark and the file's own identity.
+        func place(_ kind: NoteStick.Kind, _ file: URL) -> NoteStick {
+            var stick = NoteStick(kind: kind)
+            stick.path = file.path
+            stick.bookmark = ViewerLoader.bookmark(file)?.base64EncodedString() ?? ""
+            stick.fileID = ViewerFileID.of(file.path)?.text ?? ""
+            return stick
+        }
+        func paper(_ id: String, _ places: [NoteStick]) -> PaperNote {
+            var file = NoteFile(id: id, body: "A made-up note \(id)")
+            file.places = places
+            return PaperNote(file: file, url: folder.appending(path: id + ".md"), notebook: "Inbox")
+        }
+        func margin(_ url: URL) -> [String] {
+            let model = ViewerModel(url: url, kind: .pdf)
+            model.refreshPlaces()
+            wait(3) { !model.notes.isEmpty }
+            wait(0.3) { false }
+            return model.notes.map(\.paper.noteID).sorted()
+        }
+        func export(_ url: URL) -> ViewerPDFComments.Outcome? {
+            var result: ViewerPDFComments.Outcome?
+            app.viewers.comments(url, opened: url.path, intoOriginal: false, caller: nil, { value in
+                let wrote = (value as? [String: Any])?["wrote"] as? Int ?? 0
+                let name = (value as? [String: Any])?["file"] as? String ?? ""
+                result = .wrote(url.deletingLastPathComponent().appending(path: name), wrote)
+            }, { result = .failed($0) })
+            wait(20) { result != nil }
+            return result
+        }
+        // A sentence noted in Preview: a passage on the file (no page), as Phase 1 makes it (its path, bookmark and
+        // the file's identity, read with the window).
+        let text = PDFDocument(url: a)?.page(at: 0)?.string ?? ""
+        var sentence = place(.passage, a)
+        sentence.quote = "Growth held steady"
+        if let range = text.range(of: "Growth held steady") { sentence.after = String(text[range.upperBound...].prefix(20)) }
+        let onA = place(.file, a)
+        app.paper.store.preview([paper("P1", [sentence]), paper("P2", [onA])], notebooks: [])
+        expect(margin(a) == ["P1", "P2"], "a Preview sentence and a file note are in the margin")
+        if case .wrote(let copy, let count)? = export(a) {
+            let highlights = PDFDocument(url: copy)?.page(at: 0)?.annotations.filter { $0.type == "Highlight" }.count ?? 0
+            expect(count == 2 && highlights == 1, "both exported, the Preview sentence highlighted on its words")
+            try? FileManager.default.removeItem(at: copy)
+        } else { expect(false, "both exported") }
+        // Renamed, then exported: its notes go with it.
+        let b = folder.appending(path: "B.pdf")
+        try? FileManager.default.moveItem(at: a, to: b)
+        expect(margin(b) == ["P1", "P2"], "renamed: its notes follow it")
+        if case .wrote(let copy, let count)? = export(b) {
+            expect(count == 2, "renamed, then exported: both notes")
+            try? FileManager.default.removeItem(at: copy)
+        } else { expect(false, "renamed, then exported") }
+        // Its old path taken by a new file: the notes stay with the renamed one, never on the new one.
+        try? FileManager.default.copyItem(at: source, to: a)
+        expect(margin(a).isEmpty, "a new file at the old path gets none of them")
+        if case .failed? = export(a) {} else { expect(false, "and none of them are exported into it") }
+        expect(margin(b) == ["P1", "P2"], "they're still on the file itself")
+        print("places: " + (ok ? "one resolver: a Preview sentence, a renamed file and a reused path, in the margin and the comments" : "failed"))
+        return ok
+    }
 
     /// A Quick Look export whose result is dropped unused (a newer load) is cleaned up all the same.
     private static func cleanup(_ deck: URL) -> Bool {
@@ -387,8 +476,7 @@ enum ViewerCheck {
     }
 
     /// An off-screen viewer window on a throwaway PDF whose first page has "Growth held steady" (never ordered in).
-    private static func window(_ url: URL) -> Bool {
-        let app = PetalApp()
+    private static func window(_ url: URL, app: PetalApp) -> Bool {
         let model = ViewerModel(url: url, kind: .pdf)
         let window = ViewerWindow(model: model)
         window.setFrame(NSRect(origin: CGPoint(x: -4000, y: -4000), size: ViewerLook.size), display: false)
@@ -415,6 +503,15 @@ enum ViewerCheck {
         wait(3) { model.selection != nil }
         wait(0.5) { false }
         expect(model.selection?.page == 0 && model.selection?.quote == "Growth held steady" && model.selection?.pageText == text, "the selection's page and words")
+        // A new selection starting: the one before (and its Note) gone at once, the new one only once its read is in.
+        if let other = text.range(of: "second half") {
+            view.setCurrentSelection(page.selection(for: NSRange(other, in: text)), animate: false)
+            expect(model.selection == nil, "the old selection cleared at once, its Note hidden")
+            wait(3) { model.selection != nil }
+            expect(model.selection?.quote == "second half", "the new one offered once read")
+            view.setCurrentSelection(selection, animate: false)
+            wait(3) { model.selection?.quote == "Growth held steady" }
+        }
         // The passage as the vault check cuts it from the whole page.
         if let chosen = model.selection, let cut = ViewerSecrets.passage(chosen.pageText, range: chosen.range, secrets: []) {
             expect(cut.quote == "Growth held steady" && cut.after.hasPrefix(" through"), "the passage cut from the page's text")
@@ -440,6 +537,9 @@ enum ViewerCheck {
                      PaperNote(file: lost, url: FileManager.default.temporaryDirectory.appending(path: "W2.md"), notebook: "Inbox")]
         app.paper.store.preview(notes, notebooks: [])
         model.selection = nil
+        // Places with a path and nothing else (written by hand): the file at that path (the one resolver).
+        model.refreshPlaces()
+        wait(3) { model.notes.count == 2 }
         model.resolvePassages()
         window.contentView?.layoutSubtreeIfNeeded()
         wait(3) { model.highlights[notes[0].key] != nil && model.passages[notes[1].key] != nil }
@@ -477,11 +577,26 @@ enum ViewerCheck {
         idless.places = [linked]
         var handwritten = PaperNote(file: idless, url: FileManager.default.temporaryDirectory.appending(path: "Handwritten.md"), notebook: "Inbox")
         handwritten.instance = "1:42"
-        app.paper.store.preview(notes + [PaperNote(file: throughLink, url: FileManager.default.temporaryDirectory.appending(path: "W3.md"), notebook: "Inbox"), handwritten],
+        // An empty note just made (in the viewer or on the desk): handed between them, never let go of.
+        let draft = PaperNote(file: { var f = NoteFile(id: "W5", body: ""); f.places = [linked]; return f }(),
+                              url: FileManager.default.temporaryDirectory.appending(path: "W5.md"), notebook: "Inbox")
+        app.paper.store.preview(notes + [PaperNote(file: throughLink, url: FileManager.default.temporaryDirectory.appending(path: "W3.md"), notebook: "Inbox"), handwritten, draft],
                                 notebooks: [])
-        model.refreshAliases()
-        wait(3) { model.aliases.contains(link.path) }
+        model.refreshPlaces()
+        wait(3) { model.notes.contains { $0.paper.noteID == "W3" } }
         expect(model.notes.contains { $0.paper.noteID == "W3" }, "a note made through a link shows")
+        app.paper.fresh.insert(draft.key)
+        model.openPaper(draft)
+        app.paper.releaseFromViewer(draft)
+        expect(model.openKey == nil && app.paper.fresh.contains(draft.key) && app.paper.store.paper(draft.key) != nil,
+               "handed from the viewer to the desk: the empty draft stays")
+        app.paper.faces[draft.key] = .open
+        model.openPaper(draft)
+        expect(model.openKey == draft.key && app.paper.faces[draft.key] == .folded && app.paper.fresh.contains(draft.key) && app.paper.store.paper(draft.key) != nil,
+               "handed from the desk to the viewer: the empty draft stays")
+        model.close(draft.key, .transfer)
+        app.paper.faces[draft.key] = nil
+        app.paper.fresh.remove(draft.key)
         model.openPaper(handwritten)
         expect(model.openKey == handwritten.key && app.paper.heldByViewer[handwritten.holder] != nil, "open in the margin, held by its identity")
         app.paper.identityChanged(holder: handwritten.holder, "W4")
@@ -489,7 +604,7 @@ enum ViewerCheck {
         given.file.id = "W4"
         app.paper.releaseFromViewer(given)
         expect(model.openKey == nil && app.paper.heldByViewer.isEmpty, "given its own id, the desk opening it still closes it in the margin")
-        print("window: " + (ok ? "PDF view, selection read off the main thread, passages found by their words, highlight, margin and pages in step, a link's note, ownership across an id change" : "failed"))
+        print("window: " + (ok ? "PDF view, selection read off the main thread, passages found by their words, highlight, margin and pages in step, a link's note, ownership across an id change, the old selection cleared at once, an empty draft kept across a hand-off" : "failed"))
         window.close()
         return ok
     }

@@ -118,16 +118,16 @@ enum ViewerPath {
 
 /// Which of a note's places puts it in the viewer's margin for a file, and where.
 enum ViewerMatch {
-    /// The most specific file anchor on `path` (or the same file under another spelling, `also`): a passage with
-    /// its bounds, then a page or slide, then the file. nil when none is on it.
-    static func place(_ places: [NoteStick], path: String, also: [String] = []) -> Int? {
-        let paths = Set([path] + also)
+    /// The most specific of a note's places that names this file (`onFile`: ViewerFiles' one resolver, by the file's
+    /// identity, never a path's spelling): a passage (a `file` place with words, or Phase 1's sentence in a file),
+    /// then a page or slide, then the file. nil when none is on it.
+    static func place(_ places: [NoteStick], onFile: (NoteStick) -> Bool) -> Int? {
         func rank(_ stick: NoteStick) -> Int {
-            if stick.bounds != nil, stick.page != nil { return 0 }
+            if !stick.quote.isEmpty { return 0 }
             if stick.page != nil || stick.slide != nil { return 1 }
             return 2
         }
-        let fitting: [Int] = places.indices.filter { places[$0].kind == .file && paths.contains(places[$0].path) }
+        let fitting: [Int] = places.indices.filter { ViewerFiles.namesFile(places[$0]) && onFile(places[$0]) }
         return fitting.min { rank(places[$0]) < rank(places[$1]) }
     }
 
@@ -246,11 +246,92 @@ struct ViewerFileID: Equatable, Hashable, Sendable {
         return ViewerFileID(device: UInt64(bitPattern: Int64(info.st_dev)), inode: UInt64(info.st_ino))
     }
 
-    /// The paths among `candidates` that are `file`, by identity, never by spelling: the path the document was
-    /// opened by, the one the disk spells, a link to it, a note's path written through another link.
-    static func aliases(of file: ViewerFileID, _ candidates: [String], identify: (String) -> ViewerFileID?) -> Set<String> {
-        Set(candidates.filter { identify($0) == file })
+    /// As a place writes it: "device:inode".
+    var text: String { "\(device):\(inode)" }
+
+    init(device: UInt64, inode: UInt64) {
+        self.device = device
+        self.inode = inode
     }
+
+    init?(_ text: String) {
+        let parts = text.split(separator: ":")
+        guard parts.count == 2, let device = UInt64(parts[0]), let inode = UInt64(parts[1]) else { return nil }
+        self.init(device: device, inode: inode)
+    }
+
+    /// Where this very file is now, wherever it was moved (the volume asked by its id, `fsgetpath`); nil when it's
+    /// gone (deleted, or replaced by a save that made a new file).
+    func path() -> String? {
+        // The volume's id as stat gives it (st_dev, a 32-bit number).
+        var fsid = fsid_t(val: (Int32(truncatingIfNeeded: device), 0))
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+        let length = fsgetpath(&buffer, buffer.count, &fsid, inode)
+        guard length > 0 else { return nil }
+        let found = String(cString: buffer)
+        return ViewerFileID.of(found) == self ? found : nil
+    }
+}
+
+/// The one resolver for what file a note's place names, for the viewer's margin, the PDF comments and the tools
+/// alike, each place on its own: the very file it was made on (its `fileID`, found wherever it went: a rename or
+/// a move); that file gone (a save that made a new one), the file its bookmark finds; no bookmark, the file at its
+/// path. A shared path never names two files: a new file that took the path while the place's own file still
+/// exists elsewhere is never it, and a bookmark that finds nothing is never replaced by the path alone.
+enum ViewerFiles {
+    /// A place that names a file: a file (in any app or in the viewer), or Phase 1's sentence in a file (a passage
+    /// with a path or bookmark and no page address).
+    static func namesFile(_ stick: NoteStick) -> Bool {
+        switch stick.kind {
+        case .file: return !stick.path.isEmpty || !stick.bookmark.isEmpty
+        case .passage: return stick.url.isEmpty && (!stick.path.isEmpty || !stick.bookmark.isEmpty)
+        default: return false
+        }
+    }
+
+    /// The rule, from what the disk says: `recorded` the place's own file (nil when it has none) and whether it still
+    /// exists, the bookmark's file (nil when it has none or it finds nothing), and the path's file.
+    static func target(recorded: ViewerFileID?, recordedAlive: Bool, hasBookmark: Bool, bookmarkTarget: ViewerFileID?,
+                       pathTarget: ViewerFileID?) -> ViewerFileID? {
+        if let recorded, recordedAlive { return recorded }
+        if hasBookmark { return bookmarkTarget }
+        return pathTarget
+    }
+
+    /// The file a place names now (off the main thread: the disk is asked).
+    static func target(of stick: NoteStick, follow: (Data) -> URL?) -> ViewerFileID? {
+        guard namesFile(stick) else { return nil }
+        let recorded = ViewerFileID(stick.fileID)
+        let alive = recorded?.path() != nil
+        if let recorded, alive { return recorded }
+        // No bookmark written is no bookmark (an empty one decodes to empty data, which finds nothing).
+        let mark = stick.bookmark.isEmpty ? nil : Data(base64Encoded: stick.bookmark)
+        let viaBookmark = mark.flatMap(follow).flatMap { ViewerFileID.of($0.path) }
+        return target(recorded: recorded, recordedAlive: alive, hasBookmark: mark != nil, bookmarkTarget: viaBookmark,
+                      pathTarget: ViewerFileID.of(stick.path))
+    }
+
+    /// A place as the resolver keys it: everything it goes by.
+    static func key(_ stick: NoteStick) -> String { [stick.path, stick.bookmark, stick.fileID].joined(separator: "\u{1}") }
+
+    /// Which of `places` name `file` (by key), each resolved on its own (off the main thread).
+    static func on(_ file: ViewerFileID, _ places: [NoteStick], follow: (Data) -> URL?) -> Set<String> {
+        var found: Set<String> = []
+        for place in places where namesFile(place) {
+            let key = key(place)
+            if found.contains(key) { continue }
+            if target(of: place, follow: follow) == file { found.insert(key) }
+        }
+        return found
+    }
+}
+
+/// How a margin paper stops being open in the viewer: folded or closed there (a note made there and left empty is let
+/// go), or handed to the desk (or the desk's to the viewer: the same note open in its other editor, never let go).
+enum ViewerClose {
+    case fold, transfer
+
+    var letsGoIfEmpty: Bool { self == .fold }
 }
 
 /// A document Quick Look shows as one long page (Word's, a spreadsheet's) cut into pages at the ends of its blocks,

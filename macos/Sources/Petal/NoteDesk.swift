@@ -62,8 +62,9 @@ final class NoteDesk {
     /// What was in front when the quick question opened, for Stick here.
     private(set) var captured: (scene: NoteScene, read: ClaudePanel.FrontRead, url: String, name: String, privacy: Int)?
     @ObservationIgnored private var ghost: NSPanel?
-    /// Made just now and still empty: let go of if it's put away empty.
-    @ObservationIgnored private var fresh: Set<String> = []
+    /// Made just now and still empty: let go of if it's put away empty (folded or hidden; never when it's only
+    /// handed to its other editor, `handOff`).
+    @ObservationIgnored var fresh: Set<String> = []
 
     nonisolated static let queue = DispatchQueue(label: "petal.notes.look", qos: .userInitiated)
     /// Narrowing a window for an open note: a newer turn (the note folded, notes off, quitting) makes one still
@@ -450,6 +451,7 @@ final class NoteDesk {
                 let desktop: Int? = read.window == nil && read.none ? screen.flatMap { Spaces.desktops([$0])[$0] } : nil
                 var file = ""
                 var bookmark = ""
+                var fileID = ""
                 var twins: Int?
                 if let number = read.window, Windows.trusted {
                     let element = AXUIElementCreateApplication(pid)
@@ -459,11 +461,15 @@ final class NoteDesk {
                        let document: String = Windows.value(window, kAXDocumentAttribute), let url = URL(string: document), url.isFileURL {
                         file = url.path
                         bookmark = (try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))?.base64EncodedString() ?? ""
+                        // The file's own identity too: a note on it, or a sentence in it, is found again wherever it
+                        // goes, and a new file at its path is never it (ViewerFiles).
+                        fileID = ViewerFileID.of(url.path)?.text ?? ""
                     }
                     if !read.title.isEmpty { twins = all.filter { (Windows.value($0, kAXTitleAttribute) as String?) == read.title }.count }
                 }
                 var made = NoteScene(mac: mac, app: app, pid: pid, window: read.window, title: read.title, titleTwins: twins, tab: read.tab, file: file)
                 made.fileBookmark = bookmark
+                made.fileID = fileID
                 let scene = made
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
@@ -1178,6 +1184,18 @@ final class NoteDesk {
         if hadKeyboard { giveKeyboardBack() }
     }
 
+    /// The paper open on the desk handed to Petal's viewer's margin (its other editor): what's typed saved, the
+    /// desk's paper folded, and never let go of (an empty new note stays: it's open there now).
+    func handOff(_ key: String) {
+        keyboardWanted.cancel(key)
+        guard faces[key] == .open || faces[key] == .back else { return }
+        Self.roomTurn.cancel()
+        editors[key]?.flush()
+        faces[key] = .folded
+        if keyboard == key { keyboard = nil }
+        faceChanged(key)
+    }
+
     /// The last app other than Petal the person brought forward (kept as apps activate).
     @ObservationIgnored private var lastOtherApp: pid_t?
     @ObservationIgnored private var appWatch: NSObjectProtocol?
@@ -1754,8 +1772,11 @@ final class NoteDesk {
             s.after = String(passage.after.prefix(80))
             s.url = scene.tab?.url ?? ""
             s.path = scene.tab == nil ? scene.file : ""
-            // A sentence in a file follows the file through its bookmark, as a file's note does.
-            if scene.tab == nil { s.bookmark = scene.fileBookmark }
+            // A sentence in a file follows the file through its bookmark and its own identity, as a file's note does.
+            if scene.tab == nil {
+                s.bookmark = scene.fileBookmark
+                s.fileID = scene.fileID
+            }
             offers.append(s)
         }
         // A tab Petal can tell from the others (its id, or its tab-strip button): Safari's only tab, with no strip,
@@ -1776,6 +1797,7 @@ final class NoteDesk {
             s.path = scene.file
             s.title = (scene.file as NSString).lastPathComponent
             s.bookmark = scene.fileBookmark   // made with the read, off the main thread
+            s.fileID = scene.fileID
             offers.append(s)
         }
         offers.append(stick(.window))

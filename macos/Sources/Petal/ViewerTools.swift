@@ -114,24 +114,24 @@ extension Viewers {
     /// person allows it.
     func comments(_ pdf: URL, opened: String, intoOriginal: Bool, caller: String?, live: @escaping @Sendable () -> Bool = { true },
                   _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
-        // The notes on this PDF by its identity, whatever path spells it (a link, the path it was opened by), worked
-        // out off the main thread.
-        let candidates = Array(Set(app.paper.store.notes.flatMap { $0.file.places.filter { $0.kind == .file }.map(\.path) }))
+        // The notes on this PDF by the one resolver the margin uses (ViewerFiles: each place's own file wherever it
+        // went, else its bookmark's, else its path's), worked out off the main thread.
+        let places = app.paper.store.notes.flatMap { $0.file.places.filter(ViewerFiles.namesFile) }
         Self.queue.async {
-            let found = ViewerFileID.of(pdf.path).map { id in ViewerFileID.aliases(of: id, candidates, identify: ViewerFileID.of) } ?? []
+            let found = ViewerFileID.of(pdf.path).map { id in ViewerFiles.on(id, places, follow: ViewerLoader.follow) } ?? []
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard live() else { return fail(NoteDesk.hungUp) }
-                    self.comments(pdf, paths: [pdf.path, opened] + found, intoOriginal: intoOriginal, caller: caller, live: live, send, fail)
+                    self.comments(pdf, onFile: found, intoOriginal: intoOriginal, caller: caller, live: live, send, fail)
                 }
             }
         }
     }
 
-    private func comments(_ pdf: URL, paths: [String], intoOriginal: Bool, caller: String?, live: @escaping @Sendable () -> Bool,
+    private func comments(_ pdf: URL, onFile: Set<String>, intoOriginal: Bool, caller: String?, live: @escaping @Sendable () -> Bool,
                           _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let comments = app.paper.store.notes.compactMap { paper -> ViewerPDFComments.Comment? in
-            guard paper.version == nil, let index = ViewerMatch.place(paper.file.places, path: pdf.path, also: paths) else { return nil }
+            guard paper.version == nil, let index = ViewerMatch.place(paper.file.places, onFile: { onFile.contains(ViewerFiles.key($0)) }) else { return nil }
             // The words as written: the writer redacts them whole before anything is cut.
             return ViewerPDFComments.Comment(stick: paper.file.places[index], body: paper.file.body,
                                             color: PaperLook.rgb(app.paper.store.color(of: paper.notebook)))

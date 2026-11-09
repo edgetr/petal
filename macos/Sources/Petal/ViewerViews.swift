@@ -97,7 +97,7 @@ struct ViewerView: View {
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in ViewerDrop.take(providers) }
         // The notes' file places that are this file by its identity (a link, another spelling), again whenever they
         // or the file's path change.
-        .task(id: model.anchorSignature) { model.refreshAliases() }
+        .task(id: model.anchorSignature) { model.refreshPlaces() }
     }
 }
 
