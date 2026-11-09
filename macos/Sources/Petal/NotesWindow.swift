@@ -460,7 +460,9 @@ struct NotesWindowView: View {
             shelfRow(.helpers, symbol: "sparkle", title: "Helpers at work", count: NoteLibrary.listed(.helpers, files, now: now).count)
 
             header("Notebooks")
-            ForEach(books) { book in notebookRow(book) }
+            // The notebooks scroll when there are more than fit (many of them, or the window at its smallest), and
+            // "+ Notebook" stays pinned under the list, always in reach.
+            notebookList(books)
             Button { model.newNotebook() } label: {
                 HStack(spacing: 9) {
                     Image(systemName: "plus").font(.system(size: 11, weight: .medium)).frame(width: 10)
@@ -476,6 +478,25 @@ struct NotesWindowView: View {
         .padding(.top, 50).padding(.horizontal, 12).padding(.bottom, 12)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(look.sidebar.opacity(snapshotting ? 1 : 0.62))
+    }
+
+    /// The notebooks, in a vertical scroll view: as tall as its rows while they fit (so "+ Notebook" sits right under
+    /// them), else as tall as the room that's left, scrolling. The rows are an eager stack (a lazy one in this
+    /// window's glass misbehaves as a settings page's does). While snapshotting, where scroll views draw as
+    /// placeholders, a stand-in of the same size: the rows from the top, cut where the scroll view ends.
+    @ViewBuilder private func notebookList(_ books: [Notebook]) -> some View {
+        let rows = VStack(alignment: .leading, spacing: 1) { ForEach(books) { book in notebookRow(book) } }
+        if snapshotting {
+            ViewThatFits(in: .vertical) {
+                rows
+                Color.clear.overlay(alignment: .top) { rows.fixedSize(horizontal: false, vertical: true) }.clipped()
+            }
+        } else {
+            ViewThatFits(in: .vertical) {
+                ScrollView(.vertical) { rows }.fixedSize(horizontal: false, vertical: true)
+                ScrollView(.vertical) { rows }
+            }
+        }
     }
 
     private func header(_ text: String) -> some View {
@@ -610,7 +631,7 @@ struct NotesWindowView: View {
                 if let book { viewToggle(book) }
             }
             .padding(.top, 38).padding(.horizontal, 36).padding(.trailing, -16)
-            Scroll {
+            ScrollDown {
                 VStack(alignment: .leading, spacing: 14) {
                     NotesGrid(papers: fresh, cover: cover, across: across, now: now)
                     if !faded.isEmpty {
@@ -1033,6 +1054,22 @@ struct CanvasBoard: View {
             model.words(about: book.name, "Write on the canvas", "Your words:", value: "") { text, asked in
                 model.edit(asked.notebook, .words(.init(id: UUID().uuidString, text: text, x: 80, y: 40 + Double(layout.texts.count) * 30)))
             }
+        }
+    }
+}
+
+/// Scrolls down; while snapshotting (scroll views draw as placeholders there), a stand-in of the scroll view's own
+/// size: its content from the top, cut where the scroll view ends, so a window smaller than its notes is drawn as
+/// the window shows it.
+struct ScrollDown<Content: View>: View {
+    @Environment(\.snapshotting) private var snapshotting
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        if snapshotting {
+            Color.clear.overlay(alignment: .topLeading) { content.fixedSize(horizontal: false, vertical: true) }.clipped()
+        } else {
+            ScrollView { content }
         }
     }
 }

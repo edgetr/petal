@@ -77,13 +77,16 @@ extension Snapshot {
         app.paper.preview(here: [:], found: [:])
         let model = app.notesWindow.model
         let rootWords = NSHomeDirectory() + "/Library/Mobile Documents/com~apple~CloudDocs/Petal Notes"
-        let size = CGSize(width: 1220, height: 748)
-        func windowShot(_ name: String, dark: Bool = false) {
+        let full = CGSize(width: 1220, height: 748)
+        func windowShot(_ name: String, dark: Bool = false, size: CGSize? = nil) {
+            let size = size ?? full
+            // The window at its size, from its top: what's taller than it (the grid's stand-in for its scroll view, in a
+            // small window) is cut at the window's bottom, as the window cuts it.
             let view = NotesWindowView(model: model, now: now, rootPath: rootWords)
+                .frame(width: size.width, height: size.height, alignment: .top)
                 .clipShape(.rect(cornerRadius: 14))
                 .overlay { RoundedRectangle(cornerRadius: 14).stroke(.black.opacity(0.25), lineWidth: 0.5) }
                 .overlay(alignment: .topLeading) { TrafficLights().padding(.leading, 16).padding(.top, 15) }
-                .frame(width: size.width, height: size.height)
                 .padding(30)
                 .background(Self.desk)
                 .environment(\.colorScheme, dark ? .dark : .light)
@@ -117,6 +120,18 @@ extension Snapshot {
         model.shelf = .notebook("Health")
         windowShot("notes-window-private")
         model.shelf = .notebook("Garden")
+
+        // Many notebooks with the window at its smallest (820 by 560): the list scrolls (here cut where the scroll
+        // view ends), and "+ Notebook" stays pinned under it, in reach.
+        var many = books
+        let more = ["Recipes", "Travel", "Reading", "House", "Car", "Taxes", "Ideas", "Journal", "Music", "Films", "Running", "Languages",
+                    "Budget", "Renovation", "School", "Clients", "Research", "Side project", "Letters", "Wishlist"]
+        for (n, name) in more.enumerated() {
+            many.append(Notebook(name: name, folder: root.appending(path: name), color: [green, orange, pink, graphite][n % 4], cover: nil, count: n % 7))
+        }
+        app.paper.store.preview(notes, notebooks: many)
+        windowShot("notes-window-many", size: CGSize(width: 820, height: 560))
+        app.paper.store.preview(notes, notebooks: books)
 
         // A notebook in the dock as a stack, its papers fanned up.
         let garden = books.first { $0.name == "Garden" }!
