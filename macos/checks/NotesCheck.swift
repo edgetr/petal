@@ -739,6 +739,16 @@ struct NotesCheck {
         expect(!NoteShelf.isHere(NoteShelf.placementNow(window: 7, desktops: [], showing: [], windowValid: false))
                && NoteShelf.placementNow(window: 7, desktops: [3], showing: [3], windowValid: false) == .desktop,
                "a window placement awaiting a fresh read isn't here (a Desktop showing still is)")
+        // Remove: only the attachment when words share its line; the whole line when it's alone.
+        expect(NoteShelf.removalRange(attachment: NSRange(location: 4, length: 1), line: NSRange(location: 4, length: 7), lineText: "\u{FFFC}words\n") == NSRange(location: 4, length: 1)
+               && NoteShelf.removalRange(attachment: NSRange(location: 4, length: 1), line: NSRange(location: 4, length: 2), lineText: "\u{FFFC}\n") == NSRange(location: 4, length: 2),
+               "words beside it stay; alone, its line goes")
+        // The Desktop fallback: a note also stuck to the Desktop showing goes there while its window placement awaits a
+        // fresh read, and back to its window once the read is in.
+        expect(NoteShelf.onDesktop(window: 7, desktops: [3], screenDesktop: 3, windowValid: false)
+               && !NoteShelf.onDesktop(window: 7, desktops: [3], screenDesktop: 3, windowValid: true)
+               && !NoteShelf.onDesktop(window: nil, desktops: [2], screenDesktop: 3, windowValid: false)
+               && NoteShelf.onDesktop(window: nil, desktops: [3], screenDesktop: 3, windowValid: true), "on the Desktop by the validated placement only")
         expect(NoteShelf.shownPixels(width: 360, scale: 2) == 720 && NoteShelf.shownPixels(width: 360, scale: 0) == 360, "decoded at the shown width × scale")
         expect(NoteShelf.isHere(NoteShelf.placementNow(window: nil, desktops: [3], showing: [3])) && NoteShelf.isHere(NoteShelf.placementNow(window: 7, desktops: [], showing: []))
                && !NoteShelf.isHere(NoteShelf.placementNow(window: nil, desktops: [3], showing: [2])), "a Desktop note on the Desktop showing is here; one elsewhere isn't")

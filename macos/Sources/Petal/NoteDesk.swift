@@ -226,9 +226,12 @@ final class NoteDesk {
         looks = NoteShelf.hidingLook(looks)
         // Narrowing waiting for it cancelled, and every narrowed window's width given back now (NoteShelf.onHide).
         if NoteShelf.onHide().giveBack { giveBackAll {} }
-        for (key, panel) in panels where !isDesktop(key) { panel.conceal() }
+        // Hidden by where each is shown now (a paper shown by the window, not one shown on the Desktop), then the
+        // Desktop placed again by the validated placement: a note also stuck to the Desktop showing moves there.
+        for (_, panel) in panels where !panel.desktop { panel.conceal() }
         for panel in tabPanels.values { panel.conceal() }
         for panel in pinPanels.values { panel.conceal() }
+        placeDesktop()
     }
 
     /// Set by a focus change, cleared by the next read applied: layout shows no window's notes meanwhile.
@@ -1093,8 +1096,10 @@ final class NoteDesk {
         var showing: Set<String> = []
         for screen in NSScreen.screens {
             guard let number = Self.desktopShowing(on: screen) else { continue }
+            // The validated placement (placementNow's rule): a stale window placement never keeps a note off it.
             let notes = store.notes.filter { paper in
-                NoteShelf.placement(window: here[paper.key], onDesktopShowing: paper.file.places.contains { $0.kind == .desktop && $0.desktop == number }) == .desktop
+                NoteShelf.onDesktop(window: here[paper.key], desktops: paper.file.places.filter { $0.kind == .desktop }.map(\.desktop), screenDesktop: number,
+                                    windowValid: !awaitingRead && !hiddenForTab(paper.key))
             }
             for (index, paper) in notes.enumerated() {
                 showing.insert(paper.key)
@@ -1546,8 +1551,16 @@ final class NoteDesk {
         // With its editor open, Remove is an edit there, saved like any typing (never a write under it that its
         // unsaved typing would undo); without one, a based write.
         if let editor = editors[key] {
+            // Their bytes captured first: undo accepts them again (journaled, written in the background), redo removes
+            // them again.
+            let bytes = store.asideBytes(key)
             guard let names = store.retirePictures(key, write: false) else { return }
-            editor.removePictures(names)
+            editor.removePictures(names, { [weak self] in
+                guard let self, let now = self.store.paper(key) else { return }
+                self.store.reaccept(now.key, bytes)
+                let folder = self.store.root.appending(path: NoteShelf.pictureFolder(id: now.noteID))
+                NotePictures.shared.accepted(bytes.map { (folder.appending(path: $0.name), $0.data) })
+            }, { [weak self] in self?.store.retireAgain(key, names: names) })
             editor.flush()
         } else {
             store.retirePictures(key, write: true)

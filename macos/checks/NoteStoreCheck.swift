@@ -697,7 +697,18 @@ struct NoteStoreCheck {
         _ = store.change(changeable.key) { $0.body = $0.body.replacingOccurrences(of: "\n" + refLine, with: "") }   // the editor's save
         while store.keepsBytes("RM2", name) && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         expect(!store.keepsBytes("RM2", name) && text(single)?.contains(name) == false, "the save without it landed: the reference gone from the file, then the bytes")
+        // Undo of that Remove: its bytes accepted again (under its own name) and the line back; with the folder
+        // writable now, the picture is written, and it's all there when the notes are read again.
         try? fm.removeItem(at: blocker)
+        store.reaccept(changeable.key, [NotePictureBytes(name: name, data: Data("bytes".utf8), caption: "")])
+        _ = store.change(changeable.key) { $0.body += "\n" + refLine }
+        let pictureFile = root.appending(path: NoteShelf.pictureFolder(id: "RM2") + "/" + name)
+        while (!fm.fileExists(atPath: pictureFile.path) || text(single)?.contains(name) != true) && Date() < until.addingTimeInterval(5) {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        let reopened = NoteStore.read(root).notes.first { $0.noteID == "RM2" }
+        expect(reopened?.file.body.contains(refLine) == true && (try? Data(contentsOf: pictureFile)) == Data("bytes".utf8) && !store.keepsBytes("RM2", name),
+               "Remove, saved, undone: the picture back, written, and there after a reopen")
     }
 
     /// The one rule for picture links (NoteStore.pictureFile), journal recovery putting bytes exactly where each saved

@@ -1766,6 +1766,19 @@ enum NoteShelf {
     /// showing (the one current-placement rule, placementNow).
     static func isHere(_ placement: Placement) -> Bool { placement != .none }
 
+    /// What Remove deletes for one picture: its attachment only, or its whole line (with the break) when nothing
+    /// else is on that line, so words beside it stay.
+    static func removalRange(attachment: NSRange, line: NSRange, lineText: String) -> NSRange {
+        let rest = (lineText as NSString).replacingCharacters(in: NSRange(location: attachment.location - line.location, length: attachment.length), with: "")
+        return rest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? line : attachment
+    }
+
+    /// Whether a note shows on the Desktop showing on one screen now: stuck to that Desktop, and not placed by the
+    /// window in front (a window placement counts only while it's valid: never while a fresh read is awaited).
+    static func onDesktop(window: Int?, desktops: [Int?], screenDesktop: Int, windowValid: Bool) -> Bool {
+        placementNow(window: window, desktops: desktops, showing: [screenDesktop], windowValid: windowValid) == .desktop
+    }
+
     /// A decoded picture's weight in the image cache: its pixels, four bytes each.
     static func imageCost(width: Int, height: Int) -> Int { max(1, width) * max(1, height) * 4 }
 

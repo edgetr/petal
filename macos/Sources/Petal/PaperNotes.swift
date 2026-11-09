@@ -1152,6 +1152,25 @@ final class NoteStore {
         return names
     }
 
+    /// The pictures set aside on a paper right now (their bytes), for Remove's undo.
+    func asideBytes(_ key: String) -> [NotePictureBytes] { pictureTrouble[key] ?? [] }
+
+    /// Undo of Remove: the removed pictures' bytes accepted again under their own names (journaled with the next
+    /// snapshot, written in the background), no longer being retired.
+    func reaccept(_ key: String, _ pictures: [NotePictureBytes]) {
+        guard !pictures.isEmpty, let paper = paper(key), !readOnly(paper), let session = session(for: key) else { return }
+        for picture in pictures { pendingPictures[paper.noteID, default: [:]][picture.name] = picture.data }
+        retiring[paper.noteID]?.subtract(pictures.map(\.name))
+        enqueue(session, .pictureBytes(pictures, noteID: paper.noteID), done: nil)
+    }
+
+    /// Redo of Remove: those pictures being removed again (their bytes go once a write without them lands).
+    func retireAgain(_ key: String, names: Set<String>) {
+        guard let paper = paper(key) else { return }
+        pictureTrouble[key] = pictureTrouble[key]?.filter { !names.contains($0.name) }
+        retiring[paper.noteID, default: []].formUnion(names)
+    }
+
     /// Kept for the paper's Remove without an editor (a based write).
     @discardableResult
     func dropPictures(_ key: String) -> Bool { retirePictures(key, write: true) != nil }

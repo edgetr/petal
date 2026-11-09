@@ -471,6 +471,57 @@ struct NoteRichCheck {
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         expect(removed == 1 && body(dirty) == "typed and not saved\nmore" && dirty.history.canUndo, "Remove in the open editor: the picture gone, the typing kept, undoable", body(dirty))
 
+        // Remove takes only the picture: words joined to it on its line stay; a line with nothing else goes whole.
+        let joinedLine = editor("![](../Pictures/x/bad.png)\nnext", note: "N2", folder: work)
+        joinedLine.insertText("words", replacementRange: NSRange(location: 1, length: 0))   // typed right after the picture
+        joinedLine.removePictures(named: ["bad.png"])
+        expect(body(joinedLine) == "words\nnext", "words on the picture's line stay", body(joinedLine))
+
+        // Remove's undo brings the picture back and accepts its unsaved bytes again; redo removes it again.
+        let undoRemove = editor("before\n![](../Pictures/x/lost.png)\nafter", note: "N2", folder: work)
+        undoRemove.delegate = undoDelegate
+        undoRemove.allowsUndo = true
+        var restored = 0, retiredAgain = 0
+        undoRemove.removePictures(named: ["lost.png"], restore: { restored += 1 }, retire: { retiredAgain += 1 })
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        expect(body(undoRemove) == "before\nafter", "removed", body(undoRemove))
+        undoRemove.history.undo()
+        expect(body(undoRemove) == "before\n![](../Pictures/x/lost.png)\nafter" && restored == 1, "undo: the picture back, its bytes accepted again", body(undoRemove))
+        undoRemove.history.redo()
+        expect(body(undoRemove) == "before\nafter" && retiredAgain == 1, "redo: removed again", body(undoRemove))
+        undoRemove.history.undo()
+        expect(restored == 2 && body(undoRemove).contains("lost.png"), "and undo again restores again")
+
+        // A change the folder watcher reports is read from the file: the held bytes and the cached image replaced.
+        let staleKey = "/tmp/petal-rich/Pictures/stale/p.png"
+        let watcher = editor("![](../Pictures/stale/p.png)", note: "N2", folder: work)
+        NotePictures.shared.register(watcher)
+        NotePictures.shared.preview(URL(fileURLWithPath: staleKey), NSImage(data: pngData) ?? NSImage(), data: pngData)
+        NotePictures.shared.written([staleKey])
+        _ = NotePictures.shared.image("../Pictures/stale/p.png", in: work)   // its source recorded
+        let newer = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 8, pixelsHigh: 4, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                     colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?.representation(using: .png, properties: [:]) ?? Data()
+        let newerFile = FileManager.default.temporaryDirectory.appending(path: "petal-rich-newer-\(UUID().uuidString).png")
+        try? newer.write(to: newerFile)
+        NoteStore.files[staleKey] = newerFile
+        expect(NotePictures.shared.bytes(staleKey) == pngData, "held: the old bytes")
+        NotePictures.shared.filesChanged([staleKey])
+        spin { NotePictures.shared.bytes(staleKey) == newer }
+        expect(NotePictures.shared.bytes(staleKey) == newer && NotePictures.shared.size(staleKey) == NSSize(width: 8, height: 4),
+               "the watcher's change read from the file: bytes and image replaced", "\(String(describing: NotePictures.shared.size(staleKey)))")
+        NotePictures.shared.unregister(watcher)
+        try? FileManager.default.removeItem(at: newerFile)
+
+        // A moved editor's pictures are weighed by the holding rule where they lead now.
+        let movingHolder = editor("![](Trip.assets/held.png)", note: "N2", folder: inbox)
+        NotePictures.shared.register(movingHolder)
+        let movedKey = "/tmp/petal-rich/Work/Trip.assets/held.png"
+        NotePictures.shared.preview(URL(fileURLWithPath: movedKey), NSImage(data: pngData) ?? NSImage(), data: pngData)   // pending
+        movingHolder.noteFolder = work                                                                                    // moved
+        NotePictures.shared.written([movedKey])
+        expect(NotePictures.shared.bytes(movedKey) == pngData, "after the move, the editor contains its picture where it leads now: held")
+        NotePictures.shared.unregister(movingHolder)
+
         // One arrival for a batch of pictures: each editor scans its pictures once.
         let batchFiles = (0..<50).map { (URL(fileURLWithPath: "/tmp/petal-rich/Pictures/batch/p\($0).png"), NSImage(size: NSSize(width: 2, height: 2)), Optional<Data>.none) }
         NotePictures.shared.previewBatch(batchFiles)   // in memory first, so drawing them reads nothing

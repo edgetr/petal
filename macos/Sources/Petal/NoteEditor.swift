@@ -253,10 +253,12 @@ final class NotePictures {
 
     /// Read (again) what `key` was asked for with, decoded at the size it's shown: from its bytes when they're held,
     /// else from its file through the one link rule. An image already shown stays until the new one is in.
-    private func read(_ key: String) {
+    /// `fromDisk`: a change the folder watcher reported, or a missing picture tried again: always the file (its
+    /// held bytes and cached image both replaced). Only a re-read after eviction may use the held bytes.
+    private func read(_ key: String, fromDisk: Bool = false) {
         guard let source = sources[key], !asked.contains(key) else { return }
         asked.insert(key)
-        let inMemory = held[key], pixels = Self.shownPixels
+        let inMemory = fromDisk ? nil : held[key], pixels = Self.shownPixels
         NoteStore.io.async {
             let data = inMemory ?? NoteStore.pictureFile(source.link, noteFolder: source.folder).flatMap { NoteStore.coordinatedData($0) }
             let image = data.flatMap { Self.downsample($0, maxPixels: pixels) }
@@ -322,7 +324,7 @@ final class NotePictures {
 
     /// Files that appeared or changed under the notes' folder: every picture they touch is read again.
     func filesChanged(_ paths: [String]) {
-        for key in NoteShelf.picturesTouched(events: paths, keys: Array(Set(sizes.keys).union(broken.keys))) where sources[key] != nil { read(key) }
+        for key in NoteShelf.picturesTouched(events: paths, keys: Array(Set(sizes.keys).union(broken.keys))) where sources[key] != nil { read(key, fromDisk: true) }
     }
 
     /// A paper was revealed, hidden, opened or folded: the retry timer weighed again on the next turn (once for
@@ -356,7 +358,7 @@ final class NotePictures {
             retryTimer?.invalidate()
             retryTimer = nil
         }
-        for key in rule.retry { read(key) }
+        for key in rule.retry { read(key, fromDisk: true) }
         return rule.retry
     }
 }
@@ -834,8 +836,9 @@ final class NoteTextView: NSTextView {
         set {
             guard newValue != folderRef.url else { return }
             folderRef.url = newValue
-            // The note moved: its pictures read their links from here now; laid out and drawn again, the text and
-            // the selection untouched.
+            // The note moved: its pictures lead somewhere else now; the holding rule weighed again first, then they're
+            // laid out and drawn again, the text and the selection untouched.
+            MainActor.assumeIsolated { NotePictures.shared.editorChanged() }
             repictured()
         }
     }
@@ -861,23 +864,46 @@ final class NoteTextView: NSTextView {
     }
 
     /// Remove on the paper, while this editor is open: those pictures' attachments deleted here, as an edit saved
-    /// like any typing (so nothing typed and not saved yet brings them back). Returns how many it removed.
+    /// like any typing (so nothing typed and not saved yet brings them back): only the attachment, and its line's
+    /// break only when nothing else is on that line (NoteShelf.removalRange). One undoable change: its undo puts
+    /// them back and calls `restore` (their unsaved bytes accepted again), its redo removes them again and calls
+    /// `retire`. Returns how many it removed.
     @discardableResult
-    func removePictures(named names: Set<String>) -> Int {
+    func removePictures(named names: Set<String>, restore: @escaping () -> Void = {}, retire: @escaping () -> Void = {}) -> Int {
         guard let storage = textStorage else { return 0 }
-        var lines: [NSRange] = []
+        var ranges: [NSRange] = []
         let ns = storage.string as NSString
         storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
             guard let cell = (value as? NSTextAttachment)?.attachmentCell as? PictureCell, names.contains((cell.path as NSString).lastPathComponent) else { return }
-            lines.append(ns.lineRange(for: range))
+            let line = ns.lineRange(for: range)
+            ranges.append(NoteShelf.removalRange(attachment: range, line: line, lineText: ns.substring(with: line)))
         }
-        // From the end, so earlier ranges stay where they are; each as an ordinary, undoable change.
-        for line in lines.reversed() where shouldChangeText(in: line, replacementString: "") {
-            storage.replaceCharacters(in: line, with: "")
+        guard !ranges.isEmpty else { return 0 }
+        let undo = undoManager ?? history
+        undo.beginUndoGrouping()
+        // Registered first, so it runs last on undo (after the text is back): the bytes accepted again.
+        Self.registerRestore(undo, target: self, restore: restore, retire: retire)
+        // From the end, so earlier ranges stay where they are.
+        for range in ranges.reversed() where shouldChangeText(in: range, replacementString: "") {
+            storage.replaceCharacters(in: range, with: "")
             didChangeText()
         }
-        if !lines.isEmpty { changed() }
-        return lines.count
+        undo.setActionName("Remove Picture")
+        undo.endUndoGrouping()
+        changed()
+        return ranges.count
+    }
+
+    /// Undo of a Remove: `restore` (the pictures' bytes accepted again); its redo: `retire`, and so on.
+    private static func registerRestore(_ undo: UndoManager, target: NoteTextView, restore: @escaping () -> Void, retire: @escaping () -> Void) {
+        undo.registerUndo(withTarget: target) { view in
+            restore()
+            let again = view.undoManager ?? view.history
+            again.registerUndo(withTarget: view) { view in
+                retire()
+                MainActor.assumeIsolated { registerRestore(view.undoManager ?? view.history, target: view, restore: restore, retire: retire) }
+            }
+        }
     }
 
     /// Every picture laid out and drawn again (its folder changed); the paper measured again.
@@ -1241,8 +1267,9 @@ final class NoteEditorHandle {
     /// Typed and not saved yet: the note is fenced against a read of the folder only then (NoteShelf.fenceEditor).
     var busy: () -> Bool = { false }
     var insert: (String, URL, String, Int, Int, String) -> Bool = { _, _, _, _, _, _ in false }
-    /// Remove on the paper while this editor is open: those pictures deleted here, as typing is.
-    var removePictures: (Set<String>) -> Void = { _ in }
+    /// Remove on the paper while this editor is open: those pictures deleted here, as typing is; undo calls the
+    /// first closure (their bytes accepted again), redo the second (removed again).
+    var removePictures: (Set<String>, @escaping () -> Void, @escaping () -> Void) -> Void = { _, _, _ in }
 }
 
 /// The editor in SwiftUI: the note's lines in, the note's lines out (saved a moment after the person stops typing).
@@ -1393,9 +1420,9 @@ struct NoteEditorView: NSViewRepresentable {
             guard let text else { return false }
             return MainActor.assumeIsolated { text.insertPicture(path: path, file: file, caption: caption, at: at, length: length, selected: selected) }
         }
-        handle.removePictures = { [weak text] names in
+        handle.removePictures = { [weak text] names, restore, retire in
             guard let text else { return }
-            MainActor.assumeIsolated { _ = text.removePictures(named: names) }
+            MainActor.assumeIsolated { _ = text.removePictures(named: names, restore: restore, retire: retire) }
         }
         text.say = say
         text.flushNow = { [weak coordinator, weak text] in
