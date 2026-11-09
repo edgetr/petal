@@ -65,6 +65,8 @@ final class PetalApp {
     let routines = Routines()
     /// Petal Notes: the person's own notes on paper, stuck to places (NoteDesk.swift).
     let paper = NoteDesk()
+    /// Petal's viewer: documents with their notes in a margin (Viewer.swift).
+    let viewers = Viewers()
     /// Reading and closing browser tabs (Browsers.swift).
     @ObservationIgnored let browsers = Browsers()
     /// Where each AI app is installed, when it is.

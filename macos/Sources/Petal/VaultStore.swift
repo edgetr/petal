@@ -37,6 +37,10 @@ enum VaultStore {
         DispatchQueue.getSpecific(key: onQueue) == true ? try work() : try queue.sync(execute: work)
     }
 
+    /// For `Petal --viewer-check` only: the stand-in vault that can't be read (as a locked Keychain), to show what
+    /// fails closed.
+    nonisolated(unsafe) static var standUnreadable = false
+
     static func standIn(_ items: [VaultItem]) {
         lock.lock()
         stand = items
@@ -59,7 +63,11 @@ enum VaultStore {
     /// couldn't read all of it (nothing kept: the next ask reads again).
     static func items() throws -> [VaultItem] {
         lock.lock()
-        if let stand { lock.unlock(); return stand.sorted { $0.updated > $1.updated } }
+        if let stand {
+            lock.unlock()
+            if standUnreadable { throw Unreadable(status: errSecInteractionNotAllowed) }
+            return stand.sorted { $0.updated > $1.updated }
+        }
         if let cache { lock.unlock(); return cache }
         lock.unlock()
         return try serially {

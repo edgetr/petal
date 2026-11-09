@@ -221,6 +221,8 @@ final class Assist {
             let stop = RoutineStop(also: gone)
             request?.onHangUp { stop.stop() }
             app.routines.handle(name, args, send, fail, caller: note, live: live, stop: stop)
+        case _ where Viewers.tools.contains(name):
+            app.viewers.handle(name, args, caller: note ?? "petal", live: live, send, fail)
         case _ where NoteDesk.tools.contains(name):
             // Its asker hanging up stops what's still to come: each change checks `live` right before it's made.
             app.paper.handle(name, args, live: live, send, fail)

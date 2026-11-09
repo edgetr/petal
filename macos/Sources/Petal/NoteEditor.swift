@@ -1333,6 +1333,9 @@ struct NoteEditorView: NSViewRepresentable {
     var say: (String) -> Void = { _ in }
     /// Pictures pasted as bytes (a copy from a note): taken by the screenshot paste's path.
     var acceptPictures: ([(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? = { _ in nil }
+    /// Back at what's saved after a refused save (the person undid it): the journal's snapshot of the refused typing
+    /// is settled (`saved`: the note's file as this editor last had it).
+    var settled: (String?) -> Void = { _ in }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         /// The Edit menu's Undo and Redo (and typing's undo) use the editor's own history.
@@ -1349,6 +1352,8 @@ struct NoteEditorView: NSViewRepresentable {
         var parent: NoteEditorView
         /// Typed and not saved yet (NoteShelf.EditorMarker): set as the person types, cleared when the save runs.
         var marker = NoteShelf.EditorMarker()
+        /// A refused save's typing is in the journal (NoteStore.journalUnsaved) and hasn't landed or been settled.
+        var refusedInJournal = false
         init(_ parent: NoteEditorView) { self.parent = parent }
 
         @MainActor func textDidChange(_ notification: Notification) {
@@ -1361,27 +1366,58 @@ struct NoteEditorView: NSViewRepresentable {
             saveLater?.cancel()
             marker.typed()
             let work = DispatchWorkItem { [weak self, weak view] in
-                guard let self, let view, let storage = view.textStorage else { return }
-                // The save runs: no longer dirty, then a version that waited meanwhile is taken (the folder read again).
+                guard let self, let view else { return }
                 self.saveLater = nil
-                let body = NoteBlock.body(NoteRich.blocks(storage))
-                if body != self.body {
-                    self.body = body
-                    if let next = self.parent.save(body, self.base) { self.base = next }
-                }
-                _ = self.marker.saved()
-                self.parent.idle()
+                self.saveNow(view)
             }
             saveLater = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
         }
 
+        /// The save runs: landed, no longer dirty, then a version that waited meanwhile is taken (the folder read
+        /// again). Refused (nil: the folder switching, a drain, the paper gone), the text stays dirty and isn't taken
+        /// as saved (the desk's `write` has put it in the journal under its note's id), and it's tried again shortly.
+        @MainActor func saveNow(_ view: NoteTextView) {
+            guard let storage = view.textStorage else { return }
+            let body = NoteBlock.body(NoteRich.blocks(storage))
+            var landed = true
+            if body != self.body {
+                if let next = parent.save(body, base) {
+                    self.body = body
+                    base = next
+                    refusedInJournal = false
+                } else {
+                    landed = false
+                    refusedInJournal = true
+                }
+            } else if refusedInJournal {
+                // Undone back to what's saved: the refused typing's snapshot goes (or is replaced by the note as it is).
+                refusedInJournal = false
+                parent.settled(base)
+            }
+            _ = marker.saved(landed: landed)
+            guard landed else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, weak view] in
+                    guard let self, let view, self.marker.dirty, self.saveLater == nil else { return }
+                    self.schedule(view)
+                }
+                return
+            }
+            parent.idle()
+        }
+
+        /// What's typed handed over now (closing, quitting, another version coming): a save waiting runs at once, and
+        /// so does one for text still dirty with nothing waiting (a refused save between its tries), so a close or a
+        /// quit never leaves typing only in the editor.
         @MainActor func flush(_ view: NoteTextView) {
-            guard let work = saveLater else { return }
-            saveLater = nil
-            guard !work.isCancelled else { return }
-            work.perform()
-            work.cancel()
+            if let work = saveLater {
+                saveLater = nil
+                guard !work.isCancelled else { return }
+                work.perform()
+                work.cancel()
+                return
+            }
+            if marker.dirty { saveNow(view) }
         }
 
         @MainActor func measure(_ view: NoteTextView) {

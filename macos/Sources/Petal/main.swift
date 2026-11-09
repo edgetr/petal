@@ -82,6 +82,10 @@ MainActor.assumeIsolated {
         Snapshot.run(to: folder)
         SettingsBench.cleanUp()
         exit(0)
+    case .viewerCheck:
+        app.setActivationPolicy(.prohibited)
+        SettingsBench.isolate()
+        ViewerCheck.run(CommandLine.arguments)
     case .mcp, .usage:
         exit(0)   // handled above
     case .dock:
