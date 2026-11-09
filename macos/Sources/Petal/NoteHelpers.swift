@@ -81,6 +81,9 @@ final class NoteHelpers {
         /// What the admission gate re-derives against, held on the run (independent of `here`): the notebook the
         /// note was in when it began, the place it must be on, the source notes it compares against.
         var startNotebook = ""
+        /// That notebook as pending work finds it (NotebookBinding), so a rename isn't a move and another notes'
+        /// folder is never taken for it.
+        var startBook: NotebookBinding?
         var requiredPlace: NoteStick?
         var sources: [String] = []
         /// The call it's starting or waiting to start (for room, for its gate, for Go on): its raw sources and how
@@ -179,16 +182,19 @@ final class NoteHelpers {
     /// editor has waiting (that save is made first, never under it). The editor's next save is made on it
     /// (NoteShelf.rebase: a change of metadata only never makes a conflict with the person's words). Nothing waits
     /// anywhere else. `done`: whether it landed on that paper (`.written`; a conflict copy beside it isn't).
+    /// Refused (notes not ready yet: their folder being entered or switched; the paper gone or read only): nothing is
+    /// written and `done` hears false; a run's result stays in the helpers' journal and is tried again (`applyHeld`),
+    /// never dropped.
     func write(_ noteID: String, touch: Bool = false, _ edit: @escaping (inout NoteFile) -> Void, done: ((Bool) -> Void)? = nil) {
-        guard let desk, let paper = paper(noteID), !desk.store.readOnly(paper) else { done?(false); return }
+        guard let desk, desk.acceptsChanges, let paper = paper(noteID), !desk.store.readOnly(paper) else { done?(false); return }
         // Typing not saved yet and the helper's metadata: one snapshot, one based write (on the base it was typed on),
         // never the typing's write and then the helper's (two papers when the file changed elsewhere meanwhile).
         if let editor = desk.editors[paper.key], let typed = editor.take() {
+            // (`done` is always answered: saved, or refused. Refused, the typing is the desk's to keep: NoteDesk.write.)
             let made = desk.write(paper.key, body: typed.body, base: typed.base, also: edit) { outcome in
                 done?(outcome == .written)
             }
             editor.landed(made)
-            if made == nil { done?(false) }
             return
         }
         let made = desk.store.change(paper.key, touch: touch, edit: edit) { outcome in
@@ -211,7 +217,7 @@ final class NoteHelpers {
     /// landed there (`.written`; a copy kept beside it, `.keptBoth`, isn't: it stays held); in conflict (or not
     /// here), held whole and applied to whichever paper the person keeps. All of it lands, or none of it does.
     private func keep(_ run: Run, _ result: NoteHelp.Result) {
-        heldAnswers = HelperJournal.adding(result, note: run.noteID, notebook: run.startNotebook, sources: run.sources, at: Date(),
+        heldAnswers = HelperJournal.adding(result, note: run.noteID, notebook: startNotebook(run), book: run.startBook, sources: run.sources, at: Date(),
                                            to: heldAnswers, busy: applying)
         saveHeld()
         applyHeld()
@@ -228,7 +234,8 @@ final class NoteHelpers {
         var watch = answer.watch
         edit(&watch)
         answer.watch = watch
-        heldAnswers = HelperJournal.adding(HelperJournal.Entry(noteID: noteID, answer: answer.serialized(), at: Date(), kind: .watch), to: heldAnswers)
+        let book = paper(noteID).flatMap { store?.binding($0.notebook) }
+        heldAnswers = HelperJournal.adding(HelperJournal.Entry(noteID: noteID, answer: answer.serialized(), at: Date(), kind: .watch, book: book), to: heldAnswers)
         saveHeld()
         applyHeld()
     }
@@ -316,12 +323,16 @@ final class NoteHelpers {
     /// conflict): its note still in the notebook it ran in, every note it read still readable from there; else it's
     /// dropped, and the note says why.
     func applyHeld() {
+        // Only once notes take changes (their folder entered, its first read in): until then everything stays held.
+        guard let desk, desk.acceptsChanges else { return }
         var busy = Set(heldAnswers.filter { applying.contains($0.at) && $0.of == .answer }.map(\.noteID))
         for entry in heldAnswers where !applying.contains(entry.at) {
             // One at a time per note, in the order they were made.
             if entry.of == .answer, busy.contains(entry.noteID) { continue }
+            // Made in another notes' folder than the one in use: it waits for its own, never applied here.
+            if let book = entry.book, case .otherRoot = desk.store.resolve(book) { continue }
             let papers = store?.notes.filter { $0.noteID == entry.noteID } ?? []
-            let readOnly = papers.first.map { desk?.store.readOnly($0) ?? true } ?? true
+            let readOnly = papers.first.map { desk.store.readOnly($0) } ?? true
             guard NoteHelp.answerTarget(papers: papers.count, readOnly: readOnly) == .write else { continue }
             if entry.of == .answer, let refused = heldRefusal(entry, on: papers[0]) {
                 heldAnswers.removeAll { $0 == entry }
@@ -348,7 +359,12 @@ final class NoteHelpers {
         var facts = NoteHelp.GateFacts()
         facts.landing = true
         facts.notebook = paper.notebook
-        facts.startNotebook = entry.notebook ?? paper.notebook
+        // Its notebook as it's named now (its binding followed through a rename); not surely found, the name it had.
+        if let book = entry.book, case .found(let name)? = store?.resolve(book) {
+            facts.startNotebook = name
+        } else {
+            facts.startNotebook = entry.notebook ?? paper.notebook
+        }
         facts.privateBooks = store?.privateBooks ?? []
         facts.sources = (entry.sources ?? []).map { id in (id, self.paper(id)?.notebook) }
         if case .fail(let reason) = NoteHelp.admit(facts) { return reason }
@@ -538,6 +554,7 @@ final class NoteHelpers {
         run.line = taking
         taking = nil
         run.startNotebook = paper.notebook
+        run.startBook = store?.binding(paper.notebook)
         for stamp in paper.file.stamps where stamp.mac == mac { run.token.hold(stamp.grant) }
         runs[paper.noteID] = run
         working(paper.noteID, step: step, asked: asked, who: who)
@@ -563,6 +580,13 @@ final class NoteHelpers {
     private func endActions(_ run: Run?) {
         guard let caller = run?.sticky?.id.uuidString else { return }
         app.assist.computer.end(caller)
+    }
+
+    /// The notebook a run began in, as it's named now: its binding followed (NoteShelf.notebookFor, so a notebook
+    /// renamed while it worked isn't a note moved); not surely found, the name it had.
+    private func startNotebook(_ run: Run) -> String {
+        if let book = run.startBook, case .found(let name)? = store?.resolve(book) { return name }
+        return run.startNotebook
     }
 
     /// Whether a continuation of `run` may go on: it's still the note's run, and its token admits.
@@ -681,6 +705,9 @@ final class NoteHelpers {
         guard let desk, let paper = desk.store.paper(key), paper.version == nil, NoteHelp.calls(line) else { return }
         let noteID = paper.noteID
         let trimmed = line.trimmingCharacters(in: .whitespaces)
+        // Notes not ready yet (their folder being entered or switched): no helper starts, said plainly; the line
+        // stays runnable.
+        guard desk.takesChanges() else { return }
         // Refused here, before anything is taken: the line stays runnable.
         guard !desk.store.readOnly(paper) else { return reply(noteID, giveBack: nil) { _ in "This note has two versions: keep one before asking a helper." } }
         // A bare @Petal asks nothing: refused before any run is registered, with a faint hint.
@@ -1433,6 +1460,18 @@ final class NoteHelpers {
         return desk?.scene.map { NoteMatch.fits(required, $0) } ?? false
     }
 
+    /// The notes' folder is being switched away from: everything the helpers had going for its notes ends with it,
+    /// whole (every run stopped, every look cancelled, nothing summoned). What a run had produced is in the helpers'
+    /// journal, bound to that folder (its notebook's binding): never applied in another, waiting for its own.
+    func folderSwitching() {
+        for run in Array(runs.values) { end(run, .stopped(nil)) }
+        for noteID in looking { looks.cancel(noteID) }
+        looking = []
+        firing = []
+        summoned = []
+        mornings = []
+    }
+
     /// Petal's viewer took or gave up the keyboard, or the notes on its file changed: a helper's place is what it
     /// shows now (bound again, and what waited for it goes on).
     func viewerChanged() {
@@ -1649,8 +1688,9 @@ final class NoteHelpers {
         // (A finished result whose note isn't one writable paper now is held whole, and asked about again when it's
         // applied: `applyHeld`. That isn't a refusal.)
         facts.paperFound = landing || (paper.map { !(desk?.store.readOnly($0) ?? true) } ?? false)
-        facts.notebook = paper?.notebook ?? (landing ? run.startNotebook : "")
-        facts.startNotebook = run.startNotebook
+        facts.notebook = paper?.notebook ?? (landing ? startNotebook(run) : "")
+        facts.startNotebook = startNotebook(run)
+        facts.notesReady = desk?.acceptsChanges ?? false
         facts.privateBooks = store?.privateBooks ?? []
         facts.sources = run.sources.map { id in (id, self.paper(id)?.notebook) }
         facts.provider = run.provider
@@ -1977,7 +2017,10 @@ final class NoteHelpers {
     // MARK: The clock: coming back, watchers, chains, morning notes, merged worktrees
 
     private func tick() {
-        guard let desk, desk.on else { return }
+        // Nothing of the clock's (a note coming back, a look, a chain, a morning note) while notes aren't ready.
+        guard let desk, desk.on, desk.acceptsChanges else { return }
+        // Results a refused write left in the journal are tried again.
+        applyHeld()
         let now = Date()
         for paper in desk.store.notes where paper.version == nil {
             let file = paper.file
@@ -2052,10 +2095,14 @@ final class NoteHelpers {
         guard let clock = NoteHelp.clock(time), let due = Calendar.current.date(bySettingHour: clock.hour, minute: clock.minute, second: 0, of: now),
               now >= due, now.timeIntervalSince(due) < 6 * 3600 else { return }
         let day = NoteFile.stamp(Calendar.current.startOfDay(for: now)).prefix(10)
-        let stable = "morning-" + NoteShelf.pictureFolder(id: cover.notebook).suffix(12) + "-" + day
-        guard !mornings.contains(stable), store?.notes.contains(where: { $0.noteID == stable }) == false else { return }
+        // One a day per notebook, by the notebook itself (its cover's id, which a rename keeps), never its name; and
+        // made for it as pending work finds its notebook (its binding and the notes' folder's session, captured now).
+        guard let store, let book = store.binding(cover.notebook) else { return }
+        let session = store.session
+        let stable = "morning-" + NoteShelf.pictureFolder(id: cover.noteID).suffix(12) + "-" + day
+        guard !mornings.contains(stable), !store.notes.contains(where: { $0.noteID == stable }) else { return }
         mornings.insert(stable)
-        let notes = (store?.notes ?? []).filter { $0.notebook == cover.notebook && $0.key != cover.key && !NoteLibrary.isCoverName($0.url.lastPathComponent) && $0.version == nil }
+        let notes = store.notes.filter { $0.notebook == cover.notebook && $0.key != cover.key && !NoteLibrary.isCoverName($0.url.lastPathComponent) && $0.version == nil }
         let since = now.addingTimeInterval(-86400)
         // Each note's whole body and whole ink shielded first; its title and the ink's first sentence derived after.
         var sources: [String] = []
@@ -2086,7 +2133,10 @@ final class NoteHelpers {
             file.fromPetal = true
             self.desk?.resolveDesktop { number in
                 if let place = NoteShelf.desktopAnchor(number: number, mode: self.desk?.modeID(desktop: number) ?? "") { file.places = [place] }
-                self.store?.make(file, in: cover.notebook) { made in if made == nil { self.mornings.remove(stable) } }
+                // Still that notes' folder, and its notebook wherever it is now (renamed meanwhile: there); not
+                // surely found, nothing is made (a later tick tries again).
+                guard store.session === session, case .found(let notebook) = store.resolve(book) else { self.mornings.remove(stable); return }
+                store.make(file, in: notebook, then: { made in if made == nil { self.mornings.remove(stable) } })
             }
         }
     }
@@ -2108,6 +2158,7 @@ final class NoteHelpers {
         let run = Run(token: token, noteID: noteID, asked: paper.file.helper?.asked ?? "", who: Self.petalWho + " · " + NoteHelp.dayLabel(Date(), now: Date()))
         run.kind = .look
         run.startNotebook = paper.notebook
+        run.startBook = store?.binding(paper.notebook)
         let task = Task.detached {
             guard token.admits else { return }
             let data = await Sites.get(url, .page)

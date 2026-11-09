@@ -2063,6 +2063,9 @@ extension NoteHelp {
         /// Asked for a finished result about to land (`NoteHelpers.end`), not for something about to be sent: the
         /// destination note and every source as they are now decide; its AI and its place showing don't matter any more.
         var landing = false
+        /// Notes take changes now (NoteDesk.acceptsChanges: their folder entered, its first read in). Not yet (at
+        /// launch, during a switch of the notes' folder): nothing of a helper starts; it waits.
+        var notesReady = true
     }
 
     static func admit(_ f: GateFacts) -> Admission {
@@ -2076,6 +2079,7 @@ extension NoteHelp {
             guard NotePrivacy.readable(notebook: book, privateBooks: f.privateBooks, asker: f.notebook) else { return .fail("A note it was checking against is private now (or its notebook's cover isn't here). Ask again.") }
         }
         if f.landing { return .go }
+        guard f.notesReady else { return .wait("Petal Notes are getting ready.") }
         guard f.available.contains(f.provider) else {
             return .fail("\(f.provider == "codex" ? "Codex" : "Claude Code") isn't set up in Petal.")
         }
@@ -2299,6 +2303,10 @@ enum HelperJournal {
         /// true then, right before a result held through a conflict lands (`NoteHelpers.applyHeld`).
         var notebook: String? = nil
         var sources: [String]? = nil
+        /// That notebook as pending work finds its notebook (NotebookBinding: its folder, path and cover id, and the
+        /// notes' folder it's in, never its name alone): followed through a rename, and never applied in another
+        /// notes' folder (it waits for its own).
+        var book: NotebookBinding? = nil
 
         var of: Kind { kind ?? .answer }
     }
@@ -2322,10 +2330,10 @@ enum HelperJournal {
 
     /// A run's result, held for its note: one entry per note, a later result composed onto the one still held
     /// (`Result.then`), so what lands is what landing each in turn would have left, in one write.
-    static func adding(_ result: NoteHelp.Result, note: String, notebook: String?, sources: [String], at: Date, to entries: [Entry],
-                       busy: Set<Date> = []) -> [Entry] {
+    static func adding(_ result: NoteHelp.Result, note: String, notebook: String?, book: NotebookBinding? = nil, sources: [String], at: Date,
+                       to entries: [Entry], busy: Set<Date> = []) -> [Entry] {
         let fresh = { (all: NoteHelp.Result, read: [String]) in
-            Entry(noteID: note, answer: all.held(noteID: note).serialized(), at: at, kind: .answer, notebook: notebook, sources: read)
+            Entry(noteID: note, answer: all.held(noteID: note).serialized(), at: at, kind: .answer, notebook: notebook, sources: read, book: book)
         }
         // One being written now (`busy`) is left to land first: this one goes after it, as an entry of its own.
         guard let before = entries.last(where: { $0.noteID == note && $0.of == .answer }), !busy.contains(before.at) else {

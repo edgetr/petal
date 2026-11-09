@@ -877,6 +877,11 @@ struct WatchNumber: View {
             if !watch.history.isEmpty {
                 Text(watch.history.prefix(2).joined(separator: " · ")).font(.system(size: 11)).strikethrough().foregroundStyle(Color(white: 0.6))
             }
+            // A crossing that couldn't be confirmed: its number, faint, as on the note itself (WatchCorner); the last
+            // accepted value stays above it.
+            if !watch.unconfirmed.isEmpty {
+                Text(watch.unconfirmed + " · couldn't confirm").font(.system(size: 9.5)).foregroundStyle(Color(white: 0.6)).lineLimit(1)
+            }
         }
     }
 }

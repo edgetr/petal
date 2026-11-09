@@ -58,7 +58,7 @@ struct NoteHelpCheck {
         let handFile = NoteFile.parse(hand, fallbackID: "x", fallbackDate: now)
         expect(handFile.watch?.every == "6h" && handFile.watch?.history == ["40", "30"], "a hand-written watcher", "\(String(describing: handFile.watch))")
         expect(handFile.serialized().contains("later: kept"), "an unknown key kept")
-        expect(NoteFile.parse("---\nid: P\ncover: true\nprivate: true\n---\n", fallbackID: "x", fallbackDate: now).coverPrivate, "a private cover, by its key")
+        expect(NoteFile.parse("---\nid: P\ncover: true\nprivate: true\n---\n", fallbackID: "x", fallbackDate: now).scalarValue("private") == "true", "a private cover, by its key")
 
         // MARK: Mentions
 
@@ -399,20 +399,22 @@ struct NoteHelpCheck {
         openCover.cover = true
         var closedCover = openCover
         closedCover.set("private", .text("true"))
-        expect(openCover.coverPrivate == false && closedCover.coverPrivate == true, "a cover's private key, by name")
-        // Phase 3's rule: only files named like the cover count, and unknown only while one of them isn't read.
-        expect(NoteHelp.privacy(NoteHelp.CoverFiles(privateFlags: [false])) == .open && NoteHelp.privacy(NoteHelp.CoverFiles(privateFlags: [true])) == .closed, "a cover read: open or private")
-        expect(NoteHelp.privacy(NoteHelp.CoverFiles()) == .open, "no cover file at all: open (nothing says private)")
-        expect(NoteHelp.privacy(NoteHelp.CoverFiles(unread: 1, privateFlags: [false])) == .unknown, "a cover file unread, dataless or unreadable: unknown")
-        expect(NoteHelp.privacy(NoteHelp.CoverFiles(listed: false)) == .unknown, "the folder couldn't be listed: unknown")
-        expect(NoteHelp.privacy(NoteHelp.CoverFiles(privateFlags: [false, true])) == .closed, "a cover and its conflict copy disagree: private")
-        expect(NoteHelp.isCoverName("About this notebook.md") && NoteHelp.isCoverName("About this notebook (conflicted copy).md") && NoteHelp.isCoverName("about this notebook 2.MD"),
+        expect(!NoteContract.isPrivate(openCover) && NoteContract.isPrivate(closedCover), "a cover's private key, by name")
+        // One rule for Private notebooks, Phase 3's (NoteLibrary.privateNotebook, NotePrivacy): only files named like the
+        // cover count, and one not read is unknown, which counts as Private.
+        expect(!NoteLibrary.privateNotebook(covers: [openCover], unread: false) && NoteLibrary.privateNotebook(covers: [closedCover], unread: false), "a cover read: open or private")
+        expect(!NoteLibrary.privateNotebook(covers: [], unread: false), "no cover file at all: open (nothing says private)")
+        expect(NoteLibrary.privateNotebook(covers: [openCover], unread: true) && NoteLibrary.notebookUnknown(listed: true, unreadCovers: 1), "a cover file unread, dataless or unreadable: unknown, so Private")
+        expect(NoteLibrary.notebookUnknown(listed: false, unreadCovers: 0), "the folder couldn't be listed: unknown")
+        expect(NoteLibrary.privateNotebook(covers: [openCover, closedCover], unread: false), "a cover and its conflict copy disagree: private")
+        expect(NoteLibrary.isCoverName("About this notebook.md") && NoteLibrary.isCoverName("About this notebook (conflicted copy).md") && NoteLibrary.isCoverName("about this notebook 2.MD"),
                "the cover and its copies, by name")
-        expect(!NoteHelp.isCoverName("Plan.md") && !NoteHelp.isCoverName("About this notebook.txt") && !NoteHelp.isCoverName("Notes about this notebook.md"), "nothing else is a cover")
+        expect(!NoteLibrary.isCoverName("Plan.md") && !NoteLibrary.isCoverName("About this notebook.txt") && !NoteLibrary.isCoverName("Notes about this notebook.md"), "nothing else is a cover")
         expect(NoteHelp.isCoverPlaceholder(".About this notebook.md.icloud") && !NoteHelp.isCoverPlaceholder(".Plan.md.icloud"), "a cover not downloaded (its iCloud placeholder)")
-        expect(NoteHelp.mayRead(.open, notebook: "A", asking: nil) && !NoteHelp.mayRead(.unknown, notebook: "A", asking: "B") && !NoteHelp.mayRead(.closed, notebook: "A", asking: nil),
+        expect(NotePrivacy.readable(notebook: "B", privateBooks: ["A"], asker: nil) && !NotePrivacy.readable(notebook: "A", privateBooks: ["A"], asker: "B")
+               && !NotePrivacy.readable(notebook: "A", privateBooks: ["A"], asker: nil),
                "unknown is private from outside")
-        expect(NoteHelp.mayRead(.unknown, notebook: "A", asking: "A") && NoteHelp.mayRead(.closed, notebook: "A", asking: "A"), "a note inside it reads it")
+        expect(NotePrivacy.readable(notebook: "A", privateBooks: ["A"], asker: "A"), "a note inside it reads it")
 
         // MARK: Paths, remotes, watcher words, local times, branches
 
@@ -599,14 +601,14 @@ struct NoteHelpCheck {
         expect(NoteHelp.followUpTarget(runCheckout: nil, runProvider: "claude", runModel: "claude-opus-5-5", words: "use Sonnet for this", home: routeHome) == .newRun, "another model: its own run")
         expect(NoteHelp.followUpTarget(runCheckout: nil, runProvider: "claude", runModel: "claude-opus-5-5", words: "keep using Opus 5.5", home: routeHome) == .same, "its own model: its run")
         expect(NoteHelp.followUpTarget(runCheckout: "/Users/someone/garden", runProvider: "claude", runModel: "", words: "in ~/garden-old", home: routeHome) == .newRun, "another checkout: its own run")
-        var bookPrivacy: [String: NoteHelp.Privacy] = ["Trips": .open, "Diary": .open]
-        let lookedUp = ["Trips", "Diary"]
-        expect(NoteHelp.visibleAfterWait(lookedUp, privacy: { bookPrivacy[$0] ?? .unknown }, asking: nil) == [true, true], "before the wait: both")
-        bookPrivacy["Diary"] = .closed
-        expect(NoteHelp.visibleAfterWait(lookedUp, privacy: { bookPrivacy[$0] ?? .unknown }, asking: nil) == [true, false], "made private during the wait: not told")
-        expect(NoteHelp.visibleAfterWait(lookedUp, privacy: { bookPrivacy[$0] ?? .unknown }, asking: "Diary") == [true, true], "a note inside it still reads it")
-        bookPrivacy["Trips"] = nil
-        expect(NoteHelp.visibleAfterWait(lookedUp, privacy: { bookPrivacy[$0] ?? .unknown }, asking: nil) == [false, false], "its cover not read now: unknown, not told")
+        var privateNow: Set<String> = []
+        let lookedUp: Set<String> = ["Trips", "Diary"]
+        expect(NotePrivacy.deliverable(notebooks: lookedUp, privateBooks: privateNow, asker: nil), "before the wait: both")
+        privateNow = ["Diary"]
+        expect(!NotePrivacy.deliverable(notebooks: lookedUp, privateBooks: privateNow, asker: nil) && NotePrivacy.deliverable(notebooks: ["Trips"], privateBooks: privateNow, asker: nil),
+               "made private during the wait: not told")
+        expect(NotePrivacy.deliverable(notebooks: ["Diary"], privateBooks: privateNow, asker: "Diary"), "a note inside it still reads it")
+        expect(NotePrivacy.privateBooks(notebooks: [(name: "Diary", isPrivate: true)], held: ["Trips"]) == ["Diary", "Trips"], "a notebook the read didn't find: unknown, not told")
 
         // MARK: Round seven: the admission gate, answers kept through a conflict, reviewers, bounds, completions
 
@@ -625,11 +627,10 @@ struct NoteHelpCheck {
         placed.place = "a.example"; placed.placeShowing = false
         if case .wait = NoteHelp.admit(placed) { expect(true, "") } else { expect(false, "its place not in front: waits") }
         var access = facts
-        var accessPrivacy: [String: NoteHelp.Privacy] = ["Trips": .open]
         access.sources = [("S1", "Trips")]
-        access.privacy = { accessPrivacy[$0] ?? .unknown }
+        access.privateBooks = []
         expect(NoteHelp.admit(access) == .go, "its sources readable: go")
-        accessPrivacy["Trips"] = .closed
+        access.privateBooks = ["Trips"]
         if case .fail = NoteHelp.admit(access) { expect(true, "") } else { expect(false, "a source's notebook made private during the wait: fails") }
         access.sources = [("S1", nil)]
         if case .fail = NoteHelp.admit(access) { expect(true, "") } else { expect(false, "a source gone: fails") }
@@ -973,12 +974,12 @@ struct NoteHelpCheck {
         expect(NoteHelp.told(&reread, id: "Y") && reread?.hit == true, "a hit kept on the exact value (the rounded ¥12k would read as not crossed)")
         expect(NoteHelp.delivered(roundTrip!, amount: 11_900, cornerShowing: true) && !NoteHelp.delivered(roundTrip!, amount: 11_900, cornerShowing: false)
                && !NoteHelp.delivered(roundTrip!, amount: 11_800, cornerShowing: true), "delivered only once a face with the corner showed that very value")
-        expect(!NoteHelp.mayRead(.closed, notebook: "Diary", asking: "Work") && NoteHelp.mayRead(.closed, notebook: "Diary", asking: "Diary"),
+        expect(!NotePrivacy.readable(notebook: "Diary", privateBooks: ["Diary"], asker: "Work") && NotePrivacy.readable(notebook: "Diary", privateBooks: ["Diary"], asker: "Diary"),
                "a chain's predecessor in a private notebook is read only from inside it")
         var chainFacts = NoteHelp.GateFacts()
         chainFacts.notebook = "Work"; chainFacts.startNotebook = "Work"; chainFacts.provider = "claude"; chainFacts.available = ["claude"]
         chainFacts.sources = [("R1", "Diary")]
-        chainFacts.privacy = { $0 == "Diary" ? .closed : .open }
+        chainFacts.privateBooks = ["Diary"]
         if case .fail = NoteHelp.admit(chainFacts) { expect(true, "") } else { expect(false, "a predecessor moved into a private notebook: the gate fails the chain's run") }
 
         // MARK: Round sixteen: a helper's output shielded as it arrives, one gate for local routes, kept watcher values
@@ -1097,26 +1098,28 @@ struct NoteHelpCheck {
         if let mark = try? script.bookmarkData(options: .suitableForBookmarkFile) { try? URL.writeBookmarkData(mark, to: aliasToScript) }
         let aliasToPDF = scratch.appending(path: "Alias to quote")
         if let mark = try? pdf.bookmarkData(options: .suitableForBookmarkFile) { try? URL.writeBookmarkData(mark, to: aliasToPDF) }
-        let fileAction = { (url: URL) -> NoteTasks.Action in
-            let found = NoteTasks.resolve(url.path)
-            return NoteTasks.action(NoteHelp.TaskItem(kind: .file, title: "", target: url.path), resolved: found?.url, type: found?.type)
-        }
+        // The one opener's file rule (NoteTasks.decide, what Open all does in the note and in the Petal Notes window).
+        let fileAction = { (url: URL) -> NoteTasks.FileAction in NoteTasks.decide(url).1 }
         let real = { (url: URL) in url.resolvingSymlinksInPath() }
-        expect(fileAction(pdf) == .open(real(pdf)) && fileAction(png) == .open(real(png)) && fileAction(plainText) == .open(real(plainText)), "a PDF, a picture, text: opened")
+        expect(fileAction(pdf) == .open && fileAction(png) == .open && fileAction(plainText) == .open, "a PDF, a picture, text: opened")
         for blocked in [script, command, workflow, webloc, fileloc, dmg, pkg, app, folder] {
-            expect(fileAction(blocked) == .reveal(real(blocked)), "never opened, only revealed: \(blocked.lastPathComponent)", "\(fileAction(blocked))")
+            expect(fileAction(blocked) == .reveal, "never opened, only revealed: \(blocked.lastPathComponent)", "\(fileAction(blocked))")
         }
-        expect(fileAction(linkToScript) == .reveal(real(script)), "a link named like a PDF that leads to a script: resolved first, revealed", "\(fileAction(linkToScript))")
-        expect(fileAction(aliasToScript) == .reveal(real(script)), "a Finder alias to a script: resolved first, revealed", "\(fileAction(aliasToScript))")
-        expect(fileAction(aliasToPDF) == .open(real(pdf)), "an alias to a PDF: the PDF is opened", "\(fileAction(aliasToPDF))")
-        expect(fileAction(scratch.appending(path: "gone.pdf")) == .skip && NoteTasks.resolve("relative/path.pdf") == nil, "a file that isn't there, or a relative path: nothing")
-        let tab = { (target: String) in NoteTasks.action(NoteHelp.TaskItem(kind: .tab, title: "", target: target), resolved: nil, type: nil) }
-        expect(tab("https://a.example/x") == .open(URL(string: "https://a.example/x")!) && tab("http://a.example") != .skip, "tabs: http and https")
-        expect(tab("file:///Applications/Calculator.app") == .skip && tab("javascript:alert(1)") == .skip && tab("vnc://host") == .skip && tab("ssh://host") == .skip,
+        expect(fileAction(linkToScript) == .reveal && NoteTasks.decide(linkToScript).0.path == real(script).path, "a link named like a PDF that leads to a script: resolved first, revealed",
+               "\(NoteTasks.decide(linkToScript))")
+        expect(fileAction(aliasToScript) == .reveal, "a Finder alias to a script: resolved first, revealed", "\(NoteTasks.decide(aliasToScript))")
+        expect(fileAction(aliasToPDF) == .open && NoteTasks.decide(aliasToPDF).0.path == real(pdf).path, "an alias to a PDF: the PDF is opened", "\(NoteTasks.decide(aliasToPDF))")
+        let part = { (kind: String, target: String) in NoteContract.TaskItem(kind: kind, title: "", target: target) }
+        expect(fileAction(scratch.appending(path: "gone.pdf")) == .reveal && NoteTasks.url(part("file", "relative/path.pdf")) == nil
+               && NoteTasks.located(part("file", scratch.appending(path: "gone.pdf").path), mac: "m", follow: { _ in nil }) == nil,
+               "a file that isn't there is never opened (nor found); a relative path is no file")
+        let tab = { (target: String) in NoteTasks.url(part("tab", target)) }
+        expect(tab("https://a.example/x") == URL(string: "https://a.example/x")! && tab("http://a.example") != nil, "tabs: http and https")
+        expect(tab("file:///Applications/Calculator.app") == nil && tab("javascript:alert(1)") == nil && tab("vnc://host") == nil && tab("ssh://host") == nil,
                "tabs: nothing else")
-        let mail = { (target: String) in NoteTasks.action(NoteHelp.TaskItem(kind: .mail, title: "", target: target), resolved: nil, type: nil) }
-        expect(mail("message://%3Cabc%40example.com%3E") != .skip && mail("mailto:a@example.com") == .skip && mail("https://a.example") == .skip, "mail: message: only")
-        expect(NoteTasks.action(NoteHelp.TaskItem(kind: .window, title: "", target: "com.example.app"), resolved: nil, type: nil) == .skip, "a window never launches its app")
+        let mail = { (target: String) in NoteTasks.url(part("mail", target)) }
+        expect(mail("message://%3Cabc%40example.com%3E") != nil && mail("mailto:a@example.com") == nil && mail("https://a.example") == nil, "mail: by its message address only")
+        expect(NoteTasks.url(part("window", "com.example.app")) == nil, "a window never launches its app")
         expect(NoteTasks.web("https://github.com/a/b/pull/1") != nil && NoteTasks.web("file:///etc/hosts") == nil && NoteTasks.web("x-man-page://ls") == nil,
                "a helper's link: http or https only")
 
@@ -1265,12 +1268,12 @@ struct NoteHelpCheck {
         landingFacts.notebook = "Inbox"
         landingFacts.startNotebook = "Inbox"
         landingFacts.sources = [(id: "S1", notebook: "Research")]
-        landingFacts.privacy = { _ in .open }
+        landingFacts.privateBooks = []
         expect(NoteHelp.admit(landingFacts) == .go, "its sources still readable: the result lands (its AI or its place don't matter any more)")
-        landingFacts.privacy = { $0 == "Research" ? .closed : .open }
+        landingFacts.privateBooks = ["Research"]
         if case .fail(let why) = NoteHelp.admit(landingFacts) { expect(why.contains("private now"), "a source made Private mid-run: the result is refused at landing, plainly", why) }
         else { expect(false, "a source made Private mid-run fails the run at landing") }
-        landingFacts.privacy = { _ in .open }
+        landingFacts.privateBooks = []
         landingFacts.sources = [(id: "S1", notebook: nil)]
         if case .fail = NoteHelp.admit(landingFacts) { expect(true, "a source gone") } else { expect(false, "a source gone mid-run fails the run at landing") }
         landingFacts.sources = []
@@ -1316,22 +1319,84 @@ struct NoteHelpCheck {
         try? Data("the report".utf8).write(to: report)
         let reportID = ViewerFileID.of(report.path)?.record(mac: "this-mac") ?? ""
         let reportMark = (try? report.bookmarkData())?.base64EncodedString() ?? ""
-        let putAway = NoteHelp.TaskItem(kind: .file, title: "Report.txt", target: report.path, bookmark: reportMark, fileID: reportID)
+        let written = NoteHelp.TaskItem(kind: .file, title: "Report.txt", target: report.path, bookmark: reportMark, fileID: reportID)
         let followMark = { (mark: Data) -> URL? in var stale = false; return try? URL(resolvingBookmarkData: mark, options: [.withoutUI], relativeTo: nil, bookmarkDataIsStale: &stale) }
         var taskFile = NoteFile(id: "TK1", created: now)
-        taskFile.task = [putAway]
-        expect(!reportID.isEmpty && NoteFile.parse(taskFile.serialized(), fallbackID: "TK1", fallbackDate: now).task == [putAway], "a task's file keeps its fileID and bookmark in the note")
-        expect(NoteTasks.located(putAway, mac: "this-mac", follow: followMark)?.url.path == report.path, "a task's file where it was: found")
+        taskFile.task = [written, NoteHelp.TaskItem(kind: .tab, title: "Docs", target: "https://example.com/docs")]
+        let taskBack = NoteFile.parse(taskFile.serialized(), fallbackID: "TK1", fallbackDate: now)
+        expect(!reportID.isEmpty && taskBack.task.first == written, "a task's file keeps its fileID and bookmark in the note")
+        // As the Petal Notes window reads the same front matter (NoteContract, Phase 3's reader): the same taskParts, the
+        // file's identity with it, and its chips.
+        let taskParts = NoteContract.taskItems(taskBack)
+        expect(taskParts.count == 2 && taskParts[0].kind == "file" && taskParts[0].target == report.path && taskParts[0].fileID == reportID && taskParts[0].bookmark == reportMark
+               && taskParts[1].kind == "tab" && taskParts[1].target == "https://example.com/docs", "the helpers' task reads right in the Petal Notes window", "\(taskParts)")
+        expect(taskParts.map(NoteTasks.chip) == ["Report.txt", "example.com"] && NoteContract.tasks(taskBack) == 2, "and its chips and count", "\(taskParts.map(NoteTasks.chip))")
+        guard let putAway = taskParts.first else { return expect(false, "a task's file part") }
+        let whereNow = { NoteTasks.located(putAway, mac: "this-mac", follow: followMark)?.resolvingSymlinksInPath().path }
+        expect(whereNow() == report.path, "a task's file where it was: found", whereNow() ?? "nil")
         let renamed = taskFolder.appending(path: "Report final.txt")
         try? FileManager.default.moveItem(at: report, to: renamed)
-        expect(NoteTasks.located(putAway, mac: "this-mac", follow: followMark)?.url.path == renamed.path, "renamed: found by its identity, wherever it went",
-               NoteTasks.located(putAway, mac: "this-mac", follow: followMark)?.url.path ?? "nil")
+        expect(whereNow() == renamed.path, "renamed: found by its identity, wherever it went", whereNow() ?? "nil")
         try? Data("another file at the old path".utf8).write(to: report)
-        expect(NoteTasks.located(putAway, mac: "this-mac", follow: followMark)?.url.path == renamed.path, "another file took its path: Open all still opens the file put away, never that one")
+        expect(whereNow() == renamed.path, "another file took its path: Open all still opens the file put away, never that one")
         try? FileManager.default.removeItem(at: renamed)
-        let older = NoteHelp.TaskItem(kind: .file, title: "Report.txt", target: report.path)
-        expect(NoteTasks.located(older, mac: "this-mac", follow: followMark)?.url.path == report.path, "a task put away before files were recorded goes by its path")
-        expect(NoteTasks.located(NoteHelp.TaskItem(kind: .tab, title: "", target: report.path), mac: "this-mac", follow: followMark) == nil, "only a file's part is looked up on the disk")
+        let older = NoteContract.TaskItem(kind: "file", title: "Report.txt", target: report.path)
+        expect(NoteTasks.located(older, mac: "this-mac", follow: followMark)?.resolvingSymlinksInPath().path == report.path, "a task put away before files were recorded goes by its path")
+        expect(NoteTasks.located(NoteContract.TaskItem(kind: "tab", title: "", target: report.path), mac: "this-mac", follow: followMark) == nil, "only a file's part is looked up on the disk")
+
+        // What the Petal Notes window draws from the front matter the helpers write (NoteContract): a watcher's
+        // corner number, the older ones struck and an unconfirmed reading; Back; Helpers at work, Watching, Coming back.
+        var drawn = NoteFile(id: "DR1", created: now)
+        var drawnWatch = NoteHelp.Watch(every: "1d", line: "under $300", mac: "m", at: "09:00")
+        drawnWatch.last = "$312"
+        drawnWatch.amount = 312
+        drawnWatch.history = ["$320", "$335"]
+        drawnWatch.unconfirmed = "$289"
+        drawnWatch.url = "https://shop.example/item"
+        drawn.watch = drawnWatch
+        drawn.back = now.addingTimeInterval(3600)
+        drawn.helper = NoteHelp.Helper(state: .working, who: "✦ Petal", step: "Reading the page", asked: "@Petal check this", mac: "m", at: now)
+        let asDrawn = NoteFile.parse(drawn.serialized(), fallbackID: "DR1", fallbackDate: now)
+        let seen = NoteContract.watch(asDrawn)
+        expect(seen?.last == "$312" && seen?.history == ["$320", "$335"] && seen?.every == "1d" && seen?.line == "under $300" && seen?.paused == false,
+               "a watcher's corner number, its older ones and what it waits for read right in the window", "\(String(describing: seen))")
+        expect(seen?.unconfirmed == "$289" && NoteHelp.corner(asDrawn.watch)?.faint == "$289 · couldn't confirm", "an unconfirmed reading is drawn faintly there too, never as the value")
+        expect(NoteContract.back(asDrawn) == asDrawn.back && asDrawn.back != nil, "Back reads the same date")
+        let atWork = NoteContract.helper(asDrawn)
+        expect(atWork?.state == .working && atWork?.who == "✦ Petal" && atWork?.step == "Reading the page", "a helper at work: its state, who and step", "\(String(describing: atWork))")
+        drawn.helper = NoteHelp.Helper(state: .waiting, who: "✦ Petal", step: "Waiting for you: Allow or Don't", at: now)
+        expect(NoteContract.helper(NoteFile.parse(drawn.serialized(), fallbackID: "DR1", fallbackDate: now))?.state == .waiting, "waiting for the person: listed as needing them")
+        drawn.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", at: now)
+        expect(NoteContract.helper(NoteFile.parse(drawn.serialized(), fallbackID: "DR1", fallbackDate: now))?.state == .done, "done: no longer at work")
+        drawn.helper = NoteHelp.Helper(state: .failed, who: "✦ Petal", step: "No formula came back.", at: now)
+        expect(NoteContract.helper(NoteFile.parse(drawn.serialized(), fallbackID: "DR1", fallbackDate: now)) == nil, "failed: not among the helpers at work (its reason is its ink)")
+        var firstReading = NoteHelp.Watch(every: "1d", line: "under $300", mac: "m", at: "09:00")
+        firstReading.unconfirmed = "$289"
+        var firstFile = NoteFile(id: "DR2", created: now)
+        firstFile.watch = firstReading
+        let firstSeen = NoteContract.watch(NoteFile.parse(firstFile.serialized(), fallbackID: "DR2", fallbackDate: now))
+        expect(firstSeen?.last == "" && firstSeen?.unconfirmed == "$289", "a first reading that couldn't be confirmed: no value yet, its number faint")
+
+        // Readiness: nothing of a helper starts while notes aren't ready (their folder being entered or switched);
+        // a finished result still lands (it's held in the journal while its write is refused, and tried again).
+        var notReady = NoteHelp.GateFacts()
+        notReady.notebook = "Work"; notReady.startNotebook = "Work"; notReady.provider = "claude"; notReady.available = ["claude"]
+        notReady.notesReady = false
+        if case .wait(let why) = NoteHelp.admit(notReady) { expect(why.contains("getting ready"), "notes not ready: a helper waits, nothing is sent", why) }
+        else { expect(false, "notes not ready: a helper waits", "\(NoteHelp.admit(notReady))") }
+        notReady.landing = true
+        expect(NoteHelp.admit(notReady) == .go, "a finished result isn't refused for it (its write is; it stays in the journal)")
+        // A result is held with its notebook as pending work finds it (NotebookBinding), through the journal's file.
+        let workBook = NotebookBinding(coverID: "cover-1", path: "Work", instance: "v1:42", root: "/notes/a")
+        let heldBound = HelperJournal.adding(NoteHelp.Result(answer: NoteHelp.Ink(who: "✦ Petal", text: "Done."), helper: .keep), note: "BD1", notebook: "Work", book: workBook,
+                                         sources: [], at: now, to: [])
+        let boundFile = scratch.appending(path: "bound-journal.json")
+        expect(HelperJournal.save(heldBound, to: boundFile) && HelperJournal.load(boundFile).first?.book == workBook, "a held result keeps its notebook's binding", "\(HelperJournal.load(boundFile))")
+        let places = [NotebookPlace(name: "Work renamed", path: "Work renamed", instance: "v1:42", coverID: "cover-1")]
+        expect(NoteShelf.notebookFor(workBook, places: places, complete: true, root: "/notes/a") == .found("Work renamed"), "its notebook renamed meanwhile: still that notebook (not a note moved)")
+        expect(NoteShelf.notebookFor(workBook, places: places, complete: true, root: "/notes/b") == .otherRoot, "another notes' folder: never applied there (it waits for its own)")
+        let olderEntry = try? JSONDecoder().decode([HelperJournal.Entry].self, from: Data(#"[{"noteID":"X","answer":"---\nid: X\n---\n","at":0}]"#.utf8))
+        expect(olderEntry?.first?.book == nil && olderEntry?.count == 1, "an entry kept before bindings still reads")
 
         // D. An ordinary chat's events are delivered with the vault index unsettled, with no wait: they never pass the
         // ingestion queue or `shield` (which, here, would never come back).

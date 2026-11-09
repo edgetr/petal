@@ -956,12 +956,20 @@ struct NoteStoreCheck {
         let books = NoteStore.read(root).notebooks
         try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: lockedCover.path)
         try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: lockedNote.path)
-        let privacy = { (name: String) in books.first { $0.name == name }.map { NoteHelp.privacy($0.covers) } }
-        expect(privacy("Closed") == .closed && privacy("Open") == .open, "a cover read: private or open")
-        expect(privacy("Copy") == .closed, "a cover's conflict copy counts (one says private: private)")
-        expect(privacy("Impostor") == .open, "cover: true in another file is ignored")
-        expect(privacy("Unreadable") == .unknown, "an unreadable cover: unknown (private)")
-        expect(privacy("OtherUnread") == .open, "another note unreadable doesn't make it unknown")
+        // Read by the store's one reading of a notebook's privacy (Phase 3's: isPrivate, privacyUnknown), which the
+        // helpers ask through NotePrivacy.
+        let isPrivate = { (name: String) in books.first { $0.name == name }?.isPrivate }
+        let unknown = { (name: String) in books.first { $0.name == name }?.privacyUnknown }
+        expect(isPrivate("Closed") == true && isPrivate("Open") == false, "a cover read: private or open")
+        expect(isPrivate("Copy") == true, "a cover's conflict copy counts (one says private: private)")
+        expect(isPrivate("Impostor") == true, "cover: true and private: true in a file that isn't the cover: not a cover, and its notebook isn't known to be open (it fails closed)",
+               "\(String(describing: isPrivate("Impostor"))) \(String(describing: unknown("Impostor")))")
+        expect(isPrivate("Unreadable") == true && unknown("Unreadable") == true, "an unreadable cover: unknown (private)")
+        expect(isPrivate("OtherUnread") == false && unknown("OtherUnread") == false, "another note unreadable doesn't make it unknown")
+        let privateBooks = NotePrivacy.privateBooks(notebooks: books.map { (name: $0.name, isPrivate: $0.isPrivate) }, held: ["Gone"])
+        expect(!NotePrivacy.readable(notebook: "Closed", privateBooks: privateBooks, asker: "Open") && NotePrivacy.readable(notebook: "Closed", privateBooks: privateBooks, asker: "Closed")
+               && NotePrivacy.readable(notebook: "Open", privateBooks: privateBooks, asker: nil) && !NotePrivacy.readable(notebook: "Gone", privateBooks: privateBooks, asker: nil),
+               "what a helper may read follows: a Private (or unknown, or unread) notebook only from inside it")
     }
 
     @MainActor static func removeRefusedReadOnly(root: URL) {

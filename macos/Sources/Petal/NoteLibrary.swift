@@ -67,6 +67,8 @@ enum NoteContract {
         var last = ""
         var history: [String] = []
         var paused = false
+        /// A crossing the helpers couldn't confirm (its number): drawn faintly beside the corner, never as the value.
+        var unconfirmed = ""
     }
 
     struct Helper: Equatable {
@@ -82,7 +84,8 @@ enum NoteContract {
     static func watch(_ file: NoteFile) -> Watch? {
         guard let map = file.mapValue("watch") else { return nil }
         return Watch(every: map["every"]?.first ?? "", line: map["line"]?.first ?? "", last: map["last"]?.first ?? "",
-                     history: Array((map["history"] ?? []).prefix(5)), paused: map["paused"]?.first == "true")
+                     history: Array((map["history"] ?? []).prefix(5)), paused: map["paused"]?.first == "true",
+                     unconfirmed: map["unconfirmed"]?.first ?? "")
     }
 
     static func helper(_ file: NoteFile) -> Helper? {

@@ -28,7 +28,7 @@ swiftc -parse-as-library -O -o "$out/papernotes" Sources/Petal/NoteFile.swift So
 "$out/papernotes"
 # The Petal Notes window, canvas, dock and people: the contract's fields, views, search, the grid and cover, Private
 # notebooks, one person or none, the canvas's based write, the fan and a note dropped on an app (no file, no window).
-swiftc -parse-as-library -O -o "$out/notelibrary" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift checks/NoteLibraryCheck.swift
+swiftc -parse-as-library -O -o "$out/notelibrary" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteTasks.swift Sources/Petal/ViewerFile.swift checks/NoteLibraryCheck.swift
 "$out/notelibrary"
 # A note's text in the editor and back: the same Markdown, line for line (AppKit, nothing shown).
 swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteMentions.swift Sources/Petal/NoteEditor.swift Sources/Petal/EditMenu.swift checks/NoteRichCheck.swift
@@ -106,11 +106,18 @@ perl -0777 -ne '
     unless (/var token: RunToken\? \{[^}]*didSet \{ if token !== oldValue \{ allowedRules\.adopt\(token\) \} \}/s && /private var allowed: \[String\] \{\s*get \{ allowedRules\.value \}/s) { print "Agent: command rules must belong to the run token\n"; exit 1 }
     print "helpers: command rules scoped to the run\n";
 ' Sources/Petal/Claude.swift
-# A note tool rechecks access after the lookup's wait and right before answering.
+# A note tool tells of a Private notebook's notes only inside it, by the one fence (NotePrivacy, Phase 3's `deliver`:
+# checked again right before every answer is handed over); the helpers' own recheck is gone. `asker` is the helper's
+# note (its paper's id), `caller` its chat (whose answer shows the notes it used as chips).
 perl -0777 -ne '
-    unless (/guard let paper = self\.repick\(chosen\).*?guard readable\(paper\) else \{ return fail/s && /sendAbout\(\[paper\.noteID\], result\)/) { print "NoteTools: access must be rechecked after the wait and before answering\n"; exit 1 }
-    print "notes: access rechecked after every wait\n";
+    unless (/let deliver = .*?NotePrivacy\.deliverable\(notebooks: now, privateBooks: self\.store\.privateBooks, asker: insideNow\)/s
+            && /guard let paper = self\.repick\(chosen\), readable\(paper\.notebook\) else/ && !/stillReadable|sendAbout|visibleAfterWait|helpers\.mayRead/
+            && /func handle\(_ name: String, _ args: \[String: Any\], asker: String\? = nil, caller: String\? = nil,/ && /used\(\[paper\]\)/) {
+        print "NoteTools: one Private fence on every answer, and the notes a chat used\n"; exit 1 }
+    print "notes: every tool answer through the one Private fence\n";
 ' Sources/Petal/NoteTools.swift
+grep -q 'app.paper.handle(name, args, asker: note.flatMap { app.claude.note(withID: $0)?.paper }, caller: note, live: live, send, fail)' Sources/Petal/Assist.swift \
+    || { echo "Assist: a note tool is asked with the helper's note (asker) and its chat (caller)"; exit 1; }
 # A file helper's document is revalidated on every placement change, by the one file resolver (NoteMatch.fits, which
 # asks ViewerFiles' answer for the window in front, or the file Petal's viewer shows): never a path compared. A file's
 # repository, and a task's file at Open all, are found by ViewerFiles.locate (identity, then bookmark, then path).
@@ -118,7 +125,7 @@ grep -q 'return desk?.scene.map { NoteMatch.fits(required, $0) } ?? false' Sourc
     && grep -q 'shown.samePlace(required)' Sources/Petal/NoteHelpers.swift \
     && grep -q 'let file = ViewerFiles.locate(stick, mac: mac, follow: ViewerLoader.follow)?.path' Sources/Petal/NoteHelpers.swift \
     && grep -q 'if compare == nil, let stick, ViewerFiles.namesFile(stick) {' Sources/Petal/NoteHelpers.swift \
-    && grep -q 'let found = located(item, mac: mac, follow: follow)' Sources/Petal/NoteTasks.swift \
+    && grep -q 'if item.kind == "file" { return located(item, mac: mac, follow: follow).map(decide) }' Sources/Petal/NoteTasks.swift \
     && ! grep -n 'documentShowing\|sceneFile\|run\.document' Sources/Petal/NoteHelpers.swift Sources/Petal/NoteHelp.swift \
     || { echo "NoteHelpers: a helper's files go by the one file resolver, never a path comparison"; exit 1; }
 echo "helpers: a helper's documents and a task's file go by the one file resolver"
@@ -132,6 +139,40 @@ perl -0777 -ne '
     print "viewer tools: only the notes their asker may read\n";
 ' Sources/Petal/ViewerTools.swift
 grep -q 'app.viewers.handle(name, args, caller: note ?? "petal", live: live, send, fail)' Sources/Petal/Assist.swift || { echo "Assist: the viewer tools answer through handle (the helpers gate)"; exit 1; }
+# Where the helpers meet the Notes window's phase. Readiness: no helper starts, nothing of the clock runs and nothing
+# is written while notes aren't ready (NoteDesk.takesChanges / acceptsChanges; the gate waits), and a write that's
+# refused is always heard, its result kept in the helpers' journal and tried again. Private notebooks come from
+# NotePrivacy over NoteStore.privateBooks, nowhere else. One NoteTasks, one Open all. What's kept per notebook goes by
+# its binding (NotebookBinding, NoteShelf.notebookFor): a rename isn't a move, another notes' folder is never used.
+perl -0777 -ne '
+    unless (/func returned\(_ key: String, line: String, at ticket: NoteLine\) \{(?:(?!\n    \}\n).)*?guard desk\.takesChanges\(\) else \{ return \}(?:(?!\n    \}\n).)*?ticket\.take\(\)|func returned\((?:(?!\n    \}\n).)*?guard desk\.takesChanges\(\) else \{ return \}/s
+            && /func write\(_ noteID: String, touch: Bool = false,[^\n]*\n\s*guard let desk, desk\.acceptsChanges, let paper = paper\(noteID\)/
+            && /private func tick\(\) \{\s*(?:\/\/[^\n]*\n\s*)*guard let desk, desk\.on, desk\.acceptsChanges else \{ return \}/
+            && /func applyHeld\(\) \{\s*(?:\/\/[^\n]*\n\s*)*guard let desk, desk\.acceptsChanges else \{ return \}/
+            && /facts\.notesReady = desk\?\.acceptsChanges \?\? false/) {
+        print "NoteHelpers: nothing starts, runs or is written while notes are not ready\n"; exit 1 }
+    unless (/return NotePrivacy\.readable\(notebook: notebook, privateBooks: store\.privateBooks, asker: paper\?\.notebook\)/
+            && !/coverPrivate|NoteHelp\.Privacy|CoverFiles|visibleAfterWait|scalarValue\("private"\)|value\("private"\)/) {
+        print "NoteHelpers: Private notebooks come from NotePrivacy only\n"; exit 1 }
+    unless (/run\.startBook = store\?\.binding\(paper\.notebook\)/ && /if let book = entry\.book, case \.otherRoot = desk\.store\.resolve\(book\) \{ continue \}/
+            && /guard store\.session === session, case \.found\(let notebook\) = store\.resolve\(book\) else/
+            && /let stable = "morning-" \+ NoteShelf\.pictureFolder\(id: cover\.noteID\)/ && /func folderSwitching\(\) \{\s*for run in Array\(runs\.values\) \{ end\(run, \.stopped\(nil\)\) \}/) {
+        print "NoteHelpers: what is kept per notebook goes by its binding and its notes folder\n"; exit 1 }
+    print "helpers: ready before anything starts or is written; Private from NotePrivacy; notebooks by their binding\n";
+' Sources/Petal/NoteHelpers.swift
+! grep -n 'coverPrivate\|enum Privacy\|struct CoverFiles\|visibleAfterWait' Sources/Petal/NoteHelp.swift || { echo "NoteHelp: the helpers keep no reading of privacy of their own"; exit 1; }
+[ "$(cat Sources/Petal/*.swift | grep -c '^enum NoteTasks')" = 1 ] && ! grep -n '^extension NoteTasks' Sources/Petal/*.swift \
+    && [ "$(cat Sources/Petal/*.swift | grep -c 'NoteTasks\.openAll(')" = 1 ] && grep -q 'NoteTasks.openAll(items, mac: local.mac, follow: { ViewerLoader.follow($0) })' Sources/Petal/NoteDesk.swift \
+    && grep -q 'desk?.openAll(NoteContract.taskItems(paper.file))' Sources/Petal/NoteHelpers.swift && grep -q 'Button { app.paper.openAll(items) } label: {' Sources/Petal/NotesWindow.swift \
+    || { echo "NoteTasks: one enum and one Open all, for the note and the Petal Notes window alike"; exit 1; }
+echo "tasks: one NoteTasks, one Open all"
+perl -0777 -ne '
+    my $heard = () = /done\?\(\.failed\)/g;
+    unless ($heard == 3 && /let next = store\.change\(key, base: base, edit: \{ \$0\.body = body; also\?\(&\$0\) \}, done: done\)\s*(?:\/\/[^\n]*\n\s*)*if next == nil \{ done\?\(\.failed\) \}/
+            && /helpers\.folderSwitching\(\)\s*(?:\/\/[^\n]*\n\s*)*app\.viewers\.folderSwitching\(true\)/) {
+        print "NoteDesk: a refused write with a helper change is always heard; a folder switch ends the helpers runs ($heard)\n"; exit 1 }
+    print "notes: a refused write is heard; a switch of the notes folder ends its helpers whole\n";
+' Sources/Petal/NoteDesk.swift
 # Rule C: one admission gate. Every prompt a helper's agent gets, and every quick call, goes through NoteHelpers.start
 # (whose `prepare` asks admit right before the words are built), every turn's process starts only after the agent asks
 # its gate, every tool answer to a helper goes through admitTool (before the tool, and again right before its answer),

@@ -393,6 +393,8 @@ final class NoteDesk {
         giveBackAll {}
         // Petal's viewer first: what's typed in a margin is saved and its editor closed before the store stops taking
         // changes, and the margin stays read only until the new folder is ready.
+        // The helpers' runs, looks and summons for this folder's notes end with it.
+        helpers.folderSwitching()
         app.viewers.folderSwitching(true)
         // Every editor of the old folder sealed: its composition committed, its text no longer editable, what's typed
         // saved into the folder it was typed in. Nothing can change after it.
@@ -1746,6 +1748,8 @@ final class NoteDesk {
         // With the note it was typed in known, only a paper that is that note (never another note that took its key).
         let target = noteID.map { id in NoteShelf.saveTarget(key: key, noteID: id, instance: instance, papers: papers, current: store.currentID) } ?? key
         guard let target, let paper = store.paper(target) else {
+            // (What was to be written with it, a helper's metadata, wasn't: its asker keeps it and tries again.)
+            done?(.failed)
             // Its folder switched away from (the note is in a session that ended): to that folder's drain.
             if let late = store.drainLate(key: key, body: body, base: base) { return late }
             // Refused (the paper gone, or no paper is surely that note): the typing goes into the journal under the
@@ -1761,11 +1765,12 @@ final class NoteDesk {
             // Typed just as it became one of two papers: kept in the copy beside it, never dropped (handled: the
             // editor doesn't keep it as unsaved).
             if paper.version == nil, paper.file.body != body { store.keepAside(key, body: body) }
+            done?(.failed)
             return paper.revision ?? base ?? ""
         }
         // Petal's own changes since (a place followed or added) don't make this a conflict; words changed do.
         let base = NoteShelf.rebase(editor: base, current: paper.revision, currentBody: paper.file.body)
-        guard paper.file.body != body || also != nil else { return base }
+        guard paper.file.body != body || also != nil else { done?(.written); return base }
         if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fresh.remove(key) }
         // Links the person typed (an address alone on a line): their pages' titles may be fetched; a link already
         // in the note (from sync) never is.
@@ -1775,6 +1780,8 @@ final class NoteDesk {
         // Refused (the notes' folder switching or not ready yet, a drain): to the drain of the folder it was typed in
         // when that session has ended; else the typing goes into the journal under its note's id at once, made on
         // what the editor had (put back at the next launch if it never lands).
+        // (`done` hears a refusal either way: what `also` would have written is its asker's to keep and try again.)
+        if next == nil { done?(.failed) }
         if next == nil, let late = store.drainLate(key: key, body: body, base: base) { return late }
         if next == nil {
             store.journalUnsaved(noteID: paper.noteID, path: paper.url.path, base: base ?? paper.revision,
