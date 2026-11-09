@@ -43,8 +43,9 @@ final class NoteHelpers {
         var from = 0
         /// "and have <model> look for holes": run once this one succeeded.
         var holes: NoteHelp.Model?
-        /// What a coding helper's reviewer and follow-ups read: the note's worktree.
+        /// What a coding helper's reviewer and follow-ups read: the note's worktree, and the checkout it's bound to.
         var tree: String?
+        var checkout: String?
         /// Waiting for the note's own place to be in front (never looking at whatever else is), and what goes on then.
         var awaitingPlace = false
         @ObservationIgnored var placedResume: (() -> Void)?
@@ -113,10 +114,19 @@ final class NoteHelpers {
     /// anywhere else. `done`: whether it landed.
     func write(_ noteID: String, touch: Bool = false, _ edit: @escaping (inout NoteFile) -> Void, done: ((Bool) -> Void)? = nil) {
         guard let desk, let paper = paper(noteID), !desk.store.readOnly(paper) else { done?(false); return }
-        // Typing not saved yet goes first, into the session's queue, as the person's own save.
-        if desk.editors[paper.key]?.busy() == true { desk.editors[paper.key]?.flush() }
-        guard let key = self.paper(noteID)?.key else { done?(false); return }
-        let made = desk.store.change(key, touch: touch, edit: edit) { outcome in done?(outcome == .written) }
+        // Typing not saved yet and the helper's metadata: one snapshot, one based write (on the base it was typed on),
+        // never the typing's write and then the helper's (two papers when the file changed elsewhere meanwhile).
+        if let editor = desk.editors[paper.key], let typed = editor.take() {
+            let made = desk.write(paper.key, body: typed.body, base: typed.base, also: edit) { outcome in
+                done?(outcome == .written || { if case .keptBoth = outcome { return true } else { return false } }())
+            }
+            editor.landed(made)
+            if made == nil { done?(false) }
+            return
+        }
+        let made = desk.store.change(paper.key, touch: touch, edit: edit) { outcome in
+            done?(outcome == .written || { if case .keptBoth = outcome { return true } else { return false } }())
+        }
         if made == nil { done?(false) }
     }
 
@@ -282,7 +292,10 @@ final class NoteHelpers {
         }
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         if let helper = paper.file.helper, helper.asked == trimmed, helper.state == .done || runs[noteID] != nil { return }
-        if let run = runs[noteID], run.launched, run.sticky != nil, run.token.admits || run.token.paused {
+        // A coding helper's follow-up goes to its run only for its own checkout; naming another starts a new run (its
+        // own checkout choice and Allow), never sent to the existing agent.
+        if let run = runs[noteID], run.launched, run.sticky != nil, run.token.admits || run.token.paused,
+           NoteHelp.followUpTarget(runCheckout: run.checkout, words: trimmed, home: NSHomeDirectory()) == .same || run.checkout == nil {
             // At work (or paused): what's said now steers it in the same session, shielded first.
             var raw = Raw()
             raw.ask = NoteHelp.spoken(trimmed)
@@ -595,7 +608,7 @@ final class NoteHelpers {
     /// away from its window waits for it), the notebook's cover read first.
     private func think(_ run: Run, _ paper: PaperNote, _ text: String, pick: NoteHelp.Model?, compare: (book: String, notes: [String])?) {
         guard live(run) else { return }
-        guard let provider = provider(for: pick) else { return fail(run, "Choose an AI in Petal's settings first (Claude Code or Codex).") }
+        guard let provider = providerOrFail(run, for: pick) else { return }
         let paper = self.paper(run.noteID) ?? paper
         let anchor = NoteHelp.anchor(paper.file.places, here: desk?.here[paper.key])
         if case .away(let label) = anchor {
@@ -682,8 +695,9 @@ final class NoteHelpers {
             }
             let remotes = all.first { $0.path == checkout }?.remotes ?? []
             let remote = slug.flatMap { NoteHelp.remote(for: $0, in: remotes) } ?? remotes.first { $0.name == "origin" }?.name ?? remotes.first?.name ?? ""
-            guard let provider = self.provider(for: pick) else { return self.fail(run, "Choose an AI in Petal's settings first (Claude Code or Codex).") }
+            guard let provider = self.providerOrFail(run, for: pick) else { return }
             run.who = pick?.name ?? provider.name
+            run.checkout = checkout
             let short = (checkout as NSString).abbreviatingWithTildeInPath
             let kind = "code:" + checkout
             self.working(run.noteID, step: "Asking to work in \(short)", asked: run.asked, who: run.who)
@@ -697,7 +711,8 @@ final class NoteHelpers {
                 guard self.live(run) else { return }
                 guard allowed else { return self.fail(run, "Not allowed: nothing was changed in \(short).") }
                 let always = self.app.config.strings("aiAllowed").contains(kind)
-                let grant = always ? "always:" + kind : "reply"
+                // A real Always is shared; Allow once is this note's and this run's alone.
+                let grant = always ? "always:" + kind : NoteHelp.onceGrant(kind: kind, note: run.noteID, run: run.token.id)
                 if !already { self.stamp(run.noteID, label: "ALLOWED · \(provider.name.uppercased()) · \(short.uppercased())", grant: grant) }
                 // The authorization this run works under: taking it back stops it.
                 run.token.hold(grant)
@@ -739,10 +754,19 @@ final class NoteHelpers {
 
     // MARK: Running
 
-    private func provider(for pick: NoteHelp.Model?) -> Provider? {
-        let installed = app.providers.filter { app.paths[$0] != nil }
-        if let pick, let wanted = Provider(rawValue: pick.provider.rawValue), installed.contains(wanted) { return wanted }
-        return app.chatProvider.flatMap { installed.contains($0) ? $0 : nil } ?? installed.first
+    /// The AI a run uses: the one named, only when it's set up (never another instead); else the chat's.
+    private func provider(for pick: NoteHelp.Model?) -> NoteHelp.ProviderChoice {
+        let available = app.providers.filter { app.paths[$0] != nil && app.aiReady($0) }.map(\.rawValue)
+        return NoteHelp.providerChoice(named: pick?.provider, available: available, chat: app.chatProvider?.rawValue)
+    }
+
+    /// The provider, or the run fails saying which isn't set up (with Settings › AI's button).
+    private func providerOrFail(_ run: Run, for pick: NoteHelp.Model?) -> Provider? {
+        switch provider(for: pick) {
+        case .use(let id): return Provider(rawValue: id)
+        case .missing(let name): fail(run, "\(name) isn't set up in Petal.", settings: true); return nil
+        case .none: fail(run, "Choose an AI in Petal's settings first (Claude Code or Codex).", settings: true); return nil
+        }
     }
 
     /// The note's own helper agent (one per note while Petal runs): its tools look at the note's place. A note in a
@@ -874,11 +898,8 @@ final class NoteHelpers {
             return
         }
         var ink = NoteHelp.Ink(who: run.who, text: NoteHelp.inkText(answer))
-        if case .code = run.kind {
-            ink.proof = NoteHelp.proof(in: answer)
-            ink.link = NoteHelp.pullRequest(in: answer) ?? ""
-            if ink.proof.isEmpty, let finish = NoteHelp.finishLine(run.asked) { ink.proof = [String(finish.prefix(18))] }
-        }
+        // A coding helper's proof is only its own "Proof:" line; its finish line is kept apart (NoteHelp.codeInk).
+        if case .code = run.kind { ink = NoteHelp.codeInk(who: run.who, answer: answer, finish: NoteHelp.finishLine(run.asked)) }
         // The next answer replaces the last: one block of ink (a second opinion's comes after it).
         self.answer(noteID, [ink], who: run.who, asked: run.asked, steps: steps)
         if let holes = run.holes, let paper = paper(noteID) { secondOpinion(paper, holes, after: run, answer: answer) }
@@ -887,9 +908,10 @@ final class NoteHelpers {
     /// "and have <model> look for holes": a run of its own, after the first succeeded, reading the cover and the note
     /// first, then its answer (and in a worktree, the change), listing objections as its own ink with a count.
     private func secondOpinion(_ paper: PaperNote, _ model: NoteHelp.Model, after first: Run, answer: String) {
-        guard let provider = provider(for: model) else {
-            // Asked for, but no AI to give it: said under the answer (the answer stands).
-            return write(paper.noteID) { $0.ink.append(NoteHelp.Ink(who: Self.petalWho, text: "No second opinion: \(model.name) isn't set up in Petal's settings.")) }
+        guard case .use(let id) = provider(for: model), let provider = Provider(rawValue: id) else {
+            // Asked for, but that AI isn't set up: said under the answer (the answer stands), never another instead.
+            let name = model.provider == .claude ? "Claude Code" : "Codex"
+            return write(paper.noteID) { $0.ink.append(NoteHelp.Ink(who: Self.petalWho, text: "No second opinion: \(name) isn't set up in Petal.", link: NoteHelp.settingsLink)) }
         }
         let who = model.name.isEmpty ? provider.name : model.name
         let run = begin(paper, asked: first.asked, step: "Looking for holes", who: who)
@@ -945,7 +967,9 @@ final class NoteHelpers {
         guard !request.kind.hasPrefix("code:") else { return }
         let always = choice == .always && !request.every
         let label = (always ? "ALWAYS · " : "ALLOWED · ") + request.title.uppercased()
-        stamp(noteID, label: String(label.prefix(48)), grant: always ? "always:" + request.kind : "reply")
+        // Allow once and Buy: this note's and this run's alone; only a real Always is shared.
+        let grant = always ? "always:" + request.kind : NoteHelp.onceGrant(kind: request.kind, note: noteID, run: runs[noteID]?.token.id ?? "none")
+        stamp(noteID, label: String(label.prefix(48)), grant: grant)
         write(noteID) { file in if file.helper?.state == .waiting { file.helper?.state = .working } }
     }
 
@@ -956,7 +980,7 @@ final class NoteHelpers {
         let agent = sticky.agent
         let rules = agent.pendingAsk.flatMap(\.rules)
         let label = agent.pendingAsk.map(\.label).first.map { String($0.prefix(30)) } ?? "a command"
-        stamp(noteID, label: "ALLOWED · " + label.uppercased(), grant: "rules:" + rules.joined(separator: "\n"))
+        stamp(noteID, label: "ALLOWED · " + label.uppercased(), grant: NoteHelp.rulesGrant(rules, note: noteID, run: run.token.id))
         write(noteID) { file in file.helper?.state = .working; file.helper?.step = "Allowed" }
         agent.allow()
     }
@@ -984,7 +1008,7 @@ final class NoteHelpers {
             mainSticky(noteID)?.agent.revoke(rules)
         case .project(let id):
             AgentGrants.shared.remove(id)
-        case .reply:
+        case .once:
             if let sticky = mainSticky(noteID) { app.assist.computer.end(sticky.id.uuidString) }
         }
         // Every run holding it is cancelled, whichever note it's on (an Always for a checkout is shared).
@@ -1135,51 +1159,61 @@ final class NoteHelpers {
         let text = told.extra.text
         let line = NoteHelp.line(watch.line)
         let last = NoteHelp.amounts(watch.last, needCurrency: false).first?.value
-        let finish = { (value: Double?, hint: String?, said: String?) in
+        // The look's end: its value recorded; a hit only with an explicit yes (NoteHelp.watchVerdict), said only from
+        // this write's own "newly crossed" result; unconfirmed, shown as such and never a hit.
+        let finish = { (value: Double?, hint: String?, verdict: NoteHelp.WatchVerdict, said: String?) in
             self.looking.remove(noteID)
             guard self.current(noteID, id) != nil, token.admits else { return }
-            // This look's own end: only a look that succeeded (its write newly crossing the line) says a crossing.
             token.complete(.succeeded)
             self.looks.finish(noteID, token)
             let shown = value.map { NoteHelp.format($0, currency: line?.currency ?? "", thousands: line?.thousands ?? false) }
-            let crossed = value.map { NoteHelp.crossed($0, line: watch.line) } ?? false
             let now = Date()
             let newly = Flag()
             self.write(noteID, { file in
                 var current = file.watch
-                guard let result = NoteHelp.applyLook(&current, id: id, shown: shown, hint: hint, crossed: crossed, at: now) else { return }
+                guard let result = NoteHelp.applyLook(&current, id: id, shown: shown, hint: hint, crossed: verdict == .hit, at: now) else { return }
                 file.watch = current
                 newly.value = result
             }) { landed in
-                // Said only from this write's own result: newly crossed, and landed.
-                guard landed, newly.value, let shown else { return }
-                let words = said ?? "Now \(shown): \(watch.line). Petal never buys by itself: say “@Petal buy it” and you'll see a Buy card first."
-                self.answer(noteID, [NoteHelp.Ink(who: Self.petalWho + " · " + NoteHelp.dayLabel(Date(), now: Date()), text: words)],
-                            who: Self.petalWho, asked: self.paper(noteID)?.file.helper?.asked ?? "")
-                self.summon(noteID, open: true)
+                guard landed, let shown else { return }
+                let who = Self.petalWho + " · " + NoteHelp.dayLabel(Date(), now: Date())
+                let asked = self.paper(noteID)?.file.helper?.asked ?? ""
+                if newly.value, verdict == .hit {
+                    let words = said ?? "Now \(shown): \(watch.line). Petal never buys by itself: say “@Petal buy it” and you'll see a Buy card first."
+                    self.answer(noteID, [NoteHelp.Ink(who: who, text: words)], who: Self.petalWho, asked: asked)
+                    self.summon(noteID, open: true)
+                } else if verdict == .unconfirmed {
+                    let words = "Looks \(watch.line) (\(shown)), not confirmed."
+                    if self.paper(noteID)?.file.ink.first?.text != words { self.answer(noteID, [NoteHelp.Ink(who: who, text: words)], who: Self.petalWho, asked: asked) }
+                }
+            }
+        }
+        // A value that crossed the line (and wasn't a hit already) is confirmed first, whichever way it was read.
+        let decide = { (value: Double?, hint: String?, found: Shielded, hintWords: Shielded) in
+            guard let value, NoteHelp.crossed(value, line: watch.line), !watch.hit else { return finish(value, hint, .plain, nil) }
+            guard self.app.focus.brain.enabled else {
+                return finish(value, hint, NoteHelp.watchVerdict(crossed: true, alreadyHit: false, confirmation: nil, asked: false), nil)
+            }
+            let prompt = NoteHelp.watchConfirm(told, found: found, hint: hintWords)
+            self.app.focus.brain.ask(prompt, key: "watch|\(noteID)|\(id)|\(value)|\(Date().timeIntervalSince1970)", token: token) { reply in
+                let verdict = NoteHelp.watchVerdict(crossed: true, alreadyHit: false, confirmation: reply, asked: true)
+                finish(value, hint, verdict, verdict == .hit ? (reply?["say"] as? String).map { String($0.prefix(240)) } : nil)
             }
         }
         if !text.isEmpty, let found = NoteHelp.pick(text, line: watch.line, hint: watch.hint, last: last) {
             let hintWords = NoteHelp.hint(before: found, in: text)
-            guard NoteHelp.crossed(found.value, line: watch.line), !watch.hit, app.focus.brain.enabled else { return finish(found.value, hintWords, nil) }
-            // Crossed: the quick AI checks it's really the thing's price before the note says so; what it's told is
-            // the shielded page and ranges of it.
             let ns = text as NSString
             let hintRange = ns.range(of: hintWords, options: .backwards, range: NSRange(location: 0, length: found.range.location))
-            let hint = hintRange.location == NSNotFound ? Shielded("") : told.extra.substring(hintRange)
-            let prompt = NoteHelp.watchConfirm(told, found: told.extra.substring(found.range), hint: hint)
-            let key = "watch|\(noteID)|\(id)|\(found.text)|\(Date().timeIntervalSince1970)"
-            app.focus.brain.ask(prompt, key: key, token: token) { reply in
-                // Only an explicit, valid yes is a hit.
-                guard NoteHelp.confirmed(reply) else { return finish(nil, nil, nil) }
-                finish(found.value, hintWords, (reply?["say"] as? String).map { String($0.prefix(240)) })
-            }
-            return
+            // What the quick AI is told is the shielded page and ranges of it.
+            return decide(found.value, hintWords, told.extra.substring(found.range), hintRange.location == NSNotFound ? "" : told.extra.substring(hintRange))
         }
-        guard !text.isEmpty, app.focus.brain.enabled else { return finish(nil, nil, nil) }
-        // Couldn't tell plainly: the quick AI finds it once, and the words before it for next time.
+        guard !text.isEmpty, app.focus.brain.enabled else { return finish(nil, nil, .plain, nil) }
+        // Couldn't tell plainly: the quick AI finds it once (and the words before it for next time); a value it finds
+        // that crosses the line is confirmed like any other.
         app.focus.brain.ask(NoteHelp.watchFind(told), key: "watchfind|\(noteID)|\(id)|\(Date().timeIntervalSince1970)", token: token) { reply in
-            finish((reply?["value"] as? NSNumber)?.doubleValue, reply?["before"] as? String, nil)
+            let value = (reply?["value"] as? NSNumber)?.doubleValue
+            let found: Shielded = value.map { "\(Int($0.rounded()))" } ?? ""
+            decide(value, reply?["before"] as? String, found, "")
         }
     }
 

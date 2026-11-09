@@ -138,7 +138,7 @@ extension Snapshot {
         var fix = NoteFile(id: "H2", created: day, body: "@Petal use Opus 5.5 to fix the date picker and open a PR. Done means the tests pass. Have GPT 6.1 Sol look for holes")
         fix.places = [pr]
         fix.ink = [NoteHelp.Ink(who: "Opus 5.5", text: "Opened a PR into #42: the picker now keeps the time zone. The tests pass.",
-                                proof: ["tests ✓", "diff +9 −3", "PR #43"], link: "https://github.com/example/garden/pull/43"),
+                                proof: ["tests ✓", "diff +9 −3", "PR #43"], link: "https://github.com/example/garden/pull/43", code: true, finish: "the tests pass"),
                    NoteHelp.Ink(who: "GPT 6.1 Sol", text: "1. Does the week view use the same picker? It still shows the old time.", objections: 1)]
         fix.steps = ["New worktree of ~/garden", "Found it: the picker drops the time zone", "Fixed DatePicker.swift", "The tests pass", "Pushed, opened PR #43"]
         fix.stamps = [NoteHelp.Stamp(label: "ALLOWED · CLAUDE · ~/GARDEN", grant: "always:code:/Users/someone/garden", mac: "m"),

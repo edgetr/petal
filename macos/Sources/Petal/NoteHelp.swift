@@ -280,15 +280,19 @@ enum NoteHelp {
         var proof: [String] = []
         var link = ""
         var objections: Int? = nil
+        /// A coding helper's: its proof is only what its own "Proof:" line said (none: "No proof given"), and the
+        /// finish line the person set is kept apart from it.
+        var code = false
+        var finish = ""
 
-        init(who: String, text: String, proof: [String] = [], link: String = "", objections: Int? = nil) {
-            self.who = who; self.text = text; self.proof = proof; self.link = link; self.objections = objections
+        init(who: String, text: String, proof: [String] = [], link: String = "", objections: Int? = nil, code: Bool = false, finish: String = "") {
+            self.who = who; self.text = text; self.proof = proof; self.link = link; self.objections = objections; self.code = code; self.finish = finish
         }
 
         init?(_ value: NoteValue) {
             guard case .map = value else { return nil }
             self.init(who: value.text("who"), text: value.text("text"), proof: value.texts("proof"), link: value.text("link"),
-                      objections: Int(value.text("objections")))
+                      objections: Int(value.text("objections")), code: value.text("code") == "true", finish: value.text("finish"))
         }
 
         var value: NoteValue {
@@ -296,8 +300,14 @@ enum NoteHelp {
             if !proof.isEmpty { pairs.append(("proof", .list(proof.map { .text($0) }))) }
             if !link.isEmpty { pairs.append(("link", .text(link))) }
             if let objections { pairs.append(("objections", .text("\(objections)"))) }
+            if code { pairs.append(("code", .text("true"))) }
+            if !finish.isEmpty { pairs.append(("finish", .text(finish))) }
             return .map(pairs)
         }
+
+        /// What the paper says where proof would be: nothing for a helper that isn't coding; for a coding helper
+        /// without a "Proof:" line, "No proof given" (plain, never a badge).
+        var missingProof: Bool { code && proof.isEmpty }
 
         /// "Codex · 1 objection" for a second opinion; the writer otherwise.
         var heading: String {
@@ -322,14 +332,21 @@ enum NoteHelp {
 
         var value: NoteValue { .map([("label", .text(label)), ("grant", .text(grant)), ("mac", .text(mac))]) }
 
-        /// What a grant is: `always:<kind>` (Always for a kind of question), `rules:<rule>\n…` (Claude's per-part
-        /// rules for this note's helper), `project:<grant id>` (an agent's grant), `reply` (this reply only).
-        enum Grant: Equatable { case always(String), rules([String]), project(String), reply }
+        /// What a grant is: `always:<kind>` (a real Always, the only grant shared between notes and runs),
+        /// `once:<note>:<run>:<kind>` (Allow once, Buy, this reply: its note's and run's alone),
+        /// `rules:<note>:<run>:<rule>\n…` (Claude's per-part rules allowed in that run), `project:<grant id>`.
+        enum Grant: Equatable { case always(String), rules([String]), project(String), once(String) }
         var parsed: Grant {
             if grant.hasPrefix("always:") { return .always(String(grant.dropFirst(7))) }
-            if grant.hasPrefix("rules:") { return .rules(grant.dropFirst(6).components(separatedBy: "\n").filter { !$0.isEmpty }) }
+            if grant.hasPrefix("rules:") {
+                let rest = grant.dropFirst(6)
+                // Scoped: past its note and run.
+                let parts = rest.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
+                let rules = parts.count == 3 && !rest.hasPrefix("Bash(") ? String(parts[2]) : String(rest)
+                return .rules(rules.components(separatedBy: "\n").filter { !$0.isEmpty })
+            }
             if grant.hasPrefix("project:") { return .project(String(grant.dropFirst(8))) }
-            return .reply
+            return .once(grant)
         }
     }
 
@@ -1715,6 +1732,53 @@ extension NoteHelp {
         case .away(let label): return .waiting(label)
         case .free: return .free
         }
+    }
+}
+
+extension NoteHelp {
+    /// A one-time grant (Allow once, Buy, this reply's rules): scoped to its note and run, so taking it back stops
+    /// that run only. Only a real Always is shared (`always:<kind>`).
+    static func onceGrant(kind: String, note: String, run: String) -> String { "once:\(note):\(run):\(kind)" }
+    static func rulesGrant(_ rules: [String], note: String, run: String) -> String { "rules:\(note):\(run):" + rules.joined(separator: "\n") }
+
+    /// Where a follow-up to a coding helper goes: to its run when it names no checkout or the run's own; a new run
+    /// (its own checkout choice and Allow) when it names another.
+    enum FollowUpTarget: Equatable { case same, newRun }
+
+    static func followUpTarget(runCheckout: String?, words: String, home: String) -> FollowUpTarget {
+        let named = namedPaths(words, home: home)
+        guard !named.isEmpty else { return .same }
+        guard let runCheckout else { return .newRun }
+        return named == [standard(runCheckout)] ? .same : .newRun
+    }
+
+    /// The AI a helper runs on: the one the person named, only when it's installed and enabled in Petal (never
+    /// another instead: "Codex isn't set up in Petal"); else the chat's AI, else any set up.
+    enum ProviderChoice: Equatable { case use(String), missing(String), none }
+
+    static func providerChoice(named: Model.Provider?, available: [String], chat: String?) -> ProviderChoice {
+        if let named {
+            return available.contains(named.rawValue) ? .use(named.rawValue) : .missing(named == .claude ? "Claude Code" : "Codex")
+        }
+        if let chat, available.contains(chat) { return .use(chat) }
+        return available.first.map(ProviderChoice.use) ?? .none
+    }
+
+    /// A coding helper's ink: its answer, its proof only from its own "Proof:" line, its finish line apart.
+    static func codeInk(who: String, answer: String, finish: String?) -> Ink {
+        Ink(who: who, text: inkText(answer), proof: proof(in: answer), link: pullRequest(in: answer) ?? "", code: true, finish: finish ?? "")
+    }
+
+    /// What a watcher's look comes to when its value crossed the line (and wasn't a hit already): a hit only with
+    /// an explicit yes; unconfirmed when nothing could confirm it (the quick AI off or silent): shown as "looks
+    /// under … — not confirmed", never a hit; nothing when the confirmation said no.
+    enum WatchVerdict: Equatable { case plain, hit, unconfirmed, refuted }
+
+    static func watchVerdict(crossed: Bool, alreadyHit: Bool, confirmation: [String: Any]?, asked: Bool) -> WatchVerdict {
+        guard crossed, !alreadyHit else { return .plain }
+        guard asked, let confirmation else { return .unconfirmed }
+        if confirmed(confirmation) { return .hit }
+        return confirmation["yes"] as? Bool == false ? .refuted : .unconfirmed
     }
 }
 

@@ -1419,7 +1419,9 @@ final class NoteDesk {
 
     /// What the editor typed, made on `base` (the file as the editor last had it). Returns the next base; nil when
     /// the paper can't be written (read only: one of a conflict's papers).
-    func write(_ key: String, body: String, base: String?) -> String? {
+    /// `also`: a helper's metadata, written in the same snapshot as the typing (one based write, never two).
+    func write(_ key: String, body: String, base: String?, also: ((inout NoteFile) -> Void)? = nil,
+               done: (@MainActor (NoteStore.Outcome) -> Void)? = nil) -> String? {
         guard let paper = store.paper(key) else { return nil }
         if store.readOnly(paper) {
             // Typed just as it became one of two papers: kept in the copy beside it, never dropped.
@@ -1428,13 +1430,13 @@ final class NoteDesk {
         }
         // Petal's own changes since (a place followed or added) don't make this a conflict; words changed do.
         let base = NoteShelf.rebase(editor: base, current: paper.revision, currentBody: paper.file.body)
-        guard paper.file.body != body else { return base }
+        guard paper.file.body != body || also != nil else { return base }
         if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fresh.remove(key) }
         // Links the person typed (an address alone on a line): their pages' titles may be fetched; a link already
         // in the note (from sync) never is.
         let links = { (text: String) in Set(NoteBlock.blocks(text).compactMap { if case .link(let url) = $0 { url } else { nil } }) }
         for url in links(body).subtracting(links(paper.file.body)) { LinkPreviews.shared.requested(url) }
-        return store.change(key, base: base) { $0.body = body }
+        return store.change(key, base: base, edit: { $0.body = body; also?(&$0) }, done: done)
     }
 
     /// Pictures pasted or dropped on a note: their bytes read and decoded first (a file that's slow or not downloaded

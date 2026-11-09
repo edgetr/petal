@@ -76,7 +76,8 @@ perl -0777 -ne '
     } else { print "Agent.run not found\n"; exit 1 }
 ' Sources/Petal/Claude.swift
 perl -ne '
-    if (/\bguard\b.*\brun\b.*else \{ return \}/ && !/live\(|admits|token\.|runs\[/) { print "NoteHelpers:$.: a run guard that returns without an outcome: $_"; $bad++ }
+    # (A function named …OrFail( reports the failure of the run itself before it returns nil.)
+    if (/\bguard\b.*\brun\b.*else \{ return \}/ && !/live\(|admits|token\.|runs\[|OrFail\(/) { print "NoteHelpers:$.: a run guard that returns without an outcome: $_"; $bad++ }
     END { exit 1 if $bad; print "outcomes: every helper run guard reports one or checks its token\n" }
 ' Sources/Petal/NoteHelpers.swift
 # A helper's writes go only through the note's session as Petal's own change (journaled at once, drained at quit):

@@ -500,6 +500,46 @@ struct NoteHelpCheck {
         expect(NoteHelp.follow(seen: [oldTab], now: [newTab], here: 0) == .placed(0), "once here says it's in front: that place")
         expect(NoteHelp.follow(seen: [oldTab], now: [oldTab], here: 0) == .unchanged, "unchanged")
 
+        // MARK: Round five: follow-up checkout binding, scoped grants, watcher confirmation, providers, proof
+
+        let gardenHome = "/Users/someone"
+        expect(NoteHelp.followUpTarget(runCheckout: "/Users/someone/garden", words: "also fix the header", home: gardenHome) == .same, "a follow-up naming nothing: its run")
+        expect(NoteHelp.followUpTarget(runCheckout: "/Users/someone/garden", words: "and in ~/garden too", home: gardenHome) == .same, "naming its own checkout: its run")
+        expect(NoteHelp.followUpTarget(runCheckout: "/Users/someone/garden", words: "now do it in ~/garden-old", home: gardenHome) == .newRun,
+               "naming another checkout: a new run (its own choice and Allow), never the existing agent")
+        let onceA = NoteHelp.onceGrant(kind: "computer:com.apple.Safari", note: "A", run: "r1")
+        let onceB = NoteHelp.onceGrant(kind: "computer:com.apple.Safari", note: "B", run: "r2")
+        expect(onceA != onceB && onceA != NoteHelp.onceGrant(kind: "computer:com.apple.Safari", note: "A", run: "r3"), "Allow once: its note's and run's alone")
+        let grants = TokenTable()
+        let noteA = grants.start("A"), noteB = grants.start("B")
+        noteA.hold(onceA); noteB.hold(onceB)
+        noteA.hold("always:computer:com.apple.Safari"); noteB.hold("always:computer:com.apple.Safari")
+        expect(grants.revoke(onceA) == ["A"] && noteB.admits, "taking back one note's Allow once stops only its run")
+        let noteC = grants.start("C")
+        noteC.hold("always:computer:com.apple.Safari")
+        expect(grants.revoke("always:computer:com.apple.Safari") == ["B", "C"], "a real Always is shared: every run using it stops")
+        let rulesGrant = NoteHelp.rulesGrant(["Bash(git push)", "Bash(npm test)"], note: "A", run: "r1")
+        expect(NoteHelp.Stamp(label: "x", grant: rulesGrant, mac: "m").parsed == .rules(["Bash(git push)", "Bash(npm test)"]), "a run's rules: scoped, and read back")
+        expect(NoteHelp.Stamp(label: "x", grant: "rules:Bash(petal doctor:*)", mac: "m").parsed == .rules(["Bash(petal doctor:*)"]), "an older unscoped rule still reads")
+        expect(NoteHelp.Stamp(label: "x", grant: onceA, mac: "m").parsed == .once(onceA) && NoteHelp.Stamp(label: "x", grant: "always:trash", mac: "m").parsed == .always("trash"), "grants read")
+        expect(NoteHelp.watchVerdict(crossed: true, alreadyHit: false, confirmation: nil, asked: false) == .unconfirmed, "the quick AI off: crossed, but not confirmed (never a hit)")
+        expect(NoteHelp.watchVerdict(crossed: true, alreadyHit: false, confirmation: nil, asked: true) == .unconfirmed, "no answer: not confirmed")
+        expect(NoteHelp.watchVerdict(crossed: true, alreadyHit: false, confirmation: ["say": "it is"], asked: true) == .unconfirmed, "an answer without an explicit yes: not confirmed")
+        expect(NoteHelp.watchVerdict(crossed: true, alreadyHit: false, confirmation: ["yes": false], asked: true) == .refuted, "an explicit no: nothing")
+        expect(NoteHelp.watchVerdict(crossed: true, alreadyHit: false, confirmation: ["yes": true], asked: true) == .hit, "an explicit yes: a hit")
+        expect(NoteHelp.watchVerdict(crossed: false, alreadyHit: false, confirmation: ["yes": true], asked: true) == .plain
+               && NoteHelp.watchVerdict(crossed: true, alreadyHit: true, confirmation: ["yes": true], asked: true) == .plain, "not crossed, or a hit already: just the value")
+        expect(NoteHelp.providerChoice(named: .codex, available: ["claude"], chat: "claude") == .missing("Codex"), "Codex named but not set up: fails, never Claude instead")
+        expect(NoteHelp.providerChoice(named: .claude, available: ["claude", "codex"], chat: "codex") == .use("claude"), "the one named")
+        expect(NoteHelp.providerChoice(named: nil, available: ["claude", "codex"], chat: "codex") == .use("codex") && NoteHelp.providerChoice(named: nil, available: [], chat: "codex") == .none,
+               "none named: the chat's AI, or none")
+        let noProof = NoteHelp.codeInk(who: "Opus 5.5", answer: "Fixed it and pushed.", finish: "the tests pass")
+        expect(noProof.proof.isEmpty && noProof.missingProof && noProof.finish == "the tests pass", "no Proof: line: no proof (never the finish line as a badge), said plainly")
+        let proved = NoteHelp.codeInk(who: "Opus 5.5", answer: "Fixed it.\nProof: tests ✓ · diff +1 −1", finish: "the tests pass")
+        expect(proved.proof == ["tests ✓", "diff +1 −1"] && !proved.missingProof && proved.finish == "the tests pass", "its own proof, the finish line apart")
+        expect(NoteHelp.Ink(proved.value) == proved, "a coding ink reads back")
+        expect(!NoteHelp.Ink(who: "✦ Petal", text: "Hi").missingProof, "a helper that isn't coding has no proof to miss")
+
         // MARK: Open all never launches an app or a script (NoteTasks)
 
         let scratch = FileManager.default.temporaryDirectory.appending(path: "petal-notetasks-\(UUID().uuidString)")

@@ -1371,6 +1371,15 @@ enum NoteShelf {
     /// coordinated step, the file must still be that note (`found`: the id its text says now; nil, no file there).
     /// Another note at that path is never written, moved or trashed. `missing`: whether no file there is all right
     /// (a write makes it again; a move or trash has nothing to act on).
+    /// Where a session's write lands when its predecessor was kept beside the file as a conflict copy: on that copy,
+    /// when the write was made on what the predecessor wrote there (`carried`: the copy's path and that text); nil
+    /// (the note's own file, as always) otherwise. A later write never goes back at the original base to make a
+    /// third paper.
+    static func carryTarget(base: String?, carried: (path: String, text: String)?) -> String? {
+        guard let carried, let base, base == carried.text else { return nil }
+        return carried.path
+    }
+
     static func stillNote(found: String?, expected: String, missing: Bool) -> Bool {
         guard let found else { return missing }
         return found == expected

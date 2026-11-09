@@ -116,6 +116,7 @@ struct NoteStoreCheck {
         pictureLinks(root: root)
         removeRefusedReadOnly(root: root)
         helperAnswerDrained(root: root)
+        carriedOntoCopy(root: root)
         caseMove(root: root)
         versionGroups(root: root)
         try? fm.removeItem(at: Config.supportFolder)
@@ -684,6 +685,44 @@ struct NoteStoreCheck {
         let until = Date().addingTimeInterval(10)
         while drained.wait(timeout: .now()) == .timedOut && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         expect(text(file)?.contains("The answer") == true && text(file)?.contains("My words") == true, "drained at quit: the answer is on disk, with the person's words", text(file) ?? "nil")
+    }
+
+    /// A session's writes after a conflict copy: the person's typing and a helper's metadata go in one snapshot (one
+    /// based write: one copy, never two), and a later write made on it carries onto that copy, never a third paper.
+    @MainActor static func carriedOntoCopy(root outer: URL) {
+        let fm = FileManager.default
+        // A notes folder of its own (nothing another check left behind).
+        let root = outer.appending(path: "CarriedRoot")
+        let folder = root.appending(path: "Carried")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Carried.md")
+        _ = NoteStore.create(NoteFile(id: "CC1", body: "Before").serialized(), at: file, root: root)
+        let store = NoteStore(root: root)
+        let read = NoteStore.read(root)
+        store.preview(read.notes, notebooks: read.notebooks)
+        guard let paper = store.notes.first(where: { $0.noteID == "CC1" }), let base = paper.revision else { return expect(false, "the note is read") }
+        // Changed on another Mac meanwhile.
+        try? Data(NoteFile(id: "CC1", body: "Changed elsewhere").serialized().utf8).write(to: file)
+        // The person's typing (on the base they typed on) and the helper's answer: one snapshot.
+        _ = store.change(paper.key, base: base, edit: { file in
+            file.body = "Typed here"
+            file.ink = [NoteHelp.Ink(who: "✦ Petal", text: "First answer")]
+        })
+        // A later helper write, made on that snapshot.
+        _ = store.change(paper.key, touch: false, edit: { file in file.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", at: Date()) })
+        let drained = DispatchSemaphore(value: 0)
+        store.drain { drained.signal() }
+        let until = Date().addingTimeInterval(10)
+        while drained.wait(timeout: .now()) == .timedOut && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let papers = ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".md") }.sorted()
+        expect(papers.count == 2, "one conflict copy, never a third paper", "\(papers)")
+        let copy = papers.first { $0 != "Carried.md" }.map { folder.appending(path: $0) }
+        expect(text(file)?.contains("Changed elsewhere") == true && text(file)?.contains("First answer") == false, "the other Mac's words stay in the file")
+        expect(copy.flatMap(text)?.contains("Typed here") == true && copy.flatMap(text)?.contains("First answer") == true
+               && copy.flatMap(text)?.contains("state: done") == true, "the typing, the answer and the later write all on the one copy", copy.flatMap(text) ?? "nil")
+        // The rule itself.
+        expect(NoteShelf.carryTarget(base: "t1", carried: ("/c.md", "t1")) == "/c.md" && NoteShelf.carryTarget(base: "t0", carried: ("/c.md", "t1")) == nil
+               && NoteShelf.carryTarget(base: "t1", carried: nil) == nil, "a write made on what was kept beside the file goes there; any other, the file")
     }
 
     @MainActor static func removeRefusedReadOnly(root: URL) {

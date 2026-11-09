@@ -1350,6 +1350,11 @@ final class NoteEditorHandle {
     /// Remove on the paper while this editor is open: those pictures deleted here, as typing is; undo calls the
     /// first closure (their bytes accepted again), redo the second (removed again).
     var removePictures: (Set<String>, @escaping (String) -> Void, @escaping (String) -> Void) -> Void = { _, _, _ in }
+    /// Its typing not saved yet, taken to be saved with something else in one write (a helper's metadata): the text
+    /// and the base it was typed on; nil when nothing waits. Its own save is called off.
+    var take: () -> (body: String, base: String?)? = { nil }
+    /// That one write was made: its text is what the editor's next save is made on.
+    var landed: (String?) -> Void = { _ in }
 }
 
 /// The editor in SwiftUI: the note's lines in, the note's lines out (saved a moment after the person stops typing).
@@ -1502,6 +1507,25 @@ struct NoteEditorView: NSViewRepresentable {
             MainActor.assumeIsolated { coordinator.flush(text) }
         }
         handle.busy = { [weak coordinator] in MainActor.assumeIsolated { coordinator?.marker.dirty == true } }
+        handle.take = { [weak coordinator, weak text] in
+            guard let coordinator, let text, let storage = text.textStorage else { return nil }
+            return MainActor.assumeIsolated {
+                guard coordinator.marker.dirty else { return nil }
+                coordinator.saveLater?.cancel()
+                coordinator.saveLater = nil
+                let body = NoteBlock.body(NoteRich.blocks(storage))
+                coordinator.body = body
+                return (body, coordinator.base)
+            }
+        }
+        handle.landed = { [weak coordinator] next in
+            guard let coordinator else { return }
+            MainActor.assumeIsolated {
+                if let next { coordinator.base = next }
+                _ = coordinator.marker.saved()
+                coordinator.parent.idle()
+            }
+        }
         handle.insert = { [weak text] path, file, caption, at, length, selected in
             guard let text else { return false }
             return MainActor.assumeIsolated { text.insertPicture(path: path, file: file, caption: caption, at: at, length: length, selected: selected) }

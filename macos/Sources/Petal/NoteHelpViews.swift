@@ -51,6 +51,13 @@ struct InkView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
                 .help(ink.text.count > 600 ? "Drag it out for the whole answer" : "")
+            // The finish line the person set, apart from the evidence; no "Proof:" line, said plainly (never a badge).
+            if !ink.finish.isEmpty {
+                Text("Done means: " + ink.finish).font(.system(size: 11)).foregroundStyle(HelperLook.grey).padding(.top, 4)
+            }
+            if ink.missingProof {
+                Text("No proof given").font(.system(size: 11)).foregroundStyle(HelperLook.grey).padding(.top, 2)
+            }
             if ink.link == NoteHelp.settingsLink {
                 NoteButton(title: "Open Settings › AI") { PetalApp.shared.settings.show(.claude) }.padding(.top, 6)
             }
