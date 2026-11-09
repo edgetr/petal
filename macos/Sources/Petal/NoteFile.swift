@@ -1694,15 +1694,24 @@ enum NoteShelf {
         return keys
     }
 
-    /// A link to `target` (an absolute path) from a note's folder, by the words alone: "../Pictures/h/p.png" from
-    /// another notebook, "Trip.assets/p.png" beside it. Nil unless the link stays inside the notes' root (pictureTarget).
-    static func relink(_ target: String, from folder: String) -> String? {
-        let to = target.split(separator: "/").map(String.init), from = folder.split(separator: "/").map(String.init)
-        var common = 0
-        while common < min(to.count, from.count), to[common] == from[common] { common += 1 }
-        guard common < to.count else { return nil }
-        let link = (Array(repeating: "..", count: from.count - common) + to[common...]).joined(separator: "/")
-        return pictureTarget(link, noteFolder: folder) == target ? link : nil
+    /// What a pasted picture becomes in the note it's pasted into (one rule, no other cases): kept as it is only
+    /// when the file recorded at copy is under this notes' root and already in this note's own folder (`own`,
+    /// "<root>/Pictures/<hash>"); else copied into that folder under a fresh name; no file recorded (it couldn't be
+    /// resolved when copied): not pasted as a link at all.
+    enum PastedPicture: Equatable { case keep(String), copy, missing }
+
+    static func pastePicture(recorded: String?, root: String, own: String) -> PastedPicture {
+        guard let recorded else { return .missing }
+        if within(recorded, root) != nil, let name = within(recorded, own), !name.contains("/") { return .keep(name) }
+        return .copy
+    }
+
+    /// Two paths for the same file however each is spelled (/private/var is /var).
+    static func samePath(_ a: String, _ b: String) -> Bool { respelled(a) == respelled(b) }
+
+    static func respelled(_ path: String) -> String {
+        for top in ["/private/var/", "/private/tmp/", "/private/etc/"] where path.hasPrefix(top) { return String(path.dropFirst("/private".count)) }
+        return path
     }
 
     /// Where pasted pictures go when they're in: the selection they were pasted over when the text there still says
@@ -1733,10 +1742,7 @@ enum NoteShelf {
     /// The pictures (by where their links lead) that files appearing or changing on disk touch: the file itself, or
     /// a folder holding it. The folder watcher's paths may be spelled another way (/private/var for /var).
     static func picturesTouched(events: [String], keys: [String]) -> [String] {
-        let spell = { (path: String) -> String in
-            for top in ["/private/var/", "/private/tmp/", "/private/etc/"] where path.hasPrefix(top) { return String(path.dropFirst("/private".count)) }
-            return path
-        }
+        let spell = respelled
         let changed = events.map(spell)
         return keys.filter { key in
             let k = spell(key)

@@ -120,10 +120,7 @@ final class NotePictures {
 
     func isBroken(_ link: String, in folder: URL) -> Bool { Self.target(link, in: folder).map { broken[$0] != nil } ?? true }
 
-    func preview(_ file: URL, _ image: NSImage, data: Data? = nil) {
-        if let data { bytes[file.path] = data }
-        store(image, file.path)
-    }
+    func preview(_ file: URL, _ image: NSImage, data: Data? = nil) { previewBatch([(file, image, data)]) }
 
     /// A picture's bytes as last read (or pasted), by where its link leads: what a copy into another note stores
     /// again without reading the disk on the main thread.
@@ -147,7 +144,7 @@ final class NotePictures {
                         // Said once, when it turns broken: a redraw never asks again by itself.
                         let fresh = self.broken[key] == nil
                         self.broken[key] = Date()
-                        if fresh { NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["target": key]) }
+                        if fresh { NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["targets": [key]]) }
                         self.reconsider()
                     }
                 }
@@ -158,7 +155,19 @@ final class NotePictures {
     private func store(_ image: NSImage, _ key: String) {
         images[key] = image
         broken[key] = nil
-        NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["target": key])
+        NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["targets": [key]])
+    }
+
+    /// Many pictures in at once (a paste, an import), their images made off the main thread: stored together and
+    /// said with one arrival, so each editor scans its pictures once for all of them.
+    func previewBatch(_ items: [(file: URL, image: NSImage, data: Data?)]) {
+        guard !items.isEmpty else { return }
+        for item in items {
+            if let data = item.data { bytes[item.file.path] = data }
+            images[item.file.path] = item.image
+            broken[item.file.path] = nil
+        }
+        NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["targets": items.map(\.file.path)])
     }
 
     /// Files that appeared or changed under the notes' folder: every picture they touch is read again.
@@ -252,14 +261,17 @@ enum NoteRich {
         }
     }
 
-    /// The ranges of the pictures in `text` whose link leads to `target`: what a picture's arrival lays out again.
-    static func pictureRanges(in text: NSAttributedString, target: String) -> [NSRange] {
+    /// The ranges of the pictures in `text` whose link leads to one of `targets`: what an arrival lays out again,
+    /// found in one pass however many arrived.
+    static func pictureRanges(in text: NSAttributedString, targets: Set<String>) -> [NSRange] {
         var ranges: [NSRange] = []
         text.enumerateAttribute(.attachment, in: NSRange(location: 0, length: text.length)) { value, range, _ in
-            if let cell = (value as? NSTextAttachment)?.attachmentCell as? PictureCell, cell.leadsTo == target { ranges.append(range) }
+            if let cell = (value as? NSTextAttachment)?.attachmentCell as? PictureCell, let to = cell.leadsTo, targets.contains(to) { ranges.append(range) }
         }
         return ranges
     }
+
+    static func pictureRanges(in text: NSAttributedString, target: String) -> [NSRange] { pictureRanges(in: text, targets: [target]) }
 
     /// The editor's text for a note's body. `base`: the note's folder, for its pictures.
     @MainActor static func attributed(_ blocks: [NoteBlock], base: URL, style: Style) -> NSAttributedString {
@@ -344,6 +356,14 @@ enum NoteRich {
         var markdown: String
         var folder: String
         var note: String
+        /// The notes' root it was copied in, and each picture line's file in order, resolved (contained) when copied.
+        var root: String?
+        var files: [String?]?
+    }
+
+    /// What a picture that can't be pasted becomes: a short line of words, never a link to something else.
+    static func unpasted(_ caption: String) -> NoteBlock {
+        .text(caption.isEmpty ? "(A picture couldn't be pasted.)" : "(The picture “\(caption)” couldn't be pasted.)")
     }
 
     /// What other apps get for a copied selection: its words, a card as its address, a picture as its caption (or
@@ -693,17 +713,24 @@ final class NoteTextView: NSTextView {
         pictureObserver = nil
         guard window != nil else { return }
         pictureObserver = NotificationCenter.default.addObserver(forName: NotePictures.arrived, object: nil, queue: .main) { [weak self] note in
-            guard let target = note.userInfo?["target"] as? String else { return }
-            MainActor.assumeIsolated { _ = self?.pictureArrived(target) }
+            guard let targets = note.userInfo?["targets"] as? [String] else { return }
+            MainActor.assumeIsolated { _ = self?.pictureArrived(Set(targets)) }
         }
     }
 
     /// A picture this editor shows arrived (or turned out broken): its attachment laid out, measured and drawn again,
     /// and the paper measured again. Returns the ranges it did that for.
     @discardableResult
-    func pictureArrived(_ target: String) -> [NSRange] {
+    func pictureArrived(_ target: String) -> [NSRange] { pictureArrived([target]) }
+
+    /// How many times this editor scanned its pictures for arrivals (one scan per batch).
+    private(set) var scans = 0
+
+    @discardableResult
+    func pictureArrived(_ targets: Set<String>) -> [NSRange] {
         guard let storage = textStorage, let layoutManager else { return [] }
-        let ranges = NoteRich.pictureRanges(in: storage, target: target)
+        scans += 1
+        let ranges = NoteRich.pictureRanges(in: storage, targets: targets)
         guard !ranges.isEmpty else { return [] }
         for range in ranges {
             layoutManager.invalidateLayout(forCharacterRange: range, actualCharacterRange: nil)
@@ -835,7 +862,13 @@ final class NoteTextView: NSTextView {
         let range = selectedRange()
         guard range.length > 0, let storage = textStorage, NSMaxRange(range) <= storage.length else { return false }
         let blocks = NoteRich.blocks(storage.attributedSubstring(from: range))
-        let fragment = NoteRich.Fragment(markdown: NoteBlock.body(blocks), folder: noteFolder.path, note: noteID)
+        // Each picture's file, by the one rule's words (contained in this notes' root), beside its line.
+        let files: [String?] = blocks.compactMap { block -> String?? in
+            guard case .image(let path, _) = block else { return nil }
+            return .some(NoteShelf.pictureTarget(path, noteFolder: noteFolder.path))
+        }
+        let fragment = NoteRich.Fragment(markdown: NoteBlock.body(blocks), folder: noteFolder.path, note: noteID,
+                                         root: noteFolder.deletingLastPathComponent().path, files: files)
         guard let data = try? JSONEncoder().encode(fragment) else { return false }
         board.declareTypes([NoteRich.fragmentType, .string], owner: nil)
         board.setData(data, forType: NoteRich.fragmentType)
@@ -852,42 +885,89 @@ final class NoteTextView: NSTextView {
         if copySelection(to: .general) { delete(sender) } else { super.cut(sender) }
     }
 
-    /// A note's fragment on the pasteboard, put in over the selection with its cards and pictures. From this note,
-    /// its picture lines as they are; from another, each picture's bytes (as last read) stored again in this note's
-    /// own folder, else a link to the same file from here. False when there's no fragment.
+    /// A note's fragment on the pasteboard, put in over the selection with its cards and pictures. One rule for
+    /// every picture (NoteShelf.pastePicture): it ends up in this note's own Pictures folder. Already there (the same
+    /// note, this root): kept. Otherwise its bytes (held in memory, else read off the main thread through the one
+    /// link rule, only the very file recorded at copy) are copied there under a fresh name. A picture whose file
+    /// can't be found or read becomes a short line saying so, never a link to something else. The fragment goes in
+    /// once its pictures are ready, over the selection if that text is unchanged (NoteShelf.pasteRange); the new
+    /// pictures arrive as one batch. False when there's no fragment.
     @discardableResult
-    func pasteNote(from board: NSPasteboard) -> Bool {
+    func pasteNote(from board: NSPasteboard, done: (() -> Void)? = nil) -> Bool {
         guard let data = board.data(forType: NoteRich.fragmentType), let fragment = try? JSONDecoder().decode(NoteRich.Fragment.self, from: data) else { return false }
-        var blocks = NoteBlock.blocks(fragment.markdown)
-        if fragment.note.isEmpty || fragment.note != noteID { blocks = repointPictures(blocks, from: URL(fileURLWithPath: fragment.folder)) }
-        insertText(NoteRich.attributed(blocks, folder: folderRef, style: style), replacementRange: selectedRange())
+        let blocks = NoteBlock.blocks(fragment.markdown)
+        let sourceFolder = URL(fileURLWithPath: fragment.folder)
+        let sourceRoot = URL(fileURLWithPath: fragment.root ?? sourceFolder.deletingLastPathComponent().path)
+        let root = noteFolder.deletingLastPathComponent().path
+        let own = noteID.isEmpty ? "" : root + "/" + NoteShelf.pictureFolder(id: noteID)
+        var plans: [Int: NoteShelf.PastedPicture] = [:]
+        var held: [Int: Data] = [:]
+        var toRead: [(index: Int, link: String, file: String)] = []
+        var n = 0
+        for (index, block) in blocks.enumerated() {
+            guard case .image(let path, _) = block else { continue }
+            let recorded = fragment.files.map { $0.indices.contains(n) ? $0[n] : nil } ?? NoteShelf.pictureTarget(path, noteFolder: fragment.folder)
+            n += 1
+            let plan = own.isEmpty ? NoteShelf.PastedPicture.missing : NoteShelf.pastePicture(recorded: recorded, root: root, own: own)
+            plans[index] = plan
+            guard plan == .copy, let recorded else { continue }
+            if let bytes = MainActor.assumeIsolated({ NotePictures.shared.bytes(recorded) }) { held[index] = bytes } else { toRead.append((index, path, recorded)) }
+        }
+        let range = selectedRange()
+        let selected = NSMaxRange(range) <= (string as NSString).length ? (string as NSString).substring(with: range) : ""
+        DispatchQueue.global(qos: .userInitiated).async {
+            var bytes = held
+            for item in toRead {
+                // Through the one link rule from where it was copied, and only the very file recorded then.
+                guard let file = NoteStore.pictureFile(item.link, noteFolder: sourceFolder, root: sourceRoot), NoteShelf.samePath(file.path, item.file),
+                      let data = NoteStore.coordinatedData(file) else { continue }
+                bytes[item.index] = data
+            }
+            // Images made here, off the main thread; bytes that aren't a picture count as unreadable.
+            var images: [Int: NSImage] = [:]
+            for (index, data) in bytes { if let image = NSImage(data: data) { images[index] = image } }
+            let ready = bytes.filter { images[$0.key] != nil }, made = images
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.finishPaste(blocks, plans: plans, bytes: ready, images: made, range: range, selected: selected)
+                    done?()
+                }
+            }
+        }
         return true
     }
 
-    private func repointPictures(_ blocks: [NoteBlock], from source: URL) -> [NoteBlock] {
-        var out = blocks
+    private func finishPaste(_ blocks: [NoteBlock], plans: [Int: NoteShelf.PastedPicture], bytes: [Int: Data], images: [Int: NSImage],
+                             range: NSRange, selected: String) {
         var items: [(ext: String, data: Data, caption: String)] = []
-        var at: [Int] = []
-        for (index, block) in blocks.enumerated() {
-            guard case .image(let path, let caption) = block, let key = NotePictures.target(path, in: source) else { continue }
-            if let bytes = MainActor.assumeIsolated({ NotePictures.shared.bytes(key) }) {
-                let ext = (path as NSString).pathExtension.lowercased()
-                items.append((ext.isEmpty ? "png" : ext, bytes, caption))
-                at.append(index)
-            } else if let link = NoteShelf.relink(key, from: noteFolder.path) {
-                // Not in memory: the same file, linked from here.
-                out[index] = .image(path: link, caption: caption)
+        var order: [Int] = []
+        for index in plans.keys.sorted() where plans[index] == .copy {
+            guard let data = bytes[index], case .image(let path, let caption) = blocks[index] else { continue }
+            let ext = (path as NSString).pathExtension.lowercased()
+            items.append((ext.isEmpty ? "png" : ext, data, caption))
+            order.append(index)
+        }
+        let accepted = items.isEmpty ? [] : acceptPictures(items).flatMap { $0.count == items.count ? $0 : nil }
+        var out = blocks
+        for (index, plan) in plans {
+            guard case .image(_, let caption) = blocks[index] else { continue }
+            switch plan {
+            case .keep(let name): out[index] = .image(path: NoteShelf.pictureLink(id: noteID, name: name), caption: caption)
+            case .copy:
+                if let at = order.firstIndex(of: index), let accepted { out[index] = .image(path: accepted[at].path, caption: caption) }
+                else { out[index] = NoteRich.unpasted(caption) }
+            case .missing: out[index] = NoteRich.unpasted(caption)
             }
         }
-        if !items.isEmpty, let accepted = acceptPictures(items), accepted.count == items.count {
-            for (n, index) in at.enumerated() { out[index] = .image(path: accepted[n].path, caption: accepted[n].caption) }
-        } else {
-            for index in at {
-                if case .image(let path, let caption) = blocks[index], let key = NotePictures.target(path, in: source),
-                   let link = NoteShelf.relink(key, from: noteFolder.path) { out[index] = .image(path: link, caption: caption) }
+        let at = NoteShelf.pasteRange(at: range.location, length: range.length, selected: selected, text: string)
+        insertText(NoteRich.attributed(out, folder: folderRef, style: style), replacementRange: at)
+        if let accepted {
+            MainActor.assumeIsolated {
+                NotePictures.shared.previewBatch(accepted.enumerated().compactMap { n, picture in
+                    images[order[n]].map { (picture.file, $0, bytes[order[n]]) }
+                })
             }
         }
-        return out
     }
 
     override func paste(_ sender: Any?) {

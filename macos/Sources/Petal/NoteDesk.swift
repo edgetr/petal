@@ -1446,7 +1446,8 @@ final class NoteDesk {
                     }
                 }
             }
-            let ready = read, unread = waiting
+            // Their images made here, off the main thread, to be shown as one batch.
+            let ready = read, unread = waiting, readyImages = read.map { NSImage(data: $0.data) ?? NSImage() }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // The note's id as it is now (one given its own meanwhile is followed: store.currentID).
@@ -1493,7 +1494,7 @@ final class NoteDesk {
                     case .accepted: break
                     }
                     guard let (nowKey, accepted) = taken else { return }
-                    for (index, picture) in accepted.enumerated() { NotePictures.shared.preview(picture.file, NSImage(data: ready[index].data) ?? NSImage(), data: ready[index].data) }
+                    NotePictures.shared.previewBatch(accepted.enumerated().map { ($1.file, readyImages[$0], ready[$0].data) })
                     self.fresh.remove(nowKey)
                     if self.insertPictures(nowKey, accepted, at: items.at, length: items.length, selected: items.selected) {
                         // Into the note now (and its snapshot), not a moment later.
@@ -1542,11 +1543,8 @@ final class NoteDesk {
     /// Pictures pasted from another note (their bytes as last read): stored in this note's own folder through its
     /// session, as a paste's are, and shown at once. Their references, or nil when the note can't take them.
     func acceptCopiedPictures(_ key: String, _ items: [(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? {
-        guard let accepted = store.acceptPictures(key, items) else { return nil }
-        for (index, picture) in accepted.enumerated() {
-            NotePictures.shared.preview(picture.file, NSImage(data: items[index].data) ?? NSImage(), data: items[index].data)
-        }
-        return accepted
+        // Shown by the editor as one batch, with images it made off the main thread.
+        store.acceptPictures(key, items)
     }
 
     /// Pictures' references into a note's open editor, as ordinary text, at the cursor's place then; false when no
