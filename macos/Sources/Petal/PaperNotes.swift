@@ -318,6 +318,8 @@ final class NoteStore {
                     for session in self.sessions.values where session.busy { changed[session.key] = Int.max }
                     for paper in self.notes where self.keepAlive(paper.key) && NoteShelf.within(paper.url.path, root.path) != nil {
                         changed[paper.key] = Int.max
+                        // A newer version held off while its editor has typing not saved: taken once it's saved.
+                        if let fresh = read.notes.first(where: { $0.key == paper.key }), fresh.revision != paper.revision { self.deferred.insert(paper.key) }
                     }
                     var merged = NoteShelf.fenced(read: read.notes, memory: self.notes, key: \.key, started: started,
                                                   changed: changed, removed: self.removedAt)
@@ -791,6 +793,14 @@ final class NoteStore {
         guard isNote(from) else { return nil }
         let assets = from.deletingLastPathComponent().appending(path: NoteShelf.assetsFolder(id: noteID))
         let newAssets = folder.appending(path: assets.lastPathComponent)
+        // Its pictures' folder still linked by another paper beside it (a conflict copy, a note written elsewhere):
+        // never moved away from it (NoteShelf.picturesShared).
+        if fm.fileExists(atPath: assets.path) {
+            let others = ((try? fm.contentsOfDirectory(at: from.deletingLastPathComponent(), includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension == "md" && $0.lastPathComponent != from.lastPathComponent }
+                .compactMap { try? String(contentsOf: $0, encoding: .utf8) }
+            guard !NoteShelf.picturesShared(assets.lastPathComponent, others: others) else { return nil }
+        }
         var movedPictures: [String] = []
         if fm.fileExists(atPath: assets.path) {
             guard safe(assets, root: root), safe(newAssets, root: root) else { return nil }
@@ -969,6 +979,14 @@ final class NoteStore {
             return
         }
         session.pending.removeFirst()
+        // A flush kept beside the file (the note changed elsewhere: a conflict copy now shares its pictures): a move
+        // queued after it stops, said on the paper; it can be moved again once the conflict is settled.
+        if case .write = item.work, case .keptBoth = result.outcome, NoteShelf.stopMove(afterFlush: true),
+           let next = session.pending.first, case .move = next.work, !session.running {
+            session.pending.removeFirst()
+            for done in next.done { done(.failed) }
+            onProblem("This note changed in two places at once, so it wasn't moved: keep one, then move it again.")
+        }
         // An id write that failed before and landed on a retry: lasting now.
         if case .write = item.work, result.outcome == .written, let id = session.idPending {
             session.idPending = nil
@@ -1180,7 +1198,10 @@ final class NoteStore {
             var stillUnsaved = unsaved[job.session] ?? []
             var saved = Set<String>()
             var landed: [(text: String, aside: Bool)] = []
+            var keptBeside = false
             for item in job.items {
+                // A move after a flush that was kept beside the file: not done (NoteShelf.stopMove).
+                if case .move = item.work, NoteShelf.stopMove(afterFlush: keptBeside) { keptBeside = false; continue }
                 // Done by the queue already (its answer never reached the main thread): taken as it was. Else done
                 // here, once (a failed one again).
                 var result = NoteDisk.results[item.id]
@@ -1190,6 +1211,7 @@ final class NoteStore {
                 switch (item.work, result.outcome) {
                 case (.write(let text, _), .written), (.write(let text, _), .keptBoth), (.create(let text, _, _, _), .written):
                     landed.append((text, false))
+                    if case .keptBoth = result.outcome { keptBeside = true } else { keptBeside = false }
                 case (.keepAside(let text), .keptBoth):
                     landed.append((text, true))
                 case (.pictureBytes(let written, _), .written):
@@ -1364,6 +1386,14 @@ final class NoteStore {
         // The person's: a whole snapshot in the journal, as the queue now holds it.
         if live == nil { snapshot(paper, text: text, session: session) }
         return text
+    }
+
+    /// Notes whose newer version was held off while their editor had typing not saved yet.
+    @ObservationIgnored private var deferred: Set<String> = []
+
+    /// Its editor's typing saved: a version held off meanwhile is taken now (the folder read again).
+    func takeDeferred(_ key: String) {
+        if deferred.remove(key) != nil { reload() }
     }
 
     /// A note with no id of its own (known by its path) gets one before Petal writes, moves or sticks it: a new id in

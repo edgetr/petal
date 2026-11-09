@@ -544,8 +544,10 @@ struct NotesCheck {
                "Petal hides macOS's Dock and its bar came out: Mission Control")
         expect(NoteShelf.missionControlOpen(dockWindows: [("Dock", true), ("", true)], barHiddenByPetal: false, lastOpened: opened, now: opened.addingTimeInterval(3)),
                "a Dock window that isn't its bar: Mission Control")
-        expect(!NoteShelf.missionControlOpen(dockWindows: [("", true)], barHiddenByPetal: true, lastOpened: opened, now: opened.addingTimeInterval(61)),
-               "a minute without a fresh opening: taken as closed")
+        expect(NoteShelf.missionControlOpen(dockWindows: [("", true)], barHiddenByPetal: false, lastOpened: opened, now: opened.addingTimeInterval(600)),
+               "Mission Control's own window still up: open, however long (evidence beats the limit)")
+        expect(!NoteShelf.missionControlOpen(dockWindows: [("Dock", true)], barHiddenByPetal: true, lastOpened: opened, now: opened.addingTimeInterval(61)),
+               "only the bar while Petal hides it, a minute without a fresh opening: taken as closed")
         expect(!NoteShelf.missionControlOpen(dockWindows: [], barHiddenByPetal: true, lastOpened: opened, now: opened.addingTimeInterval(3)), "no Dock window: closed")
 
         // An open editor fences its note only while it has typing not saved yet; an idle one takes another Mac's version.
@@ -573,6 +575,31 @@ struct NotesCheck {
         let lookBefore = 7, lookAfter = NoteShelf.hidingLook(7)
         expect(!NoteShelf.mayBecomeActive(.look, ticket: lookBefore, current: lookAfter, readPID: 5, frontPID: 5),
                "the read of the tab before the switch: refused")
+
+        // An editor's dirty marker clears when its save runs; a version that waited is taken then.
+        var marker = NoteShelf.EditorMarker()
+        marker.typed()
+        expect(marker.dirty && !marker.newer() && marker.deferred, "typed, not saved: another Mac's version waits")
+        expect(marker.saved() && !marker.dirty && !marker.deferred, "the save ran: clean, and the version that waited is taken")
+        expect(!marker.saved(), "saved again with nothing waiting: nothing to take")
+        expect(marker.newer(), "clean: a newer version at once")
+
+        // Shortcuts: the notes' (⌃⌥N) on its own, whichever dock.
+        expect(NoteShelf.shortcutGroups(shortcuts: true, dockShown: false, notes: true) == (false, true), "macOS's Dock chosen, notes on: ⌃⌥N still")
+        expect(NoteShelf.shortcutGroups(shortcuts: true, dockShown: true, notes: false) == (true, false), "notes off: the dock's only")
+        expect(NoteShelf.shortcutGroups(shortcuts: false, dockShown: true, notes: true) == (false, false), "shortcuts off: none")
+
+        // A queued move stops after its flush was kept beside the file; a shared pictures' folder never moves.
+        expect(NoteShelf.stopMove(afterFlush: true) && !NoteShelf.stopMove(afterFlush: false), "kept beside: the move stops; written: it goes")
+        expect(NoteShelf.picturesShared("pictures-a.assets", others: ["![](pictures-a.assets/p.png)"])
+               && !NoteShelf.picturesShared("pictures-a.assets", others: ["![](pictures-b.assets/p.png)"]), "linked by another paper: shared")
+
+        // A drop filtered again for privacy after its last wait.
+        expect(NoteShelf.refilterDrop(readPrivacy: 3, nowPrivacy: 4, appPrivate: false) && NoteShelf.refilterDrop(readPrivacy: 3, nowPrivacy: 3, appPrivate: true)
+               && !NoteShelf.refilterDrop(readPrivacy: 3, nowPrivacy: 3, appPrivate: false), "private apps changed, or the app private now: filtered again")
+
+        // Accessibility taken away: window notes hide at once; given back: a fresh read first.
+        expect(NoteShelf.onPermission(live: false) == (true, true) && NoteShelf.onPermission(live: true) == (false, true), "hide on revocation, read afresh on return")
 
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])

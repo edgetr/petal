@@ -481,6 +481,11 @@ final class WindowEvents {
 
     private var titleListeners: Set<String> = []
 
+    /// Told whenever the observers start or stop (Accessibility given or taken away while someone listens).
+    private var liveWatchers: [String: @MainActor (Bool) -> Void] = [:]
+
+    func onLive(_ key: String, _ handler: @escaping @MainActor (Bool) -> Void) { liveWatchers[key] = handler }
+
     /// Whether `key` wants to hear windows' titles changing and browsers' tabs being selected (sticky notes on
     /// browser tabs). Off, they're dropped on the observers' own thread.
     func titles(_ key: String, _ on: Bool) {
@@ -493,7 +498,11 @@ final class WindowEvents {
     /// nobody does. Asked every second while anyone listens (`pollPermission`).
     func checkPermission() {
         let wanted = !listeners.isEmpty && Windows.trusted
-        if wanted != live { wanted ? start() : stop() }
+        if wanted != live {
+            wanted ? start() : stop()
+            // Told to whoever places things by windows (Petal Notes): taken away, hide; given back, read afresh.
+            for handler in liveWatchers.values { handler(live) }
+        }
         if live { AXWatcher.shared.watchDock() }   // after Petal restarts macOS's Dock, for Mission Control
     }
 

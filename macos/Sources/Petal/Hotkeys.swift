@@ -29,17 +29,24 @@ final class Hotkeys {
     var app: PetalApp { PetalApp.shared }
 
     /// The keys Petal would use now: one per mode (up to 9), the AI panel when there's an AI, and "+".
-    var keys: [Key] {
+    var keys: [Key] { dockKeys + noteKeys }
+
+    /// The dock's: one per mode (up to 9), the AI panel when there's an AI, and "+".
+    private var dockKeys: [Key] {
         var keys = app.config.modes.prefix(9).indices.map { Key(id: UInt32($0 + 1), code: Self.digits[$0], label: "⌃⌥\($0 + 1)") }
         if !app.providers.isEmpty { keys.append(Key(id: Self.ask, code: kVK_Space, label: "⌃⌥Space")) }
         keys.append(Key(id: Self.search, code: kVK_ANSI_Equal, label: "⌃⌥="))
-        if app.config.bool("notes") { keys.append(Key(id: Self.note, code: kVK_ANSI_N, label: "⌃⌥N")) }
         return keys
     }
 
-    /// Registers what the settings ask for, and nothing else. Called when settings or modes change.
+    /// Petal Notes' (⌃⌥N): a group of its own, kept while notes are on whichever dock is chosen.
+    private var noteKeys: [Key] { app.config.bool("notes") ? [Key(id: Self.note, code: kVK_ANSI_N, label: "⌃⌥N")] : [] }
+
+    /// Registers what the settings ask for, and nothing else (NoteShelf.shortcutGroups: the dock's while it shows,
+    /// the notes' while they're on). Called when settings or modes change, and when the dock shows or hides.
     func refresh() {
-        let wanted = app.config.bool("shortcuts") && app.docks.shown ? keys : []
+        let groups = NoteShelf.shortcutGroups(shortcuts: app.config.bool("shortcuts"), dockShown: app.docks.shown, notes: app.config.bool("notes"))
+        let wanted = (groups.dock ? dockKeys : []) + (groups.notes ? noteKeys : [])
         guard wanted.map(\.id) != registered else { return }
         for ref in refs { UnregisterEventHotKey(ref) }
         refs = []

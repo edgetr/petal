@@ -676,6 +676,9 @@ struct NoteEditorView: NSViewRepresentable {
     /// Pictures pasted or dropped: the desk reads them and puts them in, here or (once this editor is gone) in the note.
     let importPictures: (NoteImport) -> Void
     let escape: () -> Void
+    /// Its typing saved and nothing waits: a newer version deferred while it was dirty is taken now.
+    var idle: () -> Void = {}
+
     /// Whether two note ids are the same note now (an id-less note given its own is followed: NoteShelf.editorKeeps).
     var sameNote: (String, String, String) -> Bool = { a, _, b in a == b }
 
@@ -689,6 +692,8 @@ struct NoteEditorView: NSViewRepresentable {
         /// The note's file as this editor last had it: what its edits are made on.
         var base: String?
         var parent: NoteEditorView
+        /// Typed and not saved yet (NoteShelf.EditorMarker): set as the person types, cleared when the save runs.
+        var marker = NoteShelf.EditorMarker()
         init(_ parent: NoteEditorView) { self.parent = parent }
 
         @MainActor func textDidChange(_ notification: Notification) {
@@ -699,12 +704,18 @@ struct NoteEditorView: NSViewRepresentable {
         @MainActor func schedule(_ view: NoteTextView) {
             measure(view)
             saveLater?.cancel()
+            marker.typed()
             let work = DispatchWorkItem { [weak self, weak view] in
                 guard let self, let view, let storage = view.textStorage else { return }
+                // The save runs: no longer dirty, then a version that waited meanwhile is taken (the folder read again).
+                self.saveLater = nil
                 let body = NoteBlock.body(NoteRich.blocks(storage))
-                guard body != self.body else { return }
-                self.body = body
-                if let next = self.parent.save(body, self.base) { self.base = next }
+                if body != self.body {
+                    self.body = body
+                    if let next = self.parent.save(body, self.base) { self.base = next }
+                }
+                _ = self.marker.saved()
+                self.parent.idle()
             }
             saveLater = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
@@ -786,7 +797,7 @@ struct NoteEditorView: NSViewRepresentable {
             guard let coordinator, let text else { return }
             MainActor.assumeIsolated { coordinator.flush(text) }
         }
-        handle.busy = { [weak coordinator] in MainActor.assumeIsolated { coordinator?.saveLater != nil } }
+        handle.busy = { [weak coordinator] in MainActor.assumeIsolated { coordinator?.marker.dirty == true } }
         handle.insert = { [weak text] path, file, caption, at in
             guard let text else { return false }
             return MainActor.assumeIsolated { text.insertPicture(path: path, file: file, caption: caption, at: at) }
@@ -808,7 +819,7 @@ struct NoteEditorView: NSViewRepresentable {
         // Another note in this paper, or the file changed elsewhere while the person isn't typing here: read again.
         // A newer version (another Mac, another editor) taken at once by an idle editor, typing here or not; one with
         // typing not saved yet keeps it (it's saved on the file it was made on, NoteShelf.editorTakesNewer).
-        let elsewhere = NoteShelf.editorTakesNewer(bodyChanged: paper.file.body != coordinator.body, dirty: coordinator.saveLater != nil)
+        let elsewhere = NoteShelf.editorTakesNewer(bodyChanged: paper.file.body != coordinator.body, dirty: coordinator.marker.dirty)
         // The same note, whatever happened to its identity since (moved, renamed, given its own id): what's typed
         // stays, and is saved through the note as it is now (this view's save), never through a key that's gone.
         let same = sameNote(coordinator.noteID, coordinator.instance, paper.noteID)
@@ -837,7 +848,7 @@ struct NoteEditorView: NSViewRepresentable {
         if focus, let window = text.window, window.firstResponder !== text {
             DispatchQueue.main.async { window.makeFirstResponder(text) }
         }
-        if !focus, coordinator.saveLater != nil { coordinator.flush(text) }
+        if !focus, coordinator.marker.dirty { coordinator.flush(text) }
     }
 
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {

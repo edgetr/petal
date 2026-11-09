@@ -109,6 +109,7 @@ struct NoteStoreCheck {
         idBeforeChange(root: root)
         identityFollowed(root: root)
         idFirst(root: root)
+        moveAfterConflict(root: root)
         versionGroups(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -609,6 +610,42 @@ struct NoteStoreCheck {
                "a new file at an id-less note's path gets a handle of its own")
         local.rekeyID("file:Inbox/Plain.md", holder: plainHolder, "U2")
         expect(local.handle("U2") == firstLook && local.handles?[plainHolder] == nil, "an id-less note given its id keeps its handle, and its path's is retired")
+    }
+
+    /// A move queued after a flush that was kept beside the file (changed elsewhere meanwhile): stopped and said; and a
+    /// pictures' folder another paper beside it links never moves away from it.
+    @MainActor static func moveAfterConflict(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "MoveConflict")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Shared.md")
+        let original = NoteFile(id: "MC1", body: "# Shared\nmine").serialized()
+        _ = NoteStore.create(original, at: file, root: root)
+        let store = NoteStore(root: root)
+        let read = NoteStore.read(root)
+        store.preview(read.notes, notebooks: read.notebooks)
+        var said = ""
+        store.onProblem = { said = $0 }
+        guard let paper = store.notes.first(where: { $0.noteID == "MC1" }) else { return expect(false, "read") }
+        // Changed elsewhere after it was read: the next save keeps both.
+        try? Data(NoteFile(id: "MC1", body: "# Shared\ntheirs").serialized().utf8).write(to: file)
+        _ = store.change(paper.key) { $0.body += "\nmore" }
+        var moved: PaperNote?? = .none
+        store.move(paper.key, to: "Elsewhere", then: { moved = .some($0) })
+        let until = Date().addingTimeInterval(5)
+        while moved == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        expect((moved ?? nil) == nil && fm.fileExists(atPath: file.path) && !fm.fileExists(atPath: root.appending(path: "Elsewhere/Shared.md").path)
+               && said.contains("wasn't moved"), "the move stops after the flush was kept beside, and says so", said)
+
+        // A conflict copy beside it links its pictures' folder: the note's move never takes the folder away.
+        let assets = folder.appending(path: NoteShelf.assetsFolder(id: "MC2"))
+        try? fm.createDirectory(at: assets, withIntermediateDirectories: true)
+        try? Data("p".utf8).write(to: assets.appending(path: "p.png"))
+        let note = folder.appending(path: "Pictured.md")
+        _ = NoteStore.create(NoteFile(id: "MC2", body: "![](\(assets.lastPathComponent)/p.png)").serialized(), at: note, root: root)
+        _ = NoteStore.create(NoteFile(id: "MC2", body: "copy ![](\(assets.lastPathComponent)/p.png)").serialized(), at: folder.appending(path: "Pictured (conflicted copy).md"), root: root)
+        expect(NoteStore.move(note, noteID: "MC2", into: root.appending(path: "Elsewhere"), root: root) == nil && fm.fileExists(atPath: assets.appending(path: "p.png").path),
+               "a pictures' folder another paper links: not moved")
     }
 
     /// A file and its iCloud version with another id: one conflict, both papers read only with Keep this one.

@@ -101,6 +101,14 @@ final class NoteDesk {
             self.local.save(pending: store.pendingIDs)
         }
         store.onProblem = { [weak self] text in self?.say(text) }
+        // Accessibility taken away: nothing tracks the windows notes are on, so they hide at once; given back, they
+        // show again only after a fresh read of what's in front (NoteShelf.onPermission).
+        WindowEvents.shared.onLive("papernotes") { [weak self] live in
+            guard let self else { return }
+            let step = NoteShelf.onPermission(live: live)
+            if step.hide { self.concealWindowNotes() }
+            if live, step.freshRead { self.awaitingRead = true; self.lookAgain(after: 0.1) }
+        }
         // Only an editor with typing not saved yet fences its note against a read of the folder (an idle one takes
         // another Mac's version at once).
         store.keepAlive = { [weak self] key in NoteShelf.fenceEditor(dirty: self?.editors[key]?.busy() == true) }
@@ -1732,6 +1740,8 @@ final class NoteDesk {
         let ticket = looks
         let name = running.localizedName ?? ""
         let pid = running.processIdentifier
+        // The private apps as they were when the read began: filtered again after the last wait.
+        let privacy = ClaudePanel.privacy.now
         Self.read(running, mac: local.mac) { scene, read in
             guard self.on, drop == self.drops, !running.isTerminated, let number else { return }
             DispatchQueue.global(qos: .userInitiated).async {
@@ -1743,7 +1753,13 @@ final class NoteDesk {
                         // The front window of that app is the one under the drop: its tab and file. Another of its
                         // windows: that window alone.
                         var scene = scene
+                        var read = read
                         if scene.window != number { scene.tab = nil; scene.file = ""; scene.window = number; scene.title = title }
+                        // Filtered again right before its offers (the app made private meanwhile, or private apps
+                        // changed): nothing of a private app's window, tab or file is kept (NoteShelf.refilterDrop).
+                        if NoteShelf.refilterDrop(readPrivacy: privacy, nowPrivacy: ClaudePanel.privacy.now, appPrivate: self.app.assist.neverLook(scene.app)) {
+                            (scene, read) = Self.filtered(scene, read, since: privacy)
+                        }
                         if read.window == number { self.activate(scene, read: read, ticket: ticket) }
                         let offers = self.places(for: scene, read: read, appName: name)
                         // Brought forward for it (not in front now): its keyboard request waits for that app and window.

@@ -1434,6 +1434,52 @@ enum NoteShelf {
         return eventWindow == nil || eventWindow == shownWindow
     }
 
+    /// An editor's own marker of typing not saved yet: set when the person types, cleared when its save runs. A
+    /// newer version that arrived meanwhile (deferred while it was dirty) is taken once it's clean.
+    struct EditorMarker: Equatable {
+        private(set) var dirty = false
+        private(set) var deferred = false
+
+        mutating func typed() { dirty = true }
+
+        /// Another version arrived: true to take it now (clean); else it waits.
+        mutating func newer() -> Bool {
+            if dirty { deferred = true; return false }
+            return true
+        }
+
+        /// Its save ran: true to take the version that waited.
+        mutating func saved() -> Bool {
+            dirty = false
+            defer { deferred = false }
+            return deferred
+        }
+    }
+
+    /// Which of Petal's shortcuts are registered: the dock's (modes, the AI, "+") while its dock shows, the notes'
+    /// (⌃⌥N) while notes are on, whichever dock is chosen; none while shortcuts are off.
+    static func shortcutGroups(shortcuts: Bool, dockShown: Bool, notes: Bool) -> (dock: Bool, notes: Bool) {
+        (shortcuts && dockShown, shortcuts && notes)
+    }
+
+    /// A queued move whose note's flush before it was kept beside the file (a conflict copy now shares its pictures'
+    /// folder): stopped, and said on the paper; moved again once the conflict is settled.
+    static func stopMove(afterFlush outcome: Bool) -> Bool { outcome }
+
+    /// A note's pictures' folder that another paper beside it still links (a conflict copy, a note written elsewhere):
+    /// never moved away from it.
+    static func picturesShared(_ folder: String, others: [String]) -> Bool {
+        others.contains { $0.contains(folder + "/") }
+    }
+
+    /// A drop's read used after a wait: filtered again for privacy right before its offers are made, when the private
+    /// apps changed since it was read or its app is private now.
+    static func refilterDrop(readPrivacy: Int, nowPrivacy: Int, appPrivate: Bool) -> Bool { readPrivacy != nowPrivacy || appPrivate }
+
+    /// Accessibility taken away: window notes hide at once (nothing tracks their windows); given back: a fresh read of
+    /// what's in front is needed before they show.
+    static func onPermission(live: Bool) -> (hide: Bool, freshRead: Bool) { (!live, true) }
+
     /// The Accessibility permission is polled (every second) while anyone listens to windows' events, whichever of
     /// them (the dock, Petal Notes, the Mission Control watcher): granting it takes effect without Petal's dock.
     static func permissionPoll(consumers: Set<String>) -> Bool { !consumers.isEmpty }
@@ -1445,10 +1491,11 @@ enum NoteShelf {
     static let missionControlLimit: TimeInterval = 60
 
     static func missionControlOpen(dockWindows: [(name: String, onScreen: Bool)], barHiddenByPetal: Bool, lastOpened: Date, now: Date) -> Bool {
+        // Positive evidence (a window of Mission Control's own) beats the time limit.
+        if dockWindows.contains(where: { $0.onScreen && $0.name != "Dock" }) { return true }
+        // Only the bar coming out while Petal hides it, or nothing: never longer than the limit.
         guard now.timeIntervalSince(lastOpened) < missionControlLimit else { return false }
-        return dockWindows.contains { window in
-            window.onScreen && (window.name != "Dock" || barHiddenByPetal)
-        }
+        return barHiddenByPetal && dockWindows.contains { $0.onScreen && $0.name == "Dock" }
     }
 
     /// Who needs a shared watcher (Mission Control's): it runs while anyone does, whichever of them.
