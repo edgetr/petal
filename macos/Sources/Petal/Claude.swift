@@ -50,7 +50,13 @@ final class Agent {
     private(set) var pendingAsk: [Denial] = []
     @ObservationIgnored private var sessionID: String?
     @ObservationIgnored private var sessionProvider: Provider?
-    @ObservationIgnored private var allowed: [String] = []
+    /// Claude's command rules allowed in this chat; for a helper, its run's alone (`RunScoped`: a new run on the same
+    /// note starts with none, only continuations of the same run keep them).
+    @ObservationIgnored private var allowedRules = RunScoped<[String]>([])
+    private var allowed: [String] {
+        get { allowedRules.value }
+        set { allowedRules.value = newValue }
+    }
     @ObservationIgnored private var process: Process?
     @ObservationIgnored private var errorText = ""
     @ObservationIgnored private var authFailed = false   // this run's key or sign-in was refused, already said
@@ -71,7 +77,10 @@ final class Agent {
     @ObservationIgnored var helperSystem: Shielded?
     /// A helper's run (NoteHelpers): its turns are admitted, waited and run only while it runs; pausing or
     /// cancelling it ends its process.
-    @ObservationIgnored var token: RunToken?
+    @ObservationIgnored var token: RunToken? {
+        // Another run (or none): the rules the last one was allowed go.
+        didSet { if token !== oldValue { allowedRules.adopt(token) } }
+    }
     /// How its last turn ended: exited cleanly with no error, failed, or was interrupted (stopped, paused).
     @ObservationIgnored private(set) var outcome: RunToken.Outcome?
     @ObservationIgnored private var turnErrored = false

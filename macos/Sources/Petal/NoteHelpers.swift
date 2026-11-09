@@ -46,6 +46,11 @@ final class NoteHelpers {
         /// What a coding helper's reviewer and follow-ups read: the note's worktree, and the checkout it's bound to.
         var tree: String?
         var checkout: String?
+        /// The AI and model it runs on: a follow-up naming another starts its own run.
+        var provider = ""
+        var model = ""
+        /// A file helper's document: its place is good only while that file is the one showing.
+        var document: String?
         /// Waiting for the note's own place to be in front (never looking at whatever else is), and what goes on then.
         var awaitingPlace = false
         @ObservationIgnored var placedResume: (() -> Void)?
@@ -294,8 +299,10 @@ final class NoteHelpers {
         if let helper = paper.file.helper, helper.asked == trimmed, helper.state == .done || runs[noteID] != nil { return }
         // A coding helper's follow-up goes to its run only for its own checkout; naming another starts a new run (its
         // own checkout choice and Allow), never sent to the existing agent.
+        // Any follow-up naming another AI or model than the run's (or another checkout) starts its own run (or fails
+        // "not set up"), never steering the current one.
         if let run = runs[noteID], run.launched, run.sticky != nil, run.token.admits || run.token.paused,
-           NoteHelp.followUpTarget(runCheckout: run.checkout, words: trimmed, home: NSHomeDirectory()) == .same || run.checkout == nil {
+           NoteHelp.followUpTarget(runCheckout: run.checkout, runProvider: run.provider, runModel: run.model, words: trimmed, home: NSHomeDirectory()) == .same {
             // At work (or paused): what's said now steers it in the same session, shielded first.
             var raw = Raw()
             raw.ask = NoteHelp.spoken(trimmed)
@@ -641,18 +648,36 @@ final class NoteHelpers {
     func placesFollow() {
         for (noteID, run) in runs where run.launched {
             guard let paper = paper(noteID), let sticky = run.sticky, let seen = placesSeen[noteID] else { continue }
-            let follow = NoteHelp.follow(seen: seen, now: paper.file.places, here: desk?.here[paper.key])
-            switch follow {
-            case .unchanged:
-                // Waiting for its new place, which is in front now.
-                if sticky.waitingFor != nil, case .placed = NoteHelp.anchor(paper.file.places, here: desk?.here[paper.key]) {
+            let here = desk?.here[paper.key]
+            let follow = NoteHelp.follow(seen: seen, now: paper.file.places, here: here)
+            // A file helper's document, checked on every placement change, not only when the note's places changed:
+            // the window in front may show another file now (its AXDocument, its bookmark followed).
+            let document = run.kind == .petal ? Self.document(of: paper, here: here) : nil
+            let showing = document.map { NoteHelp.documentShowing(placePath: $0, sceneFile: desk?.scene?.file ?? "") } ?? true
+            if case .unchanged = follow, document == run.document {
+                let waitingForFile = run.document.map { (($0 as NSString).lastPathComponent) } == sticky.waitingFor && sticky.waitingFor != nil
+                if !showing, !waitingForFile, let document {
+                    sticky.waitingFor = (document as NSString).lastPathComponent
+                    sticky.agent.place = nil
+                    app.assist.computer.placeChanged(sticky.id.uuidString)
+                } else if showing, sticky.waitingFor != nil, case .placed = NoteHelp.anchor(paper.file.places, here: here) {
+                    // What it waited for is in front now.
                     sticky.waitingFor = nil
                     if run.kind == .petal { sticky.agent.place = place(of: paper) }
+                    app.assist.computer.placeChanged(sticky.id.uuidString)
                 }
                 continue
-            case .placed:
-                sticky.waitingFor = nil
-                sticky.agent.place = run.kind == .petal ? place(of: paper) : nil
+            }
+            run.document = document
+            switch follow {
+            case .placed, .unchanged:
+                if showing {
+                    sticky.waitingFor = nil
+                    sticky.agent.place = run.kind == .petal ? place(of: paper) : nil
+                } else {
+                    sticky.waitingFor = document.map { ($0 as NSString).lastPathComponent }
+                    sticky.agent.place = nil
+                }
             case .waiting(let label):
                 sticky.waitingFor = run.kind == .petal ? label : nil
                 sticky.agent.place = nil
@@ -664,6 +689,14 @@ final class NoteHelpers {
             app.assist.computer.placeChanged(sticky.id.uuidString)
         }
         for noteID in placesSeen.keys where runs[noteID] == nil { placesSeen[noteID] = nil }
+    }
+
+    /// The file a note's place in front is about (a file, or a sentence in a file), when it's one.
+    private static func document(of paper: PaperNote, here: Int?) -> String? {
+        guard let here, paper.file.places.indices.contains(here) else { return nil }
+        let stick = paper.file.places[here]
+        guard stick.kind == .file || stick.kind == .passage, !stick.path.isEmpty, stick.url.isEmpty else { return nil }
+        return stick.path
     }
 
     /// Layout placed notes: a run waiting for its note's place goes on once its note is on the window in front.
@@ -822,6 +855,9 @@ final class NoteHelpers {
         agent.token = run.token
         agent.folder = folder.map { URL(fileURLWithPath: $0) }
         agent.pinned = (provider, model)
+        run.provider = provider.rawValue
+        run.model = model
+        run.document = placed ? Self.document(of: paper, here: desk?.here[paper.key]) : nil
         run.sticky = sticky
         run.kind = kind
         run.from = agent.messages.count
@@ -1171,7 +1207,8 @@ final class NoteHelpers {
             let newly = Flag()
             self.write(noteID, { file in
                 var current = file.watch
-                guard let result = NoteHelp.applyLook(&current, id: id, shown: shown, hint: hint, crossed: verdict == .hit, at: now) else { return }
+                let past = value.map { NoteHelp.crossed($0, line: watch.line) } ?? false
+                guard let result = NoteHelp.applyLook(&current, id: id, shown: shown, hint: hint, past: past, confirmed: verdict == .hit, at: now) else { return }
                 file.watch = current
                 newly.value = result
             }) { landed in

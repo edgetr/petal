@@ -1573,7 +1573,9 @@ extension NoteHelp {
     /// A watcher's look, written back only into its own fields (value, history, checked, hint, hit) and only while
     /// the watcher is still the one it began under (`id`, a UUID made anew on every change of it) and not paused.
     /// Returns whether this write newly crossed the line (nil: nothing written): the only thing that says it.
-    static func applyLook(_ watch: inout Watch?, id: String, shown: String?, hint: String?, crossed: Bool, at time: Date) -> Bool? {
+    /// `past`: the value is past the line now; `confirmed`: a crossing confirmed with an explicit yes. A hit stays
+    /// while the value stays past the line (never re-armed, never said again) and clears only once it comes back.
+    static func applyLook(_ watch: inout Watch?, id: String, shown: String?, hint: String?, past: Bool, confirmed: Bool, at time: Date) -> Bool? {
         guard var current = watch, current.id == id, !current.paused else { return nil }
         guard let shown else {
             current.checked = time
@@ -1582,8 +1584,8 @@ extension NoteHelp {
         }
         current.record(shown, at: time)
         if let hint, !hint.isEmpty { current.hint = hint }
-        let newly = crossed && !current.hit
-        current.hit = crossed
+        let newly = past && confirmed && !current.hit
+        current.hit = past && (current.hit || confirmed)
         watch = current
         return newly
     }
@@ -1751,6 +1753,49 @@ extension NoteHelp {
         guard let runCheckout else { return .newRun }
         return named == [standard(runCheckout)] ? .same : .newRun
     }
+
+    /// Where any follow-up to a running helper goes: to its run only when it names neither another checkout nor
+    /// another AI or model than the run's (`runProvider`, `runModel`: what it runs on); else a new run (its own
+    /// checkout choice and Allow, or "not set up"), never steering the current one.
+    static func followUpTarget(runCheckout: String?, runProvider: String, runModel: String, words: String, home: String) -> FollowUpTarget {
+        if let runCheckout, followUpTarget(runCheckout: runCheckout, words: words, home: home) == .newRun { return .newRun }
+        guard let named = models(words).first(where: { !$0.holes }) else { return .same }
+        if named.provider.rawValue != runProvider { return .newRun }
+        return named.id.isEmpty || named.id == runModel ? .same : .newRun
+    }
+
+    /// Whether the document a file helper's place is about is the one showing in the window in front now: the
+    /// front window's document (its AXDocument, its bookmark followed) is that file, by its standardized path. Not
+    /// showing, the helper's maps are dropped and it waits.
+    static func documentShowing(placePath: String, sceneFile: String) -> Bool {
+        guard !placePath.isEmpty, !sceneFile.isEmpty else { return false }
+        return standard(placePath) == standard(sceneFile)
+    }
+
+    /// After a wait, which of the papers a tool would answer about may still be told to this caller: a note whose
+    /// notebook became private (or unknown) meanwhile is no longer readable from outside it.
+    static func visibleAfterWait(_ notebooks: [String], privacy: (String) -> Privacy, asking: String?) -> [Bool] {
+        notebooks.map { mayRead(privacy($0), notebook: $0, asking: asking) }
+    }
+}
+
+/// A value belonging to one run (the command rules Claude was allowed): kept for continuations of that run, empty
+/// for any other (a new run on the same note starts with none).
+struct RunScoped<Value> {
+    private(set) var owner: ObjectIdentifier?
+    var value: Value
+    let empty: Value
+
+    init(_ empty: Value) { self.empty = empty; value = empty }
+
+    /// The run it now belongs to: another run's (or none) clears it.
+    mutating func adopt(_ token: AnyObject?) {
+        let next = token.map(ObjectIdentifier.init)
+        if next != owner { value = empty; owner = next }
+    }
+}
+
+extension NoteHelp {
 
     /// The AI a helper runs on: the one the person named, only when it's installed and enabled in Petal (never
     /// another instead: "Codex isn't set up in Petal"); else the chat's AI, else any set up.

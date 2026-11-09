@@ -1375,9 +1375,10 @@ enum NoteShelf {
     /// when the write was made on what the predecessor wrote there (`carried`: the copy's path and that text); nil
     /// (the note's own file, as always) otherwise. A later write never goes back at the original base to make a
     /// third paper.
-    static func carryTarget(base: String?, carried: (path: String, text: String)?) -> String? {
+    static func carryTarget(base: String?, carried: (path: String, text: String, id: String)?) -> (path: String, id: String)? {
         guard let carried, let base, base == carried.text else { return nil }
-        return carried.path
+        // The copy's own identity (the id its text says), which the write is then checked against there.
+        return (carried.path, carried.id)
     }
 
     static func stillNote(found: String?, expected: String, missing: Bool) -> Bool {

@@ -154,9 +154,10 @@ enum NoteDisk {
         var url: URL
         var noteID: String
         var revision: String?
-        /// What this session's last write kept beside the file (a conflict copy) and the text it wrote there: a
-        /// later write made on that text carries onto that copy, never back at the original base (NoteShelf.carryTarget).
-        var carry: (url: URL, text: String)? = nil
+        /// What this session's last write kept beside the file (a conflict copy), the text it wrote there and that
+        /// copy's own id (an identity write's copy has its new id): a later write made on that text carries onto that
+        /// copy, checked against that id, never back at the original base (NoteShelf.carryTarget).
+        var carry: (url: URL, text: String, id: String)? = nil
     }
 
     nonisolated(unsafe) static var states: [Int: State] = [:]
@@ -734,18 +735,18 @@ final class NoteStore {
             return NoteWorkResult(outcome: .written, url: made)
         case .write(let text, let base):
             // Made on what its predecessor kept beside the file: it lands on that copy too (never a third paper).
-            if let target = NoteShelf.carryTarget(base: base, carried: state.carry.map { ($0.url.path, $0.text) }) {
-                let copy = URL(fileURLWithPath: target)
-                let outcome = save(text, to: copy, base: base, root: root, live: live, noteID: state.noteID)
+            if let target = NoteShelf.carryTarget(base: base, carried: state.carry.map { ($0.url.path, $0.text, $0.id) }) {
+                let copy = URL(fileURLWithPath: target.path)
+                let outcome = save(text, to: copy, base: base, root: root, live: live, noteID: target.id)
                 switch outcome {
-                case .written: state.carry = (copy, text)
-                case .keptBoth(let another): state.carry = (another, text)
+                case .written: state.carry = (copy, text, noteID(of: text, at: copy, root: root))
+                case .keptBoth(let another): state.carry = (another, text, noteID(of: text, at: another, root: root))
                 default: break
                 }
                 return NoteWorkResult(outcome: outcome == .written ? .keptBoth(copy) : outcome, url: state.url)
             }
             let outcome = save(text, to: state.url, base: base, root: root, live: live, noteID: state.noteID)
-            if case .keptBoth(let copy) = outcome { state.carry = (copy, text) } else if outcome == .written { state.carry = nil }
+            if case .keptBoth(let copy) = outcome { state.carry = (copy, text, noteID(of: text, at: copy, root: root)) } else if outcome == .written { state.carry = nil }
             if outcome == .written {
                 state.revision = text
                 // An id-less note given its id by this write: known by that id from now on.

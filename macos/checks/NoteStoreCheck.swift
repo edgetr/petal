@@ -721,8 +721,29 @@ struct NoteStoreCheck {
         expect(copy.flatMap(text)?.contains("Typed here") == true && copy.flatMap(text)?.contains("First answer") == true
                && copy.flatMap(text)?.contains("state: done") == true, "the typing, the answer and the later write all on the one copy", copy.flatMap(text) ?? "nil")
         // The rule itself.
-        expect(NoteShelf.carryTarget(base: "t1", carried: ("/c.md", "t1")) == "/c.md" && NoteShelf.carryTarget(base: "t0", carried: ("/c.md", "t1")) == nil
-               && NoteShelf.carryTarget(base: "t1", carried: nil) == nil, "a write made on what was kept beside the file goes there; any other, the file")
+        expect(NoteShelf.carryTarget(base: "t1", carried: ("/c.md", "t1", "C1"))?.path == "/c.md" && NoteShelf.carryTarget(base: "t1", carried: ("/c.md", "t1", "C1"))?.id == "C1"
+               && NoteShelf.carryTarget(base: "t0", carried: ("/c.md", "t1", "C1")) == nil && NoteShelf.carryTarget(base: "t1", carried: nil) == nil,
+               "a write made on what was kept beside the file goes there, checked against the copy's own id; any other, the file")
+        // An identity write's conflict copy (a note with no id of its own given one, while its file changed elsewhere):
+        // the next write carries onto that copy, checked against the copy's new id, never a third paper.
+        let idless = root.appending(path: "Idless")
+        try? fm.createDirectory(at: idless, withIntermediateDirectories: true)
+        let handFile = idless.appending(path: "By hand.md")
+        _ = NoteStore.create("Written by hand", at: handFile, root: root)
+        let session = 9_000_001
+        NoteDisk.states[session] = NoteDisk.State(url: handFile, noteID: NoteStore.noteID(of: "Written by hand", at: handFile, root: root), revision: "Written by hand")
+        try? Data("Changed elsewhere".utf8).write(to: handFile)
+        var given = NoteFile(id: "NEWID", body: "Written by hand")
+        let withID = given.serialized()
+        let identityWrite = NoteStore.perform(.write(text: withID, base: "Written by hand"), session: session, root: root)
+        given.body = "Written by hand, and more"
+        let next = NoteStore.perform(.write(text: given.serialized(), base: withID), session: session, root: root)
+        let idlessPapers = ((try? fm.contentsOfDirectory(atPath: idless.path)) ?? []).filter { $0.hasSuffix(".md") }
+        expect({ if case .keptBoth = identityWrite.outcome { return true } else { return false } }() && { if case .keptBoth = next.outcome { return true } else { return false } }()
+               && idlessPapers.count == 2, "the identity write's copy takes the next write too: two papers, not three", "\(idlessPapers)")
+        expect(idlessPapers.compactMap { text(idless.appending(path: $0)) }.contains { $0.contains("and more") && $0.contains("NEWID") } && text(handFile) == "Changed elsewhere",
+               "the next write is on the copy (its new id); the file keeps what changed elsewhere")
+        NoteDisk.states[session] = nil
     }
 
     @MainActor static func removeRefusedReadOnly(root: URL) {

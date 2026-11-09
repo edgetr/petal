@@ -11,6 +11,7 @@ extension NoteDesk {
     static let readOnlyWords = "This note has two versions right now (it changed in two places at once): nothing was changed. The person keeps one with Keep this one on the paper; then try again."
     static let notMade = "Petal couldn't make the note's file. It keeps the note and tries again; nothing to do now."
     static let hungUp = "The request ended before this was done: nothing was changed."
+    static let notThere = "No note with that id; petal_notes lists them."
     static let notThisNote = "That note's file is another note's now (it was renamed or moved meanwhile): nothing was changed. petal_notes lists them."
 
     func handle(_ name: String, _ args: [String: Any], caller: String? = nil, live: @escaping @Sendable () -> Bool = { true },
@@ -29,6 +30,19 @@ extension NoteDesk {
         // follow), off the main thread; while the vault can't be read, nothing of the notes is told.
         let send: (Any) -> Void = { value in Self.shielded(value) { out in if let out { answer(out) } else { refuse(NoteShield.unreadable) } } }
         let fail: (String) -> Void = { text in Self.shielded(text) { out in refuse(out as? String ?? NoteShield.unreadable) } }
+        // After every wait, and right before answering: the notes an answer is about must still be readable by this
+        // caller (a notebook made private meanwhile, or one whose cover isn't read now, isn't).
+        let stillReadable = { (noteID: String) -> Bool in
+            guard let paper = self.store.notes.first(where: { $0.noteID == noteID && $0.version == nil }) ?? self.store.notes.first(where: { $0.noteID == noteID }) else { return false }
+            return NoteHelp.visibleAfterWait([paper.notebook], privacy: self.helpers.privacy(of:), asking: asking?.notebook)[0]
+        }
+        let sendAbout: ([String], Any) -> Void = { ids, value in
+            Self.shielded(value) { out in
+                guard let out else { return refuse(NoteShield.unreadable) }
+                guard ids.allSatisfy(stillReadable) else { return refuse(Self.notThere) }
+                answer(out)
+            }
+        }
         guard on else { return fail("Petal Notes is off in Petal's settings (notes).") }
         switch name {
         case "petal_notes":
@@ -50,10 +64,21 @@ extension NoteDesk {
             }) { (hits: [Int]??) in
                 // The vault unreadable, or changing all the while: nothing searched, and said why.
                 guard let hits = hits ?? nil else { return refuse(NoteShield.unreadable) }
-                let found = hits.map { papers[$0] }
+                // After the search's wait: only what's still readable now.
+                let visible = NoteHelp.visibleAfterWait(hits.map { papers[$0].notebook }, privacy: self.helpers.privacy(of:), asking: asking?.notebook)
+                let found = hits.indices.filter { visible[$0] }.map { papers[hits[$0]] }
                 if found.count <= 3 { used(found) }
-                send(["notes": found.prefix(limit).map { self.summary($0) }, "count": found.count,
-                      "notebooks": self.store.notebooks.filter { self.helpers.mayRead($0.name, from: asking) }.map { ["name": $0.name, "color": $0.color.isEmpty ? "accent" : $0.color, "notes": $0.count] }])
+                let listed = Array(found.prefix(limit))
+                let value: [String: Any] = ["notes": listed.map { self.summary($0) }, "count": found.count,
+                                            "notebooks": self.store.notebooks.filter { self.helpers.mayRead($0.name, from: asking) }.map { ["name": $0.name, "color": $0.color.isEmpty ? "accent" : $0.color, "notes": $0.count] }]
+                // And once more right before answering: a note whose notebook became private meanwhile is left out.
+                Self.shielded(value) { out in
+                    guard var out = out as? [String: Any], let notes = out["notes"] as? [Any] else { return refuse(NoteShield.unreadable) }
+                    let keep = listed.indices.filter { stillReadable(listed[$0].noteID) }
+                    out["notes"] = keep.map { notes[$0] }
+                    out["count"] = (found.count - (listed.count - keep.count))
+                    answer(out)
+                }
             }
         case "petal_note_read":
             resolve(args["id"] as? String ?? "", readable: readable, refuse, fail) { paper in
@@ -73,14 +98,14 @@ extension NoteDesk {
                                     }]
             }
             if self.store.readOnly(paper) { result["note"] = "This note changed in two places at once: the person sees both papers until they keep one, and it can't be changed until then." }
-            send(result)
+            sendAbout([paper.noteID], result)
             }
         case "petal_note_write":
             let text = args["text"] as? String ?? ""
             if let id = args["id"] as? String, !id.isEmpty {
                 let append = args["append"] as? Bool ?? false
                 resolve(id, readable: readable, refuse, fail) { paper in
-                    self.persist(paper.key, live: live, send, fail, touch: true, edit: { file in
+                    self.persist(paper.key, live: live, { sendAbout([paper.noteID], $0) }, fail, touch: true, edit: { file in
                         // `![picture N]` lines are the note's own pictures again.
                         let words = NoteTold.restorePictures(text, from: file.body)
                         file.body = append ? file.body + (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + words : words
@@ -117,7 +142,7 @@ extension NoteDesk {
                 }
             }
         case "petal_note_stick":
-            resolve(args["id"] as? String ?? "", readable: readable, refuse, fail) { paper in self.stickTool(paper, args, live: live, send, fail) }
+            resolve(args["id"] as? String ?? "", readable: readable, refuse, fail) { paper in self.stickTool(paper, args, live: live, { sendAbout([paper.noteID], $0) }, fail) }
         default:
             fail("Unknown tool \(name)")
         }
@@ -150,7 +175,7 @@ extension NoteDesk {
 
     /// The note an agent names, found on what it may see of ids, files and titles (NoteShield.find, redacted with a
     /// settled index); while the vault can't be read, nothing is looked up and it's told why.
-    private func resolve(_ name: String, readable: (PaperNote) -> Bool = { _ in true }, _ refuse: @escaping (String) -> Void, _ fail: @escaping (String) -> Void,
+    private func resolve(_ name: String, readable: @escaping (PaperNote) -> Bool = { _ in true }, _ refuse: @escaping (String) -> Void, _ fail: @escaping (String) -> Void,
                          _ then: @escaping @MainActor (PaperNote) -> Void) {
         let papers = store.notes.filter(readable)
         let rows = papers.map { (handle: handle($0), body: $0.file.body, version: $0.version != nil) }
@@ -164,6 +189,8 @@ extension NoteDesk {
                 guard let paper = self.repick(chosen) else {
                     return fail("That note changed while Petal looked (renamed, or another note has its name now); petal_notes lists them.")
                 }
+                // After the lookup's wait: still readable by this caller (its notebook may have become private).
+                guard readable(paper) else { return fail(Self.notThere) }
                 then(paper)
             case .none?: fail("No note with that id; petal_notes lists them.")
             case .ambiguous(let all)?:

@@ -96,6 +96,18 @@ perl -0777 -ne '
     unless (@calls == 1 && /if fits != here \{ here = fits \}\n[^\n]*\n\s*helpers\.placesFollow\(\)/) { print "NoteDesk: placesFollow must come right after here is recomputed\n"; exit 1 }
     print "helpers: places followed after here is known\n";
 ' Sources/Petal/NoteDesk.swift
+# A helper's command rules belong to its run: a new token clears them (Agent.token adopts it).
+perl -0777 -ne '
+    unless (/var token: RunToken\? \{[^}]*didSet \{ if token !== oldValue \{ allowedRules\.adopt\(token\) \} \}/s && /private var allowed: \[String\] \{\s*get \{ allowedRules\.value \}/s) { print "Agent: command rules must belong to the run token\n"; exit 1 }
+    print "helpers: command rules scoped to the run\n";
+' Sources/Petal/Claude.swift
+# A note tool rechecks access after the lookup's wait and right before answering.
+perl -0777 -ne '
+    unless (/guard let paper = self\.repick\(chosen\).*?guard readable\(paper\) else \{ return fail/s && /sendAbout\(\[paper\.noteID\], result\)/) { print "NoteTools: access must be rechecked after the wait and before answering\n"; exit 1 }
+    print "notes: access rechecked after every wait\n";
+' Sources/Petal/NoteTools.swift
+# A file helper's document is revalidated on every placement change.
+grep -q 'NoteHelp.documentShowing(placePath:' Sources/Petal/NoteHelpers.swift || { echo "NoteHelpers: a file helper's document must be revalidated"; exit 1; }
 # An automatic approval (an earlier Always, Full access) is registered on the asking helper run's token first.
 perl -0777 -ne '
     unless (/let grant = NoteHelp\.autoGrant\(.*?\) \{\s*return done\(app\.paper\.helpers\.authorized\(owner, grant\)\)/s) { print "Assist.ask: an automatic approval must register on the run first\n"; exit 1 }
