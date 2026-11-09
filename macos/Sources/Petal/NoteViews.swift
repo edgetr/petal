@@ -355,6 +355,9 @@ struct PictureView: View {
             }
         }
         .frame(height: 96).frame(maxWidth: .infinity).clipped()
+        // On screen: a missing picture here is tried again every 10 s (NotePictures' retry timer).
+        .onAppear { NotePictures.shared.showing(link, in: folder, true) }
+        .onDisappear { NotePictures.shared.showing(link, in: folder, false) }
         .clipShape(.rect(cornerRadius: 9))
         .overlay { RoundedRectangle(cornerRadius: 9).stroke(.black.opacity(0.15), lineWidth: 0.5) }
         .overlay(alignment: .bottomLeading) {

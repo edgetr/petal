@@ -899,6 +899,7 @@ final class NoteDesk {
         // Mission Control open, or the front window changed and its read isn't in yet: nothing shows meanwhile.
         if missionControlOpen || awaitingRead { return concealUnplaced() }
         defer { reconcileRoom() }
+        prunePassageGeometry()
         guard on, let frame, let scene, scene.window != nil else {
             for panel in tabPanels.values { panel.conceal() }
             for panel in pinPanels.values { panel.conceal() }
@@ -957,11 +958,22 @@ final class NoteDesk {
         reconcilePassages()
     }
 
+    /// A note re-stuck elsewhere (its winning anchor no longer a passage) lets go of its line, pin and found state
+    /// (NoteShelf.passageGeometry): nothing of its old sentence is drawn.
+    private func prunePassageGeometry() {
+        let passages = passagesHere
+        lines = NoteShelf.passageGeometry(lines, passages: passages)
+        passageRects = NoteShelf.passageGeometry(passageRects, passages: passages)
+        let kept = NoteShelf.passageGeometry(found, passages: passages)
+        if kept != found { found = kept }
+    }
+
     /// The sketch's dashed line in the notebook's color from each showing note to its sentence, wherever the
-    /// sentence's bounds are known.
+    /// sentence's bounds are known, and only for a note placed on a passage now.
     private func drawPins(_ showing: [String]) {
         var keep: Set<String> = []
-        for key in showing {
+        let passages = passagesHere
+        for key in showing where passages.contains(key) {
             guard let rect = passageRects[key], let paper = store.paper(key), let note = panels[key], note.unveiled else { continue }
             keep.insert(key)
             let words = NoteRules.appKitFrame(rect, primaryHeight: primaryHeight)

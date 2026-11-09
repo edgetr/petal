@@ -714,6 +714,22 @@ struct NotesCheck {
                && NoteShelf.resolvedLink("./a/./b.png", from: "/n/Inbox") == "/n/Inbox/a/b.png", "a handwritten link: beside the note")
         expect(NoteShelf.resolvedLink("../../../../x.png", from: "/n/Inbox") == nil && NoteShelf.resolvedLink("/abs.png", from: "/n/Inbox") == nil,
                "above /, or absolute: none")
+        // A missing picture is asked for again every 10 s, only while it's on screen.
+        let t0 = Date()
+        expect(NoteShelf.pictureRetry(broken: ["/n/P/a": t0], onScreen: ["/n/P/a"], now: t0.addingTimeInterval(10)) == (["/n/P/a"], true),
+               "on screen, 10 s since: asked again")
+        expect(NoteShelf.pictureRetry(broken: ["/n/P/a": t0], onScreen: ["/n/P/a"], now: t0.addingTimeInterval(4)) == ([], true), "on screen, too soon: waits")
+        expect(NoteShelf.pictureRetry(broken: ["/n/P/a": t0], onScreen: ["/n/P/b"], now: t0.addingTimeInterval(60)) == ([], false), "not on screen: no timer")
+        expect(NoteShelf.pictureRetry(broken: [:], onScreen: ["/n/P/a"], now: t0) == ([], false), "nothing missing: no timer")
+        // The folder watcher's paths touch the pictures they hold, however they're spelled.
+        expect(NoteShelf.picturesTouched(events: ["/private/var/n/Pictures/h/p.png"], keys: ["/var/n/Pictures/h/p.png", "/var/n/Pictures/h/q.png"]) == ["/var/n/Pictures/h/p.png"],
+               "the file itself, in /private spelling")
+        expect(NoteShelf.picturesTouched(events: ["/var/n/Pictures/h"], keys: ["/var/n/Pictures/h/p.png", "/var/n/Pictures/hh/p.png"]) == ["/var/n/Pictures/h/p.png"],
+               "a folder: what's in it, never a folder that only starts alike")
+        // A note re-stuck from a passage to elsewhere lets go of its line, pin and found state.
+        expect(NoteShelf.passageGeometry(["a": CGRect(x: 1, y: 2, width: 3, height: 4), "b": .zero], passages: ["b"]) == ["b": .zero]
+               && NoteShelf.passageGeometry(["a": false], passages: []).isEmpty, "only notes on a passage now keep a pin")
+
         // Where a picture link may be read or written: inside the notes' root, by the words alone.
         expect(NoteShelf.pictureTarget("../Pictures/abc/p.png", noteFolder: "/n/Inbox") == "/n/Pictures/abc/p.png"
                && NoteShelf.pictureTarget("Trip.assets/p.png", noteFolder: "/n/Inbox") == "/n/Inbox/Trip.assets/p.png"

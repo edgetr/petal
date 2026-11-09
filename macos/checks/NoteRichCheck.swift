@@ -7,8 +7,14 @@ import AppKit
 enum Headless { nonisolated(unsafe) static var on = true }
 final class NoteStore {
     nonisolated static let io = DispatchQueue(label: "petal.check.notes")
-    // Nothing is read here: every picture is "not there".
-    nonisolated static func pictureFile(_ link: String, noteFolder: URL, root: URL? = nil) -> URL? { nil }
+    static let filesChanged = Notification.Name("petal.check.notesFilesChanged")
+    // Where a link leads, as the check says (nil: "not there"); every read is counted.
+    nonisolated(unsafe) static var files: [String: URL] = [:]
+    nonisolated(unsafe) static var reads = 0
+    nonisolated static func pictureFile(_ link: String, noteFolder: URL, root: URL? = nil) -> URL? {
+        reads += 1
+        return NoteShelf.pictureTarget(link, noteFolder: noteFolder.path).flatMap { files[$0] }
+    }
 }
 // Only what a card may use: what's cached, and a fetch for a link the person added. No `icon` (which fetches), so
 // drawing a card through it wouldn't compile.
@@ -73,6 +79,37 @@ struct NoteRichCheck {
         expect(NotePictures.target("../../private.png", in: folder) == nil && NotePictures.target("/etc/hosts", in: folder) == nil
                && NotePictures.shared.image("../Pictures/../../private.png", in: folder) == nil && NotePictures.shared.isBroken("/etc/hosts", in: folder),
                "a picture link leading out: no target, nothing read, a broken picture")
+        // A missing picture: said broken once, never asked again by drawing; a file appearing where it leads (the
+        // folder watcher) reads it again and it arrives; the retry asks only for what's on screen.
+        func spin(until done: () -> Bool) {
+            let end = Date().addingTimeInterval(3)
+            while !done() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        }
+        var said: [String] = []
+        let listen = NotificationCenter.default.addObserver(forName: NotePictures.arrived, object: nil, queue: nil) { note in
+            if let target = note.userInfo?["target"] as? String { said.append(target) }
+        }
+        let missing = "/tmp/petal-rich/Pictures/late/p.png"
+        _ = NotePictures.shared.image("../Pictures/late/p.png", in: folder)
+        spin { NotePictures.shared.isBroken("../Pictures/late/p.png", in: folder) }
+        let readsWhenBroken = NoteStore.reads
+        for _ in 0..<3 { _ = NotePictures.shared.image("../Pictures/late/p.png", in: folder) }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        expect(NotePictures.shared.isBroken("../Pictures/late/p.png", in: folder) && said.filter({ $0 == missing }).count == 1 && NoteStore.reads == readsWhenBroken,
+               "a missing picture: said broken once, and drawing it again never asks again")
+        expect(NotePictures.shared.retryTick(now: Date().addingTimeInterval(11), onScreen: []).isEmpty,
+               "not on screen: not asked again, and the timer stops")
+        expect(NotePictures.shared.retryTick(now: Date(), onScreen: [missing]).isEmpty, "on screen but just tried: not yet")
+        let png = FileManager.default.temporaryDirectory.appending(path: "petal-rich-\(UUID().uuidString).png")
+        try? NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                              colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?.representation(using: .png, properties: [:])?.write(to: png)
+        NoteStore.files[missing] = png
+        NotePictures.shared.filesChanged(["/private/tmp/petal-rich/Pictures/late/p.png"])
+        spin { NotePictures.shared.image("../Pictures/late/p.png", in: folder) != nil }
+        expect(NotePictures.shared.image("../Pictures/late/p.png", in: folder) != nil && !NotePictures.shared.isBroken("../Pictures/late/p.png", in: folder)
+               && said.last == missing, "the file appeared (watcher, another spelling): read again, shown, and said to the editors")
+        NotificationCenter.default.removeObserver(listen)
+        try? FileManager.default.removeItem(at: png)
         print("note editor: \(roundTrips) of \(bodies.count + 1) round trips, \(checks) picture checks" + (failures > bodies.count + 1 - roundTrips ? " (some failed)" : ""))
         if failures > 0 { exit(1) }
     }

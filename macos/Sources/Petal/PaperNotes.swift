@@ -670,6 +670,17 @@ final class NoteStore {
         return ok
     }
 
+    /// A notebook's folder, made where it's missing: only inside the notes' root, through no symbolic link, checked
+    /// again once it's there. Off the main thread (the file queue).
+    nonisolated static func makeFolder(_ folder: URL, root: URL) -> Bool {
+        guard safe(folder, root: root) else { return false }
+        var directory: ObjCBool = false
+        if !FileManager.default.fileExists(atPath: folder.path, isDirectory: &directory) {
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        return FileManager.default.fileExists(atPath: folder.path, isDirectory: &directory) && directory.boolValue && safe(folder, root: root)
+    }
+
     /// A new file in `folder` named for `stem`: the first name free on disk and not reserved by another note being
     /// made (`NoteReservations`; `own`: this note's own provisional path), made exclusively, tried again when another
     /// file takes that name first. Off the main thread.
@@ -708,8 +719,10 @@ final class NoteStore {
         switch work {
         case .create(let text, let stem, let folder, let exact):
             if let exact {
-                // A cover: only there; one already there is the cover (never a second).
-                guard create(text, at: exact, root: root) || FileManager.default.fileExists(atPath: exact.path) else { return NoteWorkResult(outcome: .failed) }
+                // A cover: its notebook's folder made first, in this same step (contained, through no link), then
+                // the cover only there; one already there is the cover (never a second).
+                guard makeFolder(exact.deletingLastPathComponent(), root: root),
+                      create(text, at: exact, root: root) || FileManager.default.fileExists(atPath: exact.path) else { return NoteWorkResult(outcome: .failed) }
                 state.url = exact
                 state.revision = coordinatedRead(exact)
                 return NoteWorkResult(outcome: .written, url: exact)
@@ -1339,6 +1352,8 @@ final class NoteStore {
     // MARK: Watching
 
     @ObservationIgnored private var watched: URL?
+    /// Files under the notes' folder appeared or changed (userInfo "paths"): what makes a missing picture show.
+    static let filesChanged = Notification.Name("petal.notesFilesChanged")
 
     private func watch() {
         guard !Headless.on, !switching else { return }
@@ -1346,10 +1361,19 @@ final class NoteStore {
         stopWatching()
         watched = root
         var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
-        let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+        let callback: FSEventStreamCallback = { _, info, count, paths, _, _ in
             guard let info else { return }
             let store = Unmanaged<NoteStore>.fromOpaque(info).takeUnretainedValue()
-            DispatchQueue.main.async { MainActor.assumeIsolated { store.changed() } }
+            // The files that appeared or changed (C strings, the stream's default): pictures among them are said to
+            // the editors showing them (NotePictures), which read them again.
+            let list = paths.assumingMemoryBound(to: UnsafePointer<CChar>.self)
+            let changed = (0..<count).map { String(cString: list[$0]) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    store.changed()
+                    NotificationCenter.default.post(name: NoteStore.filesChanged, object: nil, userInfo: ["paths": changed])
+                }
+            }
         }
         guard let stream = FSEventStreamCreate(nil, callback, &context, [root.path] as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.3,
                                                FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagNoDefer)) else { return }

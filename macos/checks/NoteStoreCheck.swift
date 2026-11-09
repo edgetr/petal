@@ -713,6 +713,22 @@ struct NoteStoreCheck {
                && text(root.appending(path: NoteShelf.pictureFolder(id: "OLD3") + "/escaped.png")) == "e",
                "a link leading out: nothing written there, the bytes kept in the note's own folder")
 
+        // A new notebook's cover: its folder made first, in the same queued step; never through a link.
+        let fresh = root.appending(path: "Fresh book")
+        let cover = fresh.appending(path: NoteShelf.coverName)
+        NoteDisk.states[77] = NoteDisk.State(url: cover, noteID: "COV", revision: nil)
+        let made77 = NoteStore.perform(.create(text: "cover", stem: "About this notebook", folder: fresh, exact: cover), session: 77, root: root)
+        expect(made77.outcome == .written && text(cover) == "cover", "a new notebook's cover written, its folder made first", "\(made77.outcome)")
+        let away = root.deletingLastPathComponent().appending(path: "Away book")
+        try? fm.createDirectory(at: away, withIntermediateDirectories: true)
+        try? fm.createSymbolicLink(at: root.appending(path: "Linked book"), withDestinationURL: away)
+        let linkedCover = root.appending(path: "Linked book/" + NoteShelf.coverName)
+        NoteDisk.states[78] = NoteDisk.State(url: linkedCover, noteID: "COV2", revision: nil)
+        expect(NoteStore.perform(.create(text: "cover", stem: "About this notebook", folder: linkedCover.deletingLastPathComponent(), exact: linkedCover),
+                                 session: 78, root: root).outcome == .failed && !fm.fileExists(atPath: away.appending(path: NoteShelf.coverName).path),
+               "a notebook folder that is a link: no cover written through it")
+        try? fm.removeItem(at: root.appending(path: "Linked book"))
+
         // A new note in "inbox" when Inbox exists: Inbox, never a second notebook.
         let store = NoteStore(root: root)
         let read = NoteStore.read(root)

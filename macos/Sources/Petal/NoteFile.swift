@@ -1679,6 +1679,33 @@ enum NoteShelf {
         return path
     }
 
+    /// Which missing pictures to ask for again now: those still on screen whose last try was at least `every` ago.
+    /// The retry timer runs only while some missing picture is on screen (`keepTimer`).
+    static func pictureRetry(broken: [String: Date], onScreen: Set<String>, now: Date, every: TimeInterval = 10) -> (retry: [String], keepTimer: Bool) {
+        let visible = broken.filter { onScreen.contains($0.key) }
+        return (visible.filter { now.timeIntervalSince($0.value) >= every }.map(\.key).sorted(), !visible.isEmpty)
+    }
+
+    /// The pictures (by where their links lead) that files appearing or changing on disk touch: the file itself, or
+    /// a folder holding it. The folder watcher's paths may be spelled another way (/private/var for /var).
+    static func picturesTouched(events: [String], keys: [String]) -> [String] {
+        let spell = { (path: String) -> String in
+            for top in ["/private/var/", "/private/tmp/", "/private/etc/"] where path.hasPrefix(top) { return String(path.dropFirst("/private".count)) }
+            return path
+        }
+        let changed = events.map(spell)
+        return keys.filter { key in
+            let k = spell(key)
+            return changed.contains { k == $0 || k.hasPrefix($0.hasSuffix("/") ? $0 : $0 + "/") }
+        }.sorted()
+    }
+
+    /// A note's passage geometry (its line, its pin's rect, found or moved) kept only while its winning anchor is a
+    /// passage: re-stuck elsewhere, all of it goes, so no pin is drawn for a passage it no longer has.
+    static func passageGeometry<V>(_ geometry: [String: V], passages: Set<String>) -> [String: V] {
+        geometry.filter { passages.contains($0.key) }
+    }
+
     /// A note's relative link as a path, from the folder its file is in, ".." taken by the words alone (never through
     /// the disk): "../Pictures/<hash>/p.png" from "/n/Inbox" is "/n/Pictures/<hash>/p.png". Nil for an absolute
     /// link, or one that climbs above "/".

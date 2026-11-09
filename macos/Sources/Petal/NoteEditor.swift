@@ -76,15 +76,31 @@ final class LinkPreviews {
 /// Notes' pictures, read off the main thread and kept while Petal runs, by where their link leads
 /// (NoteShelf.pictureTarget). A link that leads out of the notes' root, through a symbolic link or to nothing that
 /// reads as a picture is broken: a placeholder shows, never another file. Every arrival (a picture, or that it's
-/// broken) is said with `arrived`, so the editors showing it lay it out and draw it again.
+/// broken) is said with `arrived`, so the editors showing it lay it out and draw it again. A missing picture is read
+/// again when the notes' folder watcher says a file it leads to appeared or changed, and on a 10-second timer that
+/// runs only while a missing picture is on screen (NoteShelf.pictureRetry); drawing never asks again by itself.
 @MainActor @Observable
 final class NotePictures {
     static let shared = NotePictures()
     static let arrived = Notification.Name("petal.notePictureArrived")
     private(set) var images: [String: NSImage] = [:]
-    /// Broken, and when: asked again only after a while (a file iCloud is still bringing down).
+    /// Broken, and when it was last tried.
     private(set) var broken: [String: Date] = [:]
     @ObservationIgnored private var asked: Set<String> = []
+    /// What each picture was asked for with (its link and the note's folder), to ask again.
+    @ObservationIgnored private var sources: [String: (link: String, folder: URL)] = [:]
+    /// Editors that may show pictures (weak), and pictures the read-only papers show now (counted).
+    @ObservationIgnored private let editors = NSHashTable<NSView>.weakObjects()
+    @ObservationIgnored private var shownElsewhere: [String: Int] = [:]
+    @ObservationIgnored private var retryTimer: Timer?
+    @ObservationIgnored private var watching: NSObjectProtocol?
+
+    init() {
+        watching = NotificationCenter.default.addObserver(forName: NoteStore.filesChanged, object: nil, queue: .main) { [weak self] note in
+            guard let paths = note.userInfo?["paths"] as? [String] else { return }
+            MainActor.assumeIsolated { self?.filesChanged(paths) }
+        }
+    }
 
     /// Where a link leads from a note's folder, by the words alone: nil never reads anything.
     nonisolated static func target(_ link: String, in folder: URL) -> String? { NoteShelf.pictureTarget(link, noteFolder: folder.path) }
@@ -92,26 +108,10 @@ final class NotePictures {
     func image(_ link: String, in folder: URL) -> NSImage? {
         guard let key = Self.target(link, in: folder) else { return nil }
         if let image = images[key] { return image }
-        if let when = broken[key], Date().timeIntervalSince(when) < 10 { return nil }
-        guard !asked.contains(key) else { return nil }
-        asked.insert(key)
-        NoteStore.io.async {
-            // The one rule for a picture link (NoteStore.pictureFile): inside the notes' root, no symbolic link.
-            let data = NoteStore.pictureFile(link, noteFolder: folder).flatMap { NoteStore.coordinatedData($0) }
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    self.asked.remove(key)
-                    if let data, let image = NSImage(data: data) {
-                        self.store(image, key)
-                    } else {
-                        // Said once, when it turns broken: a redraw that asks again never loops.
-                        let fresh = self.broken[key] == nil
-                        self.broken[key] = Date()
-                        if fresh { NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["target": key]) }
-                    }
-                }
-            }
-        }
+        sources[key] = (link, folder)
+        // Broken: asked again only by the watcher or the retry timer, never by drawing (which would loop).
+        guard broken[key] == nil else { return nil }
+        read(key)
         return nil
     }
 
@@ -119,10 +119,82 @@ final class NotePictures {
 
     func preview(_ file: URL, _ image: NSImage) { store(image, file.path) }
 
+    /// Read (again) what `key` was asked for with; an image already shown stays until the new one is in.
+    private func read(_ key: String) {
+        guard let source = sources[key], !asked.contains(key) else { return }
+        asked.insert(key)
+        NoteStore.io.async {
+            // The one rule for a picture link (NoteStore.pictureFile): inside the notes' root, no symbolic link.
+            let data = NoteStore.pictureFile(source.link, noteFolder: source.folder).flatMap { NoteStore.coordinatedData($0) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.asked.remove(key)
+                    if let data, let image = NSImage(data: data) {
+                        self.store(image, key)
+                    } else if self.images[key] == nil {
+                        // Said once, when it turns broken: a redraw never asks again by itself.
+                        let fresh = self.broken[key] == nil
+                        self.broken[key] = Date()
+                        if fresh { NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["target": key]) }
+                        self.scheduleRetry()
+                    }
+                }
+            }
+        }
+    }
+
     private func store(_ image: NSImage, _ key: String) {
         images[key] = image
         broken[key] = nil
         NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["target": key])
+    }
+
+    /// Files that appeared or changed under the notes' folder: every picture they touch is read again.
+    func filesChanged(_ paths: [String]) {
+        for key in NoteShelf.picturesTouched(events: paths, keys: Array(Set(images.keys).union(broken.keys))) where sources[key] != nil { read(key) }
+    }
+
+    /// An editor that may show pictures, and pictures a read-only paper shows while it's on screen.
+    func register(_ editor: NSView) { editors.add(editor) }
+    func showing(_ link: String, in folder: URL, _ on: Bool) {
+        guard let key = Self.target(link, in: folder) else { return }
+        shownElsewhere[key, default: 0] += on ? 1 : -1
+        if shownElsewhere[key] ?? 0 <= 0 { shownElsewhere[key] = nil }
+        if on { scheduleRetry() }
+    }
+
+    /// The pictures on screen now: in an editor whose window shows, or on a read-only paper.
+    private var onScreen: Set<String> {
+        var keys = Set(shownElsewhere.keys)
+        for case let editor as NoteTextView in editors.allObjects {
+            guard let window = editor.window, window.isVisible, window.alphaValue > 0, window.occlusionState.contains(.visible),
+                  let storage = editor.textStorage else { continue }
+            storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, _, _ in
+                if let key = ((value as? NSTextAttachment)?.attachmentCell as? PictureCell)?.leadsTo { keys.insert(key) }
+            }
+        }
+        return keys
+    }
+
+    /// The retry timer: every 10 s, only while a missing picture is on screen.
+    private func scheduleRetry() {
+        guard retryTimer == nil, !broken.isEmpty, !Headless.on else { return }
+        retryTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { _ = self?.retryTick(now: Date()) }
+        }
+    }
+
+    /// One tick: the missing pictures on screen asked for again; none on screen, the timer stops. Returns what it
+    /// asked for again.
+    @discardableResult
+    func retryTick(now: Date, onScreen given: Set<String>? = nil) -> [String] {
+        let rule = NoteShelf.pictureRetry(broken: broken, onScreen: given ?? onScreen, now: now)
+        if !rule.keepTimer {
+            retryTimer?.invalidate()
+            retryTimer = nil
+        }
+        for key in rule.retry { read(key) }
+        return rule.retry
     }
 }
 
@@ -544,6 +616,7 @@ final class NoteTextView: NSTextView {
         if let pictureObserver { NotificationCenter.default.removeObserver(pictureObserver) }
         pictureObserver = nil
         guard window != nil else { return }
+        NotePictures.shared.register(self)
         pictureObserver = NotificationCenter.default.addObserver(forName: NotePictures.arrived, object: nil, queue: .main) { [weak self] note in
             guard let target = note.userInfo?["target"] as? String else { return }
             MainActor.assumeIsolated { _ = self?.pictureArrived(target) }
