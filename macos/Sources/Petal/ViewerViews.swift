@@ -332,8 +332,14 @@ struct ViewerPDF: NSViewRepresentable {
 
     func updateNSView(_ view: PDFView, context: Context) {
         if view.document !== model.document {
+            // The page to show taken first: assigning the document resets PDFKit's page and posts page changes,
+            // which aren't the person's and are ignored until it's at that page (`rebinding`).
+            let target = model.current
+            model.rebinding = true
             view.document = model.document
-            if let page = model.document?.page(at: model.current) { view.go(to: page) }
+            if let page = model.document?.page(at: target) { view.go(to: page) }
+            if model.current != target { model.current = target }
+            DispatchQueue.main.async { [weak model] in model?.rebinding = false }
         }
         // A note added, moved or re-stuck: its passage found again (only when the notes' passages changed).
         model.resolvePassages()
@@ -370,7 +376,8 @@ struct ViewerPDF: NSViewRepresentable {
         }
 
         @objc private func pageChanged() {
-            guard let view, let model, let page = view.currentPage, let document = view.document else { return }
+            // Only the person's own scrolling moves `current` (never PDFKit resetting its page on a new document).
+            guard let view, let model, !model.rebinding, let page = view.currentPage, let document = view.document else { return }
             let index = document.index(for: page)
             if model.current != index { model.current = index }
             relayout()

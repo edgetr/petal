@@ -288,6 +288,9 @@ final class ViewerModel: Identifiable {
     var current = 0 {
         didSet { if current != oldValue, let set = versions { drawVersions(set) } }
     }
+    /// The PDF view being given a new document and sent to its page (ViewerPDF): its own page-change callbacks then
+    /// aren't the person's scrolling and never write `current`.
+    @ObservationIgnored var rebinding = false
     /// The page or slide asked for (from 1), shown once the document is read and only if it has it.
     @ObservationIgnored var wantedPage: Int?
     /// The notes' places that name this file (by ViewerFiles.key), each resolved on its own by the one resolver (its
@@ -450,8 +453,8 @@ final class ViewerModel: Identifiable {
     func load() {
         loads += 1
         let ticket = loads
-        // Watched before anything is read (its descriptors open on the same queue, ahead of the read): a change
-        // while it loads always starts a reload.
+        // Watched before anything is read: the read starts only once the watch is armed (ViewerWatch.whenArmed),
+        // so a change while it loads always starts a reload.
         if watcher == nil { watch() }
         if !loading { loading = true }
         // What finds the file again if it moves meanwhile (fileChanged), never anchor state.
@@ -461,7 +464,7 @@ final class ViewerModel: Identifiable {
         unselected()
         let url = url
         let kind = kind
-        Viewers.queue.async {
+        let read: @Sendable () -> Void = {
             // The one path rule again at every load and reload (a file swapped for a link out of the home folder,
             // say): refused, nothing of it is read.
             guard case .success = ViewerPath.check(url.path) else {
@@ -480,6 +483,7 @@ final class ViewerModel: Identifiable {
                 }
             }
         }
+        if let watcher { watcher.whenArmed(read) } else { Viewers.queue.async(execute: read) }
     }
 
     static let cantShowText = "This file can't be shown."
@@ -567,7 +571,7 @@ final class ViewerModel: Identifiable {
         renderThumbs(data)
         resolvedFor = nil
         resolvePassages()
-        if let page = document.page(at: current) { pdfView?.go(to: page) }
+        // The PDF view is bound to the new document by ViewerPDF (rebinding), which goes to `current` itself.
         versions.map { refreshVersions($0) }
     }
 
@@ -1742,16 +1746,33 @@ final class ViewerWatch: @unchecked Sendable {
             source.setCancelHandler { close(fd) }
             made.append(source)
         }
-        lock.withLock {
+        let ready: [@Sendable () -> Void] = lock.withLock {
+            defer { armed = true; waiting = [] }
             // Let go of before it was set up: nothing is watched (a source is resumed before it's cancelled, so its
             // descriptor is closed).
             if stopped {
                 for source in made { source.setEventHandler {}; source.resume(); source.cancel() }
-                return
+                return waiting
             }
             sources = made
             for source in made { source.resume() }
+            return waiting
         }
+        for then in ready { Viewers.queue.async(execute: then) }
+    }
+
+    private var armed = false
+    private var waiting: [@Sendable () -> Void] = []
+
+    /// `then` (on Viewers.queue) once the watch is armed, its sources resumed: at once when it already is. A read
+    /// started from here can't miss a change made after it began.
+    func whenArmed(_ then: @escaping @Sendable () -> Void) {
+        let now = lock.withLock { () -> Bool in
+            if armed { return true }
+            waiting.append(then)
+            return false
+        }
+        if now { Viewers.queue.async(execute: then) }
     }
 
     private func fire() {

@@ -1769,7 +1769,25 @@ enum ViewerCheck {
         let target = NoteShelf.saveTarget(key: linkPaper.key, noteID: "W3", instance: "", papers: app.paper.store.notes.map { ($0.key, $0.noteID, $0.instance, $0.version) },
                                           current: app.paper.store.currentID)
         expect(target == renamedPaper.key, "the editor's final save goes to the renamed note")
-        print("window: " + (ok ? "PDF view, selection read off the main thread, passages found by their words, highlight, margin and pages in step, a link's note, ownership across an id change, the old selection cleared at once, an empty draft kept across a hand-off, notes off closing the margin, the right paper flipped, a rename keeping its editor" : "failed"))
+        // A reload keeps the page shown (PDFKit resetting its page on the new document is never taken for the
+        // person's scrolling), and a page asked for during it is the one shown after.
+        let shownIndex = { () -> Int? in model.pdfView.flatMap { view in view.currentPage.flatMap { view.document?.index(for: $0) } } }
+        model.go(to: 1)
+        wait(1) { model.current == 1 && shownIndex() == 1 }
+        let firstDocument = model.document
+        model.load()
+        wait(20) { !model.loading && model.document !== firstDocument && model.pdfView?.document === model.document }
+        window.contentView?.layoutSubtreeIfNeeded()
+        wait(1) { false }
+        expect(model.current == 1 && shownIndex() == 1, "a reload keeps the page shown (current \(model.current + 1), view \(shownIndex().map { $0 + 1 } ?? 0))")
+        let again = model.document
+        model.load()
+        model.ask(page: 1)
+        wait(20) { !model.loading && model.document !== again && model.pdfView?.document === model.document }
+        window.contentView?.layoutSubtreeIfNeeded()
+        wait(1) { false }
+        expect(model.current == 0 && shownIndex() == 0, "a page asked for during a reload is the one shown after (current \(model.current + 1), view \(shownIndex().map { $0 + 1 } ?? 0))")
+        print("window: " + (ok ? "PDF view, selection read off the main thread, passages found by their words, highlight, margin and pages in step, a link's note, ownership across an id change, the old selection cleared at once, an empty draft kept across a hand-off, notes off closing the margin, the right paper flipped, a rename keeping its editor, a reload keeping its page and the page asked for during it" : "failed"))
         window.close()
         return ok
     }
