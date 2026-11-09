@@ -1171,7 +1171,8 @@ final class NoteStore {
                     // Still can't land: "Unsaved notes", with the pictures it references (the journal keeps it too).
                     if let text = item.work.text {
                         let referenced = pictures.filter { text.contains($0.name) }
-                        if rescue(text, noteID: noteID, pictures: referenced) { landed.append((text, false)) }
+                        let beside = NoteDisk.states[job.session]?.url.deletingLastPathComponent()
+                        if rescue(text, noteID: noteID, pictures: referenced, from: beside) { landed.append((text, false)) }
                     }
                 default: break
                 }
@@ -1189,10 +1190,23 @@ final class NoteStore {
     /// pictures in a pictures' folder beside it laid out as in the notes' folder, so its references hold. True once
     /// the text and every picture are written there.
     @discardableResult
-    nonisolated static func rescue(_ text: String, noteID: String, pictures: [NotePictureBytes]) -> Bool { rescued(text, noteID: noteID, pictures: pictures) != nil }
+    nonisolated static func rescue(_ text: String, noteID: String, pictures: [NotePictureBytes], from noteFolder: URL? = nil) -> Bool {
+        rescued(text, noteID: noteID, pictures: pictures, from: noteFolder) != nil
+    }
 
-    /// The same, saying the file it wrote.
-    nonisolated static func rescued(_ text: String, noteID: String, pictures: [NotePictureBytes]) -> URL? {
+    /// A picture's bytes, read the way iCloud Drive wants (it may bring the file down first).
+    nonisolated private static func picture(at url: URL) -> Data? {
+        var data: Data?
+        var error: NSError?
+        NSFileCoordinator(filePresenter: nil).coordinate(readingItemAt: url, options: [], error: &error) { data = try? Data(contentsOf: $0) }
+        return data
+    }
+
+    /// The same, saying the file it wrote. Every picture its text references goes with it, laid out as in the notes'
+    /// folder: bytes still in memory (`pictures`), else copied from where the note keeps them (`noteFolder`: the
+    /// folder its file is in). Complete only once all of them are there (NoteShelf.rescueComplete); else nothing is
+    /// written and the journal keeps it.
+    nonisolated static func rescued(_ text: String, noteID: String, pictures: [NotePictureBytes], from noteFolder: URL? = nil) -> URL? {
         let fm = FileManager.default
         let folder = Config.supportFolder.appending(path: "Unsaved notes")
         try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -1204,6 +1218,22 @@ final class NoteStore {
                 if !fm.fileExists(atPath: file.path), (try? picture.data.write(to: file, options: .withoutOverwriting)) == nil { return nil }
             }
         }
+        // Every picture the text references, there too: the older ones copied from beside the note.
+        let referenced = NoteShelf.referencedPictures(text)
+        var present = Set<String>()
+        for path in referenced {
+            let into = folder.appending(path: path)
+            guard NoteShelf.within(into.path, folder.path) != nil else { continue }
+            if fm.fileExists(atPath: into.path) { present.insert(path); continue }
+            try? fm.createDirectory(at: into.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if let bytes = pictures.first(where: { $0.name == (path as NSString).lastPathComponent }) {
+                if (try? bytes.data.write(to: into, options: .withoutOverwriting)) != nil { present.insert(path) }
+            } else if let noteFolder, case let source = noteFolder.appending(path: path), NoteShelf.within(source.path, noteFolder.path) != nil,
+                      let data = picture(at: source), (try? data.write(to: into, options: .withoutOverwriting)) != nil {
+                present.insert(path)
+            }
+        }
+        guard NoteShelf.rescueComplete(referenced: referenced, present: present) else { return nil }
         let stem = safeStem(for: text, fallback: plainStem)
         for n in 0..<100 {
             let file = folder.appending(path: (n == 0 ? stem : "\(stem) \(n + 1)") + ".md")

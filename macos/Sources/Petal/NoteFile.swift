@@ -1156,6 +1156,54 @@ enum NoteShelf {
         source == .look && ticket == current && readPID == frontPID
     }
 
+    /// The pictures a note's text references in its own folder (relative paths, such as
+    /// "pictures-<hash>.assets/picture-1.png"): what a rescue must carry with it. Web addresses and absolute paths
+    /// aren't the note's own.
+    static func referencedPictures(_ text: String) -> [String] {
+        let body = NoteFile.parse(text, fallbackID: "", fallbackDate: Date()).body
+        var out: [String] = []
+        for block in NoteBlock.blocks(body) {
+            guard case .image(let path, _) = block, !path.isEmpty, !path.hasPrefix("/"), !path.contains("://"), !out.contains(path) else { continue }
+            out.append(path)
+        }
+        return out
+    }
+
+    /// A rescue (into "Unsaved notes") is complete only once every picture its text references is there too.
+    static func rescueComplete(referenced: [String], present: Set<String>) -> Bool { referenced.allSatisfy(present.contains) }
+
+    /// Writing the rest of a recovery over the file it continues at: only over nothing there, or over what landed
+    /// there (`base`) or already says it; a file that can't be read, or that changed, is kept, and the rest goes
+    /// to a file of its own.
+    enum ContinueWrite: Equatable { case write, separate }
+
+    static func continueWrite(_ disk: Disk, base: String?, text: String) -> ContinueWrite {
+        switch disk {
+        case .missing: return .write
+        case .unreadable: return .separate
+        case .text(let now): return now == base || now == text ? .write : .separate
+        }
+    }
+
+    /// A paper asked for the keyboard before layout showed it (its place not validated yet, as the first Desktop note
+    /// is): kept pending, honored once layout shows it, dropped if the person goes elsewhere first.
+    struct KeyboardRequests: Equatable {
+        private(set) var pending: Set<String> = []
+
+        /// True: take the keyboard now (it's shown); else it waits.
+        mutating func request(_ key: String, shown: Bool) -> Bool {
+            if shown { pending.remove(key); return true }
+            pending.insert(key)
+            return false
+        }
+
+        /// Layout showed `key`: true when it was waiting for the keyboard.
+        mutating func shown(_ key: String) -> Bool { pending.remove(key) != nil }
+
+        mutating func cancel(_ key: String) { pending.remove(key) }
+        mutating func cancelAll() { pending.removeAll() }
+    }
+
     /// Making a note from what's in front: only when its read became the active scene, and, after the selection was
     /// read, while that scene is still the active one and its app still in front (NoteShelf.mayBecomeActive's rule,
     /// checked again); else no note at all.

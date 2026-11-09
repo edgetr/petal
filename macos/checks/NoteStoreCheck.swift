@@ -362,6 +362,43 @@ struct NoteStoreCheck {
                "the rest continues in that same file, both pictures beside it, the note untouched", "\(pictureFiles) \(continued)")
         expect(!fm.fileExists(atPath: NoteJournal.file("JU", in: holding).path), "and the entry goes once it's all there")
 
+        // A rescue into Unsaved notes carries the note's older pictures too (copied from beside it), and isn't
+        // complete without them.
+        let illustratedFolder = root.appending(path: "Illustrated")
+        let oldAssets = illustratedFolder.appending(path: NoteShelf.assetsFolder(id: "RS"))
+        try? fm.createDirectory(at: oldAssets, withIntermediateDirectories: true)
+        try? png?.write(to: oldAssets.appending(path: "old.png"))
+        let rescuedText = NoteFile(id: "RS", body: "# Illustrated\n![](\(NoteShelf.assetsFolder(id: "RS"))/old.png)\n![](\(NoteShelf.assetsFolder(id: "RS"))/new.png)").serialized()
+        let newBytes = NotePictureBytes(name: "new.png", data: png ?? Data(), caption: "")
+        let rescuedTo = NoteStore.rescued(rescuedText, noteID: "RS", pictures: [newBytes], from: illustratedFolder)
+        let rescueAssets = Config.supportFolder.appending(path: "Unsaved notes/" + NoteShelf.assetsFolder(id: "RS"))
+        expect(rescuedTo != nil && fm.fileExists(atPath: rescueAssets.appending(path: "old.png").path) && fm.fileExists(atPath: rescueAssets.appending(path: "new.png").path),
+               "the older picture copied with the new one")
+        let gapText = NoteFile(id: "RG", body: "# Gap\n![](\(NoteShelf.assetsFolder(id: "RG"))/nowhere.png)").serialized()
+        expect(NoteStore.rescued(gapText, noteID: "RG", pictures: [], from: illustratedFolder) == nil, "a picture it references that isn't anywhere: not complete (the journal keeps it)")
+
+        // Continuing at a destination that can't be read: kept, the rest written to a file of its own.
+        let unreadableDest = Config.supportFolder.appending(path: "Unsaved notes/Locked.md")
+        try? Data("locked".utf8).write(to: unreadableDest)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: unreadableDest.path)
+        var cont = NoteJournal.Entry(noteID: "RC", path: unreadableDest.path, base: "locked", text: NoteFile(id: "RC", body: "# Continued\nmore").serialized())
+        cont.landedAt = unreadableDest.path
+        let elsewhere = NoteJournal.continueAt(cont, unreadableDest, root: root)
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: unreadableDest.path)
+        expect(elsewhere != nil && elsewhere?.path != unreadableDest.path && text(unreadableDest) == "locked",
+               "an unreadable destination kept as it was; the rest in a file of its own")
+
+        // Continuing at a copy `save` made: it landed there, and the rest continues there.
+        let saved = notes.appending(path: "SaveCopy.md")
+        let savedBase = NoteFile(id: "SC", body: "base").serialized()
+        _ = NoteStore.create(savedBase, at: saved, root: root)
+        try? Data(NoteFile(id: "SC", body: "changed at the last moment").serialized().utf8).write(to: saved)
+        let outcome = NoteStore.save(NoteFile(id: "SC", body: "recovered").serialized(), to: saved, base: savedBase, root: root, noteID: "SC")
+        if case .keptBoth(let copy) = outcome {
+            expect(NoteJournal.landing(outcome, at: saved) == copy && text(copy)?.contains("recovered") == true, "a keptBoth copy is where it landed")
+        } else { expect(false, "save kept both", "\(outcome)") }
+        expect(NoteJournal.landing(.failed, at: saved) == nil && NoteJournal.landing(.written, at: saved) == saved, "written: the file; failed: nowhere")
+
         // A text that landed while a picture it references failed: the snapshot stays with that picture's bytes,
         // and goes once the picture is saved.
         let pic = NoteJournal.Picture(name: "picture-f.png", data: Data("f".utf8))

@@ -143,6 +143,8 @@ final class NoteDesk {
                                                  shownWindow: scene?.window, own: getpid()) {
             concealWindowNotes()
         }
+        // The person went to another app before a paper waiting for the keyboard showed: it doesn't take it.
+        if event.kind == .activated, event.pid != getpid() { keyboardWanted.cancelAll() }
         switch event.kind {
         case .moved, .resized: lookAgain(after: 0.03)
         case .activated, .focused, .closed, .titleChanged, .tabSwitched, .created, .minimized, .unminimized, .shown, .hidden, .quit: lookAgain(after: 0.12)
@@ -785,6 +787,7 @@ final class NoteDesk {
                 rect = NoteRules.appKitFrame(ax, primaryHeight: primaryHeight)
             }
             panel.place(paperFrame: rect)
+            shown(key, panel)
         }
         for (key, panel) in panels where !isDesktop(key) && !showing.contains(key) { panel.conceal() }
         drawPins(showing)
@@ -878,6 +881,7 @@ final class NoteDesk {
                                      y: visible.maxY - 60 - CGFloat(index / 5) * (PaperLook.folded + 24))
                 if let point = local.desk[paper.noteID], point.count == 2 { origin = CGPoint(x: point[0], y: point[1]) }
                 panel.place(paperFrame: CGRect(x: origin.x, y: origin.y - size.height, width: size.width, height: size.height))
+                shown(paper.key, panel)
             }
         }
         for (key, panel) in panels where panel.desktop && !showing.contains(key) {
@@ -904,10 +908,26 @@ final class NoteDesk {
         local.shown = Array(Set(local.shown + [paper.noteID]))
         local.save(pending: store.pendingIDs)
         faceChanged(key)
-        panel(for: key).takeKeyboard()
+        wantKeyboard(key)
+    }
+
+    /// Papers waiting for the keyboard until layout shows them (NoteShelf.KeyboardRequests).
+    @ObservationIgnored private var keyboardWanted = NoteShelf.KeyboardRequests()
+
+    /// The keyboard for `key`: now when it's shown, else once layout shows it.
+    private func wantKeyboard(_ key: String) {
+        let panel = panel(for: key)
+        panel.refit()
+        if keyboardWanted.request(key, shown: panel.unveiled) { panel.takeKeyboard() }
+    }
+
+    /// Layout just showed `key`: the keyboard it was waiting for.
+    private func shown(_ key: String, _ panel: NotePanel) {
+        if keyboardWanted.shown(key), faces[key] == .open { panel.takeKeyboard() }
     }
 
     func fold(_ key: String) {
+        keyboardWanted.cancel(key)
         guard faces[key] == .open || faces[key] == .back else { return }
         Self.roomTurn.cancel()
         editors[key]?.flush()
@@ -918,6 +938,7 @@ final class NoteDesk {
     }
 
     func hide(_ key: String) {
+        keyboardWanted.cancel(key)
         Self.roomTurn.cancel()
         editors[key]?.flush()
         faces[key] = nil
@@ -932,7 +953,7 @@ final class NoteDesk {
 
     func flip(_ key: String) {
         faces[key] = faces[key] == .back ? .open : .back
-        if faces[key] == .open { panel(for: key).takeKeyboard() }
+        if faces[key] == .open { wantKeyboard(key) }
         panels[key]?.refit()
         faceChanged(key)
     }
@@ -946,6 +967,7 @@ final class NoteDesk {
 
     /// Clicked away from every note: the open ones fold back.
     func clickedAway() {
+        keyboardWanted.cancelAll()
         for (key, face) in faces where face == .open || face == .back { fold(key) }
     }
 

@@ -414,6 +414,29 @@ struct NotesCheck {
         expect(!NoteShelf.mayCreate(activated: true, activePID: 10, activeWindow: 6, readPID: 10, readWindow: 5, frontPID: 10), "another window of it: no note")
         expect(NoteShelf.mayTakeKeyboard(shown: true) && !NoteShelf.mayTakeKeyboard(shown: false), "the keyboard only for a paper layout showed")
 
+        // A rescue carries every picture its text references; complete only when they're all there.
+        let illustrated = NoteFile(id: "R", body: "# Trip\n![](pictures-a.assets/old.png)\nwords\n![shot](pictures-a.assets/new.png)\n![](https://example.com/web.png)").serialized()
+        expect(NoteShelf.referencedPictures(illustrated) == ["pictures-a.assets/old.png", "pictures-a.assets/new.png"], "its own pictures, not a web picture")
+        expect(!NoteShelf.rescueComplete(referenced: ["a", "b"], present: ["b"]) && NoteShelf.rescueComplete(referenced: ["a", "b"], present: ["a", "b"]),
+               "complete only with every picture")
+
+        // The rest of a recovery over the file it continues at: never over one that can't be read, or changed.
+        expect(NoteShelf.continueWrite(.missing, base: "t", text: "t2") == .write, "nothing there: written")
+        expect(NoteShelf.continueWrite(.text("t"), base: "t", text: "t2") == .write && NoteShelf.continueWrite(.text("t2"), base: "t", text: "t2") == .write,
+               "what landed there (or already it): written")
+        expect(NoteShelf.continueWrite(.unreadable, base: "t", text: "t2") == .separate, "a file that can't be read: kept, the rest to a file of its own")
+        expect(NoteShelf.continueWrite(.text("edited"), base: "t", text: "t2") == .separate, "changed since: kept")
+
+        // A keyboard request waits for layout to show its paper.
+        var keys = NoteShelf.KeyboardRequests()
+        expect(!keys.request("desk", shown: false) && keys.pending == ["desk"], "the first Desktop note, not shown yet: waits")
+        expect(keys.shown("desk") && keys.pending.isEmpty, "shown by layout: the keyboard, once")
+        expect(!keys.shown("desk"), "shown again later: nothing more")
+        expect(keys.request("w", shown: true) && keys.pending.isEmpty, "already shown: at once")
+        _ = keys.request("x", shown: false)
+        keys.cancelAll()
+        expect(!keys.shown("x"), "the person clicked elsewhere first: dropped")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

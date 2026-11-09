@@ -266,11 +266,7 @@ enum NoteJournal {
         let assets = file.deletingLastPathComponent().appending(path: NoteShelf.assetsFolder(id: entry.noteID))
         if NoteShelf.within(file.path, root.path) != nil {
             guard pictures.isEmpty || NoteStore.writePictures(pictures, into: assets, root: root).count == pictures.count else { return nil }
-            switch NoteStore.save(entry.text, to: file, base: entry.base, root: root, noteID: entry.noteID) {
-            case .written: return file
-            case .keptBoth(let copy): return copy
-            default: return nil
-            }
+            return landing(NoteStore.save(entry.text, to: file, base: entry.base, root: root, noteID: entry.noteID), at: file)
         }
         // In "Unsaved notes" (outside the notes' folder): the same, by hand.
         try? fm.createDirectory(at: assets, withIntermediateDirectories: true)
@@ -278,11 +274,24 @@ enum NoteJournal {
             let into = assets.appending(path: picture.name)
             if !fm.fileExists(atPath: into.path), (try? picture.data.write(to: into, options: .withoutOverwriting)) == nil { return nil }
         }
-        let disk = try? String(contentsOf: file, encoding: .utf8)
-        if disk == nil || disk == entry.base || disk == entry.text {
+        // Nothing there, or what landed there: written; a file that can't be read, or changed since: kept, and the
+        // rest goes to a file of its own (NoteShelf.continueWrite).
+        let disk: NoteShelf.Disk = !fm.fileExists(atPath: file.path) ? .missing
+            : (try? String(contentsOf: file, encoding: .utf8)).map { .text($0) } ?? .unreadable
+        if NoteShelf.continueWrite(disk, base: entry.base, text: entry.text) == .write {
             return (try? Data(entry.text.utf8).write(to: file, options: .atomic)) != nil ? file : nil
         }
-        return NoteStore.rescued(entry.text, noteID: entry.noteID, pictures: pictures)
+        return NoteStore.rescued(entry.text, noteID: entry.noteID, pictures: pictures, from: file.deletingLastPathComponent())
+    }
+
+    /// Where a save put a recovery's text: the file itself, or the copy `save` kept beside it (the rest continues
+    /// there); nowhere for anything else.
+    nonisolated static func landing(_ outcome: NoteStore.Outcome, at file: URL) -> URL? {
+        switch outcome {
+        case .written: return file
+        case .keptBoth(let copy): return copy
+        default: return nil
+        }
     }
 
     /// One entry put back somewhere safe: the file it's in now once it's written and said so (the note, a copy
@@ -301,7 +310,9 @@ enum NoteJournal {
             guard picturesBeside(note) else { break }
             switch NoteShelf.journalRecovery(disk: disk, base: entry.base, text: entry.text, aside: entry.aside) {
             case .nothing: return note
-            case .write: if NoteStore.save(entry.text, to: note, base: entry.base, root: root, noteID: entry.noteID) == .written { return note }
+            case .write:
+                // Written, or kept beside it by `save` itself (the file changed at the last moment): it landed there.
+                if let at = landing(NoteStore.save(entry.text, to: note, base: entry.base, root: root, noteID: entry.noteID), at: note) { return at }
             case .copy: if case .keptBoth(let copy) = NoteStore.keepBeside(entry.text, original: note, root: root) { return copy }
             }
         case .separate:
@@ -317,6 +328,8 @@ enum NoteJournal {
                 return made
             }
         }
-        return NoteStore.rescued(entry.text, noteID: entry.noteID, pictures: pictures)
+        // Into "Unsaved notes", every picture it references with it (from beside the note, where it keeps them).
+        let beside = found.count == 1 ? URL(fileURLWithPath: found[0]).deletingLastPathComponent() : URL(fileURLWithPath: entry.path).deletingLastPathComponent()
+        return NoteStore.rescued(entry.text, noteID: entry.noteID, pictures: pictures, from: beside)
     }
 }
