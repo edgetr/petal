@@ -369,6 +369,14 @@ extension NotePrivacy {
     /// Whether a picture of one window may be taken: never of one left out (then there's no picture at all).
     static func mayCapture(window: Int, excluded: Set<Int>) -> Bool { !excluded.contains(window) }
 
+    /// The notebooks counted Private: those whose cover says so (or is unknown), and any notebook a note is held in
+    /// that the latest read of the folder didn't find (gone, renamed, not read): unknown, so Private, never readable.
+    static func privateBooks(notebooks: [(name: String, isPrivate: Bool)], held: [String]) -> Set<String> {
+        var out = Set(notebooks.filter(\.isPrivate).map(\.name))
+        for name in held where !notebooks.contains(where: { NoteLibrary.same($0.name, name) }) { out.insert(name) }
+        return out
+    }
+
     /// Whether a tool's answer may still be given, right before it's handed over (after the vault's redaction, a
     /// wait): every notebook it tells of is still readable by its asker as things are now.
     static func deliverable(notebooks: Set<String>, privateBooks: Set<String>, asker: String?) -> Bool {
@@ -1014,6 +1022,7 @@ struct NoteCanvas: Codable, Equatable, Sendable {
 /// cover id (never its name, so a renamed notebook keeps them), with its name when they were made (for a rescue's
 /// file name), in order with their own times.
 struct CanvasEntry: Codable, Equatable, Sendable {
+    /// Its key: the notebook's cover id, or, while that isn't known, its folder (CanvasQueue.folderKey).
     var coverID: String
     var notebook: String
     var edits: [NoteCanvas.Stamped]
@@ -1025,6 +1034,18 @@ enum CanvasQueue {
     /// Whether a canvas entry's notebook is gone, to be rescued: only when no notebook's cover has its id and the
     /// notes' folder was read completely (no cover still downloading or unreadable, which could be it).
     static func gone(found: Bool, complete: Bool) -> Bool { !found && complete }
+
+    /// A notebook's folder as a canvas key (its volume and inode): while its cover's id isn't known.
+    static func folderKey(_ instance: String) -> String { "folder:" + instance }
+    static func isFolderKey(_ key: String) -> Bool { key.hasPrefix("folder:") }
+
+    /// Where a canvas entry goes now: by its cover id, or (a folder key) the one notebook that is that folder.
+    static func notebook(key: String, covers: [(id: String, notebook: String)], folders: [(instance: String, notebook: String)]) -> String? {
+        guard isFolderKey(key) else { return notebook(coverID: key, covers: covers) }
+        let instance = String(key.dropFirst("folder:".count))
+        let found = folders.filter { !instance.isEmpty && $0.instance == instance }
+        return found.count == 1 ? found[0].notebook : nil
+    }
 
     /// Where a canvas entry goes now: the one notebook whose cover has its id (a cover's conflict copies are in one
     /// notebook), else nil: the notebook is gone and its edits are rescued.
@@ -1097,6 +1118,26 @@ enum NoteDrop {
             case .text(let text): return text
             }
         }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// A picture for a Mail draft: its file in the note's folder, else the bytes Petal holds for it (staged in a
+    /// temporary file), else missing.
+    enum Attachment: Equatable { case file, stage, missing }
+
+    static func attachment(onDisk: Bool, held: Bool) -> Attachment { onDisk ? .file : held ? .stage : .missing }
+
+    /// Held bytes written to a file of their own in `folder` (made for this draft), by the picture's name only.
+    static func stage(_ data: Data, name: String, in folder: URL) -> URL? {
+        let safe = (name as NSString).lastPathComponent
+        guard !safe.isEmpty, safe != ".", safe != "..", !safe.contains("/") else { return nil }
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appending(path: safe)
+        return (try? data.write(to: url, options: .withoutOverwriting)) != nil ? url : nil
+    }
+
+    /// What the person is told when pictures couldn't go along.
+    static func missingWords(_ count: Int) -> String? {
+        count == 0 ? nil : count == 1 ? "1 picture couldn't be attached." : "\(count) pictures couldn't be attached."
     }
 
     /// A note with two versions or more (a conflict not kept yet) isn't used anywhere until one is kept: which

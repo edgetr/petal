@@ -49,22 +49,55 @@ extension NoteDesk {
     }
 
     /// A new message in Mail with the note's words and pictures, left for the person to send (or not).
-    private func mail(_ paper: PaperNote, title: String, text: String) {
+    /// A new message in Mail with the note's words and pictures, left for the person to send (or not). What's typed
+    /// is saved first, and the note's picture work (bytes still being saved) is waited for, a few seconds at most; a
+    /// picture still not in its folder goes from the bytes Petal holds, staged in a temporary folder Petal removes
+    /// later; one not available at all is said ("1 picture couldn't be attached").
+    private func mail(_ paper: PaperNote, title: String, text: String, tries: Int = 15) {
+        if store.picturesPending(paper.key), tries > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                MainActor.assumeIsolated {
+                    guard let now = self.store.paper(paper.key) else { return }
+                    self.mail(now, title: now.file.title, text: NoteDrop.plain(now.file.body), tries: tries - 1)
+                }
+            }
+            return
+        }
         let links = NoteBlock.blocks(paper.file.body).compactMap { block -> String? in if case .image(let path, _) = block { path } else { nil } }
+        let held = Dictionary(links.compactMap { link in
+            let name = (link as NSString).lastPathComponent
+            return store.heldPicture(paper.noteID, name).map { (name, $0) }
+        }, uniquingKeysWith: { a, _ in a })
         let folder = paper.url.deletingLastPathComponent(), root = store.root
         // Where its pictures are, found off the main thread (the disk, and iCloud may bring them down first).
         NoteStore.io.async {
-            // Only pictures that are documents, as they really are (NoteTasks' rule): nothing else goes along.
-            let files = links.compactMap { NoteStore.pictureFile($0, noteFolder: folder, root: root) }
-                .filter { FileManager.default.fileExists(atPath: $0.path) }
-                .map(NoteTasks.decide).filter { $0.1 == .open }.map(\.0)
+            let stage = FileManager.default.temporaryDirectory.appending(path: "Petal Mail").appending(path: UUID().uuidString)
+            var files: [URL] = []
+            var missing = 0
+            for link in links {
+                let name = (link as NSString).lastPathComponent
+                let onDisk = NoteStore.pictureFile(link, noteFolder: folder, root: root).flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+                switch NoteDrop.attachment(onDisk: onDisk != nil, held: held[name] != nil) {
+                case .file:
+                    // Only pictures that are documents, as they really are (NoteTasks' rule).
+                    if let onDisk, case (let url, .open) = NoteTasks.decide(onDisk) { files.append(url) } else { missing += 1 }
+                case .stage:
+                    if let staged = NoteDrop.stage(held[name]!, name: name, in: stage), case (let url, .open) = NoteTasks.decide(staged) { files.append(url) }
+                    else { missing += 1 }
+                case .missing:
+                    missing += 1
+                }
+            }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    // The staged copies go once Mail has had time to take them in.
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 600) { try? FileManager.default.removeItem(at: stage) }
                     guard let service = NSSharingService(named: .composeEmail) else { return self.clipboard(title: title, text: text, bundle: "com.apple.mail") }
                     service.subject = title
                     let items: [Any] = [text as NSString] + files.map { $0 as NSURL }
                     guard service.canPerform(withItems: items) else { return self.clipboard(title: title, text: text, bundle: "com.apple.mail") }
                     service.perform(withItems: items)
+                    if let words = NoteDrop.missingWords(missing) { self.tell(words) }
                 }
             }
         }

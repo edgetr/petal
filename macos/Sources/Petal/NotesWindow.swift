@@ -94,6 +94,8 @@ final class NotesModel {
 
     /// One change to the canvas, made on its file as it is then (NoteStore.editCanvas); shown at once.
     func edit(_ notebook: String, _ edit: NoteCanvas.Edit) {
+        // A notebook not here yet (its folder not read): nothing changes on screen that couldn't be kept.
+        guard store.canvasEditable(notebook) else { return desk.tell("Waiting for \(notebook) to download: its canvas can be changed once it's here.") }
         if let current = canvas, NoteLibrary.same(current.notebook, notebook), let layout = current.layout {
             canvas = (notebook, layout.applying(edit))
         }

@@ -2460,7 +2460,8 @@ final class NoteDesk {
     /// Whether a paper's notebook is Private.
     func isPrivate(_ key: String) -> Bool {
         guard let paper = store.paper(key) else { return false }
-        return store.notebook(paper.notebook)?.isPrivate == true
+        // Its notebook's privacy as the store counts it: a notebook the latest read didn't find is unknown, so Private.
+        return store.privateBooks.contains { NoteLibrary.same($0, paper.notebook) }
     }
 
     static func swatch(_ color: NSColor) -> NSImage {

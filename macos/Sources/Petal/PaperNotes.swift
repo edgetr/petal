@@ -462,25 +462,31 @@ final class NoteStore {
         }
         let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey, .ubiquitousItemDownloadingStatusKey,
                                       .ubiquitousItemHasUnresolvedConflictsKey, .isUbiquitousItemKey]
-        let folders = ((try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? [])
+        // Complete only when every listing and every file's details were read: a folder that couldn't be listed, or an
+        // entry whose details couldn't be read, is never taken for an empty one (NoteShelf.readComplete).
+        var complete = true
+        let listed = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])
+        if listed == nil { complete = false }
+        let folders = (listed ?? [])
             .filter { url in
-                let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+                guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { complete = false; return false }
                 // Petal's pictures (NoteShelf.picturesRoot) are no notebook.
-                return values?.isDirectory == true && values?.isSymbolicLink != true
+                return values.isDirectory == true && values.isSymbolicLink != true
                     && url.lastPathComponent.compare(NoteShelf.picturesRoot, options: .caseInsensitive) != .orderedSame
             }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         var notes: [PaperNote] = []
         var notebooks: [Notebook] = []
-        var complete = true
         for folder in folders {
             let name = folder.lastPathComponent
-            let files = ((try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])) ?? [])
-                .filter { $0.pathExtension.lowercased() == "md" }
+            let inFolder = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])
+            if inFolder == nil { complete = false }
+            let files = (inFolder ?? []).filter { $0.pathExtension.lowercased() == "md" }
             var here: [PaperNote] = []
             var coverVersionUnread = false
             for url in files {
-                guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isSymbolicLink != true else { continue }
+                guard let values = try? url.resourceValues(forKeys: Set(keys)) else { complete = false; continue }
+                guard values.isSymbolicLink != true else { continue }
                 if values.isUbiquitousItem == true, values.ubiquitousItemDownloadingStatus == .notDownloaded {
                     try? fm.startDownloadingUbiquitousItem(at: url)
                     complete = false
@@ -1255,6 +1261,12 @@ final class NoteStore {
     /// Whether a picture's recovery bytes are still kept for a note (for checks).
     func keepsBytes(_ noteID: String, _ name: String) -> Bool { pendingPictures[noteID]?[name] != nil }
 
+    /// A picture's bytes Petal still holds (not stored in its folder yet, or set aside after a failed save).
+    func heldPicture(_ noteID: String, _ name: String) -> Data? {
+        if let data = pendingPictures[noteID]?[name] { return data }
+        return notes.filter { $0.noteID == noteID }.lazy.compactMap { self.pictureTrouble[$0.key]?.first { $0.name == name }?.data }.first
+    }
+
     /// Pictures set aside on a paper (their bytes couldn't be written): said with Try again and Remove.
     func setAside(_ key: String, _ pictures: [NotePictureBytes]) { pictureTrouble[key, default: []] += pictures }
 
@@ -2028,7 +2040,11 @@ final class NoteStore {
 
 extension NoteStore {
     /// The Private notebooks' names.
-    var privateBooks: Set<String> { Set(notebooks.filter(\.isPrivate).map(\.name)) }
+    /// The Private notebooks' names, and every notebook a note held here is in that the latest read didn't find
+    /// (a note kept while it's open or being written, its notebook gone or not read): unknown, so Private.
+    var privateBooks: Set<String> {
+        NotePrivacy.privateBooks(notebooks: notebooks.map { ($0.name, $0.isPrivate) }, held: notes.map(\.notebook))
+    }
 
     /// A notebook's notes busy now (a write, a move, pictures, a paste on the way): a rename or trash waits for them.
     func notebookBusy(_ name: String) -> Bool {
@@ -2149,6 +2165,24 @@ extension NoteStore {
     }
 
     /// The notebook whose cover has `id` now (followed through renames), or nil when it's gone.
+    /// The key a notebook's canvas edits are kept by: its cover's id once it has one, else its folder itself
+    /// (`folder:` and its volume and inode); nil when neither is known yet (its folder not read).
+    func canvasKey(_ notebook: String) -> String? {
+        if let id = coverID(notebook) { return id }
+        guard let book = self.notebook(notebook), !book.instance.isEmpty else { return nil }
+        return CanvasQueue.folderKey(book.instance)
+    }
+
+    /// The notebook a canvas key names now: by its cover's id, or its folder (followed through renames), or nil.
+    func notebook(canvasKey key: String) -> Notebook? {
+        CanvasQueue.notebook(key: key, covers: coverTargetsForCanvas, folders: notebooks.map { (instance: $0.instance, notebook: $0.name) })
+            .flatMap { notebook($0) }
+    }
+
+    private var coverTargetsForCanvas: [(id: String, notebook: String)] {
+        notes.filter { $0.file.cover && $0.version == nil }.map { (id: $0.noteID, notebook: $0.notebook) }
+    }
+
     func notebook(coverID id: String) -> Notebook? {
         let covers = notes.filter { $0.file.cover && $0.version == nil }.map { (id: $0.noteID, notebook: $0.notebook) }
         return CanvasQueue.notebook(coverID: id, covers: covers).flatMap { notebook($0) }
@@ -2160,11 +2194,11 @@ extension NoteStore {
     func canvas(_ notebook: String, _ done: @escaping @MainActor (NoteCanvas?) -> Void) {
         guard let book = self.notebook(notebook) else { return done(NoteCanvas()) }
         let file = book.folder.appending(path: Self.canvasName), root = self.root
-        let id = coverID(book.name)
+        let name = book.name
         Self.io.async {
             let read = Self.readCanvas(file, root: root)
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { done(read.map { $0.applyingMerged(id.flatMap { self.canvasWaiting[$0]?.edits } ?? []) }) }
+                MainActor.assumeIsolated { done(read.map { $0.applyingMerged(self.canvasPending(name)) }) }
             }
         }
     }
@@ -2177,18 +2211,14 @@ extension NoteStore {
     /// A notebook whose cover has no id of its own yet gets one first. `done`: the canvas once saved.
     func editCanvas(_ notebook: String, _ edit: NoteCanvas.Edit, then done: @escaping @MainActor (NoteCanvas?) -> Void = { _ in }) {
         guard !switching, !draining, let book = self.notebook(notebook) else { return done(nil) }
-        let stamped = NoteCanvas.Stamped(edit)
-        guard let id = coverID(book.name) else {
-            // Its cover's id first (written through the cover's session, or a cover made), then the edit, as old as it is.
-            return withCoverID(book.name) { [weak self] id in
-                guard let self, let id else {
-                    self?.onProblem("Petal couldn't keep that change to \(book.name)'s canvas: its cover can't be written right now. Try again in a moment.")
-                    return done(nil)
-                }
-                self.queueCanvas(id, notebook: book.name, stamped, done)
-            }
+        // Journaled at once, by its cover's id or, while that isn't known (a cover still downloading, or none yet), by
+        // its folder; re-keyed by cover id once it is (`rekeyCanvas`). Only a notebook whose folder isn't read yet
+        // can't take edits: the canvas waits for it (`canvasEditable`), and nothing shown is left unjournaled.
+        guard let key = canvasKey(book.name) else {
+            onProblem("Waiting for \(book.name) to download: its canvas can be changed once it's here.")
+            return done(nil)
         }
-        queueCanvas(id, notebook: book.name, stamped, done)
+        queueCanvas(key, notebook: book.name, NoteCanvas.Stamped(edit), done)
     }
 
     private func queueCanvas(_ id: String, notebook: String, _ stamped: NoteCanvas.Stamped, _ done: @escaping @MainActor (NoteCanvas?) -> Void) {
@@ -2208,33 +2238,36 @@ extension NoteStore {
     }
 
     /// The edits of a notebook's canvas not saved yet.
-    func canvasPending(_ notebook: String) -> [NoteCanvas.Stamped] { coverID(notebook).flatMap { canvasWaiting[$0]?.edits } ?? [] }
-
-    /// A notebook's cover with an id of its own: its id written through the cover's session, or, with no cover, one
-    /// made. nil when that can't be done now.
-    private func withCoverID(_ notebook: String, then: @escaping @MainActor (String?) -> Void) {
-        guard let book = self.notebook(notebook) else { return then(nil) }
-        if let key = book.cover, paper(key) != nil {
-            ensureID(key) { id in then(id.flatMap { NoteShelf.needsID($0) ? nil : $0 }) }
-            return
-        }
-        ensureCover(book.name)
-        waitForCover(book.name, tries: 25, then)
+    func canvasPending(_ notebook: String) -> [NoteCanvas.Stamped] {
+        guard let book = self.notebook(notebook) else { return [] }
+        let keys = [coverID(book.name), book.instance.isEmpty ? nil : CanvasQueue.folderKey(book.instance)].compactMap { $0 }
+        return keys.flatMap { canvasWaiting[$0]?.edits ?? [] }
     }
 
-    /// `then` with the notebook's cover id once its cover has one (looked at again every 0.2 s for up to five
-    /// seconds, never waited on); nil when it still has none by then.
-    private func waitForCover(_ notebook: String, tries: Int, _ then: @escaping @MainActor (String?) -> Void) {
-        if let id = coverID(notebook) { return then(id) }
-        guard tries > 0 else { return then(nil) }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            MainActor.assumeIsolated { self.waitForCover(notebook, tries: tries - 1, then) }
+    /// Whether a notebook's canvas can take an edit now (its cover id or folder known), else it says it's waiting.
+    func canvasEditable(_ notebook: String) -> Bool { canvasKey(notebook) != nil }
+
+    /// Edits kept by a notebook's folder whose cover now has an id: moved to the cover id's entry, journaled there
+    /// first, then out of the folder's (never while a write of them is under way).
+    private func rekeyCanvas() {
+        for (key, entry) in canvasWaiting where CanvasQueue.isFolderKey(key) && !canvasWriting.contains(key) {
+            guard let book = notebook(canvasKey: key), let id = coverID(book.name) else { continue }
+            var target = canvasWaiting[id] ?? CanvasEntry(coverID: id, notebook: book.name, edits: [])
+            target.edits += entry.edits.filter { edit in !target.edits.contains { $0.id == edit.id } }
+            canvasWaiting[id] = target
+            canvasWaiting[key] = nil
+            canvasDone[id, default: []] += canvasDone.removeValue(forKey: key) ?? []
+            let moved = Set(entry.edits.map(\.id))
+            NoteJournal.queue.async {
+                NoteJournal.keepCanvas(target)
+                NoteJournal.ackCanvas(key, wrote: moved)
+            }
         }
     }
 
     private func pumpCanvas(_ id: String) {
         guard !canvasWriting.contains(id), !switching, !draining, let entry = canvasWaiting[id], !entry.edits.isEmpty, loaded else { return }
-        guard let book = notebook(coverID: id) else {
+        guard let book = notebook(canvasKey: id) else {
             // Not found while the folder isn't read completely (a cover still downloading could be it): it waits for
             // the next read.
             guard CanvasQueue.gone(found: false, complete: readComplete) else { return }
@@ -2298,7 +2331,10 @@ extension NoteStore {
     }
 
     /// Edits waiting, after a read of the folder: each tried again where its notebook is now (renamed, gone).
-    func pumpAllCanvas() { for id in canvasWaiting.keys { pumpCanvas(id) } }
+    func pumpAllCanvas() {
+        rekeyCanvas()
+        for id in canvasWaiting.keys { pumpCanvas(id) }
+    }
 
     /// A drain (quit, or a switch of folder): the edits waiting are already in the journal, on this Mac's own disk;
     /// nothing is written to the notes' folder here (quit never waits on iCloud for them). The next launch puts them

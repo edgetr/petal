@@ -125,6 +125,8 @@ struct NoteStoreCheck {
         coverConflict(root: root)
         canvasWaitsForCovers(root: root)
         coverRoots(top: root.deletingLastPathComponent())
+        listingErrors(root: root)
+        canvasByFolder(root: root)
         notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -1326,6 +1328,63 @@ struct NoteStoreCheck {
         }
         expect(text(coverAURL).map { NoteContract.isPrivate(NoteFile.parse($0, fallbackID: "", fallbackDate: Date())) } == true, "back in its own folder, it lands there")
         for r in [rootA, rootB] { try? fm.removeItem(at: r) }
+    }
+
+    /// A folder that can't be listed is never taken for an empty one: the read isn't complete.
+    static func listingErrors(root: URL) {
+        let fm = FileManager.default
+        let locked = root.appending(path: "Unlistable")
+        try? fm.createDirectory(at: locked, withIntermediateDirectories: true)
+        _ = NoteStore.create("a note", at: locked.appending(path: "One.md"), root: root)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        let read = NoteStore.read(root)
+        expect(!read.complete, "a notebook folder that can't be listed: the read isn't complete")
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+        expect(NoteStore.read(root).notes.contains { $0.notebook == "Unlistable" }, "once it can be, its notes are there")
+        try? fm.removeItem(at: locked)
+        let gone = root.deletingLastPathComponent().appending(path: "No root \(UUID().uuidString)/Inner")
+        try? fm.createDirectory(at: gone, withIntermediateDirectories: true)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: gone.path)
+        expect(!NoteStore.read(gone).complete, "a notes folder that can't be listed: not complete")
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: gone.path)
+        try? fm.removeItem(at: gone.deletingLastPathComponent())
+    }
+
+    /// A canvas edit made while its notebook's cover id isn't known (its cover can't be read yet) is journaled at once
+    /// by the notebook's folder, then re-keyed by the cover id once it's known, and lands.
+    @MainActor static func canvasByFolder(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Downloading")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var cover = NoteFile(id: "COVER-DL", body: "# About this notebook")
+        cover.cover = true
+        let coverURL = folder.appending(path: NoteShelf.coverName)
+        _ = NoteStore.create(cover.serialized(), at: coverURL, root: root)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: coverURL.path)
+        let canvasFile = folder.appending(path: NoteStore.canvasName)
+        try? fm.createDirectory(at: canvasFile, withIntermediateDirectories: true)   // writes fail for now
+        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        store.reload()
+        settle(1)
+        let instance = store.notebook("Downloading")?.instance ?? ""
+        expect(store.coverID("Downloading") == nil && !instance.isEmpty && store.canvasEditable("Downloading"), "a cover not read: no cover id, but its folder is known")
+        store.editCanvas("Downloading", .move("n1", .init(x: 7, y: 7))) { _ in }
+        NoteJournal.queue.sync {}
+        let byFolder = NoteJournal.readCanvas(NoteJournal.canvasFile(CanvasQueue.folderKey(instance)))
+        expect(byFolder?.edits.count == 1, "journaled at once by the notebook's folder")
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: coverURL.path)
+        store.reload()
+        settle(1.5)
+        NoteJournal.queue.sync {}
+        expect(store.coverID("Downloading") == "COVER-DL" && NoteJournal.readCanvas(NoteJournal.canvasFile("COVER-DL"))?.edits.count == 1
+               && !fm.fileExists(atPath: NoteJournal.canvasFile(CanvasQueue.folderKey(instance)).path), "re-keyed by its cover id once known, out of the folder's entry")
+        try? fm.removeItem(at: canvasFile)
+        let until = Date().addingTimeInterval(10)
+        while NoteCanvas.decode(text(canvasFile))?.notes["n1"] == nil && Date() < until { settle(0.2) }
+        NoteJournal.queue.sync {}
+        expect(NoteCanvas.decode(text(canvasFile))?.notes["n1"]?.x == 7 && !fm.fileExists(atPath: NoteJournal.canvasFile("COVER-DL").path), "and lands")
+        try? fm.removeItem(at: folder)
     }
 
     /// Making a notebook Private: shown at once, and written through its cover's session, also when it has no cover

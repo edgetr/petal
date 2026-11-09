@@ -375,6 +375,27 @@ struct NoteLibraryCheck {
         expect(coverless.target(root: "/A", notebooks: [("Bare now", "cov-new", "1:300")]) == "Bare now", "no cover id: its folder")
         expect(coverless.target(root: "/A", notebooks: [("Bare", "", "1:301")]) == nil, "a folder of the same name that isn't it: never")
         expect(bound.key != CoverFields(notebook: "Same", root: "/B", coverID: "cov-1").key, "kept per root")
+        // A note held in memory whose notebook the latest read didn't find: unknown, so Private, never readable.
+        let counted = NotePrivacy.privateBooks(notebooks: [("Health", true), ("Garden", false)], held: ["Garden", "Gone", "health"])
+        expect(counted.contains("Gone") && counted.contains("Health") && !counted.contains("Garden"), "a held note's missing notebook counts as Private", "\(counted)")
+        expect(!NotePrivacy.readable(notebook: "Gone", privateBooks: counted, asker: nil), "and its notes aren't readable from outside it")
+        // Canvas keys: by cover id, else the notebook's folder; a folder key follows the folder, never a name.
+        expect(CanvasQueue.notebook(key: CanvasQueue.folderKey("1:42"), covers: [], folders: [("1:42", "Trip renamed"), ("1:43", "Trip")]) == "Trip renamed"
+               && CanvasQueue.notebook(key: CanvasQueue.folderKey("1:44"), covers: [], folders: [("1:42", "Trip")]) == nil
+               && CanvasQueue.notebook(key: "cov", covers: [("cov", "Work")], folders: []) == "Work",
+               "a canvas entry's notebook by its cover id, or its folder while the cover id isn't known")
+        // Mail: a picture's file, else its held bytes staged, else missing and said.
+        expect(NoteDrop.attachment(onDisk: true, held: true) == .file && NoteDrop.attachment(onDisk: false, held: true) == .stage
+               && NoteDrop.attachment(onDisk: false, held: false) == .missing, "a picture for Mail: its file, its held bytes, or missing")
+        let stageFolder = FileManager.default.temporaryDirectory.appending(path: "petal-mail-check-\(UUID().uuidString)")
+        let staged = NoteDrop.stage(Data([0x89, 0x50, 0x4e, 0x47]), name: "shot.png", in: stageFolder)
+        expect(staged.map { (try? Data(contentsOf: $0)) == Data([0x89, 0x50, 0x4e, 0x47]) && $0.deletingLastPathComponent().standardizedFileURL.path == stageFolder.standardizedFileURL.path } == true,
+               "held bytes staged in a temporary file of their own")
+        expect(NoteDrop.stage(Data([1]), name: "..", in: stageFolder) == nil && NoteDrop.stage(Data([1]), name: "shot.png", in: stageFolder) == nil,
+               "never a name that leaves the folder, never over a file")
+        try? FileManager.default.removeItem(at: stageFolder)
+        expect(NoteDrop.missingWords(0) == nil && NoteDrop.missingWords(1) == "1 picture couldn't be attached." && NoteDrop.missingWords(2) == "2 pictures couldn't be attached.",
+               "what's said when pictures couldn't go along")
         expect(!CanvasQueue.gone(found: false, complete: false) && CanvasQueue.gone(found: false, complete: true) && !CanvasQueue.gone(found: true, complete: true),
                "a canvas entry is rescued only when its notebook isn't found in a folder read completely")
 

@@ -431,7 +431,7 @@ extension NoteJournal {
     /// One entry put somewhere safe: its notebook's canvas, or (gone) "Unsaved notes". True once written. While the
     /// folder wasn't read completely (a cover still downloading, which could be its notebook's), it waits.
     nonisolated static func landCanvas(_ entry: CanvasEntry, covers: [(id: String, notebook: String)], notebooks: [Notebook], complete: Bool, root: URL) -> Bool {
-        let name = CanvasQueue.notebook(coverID: entry.coverID, covers: covers)
+        let name = CanvasQueue.notebook(key: entry.coverID, covers: covers, folders: notebooks.map { (instance: $0.instance, notebook: $0.name) })
         if let name, let book = notebooks.first(where: { $0.name == name }) {
             return NoteStore.writeCanvas(entry.edits, to: book.folder.appending(path: NoteStore.canvasName), root: root) != nil
         }
