@@ -97,7 +97,9 @@ Use, in this order:
   wait for the user to pick one. Petal keeps it; leave it alone.
 - Petal Notes (macOS): `iCloud Drive/Petal Notes/<notebook>/<note>.md` (or `~/Library/Application Support/Petal/Notes`,
   or `notesFolder`). Each file starts with a small front matter (`id`, `created`, `modified`, `places`); each
-  notebook's `About this notebook.md` is its cover and holds its `color` ("accent" is the Mac's accent color), and
+  notebook's `About this notebook.md` is its cover (only it, its iCloud versions and its conflict copies, the files
+  named "About this notebook…md"; `cover: true` in any other note counts for nothing) and holds its `color` ("accent"
+  is the Mac's accent color), and
   may say `private: true` (a Private notebook) and `view: canvas` (shown as a canvas in the Petal Notes window); what
   Petal remembers there goes under its `## Petal remembers` heading. A canvas's layout is the notebook's
   `.canvas.json` (each note's spot by its id, areas, arrows, words, zoom): change it in the window, not by hand.

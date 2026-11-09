@@ -173,8 +173,12 @@ struct NoteLibraryCheck {
         expect(PersonRead.person(app: "com.apple.Safari", appName: "Safari", title: "Alex", headings: []) == nil, "only chat apps")
         expect(PersonRead.person(app: "com.apple.mail", appName: "Mail", title: "Inbox – 12 messages", headings: ["Alex Kim"]) == "Alex Kim",
                "Mail: the message's header, never the mailbox's title")
-        expect(PersonRead.contact("alex kim", contacts: [("c1", "Alex Kim"), ("c2", "Sam")]) == "c1", "a vault contact by name")
-        expect(PersonRead.contact("Alex", contacts: [("c1", "Alex"), ("c2", "alex")]) == nil, "two contacts of one name: neither")
+        // A vault contact only by the address the chat shows, never by a name, however unique.
+        let book: [(id: String, addresses: [String])] = [("c1", ["Alex.Kim@Example.com", "+90 555 111 22 33"]), ("c2", ["sam@example.com"]), ("c3", ["shared@example.com"]), ("c4", ["shared@example.com"])]
+        expect(PersonRead.contact(handle: "alex.kim@example.com", contacts: book) == "c1" && PersonRead.contact(handle: "+905551112233", contacts: book) == "c1",
+               "a contact by the chat's address (email in any case, phone by its digits)")
+        expect(PersonRead.contact(handle: "", contacts: book) == nil && PersonRead.contact(handle: "shared@example.com", contacts: book) == nil,
+               "no address, or one two contacts share: no contact")
         var personPlace = NoteStick(kind: .person)
         personPlace.title = "Alex Kim"
         personPlace.contact = "c1"
@@ -196,13 +200,11 @@ struct NoteLibraryCheck {
         expect(NoteMatch.best([personPlace], chat) == nil, "no one person in front: no note")
 
         // The person-identifier rule: a name alone never sticks a note to a person, nor finds one.
-        let twoAlexes: [(id: String, name: String)] = [("c1", "Alex"), ("c2", "alex")]
-        expect(PersonRead.identity(name: "Alex", handle: "", contacts: twoAlexes) == nil, "two contacts of one name and no address: no person place")
-        expect(PersonRead.identity(name: "Alex", handle: "", contacts: []) == nil, "a name alone: no person place (the window instead)")
-        let byHandle = PersonRead.identity(name: "Alex", handle: "alex@example.com", contacts: twoAlexes)
-        expect(byHandle?.contact == "" && byHandle?.handle == "alex@example.com", "two contacts of one name: the chat's address tells them apart")
-        let byContact = PersonRead.identity(name: "Sam", handle: "", contacts: [("c3", "Sam")])
-        expect(byContact?.contact == "c3", "exactly one contact of that name: their contact")
+        expect(PersonRead.identity(name: "Sam", handle: "", contacts: book) == nil, "a name alone, even one unique in the vault: no person place (the window instead)")
+        let byHandle = PersonRead.identity(name: "Alex", handle: "Alex.Kim@example.com", contacts: book)
+        expect(byHandle?.contact == "c1" && byHandle?.handle == "alex.kim@example.com", "the chat's address: the place, and its contact when one has it")
+        let unknownAddress = PersonRead.identity(name: "Alex", handle: "other.alex@example.com", contacts: book)
+        expect(unknownAddress?.contact == "" && unknownAddress?.handle == "other.alex@example.com", "an address no contact has: the place by address alone")
         var nameOnly = NoteStick(kind: .person)
         nameOnly.title = "Alex"
         var anotherAlex = NoteScene(app: "com.apple.MobileSMS", pid: 4, window: 2)
@@ -351,14 +353,39 @@ struct NoteLibraryCheck {
         expect(NoteLibrary.privateNotebook(covers: [], unread: true) && !NoteLibrary.privateNotebook(covers: [publicCover], unread: false),
                "unknown counts as Private; one public cover is public")
         expect(NoteLibrary.isCover(fileName: NoteShelf.coverName, file: NoteFile(id: "file:x", body: "hand written")), "a cover version without front matter is the cover")
+        // Only cover-named files are covers: another note's `cover: true` counts for nothing, and is kept as written.
+        expect(NoteLibrary.isCoverName("About this notebook (conflicted copy).md") && NoteLibrary.isCoverName("about this notebook 2.md")
+               && !NoteLibrary.isCoverName("Trip.md") && !NoteLibrary.isCoverName("About this notebook.txt"), "the cover, its conflict copies; nothing else")
+        var stray = NoteFile.parse("---\nid: S1\ncover: true\nprivate: true\n---\nnot a cover", fallbackID: "", fallbackDate: Date())
+        NoteLibrary.coverFlag(&stray, fileName: "Trip.md")
+        expect(!stray.cover && stray.serialized().contains("cover: true"), "a stray cover: true isn't a cover, and stays in its file")
+        var coverNamed = NoteFile(id: "C9", body: "")
+        NoteLibrary.coverFlag(&coverNamed, fileName: NoteShelf.coverName)
+        expect(coverNamed.cover, "the cover file is the cover, front matter or not")
+        // Cover changes recovered: each field's newest value, whichever copy it came from.
+        var older = CoverFields(notebook: "G", root: "/r", coverID: "c")
+        older.set("private", "true", at: 100)
+        older.set("color", "#111111", at: 300)
+        var newer = CoverFields(notebook: "G", root: "/r", coverID: "c")
+        newer.set("private", "", at: 200)
+        newer.set("view", "canvas", at: 50)
+        let mergedFields = older.merged(with: newer)
+        expect(mergedFields.fields == ["private": "", "color": "#111111", "view": "canvas"], "newest per field across copies", "\(mergedFields.fields)")
+        expect(newer.merged(with: older).fields == mergedFields.fields, "whichever copy comes first")
+        let roundTrip = try? JSONDecoder().decode(CoverFields.self, from: JSONEncoder().encode(mergedFields))
+        expect(roundTrip?.times["private"] == 200, "each field's time is journaled with it")
+        // An area moved with its notes: every note by its own id; one that can't get one, and the move is refused.
+        expect(CanvasQueue.groupMove(["a", "file:n.md"], resolved: ["file:n.md": "N1"]) == ["a": "a", "file:n.md": "N1"], "an id-less note moves by the id it was given")
+        expect(CanvasQueue.groupMove(["a", "file:n.md"], resolved: [:]) == nil && CanvasQueue.groupMove(["file:n.md"], resolved: ["file:n.md": "file:n.md"]) == nil,
+               "one without an id: the whole group's move is refused")
         expect(NoteLibrary.coverUnknown(fileThere: true, fileRead: true, versionsUnread: true)
                && NoteLibrary.privateNotebook(covers: [publicCover], unread: NoteLibrary.coverUnknown(fileThere: true, fileRead: true, versionsUnread: true)),
                "a cover version not read: unknown, so Private, even when the file read says public")
         expect(!NoteLibrary.coverUnknown(fileThere: true, fileRead: true, versionsUnread: false) && NoteLibrary.coverUnknown(fileThere: true, fileRead: false, versionsUnread: false)
                && !NoteLibrary.coverUnknown(fileThere: false, fileRead: false, versionsUnread: false), "known only once the file and every version are read")
 
-        expect(NoteLibrary.notebookUnknown(listed: false, unread: 0) && NoteLibrary.notebookUnknown(listed: true, unread: 1)
-               && !NoteLibrary.notebookUnknown(listed: true, unread: 0), "a notebook is known only once listed and every file in it read")
+        expect(NoteLibrary.notebookUnknown(listed: false, unreadCovers: 0) && NoteLibrary.notebookUnknown(listed: true, unreadCovers: 1)
+               && !NoteLibrary.notebookUnknown(listed: true, unreadCovers: 0), "a notebook is known only once listed and every cover file in it read")
         // Mail's staging folders: swept at launch once older than an hour.
         let launch = Date()
         expect(NoteDrop.staleStaging([("old", launch.addingTimeInterval(-7200)), ("new", launch.addingTimeInterval(-60))], now: launch) == ["old"],

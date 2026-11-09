@@ -330,17 +330,33 @@ enum NoteLibrary {
 // MARK: - Private notebooks
 
 extension NoteLibrary {
-    /// A notebook's cover: "About this notebook.md" (any version of it), front matter or not, or a note that says it.
-    static func isCover(fileName: String, file: NoteFile) -> Bool { file.cover || fileName == NoteShelf.coverName }
+    /// A notebook's cover, by its file's name only: "About this notebook.md", its iCloud versions (the same name) and
+    /// its conflict copies (any name starting "About this notebook" and ending ".md"). `cover: true` in any other note
+    /// counts for nothing: not its privacy, color or view.
+    static func isCoverName(_ fileName: String) -> Bool {
+        let name = fileName.lowercased()
+        return name.hasPrefix("about this notebook") && name.hasSuffix(".md")
+    }
+
+    static func isCover(fileName: String, file: NoteFile) -> Bool { isCoverName(fileName) }
+
+    /// A note as read: a cover by its name only. Another note's own `cover: true` is kept as written (as a key this
+    /// Petal doesn't use), never taken for a cover.
+    static func coverFlag(_ file: inout NoteFile, fileName: String) {
+        let named = isCoverName(fileName)
+        if file.cover && !named { file.extra.append((key: "cover", lines: ["cover: true"])) }
+        file.cover = named
+    }
 
     /// Whether a notebook's cover is unknown: its file is there and wasn't read (not downloaded, unreadable), or a
     /// version of it wasn't. Unknown counts as Private.
     static func coverUnknown(fileThere: Bool, fileRead: Bool, versionsUnread: Bool) -> Bool { (fileThere && !fileRead) || versionsUnread }
 
-    /// Whether a notebook's privacy is unknown (so Private): its folder couldn't be listed, or any file in it wasn't
-    /// read (a dataless or unreadable file, a version, a conflicted copy: any could be a cover saying Private). Public
-    /// only once every possible cover in it was read and none says so.
-    static func notebookUnknown(listed: Bool, unread: Int) -> Bool { !listed || unread > 0 }
+    /// Whether a notebook's privacy is unknown (so Private): its folder couldn't be listed, or one of its cover files
+    /// (`isCoverName`: the cover, a version or a conflict copy of it) wasn't read (dataless, unreadable, its details
+    /// not read). Other notes still downloading don't count. Public only once every cover file was read and none says
+    /// Private.
+    static func notebookUnknown(listed: Bool, unreadCovers: Int) -> Bool { !listed || unreadCovers > 0 }
 
     /// Whether a notebook is Private, counted across every version of its cover: Private when any says so, or while
     /// its cover is there and not read yet (unknown).
@@ -531,8 +547,38 @@ struct CoverFields: Codable, Equatable, Sendable {
     var folderID = ""
     /// Each field's value ("" takes `private` or `view` off).
     var fields: [String: String] = [:]
+    /// When each field was set (seconds since 1970): copies of one change merge newest per field.
+    var times: [String: Double] = [:]
 
     var isEmpty: Bool { fields.isEmpty }
+
+    enum CodingKeys: String, CodingKey { case notebook, root, coverID, folderID, fields, times }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        notebook = try c.decode(String.self, forKey: .notebook)
+        root = try c.decodeIfPresent(String.self, forKey: .root) ?? ""
+        coverID = try c.decodeIfPresent(String.self, forKey: .coverID) ?? ""
+        folderID = try c.decodeIfPresent(String.self, forKey: .folderID) ?? ""
+        fields = try c.decodeIfPresent([String: String].self, forKey: .fields) ?? [:]
+        times = try c.decodeIfPresent([String: Double].self, forKey: .times) ?? [:]
+    }
+
+    /// One field set now (or at `at`).
+    mutating func set(_ field: String, _ value: String, at: Double = Date().timeIntervalSince1970) {
+        fields[field] = value
+        times[field] = at
+    }
+
+    /// Two copies of the waiting changes for one notebook as one: each field's newest value (a tie keeps this one's).
+    func merged(with other: CoverFields) -> CoverFields {
+        var out = self
+        for (field, value) in other.fields where (other.times[field] ?? 0) > (out.times[field] ?? (out.fields[field] == nil ? -1 : 0)) {
+            out.fields[field] = value
+            out.times[field] = other.times[field]
+        }
+        return out
+    }
 
     /// Its key, the same through renames: its root, then its cover id, else its folder.
     var key: String { root + "|" + (coverID.isEmpty ? "folder:" + folderID : coverID) }
@@ -585,7 +631,10 @@ struct CoverFields: Codable, Equatable, Sendable {
     /// After a write of `wrote` landed: the fields still waiting (one changed again meanwhile stays).
     func after(wrote: [String: String]) -> CoverFields {
         var next = self
-        for (field, value) in wrote where next.fields[field] == value { next.fields[field] = nil }
+        for (field, value) in wrote where next.fields[field] == value {
+            next.fields[field] = nil
+            next.times[field] = nil
+        }
         return next
     }
 }
@@ -659,10 +708,21 @@ enum PersonRead {
         return !x.isEmpty && x == y
     }
 
-    /// The vault contact a person is, when exactly one contact has their name (never a guess between two).
-    static func contact(_ person: String, contacts: [(id: String, name: String)]) -> String? {
-        let hits = contacts.filter { same($0.name, person) }
+    /// The vault contact a person is: only by the address the chat shows for them (an email or phone number), and only
+    /// when exactly one contact has it; a name, however unique in the vault, never.
+    static func contact(handle: String, contacts: [(id: String, addresses: [String])]) -> String? {
+        let wanted = normalized(handle)
+        guard !wanted.isEmpty else { return nil }
+        let hits = contacts.filter { $0.addresses.map(normalized).contains(wanted) }
         return hits.count == 1 ? hits[0].id : nil
+    }
+
+    /// An address as compared: an email in lower case, a phone number as its digits (and a leading +).
+    static func normalized(_ address: String) -> String {
+        let text = address.trimmingCharacters(in: .whitespaces)
+        if text.contains("@") { return text.lowercased() }
+        let digits = text.filter { $0.isNumber || $0 == "+" }
+        return digits.filter(\.isNumber).count >= 7 ? digits : ""
     }
 
     /// The chat's own address for the person in front (an email or a phone number) when its header shows exactly
@@ -688,11 +748,10 @@ enum PersonRead {
     /// What a note on the person in front is stuck to: their name with what tells them apart, their vault contact
     /// (exactly one contact of that name) or else the chat's address for them. Nil, and no note on a person, when
     /// there's only a name: two people of one name would share it, so the note goes on the conversation's window.
-    static func identity(name: String, handle: String, contacts: [(id: String, name: String)]) -> (contact: String, handle: String)? {
-        guard !name.isEmpty else { return nil }
-        let contact = self.contact(name, contacts: contacts) ?? ""
-        guard !contact.isEmpty || !handle.isEmpty else { return nil }
-        return (contact, handle)
+    static func identity(name: String, handle: String, contacts: [(id: String, addresses: [String])]) -> (contact: String, handle: String)? {
+        // Only with the chat's own address for them: without one, the note stays on the conversation's window.
+        guard !name.isEmpty, !normalized(handle).isEmpty else { return nil }
+        return (contact(handle: handle, contacts: contacts) ?? "", normalized(handle))
     }
 
     /// Whether a person's note is on the person in front: the same vault contact, or the same address; a name alone
@@ -1036,6 +1095,18 @@ struct CanvasEntry: Codable, Equatable, Sendable {
 /// A notebook's canvas edits not saved yet: kept in memory in order, journaled, written together on the next try,
 /// and kept (never dropped) until a write takes them or, their notebook gone, a rescue does.
 enum CanvasQueue {
+    /// A group of notes moved together (an area and the notes in it): each note's own id for the move, an id-less one by
+    /// the id it was given (`resolved`); nil, and the whole move refused, when any couldn't get one.
+    static func groupMove(_ ids: [String], resolved: [String: String]) -> [String: String]? {
+        var out: [String: String] = [:]
+        for id in ids {
+            if !NoteShelf.needsID(id) { out[id] = id; continue }
+            guard let real = resolved[id], !NoteShelf.needsID(real) else { return nil }
+            out[id] = real
+        }
+        return out
+    }
+
     /// Whether a canvas entry's notebook is gone, to be rescued: only when no notebook's cover has its id and the
     /// notes' folder was read completely (no cover still downloading or unreadable, which could be it).
     static func gone(found: Bool, complete: Bool) -> Bool { !found && complete }

@@ -51,6 +51,8 @@ struct Notebook: Identifiable, Equatable {
     var coverUnread = false
     /// Its folder itself (volume and inode): what a waiting cover change is bound to, never its name.
     var instance = ""
+    /// Its privacy isn't known (its folder couldn't be listed, or a cover file wasn't read): counted Private.
+    var privacyUnknown = false
     var id: String { name }
 }
 
@@ -484,26 +486,27 @@ final class NoteStore {
             let files = (inFolder ?? []).filter { $0.pathExtension.lowercased() == "md" }
             var here: [PaperNote] = []
             var coverVersionUnread = false
-            // Files here that weren't read (any could be a cover: its name, a conflicted copy, a version, a note saying
-            // `cover: true`): while there's one, or the folder couldn't be listed, its privacy is unknown.
-            var unread = inFolder == nil ? 1 : 0
+            // Cover files here that weren't read (`NoteLibrary.isCoverName`: the cover, a conflict copy, a version of it):
+            // while there's one, or the folder couldn't be listed, its privacy is unknown. Other notes don't count.
+            var unreadCovers = 0
             for url in files {
-                guard let values = try? url.resourceValues(forKeys: Set(keys)) else { complete = false; unread += 1; continue }
+                let coverNamed = NoteLibrary.isCoverName(url.lastPathComponent)
+                guard let values = try? url.resourceValues(forKeys: Set(keys)) else { complete = false; if coverNamed { unreadCovers += 1 }; continue }
                 guard values.isSymbolicLink != true else { continue }
                 if values.isUbiquitousItem == true, values.ubiquitousItemDownloadingStatus == .notDownloaded {
                     try? fm.startDownloadingUbiquitousItem(at: url)
                     complete = false
-                    unread += 1
+                    if coverNamed { unreadCovers += 1 }
                     continue
                 }
                 let date = values.contentModificationDate ?? Date()
-                guard let text = coordinatedRead(url) else { complete = false; unread += 1; continue }
+                guard let text = coordinatedRead(url) else { complete = false; if coverNamed { unreadCovers += 1 }; continue }
                 // A file with no id of its own is known by where it is under the notes' folder, never its name alone.
                 let fallback = NoteShelf.fallbackID(relativePath: NoteShelf.relative(url.path, to: root.path) ?? name + "/" + url.lastPathComponent)
                 var paper = PaperNote(file: NoteFile.parse(text, fallbackID: fallback, fallbackDate: date), url: url, notebook: name, revision: text)
-                // "About this notebook.md" is its notebook's cover, front matter or not (the first change to it, through
-                // its session, writes it one).
-                if NoteLibrary.isCover(fileName: url.lastPathComponent, file: paper.file) { paper.file.cover = true }
+                // A cover by its name only (front matter or not); another note's own `cover: true` is kept as written,
+                // never taken for one.
+                NoteLibrary.coverFlag(&paper.file, fileName: url.lastPathComponent)
                 paper.instance = instance(of: url)
                 paper.followed = followBookmarks(&paper.file)
                 here.append(paper)
@@ -512,16 +515,15 @@ final class NoteStore {
                     for version in NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? [] {
                         guard let text = try? String(contentsOf: version.url, encoding: .utf8) else {
                             // A version not read: the notebook's cover (and so its privacy) isn't known until it is.
-                            if url.lastPathComponent == NoteShelf.coverName { coverVersionUnread = true }
+                            if coverNamed { coverVersionUnread = true; unreadCovers += 1 }
                             complete = false
-                            unread += 1
                             continue
                         }
                         var paper = PaperNote(file: NoteFile.parse(text, fallbackID: fallback, fallbackDate: version.modificationDate ?? date), url: url,
                                               notebook: name, revision: text)
                         paper.version = version.url.lastPathComponent
                         // The cover's own versions are the cover too, front matter or not: its privacy counts across all.
-                        if NoteLibrary.isCover(fileName: url.lastPathComponent, file: paper.file) { paper.file.cover = true }
+                        NoteLibrary.coverFlag(&paper.file, fileName: url.lastPathComponent)
                         here.append(paper)
                     }
                 }
@@ -530,18 +532,21 @@ final class NoteStore {
                 if a.file.cover != b.file.cover { return a.file.cover }
                 return a.file.modified > b.file.modified
             }
-            let cover = here.first { $0.file.cover && $0.version == nil } ?? here.first { $0.file.cover }
-            // Private when any version of its cover says so, or while its cover is there but not read yet (not
-            // downloaded, unreadable): never taken for public before Petal knows.
+            let cover = here.first { $0.url.lastPathComponent == NoteShelf.coverName && $0.version == nil }
+                ?? here.first { $0.file.cover && $0.version == nil } ?? here.first { $0.file.cover }
+            // Ready to be written: the cover file itself and every version of it read (its conflicts are the store's
+            // to see). Kept apart from privacy: other notes still downloading never hold a cover's write back.
             let coverFile = folder.appending(path: NoteShelf.coverName)
             let coverUnread = NoteLibrary.coverUnknown(fileThere: fm.fileExists(atPath: coverFile.path),
                                                        fileRead: here.contains { $0.url.lastPathComponent == NoteShelf.coverName && $0.version == nil },
                                                        versionsUnread: coverVersionUnread)
-                || NoteLibrary.notebookUnknown(listed: inFolder != nil, unread: unread)
+            // Privacy unknown (so Private) while the folder couldn't be listed or any cover file wasn't read.
+            let privacyUnknown = coverUnread || NoteLibrary.notebookUnknown(listed: inFolder != nil, unreadCovers: unreadCovers)
             notebooks.append(Notebook(name: name, folder: folder, color: cover?.file.color ?? "", cover: cover?.key,
                                       count: here.filter { !$0.file.cover }.count,
-                                      isPrivate: NoteLibrary.privateNotebook(covers: here.filter { $0.file.cover }.map(\.file), unread: coverUnread),
-                                      view: cover.map { NoteContract.view($0.file) } ?? .grid, coverUnread: coverUnread, instance: instance(of: folder)))
+                                      isPrivate: NoteLibrary.privateNotebook(covers: here.filter { $0.file.cover }.map(\.file), unread: privacyUnknown),
+                                      view: cover.map { NoteContract.view($0.file) } ?? .grid, coverUnread: coverUnread, instance: instance(of: folder),
+                                      privacyUnknown: privacyUnknown))
             notes += here
         }
         return (notes, notebooks, complete)
@@ -1939,7 +1944,7 @@ final class NoteStore {
             return onProblem("Petal couldn't tell which notebook \(name) is on disk yet, so nothing was changed. Try again in a moment.")
         }
         var pending = coverPending[bound.key] ?? bound
-        for (field, value) in fields where CoverFields.names.contains(field) { pending.fields[field] = value }
+        for (field, value) in fields where CoverFields.names.contains(field) { pending.set(field, value) }
         coverPending[bound.key] = pending
         // Journaled on this Mac at once (a quit before it lands loses nothing), and shown at once.
         NoteJournal.queue.async { NoteJournal.keepCover(pending) }
@@ -1999,7 +2004,7 @@ final class NoteStore {
         for pending in coverPending.values {
             guard let name = pending.target(root: root.path, notebooks: targets), let index = notebooks.firstIndex(where: { $0.name == name }) else { continue }
             let book = notebooks[index]
-            let shown = pending.shown(isPrivate: book.isPrivate, unknown: book.coverUnread, color: book.color, view: book.view)
+            let shown = pending.shown(isPrivate: book.isPrivate, unknown: book.privacyUnknown, color: book.color, view: book.view)
             notebooks[index].isPrivate = shown.isPrivate
             notebooks[index].color = shown.color
             notebooks[index].view = shown.view
@@ -2019,12 +2024,13 @@ final class NoteStore {
     @discardableResult
     func recoverCovers(_ entries: [CoverFields]) -> [CoverFields] {
         var out: [CoverFields] = []
+        // Each field's newest value wins, across every recovered copy and this session's own changes.
         for entry in entries where !entry.isEmpty {
-            var pending = coverPending[entry.key] ?? entry
-            for (field, value) in entry.fields where pending.fields[field] == nil { pending.fields[field] = value }
+            let pending = coverPending[entry.key].map { $0.merged(with: entry) } ?? entry
             coverPending[entry.key] = pending
-            out.append(pending)
         }
+        let keys = Set(entries.map(\.key))
+        out = coverPending.filter { keys.contains($0.key) }.map(\.value)
         showCovers()
         if loaded { for key in coverPending.keys { landCover(key) } }
         return out

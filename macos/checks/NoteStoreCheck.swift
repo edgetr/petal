@@ -1222,7 +1222,7 @@ struct NoteStoreCheck {
         expect(left.entries.map(\.notebook) == ["Quit"] && !fm.fileExists(atPath: NoteJournal.coverFolder().path), "at launch the cover fields move aside first")
         let store = NoteStore(root: root)
         let waiting = store.recoverCovers(left.entries)
-        NoteJournal.rejournalCovers(waiting, dropping: left.holding)
+        NoteJournal.rejournalCovers(waiting, sources: left.sources, holding: left.holding)
         expect(fm.fileExists(atPath: NoteJournal.coverFile(pending.key).path) && left.holding.allSatisfy { !fm.fileExists(atPath: $0.path) },
                "journaled again before the moved-aside copy goes")
         store.reload()
@@ -1350,6 +1350,20 @@ struct NoteStoreCheck {
         expect(NoteStore.read(root).notebooks.first { $0.name == "Uncertain" }?.isPrivate == true, "read, the copy says Private: Private")
         try? fm.removeItem(at: copyURL)
         expect(NoteStore.read(root).notebooks.first { $0.name == "Uncertain" }?.isPrivate == false, "every possible cover read and none says so: public")
+        // An unrelated note that can't be read yet (as one still downloading) changes nothing about the notebook's
+        // privacy, nor whether its cover can be written; a note saying `cover: true` that isn't the cover counts for nothing.
+        let other = folder.appending(path: "Unrelated.md")
+        _ = NoteStore.create("hello", at: other, root: root)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: other.path)
+        let withUnread = NoteStore.read(root).notebooks.first { $0.name == "Uncertain" }
+        expect(withUnread?.isPrivate == false && withUnread?.coverUnread == false && withUnread?.privacyUnknown == false,
+               "an unrelated unread note: not Private, and the cover can still be written")
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: other.path)
+        var pretender = NoteFile(id: "PRETEND", body: "not a cover")
+        pretender.cover = true
+        pretender.setScalar("private", "true")
+        _ = NoteStore.create(pretender.serialized(), at: folder.appending(path: "Pretender.md"), root: root)
+        expect(NoteStore.read(root).notebooks.first { $0.name == "Uncertain" }?.isPrivate == false, "another note's `cover: true` and `private: true` count for nothing")
         try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: folder.path)
         expect(NoteStore.read(root).notebooks.first { $0.name == "Uncertain" }?.isPrivate == true, "a folder that can't be listed: unknown, so Private")
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
@@ -1372,16 +1386,26 @@ struct NoteStoreCheck {
         NoteJournal.moveCanvas(target, from: source.coverID, ids: Set(source.edits.map(\.id)), in: journal)
         expect(NoteJournal.readCanvas(NoteJournal.canvasFile("COVER-MOVING", in: journal))?.edits.count == 1
                && !fm.fileExists(atPath: NoteJournal.canvasFile(source.coverID, in: journal).path), "written, the source goes")
-        // Cover leftovers: the moved-aside copies go only once every entry was journaled again.
+        // Cover leftovers: each moved-aside file goes only once its entry was journaled again; one that can't be read
+        // stays, and so does its folder.
         let held = journal.appending(path: "held")
         try? fm.createDirectory(at: held, withIntermediateDirectories: true)
         let entry = CoverFields(notebook: "Moving", root: "/r", coverID: "COVER-MOVING", fields: ["private": "true"])
+        let goodFile = held.appending(path: "good.json"), badFile = held.appending(path: "bad.json")
+        try? JSONEncoder().encode(entry).write(to: goodFile)
+        try? Data("not an entry".utf8).write(to: badFile)
+        let sources: [(file: URL, key: String?)] = [(goodFile, entry.key), (badFile, nil)]
         try? fm.createDirectory(at: NoteJournal.coverFile(entry.key, in: journal), withIntermediateDirectories: true)
-        NoteJournal.rejournalCovers([entry], dropping: [held], in: journal)
-        expect(fm.fileExists(atPath: held.path), "a cover entry that couldn't be journaled again: its moved-aside copy stays")
+        NoteJournal.rejournalCovers([entry], sources: sources, holding: [held], in: journal)
+        expect(fm.fileExists(atPath: goodFile.path), "a cover entry that couldn't be journaled again: its moved-aside file stays")
         try? fm.removeItem(at: NoteJournal.coverFile(entry.key, in: journal))
-        NoteJournal.rejournalCovers([entry], dropping: [held], in: journal)
-        expect(!fm.fileExists(atPath: held.path) && fm.fileExists(atPath: NoteJournal.coverFile(entry.key, in: journal).path), "journaled again, the copy goes")
+        NoteJournal.rejournalCovers([entry], sources: sources, holding: [held], in: journal)
+        expect(!fm.fileExists(atPath: goodFile.path) && fm.fileExists(atPath: NoteJournal.coverFile(entry.key, in: journal).path),
+               "journaled again, its file goes")
+        expect(fm.fileExists(atPath: badFile.path) && fm.fileExists(atPath: held.path), "a file that couldn't be read stays, and so does its folder")
+        try? fm.removeItem(at: badFile)
+        NoteJournal.rejournalCovers([], sources: [], holding: [held], in: journal)
+        expect(!fm.fileExists(atPath: held.path), "the folder goes once every file in it was read and rewritten")
         try? fm.removeItem(at: journal)
     }
 

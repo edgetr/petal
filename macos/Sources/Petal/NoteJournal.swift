@@ -434,7 +434,9 @@ extension NoteJournal {
     /// goes only once one of those wrote; one that couldn't stays for the next launch. The folder goes once empty.
     nonisolated static func recoverCanvas(_ holding: URL, root: URL) {
         let fm = FileManager.default
-        let names = ((try? fm.contentsOfDirectory(atPath: holding.path)) ?? []).filter { $0.hasSuffix(".json") }.sorted()
+        // A folder that can't be listed is kept as it is, for the next launch.
+        guard let listed = try? fm.contentsOfDirectory(atPath: holding.path) else { return }
+        let names = listed.filter { $0.hasSuffix(".json") }.sorted()
         let read = NoteStore.read(root)
         let covers = read.notes.filter { $0.file.cover && !NoteShelf.needsID($0.noteID) }.map { (id: $0.noteID, notebook: $0.notebook) }
         for name in names {
@@ -442,7 +444,8 @@ extension NoteJournal {
             guard let entry = readCanvas(url) else { continue }
             if landCanvas(entry, covers: covers, notebooks: read.notebooks, complete: read.complete, root: root) { try? fm.removeItem(at: url) }
         }
-        if (((try? fm.contentsOfDirectory(atPath: holding.path)) ?? []).filter { $0.hasSuffix(".json") }).isEmpty { try? fm.removeItem(at: holding) }
+        // Gone only once listed and empty: entries that couldn't be read stay, and so does their folder.
+        dropIfEmpty(holding)
     }
 
     /// One entry put somewhere safe: its notebook's canvas, or (gone) "Unsaved notes". True once written. While the
@@ -479,11 +482,13 @@ extension NoteJournal {
         return (try? data.write(to: url, options: .atomic)) != nil
     }
 
-    /// Cover entries recovered at launch journaled again, then the moved-aside copies dropped: only when every one
-    /// was written; else the copies stay for the next launch. On the journal's queue.
-    nonisolated static func rejournalCovers(_ entries: [CoverFields], dropping holding: [URL], in folder: URL = folder) {
-        let written = entries.map { keepCover($0, in: folder) }
-        if written.allSatisfy({ $0 }) { dropCoverLeftovers(holding) }
+    /// Cover entries recovered at launch journaled again; each moved-aside file goes once the entry it held was
+    /// written again (by its key). One that couldn't be read or decoded, or whose entry couldn't be written, stays for
+    /// the next launch, and so does its folder. On the journal's queue.
+    nonisolated static func rejournalCovers(_ entries: [CoverFields], sources: [(file: URL, key: String?)], holding: [URL], in folder: URL = folder) {
+        let written = Set(entries.filter { keepCover($0, in: folder) }.map(\.key))
+        for source in sources { if let key = source.key, written.contains(key) { try? FileManager.default.removeItem(at: source.file) } }
+        for folder in holding { dropIfEmpty(folder) }
     }
 
     /// A write took these fields: each leaves the entry only while it still holds that value.
@@ -496,7 +501,9 @@ extension NoteJournal {
     /// At launch, on the journal's queue, before the notes' `leftovers`: the cover entries (and any a recovering
     /// folder of the notes' journal holds) read and moved into a folder of their own, which goes once they're
     /// journaled again by the store (`dropCoverLeftovers`).
-    nonisolated static func coverLeftovers(in folder: URL = folder) -> (entries: [CoverFields], holding: [URL]) {
+    /// `sources`: each file read (with its entry's key; nil when it couldn't be read or decoded: it stays). `whole`:
+    /// every moved-aside folder was listed.
+    nonisolated static func coverLeftovers(in folder: URL = folder) -> (entries: [CoverFields], holding: [URL], sources: [(file: URL, key: String?)]) {
         let fm = FileManager.default
         let parent = folder.deletingLastPathComponent()
         let stamp = String(format: "%.0f", Date().timeIntervalSince1970 * 1000)
@@ -508,19 +515,25 @@ extension NoteJournal {
         let holding = ((try? fm.contentsOfDirectory(atPath: parent.path)) ?? []).filter { $0.hasPrefix("Covers journal, recovering ") }.sorted()
             .map { parent.appending(path: $0) }
         var entries: [CoverFields] = []
+        var files: [(file: URL, key: String?)] = []
         for folder in holding {
-            for name in ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).sorted() where name.hasSuffix(".json") {
-                if let data = try? Data(contentsOf: folder.appending(path: name)), let entry = try? JSONDecoder().decode(CoverFields.self, from: data) {
+            for name in ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).sorted() {
+                let file = folder.appending(path: name)
+                if let data = try? Data(contentsOf: file), let entry = try? JSONDecoder().decode(CoverFields.self, from: data) {
                     entries.append(entry)
+                    files.append((file, entry.key))
+                } else {
+                    files.append((file, nil))
                 }
             }
         }
-        return (entries, holding)
+        return (entries, holding, files)
     }
 
-    /// The moved-aside cover entries, once the store journaled them again (queued after those writes).
-    nonisolated static func dropCoverLeftovers(_ holding: [URL]) {
-        for url in holding { try? FileManager.default.removeItem(at: url) }
+    /// A moved-aside folder goes only once it was listed and holds nothing (every file in it read and rewritten).
+    nonisolated static func dropIfEmpty(_ folder: URL) {
+        guard let left = try? FileManager.default.contentsOfDirectory(atPath: folder.path), left.isEmpty else { return }
+        try? FileManager.default.removeItem(at: folder)
     }
 
     /// A canvas entry whose notebook is gone, into "Unsaved notes": the canvas its edits make, in a folder of its own.

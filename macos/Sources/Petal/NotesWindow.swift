@@ -105,6 +105,34 @@ final class NotesModel {
         }
     }
 
+    /// An area moved with the notes in it, saved as one: every note by its own id (an id-less one given its id first,
+    /// as a single move is); when any can't get one, nothing is saved and the preview snaps back.
+    func moveGroup(_ notebook: String, area: NoteCanvas.Area, notes moves: [String: NoteCanvas.Spot]) {
+        final class Waiting { var resolved: [String: String] = [:]; var left = 0 }
+        let waiting = Waiting()
+        let idless = moves.keys.filter(NoteShelf.needsID)
+        let finish = { [weak self] in
+            guard let self else { return }
+            for id in moves.keys { self.dragging[id] = nil }
+            guard let ids = CanvasQueue.groupMove(Array(moves.keys), resolved: waiting.resolved) else {
+                return self.desk.tell("Petal couldn't give every note in that area an id of its own yet, so the area stayed where it was.")
+            }
+            self.edit(notebook, .area(area))
+            for (old, spot) in moves { if let id = ids[old] { self.edit(notebook, .move(id, spot)) } }
+        }
+        guard !idless.isEmpty else { return finish() }
+        waiting.left = idless.count
+        for id in idless {
+            let done = { (new: String?) in
+                if let new { waiting.resolved[id] = new }
+                waiting.left -= 1
+                if waiting.left == 0 { finish() }
+            }
+            guard let paper = store.notes.first(where: { $0.noteID == id && $0.version == nil }) else { done(nil); continue }
+            store.ensureID(paper.key) { done($0) }
+        }
+    }
+
     /// An arrow between two notes, by their own ids (each given one first when its file has none).
     func arrow(from: PaperNote, to: PaperNote) {
         let notebook = from.notebook
@@ -1038,11 +1066,11 @@ struct CanvasArea: View {
                         var moved = area
                         moved.x = max(0, area.x + moving.dx)
                         moved.y = max(0, area.y + moving.dy)
-                        model.edit(book.name, .area(moved))
-                        // Notes with an id of their own only (nothing lasting is kept by an id-less note's path).
-                        for id in start.keys {
-                            if let spot = model.dragging.removeValue(forKey: id), !NoteShelf.needsID(id) { model.edit(book.name, .move(id, spot)) }
-                        }
+                        // The area and its notes as one move: an id-less note gets its id first; one that can't, and the
+                        // whole move is refused (everything snaps back).
+                        var moves: [String: NoteCanvas.Spot] = [:]
+                        for id in start.keys { if let spot = model.dragging[id] { moves[id] = spot } }
+                        model.moveGroup(book.name, area: moved, notes: moves)
                         start = [:]
                         moving = (0, 0)
                     })

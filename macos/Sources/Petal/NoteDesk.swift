@@ -156,7 +156,7 @@ final class NoteDesk {
                                 MainActor.assumeIsolated {
                                     let waiting = self.store.recoverCovers(covers.entries)
                                     // The moved-aside copies go only once every entry is journaled again.
-                                    NoteJournal.queue.async { NoteJournal.rejournalCovers(waiting, dropping: covers.holding) }
+                                    NoteJournal.queue.async { NoteJournal.rejournalCovers(waiting, sources: covers.sources, holding: covers.holding) }
                                 }
                             }
                         }
@@ -507,9 +507,12 @@ final class NoteDesk {
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         var (scene, read) = Self.filtered(scene, read, since: privacy)
-                        // Their vault contact, when exactly one contact has their name (the contacts read off the main
-                        // thread, PetalApp.paper.contacts); after the privacy filter, so a private app has none.
-                        if !scene.person.isEmpty { scene.personContact = PersonRead.contact(scene.person, contacts: PetalApp.shared.paper.contacts) ?? "" }
+                        // Their vault contact, only by the address the chat shows (exactly one contact with it; the
+                        // contacts read off the main thread, PetalApp.paper.contacts); after the privacy filter, so a
+                        // private app has none.
+                        if !scene.person.isEmpty {
+                            scene.personContact = PersonRead.contact(handle: scene.personHandle, contacts: PetalApp.shared.paper.contacts) ?? ""
+                        }
                         scene.desktop = desktop ?? Self.desktopShowing(on: NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)
                         done(scene, read)
                     }
@@ -1145,7 +1148,7 @@ final class NoteDesk {
 
     /// The vault's contacts (id and name only, never their details), for telling people apart: read off the main
     /// thread when notes start and again at most once a minute while a chat app is in front.
-    @ObservationIgnored private(set) var contacts: [(id: String, name: String)] = []
+    @ObservationIgnored private(set) var contacts: [(id: String, addresses: [String])] = []
     @ObservationIgnored private var contactsRead: Date?
 
     func refreshContacts() {
@@ -1154,7 +1157,9 @@ final class NoteDesk {
         VaultStore.load { [weak self] result in
             // While the vault can't be read: no contacts, so no person is told apart by one.
             guard let self else { return }
-            if case .success(let items) = result { self.contacts = items.filter { $0.kind == .contact }.map { (id: $0.id, name: $0.title) } }
+            if case .success(let items) = result {
+                self.contacts = items.filter { $0.kind == .contact }.map { (id: $0.id, addresses: [$0[.email], $0[.phone]].filter { !$0.isEmpty }) }
+            }
             else { self.contacts = [] }
         }
     }
