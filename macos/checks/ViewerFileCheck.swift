@@ -268,15 +268,37 @@ struct ViewerFileCheck {
 
         expect(ViewerComments.text("# Title\n- [ ] one\n- [x] two\n![shot](a.png)\nsee [the page](https://example.com)") == "Title\n☐ one\n☑ two\n(picture)\nsee the page",
                "a note's words as plain text")
-        let size = { (_: Int) in CGSize(width: 612, height: 792) }
+        let size = { (_: Int) in (crop: CGRect(x: 0, y: 0, width: 612, height: 792), rotation: 0) }
         let now = CGRect(x: 90, y: 300, width: 180, height: 14)
-        let spot = ViewerComments.spot(passage, passage: (1, now), pages: 5, pageSize: size)
+        let spot = ViewerComments.spot(passage, passage: (1, now), pages: 5, box: size)
         expect(spot?.page == 1 && spot?.bounds == now, "a passage's comment where its words are now, not where they were saved")
-        expect(ViewerComments.spot(passage, passage: nil, pages: 5, pageSize: size).map { $0.page == 0 && $0.bounds == nil } == true,
+        expect(ViewerComments.spot(passage, passage: nil, pages: 5, box: size).map { $0.page == 0 && $0.bounds == nil } == true,
                "a passage that moved: a sticky note on the first page, no highlight from old coordinates")
-        expect(ViewerComments.spot(plain, passage: nil, pages: 5, pageSize: size)?.page == 0 && ViewerComments.spot(paged, passage: nil, pages: 5, pageSize: size)?.page == 1,
+        expect(ViewerComments.spot(plain, passage: nil, pages: 5, box: size)?.page == 0 && ViewerComments.spot(paged, passage: nil, pages: 5, box: size)?.page == 1,
                "a note on the file: the first page; on a page: that page")
-        expect(ViewerComments.spot(paged, passage: nil, pages: 1, pageSize: size)?.page == 0, "a page the PDF hasn't any more: the first")
+        expect(ViewerComments.spot(paged, passage: nil, pages: 1, box: size)?.page == 0, "a page the PDF hasn't any more: the first")
+        // Round 16: every sticky note inside the crop box, whatever its origin, and at the visible top left when the
+        // page is turned.
+        let cropped = CGRect(x: 50, y: 30, width: 400, height: 500)
+        let onCropped = ViewerComments.spot(plain, passage: nil, pages: 1, box: { _ in (cropped, 0) })
+        expect(onCropped.map { cropped.contains($0.note) && $0.note.minX == 68 && $0.note.maxY == 510 } == true,
+               "a crop box starting at x=50: its note inside the visible area, at its top left (\(String(describing: onCropped?.note)))")
+        let nearEdge = ViewerComments.spot(passage, passage: (0, CGRect(x: 52, y: 520, width: 100, height: 12)), pages: 1, box: { _ in (cropped, 0) })
+        expect(nearEdge.map { cropped.contains($0.note) } == true, "a passage at the crop box's edge: its note kept inside")
+        for turn in [0, 90, 180, 270, -90, 450] {
+            let note = ViewerComments.spot(plain, passage: nil, pages: 1, box: { _ in (cropped, turn) })?.note ?? .zero
+            expect(cropped.contains(note), "turned \(turn)°: inside the crop box")
+        }
+        // Turned 90° clockwise, the crop box's lower-left corner shows at the top left.
+        let turned = ViewerComments.topLeft(crop: cropped, rotation: 90)
+        expect(abs(turned.minX - (cropped.minX + 20)) < 0.01 && abs(turned.minY - (cropped.minY + 18)) < 0.01, "turned 90°: at the visible top left (\(turned))")
+        let upside = ViewerComments.topLeft(crop: cropped, rotation: 180)
+        expect(abs(upside.maxX - (cropped.maxX - 18)) < 0.01 && abs(upside.minY - (cropped.minY + 20)) < 0.01, "turned 180°: at the visible top left (\(upside))")
+        let tiny = CGRect(x: 50, y: 50, width: 10, height: 10)
+        expect(ViewerComments.inside(CGRect(x: 0, y: 0, width: 20, height: 20), tiny).origin == tiny.origin, "a crop box smaller than the note: at its corner")
+        // A page asked for: the nearest the finished document has.
+        expect(ViewerPages.clamped(3, count: 5) == 2 && ViewerPages.clamped(9, count: 5) == 4 && ViewerPages.clamped(Int.max, count: 5) == 4
+               && ViewerPages.clamped(3, count: 0) == nil && ViewerPages.clamped(nil, count: 5) == nil, "a page clamped to the pages there are")
 
         // Whole-text redaction: the note's words redacted whole before they're made plain or cut.
         let secret = "sk-live-0123456789abcdef"

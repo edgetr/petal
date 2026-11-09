@@ -462,6 +462,13 @@ extension ViewerPages {
         return page - 1
     }
 
+    /// A page asked for (from 1) as an index the document has: the nearest, the last for one past its end; nil with
+    /// no page asked or no pages.
+    static func clamped(_ page: Int?, count: Int) -> Int? {
+        guard let page, count > 0 else { return nil }
+        return min(max(page, 1), count) - 1
+    }
+
     /// A page as an agent gives it: a whole number from 1 that an Int holds; nil otherwise (never trapping).
     static func requested(_ value: Any?) -> Int? {
         guard let number = value as? NSNumber, let page = Int(exactly: number.doubleValue), page >= 1 else { return nil }
@@ -778,19 +785,50 @@ enum ViewerComments {
         return text.count > 2000 ? String(text.prefix(1999)) + "…" : text
     }
 
+    /// The size of a comment's sticky note on the page (points).
+    static let noteSize: CGFloat = 20
+
     /// Where a note's comment goes: a passage where it is in the PDF now (`passage`, found again by its words:
-    /// ViewerPassages), highlighted; else a sticky note at its page's top-left corner, or the first page's for a note
-    /// on the whole file, a passage that moved, or a page the PDF hasn't any more. Never a highlight from coordinates
-    /// alone.
-    static func spot(_ stick: NoteStick, passage: (page: Int, bounds: CGRect)?, pages: Int, pageSize: (Int) -> CGSize) -> (page: Int, bounds: CGRect?, corner: CGPoint)? {
+    /// ViewerPassages), highlighted, its sticky note just before it; else a sticky note at its page's visible
+    /// top-left corner, or the first page's for a note on the whole file, a passage that moved, or a page the PDF
+    /// hasn't any more. Never a highlight from coordinates alone. `box`: each page's crop box, the part that shows,
+    /// in the page's own coordinates (its origin needn't be zero), and its rotation; every sticky note is placed
+    /// and kept inside it (`inside`), so it's never off the visible page.
+    static func spot(_ stick: NoteStick, passage: (page: Int, bounds: CGRect)?, pages: Int,
+                     box: (Int) -> (crop: CGRect, rotation: Int)) -> (page: Int, bounds: CGRect?, note: CGRect)? {
         guard pages > 0 else { return nil }
         if let passage, passage.page >= 0, passage.page < pages {
             let b = passage.bounds
-            return (passage.page, b, CGPoint(x: max(0, b.minX - 22), y: b.maxY))
+            let crop = box(passage.page).crop
+            let note = CGRect(x: b.minX - noteSize - 2, y: b.maxY - noteSize, width: noteSize, height: noteSize)
+            return (passage.page, b, inside(note, crop))
         }
         let page = stick.quote.isEmpty ? ViewerMatch.pageIndex(stick, count: pages) ?? 0 : 0
-        let size = pageSize(page)
-        return (page, nil, CGPoint(x: 18, y: max(0, size.height - 40)))
+        let (crop, rotation) = box(page)
+        return (page, nil, inside(topLeft(crop: crop, rotation: rotation), crop))
+    }
+
+    /// A sticky note at the visible top-left of a page (18 points in, 20 down, as the page is shown), in the page's
+    /// own coordinates: the crop box's corner that shows at the top left once the page is turned by `rotation`
+    /// (clockwise, a multiple of 90), and the directions right and down are on the page.
+    static func topLeft(crop: CGRect, rotation: Int) -> CGRect {
+        let turn = ((rotation % 360) + 360) % 360
+        let (corner, right, down): (CGPoint, CGVector, CGVector) = switch turn {
+        case 90: (CGPoint(x: crop.minX, y: crop.minY), CGVector(dx: 0, dy: 1), CGVector(dx: 1, dy: 0))
+        case 180: (CGPoint(x: crop.maxX, y: crop.minY), CGVector(dx: -1, dy: 0), CGVector(dx: 0, dy: 1))
+        case 270: (CGPoint(x: crop.maxX, y: crop.maxY), CGVector(dx: 0, dy: -1), CGVector(dx: -1, dy: 0))
+        default: (CGPoint(x: crop.minX, y: crop.maxY), CGVector(dx: 1, dy: 0), CGVector(dx: 0, dy: -1))
+        }
+        let half = noteSize / 2
+        let center = CGPoint(x: corner.x + right.dx * (18 + half) + down.dx * (20 + half), y: corner.y + right.dy * (18 + half) + down.dy * (20 + half))
+        return CGRect(x: center.x - half, y: center.y - half, width: noteSize, height: noteSize)
+    }
+
+    /// `rect` moved, never resized, to lie inside `crop` (its lower-left corner when the crop box is smaller).
+    static func inside(_ rect: CGRect, _ crop: CGRect) -> CGRect {
+        let x = crop.width < rect.width ? crop.minX : min(max(rect.minX, crop.minX), crop.maxX - rect.width)
+        let y = crop.height < rect.height ? crop.minY : min(max(rect.minY, crop.minY), crop.maxY - rect.height)
+        return CGRect(x: x, y: y, width: rect.width, height: rect.height)
     }
 
     /// A highlight's quadrilaterals, one per line of the passage (never one box over words that weren't selected), as

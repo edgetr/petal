@@ -60,8 +60,7 @@ final class Viewers {
     @discardableResult
     func show(_ url: URL, page: Int? = nil, front: Bool = true) -> ViewerModel {
         if let model = open.first(where: { $0.url.path == url.path }) {
-            // Only a page the document has (checked before any arithmetic).
-            if let index = ViewerPages.index(page, count: model.pageCount) { model.go(to: index) }
+            model.ask(page: page)
             if front, let window = windows[model.id] { PetalWindow.bringForward(window) }
             return model
         }
@@ -451,7 +450,12 @@ final class ViewerModel: Identifiable {
     func load() {
         loads += 1
         let ticket = loads
+        // Watched before anything is read (its descriptors open on the same queue, ahead of the read): a change
+        // while it loads always starts a reload.
+        if watcher == nil { watch() }
         if !loading { loading = true }
+        // What finds the file again if it moves meanwhile (fileChanged), never anchor state.
+        if let fileID { lastSeen = (fileID, bookmark) }
         fileID = nil
         bookmark = nil
         unselected()
@@ -509,7 +513,6 @@ final class ViewerModel: Identifiable {
         if !first { updated = Date() }
         if case .failed(let text) = read.pages {
             failed(text)
-            if watcher == nil { watch() }
             return
         }
         // The file's identity and bookmark only ever from this, the current successful read (never one kept from
@@ -532,7 +535,6 @@ final class ViewerModel: Identifiable {
         case .live: goLive()
         case .failed: break
         }
-        if watcher == nil { watch() }
     }
 
     /// The pages parsed off the main thread, then shown.
@@ -550,7 +552,8 @@ final class ViewerModel: Identifiable {
     }
 
     private func present(_ document: PDFDocument, _ data: Data) {
-        let keep = ViewerPages.index(wantedPage, count: document.pageCount) ?? min(current, max(0, document.pageCount - 1))
+        // The page asked for while it loaded, against the finished document (clamped to the pages it has).
+        let keep = ViewerPages.clamped(wantedPage, count: document.pageCount) ?? min(current, max(0, document.pageCount - 1))
         wantedPage = nil
         self.data = data
         text = ViewerText(data)
@@ -682,11 +685,14 @@ final class ViewerModel: Identifiable {
     /// The file or its folder changed: the file shown is found again (ViewerFiles' rule for the open file): its own
     /// incarnation wherever it is now (renamed or moved, whatever file took its old path); that incarnation gone (a
     /// save that made a new file), the file now at its path; nothing there, the file its bookmark finds.
+    /// The identity and bookmark of the last successful read, only to find the file again while a load is under way.
+    @ObservationIgnored private var lastSeen: (id: ViewerFileID, bookmark: Data?)?
+
     func fileChanged() {
         let url = url
         let before = stamp
-        let kept = bookmark
-        let own = fileID
+        let kept = bookmark ?? lastSeen?.bookmark
+        let own = fileID ?? lastSeen?.id
         Viewers.queue.async {
             let found = ViewerModel.follow(url: url, own: own, bookmark: kept)
             // The file followed passes the path rule before it's adopted or loaded.
@@ -741,6 +747,15 @@ final class ViewerModel: Identifiable {
     }
 
     // MARK: Pages
+
+    /// A page or slide asked for (from 1, checked a whole number): while the document loads or reloads it waits for
+    /// the finished document (`wantedPage`, never checked against a page count that isn't this load's); once shown,
+    /// the nearest page it has.
+    func ask(page: Int?) {
+        guard let page else { return }
+        if loading || document == nil { wantedPage = page; return }
+        if let index = ViewerPages.clamped(page, count: pageCount) { go(to: index) }
+    }
 
     func go(to index: Int) {
         guard index >= 0 else { return }
@@ -1394,27 +1409,51 @@ enum ViewerLoader {
 
     /// Off the main thread only. The bookmark is made with every read that finds the file, so the first move or
     /// rename is followed, and a replaced file's bookmark is its own.
+    /// How many times a read is tried while the file keeps changing under it before the load fails.
+    static let attempts = 3
+    static let keptChanging = "The file kept changing while Petal read it. It's read again once it settles."
+    /// `Petal --viewer-check` only: run inside each read, between the identity read before and the bytes (a save
+    /// that replaces the file then).
+    nonisolated(unsafe) static var duringRead: ((URL, Int) -> Void)?
+
+    /// The file read whole, its pages paired only with the incarnation they came from: inside one coordinated read
+    /// (a file iCloud hasn't downloaded comes down first), its identity, stamp and bookmark are read before the
+    /// bytes and its identity and stamp again after them (and again after a Quick Look export, which reads the file
+    /// itself); the load is used only when both agree. A save in between (a new file swapped in, or a write in
+    /// place) is read again, `attempts` times at most, then the load fails (`keptChanging`).
     static func read(_ url: URL, kind: ViewerKind) -> Read {
         let app = NSWorkspace.shared.urlForApplication(toOpen: url)
         let appName = app.map { FileManager.default.displayName(atPath: $0.path).replacingOccurrences(of: ".app", with: "") } ?? ""
-        let stamp = stamp(url)
-        guard stamp != nil else { return Read(pages: .failed("The file isn't there any more."), stamp: nil, appName: appName, appURL: app) }
-        let mark = bookmark(url)
-        let incarnation = ViewerFileID.of(url.path)
-        switch kind {
-        case .pdf:
+        for attempt in 0..<attempts {
+            var before: (id: ViewerFileID?, stamp: ViewerUpdated.Stamp?) = (nil, nil)
+            var after: (id: ViewerFileID?, stamp: ViewerUpdated.Stamp?) = (nil, nil)
+            var mark: Data?
             var data: Data?
             var error: NSError?
             NSFileCoordinator().coordinate(readingItemAt: url, options: [.withoutChanges], error: &error) { readable in
-                data = try? Data(contentsOf: readable)
+                before = (ViewerFileID.of(readable.path), stamp(readable))
+                guard before.stamp != nil else { return }
+                mark = bookmark(readable)
+                duringRead?(readable, attempt)
+                if kind == .pdf { data = try? Data(contentsOf: readable) }
+                after = (ViewerFileID.of(readable.path), stamp(readable))
             }
-            guard let data, PDFDocument(data: data) != nil else {
-                return Read(pages: .failed("Petal can't read this PDF."), stamp: stamp, bookmark: mark, appName: appName, appURL: app)
+            guard let stamp = before.stamp else { return Read(pages: .failed("The file isn't there any more."), stamp: nil, appName: appName, appURL: app) }
+            guard let id = before.id, after.id == id, after.stamp == stamp else { continue }
+            switch kind {
+            case .pdf:
+                guard let data, PDFDocument(data: data) != nil else {
+                    return Read(pages: .failed("Petal can't read this PDF."), stamp: stamp, appName: appName, appURL: app)
+                }
+                return Read(pages: .pdf(data), stamp: stamp, bookmark: mark, fileID: id, appName: appName, appURL: app)
+            case .quickLook(let unit):
+                let pages = ViewerQuickLook.export(url, unit: unit)
+                // Quick Look read the file itself: still that very file, unchanged, or read again.
+                guard ViewerFileID.of(url.path) == id, Self.stamp(url) == stamp else { continue }
+                return Read(pages: pages, stamp: stamp, bookmark: mark, fileID: id, appName: appName, appURL: app)
             }
-            return Read(pages: .pdf(data), stamp: stamp, bookmark: mark, fileID: incarnation, appName: appName, appURL: app)
-        case .quickLook(let unit):
-            return Read(pages: ViewerQuickLook.export(url, unit: unit), stamp: stamp, bookmark: mark, fileID: incarnation, appName: appName, appURL: app)
         }
+        return Read(pages: .failed(keptChanging), stamp: nil, appName: appName, appURL: app)
     }
 }
 
@@ -1819,8 +1858,10 @@ enum ViewerPDFComments {
                 return (spot.page, lines)
             }
             let found = lines.flatMap { found in ViewerComments.union(found.lines).map { (page: found.page, bounds: $0) } }
-            guard let spot = ViewerComments.spot(comment.stick, passage: found, pages: document.pageCount,
-                                                 pageSize: { document.page(at: $0)?.bounds(for: .cropBox).size ?? .zero }),
+            guard let spot = ViewerComments.spot(comment.stick, passage: found, pages: document.pageCount, box: { index in
+                      let page = document.page(at: index)
+                      return (page?.bounds(for: .cropBox) ?? .zero, page?.rotation ?? 0)
+                  }),
                   let page = document.page(at: spot.page) else { continue }
             let color = NSColor(srgbRed: comment.color.r, green: comment.color.g, blue: comment.color.b, alpha: 1)
             if let bounds = spot.bounds {
@@ -1832,7 +1873,7 @@ enum ViewerPDFComments {
                 mark.userName = author
                 page.addAnnotation(mark)
             }
-            let note = PDFAnnotation(bounds: CGRect(origin: spot.corner, size: CGSize(width: 20, height: 20)), forType: .text, withProperties: nil)
+            let note = PDFAnnotation(bounds: spot.note, forType: .text, withProperties: nil)
             note.contents = text
             note.color = color
             note.userName = author

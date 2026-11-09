@@ -206,6 +206,7 @@ enum ViewerCheck {
             failed = !fourteenth(url, app: app) || failed
             failed = !fifteenth(url, app: app) || failed
             failed = !sixteenth(url, app: app) || failed
+            failed = !seventeenth(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -1012,6 +1013,91 @@ enum ViewerCheck {
         if let key = model.openKey { app.paper.fresh.remove(key) }
         app.viewers.closed(model)
         print("sixteenth: " + (ok ? "a reload is a load: a note asked for while a replaced file is read again gets its new identity, never the old one" : "failed"))
+        return ok
+    }
+
+    /// Round 16: comments land inside a cropped (and a turned) page's visible area; a page asked for while the
+    /// document loads or reloads is kept for the finished document (clamped to the pages it has); a save that
+    /// replaces the file while it's read is read again, never its new pages with the old file's identity, and a
+    /// file that keeps changing fails the load.
+    private static func seventeenth(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("seventeenth: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let canonical = { (url: URL) in URL(fileURLWithPath: ViewerPath.canonical(url.path) ?? url.path) }
+
+        // A page whose crop box starts at x=50 (and the same turned 90°): the comment's note inside what shows.
+        for turn in [0, 90] {
+            guard let document = PDFDocument(url: source), let page = document.page(at: 0) else { expect(false, "a PDF (set up)"); return false }
+            let crop = CGRect(x: 50, y: 30, width: 400, height: 500)
+            page.setBounds(crop, for: .cropBox)
+            page.rotation = turn
+            let cropped = canonical(home).appending(path: "Cropped \(turn).pdf")
+            document.write(to: cropped)
+            var plain = NoteStick(kind: .file)
+            plain.path = cropped.path
+            var outcome: ViewerPDFComments.Outcome?
+            ViewerPDFComments.write(cropped, comments: [.init(stick: plain, body: "On the file", color: NoteInk.RGB(r: 0.2, g: 0.5, b: 0.9))], intoOriginal: false,
+                                    author: "Petal check", expected: nil, live: { true }) { outcome = $0 }
+            wait(20) { outcome != nil }
+            guard case .wrote(let written, _)? = outcome, let back = PDFDocument(url: written)?.page(at: 0),
+                  let note = back.annotations.first(where: { $0.type == "Text" }) else { expect(false, "turned \(turn)°: the comment written"); continue }
+            let visible = back.bounds(for: .cropBox)
+            expect(visible.contains(note.bounds) && visible.minX == 50, "turned \(turn)°, crop box at x=50: the note inside the visible area (\(note.bounds) in \(visible))")
+        }
+
+        // A page asked for while it loads, and while it reloads: shown once the finished document has it.
+        let deck = canonical(home).appending(path: "Deck.pdf")
+        try? pages(4, from: source)?.write(to: deck)
+        let first = app.viewers.show(deck, page: 3, front: false)
+        expect(first.loading, "loading (set up)")
+        wait(20) { !first.loading }
+        expect(first.current == 2, "a page asked for with the open: shown once loaded (\(first.current + 1))")
+        first.load()
+        _ = app.viewers.show(deck, page: 4, front: false)
+        expect(first.loading && first.wantedPage == 4, "asked for during a reload: kept for the finished document, not checked against the old one")
+        wait(20) { !first.loading }
+        expect(first.current == 3, "shown once the reload is in (\(first.current + 1))")
+        try? pages(2, from: source)?.write(to: deck)
+        first.load()
+        _ = app.viewers.show(deck, page: 4, front: false)
+        wait(20) { !first.loading }
+        expect(first.pageCount == 2 && first.current == 1, "a page the reloaded document hasn't: its last (\(first.current + 1) of \(first.pageCount))")
+        app.viewers.closed(first)
+
+        // A save replacing the file between its identity and its bytes: read again; the pages and identity agree.
+        let saved = canonical(home).appending(path: "Saved.pdf")
+        try? pages(2, from: source)?.write(to: saved)
+        ViewerLoader.duringRead = { url, attempt in
+            guard attempt == 0 else { return }
+            let temp = url.deletingLastPathComponent().appending(path: ".swap")
+            try? pages(5, from: source)?.write(to: temp)
+            _ = rename(temp.path, url.path)
+        }
+        let read = ViewerLoader.read(saved, kind: .pdf)
+        ViewerLoader.duringRead = nil
+        if case .pdf(let data) = read.pages {
+            expect(PDFDocument(data: data)?.pageCount == 5 && read.fileID == ViewerFileID.of(saved.path) && read.stamp == ViewerLoader.stamp(saved),
+                   "replaced mid-read: read again, the new pages with the new file's identity")
+        } else { expect(false, "replaced mid-read: read again (\(read.pages))") }
+        // Replaced on every try: the load fails rather than pair pages with another file.
+        ViewerLoader.duringRead = { url, attempt in
+            let temp = url.deletingLastPathComponent().appending(path: ".swap")
+            try? pages(attempt + 1, from: source)?.write(to: temp)
+            _ = rename(temp.path, url.path)
+        }
+        let restless = ViewerLoader.read(saved, kind: .pdf)
+        ViewerLoader.duringRead = nil
+        if case .failed(let text) = restless.pages {
+            expect(text == ViewerLoader.keptChanging && restless.fileID == nil, "a file that keeps changing: the load fails, no identity")
+        } else { expect(false, "a file that keeps changing: the load fails") }
+        print("seventeenth: " + (ok ? "comments inside a cropped or turned page; a page asked for while loading kept for the finished document; a save mid-read read again" : "failed"))
         return ok
     }
 

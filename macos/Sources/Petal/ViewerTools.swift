@@ -29,7 +29,7 @@ extension Viewers {
                     model.whenLoaded(within: Self.loadLimit) { _ in
                         var told = self.told(model)
                         if let page, !model.live, model.pageCount > 0, ViewerPages.index(page, count: model.pageCount) == nil {
-                            told["note"] = "It has \(model.pageCount) \(model.unit.word)s; \(model.unit.word) \(page) isn't one, so it shows where it was."
+                            told["note"] = "It has \(model.pageCount) \(model.unit.word)s; \(model.unit.word) \(page) isn't one, so it shows \(model.unit.word) \(model.current + 1)."
                         }
                         send(told)
                     }
