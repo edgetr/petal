@@ -430,9 +430,21 @@ extension NoteShelf {
     /// kept text written there and read back before anything is trashed), so the notebook never loses its cover;
     /// any other note's, where the chosen paper is.
     static func keepTarget(chosen: String, group: [String]) -> String {
-        guard group.contains(where: { NoteLibrary.isCoverName(($0 as NSString).lastPathComponent) }),
-              let canonical = group.first(where: { ($0 as NSString).lastPathComponent == NoteShelf.coverName }) else { return chosen }
+        // Only within the chosen paper's own notebook folder: never another notebook's cover.
+        let folder = (chosen as NSString).deletingLastPathComponent
+        guard NoteLibrary.isCoverName((chosen as NSString).lastPathComponent),
+              let canonical = group.first(where: { ($0 as NSString).lastPathComponent == NoteShelf.coverName && ($0 as NSString).deletingLastPathComponent == folder })
+        else { return chosen }
         return canonical
+    }
+
+    /// What papers are grouped by as one note's conflict: a cover-named file (`NoteLibrary.isCoverName`: the cover,
+    /// its versions, conflict copies, recoveries) by its notebook folder, whatever its id, so a notebook's cover
+    /// files are one group and two notebooks' covers never are (a notebook duplicated in Finder keeps its cover's id);
+    /// any other note by its id.
+    static func conflictKey(id: String, path: String) -> String {
+        let name = (path as NSString).lastPathComponent
+        return NoteLibrary.isCoverName(name) ? "cover-folder|" + (path as NSString).deletingLastPathComponent : id
     }
 
     /// A note opened on its own, with every paper of its conflict (iCloud's versions, a conflicted copy) beside it:

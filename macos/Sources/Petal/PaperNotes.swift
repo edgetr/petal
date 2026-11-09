@@ -433,7 +433,8 @@ final class NoteStore {
     /// Conflicts by paper key (NoteShelf.conflictGroups): papers with one id, and each file with all its iCloud
     /// versions whatever their ids, so every paper of the group shows Keep this one and a keep plan holds it all.
     private func regroup() {
-        let groups = NoteShelf.conflictGroups(notes.map { ($0.noteID, $0.url.path) })
+        // Cover files by their notebook folder (whatever their ids), every other note by its id (NoteShelf.conflictKey).
+        let groups = NoteShelf.conflictGroups(notes.map { (NoteShelf.conflictKey(id: $0.noteID, path: $0.url.path), $0.url.path) })
         var next: [String: [PaperNote]] = [:]
         for group in groups {
             let papers = group.map { notes[$0] }

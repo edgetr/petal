@@ -129,6 +129,7 @@ struct NoteStoreCheck {
         notebookUncertain(root: root)
         coverConflictNames(root: root)
         keepPromotes(root: root)
+        coverGroupsByFolder(root: root)
         rekeyKeepsSource(root: root)
         canvasByFolder(root: root)
         notebookFolders(root: root)
@@ -1475,6 +1476,53 @@ struct NoteStoreCheck {
                == "/n/B/About this notebook.md" && NoteShelf.keepTarget(chosen: "/n/B/Trip (conflicted copy).md", group: ["/n/B/Trip.md", "/n/B/Trip (conflicted copy).md"])
                == "/n/B/Trip (conflicted copy).md", "a cover's Keep lands on the cover's name; another note's where it's chosen")
         try? fm.removeItem(at: folder)
+    }
+
+    /// Cover conflicts are per notebook folder: a notebook duplicated in Finder (its cover's id in two folders) stays
+    /// two notebooks, Keep writes only within its own folder; a recovered cover with another id joins its notebook's
+    /// group, shows as a conflict and keeps the notebook Private until it's resolved.
+    @MainActor static func coverGroupsByFolder(root: URL) {
+        let fm = FileManager.default
+        let a = root.appending(path: "Original"), b = root.appending(path: "Original copy"), c = root.appending(path: "Recovered")
+        for folder in [a, b, c] { try? fm.createDirectory(at: folder, withIntermediateDirectories: true) }
+        func make(_ folder: URL, _ name: String, id: String, body: String, isPrivate: Bool = false) -> URL {
+            var file = NoteFile(id: id, body: body)
+            file.cover = true
+            if isPrivate { file.setScalar("private", "true") }
+            let url = folder.appending(path: name)
+            _ = NoteStore.create(file.serialized(), at: url, root: root)
+            return url
+        }
+        let coverA = make(a, NoteShelf.coverName, id: "DUP", body: "# About this notebook\nA")
+        let copyA = make(a, "About this notebook (conflicted copy).md", id: "DUP", body: "# About this notebook\nA, kept")
+        let coverB = make(b, NoteShelf.coverName, id: "DUP", body: "# About this notebook\nB")
+        let coverC = make(c, NoteShelf.coverName, id: "C-ONE", body: "# About this notebook\nC")
+        let recovered = make(c, "About this notebook (recovered).md", id: "C-TWO", body: "# About this notebook\nC, recovered", isPrivate: true)
+        let beforeB = text(coverB)
+        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        func paper(_ url: URL) -> PaperNote? { store.notes.first { $0.url.lastPathComponent == url.lastPathComponent && $0.notebook == url.deletingLastPathComponent().lastPathComponent } }
+        store.reload()
+        let readBy = Date().addingTimeInterval(8)
+        while paper(recovered) == nil && Date() < readBy { settle(0.1) }
+        guard let copyPaper = paper(copyA), let recoveredPaper = paper(recovered), let canonicalC = paper(coverC) else { expect(false, "the covers are read"); return }
+        expect(store.conflict(of: copyPaper)?.map(\.notebook).allSatisfy { $0 == "Original" } == true && store.conflict(of: copyPaper)?.count == 2,
+               "a duplicated notebook's covers never group with the original's")
+        expect(store.conflict(of: recoveredPaper)?.count == 2 && store.readOnly(recoveredPaper) && store.readOnly(canonicalC),
+               "a recovered cover with another id joins its notebook's group, both read only with Keep this one")
+        expect(store.notebook("Recovered")?.isPrivate == true, "and counts for privacy while unresolved")
+        store.keep(copyPaper)
+        var until = Date().addingTimeInterval(5)
+        while fm.fileExists(atPath: copyA.path) && Date() < until { settle(0.1) }
+        expect(text(coverA)?.contains("A, kept") == true && text(coverB) == beforeB && fm.fileExists(atPath: coverB.path),
+               "Keep writes only within its own notebook folder")
+        store.keep(canonicalC)
+        until = Date().addingTimeInterval(5)
+        while fm.fileExists(atPath: recovered.path) && Date() < until { settle(0.1) }
+        store.reload()
+        settle(1.5)
+        expect(!fm.fileExists(atPath: recovered.path) && store.notebook("Recovered")?.isPrivate == false, "resolved, the notebook is what its cover says")
+        for folder in [a, b, c] { try? fm.removeItem(at: folder) }
     }
 
     /// A folder that can't be listed is never taken for an empty one: the read isn't complete.

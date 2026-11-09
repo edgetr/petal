@@ -385,6 +385,14 @@ struct NoteLibraryCheck {
         let laterGesture = NoteCanvas.Stamped(.move("n1", .init(x: 2, y: 2)), at: 20)
         let landedLateFirst = NoteCanvas().applyingMerged([laterGesture, firstGesture])
         expect(landedLateFirst.notes["n1"]?.x == 2, "a gesture that waited for an id lands after a later one: the later one still wins")
+        // Cover conflicts are per notebook folder, by file name, never by id.
+        let coverPapers: [(id: String, path: String)] = [("SAME", "/n/A/About this notebook.md"), ("SAME", "/n/B/About this notebook.md"),
+                                                         ("OTHER", "/n/A/About this notebook (recovered).md"), ("N1", "/n/A/Trip.md"), ("N1", "/n/B/Trip (conflicted copy).md")]
+        let grouped = NoteShelf.conflictGroups(coverPapers.map { (NoteShelf.conflictKey(id: $0.id, path: $0.path), $0.path) })
+        expect(grouped.contains([0, 2]) && !grouped.contains { $0.contains(0) && $0.contains(1) } && grouped.contains([3, 4]),
+               "a notebook's cover files group by folder (a recovered one with another id too); two notebooks' covers never; other notes by id", "\(grouped)")
+        expect(NoteShelf.keepTarget(chosen: "/n/A/About this notebook (recovered).md", group: ["/n/B/About this notebook.md", "/n/A/About this notebook (recovered).md"])
+               == "/n/A/About this notebook (recovered).md", "Keep never promotes into another notebook's cover")
         expect(NoteShelf.copyStem(original: NoteShelf.coverName, title: "Health") == "About this notebook" && NoteShelf.copyStem(original: "Trip.md", title: "Trip") == "Trip",
                "a cover's copy is named for the cover; others from their title")
         var strayCover = NoteFile(id: "S", body: "")
