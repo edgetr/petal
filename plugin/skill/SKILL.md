@@ -106,9 +106,10 @@ Use, in this order:
   matter and its `id`. A note on a file in Petal's viewer keeps where in it on its `file` place: `page` or `slide`
   (from 1), and for a PDF passage `quote`, `before`, `after` and `bounds` ("x y width height" in the page's points;
   where it was: the viewer finds a passage again by its words, and one no longer there shows on the file as "passage
-  moved"); other apps show it on the file. File places and sentences in a file also keep `fileID` ("device:inode",
-  the file they were made on), so they follow the file when it's renamed and a new file at its old path never gets
-  them; keep it when editing by hand. A note changed in two places at once shows as two read-only papers (one may be a
+  moved"); other apps show it on the file. File places and sentences in a file also keep `fileID` (the file they
+  were made on: this Mac, its volume, inode and creation date), so they follow the file when it's renamed and a new
+  file at its old path never gets them; keep it when editing by hand. The viewer tools' answers hide saved secrets
+  as (hidden), and say nothing while the vault can't be read. A note changed in two places at once shows as two read-only papers (one may be a
   "(conflicted copy)" file) until the user keeps one. Which notes are open on this Mac is in `~/Library/Application Support/Petal/notes-state.json`.
 - `routines.json` (macOS): the routines; change them with the routine tools rather than by hand. What they did is in
   `~/Library/Application Support/Petal/routines-log.json`.

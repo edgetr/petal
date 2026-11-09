@@ -9,7 +9,11 @@ import AppKit
 /// the answers name the file the agent gave and the copies Petal made.
 extension Viewers {
     func handle(_ name: String, _ args: [String: Any], caller: String, live: @escaping @Sendable () -> Bool,
-                _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+                _ answer: @escaping (Any) -> Void, _ refuse: @escaping (String) -> Void) {
+        // Everything told goes through the vault's redaction first (NoteShield, as the note tools' answers): file
+        // names, labels, copies' names and paths. While the vault can't be read, nothing is told.
+        let send: (Any) -> Void = { value in Self.shielded(value) { out in if let out { answer(out) } else { refuse(NoteShield.unreadable) } } }
+        let fail: (String) -> Void = { text in Self.shielded(text) { out in refuse(out as? String ?? NoteShield.unreadable) } }
         guard app.paper.on else { return fail("Petal Notes is off in Petal's settings (notes); the viewer is part of it.") }
         let path = args["path"] as? String ?? ""
         switch name {
@@ -90,6 +94,15 @@ extension Viewers {
         }
     }
 
+    /// `value` with the vault's secrets taken out (off the main thread); nil while the vault can't be read.
+    static func shielded(_ value: Any, _ done: @escaping @MainActor (Any?) -> Void) {
+        let carried = ViewerCarry(value)
+        queue.async {
+            let out = ViewerCarry(VaultIndex.settled { $0.unreadable ? nil : NoteShield.shield(carried.value as Any, index: $0) } ?? nil)
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(out.value) } }
+        }
+    }
+
     /// What `petal_view` says about a file once it's shown: its name, how it's shown, and its pages or slides.
     private func told(_ model: ViewerModel) -> [String: Any] {
         var result: [String: Any] = ["opened": model.name]
@@ -116,19 +129,24 @@ extension Viewers {
                   _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         // The notes on this PDF by the one resolver the margin uses (ViewerFiles: each place's own file wherever it
         // went, else its bookmark's, else its path's), worked out off the main thread.
+        // The PDF's incarnation is captured now, before the person is asked: what they allow is this very file, and a
+        // file that replaced it meanwhile is never written (checked again inside the write).
         let places = app.paper.store.notes.flatMap { $0.file.places.filter(ViewerFiles.namesFile) }
+        let mac = app.paper.local.mac
         Self.queue.async {
-            let found = ViewerFileID.of(pdf.path).map { id in ViewerFiles.on(id, places, follow: ViewerLoader.follow) } ?? []
+            let id = ViewerFileID.of(pdf.path)
+            let found = id.map { ViewerFiles.on($0, places, mac: mac, follow: ViewerLoader.follow) } ?? []
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard live() else { return fail(NoteDesk.hungUp) }
-                    self.comments(pdf, onFile: found, intoOriginal: intoOriginal, caller: caller, live: live, send, fail)
+                    guard let id else { return fail("Petal can't read that file now.") }
+                    self.comments(pdf, file: id, onFile: found, intoOriginal: intoOriginal, caller: caller, live: live, send, fail)
                 }
             }
         }
     }
 
-    private func comments(_ pdf: URL, onFile: Set<String>, intoOriginal: Bool, caller: String?, live: @escaping @Sendable () -> Bool,
+    private func comments(_ pdf: URL, file: ViewerFileID, onFile: Set<String>, intoOriginal: Bool, caller: String?, live: @escaping @Sendable () -> Bool,
                           _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let comments = app.paper.store.notes.compactMap { paper -> ViewerPDFComments.Comment? in
             guard paper.version == nil, let index = ViewerMatch.place(paper.file.places, onFile: { onFile.contains(ViewerFiles.key($0)) }) else { return nil }
@@ -140,11 +158,11 @@ extension Viewers {
         let write = {
             guard live() else { return fail(NoteDesk.hungUp) }
             // Its asker hanging up stops it right up to the change (checked inside the coordinated write).
-            ViewerPDFComments.write(pdf, comments: comments, intoOriginal: intoOriginal, author: NSFullUserName(), live: live) { outcome in
+            ViewerPDFComments.write(pdf, comments: comments, intoOriginal: intoOriginal, author: NSFullUserName(), expected: file, live: live) { outcome in
                 switch outcome {
                 case .failed(let text): fail(text)
                 case .wrote(let file, let count):
-                    self.app.assist.did("Wrote \(count) note\(count == 1 ? "" : "s") into \(pdf.lastPathComponent) as comments", undo: nil)
+                    self.app.assist.did("Wrote \(count) note\(count == 1 ? "" : "s") into a PDF as comments (\(file.lastPathComponent))", undo: nil)
                     send(["wrote": count, "file": file.lastPathComponent,
                           "where": intoOriginal ? "into the PDF itself; the original is kept beside it" : "a copy beside the PDF"])
                 }
@@ -153,7 +171,7 @@ extension Viewers {
         guard intoOriginal else { return write() }
         // Changing the person's own file: asked first, whoever asks.
         app.assist.ask("pdfComments", "Write \(comments.count) note\(comments.count == 1 ? "" : "s") into \(pdf.lastPathComponent) as comments?",
-                       detail: "Petal keeps the PDF as it is now beside it, as “\(ViewerCopies.beforeNotes(original: pdf.lastPathComponent, taken: []))”.",
+                       detail: "Petal keeps the PDF as it is now beside it, named “… (before notes)”.",
                        always: true, owner: caller) { allowed in
             guard allowed else { return fail("The person said Don't: nothing was written.") }
             write()

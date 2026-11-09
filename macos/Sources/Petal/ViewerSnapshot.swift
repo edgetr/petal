@@ -178,6 +178,8 @@ enum ViewerCheck {
             let app = PetalApp()
             failed = !writes(url) || failed
             failed = !places(url, app: app) || failed
+            failed = !opening(url, app: app) || failed
+            failed = !answers(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -276,11 +278,11 @@ enum ViewerCheck {
         let notes = comments(pdf, document)
         var ok = true
         func expect(_ condition: Bool, _ what: String) { if !condition { print("writes: FAIL \(what)"); ok = false } }
-        func run(original: Bool, live: @escaping @Sendable () -> Bool = { true }, meanwhile: (@Sendable () -> Void)? = nil,
-                 lastMoment: (@Sendable () -> Void)? = nil) -> ViewerPDFComments.Outcome? {
+        func run(original: Bool, expected: ViewerFileID? = nil, live: @escaping @Sendable () -> Bool = { true }, meanwhile: (@Sendable () -> Void)? = nil,
+                 afterRead: (@Sendable () -> Void)? = nil, lastMoment: (@Sendable () -> Void)? = nil) -> ViewerPDFComments.Outcome? {
             var outcome: ViewerPDFComments.Outcome?
-            ViewerPDFComments.write(pdf, comments: notes, intoOriginal: original, author: "Petal check", live: live, meanwhile: meanwhile,
-                                    lastMoment: lastMoment) { outcome = $0 }
+            ViewerPDFComments.write(pdf, comments: notes, intoOriginal: original, author: "Petal check", expected: expected, live: live, meanwhile: meanwhile,
+                                    afterRead: afterRead, lastMoment: lastMoment) { outcome = $0 }
             wait(20) { outcome != nil }
             return outcome
         }
@@ -311,6 +313,20 @@ enum ViewerCheck {
         let later = HangUp()
         expect(run(original: false, live: { !later.gone }, lastMoment: { later.gone = true }) == .failed(ViewerPDFComments.hungUp) && names() == ["Report.pdf"],
                "hung up after the check: no copy made")
+        // Hung up during the final read itself: asked right after it, before any backup is made.
+        let reading = HangUp()
+        let reached = HangUp()
+        expect(run(original: true, live: { !reading.gone }, afterRead: { reading.gone = true }, lastMoment: { reached.gone = true }) == .failed(ViewerPDFComments.hungUp)
+               && !reached.gone && names() == ["Report.pdf"], "hung up during the final read: no backup ever made")
+        // Allowed for one file, and another took its place since (the very same bytes): nothing written.
+        let allowed = ViewerFileID.of(pdf.path)
+        let same = try? Data(contentsOf: pdf)
+        let swapped = folder.appending(path: "swap.tmp")
+        try? same?.write(to: swapped)
+        _ = try? FileManager.default.replaceItemAt(pdf, withItemAt: swapped)
+        expect(allowed != nil && ViewerFileID.of(pdf.path) != allowed && (try? Data(contentsOf: pdf)) == same, "a replacement with the same bytes (set up)")
+        expect(run(original: true, expected: allowed) == .failed(ViewerPDFComments.changed) && names() == ["Report.pdf"],
+               "the PDF allowed was replaced since: the replacement isn't written")
         // Unchanged: into the original, the original kept beside it.
         let before = try? Data(contentsOf: pdf)
         if case .wrote(_, let count)? = run(original: true) {
@@ -322,6 +338,86 @@ enum ViewerCheck {
     }
 
     final class HangUp: @unchecked Sendable { var gone = false }
+
+    /// "Open in Petal's viewer" goes through the one resolver: a place whose bookmark finds nothing opens nothing,
+    /// even with a file at its old path.
+    private static func opening(_ source: URL, app: PetalApp) -> Bool {
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("opening: FAIL \(what)"); ok = false } }
+        let present = folder.appending(path: "Here.pdf")
+        try? FileManager.default.copyItem(at: source, to: present)
+        let gone = folder.appending(path: "Gone.pdf")
+        try? FileManager.default.copyItem(at: source, to: gone)
+        var broken = NoteStick(kind: .file)
+        broken.path = present.path
+        broken.bookmark = ViewerLoader.bookmark(gone)?.base64EncodedString() ?? ""
+        try? FileManager.default.removeItem(at: gone)
+        var good = NoteStick(kind: .file)
+        good.path = present.path
+        good.bookmark = ViewerLoader.bookmark(present)?.base64EncodedString() ?? ""
+        func open(_ stick: NoteStick) -> Bool? {
+            var opened: Bool?
+            app.paper.openInViewer(stick) { opened = $0 }
+            wait(20) { opened != nil }
+            return opened
+        }
+        expect(open(broken) == false, "a bookmark that finds nothing: nothing opened, never the old path")
+        expect(open(good) == true, "a place that resolves opens")
+        print("opening: " + (ok ? "Open in Petal's viewer goes through the resolver" : "failed"))
+        return ok
+    }
+
+    /// The viewer's tool answers through the vault's redaction: a file whose name holds a secret, opened through a
+    /// link with an innocent name, is never named whole; version copies are named from redacted names; and nothing is
+    /// told while the vault can't be read.
+    private static func answers(_ source: URL, app: PetalApp) -> Bool {
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("answers: FAIL \(what)"); ok = false } }
+        let secret = "petalcheck7Q2v9Lr4Xs"
+        var key = VaultItem(kind: .apiKey, title: "Check key", sites: ["example.com"])
+        key[.value] = secret
+        VaultStore.standIn([key])
+        defer { VaultStore.standUnreadable = false; VaultStore.standIn([]) }
+        app.paper.previewReady()
+        let named = folder.appending(path: "Report \(secret).pdf")
+        try? FileManager.default.copyItem(at: source, to: named)
+        let link = folder.appending(path: "Innocent.pdf")
+        try? FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: named.path)
+        func call(_ tool: String, _ args: [String: Any]) -> (answer: String?, refusal: String?) {
+            var answer: String?
+            var refusal: String?
+            var done = false
+            app.viewers.handle(tool, args, caller: "check", live: { true }, { value in
+                answer = (try? JSONSerialization.data(withJSONObject: value)).map { String(decoding: $0, as: UTF8.self) } ?? "\(value)"
+                done = true
+            }, { text in refusal = text; done = true })
+            wait(60) { done }
+            return (answer, refusal)
+        }
+        let viewed = call("petal_view", ["path": link.path])
+        expect(viewed.answer != nil && viewed.answer?.contains(secret) == false && viewed.answer?.contains("(hidden)") == true,
+               "petal_view through a link: the file's name told redacted (\(viewed.answer ?? viewed.refusal ?? "nothing"))")
+        let made = call("petal_view_versions", ["path": link.path, "names": ["Draft \(secret)", "Short"]])
+        expect(made.answer != nil && made.answer?.contains(secret) == false, "versions: labels and paths told redacted (\(made.answer ?? made.refusal ?? "nothing"))")
+        let copies = (try? FileManager.default.subpathsOfDirectory(atPath: FileManager.default.temporaryDirectory.appending(path: "Petal Versions").path)) ?? []
+        expect(!copies.contains { $0.contains(secret) } && copies.contains { $0.contains("(hidden)") }, "the copies' names never hold the secret")
+        VaultStore.standUnreadable = true
+        VaultStore.standIn([key])
+        let closed = call("petal_view", ["path": link.path])
+        expect(closed.answer == nil && closed.refusal == NoteShield.unreadable, "the vault unreadable: nothing told (\(closed.answer ?? closed.refusal ?? "nothing"))")
+        let unmade = call("petal_view_versions", ["path": link.path, "names": ["Another"]])
+        expect(unmade.answer == nil, "and no versions made")
+        for model in app.viewers.open {
+            if let folder = model.versions?.folder { try? FileManager.default.removeItem(at: folder) }
+            model.close()
+        }
+        print("answers: " + (ok ? "redacted (a secret file name through a link, version labels and copies), nothing while the vault can't be read" : "failed"))
+        return ok
+    }
 
     /// The one file resolver, on throwaway copies: a note on a file whose path a new file took isn't on the new one;
     /// a sentence noted in Preview (Phase 1's passage on a file) is in the margin and the comments; a note on a file
@@ -338,7 +434,7 @@ enum ViewerCheck {
             var stick = NoteStick(kind: kind)
             stick.path = file.path
             stick.bookmark = ViewerLoader.bookmark(file)?.base64EncodedString() ?? ""
-            stick.fileID = ViewerFileID.of(file.path)?.text ?? ""
+            stick.fileID = ViewerFileID.of(file.path)?.record(mac: app.paper.local.mac) ?? ""
             return stick
         }
         func paper(_ id: String, _ places: [NoteStick]) -> PaperNote {
@@ -597,6 +693,14 @@ enum ViewerCheck {
         model.close(draft.key, .transfer)
         app.paper.faces[draft.key] = nil
         app.paper.fresh.remove(draft.key)
+        // Notes turned off: the paper open in the margin is saved and closed, the margin gone; on again, it's back.
+        model.openPaper(handwritten)
+        app.config.set("notes", false)
+        model.notesChanged()
+        expect(model.openKey == nil && !model.marginOn && app.paper.heldByViewer.isEmpty, "notes off: the margin and its editor closed")
+        app.config.set("notes", true)
+        model.notesChanged()
+        expect(model.marginOn, "notes on again: the margin shows")
         model.openPaper(handwritten)
         expect(model.openKey == handwritten.key && app.paper.heldByViewer[handwritten.holder] != nil, "open in the margin, held by its identity")
         app.paper.identityChanged(holder: handwritten.holder, "W4")
@@ -604,7 +708,7 @@ enum ViewerCheck {
         given.file.id = "W4"
         app.paper.releaseFromViewer(given)
         expect(model.openKey == nil && app.paper.heldByViewer.isEmpty, "given its own id, the desk opening it still closes it in the margin")
-        print("window: " + (ok ? "PDF view, selection read off the main thread, passages found by their words, highlight, margin and pages in step, a link's note, ownership across an id change, the old selection cleared at once, an empty draft kept across a hand-off" : "failed"))
+        print("window: " + (ok ? "PDF view, selection read off the main thread, passages found by their words, highlight, margin and pages in step, a link's note, ownership across an id change, the old selection cleared at once, an empty draft kept across a hand-off, notes off closing the margin" : "failed"))
         window.close()
         return ok
     }

@@ -73,16 +73,18 @@ struct ViewerView: View {
                             ViewerDocument(model: model)
                             if let set = model.versions { ViewerVersionsStrip(model: model, set: set) }
                         }
-                        Color.clear.frame(width: ViewerLook.margin)
+                        if model.marginOn { Color.clear.frame(width: ViewerLook.margin) }
                     }
                 }
-                // The margin: its own paper-white column with the notes on this file.
-                ViewerMarginView(model: model, size: size)
-                    .frame(width: ViewerLook.margin, height: size.height - ViewerLook.bar)
-                    .offset(x: size.width - ViewerLook.margin, y: ViewerLook.bar)
-                // Highlights and the dashed lines to their notes, over everything, never in the way of a click.
-                ViewerInk(model: model, size: size).allowsHitTesting(false)
-                if let selection = model.selection, !snapshotting {
+                // The margin: its own paper-white column with the notes on this file, only while Petal Notes is on.
+                if model.marginOn {
+                    ViewerMarginView(model: model, size: size)
+                        .frame(width: ViewerLook.margin, height: size.height - ViewerLook.bar)
+                        .offset(x: size.width - ViewerLook.margin, y: ViewerLook.bar)
+                    // Highlights and the dashed lines to their notes, over everything, never in the way of a click.
+                    ViewerInk(model: model, size: size).allowsHitTesting(false)
+                }
+                if let selection = model.selection, model.marginOn, !snapshotting {
                     Button("Note") { model.newNote() }
                         .buttonStyle(.plain)
                         .font(.system(size: 12, weight: .semibold))
@@ -137,8 +139,10 @@ struct ViewerBar: View {
             }
             .lineLimit(1)
             Spacer(minLength: 12)
-            ViewerBarButton(title: "New note") { model.newNote() }
-                .help(model.unit == .slide ? "A note on this slide (or the passage you selected)" : "A note on this page (or the passage you selected)")
+            if model.marginOn {
+                ViewerBarButton(title: "New note") { model.newNote() }
+                    .help(model.unit == .slide ? "A note on this slide (or the passage you selected)" : "A note on this page (or the passage you selected)")
+            }
             ViewerBarButton(title: model.appName.isEmpty ? "Open" : "Open in \(model.appName)") { model.openInApp() }
         }
         .padding(.leading, 96).padding(.trailing, 16)

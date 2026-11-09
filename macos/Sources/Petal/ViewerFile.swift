@@ -234,50 +234,69 @@ struct ViewerTurns {
     func isLatest(_ key: String, _ turn: Int) -> Bool { latest[key] == turn }
 }
 
-/// A file as the disk knows it, whatever path spells it (a link, another spelling): its volume and inode.
+/// A file as the disk knows it, whatever path spells it (a link, another spelling): one incarnation of it, its
+/// volume's UUID, its inode and its creation date. An inode alone is reused once a file is deleted; the three
+/// together are that very file, and only on the Mac that saw it (a place records this Mac's id with it).
 struct ViewerFileID: Equatable, Hashable, Sendable {
-    var device: UInt64
+    var volume: String
     var inode: UInt64
+    /// Its creation date, in milliseconds since 1970.
+    var created: Int64
 
-    /// The file a path leads to (every link followed); nil when nothing's there.
+    /// The file a path leads to (every link followed); nil when nothing's there or the disk doesn't say all three.
     static func of(_ path: String) -> ViewerFileID? {
         var info = stat()
         guard !path.isEmpty, stat(path, &info) == 0 else { return nil }
-        return ViewerFileID(device: UInt64(bitPattern: Int64(info.st_dev)), inode: UInt64(info.st_ino))
+        // The file the path leads to, every link followed (a link's own values describe the link, not its file).
+        let real: String = path.withCString { pointer in
+            guard let resolved = realpath(pointer, nil) else { return path }
+            defer { free(resolved) }
+            return String(cString: resolved)
+        }
+        let values = try? URL(fileURLWithPath: real).resourceValues(forKeys: [.volumeUUIDStringKey, .creationDateKey])
+        guard let volume = values?.volumeUUIDString, let date = values?.creationDate, let created = millis(date) else { return nil }
+        return ViewerFileID(volume: volume, inode: UInt64(info.st_ino), created: created)
     }
 
-    /// As a place writes it: "device:inode".
-    var text: String { "\(device):\(inode)" }
-
-    init(device: UInt64, inode: UInt64) {
-        self.device = device
-        self.inode = inode
+    static func millis(_ date: Date) -> Int64? {
+        let value = (date.timeIntervalSince1970 * 1000).rounded()
+        return value.isFinite && abs(value) < 1e15 ? Int64(value) : nil
     }
 
-    init?(_ text: String) {
-        let parts = text.split(separator: ":")
-        guard parts.count == 2, let device = UInt64(parts[0]), let inode = UInt64(parts[1]) else { return nil }
-        self.init(device: device, inode: inode)
+    /// As a place records it, with the Mac it was seen on: "mac|volume|inode|created".
+    func record(mac: String) -> String { [mac, volume, String(inode), String(created)].joined(separator: "|") }
+
+    /// A place's record read back; nil for anything else (an older "device:inode", a broken value).
+    static func parse(_ text: String) -> (mac: String, id: ViewerFileID)? {
+        let parts = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 4, !parts[0].isEmpty, !parts[1].isEmpty, let inode = UInt64(parts[2]), let created = Int64(parts[3]) else { return nil }
+        return (parts[0], ViewerFileID(volume: parts[1], inode: inode, created: created))
     }
 
-    /// Where this very file is now, wherever it was moved (the volume asked by its id, `fsgetpath`); nil when it's
-    /// gone (deleted, or replaced by a save that made a new file).
+    /// Where this very file is now, wherever it was moved: the volume with its UUID asked by the inode
+    /// (`fsgetpath`), accepted only when the file there is this incarnation (its volume, inode and creation date);
+    /// nil when it's gone (deleted, or replaced by a save that made a new file), or the inode now belongs to another.
     func path() -> String? {
-        // The volume's id as stat gives it (st_dev, a 32-bit number).
-        var fsid = fsid_t(val: (Int32(truncatingIfNeeded: device), 0))
-        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
-        let length = fsgetpath(&buffer, buffer.count, &fsid, inode)
-        guard length > 0 else { return nil }
-        let found = String(cString: buffer)
-        return ViewerFileID.of(found) == self ? found : nil
+        let volumes = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeUUIDStringKey], options: []) ?? []
+        for mount in volumes where (try? mount.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString) == volume {
+            var info = stat()
+            guard stat(mount.path, &info) == 0 else { continue }
+            var fsid = fsid_t(val: (info.st_dev, 0))
+            var buffer = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+            guard fsgetpath(&buffer, buffer.count, &fsid, inode) > 0 else { continue }
+            let found = String(cString: buffer)
+            if ViewerFileID.of(found) == self { return found }
+        }
+        return nil
     }
 }
 
-/// The one resolver for what file a note's place names, for the viewer's margin, the PDF comments and the tools
-/// alike, each place on its own: the very file it was made on (its `fileID`, found wherever it went: a rename or
-/// a move); that file gone (a save that made a new one), the file its bookmark finds; no bookmark, the file at its
-/// path. A shared path never names two files: a new file that took the path while the place's own file still
-/// exists elsewhere is never it, and a bookmark that finds nothing is never replaced by the path alone.
+/// The one resolver for what file a note's place names, for the viewer's margin, the PDF comments, the tools and
+/// "Open in Petal's viewer" alike, each place on its own: the very file it was made on (its `fileID`, this Mac's,
+/// found wherever it went: a rename or a move, and only when its volume, inode and creation date all match); that
+/// file gone or not this Mac's, the file its bookmark finds; no bookmark, the file at its path. A shared path never
+/// names two files: a new file that took the path while the place's own file still exists is never it, and a
+/// bookmark that finds nothing is never replaced by the path alone.
 enum ViewerFiles {
     /// A place that names a file: a file (in any app or in the viewer), or Phase 1's sentence in a file (a passage
     /// with a path or bookmark and no page address).
@@ -289,38 +308,48 @@ enum ViewerFiles {
         }
     }
 
-    /// The rule, from what the disk says: `recorded` the place's own file (nil when it has none) and whether it still
-    /// exists, the bookmark's file (nil when it has none or it finds nothing), and the path's file.
-    static func target(recorded: ViewerFileID?, recordedAlive: Bool, hasBookmark: Bool, bookmarkTarget: ViewerFileID?,
-                       pathTarget: ViewerFileID?) -> ViewerFileID? {
-        if let recorded, recordedAlive { return recorded }
-        if hasBookmark { return bookmarkTarget }
-        return pathTarget
+    /// Which way a place is found: its own file, its bookmark, its path, or not at all.
+    enum Way: Equatable { case own, bookmark, path, none }
+
+    /// The rule, from what the disk says: whether the place's own file (recorded on this Mac) was found as that very
+    /// incarnation, whether it has a bookmark and whether that found a file, and whether its path has one.
+    static func way(ownFound: Bool, hasBookmark: Bool, bookmarkFound: Bool, pathFound: Bool) -> Way {
+        if ownFound { return .own }
+        if hasBookmark { return bookmarkFound ? .bookmark : .none }
+        return pathFound ? .path : .none
     }
 
-    /// The file a place names now (off the main thread: the disk is asked).
-    static func target(of stick: NoteStick, follow: (Data) -> URL?) -> ViewerFileID? {
+    /// The file a place names now, where it is and which it is (off the main thread: the disk is asked); nil when it
+    /// names none it can be sure of. `mac`: this Mac's id (a record made on another Mac isn't looked up here).
+    static func locate(_ stick: NoteStick, mac: String, follow: (Data) -> URL?) -> (path: String, id: ViewerFileID)? {
         guard namesFile(stick) else { return nil }
-        let recorded = ViewerFileID(stick.fileID)
-        let alive = recorded?.path() != nil
-        if let recorded, alive { return recorded }
+        let own = ViewerFileID.parse(stick.fileID).flatMap { record -> (String, ViewerFileID)? in
+            guard record.mac == mac, let path = record.id.path() else { return nil }
+            return (path, record.id)
+        }
         // No bookmark written is no bookmark (an empty one decodes to empty data, which finds nothing).
         let mark = stick.bookmark.isEmpty ? nil : Data(base64Encoded: stick.bookmark)
-        let viaBookmark = mark.flatMap(follow).flatMap { ViewerFileID.of($0.path) }
-        return target(recorded: recorded, recordedAlive: alive, hasBookmark: mark != nil, bookmarkTarget: viaBookmark,
-                      pathTarget: ViewerFileID.of(stick.path))
+        let viaBookmark = own == nil ? mark.flatMap(follow).flatMap { url in ViewerFileID.of(url.path).map { (url.path, $0) } } : nil
+        let viaPath = own == nil && mark == nil ? ViewerFileID.of(stick.path).map { (stick.path, $0) } : nil
+        switch way(ownFound: own != nil, hasBookmark: mark != nil, bookmarkFound: viaBookmark != nil, pathFound: viaPath != nil) {
+        case .own: return own.map { (path: $0.0, id: $0.1) }
+        case .bookmark: return viaBookmark.map { (path: $0.0, id: $0.1) }
+        case .path: return viaPath.map { (path: $0.0, id: $0.1) }
+        case .none: return nil
+        }
     }
 
     /// A place as the resolver keys it: everything it goes by.
     static func key(_ stick: NoteStick) -> String { [stick.path, stick.bookmark, stick.fileID].joined(separator: "\u{1}") }
 
     /// Which of `places` name `file` (by key), each resolved on its own (off the main thread).
-    static func on(_ file: ViewerFileID, _ places: [NoteStick], follow: (Data) -> URL?) -> Set<String> {
+    static func on(_ file: ViewerFileID, _ places: [NoteStick], mac: String, follow: (Data) -> URL?) -> Set<String> {
         var found: Set<String> = []
+        var asked: Set<String> = []
         for place in places where namesFile(place) {
             let key = key(place)
-            if found.contains(key) { continue }
-            if target(of: place, follow: follow) == file { found.insert(key) }
+            guard asked.insert(key).inserted else { continue }
+            if locate(place, mac: mac, follow: follow)?.id == file { found.insert(key) }
         }
         return found
     }
@@ -517,13 +546,16 @@ enum ViewerSecrets {
 // MARK: - Writing into the person's files
 
 /// A write into the person's folder (a PDF's comments) lands only on the file it was made from: its asker still
-/// there, and the file the same (its identity, size, date and every byte) as when it was read. Decided inside the
-/// coordinated write, right before the change.
+/// there (asked after the file was read again), the file the very one the person allowed (`expected`: its
+/// incarnation when they were asked, never a file that replaced it since), and the same (size, date and every
+/// byte) as when it was read. Decided inside the coordinated write, right before the change.
 enum ViewerWrites {
     enum Land: Equatable { case land, hungUp, changed }
 
-    static func land(live: Bool, base: (stamp: ViewerUpdated.Stamp, bytes: Data), now: (stamp: ViewerUpdated.Stamp?, bytes: Data?)) -> Land {
+    static func land(live: Bool, base: (stamp: ViewerUpdated.Stamp, bytes: Data), expected: ViewerFileID?,
+                     now: (stamp: ViewerUpdated.Stamp?, bytes: Data?, id: ViewerFileID?)) -> Land {
         guard live else { return .hungUp }
+        if let expected, now.id != expected { return .changed }
         guard now.stamp == base.stamp, now.bytes == base.bytes else { return .changed }
         return .land
     }

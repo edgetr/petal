@@ -82,6 +82,11 @@ final class Viewers {
         windows[model.id] = nil
     }
 
+    /// Petal Notes turned on or off: every viewer's margin follows (ViewerModel.notesChanged).
+    func notesChanged() {
+        for model in open { model.notesChanged() }
+    }
+
     /// A note's file got another name (NoteStore's rekey): every viewer's records of that paper follow it.
     func rekeyed(_ old: String, _ new: String) {
         for model in open { model.rekeyed(old, new) }
@@ -280,6 +285,19 @@ final class ViewerModel: Identifiable {
 
     /// The pages scroll (a document), so the margin moves with them.
     var scrolls: Bool { unit == .page && !live }
+
+    /// The margin shows (with its notes, highlights, New note and Note) only while Petal Notes is on; the document
+    /// itself shows either way.
+    var marginOn: Bool { app.config.bool("notes") }
+
+    /// Petal Notes turned off: the paper open in the margin is saved and closed (its editor goes with the margin;
+    /// never let go of), the selection's Note and the lens with it. On again, the margin shows again by itself.
+    func notesChanged() {
+        guard !marginOn else { return }
+        if let key = openKey { close(key, .transfer) }
+        unselected()
+        follow(nil)
+    }
 
     // MARK: The reading lens
 
@@ -582,10 +600,11 @@ final class ViewerModel: Identifiable {
     /// whose path this one took doesn't.
     func refreshPlaces() {
         let file = url
+        let mac = desk.local.mac
         let places = desk.store.notes.flatMap { $0.file.places.filter(ViewerFiles.namesFile) }
         Viewers.queue.async {
             guard let id = ViewerFileID.of(file.path) else { return }
-            let found = ViewerFiles.on(id, places, follow: ViewerLoader.follow)
+            let found = ViewerFiles.on(id, places, mac: mac, follow: ViewerLoader.follow)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard file == self.url, found != self.onFile else { return }
@@ -683,11 +702,12 @@ final class ViewerModel: Identifiable {
             if unit == .slide { stick.slide = current + 1 } else { stick.page = current + 1 }
         }
         let url = url
+        let mac = desk.local.mac
         Viewers.queue.async {
-            // A bookmark and the file's own identity, so the note follows the file when it's moved or renamed and a
-            // new file at its path is never it (made off the main thread).
+            // A bookmark and the file's own incarnation on this Mac, so the note follows the file when it's moved or
+            // renamed and a new file at its path is never it (made off the main thread).
             stick.bookmark = ViewerLoader.bookmark(url)?.base64EncodedString() ?? ""
-            stick.fileID = ViewerFileID.of(url.path)?.text ?? ""
+            stick.fileID = ViewerFileID.of(url.path)?.record(mac: mac) ?? ""
             var refused = false
             if let chosen {
                 let cut = VaultIndex.settled { index -> (quote: String, before: String, after: String)? in
@@ -786,6 +806,17 @@ final class ViewerModel: Identifiable {
         let url = url
         let id = UUID().uuidString.prefix(8).lowercased()
         Viewers.queue.async {
+            // The copies' names from the file's name and each label redacted whole first (Phase 1's safeStem): a name,
+            // and the path an agent is given, never holds a secret. The vault unreadable: nothing is made.
+            let names = VaultIndex.settled { index -> (stem: String, labels: [String])? in
+                guard !index.unreadable else { return nil }
+                let stem = NoteShelf.safeStem(redacted: index.redacted(url.deletingPathExtension().lastPathComponent), fallback: "Document")
+                return (stem, labels.enumerated().map { NoteShelf.safeStem(redacted: index.redacted($1), fallback: "Version \($0 + 1)") })
+            } ?? nil
+            guard let names else {
+                return DispatchQueue.main.async { MainActor.assumeIsolated { done(.failure(.vault)) } }
+            }
+            let ext = url.pathExtension
             let folder = FileManager.default.temporaryDirectory.appending(path: "Petal Versions").appending(path: String(id))
             var made: [ViewerVersion] = []
             var failure: ViewerCopyError?
@@ -793,7 +824,7 @@ final class ViewerModel: Identifiable {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                 var taken: Set<String> = []
                 for (index, label) in labels.enumerated() {
-                    let name = ViewerCopies.version(original: url.lastPathComponent, label: label, taken: taken)
+                    let name = ViewerCopies.version(original: names.stem + (ext.isEmpty ? "" : "." + ext), label: names.labels[index], taken: taken)
                     taken.insert(name.lowercased())
                     let copy = folder.appending(path: name)
                     var error: NSError?
@@ -900,9 +931,10 @@ final class ViewerModel: Identifiable {
 }
 
 enum ViewerCopyError: Error, CustomStringConvertible {
-    case noLabels, copy
+    case noLabels, copy, vault
     var description: String {
         switch self {
+        case .vault: VaultStore.unreadableText + " Nothing was made (the copies' names are checked first)."
         case .noLabels: "Name each version (names: [\"Shorter\", \"With numbers\"])."
         case .copy: "Petal couldn't copy the file into a temporary folder: nothing was made."
         }
@@ -1323,35 +1355,49 @@ enum ViewerPDFComments {
     static let changed = "The PDF changed while Petal was writing its notes into it: nothing was written. Try again."
     static let hungUp = "The request ended before this was done: nothing was written."
 
-    /// `meanwhile` and `lastMoment`: for Petal --viewer-check only, between reading the PDF and writing, and right
-    /// before the last check ahead of each final change (the person's edit, or a hang-up, then).
-    static func write(_ pdf: URL, comments: [Comment], intoOriginal: Bool, author: String, live: @escaping @Sendable () -> Bool = { true },
-                      meanwhile: (@Sendable () -> Void)? = nil, lastMoment: (@Sendable () -> Void)? = nil, _ done: @escaping @MainActor (Outcome) -> Void) {
+    /// `expected`: the PDF the person allowed (its incarnation when they were asked): a file that replaced it since is
+    /// never written. `meanwhile`, `afterRead` and `lastMoment`: for Petal --viewer-check only, between reading the
+    /// PDF and writing, right after it's read again inside the write, and right before the last check ahead of each
+    /// final change (the person's edit, or a hang-up, then).
+    static func write(_ pdf: URL, comments: [Comment], intoOriginal: Bool, author: String, expected: ViewerFileID? = nil,
+                      live: @escaping @Sendable () -> Bool = { true }, meanwhile: (@Sendable () -> Void)? = nil,
+                      afterRead: (@Sendable () -> Void)? = nil, lastMoment: (@Sendable () -> Void)? = nil, _ done: @escaping @MainActor (Outcome) -> Void) {
         Viewers.queue.async {
-            let outcome = make(pdf, comments: comments, intoOriginal: intoOriginal, author: author, live: live, meanwhile: meanwhile, lastMoment: lastMoment)
+            let outcome = make(pdf, comments: comments, intoOriginal: intoOriginal, author: author, expected: expected, live: live,
+                               meanwhile: meanwhile, afterRead: afterRead, lastMoment: lastMoment)
             DispatchQueue.main.async { MainActor.assumeIsolated { done(outcome) } }
         }
     }
 
-    private static func make(_ pdf: URL, comments: [Comment], intoOriginal: Bool, author: String, live: @Sendable () -> Bool,
-                             meanwhile: (@Sendable () -> Void)?, lastMoment: (@Sendable () -> Void)?) -> Outcome {
+    private static func make(_ pdf: URL, comments: [Comment], intoOriginal: Bool, author: String, expected: ViewerFileID?, live: @Sendable () -> Bool,
+                             meanwhile: (@Sendable () -> Void)?, afterRead: (@Sendable () -> Void)?, lastMoment: (@Sendable () -> Void)?) -> Outcome {
         guard !comments.isEmpty else { return .failed("No notes are on this PDF yet.") }
         guard live() else { return .failed(hungUp) }
-        // Each note's words redacted whole, before anything is cut from them.
-        let told = VaultIndex.settled { index in index.unreadable ? nil : comments.map { ViewerComments.text($0.body, redact: index.redacted) } } ?? nil
+        // Each note's words redacted whole, before anything is cut from them; the copies' names made from the PDF's
+        // name redacted whole too (Phase 1's safeStem: a file name never holds a secret).
+        let told = VaultIndex.settled { index -> (texts: [String], stem: String)? in
+            guard !index.unreadable else { return nil }
+            let stem = NoteShelf.safeStem(redacted: index.redacted(pdf.deletingPathExtension().lastPathComponent), fallback: "Document")
+            return (comments.map { ViewerComments.text($0.body, redact: index.redacted) }, stem)
+        } ?? nil
         guard let told else { return .failed("Your vault can't be read right now, so Petal wrote nothing (a note's words are checked first).") }
+        let named = told.stem + ".pdf"
         // The base: the PDF as read now (its bytes and identity); the write lands only on it.
         var base: Data?
         var baseStamp: ViewerUpdated.Stamp?
         var error: NSError?
+        var baseID: ViewerFileID?
         NSFileCoordinator().coordinate(readingItemAt: pdf, options: [.withoutChanges], error: &error) { readable in
             baseStamp = ViewerLoader.stamp(readable)
+            baseID = ViewerFileID.of(readable.path)
             base = try? Data(contentsOf: readable)
         }
+        // Already another file than the one the person allowed: nothing is written.
+        if let expected, baseID != expected { return .failed(changed) }
         guard let base, let baseStamp, let document = PDFDocument(data: base), document.pageCount > 0 else { return .failed("Petal can't read this PDF.") }
         let texts = (0..<document.pageCount).map { document.page(at: $0)?.string ?? "" }
         var written = 0
-        for (comment, text) in zip(comments, told) where !text.isEmpty {
+        for (comment, text) in zip(comments, told.texts) where !text.isEmpty {
             // A passage where its words are now, never where it was saved.
             let found = ViewerPassages.find(comment.stick, in: texts).flatMap { spot -> (page: Int, bounds: CGRect)? in
                 guard let page = document.page(at: spot.page), let bounds = page.selection(for: spot.range)?.bounds(for: page), bounds.width > 0 else { return nil }
@@ -1389,9 +1435,12 @@ enum ViewerPDFComments {
         if !intoOriginal {
             // A new copy beside it: the PDF read (it's still the one the notes were written on), the copy written.
             let names = Set(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).map { $0.lowercased() })
-            let copy = folder.appending(path: ViewerCopies.withNotes(original: pdf.lastPathComponent, taken: names))
+            let copy = folder.appending(path: ViewerCopies.withNotes(original: named, taken: names))
             NSFileCoordinator().coordinate(readingItemAt: pdf, options: [.withoutChanges], writingItemAt: copy, options: [], error: &error) { readable, writable in
-                switch ViewerWrites.land(live: live(), base: (baseStamp, base), now: (ViewerLoader.stamp(readable), try? Data(contentsOf: readable))) {
+                // Read again first; its asker asked only after that blocking read.
+                let now = (stamp: ViewerLoader.stamp(readable), bytes: try? Data(contentsOf: readable), id: ViewerFileID.of(readable.path))
+                afterRead?()
+                switch ViewerWrites.land(live: live(), base: (baseStamp, base), expected: expected ?? baseID, now: now) {
                 case .hungUp: outcome = .failed(hungUp)
                 case .changed: outcome = .failed(changed)
                 case .land:
@@ -1406,12 +1455,16 @@ enum ViewerPDFComments {
         }
         // Into the original: the original kept beside it first, then the new one put in its place.
         NSFileCoordinator().coordinate(writingItemAt: pdf, options: [.forReplacing], error: &error) { writable in
-            switch ViewerWrites.land(live: live(), base: (baseStamp, base), now: (ViewerLoader.stamp(writable), try? Data(contentsOf: writable))) {
+            // Read again first (the very file the person allowed, unchanged); its asker asked only after that blocking
+            // read, before any backup is made.
+            let now = (stamp: ViewerLoader.stamp(writable), bytes: try? Data(contentsOf: writable), id: ViewerFileID.of(writable.path))
+            afterRead?()
+            switch ViewerWrites.land(live: live(), base: (baseStamp, base), expected: expected ?? baseID, now: now) {
             case .hungUp: outcome = .failed(hungUp)
             case .changed: outcome = .failed(changed)
             case .land:
                 let names = Set(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).map { $0.lowercased() })
-                let backup = folder.appending(path: ViewerCopies.beforeNotes(original: pdf.lastPathComponent, taken: names))
+                let backup = folder.appending(path: ViewerCopies.beforeNotes(original: named, taken: names))
                 do {
                     try FileManager.default.copyItem(at: writable, to: backup)
                     // Its asker checked again after the backup, right before the PDF itself changes; gone, the backup

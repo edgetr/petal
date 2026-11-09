@@ -159,6 +159,8 @@ final class NoteDesk {
     /// `notes`, `notesLook` or `notesFolder` changed (or any setting did).
     func settingsChanged() {
         followFolderSetting()
+        // Petal's viewer: its margin and the editor open there go with notes off, and come back with notes on.
+        app.viewers.notesChanged()
         // Mission Control from the shared watcher, needed while notes are on (whichever dock is chosen).
         MissionControlWatch.shared.subscribe("notes") { [weak self] open in self?.missionControl(open) }
         MissionControlWatch.shared.need("notes", on && !Headless.on)
@@ -463,7 +465,7 @@ final class NoteDesk {
                         bookmark = (try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))?.base64EncodedString() ?? ""
                         // The file's own identity too: a note on it, or a sentence in it, is found again wherever it
                         // goes, and a new file at its path is never it (ViewerFiles).
-                        fileID = ViewerFileID.of(url.path)?.text ?? ""
+                        fileID = ViewerFileID.of(url.path)?.record(mac: mac) ?? ""
                     }
                     if !read.title.isEmpty { twins = all.filter { (Windows.value($0, kAXTitleAttribute) as String?) == read.title }.count }
                 }
@@ -2235,18 +2237,23 @@ final class NoteDesk {
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
-    /// A file's place opened in Petal's viewer: its file found again through its bookmark (off the main thread),
-    /// then checked as any file the viewer opens.
-    func openInViewer(_ stick: NoteStick) {
-        let path = stick.path
-        let bookmark = Data(base64Encoded: stick.bookmark)
+    /// A file's place opened in Petal's viewer: its file found by the one resolver the margin and comments use
+    /// (ViewerFiles: its own file wherever it went, else its bookmark's, else its path's), off the main thread, then
+    /// checked as any file the viewer opens. A place whose bookmark finds nothing opens nothing (never its old path).
+    /// `done`: whether it opened.
+    func openInViewer(_ stick: NoteStick, done: @escaping @MainActor (Bool) -> Void = { _ in }) {
+        let mac = local.mac
         Self.queue.async {
-            let found = bookmark.flatMap(ViewerLoader.follow)?.path
-            let target = found.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil } ?? path
+            let found = ViewerFiles.locate(stick, mac: mac, follow: ViewerLoader.follow)?.path
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    self.app.viewers.open(path: target, page: stick.page ?? stick.slide) { result in
+                    guard let found else {
+                        self.say("Petal can't find that file any more (it was moved somewhere it can't follow, or deleted).")
+                        return done(false)
+                    }
+                    self.app.viewers.open(path: found, page: stick.page ?? stick.slide) { result in
                         if case .failure(let refusal) = result { self.say(refusal.description) }
+                        done((try? result.get()) != nil)
                     }
                 }
             }
@@ -2364,6 +2371,9 @@ final class NoteDesk {
     }
 
     /// For snapshots: Stick here as if a page were in front.
+    /// For `Petal --viewer-check` only: notes on, with made-up notes and no folder read (the tools answer).
+    func previewReady() { ready = true }
+
     func previewCapture() {
         ready = true   // snapshots: nothing to load
         var tab = NoteTab(url: "https://guide.example/day-one", title: "Day one")

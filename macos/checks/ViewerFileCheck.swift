@@ -135,19 +135,22 @@ struct ViewerFileCheck {
 
         // MARK: The one file resolver
 
-        let one = ViewerFileID(device: 1, inode: 10), two = ViewerFileID(device: 1, inode: 20)
-        expect(ViewerFiles.target(recorded: one, recordedAlive: true, hasBookmark: true, bookmarkTarget: two, pathTarget: two) == one,
+        expect(ViewerFiles.way(ownFound: true, hasBookmark: true, bookmarkFound: true, pathFound: true) == .own,
                "its own file, wherever it went: a new file at its path (or a bookmark that found that one) is never it")
-        expect(ViewerFiles.target(recorded: one, recordedAlive: false, hasBookmark: true, bookmarkTarget: two, pathTarget: two) == two,
-               "its own file gone (a save made a new one): the file its bookmark finds")
-        expect(ViewerFiles.target(recorded: nil, recordedAlive: false, hasBookmark: true, bookmarkTarget: nil, pathTarget: two) == nil,
+        expect(ViewerFiles.way(ownFound: false, hasBookmark: true, bookmarkFound: true, pathFound: true) == .bookmark,
+               "its own file not found as that incarnation (gone, its inode reused, another Mac's): the file its bookmark finds")
+        expect(ViewerFiles.way(ownFound: false, hasBookmark: true, bookmarkFound: false, pathFound: true) == .none,
                "a bookmark that finds nothing is never replaced by the path alone")
-        expect(ViewerFiles.target(recorded: nil, recordedAlive: false, hasBookmark: false, bookmarkTarget: nil, pathTarget: two) == two,
+        expect(ViewerFiles.way(ownFound: false, hasBookmark: false, bookmarkFound: false, pathFound: true) == .path,
                "a place with only a path (written by hand): the file there")
-        expect(ViewerFileID("16777234:370023497") == ViewerFileID(device: 16777234, inode: 370023497) && ViewerFileID("1:x") == nil
-               && ViewerFileID(device: 3, inode: 4).text == "3:4", "a file's identity as a place writes it")
+        let record = ViewerFileID(volume: "6D2A-UUID", inode: 370023497, created: 1_762_000_000_123).record(mac: "MAC-1")
+        expect(record == "MAC-1|6D2A-UUID|370023497|1762000000123" && ViewerFileID.parse(record)?.mac == "MAC-1"
+               && ViewerFileID.parse(record)?.id == ViewerFileID(volume: "6D2A-UUID", inode: 370023497, created: 1_762_000_000_123),
+               "a file's incarnation as a place records it: this Mac, the volume's UUID, the inode, the creation date")
+        expect(ViewerFileID.parse("16777234:370023497") == nil && ViewerFileID.parse("M|V|x|1") == nil && ViewerFileID.parse("|V|1|1") == nil,
+               "anything else isn't one (an older device:inode goes by its bookmark)")
         var withID = plain
-        withID.fileID = "16777234:370023497"
+        withID.fileID = record
         var idNote = NoteFile(id: "V9", created: when, body: "")
         idNote.places = [withID]
         expect(NoteFile.parse(idNote.serialized(), fallbackID: "x", fallbackDate: when).places[0].fileID == withID.fileID, "kept in the file")
@@ -249,13 +252,16 @@ struct ViewerFileCheck {
 
         let stamp = ViewerUpdated.Stamp(size: 10, modified: 1, inode: 7)
         let bytes = Data("%PDF-1.4 a".utf8)
-        expect(ViewerWrites.land(live: true, base: (stamp, bytes), now: (stamp, bytes)) == .land, "unchanged: it lands")
-        expect(ViewerWrites.land(live: false, base: (stamp, bytes), now: (stamp, bytes)) == .hungUp, "its asker gone: nothing")
+        let allowed = ViewerFileID(volume: "V", inode: 7, created: 1), replacement = ViewerFileID(volume: "V", inode: 9, created: 2)
+        expect(ViewerWrites.land(live: true, base: (stamp, bytes), expected: allowed, now: (stamp, bytes, allowed)) == .land, "unchanged: it lands")
+        expect(ViewerWrites.land(live: false, base: (stamp, bytes), expected: allowed, now: (stamp, bytes, allowed)) == .hungUp, "its asker gone: nothing")
         var replaced = stamp
         replaced.inode = 8
-        expect(ViewerWrites.land(live: true, base: (stamp, bytes), now: (replaced, bytes)) == .changed, "the file replaced: refused")
-        expect(ViewerWrites.land(live: true, base: (stamp, bytes), now: (stamp, Data("%PDF-1.4 b".utf8))) == .changed, "same stamp, other bytes: refused")
-        expect(ViewerWrites.land(live: true, base: (stamp, bytes), now: (nil, nil)) == .changed, "gone: refused")
+        expect(ViewerWrites.land(live: true, base: (stamp, bytes), expected: nil, now: (replaced, bytes, nil)) == .changed, "the file replaced: refused")
+        expect(ViewerWrites.land(live: true, base: (stamp, bytes), expected: allowed, now: (stamp, bytes, replacement)) == .changed,
+               "another file than the one the person allowed, even with the same bytes: refused")
+        expect(ViewerWrites.land(live: true, base: (stamp, bytes), expected: nil, now: (stamp, Data("%PDF-1.4 b".utf8), nil)) == .changed, "same stamp, other bytes: refused")
+        expect(ViewerWrites.land(live: true, base: (stamp, bytes), expected: nil, now: (nil, nil, nil)) == .changed, "gone: refused")
 
         // MARK: Keeping up, the lens
 
@@ -305,12 +311,13 @@ struct ViewerFileCheck {
         try? Data("%PDF-1.4".utf8).write(to: aliasBase.appending(path: "Real/Other.pdf"))
         try? FileManager.default.createSymbolicLink(atPath: aliasBase.appending(path: "Link.pdf").path, withDestinationPath: realPDF.path)
         try? FileManager.default.createSymbolicLink(atPath: aliasBase.appending(path: "Folder").path, withDestinationPath: aliasBase.appending(path: "Real").path)
+        let mac = "MAC-CHECK"
         func onDisk(_ path: String, recorded: Bool = false) -> NoteStick {
             var stick = NoteStick(kind: .file)
             stick.path = aliasBase.appending(path: path).path
             if recorded {
                 stick.bookmark = (try? URL(fileURLWithPath: stick.path).bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))?.base64EncodedString() ?? ""
-                stick.fileID = ViewerFileID.of(stick.path)?.text ?? ""
+                stick.fileID = ViewerFileID.of(stick.path)?.record(mac: mac) ?? ""
             }
             return stick
         }
@@ -320,17 +327,33 @@ struct ViewerFileCheck {
         }
         let byHand = ["Real/Report.pdf", "Link.pdf", "Folder/Report.pdf", "Real/Other.pdf", "Missing.pdf"].map { onDisk($0) }
         if let report = ViewerFileID.of(realPDF.path) {
-            let found = ViewerFiles.on(report, byHand, follow: follow)
+            let found = ViewerFiles.on(report, byHand, mac: mac, follow: follow)
             expect(found == Set(byHand.prefix(3).map(ViewerFiles.key)), "a note's path through a link is the same file; another file isn't", "\(found.count)")
-            expect(ViewerFileID(report.text)?.path().map { ViewerFileID.of($0) == report } == true, "a file found again by its identity")
+            expect(report.path().map { ViewerFileID.of($0) == report } == true, "a file found again by its incarnation")
             // Renamed: its notes follow it; a new file at the old path gets none of them.
             let made = onDisk("Real/Report.pdf", recorded: true)
-            try? FileManager.default.moveItem(at: realPDF, to: aliasBase.appending(path: "Real/Renamed.pdf"))
-            expect(ViewerFiles.on(report, [made], follow: follow) == [ViewerFiles.key(made)], "renamed: still on it")
+            let renamed = aliasBase.appending(path: "Real/Renamed.pdf")
+            try? FileManager.default.moveItem(at: realPDF, to: renamed)
+            expect(ViewerFiles.on(report, [made], mac: mac, follow: follow) == [ViewerFiles.key(made)], "renamed: still on it")
+            expect(ViewerFiles.locate(made, mac: mac, follow: follow)?.path.hasSuffix("Renamed.pdf") == true, "found where it is now")
             try? Data("%PDF-1.4 new".utf8).write(to: realPDF)
             let reused = ViewerFileID.of(realPDF.path)
-            expect(reused != nil && reused != report && ViewerFiles.on(reused!, [made], follow: follow).isEmpty
-                   && ViewerFiles.on(report, [made], follow: follow).count == 1, "a reused path never attaches notes; they stay on the renamed file")
+            expect(reused != nil && reused != report && ViewerFiles.on(reused!, [made], mac: mac, follow: follow).isEmpty
+                   && ViewerFiles.on(report, [made], mac: mac, follow: follow).count == 1, "a reused path never attaches notes; they stay on the renamed file")
+            // A record that isn't this very incarnation (its inode reused: another creation date; or another Mac's):
+            // never taken for it, the bookmark decides instead.
+            var recycled = made
+            if let own = ViewerFileID.parse(made.fileID) {
+                var other = own.id
+                other.created += 1
+                recycled.fileID = other.record(mac: mac)
+                expect(other.path() == nil, "an inode with another creation date isn't that file")
+            }
+            recycled.bookmark = (try? realPDF.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))?.base64EncodedString() ?? ""
+            expect(ViewerFiles.locate(recycled, mac: mac, follow: follow)?.id == reused, "an incarnation mismatch falls through to the bookmark")
+            var elsewhere = made
+            elsewhere.bookmark = recycled.bookmark
+            expect(ViewerFiles.locate(elsewhere, mac: "ANOTHER-MAC", follow: follow)?.id == reused, "another Mac's record isn't looked up here: the bookmark")
         } else { expect(false, "a throwaway file") }
         try? FileManager.default.removeItem(at: aliasBase)
 
