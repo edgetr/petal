@@ -39,7 +39,6 @@ final class ViewerWindow: NSWindow, NSWindowDelegate {
         contentView = NSHostingView(rootView: ViewerView(model: model).environment(PetalApp.shared))
         delegate = self
         center()
-        setFrameAutosaveName("PetalViewer")
     }
 
     override var canBecomeKey: Bool { true }

@@ -55,6 +55,9 @@ struct PaperView: View {
     var folded: (() -> Void)? = nil
 
     @Environment(\.snapshotting) private var snapshotting
+    /// This paper's editor, as the desk knows it: only its own going away clears its registration (the same note
+    /// opening in Petal's viewer as it closes here never loses the viewer's).
+    @State private var editorToken = UUID()
 
     private var tint: NoteInk.RGB { PaperLook.rgb(color) }
     private var words: Color { glass ? .primary : PaperLook.words }
@@ -180,7 +183,7 @@ struct PaperView: View {
             NoteEditorView(paper: paper, style: desk.style(color, glass: glass), focus: keyboard,
                            height: { desk.measured(paper.key, $0) },
                            save: { desk.write(paper.key, body: $0, base: $1) },
-                           register: { desk.editorRegistered(paper.key, $0) },
+                           register: { [editorToken] in desk.editorRegistered(paper.key, $0, token: editorToken) },
                            importPictures: { desk.importPictures($0, into: paper.key) },
                            escape: { if let folded { folded() } else { desk.fold(paper.key) } },
                            idle: { desk.store.takeDeferred(paper.key) },

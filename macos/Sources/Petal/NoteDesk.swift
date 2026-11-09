@@ -1634,6 +1634,7 @@ final class NoteDesk {
         anchors = NoteShelf.rekeyed(anchors, old, new)
         lost = NoteShelf.rekeyed(lost, old, new)
         editors = NoteShelf.rekeyed(editors, old, new)
+        editorTokens = NoteShelf.rekeyed(editorTokens, old, new)
         pinPanels = NoteShelf.rekeyed(pinPanels, old, new)
         if let tab = tabPanels.removeValue(forKey: old) { tab.conceal() }
         if let panel = panels.removeValue(forKey: old) { panel.rekey(new); panels[new] = panel }
@@ -1641,10 +1642,22 @@ final class NoteDesk {
 
     /// An editor came or went: gone (folded, closed), the folder is read again, so a version that arrived while it
     /// was open shows.
-    func editorRegistered(_ key: String, _ handle: NoteEditorHandle?) {
-        editors[key] = handle
-        if handle == nil { store.reload() }
+    /// `token`: the paper the editor is in; a going-away clears only that paper's own registration (a note can close
+    /// on the desk as it opens in Petal's viewer, in either order).
+    func editorRegistered(_ key: String, _ handle: NoteEditorHandle?, token: UUID? = nil) {
+        if let handle {
+            editors[key] = handle
+            editorTokens[key] = token
+        } else {
+            guard token == nil || editorTokens[key] == nil || editorTokens[key] == token else { return }
+            editors[key] = nil
+            editorTokens[key] = nil
+            store.reload()
+        }
     }
+
+    /// Which paper each registered editor is in (by paper key), for `editorRegistered`.
+    @ObservationIgnored private var editorTokens: [String: UUID] = [:]
 
     func keep(_ key: String) {
         guard let paper = store.paper(key) else { return }
