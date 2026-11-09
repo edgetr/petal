@@ -133,6 +133,19 @@ enum ViewerPath {
     }
 }
 
+/// What a version's copy may be read as: a file the path rule allows, or Petal's own copy, a regular file (never a
+/// link, by lstat) inside that set's own temporary folder, by canonical path. Anything else (a copy swapped for a
+/// link, or moved out) is never read: that version can't be shown.
+enum ViewerVersionGate {
+    static func allowed(_ copy: String, folder: String) -> Bool {
+        if case .success = ViewerPath.check(copy) { return true }
+        var info = stat()
+        guard lstat(copy, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              let file = ViewerPath.canonical(copy), let own = ViewerPath.canonical(folder) else { return false }
+        return ViewerPath.inside(file, own) && file != own
+    }
+}
+
 // MARK: - Notes in the margin
 
 /// Which of a note's places puts it in the viewer's margin for a file, and where.
@@ -263,7 +276,8 @@ struct ViewerFileID: Equatable, Hashable, Sendable {
     var created: Int64
 
     /// The file a path leads to (every link followed); nil when nothing's there or the disk doesn't say all three.
-    static func of(_ path: String) -> ViewerFileID? {
+    /// `uuid` false: the volume taken as having no UUID (Petal --viewer-check's stand-in for such a volume).
+    static func of(_ path: String, uuid: Bool = true) -> ViewerFileID? {
         var info = stat()
         guard !path.isEmpty, stat(path, &info) == 0 else { return nil }
         // The file the path leads to, every link followed (a link's own values describe the link, not its file).
@@ -272,9 +286,29 @@ struct ViewerFileID: Equatable, Hashable, Sendable {
             defer { free(resolved) }
             return String(cString: resolved)
         }
-        let values = try? URL(fileURLWithPath: real).resourceValues(forKeys: [.volumeUUIDStringKey, .creationDateKey])
-        guard let volume = values?.volumeUUIDString, let date = values?.creationDate, let created = millis(date) else { return nil }
-        return ViewerFileID(volume: volume, inode: UInt64(info.st_ino), created: created)
+        let values = try? URL(fileURLWithPath: real).resourceValues(forKeys: [.volumeUUIDStringKey, .creationDateKey, .volumeURLKey])
+        let created = values?.creationDate.flatMap(millis)
+        if uuid, let volume = values?.volumeUUIDString, let created {
+            return ViewerFileID(volume: volume, inode: UInt64(info.st_ino), created: created)
+        }
+        // A volume with no UUID (some network shares and older drives): known by this Mac's device number for it and
+        // where it's mounted, meaningful only on this Mac while it stays mounted there (a place records this Mac's
+        // id with it, and another Mac never looks it up: its bookmark and path decide there).
+        guard let mount = values?.volume?.path else { return nil }
+        return ViewerFileID(volume: localVolume(device: info.st_dev, mount: mount), inode: UInt64(info.st_ino), created: created ?? -1)
+    }
+
+    /// A volume with no UUID, as an identity names it: "local-<device>-<mount path, base64>".
+    static func localVolume(device: Int32, mount: String) -> String { "local-\(UInt32(bitPattern: device))-" + Data(mount.utf8).base64EncodedString() }
+
+    /// Known only on this Mac (its volume has no UUID).
+    var isLocalOnly: Bool { volume.hasPrefix("local-") }
+
+    /// A this-Mac-only volume's device number and mount path.
+    var localMount: (device: Int32, path: String)? {
+        let parts = volume.split(separator: "-", maxSplits: 2).map(String.init)
+        guard isLocalOnly, parts.count == 3, let device = UInt32(parts[1]), let data = Data(base64Encoded: parts[2]) else { return nil }
+        return (Int32(bitPattern: device), String(decoding: data, as: UTF8.self))
     }
 
     static func millis(_ date: Date) -> Int64? {
@@ -296,6 +330,16 @@ struct ViewerFileID: Equatable, Hashable, Sendable {
     /// (`fsgetpath`), accepted only when the file there is this incarnation (its volume, inode and creation date);
     /// nil when it's gone (deleted, or replaced by a save that made a new file), or the inode now belongs to another.
     func path() -> String? {
+        if let local = localMount {
+            // A volume with no UUID: the one still mounted at that path with that device number, else none.
+            var info = stat()
+            guard stat(local.path, &info) == 0, info.st_dev == local.device else { return nil }
+            var fsid = fsid_t(val: (local.device, 0))
+            var buffer = [CChar](repeating: 0, count: Int(PATH_MAX) + 1)
+            guard fsgetpath(&buffer, buffer.count, &fsid, inode) > 0 else { return nil }
+            let found = String(cString: buffer)
+            return ViewerFileID.of(found, uuid: false) == self ? found : nil
+        }
         let volumes = FileManager.default.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeUUIDStringKey], options: []) ?? []
         for mount in volumes where (try? mount.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString) == volume {
             var info = stat()

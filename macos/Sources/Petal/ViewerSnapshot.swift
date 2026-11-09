@@ -187,6 +187,7 @@ enum ViewerCheck {
             failed = !sixth(url, app: app) || failed
             failed = !seventh(url, app: app) || failed
             failed = !eighth(url, app: app) || failed
+            failed = !ninth(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -345,6 +346,55 @@ enum ViewerCheck {
     }
 
     final class HangUp: @unchecked Sendable { var gone = false }
+
+    /// The ninth review: a version's copy swapped for a link isn't read ("can't be shown"); a refused save keeps the
+    /// pastes still being read for its note, and undo retiring its snapshot keeps them too.
+    private static func ninth(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("ninth: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        let outside = folder.appending(path: "Outside")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let a = home.appending(path: "Deck.pdf")
+        try? FileManager.default.copyItem(at: source, to: a)
+        try? FileManager.default.copyItem(at: source, to: outside.appending(path: "Private.pdf"))
+        let model = ViewerModel(url: URL(fileURLWithPath: ViewerPath.canonical(a.path) ?? a.path), kind: .pdf)
+        model.load()
+        wait(20) { !model.loading }
+        var made: ViewerVersionSet?
+        model.makeVersions(["One", "Two"], asker: "check") { if case .success(let set) = $0 { made = set } }
+        wait(20) { made != nil }
+        wait(20) { made?.versions.allSatisfy { $0.thumb != nil } == true }
+        guard let set = made else { expect(false, "versions made (set up)"); return false }
+        expect(set.versions.allSatisfy { $0.thumb != nil && !$0.refused }, "Petal's own copies are read")
+        let swapped = set.versions[0].url
+        try? FileManager.default.removeItem(at: swapped)
+        try? FileManager.default.createSymbolicLink(atPath: swapped.path, withDestinationPath: outside.appending(path: "Private.pdf").path)
+        model.refreshVersions(set)
+        wait(10) { set.versions[0].refused }
+        expect(set.versions[0].refused && set.versions[0].thumb == nil && !set.versions[1].refused, "a copy swapped for a link: can't be shown, nothing of it read")
+        try? FileManager.default.removeItem(at: set.folder)
+        model.close()
+
+        // A refused save's snapshot keeps the pastes still being read; retiring it keeps them too.
+        let loading = [NoteJournal.Import(token: 7, path: "/Users/someone/Desktop/Shot.png", ext: "png")]
+        let entry = NoteStore.unsavedEntry(noteID: "P1", path: "/n/Inbox/P.md", base: "---\nid: P1\n---\nBefore", text: "---\nid: P1\n---\nBefore, typed",
+                                           pending: [:], loading: loading)
+        expect(entry.imports == loading, "a refused save keeps the pastes still being read for its note")
+        let journal = folder.appending(path: "journal")
+        NoteJournal.snapshot(entry, in: journal)
+        NoteJournal.retire(noteID: "P1", current: "---\nid: P1\n---\nBefore", in: journal)
+        let after = NoteJournal.read(NoteJournal.file("P1", in: journal))
+        expect(after?.imports == loading && after?.text == "---\nid: P1\n---\nBefore", "undone: the typing goes, the pastes' recovery stays")
+        print("ninth: " + (ok ? "a version's copy swapped for a link isn't read; refused saves and undo keep pending pastes" : "failed"))
+        return ok
+    }
 
     /// The eighth review: one path rule at every load and follow (a reload swapped to a link out of the home folder
     /// shows nothing); a refused save's snapshot is the whole note and comes back with its front matter; undoing the

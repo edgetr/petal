@@ -1207,12 +1207,21 @@ final class NoteStore {
     /// quit before that leaves it for the next launch's recovery (into that note while it says `base`, else beside
     /// it: an id-less note's path id never puts it into another file that took the path).
     func journalUnsaved(noteID: String, path: String, base: String?, text: String) {
-        let pending = pendingPictures[noteID] ?? [:]
+        let loading = (importsLoading[noteID] ?? [:]).sorted { $0.key < $1.key }.flatMap(\.value)
+        let entry = Self.unsavedEntry(noteID: noteID, path: path, base: base, text: text, pending: pendingPictures[noteID] ?? [:], loading: loading)
+        NoteJournal.queue.async { NoteJournal.snapshot(entry) }
+    }
+
+    /// A refused save's snapshot, as the ordinary snapshot path makes one: the pictures it references not saved yet
+    /// (their bytes), and the pastes still being read for the note (their sources), so a quit loses neither.
+    nonisolated static func unsavedEntry(noteID: String, path: String, base: String?, text: String, pending: [String: Data],
+                                         loading: [NoteJournal.Import]) -> NoteJournal.Entry {
         let pictures = NoteShelf.journalPictures(text: text, pending: Array(pending.keys)).compactMap { name in
             pending[name].map { NoteJournal.Picture(name: name, data: $0) }
         }
-        let entry = NoteJournal.Entry(noteID: noteID, path: path, base: base, text: text, pictures: pictures)
-        NoteJournal.queue.async { NoteJournal.snapshot(entry) }
+        var entry = NoteJournal.Entry(noteID: noteID, path: path, base: base, text: text, pictures: pictures)
+        if !loading.isEmpty { entry.imports = loading }
+        return entry
     }
 
     /// A refused save's snapshot settled (the editor is back at what's saved): with writing still waiting for the

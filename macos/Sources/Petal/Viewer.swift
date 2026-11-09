@@ -173,8 +173,12 @@ struct ViewerVersion: Identifiable, Equatable {
     var label: String
     var url: URL
     var thumb: NSImage?
+    /// Its copy isn't one the viewer may read (ViewerVersionGate): shown as "can't be shown", nothing of it read.
+    var refused = false
 
-    static func == (a: ViewerVersion, b: ViewerVersion) -> Bool { a.id == b.id && a.label == b.label && a.url == b.url && a.thumb === b.thumb }
+    static func == (a: ViewerVersion, b: ViewerVersion) -> Bool {
+        a.id == b.id && a.label == b.label && a.url == b.url && a.thumb === b.thumb && a.refused == b.refused
+    }
 }
 
 /// Versions made on copies, for whoever asked (a helper, an agent): the original is never changed by the viewer;
@@ -1016,11 +1020,25 @@ final class ViewerModel: Identifiable {
         versionReads += 1
         let turn = versionReads
         let kind = kind
+        let folder = set.folder.path
         for version in set.versions {
             Viewers.queue.async {
+                // Every read gated: the path rule, or Petal's own copy (a regular file in this set's folder).
+                guard ViewerVersionGate.allowed(version.url.path, folder: folder) else {
+                    return DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            guard turn == self.versionReads, set === self.versions,
+                                  let index = set.versions.firstIndex(where: { $0.id == version.id }) else { return }
+                            self.versionPages[version.id] = nil
+                            set.versions[index].thumb = nil
+                            set.versions[index].refused = true
+                        }
+                    }
+                }
                 let read = ViewerLoader.read(version.url, kind: kind)
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
+                        if let index = set.versions.firstIndex(where: { $0.id == version.id }), set === self.versions { set.versions[index].refused = false }
                         let keep: @MainActor (Data?) -> Void = { data in
                             guard turn == self.versionReads, set === self.versions else { return }
                             self.versionPages[version.id] = data

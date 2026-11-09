@@ -734,7 +734,10 @@ struct ViewerVersionsStrip: View {
             ForEach(set.versions) { version in
                 VStack(alignment: .leading, spacing: 6) {
                     Group {
-                        if let thumb = version.thumb { Image(nsImage: thumb).resizable().aspectRatio(contentMode: .fit) } else { Color.white }
+                        if version.refused {
+                            Text("Can't be shown").font(.system(size: 11.5)).foregroundStyle(ViewerLook.caption)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity).background(Color.white)
+                        } else if let thumb = version.thumb { Image(nsImage: thumb).resizable().aspectRatio(contentMode: .fit) } else { Color.white }
                     }
                     .frame(width: 200, height: 112)
                     .background(.white)
@@ -748,7 +751,7 @@ struct ViewerVersionsStrip: View {
                         Text(version.label + " · ").foregroundStyle(ViewerLook.caption)
                         if set.picked == version.id {
                             Text("Picked").foregroundStyle(ViewerLook.caption).fontWeight(.semibold)
-                        } else if set.picked == nil {
+                        } else if set.picked == nil, !version.refused {
                             Button { model.use(version) } label: { Text("Use this").underline().foregroundStyle(ViewerLook.caption) }
                                 .buttonStyle(.plain)
                                 .help("Tell whoever made these that this is the one (the file itself isn't changed here)")

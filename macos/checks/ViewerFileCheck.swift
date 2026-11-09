@@ -497,6 +497,47 @@ struct ViewerFileCheck {
         expect(NoteShelf.unsavedText(current: nil, base: "Written by hand", noteID: "file:Inbox/Hand.md", body: "Written by hand, typed", now: when) == "Written by hand, typed",
                "a note with no id of its own: its text is its body, as its file is")
 
+        // MARK: Ninth review: versions' copies gated, volumes with no UUID
+
+        let gateBase = FileManager.default.temporaryDirectory.appending(path: "petal-viewer-gate-\(UUID().uuidString)")
+        let setFolder = gateBase.appending(path: "Petal Versions/abc")
+        let elsewhere = gateBase.appending(path: "elsewhere")
+        try? FileManager.default.createDirectory(at: setFolder, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        let copy = setFolder.appending(path: "Deck (Short).pdf")
+        try? Data("%PDF-1.4".utf8).write(to: copy)
+        try? Data("%PDF-1.4 other".utf8).write(to: elsewhere.appending(path: "Private.pdf"))
+        expect(ViewerVersionGate.allowed(copy.path, folder: setFolder.path), "Petal's own copy in its set's folder is read")
+        try? FileManager.default.removeItem(at: copy)
+        try? FileManager.default.createSymbolicLink(atPath: copy.path, withDestinationPath: elsewhere.appending(path: "Private.pdf").path)
+        expect(!ViewerVersionGate.allowed(copy.path, folder: setFolder.path), "a copy swapped for a link (to a file outside the allowed roots): refused")
+        expect(!ViewerVersionGate.allowed(elsewhere.appending(path: "Private.pdf").path, folder: setFolder.path), "a file outside its set's folder: refused")
+        expect(!ViewerVersionGate.allowed(setFolder.path, folder: setFolder.path), "the folder itself isn't a copy")
+        try? FileManager.default.removeItem(at: gateBase)
+
+        let fallbackBase = FileManager.default.temporaryDirectory.appending(path: "petal-viewer-local-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: fallbackBase, withIntermediateDirectories: true)
+        let onShare = fallbackBase.appending(path: "Report.pdf")
+        let otherFile = fallbackBase.appending(path: "Other.pdf")
+        try? Data("%PDF-1.4".utf8).write(to: onShare)
+        try? Data("%PDF-1.4 other".utf8).write(to: otherFile)
+        if let local = ViewerFileID.of(onShare.path, uuid: false) {
+            expect(local.isLocalOnly && local.localMount != nil && local.inode > 0, "a volume with no UUID: this Mac's device and mount path stand in")
+            expect(ViewerFileID.parse(local.record(mac: "MAC-A"))?.id == local, "recorded with this Mac's id, read back")
+            expect(local.path().map { ViewerFileID.of($0, uuid: false) == local } == true, "found again on this Mac by its mount and inode")
+            var placeOnShare = NoteStick(kind: .file)
+            placeOnShare.path = otherFile.path
+            placeOnShare.fileID = local.record(mac: "MAC-A")
+            let nobody = { (_: Data) -> URL? in nil }
+            expect(ViewerFiles.locate(placeOnShare, mac: "MAC-A", follow: nobody)?.path.hasSuffix("Report.pdf") == true, "on the Mac that recorded it: its own file")
+            expect(ViewerFiles.locate(placeOnShare, mac: "MAC-B", follow: nobody)?.path.hasSuffix("Other.pdf") == true,
+                   "another Mac never trusts it: its path decides there (no bookmark)")
+            var otherLocal = local
+            otherLocal.volume = ViewerFileID.localVolume(device: (local.localMount?.device ?? 0) &+ 1, mount: local.localMount?.path ?? "/")
+            expect(otherLocal.path() == nil, "another device at that mount path isn't that volume")
+        } else { expect(false, "a fallback identity for a throwaway file") }
+        try? FileManager.default.removeItem(at: fallbackBase)
+
         // MARK: Sixth review
 
         var marker = NoteShelf.EditorMarker()
