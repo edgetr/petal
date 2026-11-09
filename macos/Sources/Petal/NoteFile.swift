@@ -106,6 +106,11 @@ struct NoteStick: Equatable, Sendable {
         return s
     }
 
+    /// As a tool is told it: from an app kept private (`isPrivate`, by the app it was noted in), only what it is and
+    /// the app (`scrubbed`). A person noted in an app made private since is "a person": never their name, contact or
+    /// address. Whether a note fits what's in front never looks at this (NoteMatch.fits).
+    func told(private isPrivate: (String) -> Bool) -> NoteStick { isPrivate(app) ? scrubbed : self }
+
     /// The tab as NoteRules knows tabs.
     var noteTab: NoteTab { NoteTab(id: tabID, element: tabElement, shared: shared, url: url, title: title) }
 
@@ -203,6 +208,25 @@ extension NoteScene {
         s.person = ""
         s.personContact = ""
         s.personHandle = ""
+        return s
+    }
+
+    /// The scene as a drop on another window of its app sees it (not the window that was read): that window alone.
+    /// What was read of the window in front (its tab, its file, how many share its title, the person in its
+    /// conversation) is that window's and never carried to another. `person`: the person read from the target
+    /// window itself, or none; their contact is worked out again from that address. A wrong note is worse than a
+    /// missing one.
+    func retargeted(to window: UInt32, title: String, person: (name: String, handle: String)? = nil) -> NoteScene {
+        var s = self
+        s.window = window
+        s.title = title
+        s.titleTwins = nil
+        s.tab = nil
+        s.file = ""
+        s.fileBookmark = ""
+        s.person = person?.name ?? ""
+        s.personHandle = person?.handle ?? ""
+        s.personContact = ""
         return s
     }
 }
@@ -1477,6 +1501,22 @@ enum NoteShelf {
             dirty = false
             defer { deferred = false }
             return deferred
+        }
+    }
+
+    /// What an editor's save came to: saved through the note (the base its next edit is made on), kept somewhere
+    /// safe that isn't the note as the editor has it (a copy beside a paper turned read only, or the drain of the
+    /// folder it was typed in), or refused (nothing took the text).
+    enum SaveAnswer: Equatable { case saved(base: String?), kept, refused }
+
+    /// An editor after its save ran: what it counts as saved (`body`), what its next edit is made on (`base`), and
+    /// whether its typing is saved now. Only an accepted save advances `body` or clears the dirty marker; a refused
+    /// one leaves both, so the text is still to be saved, and is tried again.
+    static func afterSave(body: String, base: String?, typed: String, answer: SaveAnswer) -> (body: String, base: String?, accepted: Bool) {
+        switch answer {
+        case .saved(let next): return (typed, next ?? base, true)
+        case .kept: return (typed, base, true)
+        case .refused: return (body, base, false)
         }
     }
 

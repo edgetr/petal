@@ -237,6 +237,39 @@ struct NoteLibraryCheck {
                "Messages, WhatsApp, Telegram, Slack: no address beside the name in the header, no person anchor")
         expect(PersonRead.person(app: "com.apple.mail", appName: "Mail", title: "", headings: ["Alex Kim <alex@example.com>", "Lunch with bob@corp.com"]) == nil,
                "a subject among the headings is a second candidate: no person")
+        // A person's anchor keeps the app they were noted in, so the tools are told only "a person" once that app is
+        // kept private; whether the note fits a conversation never looks at it (any chat app, by contact or address).
+        var noted = alexByMail
+        noted.app = "com.apple.MobileSMS"
+        noted.appName = "Messages"
+        let toldPrivately = noted.told(private: { $0 == "com.apple.MobileSMS" })
+        expect(toldPrivately.kind == .person && toldPrivately.title.isEmpty && toldPrivately.handle.isEmpty && toldPrivately.contact.isEmpty
+               && toldPrivately.words == "A person, in any chat app" && toldPrivately.label() == "a person",
+               "a person noted in an app made private since: told to the tools only as a person", toldPrivately.words)
+        expect(noted.told(private: { _ in false }) == noted && alexByMail.told(private: { $0 == "com.apple.MobileSMS" }) == alexByMail,
+               "not private: told as it is (an anchor with no source app can't be told apart)")
+        var inWhatsApp = anotherAlex
+        inWhatsApp.app = "net.whatsapp.WhatsApp"
+        expect(PersonRead.matches(noted, inWhatsApp) && PersonRead.samePerson(noted, alexByMail)
+               && NoteFile.parse({ var f = NoteFile(id: "P3", body: "x"); f.places = [noted]; return f }().serialized(), fallbackID: "", fallbackDate: now).places == [noted],
+               "matching across apps is independent of the source app, which round-trips in the file")
+        // A drop on another window than the one read: nothing of the read window is carried there, its person least
+        // of all; only a person read from the target window itself.
+        var front = NoteScene(mac: "m", app: "com.apple.MobileSMS", pid: 7, window: 1, title: "Alex")
+        front.person = "Alex"
+        front.personHandle = "alex@example.com"
+        front.personContact = "c1"
+        front.file = "/tmp/a.txt"
+        front.fileBookmark = "bookmark"
+        front.titleTwins = 1
+        let second = front.retargeted(to: 2, title: "Sam")
+        expect(second.window == 2 && second.title == "Sam" && second.person.isEmpty && second.personHandle.isEmpty && second.personContact.isEmpty
+               && second.file.isEmpty && second.fileBookmark.isEmpty && second.tab == nil && second.titleTwins == nil,
+               "a drop on a second chat window never carries the first window's person (or its tab or file)")
+        expect(PersonRead.identity(name: second.person, handle: second.personHandle, contacts: book) == nil, "so no person anchor is offered from it")
+        let read = front.retargeted(to: 2, title: "Sam", person: (name: "Sam", handle: "sam@example.com"))
+        expect(read.person == "Sam" && read.personHandle == "sam@example.com" && read.personContact.isEmpty,
+               "the target window's own person, when it was read from that window; their contact worked out again")
         var withHandle = NoteFile(id: "P2", body: "x")
         withHandle.places = [alexByMail]
         expect(NoteFile.parse(withHandle.serialized(), fallbackID: "", fallbackDate: now).places == [alexByMail], "a person's address round-trips")

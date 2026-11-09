@@ -594,6 +594,41 @@ struct NoteRichCheck {
                "its picture now leads from the new notebook, not the old")
         expect(moving.string == textBefore && moving.selectedRange() == NSRange(location: 2, length: 3) && remeasured == 1,
                "the text and selection kept, the pictures laid out again")
+        // A refused save (its notes folder being switched away from, nothing took the text) never advances what
+        // counts as saved or clears the dirty marker: the text stays typed and not saved, and is tried again. Only
+        // an accepted save does.
+        let refusing = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
+        refusing.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("first"), folder: refusing.folderRef, style: style))
+        var answer = NoteShelf.SaveAnswer.refused
+        var savesAsked: [(body: String, base: String?)] = []
+        var idled = 0
+        let paperNow = PaperNote(file: NoteFile(id: "REFUSE", body: "first"), url: URL(fileURLWithPath: "/tmp/petal-rich/Inbox/Refuse.md"), revision: "rev-1")
+        let refusingView = NoteEditorView(paper: paperNow, style: style, focus: false, height: { _ in },
+                                          save: { body, base in savesAsked.append((body, base)); return answer },
+                                          register: { _ in }, importPictures: { _ in }, idle: { idled += 1 })
+        let coordinator = NoteEditorView.Coordinator(refusingView)
+        coordinator.body = "first"
+        coordinator.base = "rev-1"
+        refusing.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("first and more"), folder: refusing.folderRef, style: style))
+        coordinator.schedule(refusing)
+        coordinator.flush(refusing)
+        expect(savesAsked.count == 1 && savesAsked.first?.body == "first and more" && coordinator.marker.dirty && coordinator.body == "first"
+               && coordinator.base == "rev-1" && coordinator.saveLater != nil && idled == 0,
+               "a refused save: still dirty, nothing advanced, and it's tried again", "\(savesAsked.count) savesAsked, dirty \(coordinator.marker.dirty), body \(coordinator.body)")
+        answer = .saved(base: "rev-2")
+        coordinator.flush(refusing)
+        expect(savesAsked.count == 2 && savesAsked.last?.base == "rev-1" && !coordinator.marker.dirty && coordinator.body == "first and more"
+               && coordinator.base == "rev-2" && idled == 1, "the next try accepted: saved, clean, its base advanced")
+        // Kept somewhere safe (its folder's drain, a copy beside a read-only paper): accepted, its base unchanged.
+        let keptAnswer = NoteShelf.afterSave(body: "a", base: "r", typed: "b", answer: .kept)
+        let refusedAnswer = NoteShelf.afterSave(body: "a", base: "r", typed: "b", answer: .refused)
+        expect(keptAnswer.body == "b" && keptAnswer.base == "r" && keptAnswer.accepted && refusedAnswer.body == "a" && refusedAnswer.base == "r" && !refusedAnswer.accepted,
+               "kept counts as saved; refused leaves everything")
+        // Sealed before its folder is switched away from: no longer editable, and what's typed is saved at once.
+        refusing.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("first and more, sealed"), folder: refusing.folderRef, style: style))
+        coordinator.seal(refusing)
+        expect(!refusing.isEditable && savesAsked.count == 3 && savesAsked.last?.body == "first and more, sealed" && !coordinator.marker.dirty,
+               "sealed: not editable any more, its text saved in the same step")
         print("note editor: \(roundTrips) of \(bodies.count + 1) round trips, \(checks) editor checks" + (failures > bodies.count + 1 - roundTrips ? " (some failed)" : ""))
         if failures > 0 { exit(1) }
     }

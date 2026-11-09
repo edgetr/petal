@@ -303,7 +303,7 @@ extension NoteDesk {
     /// Its words are derived only after they're redacted (NoteShield.Derived): a passage's quote is cut to 60
     /// characters, an address to 40.
     private func told(_ stick: NoteStick) -> NoteShield.Derived {
-        let place = app.assist.neverLook(stick.app) ? stick.scrubbed : stick
+        let place = stick.told(private: { app.assist.neverLook($0) })
         return NoteShield.Derived { place.redacted($0).words }
     }
 
@@ -324,7 +324,7 @@ extension NoteDesk {
     /// A note as the tools list it: its handle, title, preview and places derived from its redacted text (NoteTold).
     private func summary(_ paper: PaperNote, text: Bool = false) -> [String: Any] {
         NoteShield.note(handle: handle(paper), body: paper.file.body, notebook: paper.notebook,
-                        places: paper.file.places.map { app.assist.neverLook($0.app) ? $0.scrubbed : $0 },
+                        places: paper.file.places.map { $0.told(private: { app.assist.neverLook($0) }) },
                         modified: NoteFile.stamp(paper.file.modified), onScreen: NoteShelf.isHere(placementNow(paper.key)),
                         text: text, created: text ? NoteFile.stamp(paper.file.created) : nil)
     }

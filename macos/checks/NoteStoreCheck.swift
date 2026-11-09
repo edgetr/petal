@@ -19,6 +19,13 @@ struct NoteStoreCheck {
 
     static func text(_ url: URL) -> String? { try? String(contentsOf: url, encoding: .utf8) }
 
+    /// The files' queue held right after the first read of the folder a store is entering, before anything that
+    /// read starts is done there: queued behind the entering sequence's own steps (the files' queue for the drain,
+    /// the journal's queue, the files' queue again for the recovery and the read).
+    static func holdAfterFirstRead(_ hold: DispatchSemaphore) {
+        NoteStore.io.async { NoteJournal.queue.async { NoteStore.io.async { hold.wait() } } }
+    }
+
     @MainActor static func main() {
         // File names from titles as they are (nothing here is a secret), except where a check says otherwise.
         NoteStore.nameRedactor = { $0 }
@@ -150,6 +157,8 @@ struct NoteStoreCheck {
         renewalAcrossSwitch(root: root)
         picturesSurviveSwitch(root: root)
         notReadyDuringRecovery(root: root)
+        recoveredCoverLands(root: root)
+        lateSaveDrained(root: root)
         notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -1282,8 +1291,11 @@ struct NoteStoreCheck {
         _ = NoteStore.create(other.serialized(), at: folder.appending(path: "About this notebook (conflicted copy).md"), root: root)
         let before = [text(folder.appending(path: NoteShelf.coverName)), text(folder.appending(path: "About this notebook (conflicted copy).md"))]
         let store = NoteStore(root: root)
-        store.recoverCovers([CoverFields(notebook: "Torn", root: root.path, coverID: "COVER-TORN", fields: ["private": "true"])])
-        store.reload()
+        // As a launch finds it: the change in this Mac's journal, the folder entered the one way.
+        var torn = CoverFields(notebook: "Torn", root: root.path, coverID: "COVER-TORN", folderID: NoteStore.instance(of: folder), path: "Torn")
+        torn.set("private", "true")
+        NoteJournal.queue.sync { _ = NoteJournal.keepCover(torn) }
+        store.switchRoot(to: root, launch: true)
         let until = Date().addingTimeInterval(3)
         while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
         NoteStore.io.sync {}
@@ -1616,7 +1628,7 @@ struct NoteStoreCheck {
         // The read first, then the files' queue held, so the new id's write waits while the notebook is checked.
         store.reload()
         let hold = DispatchSemaphore(value: 0)
-        NoteStore.io.async { hold.wait() }
+        holdAfterFirstRead(hold)
         var until = Date().addingTimeInterval(8)
         while store.notebook("Trip copy") == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         let expected = NoteLibrary.renewedID("TRIP-COVER", folder: "Trip copy")
@@ -1706,7 +1718,7 @@ struct NoteStoreCheck {
         func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
         store.reload()
         let hold = DispatchSemaphore(value: 0)
-        NoteStore.io.async { hold.wait() }
+        holdAfterFirstRead(hold)
         var until = Date().addingTimeInterval(8)
         while store.renewing["Rec copy"] == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         let renewed = NoteLibrary.renewedID("REC-COVER", folder: "Rec copy")
@@ -2405,9 +2417,10 @@ struct NoteStoreCheck {
         try? fm.removeItem(at: rootB)
     }
 
-    /// A switch back to a folder whose journal recovery can't finish yet: notes aren't ready, so nothing is made,
-    /// written, pasted or changed (⌃⌥N and every other way in make nothing, and it's said); once recovery is done
-    /// and the folder's first read is in, they work.
+    /// Notes aren't ready until the folder was entered: its journal put back and its first read in. At launch (also
+    /// when the folder resolved is the one the store began with) and on a switch back alike, nothing is made, written
+    /// or changed meanwhile (⌃⌥N, the tools and every other way in are refused, and it's said); once it's entered,
+    /// they work.
     @MainActor static func notReadyDuringRecovery(root: URL) {
         let fm = FileManager.default
         let rootB = root.deletingLastPathComponent().appending(path: "petal-root-B-\(UUID().uuidString)")
@@ -2415,33 +2428,53 @@ struct NoteStoreCheck {
         let folder = root.appending(path: "Ready")
         try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
         _ = NoteStore.create(NoteFile(id: "READY-1", body: "there").serialized(), at: folder.appending(path: "There.md"), root: root)
-        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        func files() -> [String] { ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).sorted() }
+        // Everything from outside tried while the folder isn't entered: all refused, nothing on disk, and it's said.
+        func refusedAll(_ store: NoteStore) -> Bool {
+            let before = files()
+            let made = store.make(NoteFile(body: "made while getting ready"), in: "Ready")
+            store.setCover("Ready", fields: ["private": "true"])
+            var edited = false
+            store.editCanvas("Ready", .move("r", .init(x: 1, y: 1))) { edited = $0 != nil }
+            let changed = store.notes.first.map { store.change($0.key) { $0.body += "!" } }
+            return !store.notesReady && made == nil && !edited && (changed ?? nil) == nil && files() == before
+        }
+
+        // At launch, the folder resolved being the one the store began with: the journal's queue held, so its
+        // recovery can't start.
+        let launching = NoteStore(root: root)
+        var saidAtLaunch: [String] = []
+        launching.onProblem = { saidAtLaunch.append($0) }
+        expect(!launching.notesReady, "a store whose folder hasn't been entered isn't ready")
+        var hold = DispatchSemaphore(value: 0)
+        NoteJournal.queue.async { [hold] in hold.wait() }
+        var launched = false
+        launching.switchRoot(to: root, launch: true) { launched = true }
+        settle(0.5)
+        expect(!launched && refusedAll(launching) && saidAtLaunch.contains(NoteStore.gettingReady) && launching.notes.isEmpty,
+               "at launch, the resolved folder the same as the first: nothing from outside until its recovery and first read are done",
+               "\(saidAtLaunch)")
+        hold.signal()
+        var until = Date().addingTimeInterval(8)
+        while !(launched && launching.notesReady) && Date() < until { settle(0.05) }
+        expect(launched && launching.notesReady && launching.notes.contains { $0.noteID == "READY-1" }, "recovery done and the first read in: ready")
+
+        // On a switch back: the same.
+        let store = launching
         var said: [String] = []
         store.onProblem = { said.append($0) }
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
-        store.reload()
-        settle(1)
-        expect(store.notesReady, "ready once the folder's first read is in")
         var away = false
         store.switchRoot(to: rootB) { away = true }
-        var until = Date().addingTimeInterval(8)
-        while (!away || !store.loaded) && Date() < until { settle(0.05) }
-        // The journal's queue held: the switch back's recovery can't start.
-        let hold = DispatchSemaphore(value: 0)
-        NoteJournal.queue.async { hold.wait() }
+        until = Date().addingTimeInterval(8)
+        while !away && Date() < until { settle(0.05) }
+        hold = DispatchSemaphore(value: 0)
+        NoteJournal.queue.async { [hold] in hold.wait() }
         var back = false
         store.switchRoot(to: root) { back = true }
-        until = Date().addingTimeInterval(5)
-        while (store.switching || store.root != root) && Date() < until { settle(0.05) }
-        settle(0.3)
-        let beforeFiles = (try? fm.contentsOfDirectory(atPath: folder.path)) ?? []
-        let made = store.make(NoteFile(body: "made while recovering"), in: "Ready")
-        store.setCover("Ready", fields: ["private": "true"])
-        var edited = false
-        store.editCanvas("Ready", .move("r", .init(x: 1, y: 1))) { edited = $0 != nil }
-        expect(!store.switching && !back && !store.notesReady && made == nil && !edited
-               && said.contains(NoteStore.gettingReady) && ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []) == beforeFiles,
-               "recovery not done: notes aren't ready; nothing is made or changed, and it's said", "\(said)")
+        settle(0.5)
+        expect(!back && store.root == root && refusedAll(store) && said.contains(NoteStore.gettingReady),
+               "a switch back, its recovery not done: notes aren't ready; nothing is made or changed, and it's said", "\(said)")
         hold.signal()
         until = Date().addingTimeInterval(8)
         while !(back && store.notesReady) && Date() < until { settle(0.05) }
@@ -2451,6 +2484,129 @@ struct NoteStoreCheck {
         until = Date().addingTimeInterval(5)
         while landed == nil && Date() < until { settle(0.05) }
         expect(landed.map { (text($0.url) ?? "").contains("made once ready") } == true, "once ready, a new note is made")
+        try? fm.removeItem(at: folder)
+        try? fm.removeItem(at: rootB)
+    }
+
+    /// A cover change recovered from the journal (a notebook made Private before a quit, or before a switch away)
+    /// lands on its existing cover as part of entering the folder: replayed with the first read through Petal's own
+    /// path, with no other file event or read needed.
+    @MainActor static func recoveredCoverLands(root: URL) {
+        let fm = FileManager.default
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        func privateOnDisk(_ folder: URL) -> Bool {
+            text(folder.appending(path: NoteShelf.coverName)).map { NoteContract.isPrivate(NoteFile.parse($0, fallbackID: "", fallbackDate: Date())) } == true
+        }
+        func notebook(_ name: String, _ id: String) -> URL {
+            let folder = root.appending(path: name)
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            var cover = NoteFile(id: id, body: "# About this notebook")
+            cover.cover = true
+            _ = NoteStore.create(cover.serialized(), at: folder.appending(path: NoteShelf.coverName), root: root)
+            return folder
+        }
+        // At launch.
+        let atLaunch = notebook("Stalled", "COVER-STALLED")
+        var kept = CoverFields(notebook: "Stalled", root: root.path, coverID: "COVER-STALLED", folderID: NoteStore.instance(of: atLaunch), path: "Stalled")
+        kept.set("private", "true")
+        NoteJournal.queue.sync { _ = NoteJournal.keepCover(kept) }
+        let store = NoteStore(root: root)
+        var startedByEntering = false
+        store.switchRoot(to: root, launch: true) { startedByEntering = store.reads == 1 && !store.coverLanding.isEmpty }
+        var until = Date().addingTimeInterval(8)
+        while !privateOnDisk(atLaunch) && Date() < until { settle(0.05) }
+        NoteJournal.queue.sync {}
+        expect(startedByEntering && privateOnDisk(atLaunch) && store.reads == 1,
+               "a recovered Private change lands on its existing cover with the folder's first read, no other file event", "reads \(store.reads)")
+        settle(0.3)
+        NoteJournal.queue.sync {}
+        expect(!fm.fileExists(atPath: NoteJournal.coverFile(kept.key).path), "and leaves the journal once written")
+        // One recovered at launch that's ambiguous is dropped inside the folder's entering (and asks for a read
+        // there): the folder is still entered once, by the one sequence.
+        let confused = notebook("Confused", "COVER-CONFUSED-NOW")
+        var unsure = CoverFields(notebook: "Confused", root: root.path, coverID: "COVER-CONFUSED-THEN", folderID: "0:9", path: "Confused")
+        unsure.set("private", "true")
+        NoteJournal.queue.sync { _ = NoteJournal.keepCover(unsure) }
+        let again = NoteStore(root: root)
+        var saidAgain: [String] = []
+        again.onProblem = { saidAgain.append($0) }
+        var entered = 0
+        var enteredSession: RootSession?
+        again.switchRoot(to: root, launch: true) { entered += 1; enteredSession = again.session }
+        settle(1.5)
+        NoteJournal.queue.sync {}
+        expect(entered == 1 && again.session === enteredSession && again.notesReady && again.coverPending[unsure.key] == nil
+               && saidAgain.contains(unsure.droppedWords) && !privateOnDisk(confused) && !fm.fileExists(atPath: NoteJournal.coverFile(unsure.key).path),
+               "a change dropped while its folder is entered: the folder is entered once, and the read it asks for comes after",
+               "entered \(entered), said \(saidAgain)")
+        try? fm.removeItem(at: confused)
+        // On a switch back to its folder.
+        let rootB = root.deletingLastPathComponent().appending(path: "petal-root-B-\(UUID().uuidString)")
+        try? fm.createDirectory(at: rootB, withIntermediateDirectories: true)
+        let onSwitch = notebook("Stalled too", "COVER-STALLED-2")
+        var away = false
+        store.switchRoot(to: rootB) { away = true }
+        until = Date().addingTimeInterval(8)
+        while !away && Date() < until { settle(0.05) }
+        var second = CoverFields(notebook: "Stalled too", root: root.path, coverID: "COVER-STALLED-2", folderID: NoteStore.instance(of: onSwitch), path: "Stalled too")
+        second.set("private", "true")
+        NoteJournal.queue.sync { _ = NoteJournal.keepCover(second) }
+        var back = false
+        let readsBefore = store.reads
+        store.switchRoot(to: root) { back = true }
+        until = Date().addingTimeInterval(8)
+        while !(back && privateOnDisk(onSwitch)) && Date() < until { settle(0.05) }
+        expect(back && privateOnDisk(onSwitch) && store.reads == 1 && readsBefore >= 1,
+               "and on a switch back: replayed with that folder's first read", "reads \(store.reads)")
+        for folder in [atLaunch, onSwitch] { try? fm.removeItem(at: folder) }
+        try? fm.removeItem(at: rootB)
+    }
+
+    /// An editor's save that arrives after its folder's switch began (refused by the store, which is switching) goes
+    /// to that folder's own drain: stored in its note, or, when it can't land there, in Unsaved notes. Never dropped.
+    @MainActor static func lateSaveDrained(root: URL) {
+        let fm = FileManager.default
+        let rootB = root.deletingLastPathComponent().appending(path: "petal-root-B-\(UUID().uuidString)")
+        try? fm.createDirectory(at: rootB, withIntermediateDirectories: true)
+        let folder = root.appending(path: "Late")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let landsFile = folder.appending(path: "Lands.md"), blockedFile = folder.appending(path: "Blocked.md")
+        _ = NoteStore.create(NoteFile(id: "LATE-1", body: "typed before").serialized(), at: landsFile, root: root)
+        _ = NoteStore.create(NoteFile(id: "LATE-2", body: "typed before too").serialized(), at: blockedFile, root: root)
+        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        store.reload()
+        var until = Date().addingTimeInterval(8)
+        while !store.notesReady && Date() < until { settle(0.05) }
+        guard let lands = store.notes.first(where: { $0.noteID == "LATE-1" }), let blocked = store.notes.first(where: { $0.noteID == "LATE-2" }) else {
+            return expect(false, "the notes are read")
+        }
+        expect(!store.drainLate(key: lands.key, body: "x", base: lands.revision), "in the folder in use, a save isn't the drain's: it goes through the note")
+        var away = false
+        store.switchRoot(to: rootB) { away = true }
+        // The switch has begun: the store refuses a change from outside, and the text goes to the old folder's drain.
+        let refusedByStore = store.change(lands.key, edit: { $0.body = "late words" }) == nil
+        let taken = store.drainLate(key: lands.key, body: "late words", base: lands.revision)
+        // Its file can't take the text (a folder stands where it was): the drain rescues it.
+        try? fm.removeItem(at: blockedFile)
+        try? fm.createDirectory(at: blockedFile, withIntermediateDirectories: true)
+        let takenToo = store.drainLate(key: blocked.key, body: "late and blocked", base: blocked.revision)
+        expect(refusedByStore && taken && takenToo, "a save after the switch began: refused by the store, taken by its folder's drain")
+        expect(!store.drainLate(key: "/nowhere/None.md", body: "x", base: nil), "a note no ended session holds: refused, the editor keeps it")
+        let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
+        func rescued(_ words: String) -> Bool {
+            ((fm.enumerator(atPath: unsaved.path)?.allObjects as? [String]) ?? []).contains { $0.hasSuffix(".md") && (text(unsaved.appending(path: $0)) ?? "").contains(words) }
+        }
+        until = Date().addingTimeInterval(8)
+        while !(away && (text(landsFile) ?? "").contains("late words") && rescued("late and blocked")) && Date() < until { settle(0.1) }
+        NoteJournal.queue.sync {}
+        expect((text(landsFile) ?? "").contains("late words") && !fm.fileExists(atPath: NoteJournal.file("LATE-1").path),
+               "its text is stored in its note, in the folder it was typed in")
+        expect(rescued("late and blocked"), "one that can't land there is in Unsaved notes")
+        var back = false
+        store.switchRoot(to: root) { back = true }
+        until = Date().addingTimeInterval(8)
+        while !back && Date() < until { settle(0.05) }
         try? fm.removeItem(at: folder)
         try? fm.removeItem(at: rootB)
     }

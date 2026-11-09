@@ -199,6 +199,44 @@ enum NoteJournal {
         return holding
     }
 
+    /// What the journal holds for a notes' folder being entered (NoteStore.switchRoot's second step).
+    struct Prepared {
+        /// Recovering folders of note entries, oldest first: put back by `recover`.
+        var notes: [URL] = []
+        /// At launch: the canvas entries moved aside, put back by `recoverCanvas` after the notes.
+        var canvases: [URL] = []
+        /// Cover fields to wait again in the folder's session (at launch every folder's, with what to clear once
+        /// they're journaled again: `rejournalCovers`).
+        var covers: [CoverFields] = []
+        var coverHolding: [URL] = []
+        var coverSources: [(file: URL, key: String?)] = []
+        /// On a switch: the canvas edits made in this folder, to wait again in its session.
+        var canvas: [CanvasEntry] = []
+    }
+
+    /// On the journal's queue, as a folder is entered. At launch, the whole journal as a launch always took it: the
+    /// canvas entries moved aside first (the notes' recovery removes its own folder once its notes are back), the
+    /// cover fields, then the notes' journal as it was and any recovery a launch before didn't finish. On a switch,
+    /// only what was made in that folder: its note entries moved aside, and its cover fields and canvas edits read
+    /// where they are (they stay journaled until they land).
+    nonisolated static func prepare(for root: URL, launch: Bool, in folder: URL = folder) -> Prepared {
+        var out = Prepared()
+        if launch {
+            out.canvases = canvasLeftovers(in: folder)
+            let covers = coverLeftovers(in: folder)
+            out.covers = covers.entries
+            out.coverHolding = covers.holding
+            out.coverSources = covers.sources
+            out.notes = leftovers(in: folder)
+        } else {
+            out.notes = leftovers(forRoot: root, in: folder).map { [$0] } ?? []
+            let here = root.path
+            out.covers = coverEntries(in: folder).filter { !$0.root.isEmpty && NotebookBinding.sameRoot($0.root, here) }
+            out.canvas = canvasEntries(in: folder).filter { !$0.bound.root.isEmpty && NotebookBinding.sameRoot($0.bound.root, here) }
+        }
+        return out
+    }
+
     // MARK: Recovery (on the notes' queue)
 
     /// Puts back each entry of a recovering folder, one at a time: found by its note's id in the notes' folder as it

@@ -157,36 +157,15 @@ final class NoteDesk {
                 MainActor.assumeIsolated {
                     self.local = loaded
                     self.rootCache = (setting, root)
-                    NoteJournal.queue.async {
-                        // Canvas edits a launch before kept: moved aside first (the notes' recovery removes its own
-                        // folder once its notes are back), then put back by their notebook's cover id after the notes.
-                        let canvases = NoteJournal.canvasLeftovers()
-                        // Cover fields (a notebook made Private, its color or view) a launch before kept: waiting again
-                        // (shown at once), journaled again, then the moved-aside copies go.
-                        let covers = NoteJournal.coverLeftovers()
-                        if !covers.entries.isEmpty || !covers.holding.isEmpty {
-                            DispatchQueue.main.async {
-                                MainActor.assumeIsolated {
-                                    let waiting = self.store.recoverCovers(covers.entries)
-                                    // The moved-aside copies go only once every entry is journaled again.
-                                    NoteJournal.queue.async { NoteJournal.rejournalCovers(waiting, sources: covers.sources, holding: covers.holding) }
-                                }
-                            }
-                        }
-                        // The journal as it was, and any recovery a launch before didn't finish: resumed, entry by entry.
-                        let leftovers = NoteJournal.leftovers()
-                        guard !leftovers.isEmpty || !canvases.isEmpty else { return }
-                        NoteStore.io.async {
-                            for holding in leftovers { NoteJournal.recover(holding, root: root) }
-                            for holding in canvases { NoteJournal.recoverCanvas(holding, root: root) }
-                        }
-                    }
-                    // The launch recovers the whole journal itself (above), so this first switch doesn't.
-                    self.store.switchRoot(to: root, recover: false)
+                    // The folder is entered the one way (NoteStore.switchRoot), as at every later switch: this Mac's
+                    // journal put back (at launch all of it: notes, canvas edits, cover fields), then its first read,
+                    // then what was pending replayed, each step started by the one before. Notes take no change, and
+                    // no tool reads them, until the last (`takesChanges`).
                     self.ready = true
-                    // Read and watched only once the first folder is settled: the switch starts the store itself
-                    // when it's done (and after every later switch).
-                    if !self.store.switching { self.store.start() }
+                    self.store.switchRoot(to: root, launch: true) {
+                        self.look()
+                        self.followFolderSetting()
+                    }
                     self.settingsChanged()
                 }
             }
@@ -383,7 +362,9 @@ final class NoteDesk {
         lookSoon?.cancel()
         looks += 1
         giveBackAll {}
-        for editor in editors.values { editor.flush() }
+        // Every editor of the old folder sealed first: its composition committed, its text no longer editable, what's
+        // typed saved into the folder it was typed in. Nothing can change after it.
+        for editor in editors.values { editor.seal() }
         editors = [:]
         for panel in panels.values { panel.conceal() }
         for panel in tabPanels.values { panel.conceal() }
@@ -508,10 +489,7 @@ final class NoteDesk {
                     if !read.title.isEmpty { twins = all.filter { (Windows.value($0, kAXTitleAttribute) as String?) == read.title }.count }
                     // The person in a chat app's conversation (never an app kept private): one person or none.
                     if !quiet, PersonRead.isChat(app), ClaudePanel.privacy.current(privacy), let window = all.first(where: { Windows.id(of: $0) == number }) {
-                        let header = Self.headings(window)
-                        person = PersonRead.person(app: app, appName: appName, title: read.title, headings: header) ?? ""
-                        // Their address only from the header element that named them, never the window's title.
-                        handle = PersonRead.handle(person: person, headings: header) ?? ""
+                        (person, handle) = Self.person(in: window, title: read.title, app: app, appName: appName)
                     }
                 }
                 var made = NoteScene(mac: mac, app: app, pid: pid, window: read.window, title: read.title, titleTwins: twins, tab: read.tab, file: file)
@@ -534,6 +512,14 @@ final class NoteDesk {
                 }
             }
         }
+    }
+
+    /// The person in one chat window's conversation, from that window's own header: one person or none, and their
+    /// address only from the header element that named them, never the window's title. Off the main thread.
+    nonisolated static func person(in window: AXUIElement, title: String, app: String, appName: String) -> (name: String, handle: String) {
+        let header = headings(window)
+        let name = PersonRead.person(app: app, appName: appName, title: title, headings: header) ?? ""
+        return (name, PersonRead.handle(person: name, headings: header) ?? "")
     }
 
     /// A chat window's header, for the person in it: its Accessibility headings and its toolbar's words, in order,
@@ -1612,24 +1598,28 @@ final class NoteDesk {
                               dim: NSColor(white: 0.53, alpha: 1), petal: PaperLook.nsColor(NoteInk.ink(tint)), accent: color)
     }
 
-    /// What the editor typed, made on `base` (the file as the editor last had it). Returns the next base; nil when
-    /// the paper can't be written (read only: one of a conflict's papers).
-    func write(_ key: String, body: String, base: String?) -> String? {
-        guard let paper = store.paper(key) else { return nil }
-        if store.readOnly(paper) {
-            // Typed just as it became one of two papers: kept in the copy beside it, never dropped.
-            if paper.version == nil, paper.file.body != body { store.keepAside(key, body: body) }
-            return nil
+    /// What the editor typed, made on `base` (the file as the editor last had it): saved through the note (the next
+    /// base), kept somewhere safe (beside a paper that turned read only; or, when its folder is being switched away
+    /// from or is no longer the one in use, in that folder's own drain: NoteStore.drainLate), or refused, and then
+    /// the editor keeps it as typed and not saved. Typed text is never dropped.
+    func write(_ key: String, body: String, base: String?) -> NoteShelf.SaveAnswer {
+        if store.notesReady, let paper = store.paper(key) {
+            if store.readOnly(paper) {
+                // Typed just as it became one of two papers: kept in the copy beside it, never dropped.
+                if paper.version == nil, paper.file.body != body { store.keepAside(key, body: body) }
+                return .kept
+            }
+            // Petal's own changes since (a place followed or added) don't make this a conflict; words changed do.
+            let base = NoteShelf.rebase(editor: base, current: paper.revision, currentBody: paper.file.body)
+            guard paper.file.body != body else { return .saved(base: base) }
+            if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fresh.remove(key) }
+            // Links the person typed (an address alone on a line): their pages' titles may be fetched; a link already
+            // in the note (from sync) never is.
+            let links = { (text: String) in Set(NoteBlock.blocks(text).compactMap { if case .link(let url) = $0 { url } else { nil } }) }
+            for url in links(body).subtracting(links(paper.file.body)) { LinkPreviews.shared.requested(url) }
+            if let next = store.change(key, base: base, edit: { $0.body = body }) { return .saved(base: next) }
         }
-        // Petal's own changes since (a place followed or added) don't make this a conflict; words changed do.
-        let base = NoteShelf.rebase(editor: base, current: paper.revision, currentBody: paper.file.body)
-        guard paper.file.body != body else { return base }
-        if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fresh.remove(key) }
-        // Links the person typed (an address alone on a line): their pages' titles may be fetched; a link already
-        // in the note (from sync) never is.
-        let links = { (text: String) in Set(NoteBlock.blocks(text).compactMap { if case .link(let url) = $0 { url } else { nil } }) }
-        for url in links(body).subtracting(links(paper.file.body)) { LinkPreviews.shared.requested(url) }
-        return store.change(key, base: base) { $0.body = body }
+        return store.drainLate(key: key, body: body, base: base) ? .kept : .refused
     }
 
     /// Pictures pasted or dropped on a note: their bytes read and decoded first (a file that's slow or not downloaded
@@ -1968,6 +1958,10 @@ final class NoteDesk {
         // people, so then the note goes on the conversation's window.
         if let identity = PersonRead.identity(name: scene.person, handle: scene.personHandle, contacts: contacts) {
             var s = NoteStick(kind: .person)
+            // The app they were noted in: only so the place is scrubbed for the tools once that app is kept private
+            // (NoteStick.told); where the note shows never looks at it.
+            s.app = scene.app
+            s.appName = appName
             s.title = scene.person
             s.contact = identity.contact
             s.handle = identity.handle
@@ -2186,9 +2180,26 @@ final class NoteDesk {
         let privacy = ClaudePanel.privacy.now
         Self.read(running, mac: local.mac) { scene, read in
             guard self.on, drop == self.drops, !running.isTerminated, let number else { return }
+            // Another window than the one read: the person in it is read from that window itself (never the front
+            // window's), and only in a chat app that isn't kept private; else none.
+            let other = scene.window != number
+            let chat = other && PersonRead.isChat(scene.app) && !self.app.assist.neverLook(scene.app)
+            let bundle = scene.app
             DispatchQueue.global(qos: .userInitiated).async {
                 let alive = (CGWindowListCopyWindowInfo([.optionIncludingWindow], number) as? [[String: Any]])?
                     .contains { ($0[kCGWindowOwnerPID as String] as? pid_t) == pid } ?? false
+                var there: (name: String, handle: String)?
+                if alive, chat, Windows.trusted, ClaudePanel.privacy.current(privacy) {
+                    let element = AXUIElementCreateApplication(pid)
+                    AXUIElementSetMessagingTimeout(element, 0.3)
+                    let all: [AXUIElement] = Windows.value(element, kAXWindowsAttribute) ?? []
+                    if let target = all.first(where: { Windows.id(of: $0) == number }) {
+                        let own: String = Windows.value(target, kAXTitleAttribute) ?? title
+                        let found = Self.person(in: target, title: own, app: bundle, appName: name)
+                        if !found.name.isEmpty { there = found }
+                    }
+                }
+                let person = there
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         guard alive, self.on, drop == self.drops, !running.isTerminated else { return self.say("That window closed before the note could go on it.") }
@@ -2196,7 +2207,12 @@ final class NoteDesk {
                         // windows: that window alone.
                         var scene = scene
                         var read = read
-                        if scene.window != number { scene.tab = nil; scene.file = ""; scene.window = number; scene.title = title }
+                        if scene.window != number {
+                            scene = scene.retargeted(to: number, title: title, person: person)
+                            if !scene.person.isEmpty {
+                                scene.personContact = PersonRead.contact(handle: scene.personHandle, contacts: self.contacts) ?? ""
+                            }
+                        }
                         // Filtered again right before its offers (the app made private meanwhile, or private apps
                         // changed): nothing of a private app's window, tab or file is kept (NoteShelf.refilterDrop).
                         if NoteShelf.refilterDrop(readPrivacy: privacy, nowPrivacy: ClaudePanel.privacy.now, appPrivate: self.app.assist.neverLook(scene.app)) {

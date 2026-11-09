@@ -1303,6 +1303,9 @@ final class NoteTextView: NSTextView {
 @MainActor
 final class NoteEditorHandle {
     var flush: () -> Void = {}
+    /// Before its notes' folder is switched away from: any input-method composition is ended (its marked text
+    /// committed), the text can't be changed any more, and what's typed is saved; nothing can change after.
+    var seal: () -> Void = {}
     /// Typed and not saved yet: the note is fenced against a read of the folder only then (NoteShelf.fenceEditor).
     var busy: () -> Bool = { false }
     var insert: (String, URL, String, Int, Int, String) -> Bool = { _, _, _, _, _, _ in false }
@@ -1317,8 +1320,9 @@ struct NoteEditorView: NSViewRepresentable {
     let style: NoteRich.Style
     var focus: Bool
     let height: (CGFloat) -> Void
-    /// Saves what's typed, made on the given base; returns the next base (nil: it can't be written).
-    let save: (String, String?) -> String?
+    /// Saves what's typed, made on the given base: saved (the next base), kept somewhere safe, or refused
+    /// (NoteShelf.SaveAnswer).
+    let save: (String, String?) -> NoteShelf.SaveAnswer
     /// Hands the desk this editor (nil once it goes): to save what's typed now, and put pictures in.
     let register: (NoteEditorHandle?) -> Void
     /// Pictures pasted or dropped: the desk reads them and puts them in, here or (once this editor is gone) in the note.
@@ -1355,24 +1359,41 @@ struct NoteEditorView: NSViewRepresentable {
             schedule(view)
         }
 
-        @MainActor func schedule(_ view: NoteTextView) {
+        @MainActor func schedule(_ view: NoteTextView, after delay: TimeInterval = 0.5) {
             measure(view)
             saveLater?.cancel()
             marker.typed()
             let work = DispatchWorkItem { [weak self, weak view] in
                 guard let self, let view, let storage = view.textStorage else { return }
-                // The save runs: no longer dirty, then a version that waited meanwhile is taken (the folder read again).
                 self.saveLater = nil
                 let body = NoteBlock.body(NoteRich.blocks(storage))
                 if body != self.body {
-                    self.body = body
-                    if let next = self.parent.save(body, self.base) { self.base = next }
+                    // Only an accepted save advances what counts as saved; a refused one leaves the text typed and
+                    // not saved (still dirty), and is tried again in a moment (NoteShelf.afterSave).
+                    let next = NoteShelf.afterSave(body: self.body, base: self.base, typed: body, answer: self.parent.save(body, self.base))
+                    self.body = next.body
+                    self.base = next.base
+                    guard next.accepted else { return self.schedule(view, after: 1) }
                 }
+                // Saved: no longer dirty, then a version that waited meanwhile is taken (the folder read again).
                 _ = self.marker.saved()
                 self.parent.idle()
             }
             saveLater = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        }
+
+        /// Its folder is being switched away from: the composition under way is committed, the text is no longer
+        /// editable, and what's typed is saved now (`flush`), so nothing can change after it.
+        @MainActor func seal(_ view: NoteTextView) {
+            if view.hasMarkedText() {
+                view.unmarkText()
+                view.inputContext?.discardMarkedText()
+            }
+            view.isEditable = false
+            // Whatever the composition left in the text counts as typed.
+            schedule(view)
+            flush(view)
         }
 
         @MainActor func flush(_ view: NoteTextView) {
@@ -1451,6 +1472,10 @@ struct NoteEditorView: NSViewRepresentable {
         handle.flush = { [weak coordinator, weak text] in
             guard let coordinator, let text else { return }
             MainActor.assumeIsolated { coordinator.flush(text) }
+        }
+        handle.seal = { [weak coordinator, weak text] in
+            guard let coordinator, let text else { return }
+            MainActor.assumeIsolated { coordinator.seal(text) }
         }
         handle.busy = { [weak coordinator] in MainActor.assumeIsolated { coordinator?.marker.dirty == true } }
         handle.insert = { [weak text] path, file, caption, at, length, selected in
