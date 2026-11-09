@@ -224,7 +224,8 @@ enum MCP {
             json["byDay"] = Insights.byDay(from: from, to: to)
             return json
         case "petal_look", "petal_apps", "petal_windows", "petal_trash", "petal_remember", "petal_forget", "petal_memories", "petal_show", "petal_vault", "petal_ui", "petal_act",
-             "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
+             "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete",
+             "petal_notes", "petal_note_read", "petal_note_write", "petal_note_move", "petal_note_stick":
             // Petal itself does these, with its own permissions (and asks the person first where it should).
             let json = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
             // Which chat asks: a Petal chat's note (PETAL_NOTE, set by Petal for its own chats), answered about the

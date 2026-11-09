@@ -27,9 +27,23 @@ enum Spaces {
 
     /// What `screen` shows: a Desktop (its number), or a full-screen app's Space.
     static func showing(on screen: NSScreen) -> (desktop: Int?, fullScreen: Bool) {
+        showing(uuid: uuid(of: screen))
+    }
+
+    /// The Desktop each screen (by its display UUID, `screenID`) shows, read once: from any thread, so a caller
+    /// never waits on the window server on the main thread.
+    nonisolated static func desktops(_ screens: [String]) -> [String: Int] {
+        var out: [String: Int] = [:]
+        for screen in screens { if let number = showing(uuid: screen).desktop { out[screen] = number } }
+        return out
+    }
+
+    /// A screen's display UUID, as `desktops` takes it.
+    static func screenID(_ screen: NSScreen) -> String? { uuid(of: screen) }
+
+    nonisolated private static func showing(uuid wanted: String?) -> (desktop: Int?, fullScreen: Bool) {
         guard let mainConnection, let copySpaces,
               let displays = copySpaces(mainConnection())?.takeRetainedValue() as? [[String: Any]] else { return (nil, false) }
-        let wanted = uuid(of: screen)
         var number = 0
         var found: Int?
         var fullScreen = false

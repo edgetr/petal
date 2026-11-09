@@ -101,5 +101,7 @@ MainActor.assumeIsolated {
     let delegate = AppDelegate()
     app.delegate = delegate
     app.setActivationPolicy(.accessory)
+    // The standard editing keys for every text view, through a main menu that's never shown (EditMenu).
+    app.mainMenu = EditMenu.make()
     app.run()
 }

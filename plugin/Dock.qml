@@ -169,7 +169,10 @@ Item {
       property bool finderInDock: true
       property string chatWhileWorking: "steer"
       property bool selectionAsk: true
-      property bool aiNotes: true
+      property bool notes: true
+      property string notesLook: "paper"
+      property string notesFolder: ""
+      property string notesNotebook: "Inbox"
       // macOS: Petal AI can use apps for the user (petal_ui, petal_act).
       property bool computerUse: true
       property var aiNeverLook: ["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"]

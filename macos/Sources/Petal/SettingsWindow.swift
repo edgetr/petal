@@ -1307,6 +1307,44 @@ struct AppsSettings: View {
             }
             SettingToggle(key: "trash", title: "Trash")
         }
+        NotesCard()
+    }
+}
+
+/// Petal Notes: on or off, paper or glass, the notebook new notes go to, and where the files are.
+struct NotesCard: View {
+    @Environment(PetalApp.self) private var app
+
+    var body: some View {
+        Card(title: "Notes") {
+            SettingToggle(key: "notes", title: "Petal Notes", detail: "Your own notes on paper, stuck to a sentence, a tab, a window, an app, a file or a Desktop. ⌃⌥N makes one where you are.")
+            if app.config.bool("notes") {
+                HStack {
+                    Text("Look").font(.system(size: 13))
+                    Spacer()
+                    Segments(options: [("paper", "Paper"), ("glass", "Glass")],
+                             selection: Binding(get: { app.config.string("notesLook") == "glass" ? "glass" : "paper" }, set: { app.config.set("notesLook", $0) }))
+                        .frame(width: 180)
+                }
+                HStack {
+                    Text("New notes go to").font(.system(size: 13))
+                    Spacer()
+                    Picker("", selection: Binding(get: { app.paper.defaultNotebook }, set: { app.config.set("notesNotebook", $0) })) {
+                        ForEach(Array(Set(app.paper.store.notebooks.map(\.name) + [app.paper.defaultNotebook])).sorted(), id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden().frame(width: 180)
+                }
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Kept in").font(.system(size: 13))
+                        Text(app.paper.store.inICloud ? "iCloud Drive › Petal Notes" : (app.paper.store.root.path as NSString).abbreviatingWithTildeInPath)
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([app.paper.store.root]) }
+                }
+            }
+        }
     }
 }
 

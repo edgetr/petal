@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Checks the window maths (tiling and parking), when the dock looks at the windows, and which controls Petal AI is
-# told about (UIMap), where AI sticky notes show and sit (NoteLayout), how a note works in the background and what its
+# told about (UIMap), where notes' tabs and AI sticky notes show and sit (NoteLayout), Petal Notes' files, places, edge tabs and
+# room beside a window (NoteFile), how a note works in the background and what its
 # preview says (Background), the vault's pure side (sites, 2FA codes, exports, when it fills by itself), and agents
 # using the vault (AgentAccess: petal run's variables and redaction, who's asking, projects and grants; worktrees on
 # throwaway folders in the temporary folder; writing through a full pipe; an unreadable answer and which signals it
@@ -21,6 +22,22 @@ swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIM
 "$out/uimap"
 swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift checks/NoteLayoutCheck.swift
 "$out/notes"
+# Petal Notes: the note file's round trip, iCloud's conflict copies, the ranked fallback of a note's places, the tabs
+# on a window's edge, fading, and the room beside a window (no file, no window).
+swiftc -parse-as-library -O -o "$out/papernotes" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift checks/NotesCheck.swift
+"$out/papernotes"
+# A note's text in the editor and back: the same Markdown, line for line (AppKit, nothing shown).
+swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteEditor.swift Sources/Petal/EditMenu.swift checks/NoteRichCheck.swift
+"$out/noterich"
+# Petal Notes' files on throwaway folders in the temporary folder: saves that keep both, names from the disk, no
+# writes through symbolic links, two notebooks' Todo.md, a renamed file's bookmark, the journal's launch recovery
+# after a hang, and a cancelled tool write leaving nothing (never the Trash).
+swiftc -parse-as-library -O -o "$out/notestore" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/PaperNotes.swift Sources/Petal/NoteJournal.swift checks/NoteStoreCheck.swift
+"$out/notestore"
+# A passage for Petal AI follows petal_look's rule for selected text (UIMap.selectionHidden), and what the note tools
+# tell an agent is redacted with the vault's index, or not told while the vault can't be read (NoteShield).
+swiftc -parse-as-library -O -o "$out/noteselection" Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift checks/NoteSelectionCheck.swift
+"$out/noteselection"
 swiftc -parse-as-library -O -o "$out/background" Sources/Petal/Background.swift Sources/Petal/UIMap.swift checks/BackgroundCheck.swift
 "$out/background"
 swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Petal/UIMap.swift checks/VaultCheck.swift

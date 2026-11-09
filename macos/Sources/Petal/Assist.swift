@@ -221,6 +221,9 @@ final class Assist {
             let stop = RoutineStop(also: gone)
             request?.onHangUp { stop.stop() }
             app.routines.handle(name, args, send, fail, caller: note, live: live, stop: stop)
+        case _ where NoteDesk.tools.contains(name):
+            // Its asker hanging up stops what's still to come: each change checks `live` right before it's made.
+            app.paper.handle(name, args, live: live, send, fail)
         case "petal_memories":
             let mode = args["mode"] as? String
             send(["memories": memories.filter { mode == nil || $0.mode == mode || $0.mode.isEmpty }.map(record)])
@@ -230,6 +233,19 @@ final class Assist {
     }
 
     // MARK: Looking
+
+    /// Whether text selected in `field` may never go to the AI (petal_look's rule, and the note tools' for a
+    /// passage): a password field, a field named like a password, token, key, card number or security code, a field
+    /// Petal filled with a secret, any of the field's whole text holding a vault secret, or one piece of a secret the
+    /// window shows in pieces (a card number as four fields: selected a field at a time, it would be told whole).
+    /// Off the main thread (Accessibility, the vault).
+    nonisolated static func selectionInSecret(_ field: AXUIElement, pid: pid_t, window: CGWindowID?) -> Bool {
+        // The field's whole text, checked against the vault: a saved key in a field named nothing secret.
+        var node = Reader.node(field)
+        if !UIMap.isSecure(node) { node.value = Windows.value(field, kAXValueAttribute) ?? "" }
+        return UIMap.selectionHidden(in: node, filled: Sensitive.isFilled(field, pid: pid), secret: VaultIndex.current().matches)
+            || Reader.inJoinedSecret(pid: pid, window: window, controls: [field])
+    }
 
     /// What's in front: the app, its window, the browser's tab, selected text, the mode, the other windows showing;
     /// with `screenshot` ("window" or "screen") a picture saved where the AI can read it, and the clipboard if asked.
@@ -325,15 +341,7 @@ final class Assist {
             let title = Self.withoutSecrets(realTitle)
             // Nothing selected in a field holding a secret, not even part of one: a card number selected four
             // digits at a time would otherwise be told whole over four looks.
-            let inSecret = !selected.isEmpty && focused.map { field in
-                // The field's whole text, checked against the vault: a saved key in a field named nothing secret.
-                var node = Reader.node(field)
-                if !UIMap.isSecure(node) { node.value = Windows.value(field, kAXValueAttribute) ?? "" }
-                return UIMap.selectionHidden(in: node, filled: Sensitive.isFilled(field, pid: pid), secret: VaultIndex.current().matches)
-                    // Nor one piece of a secret the window shows in pieces (a card number as four fields): selected a
-                    // field at a time, it would be told whole.
-                    || Reader.inJoinedSecret(pid: pid, window: number, controls: [field])
-            } == true
+            let inSecret = !selected.isEmpty && focused.map { Self.selectionInSecret($0, pid: pid, window: number) } == true
             let shownSelection = selected.isEmpty ? "" : inSecret ? Self.selectionInSecret
                 : Self.shownText(selected, limit: 8000) ?? Self.tooMuchSelected
             let shownClipboard = clipboard.map { Self.shownText($0, limit: 4000) ?? Self.tooMuchClipboard }

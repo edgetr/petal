@@ -81,6 +81,9 @@ final class DockController {
 
     func show(_ on: Bool) {
         shown = on
+        // Mission Control from the shared watcher (MissionControlWatch), needed while this dock is shown.
+        MissionControlWatch.shared.subscribe("dock") { [weak self] open in self?.setMissionControl(open) }
+        MissionControlWatch.shared.need("dock", on)
         if on {
             // Windows opening, closing, minimizing and moving, as they happen (with Accessibility).
             WindowEvents.shared.listen("dock") { [weak self] event in self?.handle(event) }
@@ -127,10 +130,6 @@ final class DockController {
         case .quit:
             minimizedByApp[event.pid] = nil
             minimizedChanged[event.pid] = nil
-        case .missionControl:
-            setMissionControl(true)
-        case .missionControlEnded:
-            setMissionControl(false)
         default:
             break   // apps launching, quitting, hiding, another Desktop: the NSWorkspace observers above
         }
@@ -141,8 +140,8 @@ final class DockController {
     /// Mission Control (or App Exposé) is open. macOS's Dock always comes out there, whatever its own settings say
     /// (no setting keeps it away, and it's the Dock that draws Mission Control), so Petal's dock steps aside while
     /// it's open: one dock on the screen, not two. Comes back the moment it closes.
+    /// As MissionControlWatch says (its events, and its check that macOS's Dock still has a window up).
     private(set) var missionControl = false
-    private var missionControlCheck: Timer?
 
     private func setMissionControl(_ on: Bool) {
         guard on != missionControl else { return }
@@ -152,28 +151,6 @@ final class DockController {
         }
         app.previews.hold(on)
         for panel in panels.values { panel.aside = on }
-        missionControlCheck?.invalidate()
-        missionControlCheck = nil
-        guard on else { return }
-        // A safety net, should the Dock not say Mission Control closed (it was restarted, say): while it's open the
-        // Dock has a window on the screen; once it has none, Petal's dock comes back.
-        missionControlCheck = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            Self.lookQueue.async {
-                let open = Self.systemDockOnScreen()
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated { if !open { self?.setMissionControl(false) } }
-                }
-            }
-        }
-        missionControlCheck?.tolerance = 0.3
-    }
-
-    /// Whether macOS's Dock has a window on the screen: it does while Mission Control is open, and not while it's
-    /// hidden for Petal. Asks the window server: off the main thread.
-    nonisolated private static func systemDockOnScreen() -> Bool {
-        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first,
-              let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else { return false }
-        return windows.contains { $0[kCGWindowOwnerPID as String] as? pid_t == dock.processIdentifier }
     }
 
     private func look(_ cause: LookSchedule.Cause) {
@@ -1258,6 +1235,8 @@ struct ClaudeButton: View {
                                if app.previews.hoverNotes(on, in: dock) { app.tooltips.hide() }
                                else { app.tooltips.show(on ? app.usageTooltip : nil, over: "claude", in: dock) }
                            },
+                           // Dragged out onto a spot: a blank Petal Note there (on the window under it, or the Desktop).
+                           drag: app.config.bool("notes") ? { _, ended in app.paper.dragFromAI(ended: ended) } : nil,
                            // A file dropped on it goes to the AI: "summarize it", "what's in it?".
                            files: { urls in
                                dropped = urls.first.map { NSWorkspace.shared.icon(forFile: $0.path) }

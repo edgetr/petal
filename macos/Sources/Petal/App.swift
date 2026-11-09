@@ -63,6 +63,8 @@ final class PetalApp {
     @ObservationIgnored let selection = SelectionAsk()
     /// Routines in the person's own words: what Petal does by itself when a file lands, an app opens, a mode starts.
     let routines = Routines()
+    /// Petal Notes: the person's own notes on paper, stuck to places (NoteDesk.swift).
+    let paper = NoteDesk()
     /// Reading and closing browser tabs (Browsers.swift).
     @ObservationIgnored let browsers = Browsers()
     /// Where each AI app is installed, when it is.
@@ -118,6 +120,7 @@ final class PetalApp {
             Perf.span("onChange: hotkeys") { self.hotkeys.refresh() }
             Perf.span("onChange: menuBar") { self.menuBar.refresh() }
             self.claude.notesSettingChanged()   // sticky notes turned off: no listening, nudges or taking app clicks
+            self.paper.settingsChanged()   // Petal Notes on or off, its look or its folder
             self.assist.computer.settingsChanged()   // using apps turned off, or an app made private: what's under way stops
 
         }
@@ -131,6 +134,7 @@ final class PetalApp {
         activity.start()
         automation.start()
         menuBar.start()
+        paper.start()
         aiSetup.refreshAll()
         Apps.warm()
         // Codex's default model, as Codex's own settings change (read off the main thread).
@@ -159,6 +163,7 @@ final class PetalApp {
     }
 
     func stop() {
+        paper.stop()   // what's typed in notes is written, and windows narrowed for a note get their width back
         config.flush()
         InstructionsText.flush()
         Chats.flush()
@@ -521,7 +526,11 @@ final class PetalApp {
         let path = Bundle.main.bundlePath
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "sleep 1; /usr/bin/open \"$0\"", path]
+        // Quitting can take a while now (notes saved, windows given back: up to 10 s), so the helper waits for this
+        // very process to be gone, by its pid, before opening Petal again; still there after a minute, it opens
+        // nothing (a second Petal would only step aside for this one).
+        process.arguments = ["-c", "i=0; while /bin/kill -0 \"$1\" 2>/dev/null && [ $i -lt 300 ]; do sleep 0.2; i=$((i+1)); done; "
+                             + "/bin/kill -0 \"$1\" 2>/dev/null || /usr/bin/open \"$0\"", path, String(getpid())]
         try? process.run()
         NSApp.terminate(nil)
     }
@@ -677,6 +686,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         PetalApp.shared.settings.show()
         return false
+    }
+
+    /// Notes first: what's typed is written and narrowed windows get their width back, off the main thread (up to
+    /// 10 seconds), then Petal goes.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard PetalApp.started else { return .terminateNow }
+        PetalApp.shared.paper.prepareToQuit { NSApp.reply(toApplicationShouldTerminate: true) }
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {

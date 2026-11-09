@@ -3,7 +3,8 @@ import Carbon.HIToolbox
 import Observation
 
 /// Petal's keyboard shortcuts, global while `shortcuts` is on: Control-Option-1…9 puts the Desktop in front in that
-/// mode (in modes.json's order), Control-Option-Space opens the AI panel, Control-Option-= the "+" search. A
+/// mode (in modes.json's order), Control-Option-Space opens the AI panel, Control-Option-= the "+" search,
+/// Control-Option-N a new Petal Note on what's in front (with notes on). A
 /// combination macOS or another app already uses is left alone.
 @MainActor @Observable
 final class Hotkeys {
@@ -23,20 +24,29 @@ final class Hotkeys {
     static let digits = [kVK_ANSI_1, kVK_ANSI_2, kVK_ANSI_3, kVK_ANSI_4, kVK_ANSI_5, kVK_ANSI_6, kVK_ANSI_7, kVK_ANSI_8, kVK_ANSI_9]
     static let ask: UInt32 = 100
     static let search: UInt32 = 101
+    static let note: UInt32 = 102
 
     var app: PetalApp { PetalApp.shared }
 
     /// The keys Petal would use now: one per mode (up to 9), the AI panel when there's an AI, and "+".
-    var keys: [Key] {
+    var keys: [Key] { dockKeys + noteKeys }
+
+    /// The dock's: one per mode (up to 9), the AI panel when there's an AI, and "+".
+    private var dockKeys: [Key] {
         var keys = app.config.modes.prefix(9).indices.map { Key(id: UInt32($0 + 1), code: Self.digits[$0], label: "⌃⌥\($0 + 1)") }
         if !app.providers.isEmpty { keys.append(Key(id: Self.ask, code: kVK_Space, label: "⌃⌥Space")) }
         keys.append(Key(id: Self.search, code: kVK_ANSI_Equal, label: "⌃⌥="))
         return keys
     }
 
-    /// Registers what the settings ask for, and nothing else. Called when settings or modes change.
+    /// Petal Notes' (⌃⌥N): a group of its own, kept while notes are on whichever dock is chosen.
+    private var noteKeys: [Key] { app.config.bool("notes") ? [Key(id: Self.note, code: kVK_ANSI_N, label: "⌃⌥N")] : [] }
+
+    /// Registers what the settings ask for, and nothing else (NoteShelf.shortcutGroups: the dock's while it shows,
+    /// the notes' while they're on). Called when settings or modes change, and when the dock shows or hides.
     func refresh() {
-        let wanted = app.config.bool("shortcuts") && app.docks.shown ? keys : []
+        let groups = NoteShelf.shortcutGroups(shortcuts: app.config.bool("shortcuts"), dockShown: app.docks.shown, notes: app.config.bool("notes"))
+        let wanted = (groups.dock ? dockKeys : []) + (groups.notes ? noteKeys : [])
         guard wanted.map(\.id) != registered else { return }
         for ref in refs { UnregisterEventHotKey(ref) }
         refs = []
@@ -85,6 +95,8 @@ final class Hotkeys {
             app.claude.toggle()
         case Self.search:
             if app.search.isOpen { app.search.close() } else { app.search.open(in: nil) }
+        case Self.note:
+            app.paper.newHere()
         case 1...9:
             let modes = app.config.modes
             guard Int(key) <= modes.count,

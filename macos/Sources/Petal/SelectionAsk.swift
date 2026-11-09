@@ -72,7 +72,10 @@ final class SelectionAsk {
         let appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appElement, 0.25)
         guard let focused: AXUIElement = Windows.value(appElement, kAXFocusedUIElementAttribute) else { return nil }
-        if (Windows.value(focused, kAXSubroleAttribute) as String?) == kAXSecureTextFieldSubrole as String { return nil }
+        // petal_look's rule, before anything is captured (for Ask or a note): nothing from a password field, a field
+        // named for or filled with a secret, nor text holding a vault secret.
+        let window: CGWindowID? = (Windows.value(appElement, kAXFocusedWindowAttribute) as AXUIElement?).flatMap { Windows.id(of: $0) }
+        if Assist.selectionInSecret(focused, pid: pid, window: window) { return nil }
         guard let text: String = Windows.value(focused, kAXSelectedTextAttribute) else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.count >= 2, trimmed.count <= 20000 else { return nil }
@@ -96,7 +99,7 @@ final class SelectionAsk {
         // Just above the selection's end, else just above the pointer.
         let anchor = bounds.map { CGRect(x: $0.maxX - 2, y: $0.maxY, width: 2, height: 2) } ?? CGRect(x: mouse.x, y: mouse.y + 10, width: 2, height: 2)
         let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main ?? NSScreen.screens[0]
-        panel.show(SelectionButton { [weak self] in self?.ask() }, near: anchor, on: screen)
+        panel.show(SelectionButton(note: app.paper.on, ask: { [weak self] in self?.ask() }, write: { [weak self] in self?.note() }), near: anchor, on: screen)
         hideLater?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.hide() }
         hideLater = work
@@ -108,6 +111,13 @@ final class SelectionAsk {
         app.claude.quote(found.text, from: found.source)
         app.claude.open(asking: nil)
         hide()
+    }
+
+    /// "Note": a new Petal Note on the selected sentence (its page or file), open to write in.
+    private func note() {
+        guard let found else { return hide() }
+        hide()
+        app.paper.note(on: found.text)
     }
 
     private func hide() {
@@ -129,24 +139,40 @@ extension GlassPanel {
     }
 }
 
-/// The small button by a selection.
+/// The small buttons by a selection: Note (with Petal Notes on) and Ask Petal AI.
 private struct SelectionButton: View {
-    let action: () -> Void
-    @State private var hovering = false
+    let note: Bool
+    let ask: () -> Void
+    let write: () -> Void
+    @State private var hovering: String?
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 5) {
-                ProviderMark(provider: PetalApp.shared.chatProvider).frame(width: 13, height: 13)
-                Text("Ask Petal AI").font(.system(size: 12, weight: .medium))
+        GlassEffectContainer(spacing: 4) {
+            HStack(spacing: 4) {
+                if note {
+                    pill("note", action: write) {
+                        Image(systemName: "note.text").font(.system(size: 11, weight: .medium))
+                        Text("Note").font(.system(size: 12, weight: .medium))
+                    }
+                }
+                pill("ask", action: ask) {
+                    ProviderMark(provider: PetalApp.shared.chatProvider).frame(width: 13, height: 13)
+                    Text("Ask Petal AI").font(.system(size: 12, weight: .medium))
+                }
             }
-            .padding(.horizontal, 11).frame(height: 26)
-            .glassEffect(.regular.interactive(), in: .capsule)
-            .scaleEffect(hovering ? 1.04 : 1)
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.12), value: hovering)
         .padding(4)
+    }
+
+    private func pill<Label: View>(_ id: String, action: @escaping () -> Void, @ViewBuilder label: () -> Label) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) { label() }
+                .padding(.horizontal, 11).frame(height: 26)
+                .glassEffect(.regular.interactive(), in: .capsule)
+                .scaleEffect(hovering == id ? 1.04 : 1)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 ? id : (hovering == id ? nil : hovering) }
     }
 }

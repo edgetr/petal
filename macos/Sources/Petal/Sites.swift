@@ -14,8 +14,10 @@ final class Sites {
     @ObservationIgnored private var images: [String: NSImage] = [:]
     @ObservationIgnored private var fetching: Set<String> = []
     @ObservationIgnored private var failed: [String: Date] = [:]
+    /// Hosts whose cached icon is being read from disk (off the main thread).
+    @ObservationIgnored private var loading: Set<String> = []
 
-    static let folder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "Petal/sites")
+    nonisolated static let folder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "Petal/sites")
 
     // MARK: Addresses
 
@@ -66,18 +68,50 @@ final class Sites {
 
     // MARK: Icons
 
-    /// The site's icon, or a globe while it's fetched (or when it has none).
+    /// The site's icon, or a globe while it's fetched (or when it has none): a website shortcut the person put in
+    /// their dock.
     func icon(_ id: String) -> NSImage? {
+        if let image = cachedIcon(id) { return image }
+        requestIcon(id)
+        return nil
+    }
+
+    /// The site's icon only if it's already here (in memory or in Petal's cache): drawing a note's link card never
+    /// fetches anything.
+    /// Petal's cache on disk is read off the main thread; the icon shows once it's in.
+    func cachedIcon(_ id: String) -> NSImage? {
         guard let host = Self.domain(id) else { return nil }
         _ = arrived
         if let image = images[host] { return image }
-        let file = Self.folder.appending(path: host + ".png")
-        if let image = NSImage(contentsOf: file) {
-            images[host] = image
-            return image
-        }
-        fetch(id, host: host, to: file)
+        loadCached(host)
         return nil
+    }
+
+    /// The cached icon's bytes read off the main thread; `then` says whether there was one.
+    private func loadCached(_ host: String, then: (@MainActor (Bool) -> Void)? = nil) {
+        guard !loading.contains(host) else { then?(images[host] != nil); return }
+        loading.insert(host)
+        let file = Self.folder.appending(path: host + ".png")
+        Task.detached(priority: .utility) {
+            let data = try? Data(contentsOf: file)
+            await MainActor.run {
+                self.loading.remove(host)
+                if let data, let image = NSImage(data: data) {
+                    self.images[host] = image
+                    self.arrived += 1
+                }
+                then?(self.images[host] != nil)
+            }
+        }
+    }
+
+    /// Fetches the site's icon (bounded, streamed): for a dock shortcut, or a link the person pasted or typed.
+    func requestIcon(_ id: String) {
+        guard let host = Self.domain(id), images[host] == nil else { return }
+        // Petal's own cache first (read off the main thread), the site only when it has none.
+        loadCached(host) { [weak self] found in
+            if !found { self?.fetch(id, host: host, to: Self.folder.appending(path: host + ".png")) }
+        }
     }
 
     private func fetch(_ id: String, host: String, to file: URL) {
@@ -86,11 +120,14 @@ final class Sites {
         fetching.insert(host)
         Task.detached(priority: .utility) {
             let data = await Self.download(base)
+            // Kept in Petal's cache (written here, off the main thread).
+            if let data, let image = NSImage(data: data), image.isValid, let png = Self.png(image) {
+                try? FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
+                try? png.write(to: file, options: .atomic)
+            }
             await MainActor.run {
                 self.fetching.remove(host)
                 guard let data, let image = NSImage(data: data), image.isValid else { self.failed[host] = Date(); return }
-                try? FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
-                if let png = Self.png(image) { try? png.write(to: file, options: .atomic) }
                 self.images[host] = image
                 self.arrived += 1
             }
@@ -99,23 +136,42 @@ final class Sites {
 
     /// The site's own icon, in the order a browser would look for a good one.
     nonisolated private static func download(_ base: URL) async -> Data? {
-        if let data = await get(base.appending(path: "apple-touch-icon.png")), isImage(data) { return data }
-        if let page = await get(base), let html = String(data: page.prefix(200_000), encoding: .utf8) ?? String(data: page.prefix(200_000), encoding: .isoLatin1) {
-            for href in iconLinks(html) {
+        if let data = await get(base.appending(path: "apple-touch-icon.png"), .image), isImage(data) { return data }
+        if let page = await get(base, .page), let html = String(data: page, encoding: .utf8) ?? String(data: page, encoding: .isoLatin1) {
+            for href in iconLinks(html).prefix(4) {
                 guard let url = URL(string: href, relativeTo: base)?.absoluteURL, ["http", "https"].contains(url.scheme ?? "") else { continue }
-                if let data = await get(url), isImage(data) { return data }
+                if let data = await get(url, .image), isImage(data) { return data }
             }
         }
-        if let data = await get(base.appending(path: "favicon.ico")), isImage(data) { return data }
+        if let data = await get(base.appending(path: "favicon.ico"), .image), isImage(data) { return data }
         return nil
     }
 
-    nonisolated private static func get(_ url: URL) async -> Data? {
+    /// One response, streamed and bounded (NoteShelf.fetchAccepts, fetchLimit): an image or an HTML page by its
+    /// content type before anything is read, no more than its limit (too big: nothing), within 10 seconds.
+    nonisolated static func get(_ url: URL, _ kind: NoteShelf.FetchKind) async -> Data? {
         var request = URLRequest(url: url, timeoutInterval: 8)
         request.setValue("Petal", forHTTPHeaderField: "User-Agent")
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200, data.count < 2_000_000 else { return nil }
-        return data
+        let deadline = Date().addingTimeInterval(10)
+        guard let (bytes, response) = try? await URLSession.shared.bytes(for: request) else { return nil }
+        let http = response as? HTTPURLResponse
+        guard NoteShelf.fetchAccepts(kind, status: http?.statusCode ?? 0, contentType: http?.value(forHTTPHeaderField: "Content-Type")) else {
+            bytes.task.cancel()
+            return nil
+        }
+        let limit = NoteShelf.fetchLimit(kind)
+        if let length = http?.expectedContentLength, length > Int64(limit), kind == .image { bytes.task.cancel(); return nil }
+        var data = Data()
+        var complete = true
+        do {
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count >= limit || Date() > deadline { complete = false; break }
+            }
+        } catch { complete = false }
+        bytes.task.cancel()
+        // A page is read for its head (its start will do); an image only whole.
+        return kind == .page || complete ? data : nil
     }
 
     nonisolated private static func isImage(_ data: Data) -> Bool {
