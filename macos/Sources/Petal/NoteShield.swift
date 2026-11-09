@@ -29,7 +29,10 @@ enum NoteShield {
     /// the raw text, a file name or a path.
     static func find(_ name: String, rows: [(handle: String, body: String, version: Bool)], index: UIMap.SecretIndex) -> Lookup {
         guard !index.unreadable else { return .unreadable }
-        if let at = rows.firstIndex(where: { $0.handle == name }) { return .found(at) }
+        // An exact handle names one paper; two with it (notes sharing an id, until one gets its own) are never guessed between.
+        let exact = rows.indices.filter { rows[$0].handle == name }
+        if exact.count == 1 { return .found(exact[0]) }
+        if exact.count > 1 { return .ambiguous(exact) }
         // A handle told as the redaction showed it (an older one it changed): accepted when it names exactly one.
         let shownAs = rows.indices.filter { index.redacted(rows[$0].handle) == name && rows[$0].handle != name }
         if shownAs.count == 1 { return .found(shownAs[0]) }

@@ -385,6 +385,21 @@ struct NoteLibraryCheck {
         let laterGesture = NoteCanvas.Stamped(.move("n1", .init(x: 2, y: 2)), at: 20)
         let landedLateFirst = NoteCanvas().applyingMerged([laterGesture, firstGesture])
         expect(landedLateFirst.notes["n1"]?.x == 2, "a gesture that waited for an id lands after a later one: the later one still wins")
+        // A cover id in two notebook folders (a notebook duplicated in Finder): the later folder by name gets a new id,
+        // the same on every Mac.
+        let dupes = NoteLibrary.duplicateCovers([("SAME", "Trip"), ("SAME", "Trip copy"), ("ONLY", "Work")])
+        expect(dupes.keys.sorted() == ["Trip copy"] && dupes["Trip copy"] == NoteLibrary.renewedID("SAME", folder: "Trip copy"),
+               "only the later folder's cover is renewed", "\(dupes)")
+        let renewed = NoteLibrary.renewedID("SAME", folder: "Trip copy")
+        expect(renewed == NoteLibrary.renewedID("SAME", folder: "Trip copy") && renewed != NoteLibrary.renewedID("SAME", folder: "Trip copy 2")
+               && UUID(uuidString: renewed) != nil && renewed != "SAME", "the new id: a UUID made from the old id and the folder, the same on both Macs")
+        expect(NoteLibrary.isCanonicalCover("about this notebook.md") && NoteLibrary.isCanonicalCover("About This Notebook.MD") && !NoteLibrary.isCanonicalCover("About this notebook (recovered).md"),
+               "the cover's name matched as the file system does, case-insensitive")
+        expect(NoteDrop.waitForPictures(saving: false, importing: 1) && NoteDrop.waitForPictures(saving: true, importing: 0) && !NoteDrop.waitForPictures(saving: false, importing: 0),
+               "Mail waits for pictures being saved and pictures still being read in")
+        expect(CanvasQueue.ambiguous(key: "SAME", covers: [("SAME", "Trip"), ("SAME", "Trip copy")]) && !CanvasQueue.ambiguous(key: "SAME", covers: [("SAME", "Trip")]),
+               "a cover id two notebooks share: canvas edits wait, never rescued as gone")
+
         // Cover conflicts are per notebook folder, by file name, never by id.
         let coverPapers: [(id: String, path: String)] = [("SAME", "/n/A/About this notebook.md"), ("SAME", "/n/B/About this notebook.md"),
                                                          ("OTHER", "/n/A/About this notebook (recovered).md"), ("N1", "/n/A/Trip.md"), ("N1", "/n/B/Trip (conflicted copy).md")]

@@ -379,6 +379,9 @@ final class NoteStore {
                     if merged != self.notes { self.notes = merged }
                     if read.notebooks != self.notebooks { self.notebooks = read.notebooks }
                     self.readComplete = read.complete
+                    // A cover id found in two notebook folders (a notebook duplicated in Finder): the later folder's
+                    // cover gets its own id, through its session; that notebook is Private until it lands.
+                    self.renewDuplicateCovers()
                     self.regroup()
                     // Cover changes waiting are replayed only now, with the conflicts this read found rebuilt: never
                     // onto a cover in conflict.
@@ -537,13 +540,13 @@ final class NoteStore {
                 if a.file.cover != b.file.cover { return a.file.cover }
                 return a.file.modified > b.file.modified
             }
-            let cover = here.first { $0.url.lastPathComponent == NoteShelf.coverName && $0.version == nil }
+            let cover = here.first { NoteLibrary.isCanonicalCover($0.url.lastPathComponent) && $0.version == nil }
                 ?? here.first { $0.file.cover && $0.version == nil } ?? here.first { $0.file.cover }
             // Ready to be written: the cover file itself and every version of it read (its conflicts are the store's
             // to see). Kept apart from privacy: other notes still downloading never hold a cover's write back.
             let coverFile = folder.appending(path: NoteShelf.coverName)
             let coverUnread = NoteLibrary.coverUnknown(fileThere: fm.fileExists(atPath: coverFile.path),
-                                                       fileRead: here.contains { $0.url.lastPathComponent == NoteShelf.coverName && $0.version == nil },
+                                                       fileRead: here.contains { NoteLibrary.isCanonicalCover($0.url.lastPathComponent) && $0.version == nil },
                                                        versionsUnread: coverVersionUnread)
             // Privacy unknown (so Private) while the folder couldn't be listed or any cover file wasn't read.
             let privacyUnknown = coverUnread || strayPrivate || NoteLibrary.notebookUnknown(listed: inFolder != nil, unreadCovers: unreadCovers)
@@ -818,7 +821,9 @@ final class NoteStore {
             if outcome == .written {
                 state.revision = text
                 // An id-less note given its id by this write: known by that id from now on.
-                if NoteShelf.needsID(state.noteID) { state.noteID = noteID(of: text, at: state.url, root: root) }
+                // Known by the id in the text it wrote from now on (an id-less note given one, a duplicated cover given
+                // its own).
+                state.noteID = noteID(of: text, at: state.url, root: root)
             }
             return NoteWorkResult(outcome: outcome, url: state.url)
         case .keepAside(let text):
@@ -1895,6 +1900,9 @@ final class NoteStore {
     /// Pictures still being read for the note: it isn't empty.
     func importing(_ key: String) -> Bool { paper(key).map { importsLoading[$0.noteID]?.isEmpty == false } ?? false }
 
+    /// How many pictures pasted or dropped on a note are still being read in.
+    func importingCount(_ key: String) -> Int { paper(key).map { (importsLoading[$0.noteID] ?? [:]).values.reduce(0) { $0 + $1.count } } ?? 0 }
+
     /// Quitting: a paste finishing now is left in the journal for the next launch.
     var quitting: Bool { draining }
 
@@ -1949,8 +1957,12 @@ final class NoteStore {
         let name = self.notebook(notebook)?.name ?? ensureNotebook(notebook, color: "")
         guard let book = self.notebook(name) else { return }
         // Bound to this root and to the notebook's cover id or folder, never its name.
-        let bound = CoverFields(notebook: name, root: root.path, coverID: book.cover.flatMap { paper($0) }.map(\.noteID).flatMap { NoteShelf.needsID($0) ? nil : $0 } ?? "",
-                                folderID: book.instance)
+        // Its cover's id only once it's landed and its own (not one shared with a duplicated notebook): else its folder.
+        let landedID = book.cover.flatMap { paper($0) }.map(\.noteID).flatMap { id in
+            NoteShelf.lasting(id, pending: pendingIDs) && renewing[name] == nil
+                && notes.filter({ $0.noteID == id && $0.version == nil && NoteLibrary.isCanonicalCover($0.url.lastPathComponent) }).count == 1 ? id : nil
+        }
+        let bound = CoverFields(notebook: name, root: root.path, coverID: landedID ?? "", folderID: book.instance)
         guard !bound.coverID.isEmpty || !bound.folderID.isEmpty else {
             return onProblem("Petal couldn't tell which notebook \(name) is on disk yet, so nothing was changed. Try again in a moment.")
         }
@@ -1992,7 +2004,9 @@ final class NoteStore {
               let name = pending.target(root: root.path, notebooks: coverTargets), let found = notebook(name) else { return }
         if found.cover == nil, !found.coverUnread { return ensureCover(name) }
         // Never onto a cover not read, or in conflict (its versions read only until one is kept).
-        guard !found.coverUnread, let coverKey = found.cover, let cover = paper(coverKey), !readOnly(cover) else { return }
+        // Not while its id is being written (a duplicated cover renewed); an id-less cover gets its id through `change`.
+        guard !found.coverUnread, renewing[name] == nil, let coverKey = found.cover, let cover = paper(coverKey), !readOnly(cover),
+              !pendingIDs.contains(cover.noteID) else { return }
         let wrote = pending.fields
         coverLanding.insert(key)
         let changed = change(coverKey, touch: false, edit: { CoverFields.apply(wrote, to: &$0) }) { outcome in
@@ -2008,6 +2022,54 @@ final class NoteStore {
         if changed == nil { coverLanding.remove(key) }
     }
 
+    /// Notebooks whose cover is being given its own id (a duplicated cover), by name: Private until it lands.
+    @ObservationIgnored var renewing: [String: String] = [:]
+
+    /// Covers sharing one id across notebook folders: every folder but the first by name (NoteLibrary.duplicateCovers)
+    /// gets a new, deterministic id written into its cover through the cover's session (its front matter only).
+    private func renewDuplicateCovers() {
+        let covers = notes.filter { $0.version == nil && NoteLibrary.isCanonicalCover($0.url.lastPathComponent) && !NoteShelf.needsID($0.noteID) }
+        for (folder, newID) in NoteLibrary.duplicateCovers(covers.map { (id: $0.noteID, folder: $0.notebook) }) where renewing[folder] == nil {
+            guard let paper = covers.first(where: { $0.notebook == folder }) else { continue }
+            reidentify(paper.key, to: newID)
+        }
+        markRenewing()
+    }
+
+    /// A note given a new id of its own (not an id-less note's first: the old id stays with the other note that has
+    /// it, so nothing kept by it moves): written through its session, waited for like any id being written.
+    private func reidentify(_ key: String, to new: String) {
+        guard !switching, let index = notes.firstIndex(where: { $0.key == key }), notes[index].version == nil, !readOnly(notes[index]),
+              let session = session(for: key) else { return }
+        var paper = notes[index]
+        let base = paper.revision
+        paper.file.id = new
+        let text = paper.file.serialized()
+        paper.revision = text
+        notes[index] = paper
+        session.noteID = new
+        touch(key)
+        pendingIDs.insert(new)
+        session.idPending = new
+        let notebook = paper.notebook
+        renewing[notebook] = new
+        enqueue(session, .write(text: text, base: base), done: { outcome in
+            if self.renewing[notebook] == new { self.renewing[notebook] = nil }
+            self.idWritten(new, landed: outcome == .written)
+            self.reload()
+        })
+        snapshot(paper, text: text, session: session)
+    }
+
+    /// A notebook whose cover is getting its own id counts as Private (unknown) until it lands.
+    private func markRenewing() {
+        for name in renewing.keys {
+            guard let index = notebooks.firstIndex(where: { $0.name == name }) else { continue }
+            notebooks[index].isPrivate = true
+            notebooks[index].privacyUnknown = true
+        }
+    }
+
     /// Every notebook as shown: what its cover says, with only the fields still waiting for it (in this root) over it;
     /// an unknown cover counts as Private.
     private func showCovers() {
@@ -2020,6 +2082,7 @@ final class NoteStore {
             notebooks[index].color = shown.color
             notebooks[index].view = shown.view
         }
+        markRenewing()
     }
 
     /// After a read of the folder (its conflicts rebuilt): what's waiting shown over what the covers say, and landed
@@ -2186,8 +2249,9 @@ extension NoteStore {
 
     /// A notebook's cover id, when its cover has one of its own in its file (what its canvas edits are kept by).
     func coverID(_ notebook: String) -> String? {
-        guard let book = self.notebook(notebook), let key = book.cover, let cover = paper(key),
-              NoteShelf.lasting(cover.noteID, pending: pendingIDs) else { return nil }
+        guard let book = self.notebook(notebook), renewing[book.name] == nil, let key = book.cover, let cover = paper(key),
+              NoteShelf.lasting(cover.noteID, pending: pendingIDs),
+              coverTargetsForCanvas.filter({ $0.id == cover.noteID }).map({ $0.notebook.lowercased() }).uniqued().count == 1 else { return nil }
         return cover.noteID
     }
 
@@ -2298,7 +2362,8 @@ extension NoteStore {
         guard let book = notebook(canvasKey: id) else {
             // Not found while the folder isn't read completely (a cover still downloading could be it): it waits for
             // the next read.
-            guard CanvasQueue.gone(found: false, complete: readComplete) else { return }
+            guard CanvasQueue.gone(found: false, complete: readComplete),
+                  !CanvasQueue.ambiguous(key: id, covers: coverTargetsForCanvas) else { return }
             // Its notebook is gone (trashed, or its cover with it): rescued into Unsaved notes, never dropped.
             canvasWaiting[id] = nil
             canvasDone[id] = nil

@@ -177,6 +177,14 @@ enum NoteContract {
     }
 }
 
+extension Array where Element: Hashable {
+    /// The elements, each once, in order.
+    func uniqued() -> [Element] {
+        var seen: Set<Element> = []
+        return filter { seen.insert($0).inserted }
+    }
+}
+
 // MARK: - The window's views
 
 enum NoteLibrary {
@@ -340,6 +348,42 @@ extension NoteLibrary {
 
     static func isCover(fileName: String, file: NoteFile) -> Bool { isCoverName(fileName) }
 
+    /// "About this notebook.md" itself, as the file system matches names (case-insensitive, as iCloud Drive and Mac
+    /// volumes are): the one helper every comparison with the canonical cover's name uses.
+    static func isCanonicalCover(_ fileName: String) -> Bool {
+        fileName.compare(NoteShelf.coverName, options: .caseInsensitive) == .orderedSame
+    }
+
+    /// Covers sharing one id across notebook folders (a notebook duplicated in Finder): every folder but the first, by
+    /// folder name, gets a new id, so both Macs pick the same ones. `covers`: each canonical cover's id and its folder's
+    /// name. Returns, for each folder to change, its new id (`renewedID`).
+    static func duplicateCovers(_ covers: [(id: String, folder: String)]) -> [String: String] {
+        var out: [String: String] = [:]
+        for (id, group) in Dictionary(grouping: covers, by: \.id) where group.count > 1 {
+            let folders = Set(group.map(\.folder)).sorted()
+            for folder in folders.dropFirst() { out[folder] = renewedID(id, folder: folder) }
+        }
+        return out
+    }
+
+    /// The new id a duplicated cover gets: a UUID made from the old id and its folder's name (FNV-1a, twice), so two
+    /// Macs doing it at once write the same id.
+    static func renewedID(_ id: String, folder: String) -> String {
+        func fnv(_ text: String, _ seed: UInt64) -> UInt64 {
+            var hash = seed
+            for byte in text.utf8 { hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
+            return hash
+        }
+        let source = id + "\u{0}" + folder
+        let a = fnv(source, 0xcbf2_9ce4_8422_2325), b = fnv(source, 0x8422_2325_cbf2_9ce4)
+        var bytes = (0..<8).map { UInt8((a >> (8 * $0)) & 0xff) } + (0..<8).map { UInt8((b >> (8 * $0)) & 0xff) }
+        bytes[6] = (bytes[6] & 0x0f) | 0x50   // a name-based UUID's version
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        let uuid = UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                               bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
+        return uuid.uuidString
+    }
+
     /// A note that isn't cover-named but says `cover: true` and `private: true`: a sign a cover lost its name (a copy
     /// named from its heading, a rename). Its notebook's privacy is unknown, so Private, until the person resolves it.
     static func strayPrivateCover(fileName: String, file: NoteFile) -> Bool {
@@ -433,7 +477,7 @@ extension NoteShelf {
         // Only within the chosen paper's own notebook folder: never another notebook's cover.
         let folder = (chosen as NSString).deletingLastPathComponent
         guard NoteLibrary.isCoverName((chosen as NSString).lastPathComponent),
-              let canonical = group.first(where: { ($0 as NSString).lastPathComponent == NoteShelf.coverName && ($0 as NSString).deletingLastPathComponent == folder })
+              let canonical = group.first(where: { NoteLibrary.isCanonicalCover(($0 as NSString).lastPathComponent) && ($0 as NSString).deletingLastPathComponent == folder })
         else { return chosen }
         return canonical
     }
@@ -1141,6 +1185,12 @@ enum CanvasQueue {
         return out
     }
 
+    /// Whether a canvas key's cover id is in two notebooks at once (a duplicated notebook, until one cover gets its
+    /// own id): never taken for gone, it waits.
+    static func ambiguous(key: String, covers: [(id: String, notebook: String)]) -> Bool {
+        !isFolderKey(key) && Set(covers.filter { $0.id == key }.map { $0.notebook.lowercased() }).count > 1
+    }
+
     /// Whether a canvas entry's notebook is gone, to be rescued: only when no notebook's cover has its id and the
     /// notes' folder was read completely (no cover still downloading or unreadable, which could be it).
     static func gone(found: Bool, complete: Bool) -> Bool { !found && complete }
@@ -1235,6 +1285,10 @@ enum NoteDrop {
     enum Attachment: Equatable { case file, stage, missing }
 
     static func attachment(onDisk: Bool, held: Bool) -> Attachment { onDisk ? .file : held ? .stage : .missing }
+
+    /// Whether a Mail draft waits a little longer before it's made: a picture's bytes still being saved, or pictures
+    /// pasted or dropped still being read in.
+    static func waitForPictures(saving: Bool, importing: Int) -> Bool { saving || importing > 0 }
 
     /// Where Mail drafts' staged pictures go: a folder per draft inside it.
     static var stagingRoot: URL { FileManager.default.temporaryDirectory.appending(path: "Petal Mail") }

@@ -130,6 +130,8 @@ struct NoteStoreCheck {
         coverConflictNames(root: root)
         keepPromotes(root: root)
         coverGroupsByFolder(root: root)
+        duplicatedNotebook(root: root)
+        lowercaseCover(root: root)
         rekeyKeepsSource(root: root)
         canvasByFolder(root: root)
         notebookFolders(root: root)
@@ -1514,8 +1516,10 @@ struct NoteStoreCheck {
         store.keep(copyPaper)
         var until = Date().addingTimeInterval(5)
         while fm.fileExists(atPath: copyA.path) && Date() < until { settle(0.1) }
-        expect(text(coverA)?.contains("A, kept") == true && text(coverB) == beforeB && fm.fileExists(atPath: coverB.path),
-               "Keep writes only within its own notebook folder")
+        // (The duplicated notebook's cover gets its own id meanwhile: only its id changes, never its words.)
+        let coverBNow = text(coverB).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) }
+        expect(text(coverA)?.contains("A, kept") == true && coverBNow?.body == beforeB.map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()).body }
+               && fm.fileExists(atPath: coverB.path), "Keep writes only within its own notebook folder")
         store.keep(canonicalC)
         until = Date().addingTimeInterval(5)
         while fm.fileExists(atPath: recovered.path) && Date() < until { settle(0.1) }
@@ -1523,6 +1527,68 @@ struct NoteStoreCheck {
         settle(1.5)
         expect(!fm.fileExists(atPath: recovered.path) && store.notebook("Recovered")?.isPrivate == false, "resolved, the notebook is what its cover says")
         for folder in [a, b, c] { try? fm.removeItem(at: folder) }
+    }
+
+    /// A notebook duplicated in Finder (its cover's id in two folders): the later folder's cover gets a new,
+    /// deterministic id through its session, Private until it lands; then its cover fields and canvas stay its own.
+    @MainActor static func duplicatedNotebook(root: URL) {
+        let fm = FileManager.default
+        let a = root.appending(path: "Trip"), b = root.appending(path: "Trip copy")
+        for folder in [a, b] { try? fm.createDirectory(at: folder, withIntermediateDirectories: true) }
+        var cover = NoteFile(id: "TRIP-COVER", body: "# About this notebook\nTrips")
+        cover.cover = true
+        _ = NoteStore.create(cover.serialized(), at: a.appending(path: NoteShelf.coverName), root: root)
+        _ = NoteStore.create(cover.serialized(), at: b.appending(path: NoteShelf.coverName), root: root)
+        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        // The read first, then the files' queue held, so the new id's write waits while the notebook is checked.
+        store.reload()
+        let hold = DispatchSemaphore(value: 0)
+        NoteStore.io.async { hold.wait() }
+        var until = Date().addingTimeInterval(8)
+        while store.notebook("Trip copy") == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let expected = NoteLibrary.renewedID("TRIP-COVER", folder: "Trip copy")
+        expect(store.renewing["Trip copy"] == expected && store.notebook("Trip copy")?.isPrivate == true && store.notebook("Trip")?.isPrivate == false,
+               "the later folder's cover is getting its new id, and that notebook is Private until it lands")
+        expect(store.coverID("Trip copy") == nil, "while its new id is being written, the renewed notebook's cover id isn't used as a key")
+        hold.signal()
+        until = Date().addingTimeInterval(8)
+        func idOnDisk(_ folder: URL) -> String? { text(folder.appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()).id } }
+        while idOnDisk(b) != expected && Date() < until { settle(0.1) }
+        until = Date().addingTimeInterval(5)
+        while store.renewing["Trip copy"] != nil && Date() < until { settle(0.1) }
+        store.reload()
+        settle(1.5)
+        expect(idOnDisk(b) == expected && idOnDisk(a) == "TRIP-COVER" && text(b.appending(path: NoteShelf.coverName))?.contains("Trips") == true,
+               "written: the later cover has its new id (its words kept), the first keeps its own")
+        expect(store.coverID("Trip copy") == expected && store.coverID("Trip") == "TRIP-COVER" && store.notebook("Trip copy")?.isPrivate == false,
+               "landed: each notebook's own id, and it's no longer Private")
+        // Then everything kept by cover id stays separate.
+        store.editCanvas("Trip copy", .move("n1", .init(x: 3, y: 3))) { _ in }
+        until = Date().addingTimeInterval(5)
+        while NoteCanvas.decode(text(b.appending(path: NoteStore.canvasName)))?.notes["n1"] == nil && Date() < until { settle(0.1) }
+        expect(NoteCanvas.decode(text(b.appending(path: NoteStore.canvasName)))?.notes["n1"]?.x == 3 && !fm.fileExists(atPath: a.appending(path: NoteStore.canvasName).path),
+               "a canvas edit lands only in its own notebook")
+        store.setCover("Trip copy", fields: ["private": "true"])
+        until = Date().addingTimeInterval(5)
+        func privateOnDisk(_ folder: URL) -> Bool? { text(folder.appending(path: NoteShelf.coverName)).map { NoteContract.isPrivate(NoteFile.parse($0, fallbackID: "", fallbackDate: Date())) } }
+        while privateOnDisk(b) != true && Date() < until { settle(0.1); store.reload() }
+        expect(privateOnDisk(b) == true && privateOnDisk(a) == false, "a cover field lands only on its own notebook's cover")
+        for folder in [a, b] { try? fm.removeItem(at: folder) }
+    }
+
+    /// A cover named in another case ("about this notebook.md") is the cover, read and known.
+    static func lowercaseCover(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Lower")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var cover = NoteFile(id: "LOWER-COVER", body: "# About this notebook\nlower")
+        cover.cover = true
+        _ = NoteStore.create(cover.serialized(), at: folder.appending(path: "about this notebook.md"), root: root)
+        let book = NoteStore.read(root).notebooks.first { $0.name == "Lower" }
+        expect(book?.cover != nil && book?.coverUnread == false && book?.privacyUnknown == false && book?.isPrivate == false,
+               "a lowercase cover name is read as the cover, known and public")
+        try? fm.removeItem(at: folder)
     }
 
     /// A folder that can't be listed is never taken for an empty one: the read isn't complete.

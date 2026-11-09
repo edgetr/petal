@@ -54,7 +54,8 @@ extension NoteDesk {
     /// picture still not in its folder goes from the bytes Petal holds, staged in a temporary folder Petal removes
     /// later; one not available at all is said ("1 picture couldn't be attached").
     private func mail(_ paper: PaperNote, title: String, text: String, tries: Int = 15) {
-        if store.picturesPending(paper.key), tries > 0 {
+        // Waiting for both: bytes still being saved, and pictures pasted or dropped still being read in.
+        if NoteDrop.waitForPictures(saving: store.picturesPending(paper.key), importing: store.importingCount(paper.key)), tries > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 MainActor.assumeIsolated {
                     guard let now = self.store.paper(paper.key) else { return }
@@ -69,11 +70,13 @@ extension NoteDesk {
             return store.heldPicture(paper.noteID, name).map { (name, $0) }
         }, uniquingKeysWith: { a, _ in a })
         let folder = paper.url.deletingLastPathComponent(), root = store.root
+        // Pictures still being read in after the wait aren't in the note yet: they can't go, and that's said.
+        let stillComing = store.importingCount(paper.key)
         // Where its pictures are, found off the main thread (the disk, and iCloud may bring them down first).
         NoteStore.io.async {
             let stage = NoteDrop.stagingRoot.appending(path: UUID().uuidString)
             var files: [URL] = []
-            var missing = 0
+            var missing = stillComing
             for link in links {
                 let name = (link as NSString).lastPathComponent
                 let onDisk = NoteStore.pictureFile(link, noteFolder: folder, root: root).flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
