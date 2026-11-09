@@ -477,11 +477,11 @@ final class NoteDesk {
                             switch NoteShelf.passagePoll(read: measure?.read, quote: item.1.quote, words: measure?.words, rescanned: true) {
                             case .still(let words):
                                 self.anchors[item.0] = anchors[index]
-                                self.lost.remove(item.0)
+                                self.lost[item.0] = nil
                                 states[item.0] = .at(words: words, visible: measure?.visible)
                             default:
                                 self.anchors[item.0] = nil
-                                self.lost.insert(item.0)
+                                self.lost[item.0] = Date()
                                 states[item.0] = .moved
                             }
                         }
@@ -517,7 +517,9 @@ final class NoteDesk {
     /// longer holds its quote (text put in before it) is found again; found again and not there, it moved.
     @ObservationIgnored private var anchors: [String: PassageAnchor] = [:]
     /// Passages found to have moved: not looked for again until the window or the notes change.
-    @ObservationIgnored private var lost: Set<String> = []
+    /// Passages found to have moved, with when they were last looked for: looked for again every 2 s at most while
+    /// their note is here (NoteShelf.passageWatch), so one brought back (Undo) comes back.
+    @ObservationIgnored private var lost: [String: Date] = [:]
     @ObservationIgnored private var passageTimer: Timer?
     @ObservationIgnored private var measuring = false
     @ObservationIgnored private var finding = false
@@ -535,10 +537,10 @@ final class NoteDesk {
     /// longer a passage note here is let go (its anchor and any measurement of it); none left, the watcher stops.
     private func reconcilePassages() {
         let wanted = passagesHere
-        let before = Set(anchors.keys).union(lost)
+        let before = Set(anchors.keys).union(lost.keys)
         anchors = anchors.filter { wanted.contains($0.key) }
-        lost = lost.intersection(wanted)
-        if Set(anchors.keys).union(lost) != before { passageTurn += 1 }
+        lost = lost.filter { wanted.contains($0.key) }
+        if Set(anchors.keys).union(lost.keys) != before { passageTurn += 1 }
         guard !wanted.isEmpty, on, listening else { return stopWatchingPassages() }
         if passageTimer == nil {
             passageTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -551,17 +553,17 @@ final class NoteDesk {
         passageTimer?.invalidate()
         passageTimer = nil
         anchors = [:]
-        lost = []
+        lost = [:]
         passageTurn += 1
     }
 
     /// One tick (NoteShelf.passageWatch): stop, find again, skip while busy, or measure.
     private func tickPassages() {
         guard on, listening else { return stopWatchingPassages() }
-        switch NoteShelf.passageWatch(wanted: passagesHere, known: Set(anchors.keys).union(lost), busy: measuring || finding) {
+        switch NoteShelf.passageWatch(wanted: passagesHere, anchored: Set(anchors.keys), moved: lost, now: Date(), busy: measuring || finding || scans.running) {
         case .stop: stopWatchingPassages()
         case .skip: break
-        case .find: if let scene, Date().timeIntervalSince(rescanned) > 1 { findPassages(scene) }
+        case .find: if let scene { findPassages(scene) }
         case .measure: measurePassages()
         }
     }
@@ -1063,6 +1065,10 @@ final class NoteDesk {
         let base = NoteShelf.rebase(editor: base, current: paper.revision, currentBody: paper.file.body)
         guard paper.file.body != body else { return base }
         if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fresh.remove(key) }
+        // Links the person typed (an address alone on a line): their pages' titles may be fetched; a link already
+        // in the note (from sync) never is.
+        let links = { (text: String) in Set(NoteBlock.blocks(text).compactMap { if case .link(let url) = $0 { url } else { nil } }) }
+        for url in links(body).subtracting(links(paper.file.body)) { LinkPreviews.shared.requested(url) }
         return store.change(key, base: base) { $0.body = body }
     }
 

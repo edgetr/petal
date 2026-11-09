@@ -166,8 +166,11 @@ struct PaperView: View {
             .padding(.bottom, 6)
         }
         // One of a conflict's papers is read only, with Keep this one: nothing typed into it could be kept.
-        if snapshotting || desk == nil || conflict {
+        if snapshotting || desk == nil {
             NoteBodyView(paper: paper, tint: tint, accent: color, glass: glass).padding(.bottom, 18)
+        } else if conflict {
+            // Read only, in a scroll view as tall as the editor may be: a long one never runs off the screen.
+            ConflictBody(paper: paper, tint: tint, accent: color, glass: glass, resized: { desk?.measured(paper.key, $0) }).padding(.bottom, 18)
         } else if let desk {
             NoteEditorView(paper: paper, style: desk.style(color, glass: glass), focus: keyboard,
                            height: { desk.measured(paper.key, $0) },
@@ -234,6 +237,36 @@ struct Letterhead: View {
 }
 
 /// The note's writing, read only: in snapshots, and wherever the editor isn't.
+/// One of a conflict's papers, read only: its text in a bounded scroll view, as high as its words up to the editor's
+/// greatest height (the paper never grows past it, so it stays on the screen).
+struct ConflictBody: View {
+    let paper: PaperNote
+    let tint: NoteInk.RGB
+    let accent: NSColor
+    let glass: Bool
+    /// Its height changed: the paper fits itself to it again.
+    var resized: (CGFloat) -> Void = { _ in }
+    @State private var height: CGFloat = 0
+
+    struct Height: PreferenceKey {
+        static let defaultValue: CGFloat = 0
+        static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+    }
+
+    var body: some View {
+        ScrollView(.vertical) {
+            NoteBodyView(paper: paper, tint: tint, accent: accent, glass: glass)
+                .background(GeometryReader { Color.clear.preference(key: Height.self, value: $0.size.height) })
+        }
+        .scrollIndicators(.automatic)
+        .onPreferenceChange(Height.self) { new in
+            height = new
+            resized(new)
+        }
+        .frame(height: min(PaperLook.maxOpen - 70, max(PaperLook.minOpen - 70, height)))
+    }
+}
+
 struct NoteBodyView: View {
     let paper: PaperNote
     let tint: NoteInk.RGB

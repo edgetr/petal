@@ -1063,22 +1063,74 @@ enum NoteShelf {
 
     /// A conflict paper's own handle part is kept by its note's id and a hash of its file's name (`id#hash`), never a
     /// path or an inode.
-    static func copyKey(noteID: String, fileName: String) -> String {
+    /// The paper's identity inside the notes folder is hashed: its notebook and file name (`file:` namespace), or an
+    /// iCloud version's name (`version:` namespace), so `Work/Todo.md` and `Home/Todo.md` (one id, one basename) and
+    /// a version of either never share a handle.
+    static func copyKey(noteID: String, notebook: String, fileName: String, version: String?) -> String {
+        let identity = version.map { "version:" + notebook + "/" + fileName + "#" + $0 } ?? "file:" + notebook + "/" + fileName
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-        for byte in fileName.utf8 { hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
+        for byte in identity.utf8 { hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
         return noteID + "#" + String(format: "%016llx", hash)
     }
 
-    /// One tick of the passage watcher: stop when no passage note is on the window (`wanted` empty); find again
-    /// when one has no anchor and wasn't already found to have moved (`known`: anchored or moved); skip while a
-    /// measurement is still under way; else measure.
+    /// A Keep this one plan's snapshot: every paper shown (a version by its name, with its text), and always the
+    /// current file at each path a shown paper is at, with its text and id; nil when a current file isn't known
+    /// (nothing is written or trashed then).
+    static func keepSnapshot(papers: [(path: String, version: String?, revision: String?)],
+                             current: [String: (revision: String?, id: String)]) -> (snapshot: [String: String], ids: [String: String])? {
+        var snapshot: [String: String] = [:]
+        var ids: [String: String] = [:]
+        for paper in papers {
+            if let version = paper.version { snapshot["version:" + version] = paper.revision ?? "" }
+            guard let file = current[paper.path], let revision = file.revision else { return nil }
+            snapshot["file:" + paper.path] = revision
+            ids[paper.path] = file.id
+        }
+        return (snapshot, ids)
+    }
+
+    /// Writing the kept text over a file during Keep this one: only while it still says what was shown and is still
+    /// that note (both known), checked inside the coordinated write.
+    static func keepWrite(disk: String?, shown: String?, diskID: String?, shownID: String?) -> Bool {
+        guard let shown, let shownID, let disk else { return false }
+        return disk == shown && diskID == shownID
+    }
+
+    /// Whether a link's card may fetch its page: an http(s) address the person pasted or typed themselves (`own`),
+    /// not one already fetched or cached; never one only shown in a note (opened from sync, say).
+    static func linkFetch(_ address: String, own: Bool, cached: Bool) -> Bool {
+        guard own, !cached, let url = URL(string: address), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return false }
+        return true
+    }
+
+    /// A link's response read for its title: only a 200 HTML page (judged from its content type, before any of it
+    /// is read), and only its first `linkLimit` bytes.
+    static let linkLimit = 300_000
+
+    static func linkResponse(status: Int, contentType: String?) -> Bool {
+        guard status == 200, let type = contentType?.lowercased() else { return false }
+        return type.hasPrefix("text/html") || type.hasPrefix("application/xhtml+xml")
+    }
+
+    /// A passage found to have moved is looked for again, but no more than every `movedRetry` seconds.
+    static let movedRetry: TimeInterval = 2
+
+    static func retryMoved(lastTry: Date?, now: Date) -> Bool {
+        guard let lastTry else { return true }
+        return now.timeIntervalSince(lastTry) >= movedRetry
+    }
+
+    /// One tick of the passage watcher: stop when no passage note is on the window (`wanted` empty); skip while a
+    /// scan or measurement is still under way; find when one has no anchor and hasn't been looked for, or was found
+    /// to have moved and its retry is due (`moved`: when it was last looked for; every `movedRetry` seconds, so a
+    /// sentence brought back by Undo comes back); else measure.
     enum WatchStep: Equatable { case stop, find, skip, measure }
 
-    static func passageWatch(wanted: Set<String>, known: Set<String>, busy: Bool) -> WatchStep {
+    static func passageWatch(wanted: Set<String>, anchored: Set<String>, moved: [String: Date], now: Date, busy: Bool) -> WatchStep {
         if wanted.isEmpty { return .stop }
         if busy { return .skip }
-        if !wanted.isSubset(of: known) { return .find }
-        return .measure
+        if wanted.contains(where: { !anchored.contains($0) && retryMoved(lastTry: moved[$0], now: now) }) { return .find }
+        return anchored.isEmpty ? .skip : .measure
     }
 
     /// The paper a lookup chose (its file `key` and note `id`), as the notes are now: that same file while it's still

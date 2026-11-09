@@ -279,16 +279,33 @@ struct NotesCheck {
                "found again and still not there: moved (no pin), never the text's frame")
         expect(NoteShelf.passagePoll(read: "the sentence", quote: "the sentence", words: words, rescanned: true) == .still(words), "found again: at its words")
         // And runs only while a passage note is here; a busy tick is skipped, never the end of watching.
-        expect(NoteShelf.passageWatch(wanted: [], known: ["a"], busy: false) == .stop, "no passage note here: stop")
-        expect(NoteShelf.passageWatch(wanted: ["a"], known: ["a"], busy: true) == .skip, "a slow measurement: skip this tick, keep watching")
-        expect(NoteShelf.passageWatch(wanted: ["a", "b"], known: ["a"], busy: false) == .find, "a passage note not looked for yet: find it")
-        expect(NoteShelf.passageWatch(wanted: ["a"], known: ["a", "b"], busy: false) == .measure, "all known: measure")
-        expect(NoteShelf.passageWatch(wanted: [], known: [], busy: true) == .stop, "the last passage note re-stuck elsewhere: stop, even mid-measure")
+        let tick = Date(timeIntervalSince1970: 1_000)
+        expect(NoteShelf.passageWatch(wanted: [], anchored: ["a"], moved: [:], now: tick, busy: false) == .stop, "no passage note here: stop")
+        expect(NoteShelf.passageWatch(wanted: ["a"], anchored: ["a"], moved: [:], now: tick, busy: true) == .skip, "a slow measurement: skip this tick, keep watching")
+        expect(NoteShelf.passageWatch(wanted: ["a", "b"], anchored: ["a"], moved: [:], now: tick, busy: false) == .find, "a passage note not looked for yet: find it")
+        expect(NoteShelf.passageWatch(wanted: ["a"], anchored: ["a"], moved: [:], now: tick, busy: false) == .measure, "all anchored: measure")
+        expect(NoteShelf.passageWatch(wanted: [], anchored: [], moved: [:], now: tick, busy: true) == .stop, "the last passage note re-stuck elsewhere: stop, even mid-measure")
+        // A moved passage is looked for again, every 2 seconds at most (Undo brings its sentence back).
+        let movedA = ["a": tick.addingTimeInterval(-1)]
+        expect(NoteShelf.passageWatch(wanted: ["a"], anchored: [], moved: movedA, now: tick, busy: false) == .skip, "moved a second ago: not yet")
+        expect(NoteShelf.passageWatch(wanted: ["a"], anchored: [], moved: movedA, now: tick.addingTimeInterval(1), busy: false) == .find,
+               "two seconds since: looked for again")
+        expect(NoteShelf.passageWatch(wanted: ["a", "b"], anchored: ["b"], moved: movedA, now: tick, busy: false) == .measure,
+               "the others measured meanwhile")
+        expect(NoteShelf.passageWatch(wanted: ["a"], anchored: [], moved: ["a": tick.addingTimeInterval(-5)], now: tick, busy: true) == .skip,
+               "a scan under way: the retry waits for the gate")
+        expect(NoteShelf.retryMoved(lastTry: nil, now: tick) && !NoteShelf.retryMoved(lastTry: tick.addingTimeInterval(-1.9), now: tick)
+               && NoteShelf.retryMoved(lastTry: tick.addingTimeInterval(-2), now: tick), "the retry schedule: 2 s")
 
         // Lasting records only by a real id that's in its file.
         expect(NoteShelf.lasting("U1", pending: []) && !NoteShelf.lasting("U1", pending: ["U1"]) && !NoteShelf.lasting("file:Inbox/a.md", pending: []),
                "a real id written: lasting; one still being written, or a path's id: memory only")
-        expect(NoteShelf.copyKey(noteID: "U1", fileName: "A 2.md").hasPrefix("U1#") && !NoteShelf.copyKey(noteID: "U1", fileName: "A 2.md").contains("A 2"),
+        let work = NoteShelf.copyKey(noteID: "U1", notebook: "Work", fileName: "Todo.md", version: nil)
+        let home = NoteShelf.copyKey(noteID: "U1", notebook: "Home", fileName: "Todo.md", version: nil)
+        let version = NoteShelf.copyKey(noteID: "U1", notebook: "Work", fileName: "Todo.md", version: "Todo.md")
+        expect(work != home && work != version && home != version, "Work/Todo.md, Home/Todo.md and an iCloud version: three handles")
+        expect(work == NoteShelf.copyKey(noteID: "U1", notebook: "Work", fileName: "Todo.md", version: nil), "the same paper, the same handle")
+        expect(work.hasPrefix("U1#") && !work.contains("Todo") && !work.contains("Work"),
                "a conflict paper's key: its note's id and a hash of its file's name, no path")
 
         // A passage that moved is an explicit state: no line, no pin, not found.
@@ -318,6 +335,28 @@ struct NotesCheck {
                "one that fits stays where it is")
         let second = CGRect(x: 1440, y: 0, width: 1920, height: 1055)
         expect(NoteShelf.wholeOnScreen(CGRect(x: 3200, y: 100, width: 380, height: 420), visible: second).maxX == second.maxX, "on a second screen, its own edge")
+
+        // Keep this one's plan always holds the current file at each path shown, its text and id.
+        let mixed = NoteShelf.keepSnapshot(papers: [("/n/Inbox/T.md", "v1", "theirs")], current: ["/n/Inbox/T.md": ("mine", "MAC-A-ID")])
+        expect(mixed?.snapshot["file:/n/Inbox/T.md"] == "mine" && mixed?.snapshot["version:v1"] == "theirs" && mixed?.ids["/n/Inbox/T.md"] == "MAC-A-ID",
+               "a version with another id: the current file is in the plan anyway")
+        expect(NoteShelf.keepSnapshot(papers: [("/n/Inbox/T.md", "v1", "theirs")], current: [:]) == nil, "the current file not known: no plan")
+        expect(!NoteShelf.keepWrite(disk: "mine", shown: nil, diskID: "MAC-A-ID", shownID: nil), "never written over unchecked")
+        expect(!NoteShelf.keepWrite(disk: "mine, edited", shown: "mine", diskID: "MAC-A-ID", shownID: "MAC-A-ID"), "changed since: refused")
+        expect(!NoteShelf.keepWrite(disk: "mine", shown: "mine", diskID: "OTHER", shownID: "MAC-A-ID"), "another note now: refused")
+        expect(NoteShelf.keepWrite(disk: "mine", shown: "mine", diskID: "MAC-A-ID", shownID: "MAC-A-ID"), "exactly as shown: written")
+
+        // A link's page is fetched only for one the person added, only if it's an HTML page, and only its start.
+        expect(NoteShelf.linkFetch("https://example.com/a", own: true, cached: false), "pasted or typed: fetched")
+        expect(!NoteShelf.linkFetch("https://example.com/a", own: false, cached: false), "only shown in a note from sync: never")
+        expect(!NoteShelf.linkFetch("https://example.com/a", own: true, cached: true) && !NoteShelf.linkFetch("file:///etc/hosts", own: true, cached: false),
+               "already cached, or not http(s): not fetched")
+        expect(NoteShelf.linkResponse(status: 200, contentType: "text/html; charset=utf-8") && NoteShelf.linkResponse(status: 200, contentType: "application/xhtml+xml"),
+               "an HTML page: read")
+        expect(!NoteShelf.linkResponse(status: 200, contentType: "video/mp4") && !NoteShelf.linkResponse(status: 200, contentType: "application/zip")
+               && !NoteShelf.linkResponse(status: 200, contentType: nil) && !NoteShelf.linkResponse(status: 404, contentType: "text/html"),
+               "a video, a download, no type, or not found: refused before any of it is read")
+        expect(NoteShelf.linkLimit == 300_000, "read no more than 300 KB")
 
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])

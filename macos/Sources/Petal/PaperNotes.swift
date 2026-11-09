@@ -58,6 +58,8 @@ struct NotePictureBytes: @unchecked Sendable {
 /// text to write there; the other files to go to the Trash.
 struct NoteKeep: @unchecked Sendable {
     var snapshot: [String: String]
+    /// Each path's current file's note id as shown (NoteShelf.keepSnapshot): checked with its text before any write.
+    var ids: [String: String] = [:]
     var kept: URL
     var keptText: String?
     var files: [URL]
@@ -737,9 +739,11 @@ final class NoteStore {
             var ok = false
             var error: NSError?
             let shown = plan.snapshot["file:" + plan.kept.path]
+            let shownID = plan.ids[plan.kept.path]
             NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: plan.kept, options: [], error: &error) { url in
                 let disk = try? String(contentsOf: url, encoding: .utf8)
-                guard shown == nil || disk == shown else { return }
+                // Only over the current file exactly as shown, and still that note (NoteShelf.keepWrite).
+                guard NoteShelf.keepWrite(disk: disk, shown: shown, diskID: disk.map { Self.noteID(of: $0, at: url, root: root) }, shownID: shownID) else { return }
                 ok = (try? Data(text.utf8).write(to: url, options: .atomic)) != nil && (try? String(contentsOf: url, encoding: .utf8)) == text
             }
             guard ok else { return false }
@@ -1577,10 +1581,18 @@ final class NoteStore {
     /// candidate checked again inside its own coordinated write or trash (`NoteStore.keep`).
     func keep(_ kept: PaperNote) {
         let shown = conflicts[kept.noteID] ?? [kept]
-        var snapshot: [String: String] = [:]
-        for paper in shown { snapshot[paper.version.map { "version:" + $0 } ?? "file:" + paper.url.path] = paper.revision ?? "" }
-        let plan = NoteKeep(snapshot: snapshot, kept: kept.url, keptText: kept.version == nil ? nil : kept.file.serialized(),
+        // Always the current file at every path shown (a version's own id may differ from it): its text and id, as
+        // last read; one not known, nothing is done.
+        var current: [String: (revision: String?, id: String)] = [:]
+        for url in Set(shown.map(\.url)) {
+            if let file = notes.first(where: { $0.url == url && $0.version == nil }) { current[url.path] = (file.revision, file.noteID) }
+        }
+        guard let (snapshot, ids) = NoteShelf.keepSnapshot(papers: shown.map { ($0.url.path, $0.version, $0.revision) }, current: current) else {
+            return onProblem("Petal couldn't check that note's file as it is now, so nothing was kept or removed. Try again in a moment.")
+        }
+        var plan = NoteKeep(snapshot: snapshot, kept: kept.url, keptText: kept.version == nil ? nil : kept.file.serialized(),
                             files: Array(Set(shown.map(\.url))))
+        plan.ids = ids
         let key = kept.url.path
         let session = sessionAt(key, noteID: kept.noteID) ?? makeSession(key: key, url: kept.url, noteID: kept.noteID, revision: kept.revision)
         enqueue(session, .keep(plan), done: nil)

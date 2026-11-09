@@ -2,31 +2,56 @@ import AppKit
 import Observation
 import SwiftUI
 
-/// A link's card: its page's title and site, and the site's icon (Sites.swift). Fetched once per address, off the
-/// main thread; nothing is fetched for a private app's page or while snapshotting.
+/// A link's card: its page's title and site, and the site's icon (Sites.swift). A card only shows what's cached;
+/// a page is fetched only for an address the person pasted or typed themselves (`requested`, NoteShelf.linkFetch),
+/// never for one merely shown in a note (opened from sync, say). The fetch streams: anything that isn't an HTML page
+/// is refused from its content type before any of it is read, and reading stops at a fixed size or time. Off the
+/// main thread; nothing is fetched while snapshotting.
 @MainActor @Observable
 final class LinkPreviews {
     static let shared = LinkPreviews()
     private(set) var titles: [String: String] = [:]
     @ObservationIgnored private var asked: Set<String> = []
 
-    func title(_ url: String) -> String? {
-        if let title = titles[url] { return title }
-        fetch(url)
-        return nil
-    }
+    /// What's cached for an address; never a fetch.
+    func title(_ url: String) -> String? { titles[url] }
 
-    private func fetch(_ address: String) {
-        guard !Headless.on, !asked.contains(address), let url = URL(string: address), ["http", "https"].contains(url.scheme ?? "") else { return }
+    /// The person pasted or typed this address: its page's title is fetched, once.
+    func requested(_ address: String) {
+        guard !Headless.on, NoteShelf.linkFetch(address, own: true, cached: titles[address] != nil || asked.contains(address)),
+              let url = URL(string: address) else { return }
         asked.insert(address)
         Task.detached(priority: .utility) {
-            var request = URLRequest(url: url, timeoutInterval: 8)
-            request.setValue("Petal", forHTTPHeaderField: "User-Agent")
-            guard let (data, response) = try? await URLSession.shared.data(for: request), (response as? HTTPURLResponse)?.statusCode == 200,
-                  let html = String(data: data.prefix(300_000), encoding: .utf8) ?? String(data: data.prefix(300_000), encoding: .isoLatin1) else { return }
-            let title = Self.title(in: html)
+            let title = await Self.fetchTitle(url)
             await MainActor.run { if let title { LinkPreviews.shared.titles[address] = title } }
         }
+    }
+
+    /// The page's title, read as a stream: a 200 HTML page only (its content type checked first), its first
+    /// `NoteShelf.linkLimit` bytes at most (less once its head is in), within 10 seconds.
+    nonisolated static func fetchTitle(_ url: URL) async -> String? {
+        var request = URLRequest(url: url, timeoutInterval: 8)
+        request.setValue("Petal", forHTTPHeaderField: "User-Agent")
+        let deadline = Date().addingTimeInterval(10)
+        guard let (bytes, response) = try? await URLSession.shared.bytes(for: request) else { return nil }
+        let http = response as? HTTPURLResponse
+        guard NoteShelf.linkResponse(status: http?.statusCode ?? 0, contentType: http?.value(forHTTPHeaderField: "Content-Type")) else {
+            bytes.task.cancel()
+            return nil
+        }
+        var data = Data()
+        data.reserveCapacity(32_768)
+        let headEnd = Data("</head>".utf8)
+        do {
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count >= NoteShelf.linkLimit || Date() > deadline { break }
+                if data.count % 4096 == 0, data.range(of: headEnd, options: [], in: max(0, data.count - 4103)..<data.count) != nil { break }
+            }
+        } catch {}
+        bytes.task.cancel()
+        guard let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else { return nil }
+        return title(in: html)
     }
 
     /// A page's title: its og:title, else its <title>.
@@ -601,7 +626,11 @@ final class NoteTextView: NSTextView {
         return true
     }
 
-    func insertCard(_ url: String) { insertLine(LinkCell(url: url), kind: "link") }
+    func insertCard(_ url: String) {
+        // Pasted by the person: its page's title may be fetched.
+        MainActor.assumeIsolated { LinkPreviews.shared.requested(url) }
+        insertLine(LinkCell(url: url), kind: "link")
+    }
 
     /// An attachment on a line of its own, at the cursor.
     private func insertLine(_ cell: NSTextAttachmentCell, kind: String) {

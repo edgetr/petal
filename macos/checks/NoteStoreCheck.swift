@@ -213,6 +213,22 @@ struct NoteStoreCheck {
         let plan = NoteKeep(snapshot: ["file:" + keepA.path: "ka", "file:" + keepB.path: "kb"], kept: keepA, keptText: nil, files: [keepA, keepB])
         expect(!NoteStore.keep(plan, root: root) && text(keepB) == "kb edited", "a paper edited since it was shown: nothing removed")
         expect(NoteWork.keepAside(text: "x").keeps && !NoteWork.trash(revision: nil).keeps, "writing is kept until it lands; a trash isn't")
+
+        // Keeping an iCloud version (here, with another id than the current file): never over a current file the
+        // plan didn't check, and only while it's exactly as shown and still that note.
+        let current = work.appending(path: "Versioned.md")
+        let mine = NoteFile(id: "MAC-A", body: "mine").serialized()
+        _ = NoteStore.create(mine, at: current, root: root)
+        let theirs = NoteFile(id: "MAC-B", body: "theirs").serialized()
+        let unchecked = NoteKeep(snapshot: [:], kept: current, keptText: theirs, files: [current])
+        expect(!NoteStore.keep(unchecked, root: root) && text(current) == mine, "a plan without the current file: nothing written")
+        guard let made = NoteShelf.keepSnapshot(papers: [(current.path, nil, mine)], current: [current.path: (mine, "MAC-A")]) else { return expect(false, "a plan") }
+        var checked = NoteKeep(snapshot: made.snapshot, kept: current, keptText: theirs, files: [current])
+        checked.ids = made.ids
+        try? Data(NoteFile(id: "MAC-A", body: "mine, edited").serialized().utf8).write(to: current)
+        expect(!NoteStore.keep(checked, root: root) && text(current)?.contains("edited") == true, "the current file changed since: nothing written")
+        try? Data(mine.utf8).write(to: current)
+        expect(NoteStore.keep(checked, root: root) && text(current) == theirs, "exactly as shown: the kept version written")
     }
 
     /// The journal: accepted writing put back at launch after the notes' queue never got to it.
