@@ -1466,6 +1466,7 @@ struct AppSlot: View {
             drag: { delta, ended in drag(delta, ended: ended) },
             files: config.bool("dropToOpen") ? { urls in app.docks.launch(item.id, files: urls) } : nil,
             fileOver: { fileOver = $0 },
+            note: Sites.isWeb(item.id) ? nil : { id in app.paper.use(id, in: item.id) },
             press: { pressed = $0 }))
         .onChange(of: app.signals.bounces[item.id]) { _, _ in bounce() }
     }
@@ -1748,7 +1749,12 @@ struct StackSlot: View {
     var body: some View {
         let key = "stack:\(folder)"
         ZStack {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: Stacks.url(folder).path)).resizable().frame(width: icon, height: icon)
+            // A notebook of Petal Notes: a little pile of paper in its color.
+            if let book = app.paper.notebook(forStack: folder) {
+                NotebookPile(color: app.paper.store.color(of: book.name), icon: icon)
+            } else {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: Stacks.url(folder).path)).resizable().frame(width: icon, height: icon)
+            }
             if app.config.bool("progress"), let progress = app.signals.progress[folder] {
                 Circle().stroke(.white.opacity(0.18), lineWidth: 3).frame(width: icon + 8, height: icon + 8)
                 Circle().trim(from: 0, to: max(0.02, progress))
@@ -1828,6 +1834,8 @@ struct SlotMouse: NSViewRepresentable {
     var drag: ((CGFloat, Bool) -> Void)? = nil
     var files: (([URL]) -> Void)? = nil
     var fileOver: (Bool) -> Void = { _ in }
+    /// A note dropped on it (Petal Notes): its id.
+    var note: ((String) -> Void)? = nil
     /// What a drag over it shows: a copy ("+") into an app, or nothing extra where the slot has its own animation.
     var dropOperation: NSDragOperation = .copy
     /// The button went down (true) or up, or a drag took over (false): for feedback the moment it's pressed. What a
@@ -1840,14 +1848,15 @@ struct SlotMouse: NSViewRepresentable {
     final class MouseView: NSView {
         var handlers: SlotMouse? {
             didSet {
-                let wantsFiles = handlers?.files != nil
-                if wantsFiles != registered {
-                    if wantsFiles { registerForDraggedTypes([.fileURL]) } else { unregisterDraggedTypes() }
-                    registered = wantsFiles
+                let wanted: [NSPasteboard.PasteboardType] = (handlers?.files != nil ? [.fileURL] : []) + (handlers?.note != nil ? [.petalNote] : [])
+                if wanted != registered {
+                    unregisterDraggedTypes()
+                    if !wanted.isEmpty { registerForDraggedTypes(wanted) }
+                    registered = wanted
                 }
             }
         }
-        private var registered = false
+        private var registered: [NSPasteboard.PasteboardType] = []
         private var down: NSPoint?
         private var dragging = false
         private var area: NSTrackingArea?
@@ -1937,6 +1946,10 @@ struct SlotMouse: NSViewRepresentable {
 
         override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
             handlers?.fileOver(false)
+            if let id = sender.draggingPasteboard.data(forType: .petalNote).map({ String(decoding: $0, as: UTF8.self) }), let note = handlers?.note {
+                note(id)
+                return true
+            }
             let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
             guard !urls.isEmpty, let files = handlers?.files else { return false }
             files(urls)

@@ -65,6 +65,8 @@ final class PetalApp {
     let routines = Routines()
     /// Petal Notes: the person's own notes on paper, stuck to places (NoteDesk.swift).
     let paper = NoteDesk()
+    /// The Petal Notes window: every note, its notebooks, their grid and canvas (NotesWindow.swift).
+    @ObservationIgnored let notesWindow = NotesWindow()
     /// Petal's viewer: documents with their notes in a margin (Viewer.swift).
     let viewers = Viewers()
     /// Reading and closing browser tabs (Browsers.swift).
@@ -534,7 +536,16 @@ final class PetalApp {
         process.arguments = ["-c", "i=0; while /bin/kill -0 \"$1\" 2>/dev/null && [ $i -lt 300 ]; do sleep 0.2; i=$((i+1)); done; "
                              + "/bin/kill -0 \"$1\" 2>/dev/null || /usr/bin/open \"$0\"", path, String(getpid())]
         try? process.run()
-        NSApp.terminate(nil)
+        Self.quit()
+    }
+
+    /// Quits Petal, from the run loop and never from inside a block of the main dispatch queue. Quitting answers
+    /// later (`applicationShouldTerminate`: notes are saved first), and AppKit waits for that answer inside
+    /// `terminate`. Called from a main-queue block (a signal's handler, an `asyncAfter`), that wait would sit inside
+    /// the block, the main queue could run nothing else, the notes' drain and the answer would never arrive, and
+    /// Petal would never quit.
+    static func quit() {
+        RunLoop.main.perform(inModes: [.common]) { MainActor.assumeIsolated { NSApp.terminate(nil) } }
     }
 
     // MARK: IPC
@@ -671,7 +682,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for number in [SIGTERM, SIGINT, SIGHUP] {
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
-            source.setEventHandler { NSApp.terminate(nil) }
+            source.setEventHandler { PetalApp.quit() }
             source.resume()
             signals.append(source)
         }

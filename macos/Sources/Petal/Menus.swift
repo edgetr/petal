@@ -29,7 +29,7 @@ enum Menus {
         }
         menu.addItem(ClosureMenuItem(title: "Petal Settings…") { app.settings.show() })
         menu.addItem(ClosureMenuItem(title: "Use macOS’s Dock") { app.useDock("macos") })
-        menu.addItem(ClosureMenuItem(title: "Quit Petal") { NSApp.terminate(nil) })
+        menu.addItem(ClosureMenuItem(title: "Quit Petal") { PetalApp.quit() })
         pop(menu)
     }
 

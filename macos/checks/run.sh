@@ -24,10 +24,14 @@ swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift check
 "$out/notes"
 # Petal Notes: the note file's round trip, iCloud's conflict copies, the ranked fallback of a note's places, the tabs
 # on a window's edge, fading, and the room beside a window (no file, no window).
-swiftc -parse-as-library -O -o "$out/papernotes" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift checks/NotesCheck.swift
+swiftc -parse-as-library -O -o "$out/papernotes" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift checks/NotesCheck.swift
 "$out/papernotes"
+# The Petal Notes window, canvas, dock and people: the contract's fields, views, search, the grid and cover, Private
+# notebooks, one person or none, the canvas's based write, the fan and a note dropped on an app (no file, no window).
+swiftc -parse-as-library -O -o "$out/notelibrary" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift checks/NoteLibraryCheck.swift
+"$out/notelibrary"
 # A note's text in the editor and back: the same Markdown, line for line (AppKit, nothing shown).
-swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteMentions.swift Sources/Petal/NoteEditor.swift Sources/Petal/EditMenu.swift checks/NoteRichCheck.swift
+swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteMentions.swift Sources/Petal/NoteEditor.swift Sources/Petal/EditMenu.swift checks/NoteRichCheck.swift
 "$out/noterich"
 # Petal Notes' files on throwaway folders in the temporary folder: saves that keep both, names from the disk, no
 # writes through symbolic links, two notebooks' Todo.md, a renamed file's bookmark, the journal's launch recovery
@@ -36,12 +40,12 @@ swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sour
 # chain) read back exactly, times and models in words, prices on a page, a notebook's memory, plain arithmetic,
 # chained notes' loops and the person's checkouts (no window, no AI), and Open all never launching an app or a script
 # (NoteTasks: real files, a link and a Finder alias in a throwaway folder in the temporary folder; nothing is opened).
-swiftc -parse-as-library -O -o "$out/notehelp" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteTasks.swift Sources/Petal/ViewerFile.swift checks/NoteHelpCheck.swift
+swiftc -parse-as-library -O -o "$out/notehelp" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteTasks.swift Sources/Petal/ViewerFile.swift checks/NoteHelpCheck.swift
 "$out/notehelp"
 # The Shielded boundary is the compiler's: what a helper tells an AI can't be made from a raw string. Each of these
 # must fail to compile (a raw string interpolated into a prompt, put into what a helper is told, or made Shielded
 # outside NoteShield), and the shielded way must compile.
-shielded=(Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift)
+shielded=(Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift)
 boundary() {
     printf '@main struct B { static func main() {\n let raw = String(CommandLine.arguments.count)\n %s\n } }\n' "$2" > "$out/boundary.swift"
     if swiftc -parse-as-library -o "$out/boundary" "${shielded[@]}" "$out/boundary.swift" >/dev/null 2>&1; then built=yes; else built=no; fi
@@ -488,7 +492,7 @@ perl -0777 -ne '
 if grep -n 'file\.cover\b' Sources/Petal/NoteHelpers.swift; then echo "NoteHelpers: helpers find covers by name, never by cover: true"; exit 1; fi
 [ "$(grep -c 'coverToChange(paper' Sources/Petal/NoteHelpers.swift)" -ge 4 ] || { echo "NoteHelpers: every cover change goes through coverToChange"; exit 1; }
 echo "helpers: covers by the cover rule; a cover in conflict gets no memory"
-swiftc -parse-as-library -O -o "$out/notestore" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/PaperNotes.swift Sources/Petal/NoteJournal.swift checks/NoteStoreCheck.swift
+swiftc -parse-as-library -O -o "$out/notestore" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/PaperNotes.swift Sources/Petal/NoteJournal.swift checks/NoteStoreCheck.swift
 "$out/notestore"
 # Selection changes never read text on the main thread: PDFKit's selection string isn't read anywhere in the viewer's
 # views (the words come from ViewerText's read off it).
@@ -498,11 +502,11 @@ fi
 echo "viewer: no selection text read on the main thread"
 # A passage for Petal AI follows petal_look's rule for selected text (UIMap.selectionHidden), and what the note tools
 # tell an agent is redacted with the vault's index, or not told while the vault can't be read (NoteShield).
-swiftc -parse-as-library -O -o "$out/noteselection" Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift checks/NoteSelectionCheck.swift
+swiftc -parse-as-library -O -o "$out/noteselection" Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift checks/NoteSelectionCheck.swift
 "$out/noteselection"
 # Petal's viewer: a file anchor's page, slide and passage, the path an agent names (on throwaway folders in the
 # temporary folder), the margin's layout, a preview cut into pages, copies' names and comments (no window, no PDF).
-swiftc -parse-as-library -O -o "$out/viewer" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/ViewerFile.swift checks/ViewerFileCheck.swift
+swiftc -parse-as-library -O -o "$out/viewer" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/ViewerFile.swift checks/ViewerFileCheck.swift
 "$out/viewer"
 swiftc -parse-as-library -O -o "$out/background" Sources/Petal/Background.swift Sources/Petal/UIMap.swift checks/BackgroundCheck.swift
 "$out/background"
@@ -529,8 +533,19 @@ swiftc -parse-as-library -O -o "$out/cancel" Sources/Petal/ActingCancel.swift So
 "$out/cancel"
 # What a note's helper does in the person's apps ends with every change of its run's state (the real RunToken,
 # Acting.Cancel(run:) and the gate every change goes through): Pause with a press still waiting, and it never happens.
-swiftc -parse-as-library -O -o "$out/runactions" Sources/Petal/ActingCancel.swift Sources/Petal/RunActions.swift Sources/Petal/Background.swift Sources/Petal/UIMap.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift checks/RunActionsCheck.swift
+swiftc -parse-as-library -O -o "$out/runactions" Sources/Petal/ActingCancel.swift Sources/Petal/RunActions.swift Sources/Petal/Background.swift Sources/Petal/UIMap.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift checks/RunActionsCheck.swift
 "$out/runactions"
+# The Petal Notes window opens a dialog only through NotesModel.dialog, which captures the notes folder's session and
+# the notebook's binding first and checks both before applying the answer: every alert, sheet or panel in it is made
+# inside one of the private functions only `dialog` calls (askWords, confirmTrash).
+perl -ne '
+    $func = $1 if /\bfunc (\w+)/;
+    if (/runModal|NSAlert\(|\.sheet\(|NSOpenPanel|NSSavePanel|beginSheet|\.alert\(|confirmationDialog|\.fileImporter\(/ && $func !~ /^(askWords|confirmTrash)$/) {
+        print "$ARGV:$.: a dialog outside NotesModel.dialog (in $func)\n"; $bad++
+    }
+    $private++ if /private static func (askWords|confirmTrash)\(/;
+    END { if ($bad || $private != 2) { print "notes window dialogs: not all through dialog\n"; exit 1 } print "notes window dialogs: all through dialog\n" }
+' Sources/Petal/NotesWindow.swift
 # Every card Petal AI's tools put up says whose it is (Assist.ask's `owner`), so a chat's Stop or an agent hanging up
 # answers it Don't: the parameter has no default, and every call to it (a string first: the card's kind) names it.
 perl -0777 -ne '
@@ -557,3 +572,11 @@ perl -0777 -ne '
     }
     END { if ($bad) { print "$bad card(s) without an owner\n"; exit 1 } print "asks: all $calls name their owner\n" }
 ' Sources/Petal/*.swift
+# Quitting answers later (notes are saved first), and AppKit waits for the answer inside `terminate`. Called from a
+# block of the main dispatch queue (a signal's handler, an asyncAfter), that wait stops the queue, the answer never
+# arrives and Petal never quits. So the one call to terminate is PetalApp.quit's, from the run loop, and the answer
+# comes back on the run loop too.
+n=$(grep -n 'NSApp\.terminate\|NSApplication\.shared\.terminate' Sources/Petal/*.swift | grep -vc 'RunLoop\.main\.perform(inModes: \[\.common\]) { MainActor\.assumeIsolated { NSApp\.terminate(nil) } }' || true)
+r=$(awk '/func prepareToQuit\(/,/^    }$/' Sources/Petal/NoteDesk.swift | grep -c 'DispatchQueue\.main\.async' || true)
+if [ "$n" != 0 ] || [ "$r" != 0 ]; then echo "quit: terminate is called outside PetalApp.quit, or its answer comes back on the main queue"; exit 1; fi
+echo "quit: only from the run loop"

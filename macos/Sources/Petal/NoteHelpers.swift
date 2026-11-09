@@ -349,7 +349,7 @@ final class NoteHelpers {
         facts.landing = true
         facts.notebook = paper.notebook
         facts.startNotebook = entry.notebook ?? paper.notebook
-        facts.privacy = { self.privacy(of: $0) }
+        facts.privateBooks = store?.privateBooks ?? []
         facts.sources = (entry.sources ?? []).map { id in (id, self.paper(id)?.notebook) }
         if case .fail(let reason) = NoteHelp.admit(facts) { return reason }
         return nil
@@ -965,7 +965,7 @@ final class NoteHelpers {
         guard let folder = store?.notebooks.first(where: { $0.name == notebook })?.folder else { return }
         DispatchQueue.global(qos: .userInitiated).async {
             let names = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
-            for name in names where NoteHelp.isCoverName(name) || NoteHelp.isCoverPlaceholder(name) {
+            for name in names where NoteLibrary.isCoverName(name) || NoteHelp.isCoverPlaceholder(name) {
                 let real = NoteHelp.isCoverPlaceholder(name) ? String(name.dropFirst().dropLast(7)) : name
                 try? FileManager.default.startDownloadingUbiquitousItem(at: folder.appending(path: real))
             }
@@ -1320,7 +1320,7 @@ final class NoteHelpers {
     /// from sync or a tool).
     func openAll(_ key: String) {
         guard let paper = store?.paper(key) else { return }
-        NoteTasks.openAll(paper.file.task, mac: mac, follow: { ViewerLoader.follow($0) })
+        desk?.openAll(NoteContract.taskItems(paper.file))
     }
 
     // MARK: Helpers that think: the chat AI, or the person's own coding AI
@@ -1559,7 +1559,7 @@ final class NoteHelpers {
     private func sticky(for paper: PaperNote) -> StickyNote {
         let sticky = StickyNote()
         sticky.paper = paper.noteID
-        sticky.secret = privacy(of: paper.notebook) != .open
+        sticky.secret = isPrivate(paper.notebook)
         sticky.agent.keeps = false
         app.claude.notes.append(sticky)
         return sticky
@@ -1583,7 +1583,7 @@ final class NoteHelpers {
     func previewable(_ sticky: StickyNote) -> Bool {
         guard let noteID = sticky.paper else { return true }
         if sticky.secret { return false }
-        return paper(noteID).map { privacy(of: $0.notebook) == .open } ?? false
+        return paper(noteID).map { !isPrivate($0.notebook) } ?? false
     }
 
     /// Where the note is now, as its helper's tools see it (NotePlace): the window in front when the note is on it,
@@ -1651,7 +1651,7 @@ final class NoteHelpers {
         facts.paperFound = landing || (paper.map { !(desk?.store.readOnly($0) ?? true) } ?? false)
         facts.notebook = paper?.notebook ?? (landing ? run.startNotebook : "")
         facts.startNotebook = run.startNotebook
-        facts.privacy = { self.privacy(of: $0) }
+        facts.privateBooks = store?.privateBooks ?? []
         facts.sources = run.sources.map { id in (id, self.paper(id)?.notebook) }
         facts.provider = run.provider
         facts.model = run.model
@@ -2055,7 +2055,7 @@ final class NoteHelpers {
         let stable = "morning-" + NoteShelf.pictureFolder(id: cover.notebook).suffix(12) + "-" + day
         guard !mornings.contains(stable), store?.notes.contains(where: { $0.noteID == stable }) == false else { return }
         mornings.insert(stable)
-        let notes = (store?.notes ?? []).filter { $0.notebook == cover.notebook && $0.key != cover.key && !NoteHelp.isCoverName($0.url.lastPathComponent) && $0.version == nil }
+        let notes = (store?.notes ?? []).filter { $0.notebook == cover.notebook && $0.key != cover.key && !NoteLibrary.isCoverName($0.url.lastPathComponent) && $0.version == nil }
         let since = now.addingTimeInterval(-86400)
         // Each note's whole body and whole ink shielded first; its title and the ink's first sentence derived after.
         var sources: [String] = []
@@ -2561,7 +2561,8 @@ final class NoteHelpers {
             NoteHelp.CoverCandidate(key: $0.key, name: $0.url.lastPathComponent, inFolder: $0.url.deletingLastPathComponent().standardizedFileURL.path == folder,
                                     version: $0.version != nil, readOnly: store.readOnly($0))
         }
-        return NoteHelp.coverChoice(candidates, unread: book.covers.unread + (book.covers.listed ? 0 : 1))
+        // (Not read yet, as the store's one reading of the folder found it: its cover file or a version of it unread.)
+        return NoteHelp.coverChoice(candidates, unread: book.coverUnread || book.privacyUnknown ? 1 : 0)
     }
 
     /// The notebook's one cover, when there's one to read.
@@ -2583,19 +2584,15 @@ final class NoteHelpers {
         return nil
     }
 
-    /// A notebook's privacy by its cover files ("About this notebook.md", its iCloud versions and conflict copies):
-    /// open, private, or unknown while one of them is unread, dataless or unreadable, or the folder can't be listed
-    /// (counted as private for outside reads, search and previews).
-    func privacy(of notebook: String) -> NoteHelp.Privacy {
-        // Read from its cover files as the folder's read found them (Phase 3's rule); a notebook the read didn't find
-        // is unknown.
-        guard let book = store?.notebooks.first(where: { $0.name == notebook }) else { return .unknown }
-        return NoteHelp.privacy(book.covers)
-    }
+    /// Private notebooks come from the one place that reads them (NotePrivacy over NoteStore.privateBooks: a cover
+    /// that says so, or one not read yet, unknown, which counts as Private; a notebook a held note is in that the
+    /// read didn't find, too). Whether a notebook counts as Private now, for anyone outside it.
+    func isPrivate(_ notebook: String) -> Bool { !mayRead(notebook, from: nil) }
 
-    /// Whether a note may read `notebook`: always its own; one not known to be open never from outside it.
+    /// Whether a note may read `notebook`: always its own; a Private (or unknown) one never from outside it.
     func mayRead(_ notebook: String, from paper: PaperNote?) -> Bool {
-        NoteHelp.mayRead(privacy(of: notebook), notebook: notebook, asking: paper?.notebook)
+        guard let store else { return false }
+        return NotePrivacy.readable(notebook: notebook, privateBooks: store.privateBooks, asker: paper?.notebook)
     }
 
     /// The one note titled `name` (never a guess between two), not in a Private notebook the asking note isn't in.
@@ -2618,7 +2615,7 @@ final class NoteHelpers {
     func names(for key: String) -> (notes: [String], notebooks: [String], place: String) {
         guard let store, let desk else { return ([], [], "") }
         let paper = store.paper(key)
-        let notes = store.notes.filter { $0.version == nil && $0.key != key && !NoteHelp.isCoverName($0.url.lastPathComponent) && mayRead($0.notebook, from: paper) }
+        let notes = store.notes.filter { $0.version == nil && $0.key != key && !NoteLibrary.isCoverName($0.url.lastPathComponent) && mayRead($0.notebook, from: paper) }
             .map(\.file.title).filter { !$0.isEmpty }
         let books = store.notebooks.map(\.name).filter { mayRead($0, from: paper) }
         return (Array(Set(notes)).sorted(), books, paper.map { NoteText.site(desk.letterhead($0).place) } ?? "")

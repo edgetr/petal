@@ -168,10 +168,6 @@ extension NoteFile {
         set { set("from", newValue ? .text("petal") : nil) }
     }
 
-    /// A Private notebook's cover (`private: true`, Phase 3's key, read by name): its notes are read only by an @ on
-    /// a note inside it, and its helpers stay out of previews.
-    var coverPrivate: Bool { value("private")?.string == "true" }
-
     var watch: NoteHelp.Watch? {
         get { value("watch").flatMap(NoteHelp.Watch.init) }
         set { set("watch", newValue?.value) }
@@ -396,15 +392,6 @@ enum NoteHelp {
             if !bookmark.isEmpty { pairs.append(("bookmark", .text(bookmark))) }
             if !fileID.isEmpty { pairs.append(("fileID", .text(fileID))) }
             return .map(pairs)
-        }
-
-        /// A file's part as a file place, for the one file resolver (ViewerFiles.locate).
-        var stick: NoteStick {
-            var stick = NoteStick(kind: .file)
-            stick.path = target
-            stick.bookmark = bookmark
-            stick.fileID = fileID
-            return stick
         }
     }
 
@@ -1752,41 +1739,10 @@ final class TokenTable {
 }
 
 extension NoteHelp {
-    /// A notebook's privacy, by its cover: open, private, or unknown (no cover, a cover not downloaded or not
-    /// readable, or two of them): unknown counts as private for reads from outside it, search and previews, until
-    /// its one cover is read.
-    enum Privacy: Equatable { case open, closed, unknown }
-
-    /// A notebook's cover files, as a read of its folder found them (Phase 3's rule): only "About this notebook.md",
-    /// its iCloud versions and its conflict copies (a name starting "About this notebook" and ending ".md") count;
-    /// `cover: true` in any other file is ignored. `listed`: the folder could be listed; `unread`: cover files not
-    /// downloaded or not readable; `privateFlags`: what each cover read says.
-    struct CoverFiles: Equatable, Sendable {
-        var listed = true
-        var unread = 0
-        var privateFlags: [Bool] = []
-    }
-
-    static func isCoverName(_ name: String) -> Bool {
-        let lower = name.lowercased()
-        return lower.hasPrefix("about this notebook") && lower.hasSuffix(".md")
-    }
-
     /// iCloud's placeholder for a cover not downloaded (".About this notebook.md.icloud").
     static func isCoverPlaceholder(_ name: String) -> Bool {
-        name.hasPrefix(".") && name.lowercased().hasSuffix(".icloud") && isCoverName(String(name.dropFirst().dropLast(7)))
+        name.hasPrefix(".") && name.lowercased().hasSuffix(".icloud") && NoteLibrary.isCoverName(String(name.dropFirst().dropLast(7)))
     }
-
-    /// Unknown (so private) only while a cover file is unread, dataless or unreadable, or the folder can't be listed;
-    /// other notes still downloading don't count. Every cover read: private if any says so, else open (no cover at
-    /// all: open).
-    static func privacy(_ covers: CoverFiles) -> Privacy {
-        guard covers.listed, covers.unread == 0 else { return .unknown }
-        return covers.privateFlags.contains(true) ? .closed : .open
-    }
-
-    /// May a note in `asking` read a notebook with this privacy (its own always)?
-    static func mayRead(_ privacy: Privacy, notebook: String, asking: String?) -> Bool { privacy == .open || asking == notebook }
 
     /// A watcher's look, written back only into its own fields (value, history, checked, hint, hit) and only while
     /// the watcher is still the one it began under (`id`, a UUID made anew on every change of it) and not paused.
@@ -2064,12 +2020,6 @@ extension NoteHelp {
         if named.provider.rawValue != runProvider { return .newRun }
         return named.id.isEmpty || named.id == runModel ? .same : .newRun
     }
-
-    /// After a wait, which of the papers a tool would answer about may still be told to this caller: a note whose
-    /// notebook became private (or unknown) meanwhile is no longer readable from outside it.
-    static func visibleAfterWait(_ notebooks: [String], privacy: (String) -> Privacy, asking: String?) -> [Bool] {
-        notebooks.map { mayRead(privacy($0), notebook: $0, asking: asking) }
-    }
 }
 
 // MARK: - Rule C: one admission gate, from what's true now
@@ -2089,7 +2039,9 @@ extension NoteHelp {
         /// Its notebook now, and when the run began (the caller moved meanwhile: what it was told is stale).
         var notebook = ""
         var startNotebook = ""
-        var privacy: (String) -> Privacy = { _ in .open }
+        /// The notebooks counted Private now (NoteStore.privateBooks: a cover that says so, or one not read; the one
+        /// rule, NotePrivacy): a source in one is read only from inside it.
+        var privateBooks: Set<String> = []
         /// The run's own required place (held on the run, independent of `here`) and whether it shows now.
         var place: String? = nil
         var placeShowing = true
@@ -2121,7 +2073,7 @@ extension NoteHelp {
         guard f.builtPrivacy == f.nowPrivacy else { return .rebuild }
         for source in f.sources {
             guard let book = source.notebook else { return .fail("A note it was checking against is gone. Ask again.") }
-            guard mayRead(f.privacy(book), notebook: book, asking: f.notebook) else { return .fail("A note it was checking against is private now (or its notebook's cover isn't here). Ask again.") }
+            guard NotePrivacy.readable(notebook: book, privateBooks: f.privateBooks, asker: f.notebook) else { return .fail("A note it was checking against is private now (or its notebook's cover isn't here). Ask again.") }
         }
         if f.landing { return .go }
         guard f.available.contains(f.provider) else {
@@ -2196,7 +2148,7 @@ extension NoteHelp {
     }
 
     static func coverChoice(_ candidates: [CoverCandidate], unread: Int) -> CoverChoice {
-        let covers = candidates.filter { $0.inFolder && isCoverName($0.name) }
+        let covers = candidates.filter { $0.inFolder && NoteLibrary.isCoverName($0.name) }
         // One not read yet (not downloaded, unreadable): not here, waited for; two versions: needs a choice.
         if unread > 0 { return .notHere }
         if covers.count > 1 || covers.contains(where: { $0.version || $0.readOnly }) { return .conflict }

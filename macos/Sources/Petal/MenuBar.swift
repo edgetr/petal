@@ -137,13 +137,16 @@ final class MenuBar: NSObject, NSMenuDelegate {
             }
         }
         menu.addItem(.separator())
+        if config.bool("notes") {
+            menu.addItem(ClosureMenuItem(title: "Petal Notes") { [weak self] in self?.app.notesWindow.show() })
+        }
         menu.addItem(ClosureMenuItem(title: "Petal Settings…") { [weak self] in self?.app.settings.show() })
         if config.whichDock == "petal" {
             menu.addItem(ClosureMenuItem(title: "Use macOS’s Dock") { [weak self] in self?.app.useDock("macos") })
         } else {
             menu.addItem(ClosureMenuItem(title: "Use Petal’s Dock") { [weak self] in self?.app.useDock("petal") })
         }
-        menu.addItem(ClosureMenuItem(title: "Quit Petal") { NSApp.terminate(nil) })
+        menu.addItem(ClosureMenuItem(title: "Quit Petal") { PetalApp.quit() })
     }
 
     // MARK: The mark

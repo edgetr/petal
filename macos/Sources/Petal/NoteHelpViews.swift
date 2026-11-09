@@ -34,7 +34,7 @@ struct HelperFront: View {
             // What a helper wrote: scrolls when it's more than the screen has room for.
             BoundedScroll(maxHeight: inkRoom) {
                 VStack(alignment: .leading, spacing: 0) {
-                    if !file.task.isEmpty { TaskChips(paper: paper, tint: tint, desk: desk).padding(.vertical, 6) }
+                    if !file.task.isEmpty { PaperTaskChips(paper: paper, tint: tint, desk: desk).padding(.vertical, 6) }
                     if let calc = file.calc { CalcLine(calc: calc, body: file.body, tint: tint, glass: glass) }
                     ForEach(Array(file.ink.enumerated()), id: \.offset) { _, ink in InkView(ink: ink, heading: ink.heading(among: file.ink), tint: !ink.opinion ? tint : NoteInk.hex("#a550a7") ?? tint, glass: glass) }
                 }
@@ -171,8 +171,9 @@ struct CalcLine: View {
     }
 }
 
-/// A task put away: its parts as chips, and Open all.
-struct TaskChips: View {
+/// A task put away, on the note's own paper: its parts as chips, and Open all (the Petal Notes window's grid has its
+/// own smaller `TaskChips`; both open through the one opener, NoteDesk.openAll).
+struct PaperTaskChips: View {
     let paper: PaperNote
     let tint: NoteInk.RGB
     var desk: NoteDesk?
