@@ -484,16 +484,20 @@ final class NoteStore {
             let files = (inFolder ?? []).filter { $0.pathExtension.lowercased() == "md" }
             var here: [PaperNote] = []
             var coverVersionUnread = false
+            // Files here that weren't read (any could be a cover: its name, a conflicted copy, a version, a note saying
+            // `cover: true`): while there's one, or the folder couldn't be listed, its privacy is unknown.
+            var unread = inFolder == nil ? 1 : 0
             for url in files {
-                guard let values = try? url.resourceValues(forKeys: Set(keys)) else { complete = false; continue }
+                guard let values = try? url.resourceValues(forKeys: Set(keys)) else { complete = false; unread += 1; continue }
                 guard values.isSymbolicLink != true else { continue }
                 if values.isUbiquitousItem == true, values.ubiquitousItemDownloadingStatus == .notDownloaded {
                     try? fm.startDownloadingUbiquitousItem(at: url)
                     complete = false
+                    unread += 1
                     continue
                 }
                 let date = values.contentModificationDate ?? Date()
-                guard let text = coordinatedRead(url) else { complete = false; continue }
+                guard let text = coordinatedRead(url) else { complete = false; unread += 1; continue }
                 // A file with no id of its own is known by where it is under the notes' folder, never its name alone.
                 let fallback = NoteShelf.fallbackID(relativePath: NoteShelf.relative(url.path, to: root.path) ?? name + "/" + url.lastPathComponent)
                 var paper = PaperNote(file: NoteFile.parse(text, fallbackID: fallback, fallbackDate: date), url: url, notebook: name, revision: text)
@@ -510,6 +514,7 @@ final class NoteStore {
                             // A version not read: the notebook's cover (and so its privacy) isn't known until it is.
                             if url.lastPathComponent == NoteShelf.coverName { coverVersionUnread = true }
                             complete = false
+                            unread += 1
                             continue
                         }
                         var paper = PaperNote(file: NoteFile.parse(text, fallbackID: fallback, fallbackDate: version.modificationDate ?? date), url: url,
@@ -532,6 +537,7 @@ final class NoteStore {
             let coverUnread = NoteLibrary.coverUnknown(fileThere: fm.fileExists(atPath: coverFile.path),
                                                        fileRead: here.contains { $0.url.lastPathComponent == NoteShelf.coverName && $0.version == nil },
                                                        versionsUnread: coverVersionUnread)
+                || NoteLibrary.notebookUnknown(listed: inFolder != nil, unread: unread)
             notebooks.append(Notebook(name: name, folder: folder, color: cover?.file.color ?? "", cover: cover?.key,
                                       count: here.filter { !$0.file.cover }.count,
                                       isPrivate: NoteLibrary.privateNotebook(covers: here.filter { $0.file.cover }.map(\.file), unread: coverUnread),
@@ -2009,15 +2015,19 @@ final class NoteStore {
 
     /// Cover fields a launch before kept (NoteJournal.coverLeftovers), of every root: waiting again, each only for its
     /// own root, shown at once (Private first).
-    func recoverCovers(_ entries: [CoverFields]) {
+    /// Returns the entries as they wait now, for the journal (NoteJournal.rejournalCovers).
+    @discardableResult
+    func recoverCovers(_ entries: [CoverFields]) -> [CoverFields] {
+        var out: [CoverFields] = []
         for entry in entries where !entry.isEmpty {
             var pending = coverPending[entry.key] ?? entry
             for (field, value) in entry.fields where pending.fields[field] == nil { pending.fields[field] = value }
             coverPending[entry.key] = pending
-            NoteJournal.queue.async { NoteJournal.keepCover(pending) }
+            out.append(pending)
         }
         showCovers()
         if loaded { for key in coverPending.keys { landCover(key) } }
+        return out
     }
 
     /// The notebook's color: its cover's ("accent" is the Mac's accent color), else the Mac's accent color.
@@ -2258,10 +2268,8 @@ extension NoteStore {
             canvasWaiting[key] = nil
             canvasDone[id, default: []] += canvasDone.removeValue(forKey: key) ?? []
             let moved = Set(entry.edits.map(\.id))
-            NoteJournal.queue.async {
-                NoteJournal.keepCanvas(target)
-                NoteJournal.ackCanvas(key, wrote: moved)
-            }
+            // The old entry loses them only once the new one holds them (NoteJournal.moveCanvas).
+            NoteJournal.queue.async { NoteJournal.moveCanvas(target, from: key, ids: moved) }
         }
     }
 

@@ -364,29 +364,46 @@ extension NoteJournal {
     /// The edits waiting in memory, added to the entry on disk (by id, in order): only an acknowledgement (`ackCanvas`)
     /// takes an edit out, so no write of what's in memory (emptied by a drain, say) ever drops one. On the journal's
     /// queue.
-    nonisolated static func keepCanvas(_ entry: CanvasEntry, in folder: URL = folder) {
+    /// True once the entry on disk holds them (an entry there that can't be read is never written over: false).
+    @discardableResult
+    nonisolated static func keepCanvas(_ entry: CanvasEntry, in folder: URL = folder) -> Bool {
         let url = canvasFile(entry.coverID, in: folder)
         var entry = entry
-        if let there = readCanvas(url) {
+        if FileManager.default.fileExists(atPath: url.path) {
+            guard let there = readCanvas(url) else { return false }
             let ids = Set(entry.edits.map(\.id))
             entry.edits = there.edits.filter { !ids.contains($0.id) } + entry.edits
         }
-        write(entry, to: url, in: folder)
+        return write(entry, to: url, in: folder)
     }
 
-    private nonisolated static func write(_ entry: CanvasEntry, to url: URL, in folder: URL) {
-        guard !entry.edits.isEmpty else { try? FileManager.default.removeItem(at: url); return }
+    @discardableResult
+    private nonisolated static func write(_ entry: CanvasEntry, to url: URL, in folder: URL) -> Bool {
+        guard !entry.edits.isEmpty else {
+            try? FileManager.default.removeItem(at: url)
+            return !FileManager.default.fileExists(atPath: url.path)
+        }
         try? FileManager.default.createDirectory(at: canvasFolder(in: folder), withIntermediateDirectories: true)
-        guard let data = try? JSONEncoder().encode(entry) else { return }
-        try? data.write(to: url, options: .atomic)
+        guard let data = try? JSONEncoder().encode(entry) else { return false }
+        return (try? data.write(to: url, options: .atomic)) != nil
     }
 
     /// A write took these edits: only they leave the entry on disk (by id); the entry goes once none is left.
-    nonisolated static func ackCanvas(_ coverID: String, wrote ids: Set<String>, in folder: URL = folder) {
+    @discardableResult
+    nonisolated static func ackCanvas(_ coverID: String, wrote ids: Set<String>, in folder: URL = folder) -> Bool {
         let url = canvasFile(coverID, in: folder)
-        guard var entry = readCanvas(url) else { return }
+        guard var entry = readCanvas(url) else { return !FileManager.default.fileExists(atPath: url.path) }
         entry.edits.removeAll { ids.contains($0.id) }
-        write(entry, to: url, in: folder)
+        return write(entry, to: url, in: folder)
+    }
+
+    /// Edits moved from one key to another (re-keyed by a cover id once known): the old entry loses them only after
+    /// the new one was written; until then both are kept, and it's tried again (every 2 s, a few minutes at most;
+    /// after that both stay for the next launch, which puts each back by its key, merged). On the journal's queue.
+    nonisolated static func moveCanvas(_ target: CanvasEntry, from old: String, ids: Set<String>, in folder: URL = folder, attempt: Int = 0) {
+        if keepCanvas(target, in: folder) { ackCanvas(old, wrote: ids, in: folder); return }
+        guard attempt < 90 else { return }
+        queue.asyncAfter(deadline: .now() + 2) { moveCanvas(target, from: old, ids: ids, in: folder, attempt: attempt + 1) }
     }
 
     nonisolated static func readCanvas(_ url: URL) -> CanvasEntry? {
@@ -449,12 +466,24 @@ extension NoteJournal {
 
     /// A notebook's cover fields waiting, written over its entry (the latest value of each field). On the journal's
     /// queue.
-    nonisolated static func keepCover(_ entry: CoverFields, in folder: URL = folder) {
+    /// True once the entry on disk says it.
+    @discardableResult
+    nonisolated static func keepCover(_ entry: CoverFields, in folder: URL = folder) -> Bool {
         let url = coverFile(entry.key, in: folder)
-        guard !entry.isEmpty else { try? FileManager.default.removeItem(at: url); return }
+        guard !entry.isEmpty else {
+            try? FileManager.default.removeItem(at: url)
+            return !FileManager.default.fileExists(atPath: url.path)
+        }
         try? FileManager.default.createDirectory(at: coverFolder(in: folder), withIntermediateDirectories: true)
-        guard let data = try? JSONEncoder().encode(entry) else { return }
-        try? data.write(to: url, options: .atomic)
+        guard let data = try? JSONEncoder().encode(entry) else { return false }
+        return (try? data.write(to: url, options: .atomic)) != nil
+    }
+
+    /// Cover entries recovered at launch journaled again, then the moved-aside copies dropped: only when every one
+    /// was written; else the copies stay for the next launch. On the journal's queue.
+    nonisolated static func rejournalCovers(_ entries: [CoverFields], dropping holding: [URL], in folder: URL = folder) {
+        let written = entries.map { keepCover($0, in: folder) }
+        if written.allSatisfy({ $0 }) { dropCoverLeftovers(holding) }
     }
 
     /// A write took these fields: each leaves the entry only while it still holds that value.

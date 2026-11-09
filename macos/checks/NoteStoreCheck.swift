@@ -126,6 +126,8 @@ struct NoteStoreCheck {
         canvasWaitsForCovers(root: root)
         coverRoots(top: root.deletingLastPathComponent())
         listingErrors(root: root)
+        notebookUncertain(root: root)
+        rekeyKeepsSource(root: root)
         canvasByFolder(root: root)
         notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
@@ -1219,9 +1221,8 @@ struct NoteStoreCheck {
         let left = NoteJournal.coverLeftovers()
         expect(left.entries.map(\.notebook) == ["Quit"] && !fm.fileExists(atPath: NoteJournal.coverFolder().path), "at launch the cover fields move aside first")
         let store = NoteStore(root: root)
-        store.recoverCovers(left.entries)
-        NoteJournal.queue.sync {}
-        NoteJournal.dropCoverLeftovers(left.holding)
+        let waiting = store.recoverCovers(left.entries)
+        NoteJournal.rejournalCovers(waiting, dropping: left.holding)
         expect(fm.fileExists(atPath: NoteJournal.coverFile(pending.key).path) && left.holding.allSatisfy { !fm.fileExists(atPath: $0.path) },
                "journaled again before the moved-aside copy goes")
         store.reload()
@@ -1328,6 +1329,60 @@ struct NoteStoreCheck {
         }
         expect(text(coverAURL).map { NoteContract.isPrivate(NoteFile.parse($0, fallbackID: "", fallbackDate: Date())) } == true, "back in its own folder, it lands there")
         for r in [rootA, rootB] { try? fm.removeItem(at: r) }
+    }
+
+    /// A notebook whose possible covers can't all be read is unknown, so Private: an unreadable conflicted copy of a
+    /// public cover, or a folder that can't be listed. Public again once every file in it reads.
+    static func notebookUncertain(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Uncertain")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var cover = NoteFile(id: "COVER-UNC", body: "# About this notebook")
+        cover.cover = true
+        _ = NoteStore.create(cover.serialized(), at: folder.appending(path: NoteShelf.coverName), root: root)
+        var copy = cover
+        copy.setScalar("private", "true")
+        let copyURL = folder.appending(path: "About this notebook (conflicted copy).md")
+        _ = NoteStore.create(copy.serialized(), at: copyURL, root: root)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: copyURL.path)
+        expect(NoteStore.read(root).notebooks.first { $0.name == "Uncertain" }?.isPrivate == true, "an unreadable conflicted copy of the cover: unknown, so Private")
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: copyURL.path)
+        expect(NoteStore.read(root).notebooks.first { $0.name == "Uncertain" }?.isPrivate == true, "read, the copy says Private: Private")
+        try? fm.removeItem(at: copyURL)
+        expect(NoteStore.read(root).notebooks.first { $0.name == "Uncertain" }?.isPrivate == false, "every possible cover read and none says so: public")
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: folder.path)
+        expect(NoteStore.read(root).notebooks.first { $0.name == "Uncertain" }?.isPrivate == true, "a folder that can't be listed: unknown, so Private")
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+        try? fm.removeItem(at: folder)
+    }
+
+    /// Re-keying canvas edits (a folder key to a cover id) never drops the source before its replacement is written:
+    /// a failed write keeps both.
+    static func rekeyKeepsSource(root: URL) {
+        let fm = FileManager.default
+        let journal = root.deletingLastPathComponent().appending(path: "Journal \(UUID().uuidString)")
+        let source = CanvasEntry(coverID: CanvasQueue.folderKey("9:9"), notebook: "Moving", edits: [NoteCanvas.Stamped(.move("n1", .init(x: 1, y: 1)))])
+        expect(NoteJournal.keepCanvas(source, in: journal), "the source entry is journaled")
+        // The replacement can't be written: something unreadable already sits where it goes.
+        let target = CanvasEntry(coverID: "COVER-MOVING", notebook: "Moving", edits: source.edits)
+        try? fm.createDirectory(at: NoteJournal.canvasFile("COVER-MOVING", in: journal), withIntermediateDirectories: true)
+        NoteJournal.moveCanvas(target, from: source.coverID, ids: Set(source.edits.map(\.id)), in: journal, attempt: 90)
+        expect(NoteJournal.readCanvas(NoteJournal.canvasFile(source.coverID, in: journal))?.edits.count == 1, "the replacement failed: the source keeps its edits")
+        try? fm.removeItem(at: NoteJournal.canvasFile("COVER-MOVING", in: journal))
+        NoteJournal.moveCanvas(target, from: source.coverID, ids: Set(source.edits.map(\.id)), in: journal)
+        expect(NoteJournal.readCanvas(NoteJournal.canvasFile("COVER-MOVING", in: journal))?.edits.count == 1
+               && !fm.fileExists(atPath: NoteJournal.canvasFile(source.coverID, in: journal).path), "written, the source goes")
+        // Cover leftovers: the moved-aside copies go only once every entry was journaled again.
+        let held = journal.appending(path: "held")
+        try? fm.createDirectory(at: held, withIntermediateDirectories: true)
+        let entry = CoverFields(notebook: "Moving", root: "/r", coverID: "COVER-MOVING", fields: ["private": "true"])
+        try? fm.createDirectory(at: NoteJournal.coverFile(entry.key, in: journal), withIntermediateDirectories: true)
+        NoteJournal.rejournalCovers([entry], dropping: [held], in: journal)
+        expect(fm.fileExists(atPath: held.path), "a cover entry that couldn't be journaled again: its moved-aside copy stays")
+        try? fm.removeItem(at: NoteJournal.coverFile(entry.key, in: journal))
+        NoteJournal.rejournalCovers([entry], dropping: [held], in: journal)
+        expect(!fm.fileExists(atPath: held.path) && fm.fileExists(atPath: NoteJournal.coverFile(entry.key, in: journal).path), "journaled again, the copy goes")
+        try? fm.removeItem(at: journal)
     }
 
     /// A folder that can't be listed is never taken for an empty one: the read isn't complete.

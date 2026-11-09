@@ -132,6 +132,8 @@ final class NoteDesk {
         // another Mac's version at once).
         store.keepAlive = { [weak self] key in NoteShelf.fenceEditor(dirty: self?.editors[key]?.busy() == true) }
         Self.queue.async { Self.recoverNarrowed() }
+        // Mail drafts' staged pictures a Petal before left behind (it quit before their share finished), older than an hour.
+        DispatchQueue.global(qos: .utility).async { NoteDrop.sweepStaging() }
         // This Mac's notes state and the notes folder, read and resolved off the main thread (the folder may be in
         // iCloud Drive): only then are notes read, watched and shown.
         let setting = app.config.string("notesFolder")
@@ -152,8 +154,9 @@ final class NoteDesk {
                         if !covers.entries.isEmpty || !covers.holding.isEmpty {
                             DispatchQueue.main.async {
                                 MainActor.assumeIsolated {
-                                    self.store.recoverCovers(covers.entries)
-                                    NoteJournal.queue.async { NoteJournal.dropCoverLeftovers(covers.holding) }
+                                    let waiting = self.store.recoverCovers(covers.entries)
+                                    // The moved-aside copies go only once every entry is journaled again.
+                                    NoteJournal.queue.async { NoteJournal.rejournalCovers(waiting, dropping: covers.holding) }
                                 }
                             }
                         }

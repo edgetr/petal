@@ -71,7 +71,7 @@ extension NoteDesk {
         let folder = paper.url.deletingLastPathComponent(), root = store.root
         // Where its pictures are, found off the main thread (the disk, and iCloud may bring them down first).
         NoteStore.io.async {
-            let stage = FileManager.default.temporaryDirectory.appending(path: "Petal Mail").appending(path: UUID().uuidString)
+            let stage = NoteDrop.stagingRoot.appending(path: UUID().uuidString)
             var files: [URL] = []
             var missing = 0
             for link in links {
@@ -90,12 +90,14 @@ extension NoteDesk {
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    // The staged copies go once Mail has had time to take them in.
-                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 600) { try? FileManager.default.removeItem(at: stage) }
-                    guard let service = NSSharingService(named: .composeEmail) else { return self.clipboard(title: title, text: text, bundle: "com.apple.mail") }
+                    let cleanUp = { MailStaging.remove(stage) }
+                    guard let service = NSSharingService(named: .composeEmail) else { cleanUp(); return self.clipboard(title: title, text: text, bundle: "com.apple.mail") }
                     service.subject = title
                     let items: [Any] = [text as NSString] + files.map { $0 as NSURL }
-                    guard service.canPerform(withItems: items) else { return self.clipboard(title: title, text: text, bundle: "com.apple.mail") }
+                    guard service.canPerform(withItems: items) else { cleanUp(); return self.clipboard(title: title, text: text, bundle: "com.apple.mail") }
+                    // The staged copies go when the share finishes (once Mail has taken them in) or fails; a quit before
+                    // that leaves them for the next launch's sweep (NoteDrop.sweepStaging).
+                    service.delegate = MailStaging.watch(stage)
                     service.perform(withItems: items)
                     if let words = NoteDrop.missingWords(missing) { self.tell(words) }
                 }
@@ -148,6 +150,41 @@ extension NoteDesk {
         board.setString(text, forType: .string)
         Self.bringUp(bundle)
         tell("“\(title.isEmpty ? "The note" : title)” is on the clipboard: paste it into \(Apps.cachedName(bundle) ?? "the app").")
+    }
+}
+
+// MARK: - Mail's staged pictures
+
+/// The staging folder of each Mail draft being shared, removed when its share finishes (a moment later, so Mail has
+/// taken the pictures in) or fails. Kept alive here while the share is under way (a share service's delegate is weak).
+@MainActor
+final class MailStaging: NSObject, NSSharingServiceDelegate {
+    private static var watching: [ObjectIdentifier: MailStaging] = [:]
+    private let folder: URL
+
+    private init(_ folder: URL) { self.folder = folder }
+
+    static func watch(_ folder: URL) -> MailStaging {
+        let watcher = MailStaging(folder)
+        watching[ObjectIdentifier(watcher)] = watcher
+        return watcher
+    }
+
+    nonisolated static func remove(_ folder: URL, after delay: TimeInterval = 0) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { try? FileManager.default.removeItem(at: folder) }
+    }
+
+    private func done(after delay: TimeInterval) {
+        Self.remove(folder, after: delay)
+        Self.watching[ObjectIdentifier(self)] = nil
+    }
+
+    nonisolated func sharingService(_ sharingService: NSSharingService, didShareItems items: [Any]) {
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.done(after: 30) } }
+    }
+
+    nonisolated func sharingService(_ sharingService: NSSharingService, didFailToShareItems items: [Any], error: any Error) {
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.done(after: 0) } }
     }
 }
 

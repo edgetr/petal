@@ -337,6 +337,11 @@ extension NoteLibrary {
     /// version of it wasn't. Unknown counts as Private.
     static func coverUnknown(fileThere: Bool, fileRead: Bool, versionsUnread: Bool) -> Bool { (fileThere && !fileRead) || versionsUnread }
 
+    /// Whether a notebook's privacy is unknown (so Private): its folder couldn't be listed, or any file in it wasn't
+    /// read (a dataless or unreadable file, a version, a conflicted copy: any could be a cover saying Private). Public
+    /// only once every possible cover in it was read and none says so.
+    static func notebookUnknown(listed: Bool, unread: Int) -> Bool { !listed || unread > 0 }
+
     /// Whether a notebook is Private, counted across every version of its cover: Private when any says so, or while
     /// its cover is there and not read yet (unknown).
     static func privateNotebook(covers: [NoteFile], unread: Bool) -> Bool { unread || covers.contains(where: NoteContract.isPrivate) }
@@ -1125,6 +1130,27 @@ enum NoteDrop {
     enum Attachment: Equatable { case file, stage, missing }
 
     static func attachment(onDisk: Bool, held: Bool) -> Attachment { onDisk ? .file : held ? .stage : .missing }
+
+    /// Where Mail drafts' staged pictures go: a folder per draft inside it.
+    static var stagingRoot: URL { FileManager.default.temporaryDirectory.appending(path: "Petal Mail") }
+
+    /// The staging folders to sweep: those older than an hour (a draft's pictures are long taken in by then).
+    static func staleStaging(_ folders: [(name: String, modified: Date)], now: Date, after: TimeInterval = 3600) -> [String] {
+        folders.filter { now.timeIntervalSince($0.modified) > after }.map(\.name)
+    }
+
+    /// At launch, off the main thread: staging folders a Petal before left (it quit before cleaning up) and older
+    /// than an hour, removed. Returns how many.
+    @discardableResult
+    static func sweepStaging(in root: URL = stagingRoot, now: Date = Date()) -> Int {
+        let fm = FileManager.default
+        let folders = ((try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey], options: [])) ?? []).compactMap { url in
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate).map { (name: url.lastPathComponent, modified: $0) }
+        }
+        let stale = staleStaging(folders, now: now)
+        for name in stale { try? fm.removeItem(at: root.appending(path: name)) }
+        return stale.count
+    }
 
     /// Held bytes written to a file of their own in `folder` (made for this draft), by the picture's name only.
     static func stage(_ data: Data, name: String, in folder: URL) -> URL? {

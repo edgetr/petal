@@ -357,6 +357,19 @@ struct NoteLibraryCheck {
         expect(!NoteLibrary.coverUnknown(fileThere: true, fileRead: true, versionsUnread: false) && NoteLibrary.coverUnknown(fileThere: true, fileRead: false, versionsUnread: false)
                && !NoteLibrary.coverUnknown(fileThere: false, fileRead: false, versionsUnread: false), "known only once the file and every version are read")
 
+        expect(NoteLibrary.notebookUnknown(listed: false, unread: 0) && NoteLibrary.notebookUnknown(listed: true, unread: 1)
+               && !NoteLibrary.notebookUnknown(listed: true, unread: 0), "a notebook is known only once listed and every file in it read")
+        // Mail's staging folders: swept at launch once older than an hour.
+        let launch = Date()
+        expect(NoteDrop.staleStaging([("old", launch.addingTimeInterval(-7200)), ("new", launch.addingTimeInterval(-60))], now: launch) == ["old"],
+               "only staging folders older than an hour are swept")
+        let sweepRoot = FileManager.default.temporaryDirectory.appending(path: "petal-sweep-\(UUID().uuidString)")
+        for name in ["old", "new"] { try? FileManager.default.createDirectory(at: sweepRoot.appending(path: name), withIntermediateDirectories: true) }
+        try? FileManager.default.setAttributes([.modificationDate: launch.addingTimeInterval(-7200)], ofItemAtPath: sweepRoot.appending(path: "old").path)
+        expect(NoteDrop.sweepStaging(in: sweepRoot, now: launch) == 1 && !FileManager.default.fileExists(atPath: sweepRoot.appending(path: "old").path)
+               && FileManager.default.fileExists(atPath: sweepRoot.appending(path: "new").path), "the launch sweep removes the old folder, keeps the new")
+        try? FileManager.default.removeItem(at: sweepRoot)
+
         // Petal's own pictures leave out every window showing a Private notebook's note.
         let surfaces = [NotePrivacy.Surface(window: 11, showsPrivate: true), NotePrivacy.Surface(window: 12, showsPrivate: false),
                         NotePrivacy.Surface(window: 13, showsPrivate: true)]
