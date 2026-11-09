@@ -323,7 +323,9 @@ final class NoteStore {
         stopWatching()
         let jobs = drainJobs()
         let unsaved = drainUnsaved()
-        drainCanvas()
+        // Canvas edits waiting stay, bound to their own notes' folder: they land if it comes back in time, else are
+        // rescued (NoteShelf.notebookFor's `otherRoot`).
+        drainCanvas(keep: true)
         let oldRoot = root
         Self.io.async {
             Self.drain(jobs, unsaved: unsaved, root: oldRoot)
@@ -2026,12 +2028,50 @@ final class NoteStore {
     func binding(_ notebook: String) -> NotebookBinding? {
         guard let book = self.notebook(notebook), !book.instance.isEmpty else { return nil }
         let id = notebookPlaces.first { $0.name == book.name }?.coverID ?? ""
-        return NotebookBinding(coverID: NoteShelf.lasting(id, pending: pendingIDs) ? id : "", path: book.folder.lastPathComponent, instance: book.instance)
+        return NotebookBinding(coverID: NoteShelf.lasting(id, pending: pendingIDs) ? id : "", path: book.folder.lastPathComponent,
+                               instance: book.instance, root: root.path)
     }
 
-    /// The one rule (NoteShelf.notebookFor), against the notebooks as read now.
+    /// The one rule (NoteShelf.notebookFor), against the notebooks of this notes' folder as read now.
     func resolve(_ binding: NotebookBinding) -> NoteShelf.BindingResult {
-        NoteShelf.notebookFor(binding, places: notebookPlaces, complete: readComplete)
+        NoteShelf.notebookFor(binding, places: notebookPlaces, complete: readComplete, root: root.path)
+    }
+
+    /// The notebooks of a notes' folder as they are on disk right now (each folder's path, its volume and inode, and
+    /// its one canonical cover's own id), read without reading their notes: what a canvas write checks its binding
+    /// against inside its coordinated step. Off the main thread.
+    nonisolated static func placesNow(root: URL) -> [NotebookPlace] {
+        let fm = FileManager.default
+        let names = (try? fm.contentsOfDirectory(atPath: root.path)) ?? []
+        return names.sorted().compactMap { name in
+            let folder = root.appending(path: name)
+            // The same notebooks `read` finds: no hidden folder, no symbolic link, never Petal's pictures.
+            guard !name.hasPrefix("."), name.compare(NoteShelf.picturesRoot, options: .caseInsensitive) != .orderedSame,
+                  let values = try? folder.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                  values.isDirectory == true, values.isSymbolicLink != true else { return nil }
+            return NotebookPlace(name: name, path: name, instance: instance(of: folder), coverID: coverIDNow(in: folder))
+        }
+    }
+
+    /// A notebook folder's one canonical cover's own id as its file says now ("" for none, several, one that can't
+    /// be read or one with no id of its own).
+    nonisolated static func coverIDNow(in folder: URL) -> String {
+        let covers = ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).filter(NoteLibrary.isCanonicalCover)
+        guard covers.count == 1, let text = try? String(contentsOf: folder.appending(path: covers[0]), encoding: .utf8) else { return "" }
+        let id = NoteFile.parse(text, fallbackID: "file:", fallbackDate: Date()).id
+        return NoteShelf.needsID(id) ? "" : id
+    }
+
+    /// The binding of a notebook folder as it is on disk now (for a write that isn't pending work: versions merged on
+    /// a read). Off the main thread.
+    nonisolated static func bindingNow(_ folder: URL, root: URL) -> NotebookBinding {
+        NotebookBinding(coverID: coverIDNow(in: folder), path: folder.lastPathComponent, instance: instance(of: folder), root: root.path)
+    }
+
+    /// Whether a binding still finds this very folder, by the one rule, against the notes' folder as it is now.
+    nonisolated static func bindingHolds(_ binding: NotebookBinding, folder: URL, root: URL) -> Bool {
+        guard case .found(let name) = NoteShelf.notebookFor(binding, places: placesNow(root: root), complete: false, root: root.path) else { return false }
+        return name.compare(folder.lastPathComponent, options: .caseInsensitive) == .orderedSame
     }
 
     /// The fields waiting under `key`, made on their notebook's cover as it is now through the cover's session (a
@@ -2196,17 +2236,18 @@ final class NoteStore {
         for key in coverPending.keys { landCover(key) }
     }
 
-    /// Every cover change waiting in this root, after a read: found, it lands (`landCover`); ambiguous for the limit over
-    /// complete reads (or on the first complete read after the launch that recovered it), dropped and said, out of the
+    /// Every cover change waiting, after a read: found, it lands (`landCover`); ambiguous, or made in another notes'
+    /// folder, for the limit over complete reads (or on the first complete read after the launch that recovered it), dropped and said, out of the
     /// journal; its notebook gone after a complete read, dropped (nothing left to change). Never applied by a guess.
     private func judgeCovers() {
         let places = notebookPlaces
-        for (key, pending) in coverPending where pending.root == root.path {
-            switch NoteShelf.notebookFor(pending.binding, places: places, complete: readComplete) {
+        for (key, pending) in coverPending {
+            switch NoteShelf.notebookFor(pending.binding, places: places, complete: readComplete, root: root.path) {
             case .found:
                 coverAmbiguousSince[key] = nil
                 coversFromLaunch.remove(key)
-            case .ambiguous:
+            case .ambiguous, .otherRoot:
+                // Ambiguous, or made in another notes' folder than the one in use: never applied here.
                 guard readComplete else { continue }
                 let since = coverAmbiguousSince[key] ?? Date()
                 coverAmbiguousSince[key] = since
@@ -2507,9 +2548,10 @@ extension NoteStore {
             case .gone:
                 // Its notebook is gone (trashed): rescued into Unsaved notes with the whole canvas, never dropped.
                 break
-            case .ambiguous:
-                // Never written to any notebook. Ambiguous over complete reads for the limit: rescued like a deletion
-                // (never left waiting where nobody sees it); resolved before that, it lands as usual.
+            case .ambiguous, .otherRoot:
+                // Never written to any notebook (nor to another notes' folder). Ambiguous, or its own folder not the
+                // one in use, over complete reads for the limit: rescued like a deletion (never left waiting where
+                // nobody sees it); resolved before that, it lands as usual.
                 guard readComplete else { return }
                 let since = canvasAmbiguousSince[id] ?? Date()
                 canvasAmbiguousSince[id] = since
@@ -2541,7 +2583,8 @@ extension NoteStore {
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         self.canvasWriting.remove(id)
-                        let why = found == .gone ? "the notebook is gone" : "Petal couldn't tell which notebook they belong to"
+                        let why = found == .gone ? "the notebook is gone"
+                            : found == .otherRoot ? "they were made in another notes folder" : "Petal couldn't tell which notebook they belong to"
                         self.onProblem(kept ? "\(entry.notebook)'s canvas changes are kept in Unsaved notes: \(why)."
                                             : "\(entry.notebook)'s canvas changes are kept on this Mac until Petal can save them.")
                     }
@@ -2554,9 +2597,11 @@ extension NoteStore {
         let started = canvasGeneration
         let callbacks = canvasDone[id] ?? []
         canvasDone[id] = []
-        let file = book.folder.appending(path: Self.canvasName), root = self.root
+        let folder = book.folder, root = self.root, binding = entry.bound
         Self.io.async {
-            let saved = Self.writeCanvas(batch, to: file, root: root)
+            // The binding is checked again inside the coordinated write: no longer this folder, nothing is written
+            // and the edits stay (journal too), tried again where they belong.
+            let saved = Self.writeCanvas(batch, binding: binding, in: folder, root: root)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.canvasWriting.remove(id)
@@ -2600,9 +2645,10 @@ extension NoteStore {
     /// A drain (quit, or a switch of folder): the edits waiting are already in the journal, on this Mac's own disk;
     /// nothing is written to the notes' folder here (quit never waits on iCloud for them). The next launch puts them
     /// back (NoteJournal.recoverCanvas).
-    func drainCanvas() {
+    /// `keep`: a switch of folder keeps the entries waiting in memory (each bound to the folder it was made in).
+    func drainCanvas(keep: Bool = false) {
         canvasGeneration += 1
-        canvasWaiting = [:]
+        if !keep { canvasWaiting = [:] }
         canvasDone = [:]
         lastCanvas = [:]
         canvasAmbiguousSince = [:]
@@ -2613,22 +2659,29 @@ extension NoteStore {
     nonisolated static func readCanvas(_ file: URL, root: URL, resolve: Bool = true) -> NoteCanvas? {
         guard safe(file, root: root) else { return nil }
         guard FileManager.default.fileExists(atPath: file.path) else { return NoteCanvas() }
-        if resolve, !(NSFileVersion.unresolvedConflictVersionsOfItem(at: file) ?? []).isEmpty { return writeCanvas([], to: file, root: root) }
+        if resolve, !(NSFileVersion.unresolvedConflictVersionsOfItem(at: file) ?? []).isEmpty {
+            let folder = file.deletingLastPathComponent()
+            return writeCanvas([], binding: bindingNow(folder, root: root), in: folder, root: root)
+        }
         guard let text = coordinatedRead(file) else { return nil }
         let versions = (NSFileVersion.unresolvedConflictVersionsOfItem(at: file) ?? []).compactMap { try? String(contentsOf: $0.url, encoding: .utf8) }
         return NoteCanvas.merged(disk: text, versions: versions)
     }
 
-    /// Canvas edits on the file at `file`, coordinated and atomic: made on the file as it is merged with every
-    /// version iCloud kept of it (one Petal can't read is left out and left unresolved), and the versions merged are
-    /// marked resolved once the merge is written. Nil (nothing written) when the file isn't a canvas Petal can read,
-    /// its folder is gone or the write failed. Off the main thread.
-    nonisolated static func writeCanvas(_ edits: [NoteCanvas.Stamped], to file: URL, root: URL) -> NoteCanvas? {
-        guard safe(file, root: root), safe(file.deletingLastPathComponent(), root: root),
-              FileManager.default.fileExists(atPath: file.deletingLastPathComponent().path) else { return nil }
+    /// The one way a canvas is written: edits on the canvas of `folder`, coordinated and atomic, only while their
+    /// binding still finds that very folder (checked inside the coordinated step, right before writing, through
+    /// NoteShelf.notebookFor against the notes' folder as it is then, as Phase 1's `stillNote` is). Made on the file
+    /// as it is merged with every version iCloud kept of it (one Petal can't read is left out and left unresolved),
+    /// and the versions merged are marked resolved once the merge is written. Nil (nothing written) when the binding
+    /// no longer finds this folder, the file isn't a canvas Petal can read, its folder is gone or the write failed.
+    /// Off the main thread.
+    nonisolated static func writeCanvas(_ edits: [NoteCanvas.Stamped], binding: NotebookBinding, in folder: URL, root: URL) -> NoteCanvas? {
+        let file = folder.appending(path: canvasName)
+        guard safe(file, root: root), safe(folder, root: root), FileManager.default.fileExists(atPath: folder.path) else { return nil }
         var result: NoteCanvas?
         var error: NSError?
         NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: file, options: .forMerging, error: &error) { url in
+            guard bindingHolds(binding, folder: folder, root: root) else { return }
             let there = FileManager.default.fileExists(atPath: url.path)
             let disk = there ? (try? String(contentsOf: url, encoding: .utf8)) : nil
             // A file there that can't be read is never taken for no file.
@@ -2657,8 +2710,8 @@ extension NoteStore {
         return result
     }
 
-    nonisolated static func writeCanvas(_ edit: NoteCanvas.Edit, to file: URL, root: URL) -> NoteCanvas? {
-        writeCanvas([NoteCanvas.Stamped(edit)], to: file, root: root)
+    nonisolated static func writeCanvas(_ edit: NoteCanvas.Edit, binding: NotebookBinding, in folder: URL, root: URL) -> NoteCanvas? {
+        writeCanvas([NoteCanvas.Stamped(edit)], binding: binding, in: folder, root: root)
     }
 }
 

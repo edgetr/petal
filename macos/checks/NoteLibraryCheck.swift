@@ -217,9 +217,26 @@ struct NoteLibraryCheck {
         anotherAlex.personHandle = "alex@example.com"
         expect(PersonRead.matches(alexByMail, anotherAlex), "the same address is the same person, in any chat app")
         expect(!PersonRead.samePerson(nameOnly, nameOnly) && PersonRead.samePerson(alexByMail, alexByMail), "one person by contact or address, never by name")
-        expect(PersonRead.handle(title: "Alex Kim", headings: ["Alex Kim <ALEX@example.com>"]) == "alex@example.com", "an address in the header")
-        expect(PersonRead.handle(title: "", headings: ["+90 555 123 45 67"]) == "+905551234567", "a phone number in the header")
-        expect(PersonRead.handle(title: "a@example.com", headings: ["b@example.com"]) == nil, "two addresses: none")
+        expect(PersonRead.handle(person: "Alex Kim", headings: ["Alex Kim <ALEX@example.com>"]) == "alex@example.com",
+               "an address in the header element that names the person")
+        expect(PersonRead.handle(person: "+90 555 123 45 67", headings: ["+90 555 123 45 67"]) == "+905551234567", "a person shown only by their number")
+        expect(PersonRead.handle(person: "Alex Kim", headings: ["Alex Kim <a@example.com>", "Alex Kim <b@example.com>"]) == nil, "two addresses: none")
+        // Mail's window title is the subject: an address there is never the person's.
+        let subject = "Invoice for alex.kim@example.com"
+        let mailPerson = PersonRead.person(app: "com.apple.mail", appName: "Mail", title: subject, headings: ["Alex Kim"]) ?? ""
+        expect(mailPerson == "Alex Kim" && PersonRead.handle(person: mailPerson, headings: ["Alex Kim"]) == nil
+               && PersonRead.identity(name: mailPerson, handle: PersonRead.handle(person: mailPerson, headings: ["Alex Kim"]) ?? "", contacts: book) == nil,
+               "Mail: a subject's address is never taken; no address in the header, no person anchor")
+        expect(PersonRead.person(app: "com.apple.mail", appName: "Mail", title: subject, headings: ["Alex Kim <alex.kim@example.com>"]) == "Alex Kim"
+               && PersonRead.handle(person: "Alex Kim", headings: ["Alex Kim <alex.kim@example.com>"]) == "alex.kim@example.com",
+               "Mail: the address beside the name in the message's header")
+        // In every app, an address only from the element that named the person: another element's, or the title's, never.
+        expect(PersonRead.handle(person: "Alex", headings: ["Alex", "sam@example.com"]) == nil
+               && PersonRead.person(app: "com.apple.MobileSMS", appName: "Messages", title: "Alex", headings: ["Alex"]) == "Alex"
+               && PersonRead.handle(person: "Alex", headings: ["Alex"]) == nil,
+               "Messages, WhatsApp, Telegram, Slack: no address beside the name in the header, no person anchor")
+        expect(PersonRead.person(app: "com.apple.mail", appName: "Mail", title: "", headings: ["Alex Kim <alex@example.com>", "Lunch with bob@corp.com"]) == nil,
+               "a subject among the headings is a second candidate: no person")
         var withHandle = NoteFile(id: "P2", body: "x")
         withHandle.places = [alexByMail]
         expect(NoteFile.parse(withHandle.serialized(), fallbackID: "", fallbackDate: now).places == [alexByMail], "a person's address round-trips")
@@ -487,6 +504,10 @@ struct NoteLibraryCheck {
         expect(NoteShelf.notebookFor(trip, places: [place("Trip", "1:10", "X"), place("trip", "1:10", "X")], complete: true) == .ambiguous
                && NoteShelf.notebookFor(NotebookBinding(coverID: "X", path: "Trip", instance: ""), places: [place("Trip", "1:1", "X"), place("trip", "1:2", "X")], complete: true) == .ambiguous,
                "two candidates: ambiguous, never a pick")
+        let inA = NotebookBinding(coverID: "X", path: "Trip", instance: "1:10", root: "/Notes A")
+        expect(NoteShelf.notebookFor(inA, places: [place("Trip", "1:10", "X")], complete: true, root: "/Notes B") == .otherRoot
+               && NoteShelf.notebookFor(inA, places: [place("Trip", "1:10", "X")], complete: true, root: "/Notes A/") == .found("Trip"),
+               "made in another notes folder: never resolved against this one, even a notebook just like it")
         let start = Date(timeIntervalSince1970: 1_000_000)
         expect(!NoteShelf.ambiguityExpired(since: start, now: start.addingTimeInterval(599), complete: true)
                && NoteShelf.ambiguityExpired(since: start, now: start.addingTimeInterval(600), complete: true)

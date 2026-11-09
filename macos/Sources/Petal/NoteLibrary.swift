@@ -696,7 +696,7 @@ struct CoverFields: Codable, Equatable, Sendable {
     var key: String { storedKey }
 
     /// What it's bound to (NoteShelf.notebookFor).
-    var binding: NotebookBinding { NotebookBinding(coverID: coverID, path: path.isEmpty ? notebook : path, instance: folderID) }
+    var binding: NotebookBinding { NotebookBinding(coverID: coverID, path: path.isEmpty ? notebook : path, instance: folderID, root: root) }
 
     init(notebook: String, root: String = "", coverID: String = "", folderID: String = "", path: String = "", fields: [String: String] = [:]) {
         self.notebook = notebook
@@ -711,7 +711,7 @@ struct CoverFields: Codable, Equatable, Sendable {
     /// The notebook it's for in `root` now (NoteShelf.notebookFor: its folder first, so the original over a
     /// duplicate); nil when it's another root's, not found, or found twice (never a guess).
     func target(root now: String, places: [NotebookPlace]) -> String? {
-        guard root == now, case .found(let name) = NoteShelf.notebookFor(binding, places: places, complete: false) else { return nil }
+        guard case .found(let name) = NoteShelf.notebookFor(binding, places: places, complete: false, root: now) else { return nil }
         return name
     }
 
@@ -822,7 +822,7 @@ enum PersonRead {
         default:
             found = [title] + headings
         }
-        let names = found.compactMap(name).filter { $0.compare(appName, options: .caseInsensitive) != .orderedSame }
+        let names = found.compactMap { parts($0).name }.filter { $0.compare(appName, options: .caseInsensitive) != .orderedSame }
         var distinct: [String] = []
         for n in names where !distinct.contains(where: { same($0, n) }) { distinct.append(n) }
         return distinct.count == 1 ? distinct[0] : nil
@@ -853,23 +853,40 @@ enum PersonRead {
         return digits.filter(\.isNumber).count >= 7 ? digits : ""
     }
 
-    /// The chat's own address for the person in front (an email or a phone number) when its header shows exactly
-    /// one; nil when it shows none or several.
-    static func handle(title: String, headings: [String]) -> String? {
-        var found: [String] = []
-        for text in [title] + headings {
-            let range = NSRange(text.startIndex..., in: text)
-            if let email = try? NSRegularExpression(pattern: #"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"#) {
-                for match in email.matches(in: text, range: range) { found.append((text as NSString).substring(with: match.range).lowercased()) }
-            }
-            if let phone = try? NSRegularExpression(pattern: #"\+?\d[\d \-().]{6,}\d"#) {
-                for match in phone.matches(in: text, range: range) {
-                    let digits = (text as NSString).substring(with: match.range).filter { $0.isNumber || $0 == "+" }
-                    if digits.filter(\.isNumber).count >= 7 { found.append(digits) }
-                }
+    /// One element of a conversation's header as a person: the name it shows (its addresses taken out, or, when it
+    /// shows only an address, that address) and the addresses (emails, phone numbers) in that same element.
+    static func parts(_ text: String) -> (name: String?, addresses: [String]) {
+        var addresses: [String] = []
+        var rest = text as NSString
+        let patterns = [#"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"#, #"\+?\d[\d \-().]{6,}\d"#]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in regex.matches(in: rest as String, range: NSRange(location: 0, length: rest.length)).reversed() {
+                let found = rest.substring(with: match.range)
+                let address = found.contains("@") ? found.lowercased() : found.filter { $0.isNumber || $0 == "+" }
+                guard found.contains("@") || address.filter(\.isNumber).count >= 7 else { continue }
+                addresses.insert(address, at: 0)
+                rest = rest.replacingCharacters(in: match.range, with: " ") as NSString
             }
         }
-        let distinct = Set(found)
+        let left = (rest as String).replacingOccurrences(of: "<", with: " ").replacingOccurrences(of: ">", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if left.isEmpty, addresses.count == 1 { return (name(text), addresses) }
+        return (name(left), addresses)
+    }
+
+    /// The chat's own address for the person in front (an email or a phone number): only from the header element
+    /// that names that person (the same element the person was read from), and only when it shows exactly one. Never
+    /// from the window's title (Mail's is the subject) or any other element: no address there, no person anchor.
+    static func handle(person: String, headings: [String]) -> String? {
+        guard !person.isEmpty else { return nil }
+        var found: [String] = []
+        for text in headings {
+            let read = parts(text)
+            guard let shown = read.name, same(shown, person) else { continue }
+            found += read.addresses
+        }
+        let distinct = Set(found.map(normalized).filter { !$0.isEmpty })
         return distinct.count == 1 ? distinct.first : nil
     }
 
@@ -1220,6 +1237,30 @@ struct NotebookBinding: Codable, Equatable, Hashable, Sendable {
     var coverID: String
     var path: String
     var instance: String
+    /// The notes' folder it was made in: it's found only there ("" for one an earlier build wrote: wherever it is).
+    var root: String = ""
+
+    init(coverID: String, path: String, instance: String, root: String = "") {
+        self.coverID = coverID
+        self.path = path
+        self.instance = instance
+        self.root = root
+    }
+
+    enum CodingKeys: String, CodingKey { case coverID, path, instance, root }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        coverID = try c.decodeIfPresent(String.self, forKey: .coverID) ?? ""
+        path = try c.decodeIfPresent(String.self, forKey: .path) ?? ""
+        instance = try c.decodeIfPresent(String.self, forKey: .instance) ?? ""
+        root = try c.decodeIfPresent(String.self, forKey: .root) ?? ""
+    }
+
+    /// Two notes' folders as one (their paths standardized).
+    static func sameRoot(_ a: String, _ b: String) -> Bool {
+        URL(fileURLWithPath: a).standardizedFileURL.path == URL(fileURLWithPath: b).standardizedFileURL.path
+    }
 }
 
 /// A notebook as a binding is resolved against: its name, its folder's path under the notes' folder, its folder
@@ -1235,7 +1276,9 @@ extension NoteShelf {
     /// `found`: its notebook. `ambiguous`: something matches it (its folder, path or cover id) but not surely, or twice:
     /// never written anywhere, and rescued once it stays so (`ambiguityExpired`). `wait`: nothing matches while the
     /// notes' folder wasn't read completely. `gone`: nothing matches after a complete read.
-    enum BindingResult: Equatable { case found(String), ambiguous, wait, gone }
+    /// `otherRoot`: made in another notes' folder than the one asked about: never applied here; it waits for its own
+    /// folder, under the same limit as `ambiguous`.
+    enum BindingResult: Equatable { case found(String), ambiguous, otherRoot, wait, gone }
 
     /// How long an ambiguous binding is given, over complete reads, before its edits are rescued.
     static let ambiguityLimit: TimeInterval = 600
@@ -1253,7 +1296,9 @@ extension NoteShelf {
     /// 3. else the recorded cover id, when exactly one notebook has it and its path or folder matches too.
     /// Two candidates at any step, or a partial match only: ambiguous, never a pick. Gone only when nothing matches by
     /// folder, path or id, after a complete read of the notes' folder (`complete`); else it waits.
-    static func notebookFor(_ binding: NotebookBinding, places: [NotebookPlace], complete: Bool) -> BindingResult {
+    /// `root`: the notes' folder `places` are in; a binding made in another is never resolved against them.
+    static func notebookFor(_ binding: NotebookBinding, places: [NotebookPlace], complete: Bool, root: String? = nil) -> BindingResult {
+        if let root, !binding.root.isEmpty, !NotebookBinding.sameRoot(binding.root, root) { return .otherRoot }
         func samePath(_ place: NotebookPlace) -> Bool { place.path.compare(binding.path, options: .caseInsensitive) == .orderedSame }
         func idMatches(_ place: NotebookPlace) -> Bool {
             !binding.coverID.isEmpty && (place.coverID == binding.coverID || place.coverID == NoteLibrary.renewedID(binding.coverID, folder: place.path))

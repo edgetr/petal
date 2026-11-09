@@ -457,10 +457,13 @@ extension NoteJournal {
     /// notes" with its whole canvas when, after a complete read, nothing matches it or it's still ambiguous (never
     /// written to a notebook it can't tell surely). True once written. The folder not read completely: it waits.
     nonisolated static func landCanvas(_ entry: CanvasEntry, places: [NotebookPlace], notebooks: [Notebook], complete: Bool, root: URL) -> Bool {
-        switch NoteShelf.notebookFor(entry.bound, places: places, complete: complete) {
+        switch NoteShelf.notebookFor(entry.bound, places: places, complete: complete, root: root.path) {
         case .found(let name):
             guard let book = notebooks.first(where: { $0.name == name }) else { return false }
-            return NoteStore.writeCanvas(entry.edits, to: book.folder.appending(path: NoteStore.canvasName), root: root) != nil
+            return NoteStore.writeCanvas(entry.edits, binding: entry.bound, in: book.folder, root: root) != nil
+        case .otherRoot:
+            // Made in another notes' folder than this launch's: never applied here; rescued whole at this launch.
+            return rescueCanvas(entry) != nil
         case .gone:
             return rescueCanvas(entry) != nil
         case .ambiguous:

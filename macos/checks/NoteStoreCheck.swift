@@ -142,6 +142,8 @@ struct NoteStoreCheck {
         deletedNotebookRescue(root: root)
         ambiguousRescue(root: root)
         ambiguousCovers(root: root)
+        writeRechecksBinding(root: root)
+        canvasOtherRoot(root: root)
         notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -1104,25 +1106,28 @@ struct NoteStoreCheck {
         let folder = root.appending(path: "Canvas")
         try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
         let file = folder.appending(path: NoteStore.canvasName)
-        let first = NoteStore.writeCanvas(.move("n1", .init(x: 10, y: 10)), to: file, root: root)
+        func write(_ edit: NoteCanvas.Edit, in folder: URL) -> NoteCanvas? {
+            NoteStore.writeCanvas(edit, binding: NoteStore.bindingNow(folder, root: root), in: folder, root: root)
+        }
+        let first = write(.move("n1", .init(x: 10, y: 10)), in: folder)
         expect(first?.notes["n1"]?.x == 10 && NoteCanvas.decode(text(file)) == first, "the first edit makes the file")
         // Another Mac moved another note meanwhile.
         let elsewhere = NoteCanvas.decode(text(file))!.applying(.move("n2", .init(x: 70, y: 70)), at: Date().timeIntervalSince1970 + 1)
         try? Data(elsewhere.encoded().utf8).write(to: file)
-        let second = NoteStore.writeCanvas(.move("n1", .init(x: 20, y: 20)), to: file, root: root)
+        let second = write(.move("n1", .init(x: 20, y: 20)), in: folder)
         expect(second?.notes["n1"]?.x == 20 && second?.notes["n2"]?.x == 70, "what moved elsewhere stays")
         try? Data("the person's own words".utf8).write(to: file)
-        expect(NoteStore.writeCanvas(.move("n1", .init(x: 1, y: 1)), to: file, root: root) == nil && text(file) == "the person's own words",
+        expect(write(.move("n1", .init(x: 1, y: 1)), in: folder) == nil && text(file) == "the person's own words",
                "a file that isn't a canvas is left as it is")
         let outside = root.deletingLastPathComponent().appending(path: "Outside-\(UUID().uuidString)")
         try? fm.createDirectory(at: outside, withIntermediateDirectories: true)
         let link = root.appending(path: "Linked")
         try? fm.createSymbolicLink(at: link, withDestinationURL: outside)
-        expect(NoteStore.writeCanvas(.move("n1", .init(x: 1, y: 1)), to: link.appending(path: NoteStore.canvasName), root: root) == nil
+        expect(write(.move("n1", .init(x: 1, y: 1)), in: link) == nil
                && !fm.fileExists(atPath: outside.appending(path: NoteStore.canvasName).path), "never through a symbolic link")
         try? fm.removeItem(at: link)
         try? fm.removeItem(at: outside)
-        expect(NoteStore.writeCanvas(.move("n1", .init(x: 1, y: 1)), to: root.appending(path: "Never made \(UUID().uuidString)/\(NoteStore.canvasName)"), root: root) == nil,
+        expect(write(.move("n1", .init(x: 1, y: 1)), in: root.appending(path: "Never made \(UUID().uuidString)")) == nil,
                "no notebook folder: nothing made")
     }
 
@@ -2006,6 +2011,108 @@ struct NoteStoreCheck {
         for folder in [here, there, locked] { try? fm.removeItem(at: folder) }
     }
 
+    /// A canvas write checks its binding again inside its coordinated step: the folder replaced by another notebook
+    /// between the queue and the write, nothing is written and the edits stay waiting, in the journal too.
+    @MainActor static func writeRechecksBinding(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Recheck")
+        func makeNotebook(_ id: String) {
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            var cover = NoteFile(id: id, body: "# About this notebook")
+            cover.cover = true
+            _ = NoteStore.create(cover.serialized(), at: folder.appending(path: NoteShelf.coverName), root: root)
+        }
+        makeNotebook("COVER-RECHECK")
+        let canvasFile = folder.appending(path: NoteStore.canvasName)
+        // The function itself: a binding that no longer finds the folder writes nothing.
+        let old = NoteStore.bindingNow(folder, root: root)
+        expect(NoteStore.writeCanvas(.move("p", .init(x: 1, y: 1)), binding: old, in: folder, root: root)?.notes["p"] != nil, "its own folder: written")
+        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        store.reload()
+        settle(1)
+        // The files' queue held: the write is queued, and the folder is replaced by another notebook meanwhile.
+        let hold = DispatchSemaphore(value: 0)
+        NoteStore.io.async { hold.wait() }
+        store.editCanvas("Recheck", .move("q1", .init(x: 8, y: 8))) { _ in }
+        try? fm.removeItem(at: folder)
+        makeNotebook("COVER-SOMEONE-ELSE")
+        hold.signal()
+        settle(1)
+        NoteJournal.queue.sync {}
+        let key = store.canvasWaiting.keys.first ?? ""
+        expect(NoteCanvas.decode(text(canvasFile))?.notes["q1"] == nil && store.canvasWaiting[key]?.edits.count == 1
+               && NoteJournal.readCanvas(NoteJournal.canvasFile(key))?.edits.count == 1,
+               "the binding checked inside the write: another notebook there now, nothing written, the edit kept (journal too)")
+        expect(NoteStore.writeCanvas(.move("p2", .init(x: 1, y: 1)), binding: old, in: folder, root: root) == nil
+               && NoteCanvas.decode(text(canvasFile))?.notes["p2"] == nil, "and the function refuses a binding that no longer finds it")
+        store.drainCanvas()
+        NoteJournal.ackCanvas(key, wrote: Set(NoteJournal.readCanvas(NoteJournal.canvasFile(key))?.edits.map(\.id) ?? []))
+        try? fm.removeItem(at: folder)
+    }
+
+    /// Canvas edits are bound to the notes' folder they were made in: after a switch to another (with a notebook of
+    /// the same name and cover), they're never written there; they wait for their own folder, and are rescued whole
+    /// under the same limit, or at the next launch.
+    @MainActor static func canvasOtherRoot(root: URL) {
+        let fm = FileManager.default
+        let rootB = root.deletingLastPathComponent().appending(path: "petal-root-B-\(UUID().uuidString)")
+        for base in [root, rootB] {
+            let folder = base.appending(path: "Shared")
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            var cover = NoteFile(id: "COVER-SHARED", body: "# About this notebook")
+            cover.cover = true
+            _ = NoteStore.create(cover.serialized(), at: folder.appending(path: NoteShelf.coverName), root: base)
+        }
+        let canvasA = root.appending(path: "Shared").appending(path: NoteStore.canvasName)
+        let canvasB = rootB.appending(path: "Shared").appending(path: NoteStore.canvasName)
+        try? fm.createDirectory(at: canvasA, withIntermediateDirectories: true)   // A's writes fail for now
+        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        store.reload()
+        settle(1)
+        store.editCanvas("Shared", .move("s1", .init(x: 5, y: 5))) { _ in }
+        settle(0.3)
+        let key = store.canvasWaiting.keys.first ?? ""
+        var switched = false
+        store.switchRoot(to: rootB) { switched = true }
+        var until = Date().addingTimeInterval(8)
+        while (!switched || !store.loaded) && Date() < until { settle(0.1) }
+        store.reload()
+        settle(1.5)
+        expect(store.canvasWaiting[key] != nil && store.canvasAmbiguousSince[key] != nil && NoteCanvas.decode(text(canvasB))?.notes["s1"] == nil,
+               "after a switch: never written into the other folder's notebook of the same name and cover, it waits")
+        store.canvasAmbiguousSince[key] = Date().addingTimeInterval(-NoteShelf.ambiguityLimit - 1)
+        store.reload()
+        let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
+        func rescued(_ name: String) -> NoteCanvas? {
+            for dir in (try? fm.contentsOfDirectory(at: unsaved, includingPropertiesForKeys: nil)) ?? [] {
+                if let saved = text(dir.appending(path: name + " canvas.json")), let canvas = NoteCanvas.decode(saved), !canvas.notes.isEmpty { return canvas }
+            }
+            return nil
+        }
+        until = Date().addingTimeInterval(8)
+        while rescued("Shared") == nil && Date() < until { settle(0.2) }
+        NoteJournal.queue.sync {}
+        expect(rescued("Shared")?.notes["s1"]?.x == 5 && NoteCanvas.decode(text(canvasB))?.notes["s1"] == nil && store.canvasWaiting[key] == nil
+               && !fm.fileExists(atPath: NoteJournal.canvasFile(key).path),
+               "still in another folder after the limit: rescued whole, out of the journal, never applied to the other folder")
+        // At a launch whose notes' folder is another: rescued, never written there.
+        let read = NoteStore.read(rootB)
+        let entry = CanvasEntry(coverID: "folder:launch", notebook: "Launch shared", edits: [NoteCanvas.Stamped(.move("l2", .init(x: 2, y: 2)))],
+                                binding: NotebookBinding(coverID: "COVER-SHARED", path: "Shared", instance: "", root: root.path))
+        expect(NoteJournal.landCanvas(entry, places: NoteStore.places(notes: read.notes, notebooks: read.notebooks), notebooks: read.notebooks,
+                                      complete: read.complete, root: rootB)
+               && rescued("Launch shared")?.notes["l2"] != nil && NoteCanvas.decode(text(canvasB))?.notes["l2"] == nil,
+               "recovered at a launch in another notes folder: rescued, never written there")
+        var back = false
+        store.switchRoot(to: root) { back = true }
+        until = Date().addingTimeInterval(8)
+        while !back && Date() < until { settle(0.1) }
+        try? fm.removeItem(at: rootB)
+        try? fm.removeItem(at: root.appending(path: "Shared"))
+    }
+
     /// Making a notebook Private: shown at once, and written through its cover's session, also when it has no cover
     /// (one is made, never over a file) or a cover with no front matter (it gets its id and front matter).
     @MainActor static func privateCovers(root: URL) {
@@ -2045,7 +2152,7 @@ struct NoteStoreCheck {
         let from = root.appending(path: "Trip")
         try? fm.createDirectory(at: from, withIntermediateDirectories: true)
         _ = NoteStore.create("a note", at: from.appending(path: "One.md"), root: root)
-        _ = NoteStore.writeCanvas(.move("n1", .init(x: 1, y: 1)), to: from.appending(path: NoteStore.canvasName), root: root)
+        _ = NoteStore.writeCanvas(.move("n1", .init(x: 1, y: 1)), binding: NoteStore.bindingNow(from, root: root), in: from, root: root)
         let to = root.appending(path: "Holiday")
         expect(NoteStore.moveFolder(from, to: to, root: root) && text(to.appending(path: "One.md")) == "a note"
                && fm.fileExists(atPath: to.appending(path: NoteStore.canvasName).path) && !fm.fileExists(atPath: from.path), "renamed, everything in it along")

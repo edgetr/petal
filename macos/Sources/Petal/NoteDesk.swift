@@ -501,7 +501,8 @@ final class NoteDesk {
                     if !quiet, PersonRead.isChat(app), ClaudePanel.privacy.current(privacy), let window = all.first(where: { Windows.id(of: $0) == number }) {
                         let header = Self.headings(window)
                         person = PersonRead.person(app: app, appName: appName, title: read.title, headings: header) ?? ""
-                        if !person.isEmpty { handle = PersonRead.handle(title: read.title, headings: header) ?? "" }
+                        // Their address only from the header element that named them, never the window's title.
+                        handle = PersonRead.handle(person: person, headings: header) ?? ""
                     }
                 }
                 var made = NoteScene(mac: mac, app: app, pid: pid, window: read.window, title: read.title, titleTwins: twins, tab: read.tab, file: file)
