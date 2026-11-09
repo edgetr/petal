@@ -305,12 +305,31 @@ struct NoteStoreCheck {
         let waitingOne = NoteJournal.Import(token: 9, path: notDownloaded.path, ext: "png")
         both.imports = [NoteJournal.Import(token: 9, path: source.path, ext: "png", caption: "source"), waitingOne]
         NoteJournal.snapshot(both, in: journal)
-        let (stored, left) = NoteJournal.putIn(both, token: 9, root: root)
-        expect(stored && left == [waitingOne] && text(partial)?.contains(NoteShelf.assetsFolder(id: "JQ")) == true,
-               "the read file goes in, the waiting one is said", "\(left)")
-        NoteJournal.importsDone(noteID: "JQ", token: 9, keeping: left, in: journal)
-        expect(NoteJournal.read(NoteJournal.file("JQ", in: journal))?.imports == [waitingOne], "the waiting file stays in the journal")
+        let (stored, left, landedText) = NoteJournal.putIn(both, token: 9, root: root)
+        expect(stored && left == [waitingOne] && text(partial)?.contains(NoteShelf.assetsFolder(id: "JQ")) == true && landedText == text(partial),
+               "the read file goes in, the waiting one is said, and what landed in the note too", "\(left)")
+        // The snapshot advances to what landed, keeping only the waiting file.
+        if let landedText { NoteJournal.advance(noteID: "JQ", from: partialText, to: landedText, token: 9, keeping: left, in: journal) }
+        let advanced = NoteJournal.read(NoteJournal.file("JQ", in: journal))
+        expect(advanced?.text == landedText && advanced?.base == nil && advanced?.imports == [waitingOne],
+               "the snapshot's text is what landed, with only the waiting file")
+        // The waiting file arrives: recovered on what landed, both pictures in the note, no competing copy.
+        try? png?.write(to: notDownloaded)
+        if let advanced {
+            let again = NoteJournal.putIn(advanced, token: 9, root: root)
+            let names = (try? fm.contentsOfDirectory(atPath: notes.path)) ?? []
+            expect(again.stored && again.landed == text(partial) && (text(partial)?.components(separatedBy: "![").count ?? 0) == 3
+                   && !names.contains { $0.hasPrefix("Partial") && $0.contains("conflicted") },
+                   "the second picture goes in beside the first, never as a competing version", text(partial) ?? "nil")
+        }
+        // A newer snapshot is never overwritten by an advance.
+        var newer = both
+        newer.text = NoteFile(id: "JQ", body: "typed since").serialized()
+        NoteJournal.snapshot(newer, in: journal)
+        NoteJournal.advance(noteID: "JQ", from: partialText, to: landedText ?? "", token: 9, keeping: [waitingOne], in: journal)
+        expect(NoteJournal.read(NoteJournal.file("JQ", in: journal))?.text == newer.text, "a newer snapshot keeps its text")
         NoteJournal.importsDone(noteID: "JQ", token: 9, in: journal)
+        NoteJournal.forget(noteID: "JQ", in: journal)
         expect(!fm.fileExists(atPath: NoteJournal.file("JQ", in: journal).path), "once it's in (or removed): out")
 
         // A text that landed while a picture it references failed: the snapshot stays with that picture's bytes,

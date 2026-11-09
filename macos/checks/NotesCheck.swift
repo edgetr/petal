@@ -384,6 +384,19 @@ struct NotesCheck {
                "a page, a video, no type, not 200: refused before reading")
         expect(NoteShelf.fetchLimit(.image) == 512_000 && NoteShelf.fetchLimit(.page) == 300_000, "an icon at most 512 KB, a page's start 300 KB")
 
+        // A partial put-in advances its snapshot to what landed, never a newer one.
+        expect(NoteShelf.advancedSnapshot(current: "t0", used: "t0", landed: "t0+p1") == "t0+p1", "the snapshot it was made from: advanced")
+        expect(NoteShelf.advancedSnapshot(current: "t0, typed since", used: "t0", landed: "t0+p1") == nil, "a newer snapshot: left as it is")
+
+        // Only a fresh read of the current look, of the app still in front, becomes the active scene.
+        expect(NoteShelf.mayBecomeActive(.look, ticket: 7, current: 7, readPID: 10, frontPID: 10), "a fresh read of what's in front: active")
+        expect(!NoteShelf.mayBecomeActive(.captured, ticket: 7, current: 7, readPID: 10, frontPID: 10),
+               "Stick here's captured scene: only the new note's anchor, never active")
+        expect(!NoteShelf.mayBecomeActive(.look, ticket: 7, current: 8, readPID: 10, frontPID: 10),
+               "a read still under way when notes were hidden (a new look began): refused")
+        expect(!NoteShelf.mayBecomeActive(.look, ticket: 7, current: 7, readPID: 10, frontPID: 20), "a late read of the app left behind: refused")
+        expect(!NoteShelf.mayBecomeActive(.look, ticket: 7, current: 7, readPID: 10, frontPID: nil), "no app known in front: refused")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

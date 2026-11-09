@@ -1523,16 +1523,23 @@ final class NoteStore {
             let entry = NoteJournal.read(NoteJournal.file(noteID))
             Self.io.async {
                 var stored = false
+                var landed: String?
                 var waiting: [NoteJournal.Import] = entry?.imports?.filter { $0.token == token } ?? []
                 if var entry {
                     // Its text already in its note (the folder switch's drain wrote it): the base its lines go on.
                     let found = NoteStore.read(root).notes.filter { $0.noteID == noteID && $0.version == nil }
                     if found.count == 1, NoteStore.coordinatedRead(found[0].url) == entry.text { entry.landed = true }
-                    (stored, waiting) = NoteJournal.putIn(entry, token: token, root: root)
+                    (stored, waiting, landed) = NoteJournal.putIn(entry, token: token, root: root)
                 }
-                // Out of the journal: what went in; a file not read yet stays for its own next try.
-                let keeping = waiting
-                if stored { NoteJournal.queue.async { NoteJournal.importsDone(noteID: noteID, token: token, keeping: keeping) } }
+                // Out of the journal: what went in; a file not read yet stays for its own next try. Landed in the note,
+                // the snapshot's text advances to it (never a newer one's), so that try builds on it.
+                let keeping = waiting, used = entry?.text, now = landed
+                if stored {
+                    NoteJournal.queue.async {
+                        if let used, let now { NoteJournal.advance(noteID: noteID, from: used, to: now, token: token, keeping: keeping) }
+                        else { NoteJournal.importsDone(noteID: noteID, token: token, keeping: keeping) }
+                    }
+                }
                 DispatchQueue.main.async { MainActor.assumeIsolated { if stored, root == self.root { self.reload() }; done(stored, keeping) } }
             }
         }

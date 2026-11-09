@@ -193,14 +193,37 @@ enum NoteJournal {
     /// pictures and their lines are written. Its other pastes and pictures wait for theirs.
     /// `waiting`: its files not read yet and still there, each kept for its own next try (the ones read go in
     /// now, whatever the rest do).
-    nonisolated static func putIn(_ entry: Entry, token: Int, root: URL) -> (stored: Bool, waiting: [Import]) {
-        guard let mine = entry.imports?.filter({ $0.token == token }), !mine.isEmpty else { return (false, []) }
+    /// `landed`: the text now in the note itself when it went there (not into a copy beside it or a file of its own):
+    /// what the journal's snapshot advances to (`advance`).
+    nonisolated static func putIn(_ entry: Entry, token: Int, root: URL) -> (stored: Bool, waiting: [Import], landed: String?) {
+        guard let mine = entry.imports?.filter({ $0.token == token }), !mine.isEmpty else { return (false, [], nil) }
         var one = Entry(noteID: entry.noteID, path: entry.path, base: entry.base, text: entry.text)
         one.landed = entry.landed
         one.imports = mine
         let (ready, waiting) = readImports(one)
-        guard !ready.pictures.isEmpty else { return (false, waiting) }
-        return (recoverEntry(ready, notes: NoteStore.read(root).notes, root: root), waiting)
+        guard !ready.pictures.isEmpty else { return (false, waiting, nil) }
+        let notes = NoteStore.read(root).notes
+        guard recoverEntry(ready, notes: notes, root: root) else { return (false, waiting, nil) }
+        let found = notes.filter { $0.noteID == entry.noteID && $0.version == nil }
+        let landed = found.count == 1 && NoteStore.coordinatedRead(found[0].url) == ready.text ? ready.text : nil
+        return (true, waiting, landed)
+    }
+
+    /// Part of a paste put into its note: the snapshot's whole text (and base) advance to what landed, with only the
+    /// sources still waiting, while it's still the snapshot that put-in was made from (NoteShelf.advancedSnapshot);
+    /// a newer snapshot keeps its text and only loses this paste's sources that went in.
+    nonisolated static func advance(noteID: String, from used: String, to landed: String, token: Int, keeping: [Import], in folder: URL = folder) {
+        let url = file(noteID, in: folder)
+        guard var entry = read(url) else { return }
+        guard let next = NoteShelf.advancedSnapshot(current: entry.text, used: used, landed: landed) else {
+            return importsDone(noteID: noteID, token: token, keeping: keeping, in: folder)
+        }
+        entry.text = next
+        entry.base = nil
+        entry.landed = true
+        let rest = (entry.imports ?? []).filter { $0.token != token } + keeping
+        entry.imports = rest.isEmpty ? nil : rest
+        settle(entry, at: url, in: folder)
     }
 
     /// One entry put back somewhere safe: true once it's written and said so.

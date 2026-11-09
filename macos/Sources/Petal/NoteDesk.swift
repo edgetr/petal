@@ -157,6 +157,8 @@ final class NoteDesk {
     /// front window's read; Desktop notes stay.
     private func concealWindowNotes() {
         awaitingRead = true
+        // A read already under way (of the window left behind) is stale from now on.
+        looks += 1
         Self.roomTurn.cancel()
         for (key, panel) in panels where !isDesktop(key) { panel.conceal() }
         for panel in tabPanels.values { panel.conceal() }
@@ -287,9 +289,19 @@ final class NoteDesk {
         looks += 1
         let ticket = looks
         Self.read(running, mac: local.mac, tabs: pagesStuck) { scene, read in
-            guard ticket == self.looks else { return }
-            self.apply(scene, read: read)
+            self.activate(scene, read: read, ticket: ticket)
         }
+    }
+
+    /// A fresh read made the active scene, only while its look is still the current one (hiding notes on a focus
+    /// change starts a new look) and its app is still the one in front (NoteShelf.mayBecomeActive): a late read of
+    /// the app left behind never shows its notes over the next.
+    @discardableResult
+    private func activate(_ scene: NoteScene, read: ClaudePanel.FrontRead, ticket: Int) -> Bool {
+        guard NoteShelf.mayBecomeActive(.look, ticket: ticket, current: looks, readPID: scene.pid,
+                                        frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) else { return false }
+        apply(scene, read: read)
+        return true
     }
 
     /// Some note is on a page (a tab, or a sentence on a page): browsers' tabs are worth reading.
@@ -1436,8 +1448,9 @@ final class NoteDesk {
         guard on, let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return }
         let name = running.localizedName ?? ""
         let privacy = ClaudePanel.privacy.now
+        let ticket = looks
         Self.read(running, mac: local.mac) { scene, read in
-            self.apply(scene, read: read)
+            self.activate(scene, read: read, ticket: ticket)
             self.passage(in: scene, privacy: privacy) { selected in
                 let passage: (quote: String, before: String, after: String)?
                 switch selected {
@@ -1548,6 +1561,7 @@ final class NoteDesk {
     /// The note for a drop on `running`'s window `number`, once what's in front of that app is read and the window
     /// is checked to be still there (off the main thread).
     private func noteOnDropped(_ running: NSRunningApplication, window number: CGWindowID?, frame bounds: CGRect?, title: String, at point: CGPoint, drop: Int) {
+        let ticket = looks
         let name = running.localizedName ?? ""
         let pid = running.processIdentifier
         Self.read(running, mac: local.mac) { scene, read in
@@ -1562,7 +1576,7 @@ final class NoteDesk {
                         // windows: that window alone.
                         var scene = scene
                         if scene.window != number { scene.tab = nil; scene.file = ""; scene.window = number; scene.title = title }
-                        if read.window == number { self.apply(scene, read: read) }
+                        if read.window == number { self.activate(scene, read: read, ticket: ticket) }
                         let offers = self.places(for: scene, read: read, appName: name)
                         if let first = offers.first(where: { $0.kind != .passage }) { self.make(on: first, at: point, window: read.window == number ? read.frame ?? bounds : bounds) }
                         // Another window than the one in front: it comes forward (the pointer stays), and the note with it.
@@ -1694,9 +1708,10 @@ final class NoteDesk {
         let (scene, read) = Self.filtered(captured.scene, captured.read, since: captured.privacy)
         let offers = places(for: scene, read: read, appName: captured.name)
         guard let place = offers.first(where: { $0.kind != .passage }) else { return say(Self.unknownFront) }
-        // Captured before: never the read that ends a wait after a focus change (the next look is).
-        apply(scene, read: read, fresh: false)
+        // Captured before: only the new note's anchor, never the active scene (NoteShelf.mayBecomeActive refuses a
+        // captured read); the note shows once its place is next read in front.
         if let paper = make(on: place, body: lines.joined(separator: "\n"), chat: chat.uuidString) { fresh.remove(paper.key) }
+        lookAgain(after: 0.05)
     }
 
     // MARK: The letterhead's menus

@@ -1133,6 +1133,20 @@ enum NoteShelf {
         return groups.values.filter { $0.count > 1 }.map { $0.sorted() }.sorted { $0[0] < $1[0] }
     }
 
+    /// A journal snapshot after part of a paste was put into its note: its text becomes what landed (so a later
+    /// recovery of what's still waiting builds on it, never a competing version), but only while the snapshot is
+    /// still the one that recovery was made from (`used`); a newer one is never overwritten (nil).
+    static func advancedSnapshot(current: String, used: String, landed: String) -> String? { current == used ? landed : nil }
+
+    /// Whether a read of what's in front may become the active scene: only a fresh read (never one captured before,
+    /// as Stick here's) of the look still current (`ticket`; hiding notes on a focus change starts a new one) and of
+    /// the app still in front.
+    enum SceneSource: Equatable { case look, captured }
+
+    static func mayBecomeActive(_ source: SceneSource, ticket: Int, current: Int, readPID: Int32, frontPID: Int32?) -> Bool {
+        source == .look && ticket == current && readPID == frontPID
+    }
+
     /// Whether a focus change hides the notes of the window shown now, at once (until the new front window's read is
     /// validated): another app activated; another window focused; or the shown window closed, minimized or hidden,
     /// or its app quit. Petal's own windows never do.
