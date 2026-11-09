@@ -48,7 +48,7 @@ extension Viewers {
                         case .success(let set):
                             send(["set": set.id, "file": model.name,
                                   "versions": set.versions.map { ["id": $0.id, "name": $0.label, "path": $0.url.path] },
-                                  "note": "Copies in a temporary folder, shown under the document with Use this. Change the copies (never the file itself); their pictures follow. petal_view_pick tells you which one the person picks. Newer versions replace these (their copies go, but a picked one), and every copy goes when the viewer closes: read the picked one while it's open."])
+                                  "note": "Copies in a temporary folder, shown under the document with Use this. Change the copies (never the file itself); their pictures follow. petal_view_pick tells you which one the person picks. Newer versions replace these (their copies go, but a picked one; one you changed goes to the Trash), and every copy goes when the viewer closes: read the picked one while it's open."])
                         }
                     }
                 }
@@ -166,7 +166,12 @@ extension Viewers {
                 switch outcome {
                 case .failed(let text): fail(text)
                 case .wrote(let file, let count):
-                    self.app.assist.did("Wrote \(count) note\(count == 1 ? "" : "s") into a PDF as comments (\(file.lastPathComponent))", undo: nil)
+                    // What Petal AI did is kept in ai-history.json: the file's name only through the vault's settled
+                    // redaction, left out while the vault can't be read.
+                    let line = "Wrote \(count) note\(count == 1 ? "" : "s") into a PDF as comments"
+                    Self.shielded(file.lastPathComponent) { name in
+                        self.app.assist.did((name as? String).map { line + " (\($0))" } ?? line, undo: nil)
+                    }
                     send(["wrote": count, "file": file.lastPathComponent,
                           "where": intoOriginal ? "into the PDF itself; the original is kept beside it" : "a copy beside the PDF"])
                 }

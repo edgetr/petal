@@ -159,6 +159,13 @@ enum ViewerCheck {
     static func run(_ arguments: [String]) {
         Headless.on = true
         VaultStore.standIn([])
+        // Someone's work from a removed set of versions goes to a throwaway "Trash", never the person's.
+        let trashed = FileManager.default.temporaryDirectory.appending(path: "petal-viewer-trash-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: trashed, withIntermediateDirectories: true)
+        Self.trashed = trashed
+        ViewerVersionStore.trash = { url in
+            (try? FileManager.default.moveItem(at: url, to: trashed.appending(path: UUID().uuidString + "-" + url.lastPathComponent))) != nil
+        }
         // The throwaway files (the samples, the checks' own folders) stand outside the real home folder: one folder
         // above both stands in for it (the path rule's own checks point it at their folders).
         ViewerPath.home = "/private"
@@ -194,12 +201,14 @@ enum ViewerCheck {
             failed = !twelfth(url, app: app) || failed
             failed = !thirteenth(url, app: app) || failed
             failed = !fourteenth(url, app: app) || failed
+            failed = !fifteenth(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
             failed = !cleanup(url) || failed
         }
         failed = !remote() || failed
+        try? FileManager.default.removeItem(at: trashed)
         exit(failed ? 1 : 0)
     }
 
@@ -570,10 +579,10 @@ enum ViewerCheck {
         let picked = second.versions[1]
         model.use(picked)
         guard let third = make(["Five"]) else { expect(false, "a third set (set up)"); return false }
-        wait(5) { ((try? FileManager.default.contentsOfDirectory(atPath: second.folder.path)) ?? []).count == 1 }
+        wait(5) { ((try? FileManager.default.contentsOfDirectory(atPath: second.folder.path)) ?? []).filter { $0 != ViewerVersionStore.manifest }.count == 1 }
         expect(app.viewers.versionSets[second.id] === second && second.versions.map(\.id) == [picked.id] && second.versions.allSatisfy { $0.thumb == nil },
                "a replaced set with a pick: kept for its asker with only the picked version, pictures dropped")
-        let left = (try? FileManager.default.contentsOfDirectory(atPath: second.folder.path)) ?? []
+        let left = ((try? FileManager.default.contentsOfDirectory(atPath: second.folder.path)) ?? []).filter { $0 != ViewerVersionStore.manifest }
         expect(left == [picked.url.lastPathComponent], "its other copies removed, the picked one kept (\(left))")
         // The viewer closes: every set's copies go, picked or not.
         model.close()
@@ -842,6 +851,105 @@ enum ViewerCheck {
         app.viewers.closed(onB)
         app.viewers.closed(model)
         print("fourteenth: " + (ok ? "file places only with the file's identity; also keeps another file's anchor; the newest membership read wins" : "failed"))
+        return ok
+    }
+
+    /// Where this run's "Trash" is (a throwaway folder).
+    static var trashed: URL?
+    static func inTrash() -> [String] {
+        guard let trashed else { return [] }
+        return ((try? FileManager.default.contentsOfDirectory(atPath: trashed.path)) ?? []).map { String($0.dropFirst(37)) }.sorted()
+    }
+
+    /// The fifteenth review: an older request for versions finishing last never retires the newer set (it removes
+    /// only its own); a copy someone edited goes to the Trash, never deleted; a reload that fails keeps nothing of
+    /// the file before it (no identity, page or selection to offer as a place); and what Petal AI did with a PDF is
+    /// kept in its history with the file's name redacted.
+    private static func fifteenth(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("fifteenth: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let canonical = { (url: URL) in URL(fileURLWithPath: ViewerPath.canonical(url.path) ?? url.path) }
+        let deck = home.appending(path: "Deck.pdf")
+        try? FileManager.default.copyItem(at: source, to: deck)
+        let model = app.viewers.show(canonical(deck), front: false)
+        wait(20) { !model.loading }
+
+        // Two helpers ask at once: the older one never replaces or retires the newer set.
+        var older: Result<ViewerVersionSet, ViewerCopyError>?
+        var newer: Result<ViewerVersionSet, ViewerCopyError>?
+        model.makeVersions(["Older"], asker: "first") { older = $0 }
+        model.makeVersions(["Newer"], asker: "second") { newer = $0 }
+        wait(20) { older != nil && newer != nil }
+        guard case .success(let set)? = newer else { expect(false, "the newer request made its set (\(String(describing: newer)))"); return false }
+        if case .failure(.superseded)? = older {} else { expect(false, "the older request: superseded, never shown (\(String(describing: older)))") }
+        expect(model.versions === set && FileManager.default.fileExists(atPath: set.versions[0].url.path), "the newer set shown, its copies there")
+        wait(1) { false }
+        let ownLeft = ((try? FileManager.default.contentsOfDirectory(atPath: set.folder.deletingLastPathComponent().path)) ?? []).filter { name in
+            ((try? FileManager.default.contentsOfDirectory(atPath: set.folder.deletingLastPathComponent().appending(path: name).path)) ?? []).contains { $0.contains("(Older)") }
+        }
+        expect(ownLeft.isEmpty, "the older request's own copies removed")
+
+        // A copy someone edited, then replaced by newer versions: to the Trash, never deleted.
+        if let handle = try? FileHandle(forWritingTo: set.versions[0].url) {
+            handle.seekToEndOfFile(); handle.write(Data("\n% an agent's edit\n".utf8)); try? handle.close()
+        }
+        let edited = set.versions[0].url.lastPathComponent
+        var third: ViewerVersionSet?
+        model.makeVersions(["Third", "Fourth"], asker: "second") { if case .success(let made) = $0 { third = made } }
+        wait(20) { third != nil }
+        wait(5) { !FileManager.default.fileExists(atPath: set.folder.path) }
+        expect(inTrash().contains(edited) && !FileManager.default.fileExists(atPath: set.folder.path), "an edited copy of a replaced set went to the Trash (\(inTrash()))")
+        // Closing: untouched copies deleted, nothing of them in the Trash.
+        let before = inTrash()
+        if let third { app.viewers.closed(model); wait(5) { !FileManager.default.fileExists(atPath: third.folder.path) } }
+        expect(inTrash() == before && third.map { !FileManager.default.fileExists(atPath: $0.folder.path) } == true, "untouched copies deleted when the viewer closes")
+
+        // A readable PDF replaced by an unreadable one: the reload keeps nothing of it.
+        let reloaded = app.viewers.show(canonical(deck), front: false)
+        wait(20) { !reloaded.loading && reloaded.fileAnchor() != nil }
+        reloaded.go(to: 1)
+        expect(reloaded.fileAnchor() != nil && reloaded.pageCount > 0, "readable: a place (set up)")
+        try? FileManager.default.removeItem(at: deck)
+        try? Data("%PDF-1.4 broken".utf8).write(to: deck)
+        // A reload (as the file watcher starts one): the view stays up while it's read, so its answer is waited for.
+        reloaded.load()
+        wait(20) { reloaded.problem != nil }
+        expect(reloaded.problem != nil && reloaded.fileAnchor() == nil && reloaded.pageCount == 0 && reloaded.selection == nil && reloaded.fileID == nil,
+               "a reload that fails: no identity, pages or selection left from the file before")
+        app.viewers.closed(reloaded)
+
+        // What Petal AI did, kept in its history: the file's name redacted.
+        let secret = "petalcheck7Q2v9Lr4Xs"
+        var key = VaultItem(kind: .apiKey, title: "Check key", sites: ["example.com"])
+        key[.value] = secret
+        VaultStore.standIn([key])
+        defer { VaultStore.standIn([]) }
+        let named = home.appending(path: "Report \(secret).pdf")
+        try? FileManager.default.copyItem(at: source, to: named)
+        var place = NoteStick(kind: .file)
+        place.path = canonical(named).path
+        place.fileID = ViewerFileID.of(named.path)?.record(mac: app.paper.local.mac) ?? ""
+        var file = NoteFile(id: "H15", body: "A made-up note")
+        file.places = [place]
+        let keptNotes = app.paper.store.notes
+        app.paper.store.preview(keptNotes + [PaperNote(file: file, url: folder.appending(path: "H15.md"), notebook: "Inbox")], notebooks: app.paper.store.notebooks)
+        defer { app.paper.store.preview(keptNotes, notebooks: app.paper.store.notebooks) }
+        let historyBefore = app.assist.history.count
+        var wrote: Any?
+        app.viewers.comments(canonical(named), opened: named.path, intoOriginal: false, caller: nil, { wrote = $0 }, { wrote = $0 })
+        wait(20) { wrote != nil }
+        wait(5) { app.assist.history.count > historyBefore }
+        let line = app.assist.history.first?.text ?? ""
+        expect(app.assist.history.count > historyBefore && line.hasPrefix("Wrote 1 note into a PDF") && !line.contains(secret) && !line.contains("petalcheck"),
+               "the history line never holds the vault's secret (\(line))")
+        print("fifteenth: " + (ok ? "an older versions request never retires the newer; edited copies to the Trash; a failed reload keeps no identity; history redacted" : "failed"))
         return ok
     }
 

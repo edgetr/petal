@@ -199,11 +199,67 @@ final class ViewerVersionStore: @unchecked Sendable {
         return (try? handle.readToEnd()) ?? Data()
     }
 
-    /// A copy written into the pinned folder from bytes (made when the set is made), through descriptors too.
+    /// What Petal wrote into a set, as it left it: each copy's name and, read with fstat right after writing, its
+    /// inode, size and modification time (nanoseconds). Kept in the set's folder (`manifest`). A file still exactly
+    /// so is Petal's own, untouched, and may be removed; anything else there (a copy someone edited or replaced, a
+    /// file or folder an agent added) is someone's work: moved to the Trash at most, never deleted.
+    struct Made: Codable, Equatable, Sendable {
+        var name: String
+        var inode: UInt64
+        var size: Int64
+        var modified: Int64
+
+        init(name: String, _ info: stat) {
+            self.name = name
+            inode = UInt64(info.st_ino)
+            size = Int64(info.st_size)
+            modified = Int64(info.st_mtimespec.tv_sec) * 1_000_000_000 + Int64(info.st_mtimespec.tv_nsec)
+        }
+
+        /// Whether `info` (an entry named `name`) is this copy exactly as Petal left it: a regular file, the same
+        /// inode, size and modification time.
+        func untouched(_ name: String, _ info: stat) -> Bool {
+            (info.st_mode & S_IFMT) == S_IFREG && Made(name: name, info) == self
+        }
+    }
+
+    /// The manifest's name in a set's folder.
+    static let manifest = ".petal-made.json"
+
+    /// Where someone's work goes when its set is removed: the Trash (FileManager.trashItem). `Petal --viewer-check`
+    /// and the checks point it at a throwaway folder (never the person's Trash). Returns whether it moved.
+    nonisolated(unsafe) static var trash: (URL) -> Bool = { url in (try? FileManager.default.trashItem(at: url, resultingItemURL: nil)) != nil }
+
+    /// A copy written into the pinned folder from bytes (made when the set is made), through descriptors too, and
+    /// recorded in the set's manifest as Petal left it.
     func write(_ pin: Pin, file name: String, data: Data) -> Bool {
-        guard !name.contains("/"), let dir = openSet(pin) else { return false }
+        guard !name.contains("/"), name != Self.manifest, let dir = openSet(pin) else { return false }
         defer { close(dir) }
         let fd = openat(dir, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { return false }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        do { try handle.write(contentsOf: data) } catch { try? handle.close(); return false }
+        var info = stat()
+        let stated = fstat(fd, &info) == 0
+        try? handle.close()
+        guard stated else { return false }
+        return Self.record(dir, Self.made(dir) + [Made(name: name, info)])
+    }
+
+    /// The manifest of the folder `dir` is open on (empty when there's none, or it isn't a regular file).
+    static func made(_ dir: Int32) -> [Made] {
+        let fd = openat(dir, manifest, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { return [] }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size < 1_000_000,
+              let data = try? handle.readToEnd() else { return [] }
+        return (try? JSONDecoder().decode([Made].self, from: data)) ?? []
+    }
+
+    private static func record(_ dir: Int32, _ made: [Made]) -> Bool {
+        guard let data = try? JSONEncoder().encode(made) else { return false }
+        let fd = openat(dir, manifest, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0o600)
         guard fd >= 0 else { return false }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         do { try handle.write(contentsOf: data); try handle.close() } catch { return false }
@@ -213,17 +269,16 @@ final class ViewerVersionStore: @unchecked Sendable {
     /// The pinned folder's path, for whoever edits the copies (the agent) and for watching it.
     func path(_ pin: Pin) -> URL { root.appending(path: pin.name) }
 
-    /// A set's copies removed through its pinned folder (never a folder swapped in for it), all but `keeping` (the
-    /// copy picked, still the asker's to read); with nothing kept, the folder itself goes too. What an agent added
-    /// there (a lock file, a folder of its own) goes with them. Everything is listed and removed through
-    /// descriptors (`fdopendir`, `unlinkat`, subfolders opened with `openat(O_DIRECTORY | O_NOFOLLOW)`), never an
-    /// absolute path. False when the folder isn't the pinned one.
+    /// A set removed through its pinned folder (never a folder swapped in for it), all but `keeping` (the copy
+    /// picked, still the asker's to read): Petal's own copies still as it left them deleted; anything someone
+    /// changed or added moved to the Trash (`empty`); the folder itself goes once nothing is left in it. False when
+    /// the folder isn't the pinned one.
     @discardableResult
     func remove(_ pin: Pin, keeping: String? = nil) -> Bool {
         guard let dir = openSet(pin) else { return false }
-        Self.empty(dir, keeping: keeping)
+        let left = Self.empty(dir, keeping: keeping, made: Self.made(dir), folder: path(pin))
         close(dir)
-        if keeping == nil { _ = unlinkat(rootFD, pin.name, AT_REMOVEDIR) }
+        if keeping == nil, left == 0 { _ = unlinkat(rootFD, pin.name, AT_REMOVEDIR) }
         return true
     }
 
@@ -244,20 +299,29 @@ final class ViewerVersionStore: @unchecked Sendable {
         return out
     }
 
-    /// Everything in the folder `dir` is open on removed through descriptors, all but `keeping`: a file or link
-    /// unlinked where it is (a link never followed), a folder opened with `O_NOFOLLOW`, emptied the same way, then
-    /// removed.
-    static func empty(_ dir: Int32, keeping: String? = nil) {
-        for name in names(dir) where name != keeping {
-            let sub = openat(dir, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
-            if sub >= 0 {
-                empty(sub)
-                close(sub)
-                _ = unlinkat(dir, name, AT_REMOVEDIR)
-            } else {
+    /// Everything in the folder `dir` is open on, all but `keeping`, listed through its descriptor: a copy still as
+    /// Petal left it (`made`) unlinked there; anything else (edited, replaced, added: a file, a link or a folder) is
+    /// someone's work and moved to the Trash whole (`trash`), only while `folder/name` is still that very entry
+    /// (the same device and inode), never followed through a link; else it's left where it is. The manifest goes
+    /// last, once nothing else is left. Returns how many entries are left.
+    @discardableResult
+    static func empty(_ dir: Int32, keeping: String? = nil, made: [Made], folder: URL?) -> Int {
+        for name in names(dir) where name != keeping && name != manifest {
+            var info = stat()
+            guard fstatat(dir, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
+            if let own = made.first(where: { $0.name == name }), own.untouched(name, info) {
                 _ = unlinkat(dir, name, 0)
+                continue
             }
+            guard let folder else { continue }
+            let at = folder.appending(path: name)
+            var there = stat()
+            guard lstat(at.path, &there) == 0, there.st_dev == info.st_dev, there.st_ino == info.st_ino else { continue }
+            _ = trash(at)
         }
+        let rest = names(dir).filter { $0 != manifest }
+        if rest.isEmpty { _ = unlinkat(dir, manifest, 0) }
+        return names(dir).count
     }
 
     /// Whether a set left in the versions root is stale: its newest change (the folder or anything directly in it)
@@ -266,8 +330,9 @@ final class ViewerVersionStore: @unchecked Sendable {
         now.timeIntervalSince(newest) > age
     }
 
-    /// Every stale set in the root removed (at launch), through descriptors as `remove` does: a link or a file there
-    /// is only unlinked, never followed. Returns the names removed.
+    /// Every stale set in the root removed (at launch), as `remove` does: Petal's untouched copies deleted, what
+    /// someone changed moved to the Trash, through descriptors; a link or a file in the root itself is only
+    /// unlinked, never followed. Returns the names of the sets gone.
     @discardableResult
     func sweep(now: Date = Date(), age: TimeInterval = 24 * 60 * 60) -> [String] {
         func time(_ info: stat) -> Date {
@@ -287,13 +352,12 @@ final class ViewerVersionStore: @unchecked Sendable {
             }
             guard Self.stale(newest: newest, now: now, age: age) else { if set >= 0 { close(set) }; continue }
             if set >= 0 {
-                Self.empty(set)
+                let left = Self.empty(set, made: Self.made(set), folder: root.appending(path: name))
                 close(set)
-                _ = unlinkat(rootFD, name, AT_REMOVEDIR)
-            } else {
-                _ = unlinkat(rootFD, name, 0)
+                if left == 0, unlinkat(rootFD, name, AT_REMOVEDIR) == 0 { removed.append(name) }
+            } else if unlinkat(rootFD, name, 0) == 0 {
+                removed.append(name)
             }
-            removed.append(name)
         }
         return removed
     }

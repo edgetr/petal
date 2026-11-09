@@ -473,19 +473,24 @@ final class ViewerModel: Identifiable {
     static let cantShowText = "This file can't be shown."
 
     /// The file shown no longer passes the path rule: nothing of it is shown or kept.
-    private func cantShow() {
+    private func cantShow() { failed(Self.cantShowText) }
+
+    /// A load that failed (refused by the path rule, unreadable, gone): nothing of the file before it is kept, no
+    /// pages, no selection, no identity or bookmark to offer as a place, and what went wrong said before the load
+    /// ends (so whoever waits for it sees it).
+    private func failed(_ text: String) {
         document = nil
         data = nil
-        text = nil
+        self.text = nil
         live = false
         pageCount = 0
         thumbs = [:]
         passages = [:]
-        selection = nil
-        // Not a file the viewer may show: no identity to offer as a place.
+        unselected()
         fileID = nil
         bookmark = nil
-        problem = Self.cantShowText
+        identified()
+        problem = text
         loading = false
     }
 
@@ -493,16 +498,21 @@ final class ViewerModel: Identifiable {
         if appName.isEmpty { appName = read.appName; appURL = read.appURL }
         let first = stamp == nil
         stamp = read.stamp
-        if let made = read.bookmark { bookmark = made }
-        if let read = read.fileID {
-            let changed = fileID != read
-            fileID = read
-            identified()
-            // Which notes are on this file, worked out again for the file as it is now (refreshPlaces is fenced
-            // by this load).
-            if changed { refreshPlaces() }
-        }
         if !first { updated = Date() }
+        if case .failed(let text) = read.pages {
+            failed(text)
+            if watcher == nil { watch() }
+            return
+        }
+        // The file's identity and bookmark only ever from this, the current successful read (never one kept from
+        // a read before it).
+        let changed = fileID != read.fileID
+        bookmark = read.bookmark
+        fileID = read.fileID
+        identified()
+        // Which notes are on this file, worked out again for the file as it is now (refreshPlaces is fenced by
+        // this load).
+        if changed { refreshPlaces() }
         switch read.pages {
         case .pdf(let data): show(data, ticket: ticket)
         case .web(let preview):
@@ -513,11 +523,7 @@ final class ViewerModel: Identifiable {
                 if let data { self.show(data, ticket: ticket) } else { self.goLive() }
             }
         case .live: goLive()
-        case .failed(let text):
-            // What went wrong first, so whoever waits for the load (whenLoaded, petal_view) sees it, never a success
-            // with 0 pages.
-            problem = text
-            loading = false
+        case .failed: break
         }
         if watcher == nil { watch() }
     }
@@ -1100,6 +1106,8 @@ final class ViewerModel: Identifiable {
         let labels = ViewerCopies.labels(labels)
         guard !labels.isEmpty else { return done(.failure(.noLabels)) }
         guard live(), !closedNow else { return done(.failure(.cancelled)) }
+        // Each request a generation, from when it starts: only the newest may replace the set shown.
+        let generation = turns.begin("versions")
         let url = url
         let id = UUID().uuidString.prefix(8).lowercased()
         let closing = closing
@@ -1150,6 +1158,12 @@ final class ViewerModel: Identifiable {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     if let failed { return done(.failure(failed)) }
+                    // A newer request started meanwhile: this one removes only its own copies (handed to no one
+                    // yet), and never replaces or retires the newer set.
+                    guard self.turns.isLatest("versions", generation) else {
+                        Viewers.queue.async { store.remove(pin) }
+                        return done(.failure(.superseded))
+                    }
                     // Closed or hung up after the copies were made: they go, and nothing is shown.
                     guard !self.closedNow, live() else {
                         Viewers.queue.async { store.remove(pin) }
@@ -1304,9 +1318,10 @@ final class ViewerModel: Identifiable {
 }
 
 enum ViewerCopyError: Error, CustomStringConvertible {
-    case noLabels, copy, vault, cancelled
+    case noLabels, copy, vault, cancelled, superseded
     var description: String {
         switch self {
+        case .superseded: "Newer versions of this file were asked for while these were being made: these weren't made, and the newer ones are shown."
         case .cancelled: "The viewer was closed, or the request ended, before the versions were made: nothing was made."
         case .vault: VaultStore.unreadableText + " Nothing was made (the copies' names are checked first)."
         case .noLabels: "Name each version (names: [\"Shorter\", \"With numbers\"])."

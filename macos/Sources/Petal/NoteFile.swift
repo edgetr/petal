@@ -110,6 +110,12 @@ struct NoteStick: Equatable, Sendable {
     /// The tab as NoteRules knows tabs.
     var noteTab: NoteTab { NoteTab(id: tabID, element: tabElement, shared: shared, url: url, title: title) }
 
+    /// The same passage: its words and the words around them (the same words twice on one page are two passages,
+    /// told apart only by what's before and after). Two with no words are the same (a whole file or page).
+    func samePassage(_ other: NoteStick) -> Bool {
+        quote == other.quote && before == other.before && after == other.after
+    }
+
     /// The same file, as the one file resolver knows files: by the incarnation recorded with each place (`fileID`:
     /// both have it and it's the same), else, with neither recorded, by the very same bookmark at the same path. A
     /// path alone never proves it (another file may have taken it), and what can't be proven the same file is
@@ -127,11 +133,11 @@ struct NoteStick: Equatable, Sendable {
     func samePlace(_ other: NoteStick) -> Bool {
         guard kind == other.kind else { return false }
         switch kind {
-        case .passage: return quote == other.quote && (url.isEmpty ? sameFile(other) : NoteRules.sameURL(url, other.url))
+        case .passage: return samePassage(other) && (url.isEmpty ? sameFile(other) : NoteRules.sameURL(url, other.url))
         case .tab:
             if mac == other.mac, let a = pid, let b = other.pid { return NoteRules.sameTab(noteTab, pid: a, other.noteTab, pid: b) }
             return NoteRules.byAddress(noteTab, other.noteTab)
-        case .file: return sameFile(other) && page == other.page && slide == other.slide && quote == other.quote
+        case .file: return sameFile(other) && page == other.page && slide == other.slide && samePassage(other)
         case .window: return NoteShelf.sameWindow(self, other)
         case .app: return app == other.app
         case .desktop: return desktop == other.desktop

@@ -76,6 +76,18 @@ struct ViewerFileCheck {
         expect(!passage.samePlace(otherBookmark) && !bookmarked.samePlace(otherBookmark), "no identity on either: only the very same bookmark")
         let alsoStuck = [recorded].filter { !$0.samePlace(tookPath) } + [tookPath]
         expect(alsoStuck == [recorded, tookPath], "also: the other file's anchor added, the first kept")
+        // Fifteenth review: the same words twice on one page are two passages (told apart by the words around them).
+        var firstTime = recorded
+        firstTime.quote = "Growth"; firstTime.before = "Q1: "; firstTime.after = " held"
+        var secondTime = firstTime
+        secondTime.before = "Q3: "; secondTime.after = " slowed"
+        expect(!firstTime.samePlace(secondTime) && firstTime.samePlace(firstTime), "the same words twice on a page: two places")
+        expect([firstTime].filter { !$0.samePlace(secondTime) } + [secondTime] == [firstTime, secondTime], "also: both kept")
+        var inPreview = firstTime
+        inPreview.kind = .passage
+        var inPreviewAgain = inPreview
+        inPreviewAgain.before = "Q3: "
+        expect(!inPreview.samePlace(inPreviewAgain), "a sentence in a file too")
         let instead = [recorded, otherPage].filter { !$0.samePlace(samePage) } + [samePage]
         expect(instead == [otherPage, samePage], "the same file and page again: replaced, never doubled")
         expect(slide.label() == "Deck.pptx · slide 5" && passage.spot == "page 3", "the letterhead says where in the file", slide.label())
@@ -567,14 +579,38 @@ struct ViewerFileCheck {
         }
         // Eleventh review: a set retired removes its copies through its pin (all but a picked one), and a launch
         // sweeps away sets untouched for a day.
+        // Someone's work goes to a throwaway "Trash" here, never the person's.
+        let trashed = gateBase.appending(path: "Trash")
+        try? FileManager.default.createDirectory(at: trashed, withIntermediateDirectories: true)
+        ViewerVersionStore.trash = { url in
+            (try? FileManager.default.moveItem(at: url, to: trashed.appending(path: UUID().uuidString + "-" + url.lastPathComponent))) != nil
+        }
+        let inTrash = { ((try? FileManager.default.contentsOfDirectory(atPath: trashed.path)) ?? []).map { String($0.dropFirst(37)) }.sorted() }
+        let inFolder = { (url: URL) in ((try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []).filter { $0 != ViewerVersionStore.manifest }.sorted() }
         if let store = ViewerVersionStore(root: gateBase.appending(path: "Retire")) {
             if let pin = store.makeSet("s1") {
                 _ = store.write(pin, file: "A.pdf", data: Data("a".utf8))
                 _ = store.write(pin, file: "B.pdf", data: Data("b".utf8))
                 try? FileManager.default.createDirectory(at: store.path(pin).appending(path: "~lock"), withIntermediateDirectories: true)
-                expect(store.remove(pin, keeping: "B.pdf") && (try? FileManager.default.contentsOfDirectory(atPath: store.path(pin).path)) == ["B.pdf"],
-                       "a replaced set: every copy removed but the picked one")
+                expect(store.remove(pin, keeping: "B.pdf") && inFolder(store.path(pin)) == ["B.pdf"],
+                       "a replaced set: every copy gone but the picked one")
+                expect(inTrash() == ["~lock"], "what someone added went to the Trash, Petal's untouched copy was deleted (\(inTrash()))")
                 expect(store.remove(pin) && !FileManager.default.fileExists(atPath: store.path(pin).path), "its viewer closed: the set's folder gone")
+            }
+            // Fifteenth review: a copy someone edited, or replaced, is never deleted: it goes to the Trash.
+            if let pin = store.makeSet("s3") {
+                _ = store.write(pin, file: "Edited.pdf", data: Data("a".utf8))
+                _ = store.write(pin, file: "Replaced.pdf", data: Data("b".utf8))
+                _ = store.write(pin, file: "Untouched.pdf", data: Data("c".utf8))
+                let folder = store.path(pin)
+                if let handle = try? FileHandle(forWritingTo: folder.appending(path: "Edited.pdf")) {
+                    handle.seekToEndOfFile(); handle.write(Data(" and more".utf8)); try? handle.close()
+                }
+                try? Data("new".utf8).write(to: folder.appending(path: ".save"))
+                _ = rename(folder.appending(path: ".save").path, folder.appending(path: "Replaced.pdf").path)
+                let before = inTrash()
+                expect(store.remove(pin) && !FileManager.default.fileExists(atPath: folder.path), "the set removed")
+                expect(Set(inTrash()).subtracting(before) == ["Edited.pdf", "Replaced.pdf"], "the edited and replaced copies went to the Trash, the untouched one was deleted (\(inTrash()))")
             }
             if let pin = store.makeSet("s2") {
                 _ = store.write(pin, file: "A.pdf", data: Data("a".utf8))
@@ -596,7 +632,8 @@ struct ViewerFileCheck {
                 _ = store.write(fresh, file: "A.pdf", data: Data("a".utf8))
                 _ = store.write(touched, file: "A.pdf", data: Data("a".utf8))
                 let dayAgo = now.addingTimeInterval(-30 * 3600)
-                for path in [store.path(old).appending(path: "A.pdf"), store.path(old), store.path(touched)] {
+                for path in [store.path(old).appending(path: "A.pdf"), store.path(old).appending(path: ViewerVersionStore.manifest), store.path(old),
+                             store.path(touched)] {
                     try? FileManager.default.setAttributes([.modificationDate: dayAgo], ofItemAtPath: path.path)
                 }
                 let removed = store.sweep(now: now)
@@ -617,15 +654,21 @@ struct ViewerFileCheck {
         try? Data("b".utf8).write(to: pinnedAt.appending(path: "sub/deeper/B.pdf"))
         try? Data("keep".utf8).write(to: outsideFolder.appending(path: "Keep.pdf"))
         try? FileManager.default.createSymbolicLink(atPath: pinnedAt.appending(path: "link").path, withDestinationPath: outsideFolder.path)
+        var aInfo = stat()
+        _ = lstat(pinnedAt.appending(path: "A.pdf").path, &aInfo)
+        let madeA = ViewerVersionStore.Made(name: "A.pdf", aInfo)
+        let trashedBefore = inTrash()
         let pinnedFD = Darwin.open(pinnedAt.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
         try? FileManager.default.moveItem(at: pinnedAt, to: movedTo)
         try? FileManager.default.createDirectory(at: pinnedAt, withIntermediateDirectories: true)
         try? Data("decoy".utf8).write(to: pinnedAt.appending(path: "A.pdf"))
         try? FileManager.default.createDirectory(at: pinnedAt.appending(path: "sub"), withIntermediateDirectories: true)
         expect(Set(ViewerVersionStore.names(pinnedFD)) == ["A.pdf", "sub", "link"], "listed through the descriptor: the pinned folder's names, not the decoy's")
-        ViewerVersionStore.empty(pinnedFD)
+        ViewerVersionStore.empty(pinnedFD, made: [madeA], folder: pinnedAt)
         Darwin.close(pinnedFD)
-        expect(((try? FileManager.default.contentsOfDirectory(atPath: movedTo.path)) ?? ["?"]).isEmpty, "the pinned folder emptied wherever it is now, its subfolders too")
+        expect(Set((try? FileManager.default.contentsOfDirectory(atPath: movedTo.path)) ?? []) == ["sub", "link"],
+               "Petal's own copy deleted through the descriptor wherever the folder is now; someone's folder and link left, never trashed through a path that's another's")
+        expect(inTrash() == trashedBefore, "nothing moved to the Trash through the swapped path")
         expect(FileManager.default.fileExists(atPath: pinnedAt.appending(path: "A.pdf").path) && FileManager.default.fileExists(atPath: pinnedAt.appending(path: "sub").path),
                "the decoy at its old path untouched")
         expect(FileManager.default.fileExists(atPath: outsideFolder.appending(path: "Keep.pdf").path), "a link inside unlinked, never followed")
