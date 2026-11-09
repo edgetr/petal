@@ -622,7 +622,7 @@ final class ViewerModel: Identifiable {
         case .live(let read, let unit):
             unit.accept {
                 self.adopt(read)
-                self.goLive()
+                self.goLive(read.copy)
             }
         case .failed(let text):
             leaveLoaded()
@@ -652,6 +652,8 @@ final class ViewerModel: Identifiable {
         documentLoads.invalidate()
         thumbLoads.invalidate()
         keepFollowing()
+        liveCopy = nil
+        liveURL = nil
         document = nil
         data = nil
         text = nil
@@ -731,6 +733,8 @@ final class ViewerModel: Identifiable {
         self.data = data
         text = ViewerText(data)
         self.document = document
+        liveCopy = nil
+        liveURL = nil
         live = false
         pageCount = document.pageCount
         current = max(0, keep)
@@ -745,7 +749,12 @@ final class ViewerModel: Identifiable {
         versions.map { drawVersions($0) }
     }
 
-    private func goLive() {
+    /// Quick Look's own view of Petal's private copy (`copy`: from this load's read; without one there's nothing
+    /// Quick Look may be given).
+    private func goLive(_ copy: ViewerLive?) {
+        guard let copy else { return transition(.failed("Petal can't show this file.")) }
+        liveCopy = copy
+        liveURL = copy.url
         document = nil
         data = nil
         text = nil
@@ -1524,11 +1533,7 @@ final class ViewerModel: Identifiable {
                 } else {
                     guard current() else { break }
                     ViewerModel.versionExport?(version.name)
-                    let holder = ViewerExport()
-                    let own = holder.folder.appending(path: version.name)
-                    let pages = (try? bytes.write(to: own)) != nil ? ViewerQuickLook.export(own, unit: kind.unit) : .failed("")
-                    withExtendedLifetime(holder) {}
-                    results.append((version.id, made, pages))
+                    results.append((version.id, made, ViewerQuickLook.export(bytes: bytes, name: version.name, unit: kind.unit).pages))
                 }
             }
             let read = results
@@ -1640,15 +1645,20 @@ final class ViewerModel: Identifiable {
         return nil
     }
 
+    /// Petal's private copy Quick Look's own view shows (kept while it's shown), and where it is.
+    @ObservationIgnored private var liveCopy: ViewerLive?
+    private(set) var liveURL: URL?
+
     /// Closed (its window gone): nothing of it is told any more.
     var isClosed: Bool { closedNow }
 
-    /// What a tool's answer about this viewer describes, in a word: the document loaded (its incarnation and stamp),
-    /// whether it's loading, what went wrong, and its pages and the page shown. Another mark by the time the answer
-    /// is delivered, and it's told again as it is then.
-    var shownMark: String {
+    /// The viewer's state behind a tool's answer (`Viewers.Told`'s mark): closed or not, the file's name and path,
+    /// the document loaded (its incarnation and stamp), whether it's loading, what went wrong, and its pages and
+    /// the page shown. Anything else by the time the answer is delivered, and it's told again as it is then.
+    var shownState: [String] {
         let base = loadedBase.map { "\($0.id.volume)|\($0.id.inode)|\($0.id.created)|\($0.stamp.size)|\($0.stamp.modified)" } ?? "none"
-        return [base, loading ? "loading" : "loaded", problem ?? "", "\(live)", "\(pageCount)", "\(current)", "\(notes.count)"].joined(separator: "\u{1}")
+        return [closedNow ? "closed" : "open", name, url.path, base, loading ? "loading" : "loaded", problem ?? "", "\(live)", "\(pageCount)", "\(current)",
+                "\(notes.count)"]
     }
 
     /// Snapshots only: the made-up document `preview` loads.
@@ -1846,6 +1856,16 @@ enum ViewerLoader {
         var fileID: ViewerFileID? = nil
         var appName: String
         var appURL: URL?
+        /// Petal's private copy of the checked bytes (anything Quick Look shows): what Quick Look's own view is
+        /// given, never the original's path.
+        var copy: ViewerLive? = nil
+    }
+
+    /// The original as it is now through the one pinned read (its stamp, bytes and identity; all nil when it isn't
+    /// readable that way): what a write is checked against.
+    static func pinnedNow(_ url: URL) -> (stamp: ViewerUpdated.Stamp?, bytes: Data?, id: ViewerFileID?) {
+        if case .read(let bytes, let id, let stamp) = readPinned(url, expected: nil) { return (stamp, bytes, id) }
+        return (nil, nil, nil)
     }
 
     static func stamp(_ url: URL) -> ViewerUpdated.Stamp? {
@@ -1918,53 +1938,61 @@ enum ViewerLoader {
         let appName = app.map { FileManager.default.displayName(atPath: $0.path).replacingOccurrences(of: ".app", with: "") } ?? ""
         for attempt in 0..<attempts {
             guard current() else { return Read(pages: .failed(superseded), stamp: nil, appName: appName, appURL: app) }
-            var before: (id: ViewerFileID?, stamp: ViewerUpdated.Stamp?) = (nil, nil)
-            var after: (id: ViewerFileID?, stamp: ViewerUpdated.Stamp?) = (nil, nil)
+            var gone = false
             var mark: Data?
-            var data: Data?
-            var refused = false
+            var pinned: PinnedRead = .unreadable
             var error: NSError?
             NSFileCoordinator().coordinate(readingItemAt: url, options: [.withoutChanges], error: &error) { readable in
-                before = (ViewerFileID.of(readable.path), stamp(readable))
-                guard before.stamp != nil else { return }
+                guard let before = ViewerFileID.of(readable.path) else { gone = true; return }
                 mark = bookmark(readable)
                 duringRead?(readable, attempt)
-                // The one way the original is read (the versions read it the same way): pinned (readPinned).
-                if kind == .pdf {
-                    switch readPinned(readable, expected: before.id) {
-                    case .read(let bytes, _, _): data = bytes
-                    case .refused: refused = true
-                    case .changed, .unreadable: break
-                    }
-                }
-                after = (ViewerFileID.of(readable.path), stamp(readable))
+                // The one way any original is read, on every try (never only the first): the path rule and its
+                // identity right before, through a pinned descriptor (readPinned).
+                pinned = readPinned(readable, expected: before)
             }
-            if refused { return Read(pages: .failed(ViewerModel.cantShowText), stamp: nil, appName: appName, appURL: app) }
-            guard let stamp = before.stamp else { return Read(pages: .failed("The file isn't there any more."), stamp: nil, appName: appName, appURL: app) }
-            guard let id = before.id, after.id == id, after.stamp == stamp else { continue }
-            switch kind {
-            case .pdf:
-                guard let data, PDFDocument(data: data) != nil else {
-                    return Read(pages: .failed("Petal can't read this PDF."), stamp: stamp, appName: appName, appURL: app)
+            if gone { return Read(pages: .failed("The file isn't there any more."), stamp: nil, appName: appName, appURL: app) }
+            switch pinned {
+            case .refused: return Read(pages: .failed(ViewerModel.cantShowText), stamp: nil, appName: appName, appURL: app)
+            case .changed: continue
+            case .unreadable:
+                return Read(pages: .failed(kind == .pdf ? "Petal can't read this PDF." : "Petal can't read this file."), stamp: nil, appName: appName, appURL: app)
+            case .read(let bytes, let id, let stamp):
+                switch kind {
+                case .pdf:
+                    guard PDFDocument(data: bytes) != nil else {
+                        return Read(pages: .failed("Petal can't read this PDF."), stamp: stamp, appName: appName, appURL: app)
+                    }
+                    return Read(pages: .pdf(bytes), stamp: stamp, bookmark: mark, fileID: id, appName: appName, appURL: app)
+                case .quickLook(let unit):
+                    guard current() else { return Read(pages: .failed(superseded), stamp: nil, appName: appName, appURL: app) }
+                    // Quick Look never gets the original's path: it previews a private copy of the checked bytes.
+                    let made = ViewerQuickLook.export(bytes: bytes, name: url.lastPathComponent, unit: unit)
+                    return Read(pages: made.pages, stamp: stamp, bookmark: mark, fileID: id, appName: appName, appURL: app, copy: made.copy)
                 }
-                return Read(pages: .pdf(data), stamp: stamp, bookmark: mark, fileID: id, appName: appName, appURL: app)
-            case .quickLook(let unit):
-                guard current() else { return Read(pages: .failed(superseded), stamp: nil, appName: appName, appURL: app) }
-                let pages = ViewerQuickLook.export(url, unit: unit)
-                // Quick Look read the file itself: still that very file, unchanged, or read again.
-                guard ViewerFileID.of(url.path) == id, Self.stamp(url) == stamp else { continue }
-                return Read(pages: pages, stamp: stamp, bookmark: mark, fileID: id, appName: appName, appURL: app)
             }
         }
         return Read(pages: .failed(keptChanging), stamp: nil, appName: appName, appURL: app)
     }
 }
 
+/// Petal's private copy of a document's checked bytes, in an export folder of its own (which goes once nothing holds
+/// it): what Quick Look is given, never the original's path.
+final class ViewerLive: @unchecked Sendable {
+    let url: URL
+    let export: ViewerExport
+
+    init(url: URL, export: ViewerExport) {
+        self.url = url
+        self.export = export
+    }
+}
+
 /// A folder Quick Look exported a preview into: it owns that folder, which goes (off the main thread) once nothing
 /// holds the export any more, whether its pages were used or a newer load made it stand down.
 final class ViewerExport: @unchecked Sendable {
-    /// Where every export goes, each in a folder of its own.
-    static var root: URL { FileManager.default.temporaryDirectory.appending(path: "Petal Viewer") }
+    /// Where every export goes, each in a folder of its own: the viewer's own folder under Petal's support folder
+    /// (`PETAL_SUPPORT_DIR` isolates it), with the private copies Quick Look is given.
+    static var root: URL { Config.supportFolder.appending(path: "Viewer") }
 
     let folder: URL
 
@@ -1993,14 +2021,25 @@ final class ViewerExport: @unchecked Sendable {
 /// off the main thread: a PDF it gives (iWork's) is the pages; an HTML preview (Office's) is laid out by WebKit and
 /// cut into slides or pages; nothing exported, Quick Look's own view shows it instead.
 enum ViewerQuickLook {
-    static func export(_ url: URL, unit: ViewerUnit) -> ViewerLoader.Pages {
+    /// A document's pages from its checked bytes: written as a private copy (under its own name) in an export
+    /// folder of Petal's own, which is all Quick Look is ever given. The copy comes back too, for Quick Look's own
+    /// view when nothing could be exported.
+    static func export(bytes: Data, name: String, unit: ViewerUnit) -> (pages: ViewerLoader.Pages, copy: ViewerLive?) {
         let export = ViewerExport()
-        // Quick Look reads the file where it is. A file iCloud hasn't downloaded comes down first (a coordinated
-        // read); Quick Look runs after it, so an app saving the file never waits on Petal.
-        var error: NSError?
-        var readable = url
-        NSFileCoordinator().coordinate(readingItemAt: url, options: [.withoutChanges], error: &error) { readable = $0 }
-        let ran = error == nil && run(["/usr/bin/qlmanage", "-p", "-o", export.folder.path, readable.path], timeout: 40)
+        let source = export.folder.appending(path: "original")
+        let file = source.appending(path: (name as NSString).lastPathComponent)
+        guard (try? FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)) != nil,
+              (try? bytes.write(to: file)) != nil else { return (.failed("Petal couldn't make its copy to show this file."), nil) }
+        ViewerQuickLook.exporting?(file)
+        return (pages(of: file, into: export, unit: unit), ViewerLive(url: file, export: export))
+    }
+
+    /// Petal --viewer-check only: told the file Quick Look is about to be given.
+    nonisolated(unsafe) static var exporting: ((URL) -> Void)?
+
+    /// Quick Look's export of `file` (always a private copy of Petal's own) into `export`'s folder.
+    private static func pages(of file: URL, into export: ViewerExport, unit: ViewerUnit) -> ViewerLoader.Pages {
+        let ran = run(["/usr/bin/qlmanage", "-p", "-o", export.folder.path, file.path], timeout: 40)
         guard ran, let folder = (try? FileManager.default.contentsOfDirectory(at: export.folder, includingPropertiesForKeys: nil))?
             .first(where: { $0.pathExtension == "qlpreview" }) else { return .live }
         let properties = (try? Data(contentsOf: folder.appending(path: "PreviewProperties.plist")))
@@ -2371,9 +2410,8 @@ enum ViewerPDFComments {
         var error: NSError?
         var baseID: ViewerFileID?
         NSFileCoordinator().coordinate(readingItemAt: pdf, options: [.withoutChanges], error: &error) { readable in
-            baseStamp = ViewerLoader.stamp(readable)
-            baseID = ViewerFileID.of(readable.path)
-            base = try? Data(contentsOf: readable)
+            // The one way an original is read (ViewerLoader.readPinned): the path rule and its identity right before.
+            (baseStamp, base, baseID) = ViewerLoader.pinnedNow(readable)
         }
         // Already another file than the one the person allowed: nothing is written.
         if let expected, baseID != expected { return .failed(changed) }
@@ -2429,7 +2467,7 @@ enum ViewerPDFComments {
             let copy = folder.appending(path: ViewerCopies.withNotes(original: named, taken: names))
             NSFileCoordinator().coordinate(readingItemAt: pdf, options: [.withoutChanges], writingItemAt: copy, options: [], error: &error) { readable, writable in
                 // Read again first; its asker asked only after that blocking read.
-                let now = (stamp: ViewerLoader.stamp(readable), bytes: try? Data(contentsOf: readable), id: ViewerFileID.of(readable.path))
+                let now = ViewerLoader.pinnedNow(readable)
                 afterRead?()
                 switch ViewerWrites.land(live: live(), base: (baseStamp, base), expected: expected ?? baseID, now: now) {
                 case .hungUp: outcome = .failed(hungUp)
@@ -2448,7 +2486,7 @@ enum ViewerPDFComments {
         NSFileCoordinator().coordinate(writingItemAt: pdf, options: [.forReplacing], error: &error) { writable in
             // Read again first (the very file the person allowed, unchanged); its asker asked only after that blocking
             // read, before any backup is made.
-            let now = (stamp: ViewerLoader.stamp(writable), bytes: try? Data(contentsOf: writable), id: ViewerFileID.of(writable.path))
+            let now = ViewerLoader.pinnedNow(writable)
             afterRead?()
             switch ViewerWrites.land(live: live(), base: (baseStamp, base), expected: expected ?? baseID, now: now) {
             case .hungUp: outcome = .failed(hungUp)

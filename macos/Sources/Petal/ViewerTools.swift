@@ -48,10 +48,12 @@ extension Viewers {
                         told {
                             guard !model.isClosed else { return Told(refusal: Self.closedText) }
                             var told = self.told(model)
-                            if let page, !model.live, model.pageCount > 0, ViewerPages.index(page, count: model.pageCount) == nil {
+                            // The page asked for is checked only against a finished document: while it loads or
+                            // reloads the answer says it's loading (never the pages of the document before).
+                            if let page, !model.loading, !model.live, model.pageCount > 0, ViewerPages.index(page, count: model.pageCount) == nil {
                                 told["note"] = "It has \(model.pageCount) \(model.unit.word)s; \(model.unit.word) \(page) isn't one, so it shows \(model.unit.word) \(model.current + 1)."
                             }
-                            return Told(told, mark: model.shownMark)
+                            return Told(told, state: model.shownState)
                         }
                     }
                 }
@@ -78,7 +80,7 @@ extension Viewers {
                                 return Told(["set": set.id, "file": model.name,
                                              "versions": set.versions.map { ["id": $0.id, "name": $0.label, "path": $0.url.path] },
                                              "note": held.map { $0 + " " + note } ?? note],
-                                            mark: set.id + "|" + (held ?? ""))
+                                            state: model.shownState)
                             }
                         }
                     }
@@ -98,12 +100,11 @@ extension Viewers {
                     case .picked(let picked):
                         Told(["picked": ["id": picked.id, "name": picked.label, "path": picked.url.path],
                               "note": "The original is as it was when these were made. Change it only after the person allows it, and ask petal_view_pick again right before you do: once the original changes, the pick isn't told."],
-                             mark: "picked|" + picked.id)
-                    case .suspended(let reason): Told(["picked": NSNull(), "note": reason], mark: "suspended|" + reason)
+                             state: set.viewer?.shownState ?? [])
+                    case .suspended(let reason): Told(["picked": NSNull(), "note": reason], state: set.viewer?.shownState ?? [])
                     case .closed:
-                        Told(["picked": NSNull(), "note": set.picked == nil ? "The viewer was closed without a pick." : "The viewer was closed, and its copies went with it."],
-                             mark: "closed")
-                    case .waiting: Told(["picked": NSNull(), "note": "Not picked yet."], mark: "waiting")
+                        Told(["picked": NSNull(), "note": set.picked == nil ? "The viewer was closed without a pick." : "The viewer was closed, and its copies went with it."])
+                    case .waiting: Told(["picked": NSNull(), "note": "Not picked yet."], state: set.viewer?.shownState ?? [])
                     }
                 }
             }
@@ -130,7 +131,7 @@ extension Viewers {
                             guard ViewerKind.of(url.path) == .pdf else { return fail("Comments go into a PDF; that file isn't one.") }
                             // What was written is a fact of its own (no viewer's state): told while its asker is there.
                             self.comments(url, opened: path, intoOriginal: original, caller: caller, live: live,
-                                          { value in told { Told(value, mark: "written") } }, fail)
+                                          { value in told { Told(value) } }, fail)
                         }
                     }
                 }
@@ -140,21 +141,30 @@ extension Viewers {
         }
     }
 
-    /// An answer as it's made from the state it describes: what's told (or why it's refused), and `mark`, that
-    /// state in a word; the same mark after the redaction means the answer still holds.
+    /// An answer as it's made from the state it describes: what's told (or why it's refused), and `mark`, one value
+    /// built from everything the answer states (the answer itself, so a field added to an answer later is in the
+    /// mark by construction) and from the viewer's state behind it (`state`: its file's name and path, identity and
+    /// stamp, loading, pages and page shown). The same mark after the redaction means the answer still holds.
     struct Told {
         var value: Any?
         var refusal: String?
         var mark: String
 
-        init(_ value: Any, mark: String) {
+        init(_ value: Any, state: [String] = []) {
             self.value = value
-            self.mark = mark
+            mark = Self.mark(of: ["answer": value, "state": state])
         }
 
         init(refusal: String) {
             self.refusal = refusal
-            mark = "refused|" + refusal
+            mark = Self.mark(of: ["refused": refusal])
+        }
+
+        /// A value as one word: its JSON with keys sorted (what an answer is sent as), else its description.
+        static func mark(of value: Any) -> String {
+            guard JSONSerialization.isValidJSONObject(value),
+                  let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) else { return "\(value)" }
+            return String(decoding: data, as: UTF8.self)
         }
     }
 

@@ -220,6 +220,7 @@ enum ViewerCheck {
             failed = !twentysecond(url, app: app) || failed
             failed = !twentythird(url, app: app) || failed
             failed = !twentyfourth(url, app: app) || failed
+            failed = !twentyfifth(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -227,6 +228,7 @@ enum ViewerCheck {
             failed = !closingMidExport(url, app: PetalApp.shared) || failed
             failed = !twentieth(deck: url, app: PetalApp.shared) || failed
             failed = !refusedMidConversion(deck: url, app: PetalApp.shared) || failed
+            failed = !outsideBetweenTries(deck: url) || failed
         }
         failed = !remote() || failed
         try? FileManager.default.removeItem(at: trashed)
@@ -1661,6 +1663,117 @@ enum ViewerCheck {
         return ok
     }
 
+    /// Round 25: Quick Look is only ever given Petal's private copy of the checked bytes; a deck that becomes a link
+    /// to somewhere outside the allowed places between two tries of a read is refused, and nothing outside is read
+    /// for Quick Look or exported.
+    private static func outsideBetweenTries(deck source: URL) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("outside: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        let outside = folder.appending(path: "Outside")
+        for made in [home, outside] { try? FileManager.default.createDirectory(at: made, withIntermediateDirectories: true) }
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let deck = URL(fileURLWithPath: ViewerPath.canonical(home.path) ?? home.path).appending(path: "Deck.\(source.pathExtension)")
+        let away = outside.appending(path: "Private.\(source.pathExtension)")
+        try? FileManager.default.copyItem(at: source, to: deck)
+        try? FileManager.default.copyItem(at: source, to: away)
+        let given = Seen()
+        ViewerQuickLook.exporting = { given.add($0.path) }
+        defer { ViewerQuickLook.exporting = nil; ViewerLoader.duringRead = nil }
+
+        // As it is: Quick Look gets a private copy in the viewer's own folder, never the original's path.
+        let plain = ViewerLoader.read(deck, kind: .quickLook(.slide))
+        if case .failed(let text) = plain.pages { expect(false, "the deck read (set up): \(text)") }
+        expect(given.all.count == 1 && given.all.allSatisfy { $0.hasPrefix(ViewerExport.root.path + "/") && $0 != deck.path },
+               "Quick Look is given Petal's private copy, never the original's path (\(given.all))")
+        expect(plain.copy?.url.path == given.all.first && plain.fileID == ViewerFileID.of(deck.path), "the copy kept for Quick Look's own view; the identity the original's")
+
+        // The first try sees it change (a save); before the second it's a link to a file outside: refused.
+        let before = given.all.count
+        ViewerLoader.duringRead = { url, attempt in
+            guard attempt == 0 else { return }
+            let temp = url.deletingLastPathComponent().appending(path: ".saving")
+            try? FileManager.default.copyItem(at: source, to: temp)
+            _ = rename(temp.path, url.path)
+        }
+        let tries = Tally()
+        let swapped = ViewerLoader.read(deck, kind: .quickLook(.slide), current: {
+            tries.add(0)
+            if tries.all[0] == 2 {
+                try? FileManager.default.removeItem(at: deck)
+                try? FileManager.default.createSymbolicLink(atPath: deck.path, withDestinationPath: away.path)
+            }
+            return true
+        })
+        if case .failed(let text) = swapped.pages {
+            expect(text == ViewerModel.cantShowText, "a link outside between tries: refused (\(text))")
+        } else { expect(false, "a link outside between tries: refused") }
+        expect((tries.all[0] ?? 0) >= 2, "a second try was made (set up)")
+        expect(given.all.count == before && swapped.copy == nil && swapped.fileID == nil, "nothing of it copied, exported or given to Quick Look")
+        print("outside: " + (ok ? "Quick Look only ever gets Petal's private copy; a link outside between tries is refused, nothing exported" : "failed"))
+        return ok
+    }
+
+    /// Round 25: an answer made again while the document reloads says it's loading (the page asked for is never
+    /// checked against the document before); a file renamed while the answer was redacted is told by its name now.
+    private static func twentyfifth(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("twentyfifth: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let root = URL(fileURLWithPath: ViewerPath.canonical(home.path) ?? home.path)
+        func toolCall(_ tool: String, _ args: [String: Any]) -> () -> (answer: [String: Any]?, refusal: String?) {
+            var answer: [String: Any]?
+            var refusal: String?
+            app.viewers.handle(tool, args, caller: "mark-check", live: { true }, { answer = $0 as? [String: Any] }, { refusal = $0 })
+            return {
+                wait(15) { answer != nil || refusal != nil }
+                return (answer, refusal)
+            }
+        }
+        Viewers.shielding = { Thread.sleep(forTimeInterval: 1.0) }
+        defer { Viewers.shielding = nil; ViewerLoader.duringRead = nil }
+
+        // Renamed while the answer is redacted: told by its name now.
+        let first = root.appending(path: "Before.pdf")
+        try? FileManager.default.copyItem(at: source, to: first)
+        let model = app.viewers.show(first, front: false)
+        wait(20) { !model.loading }
+        let renaming = toolCall("petal_view", ["path": first.path])
+        wait(0.2) { false }
+        let renamed = root.appending(path: "After.pdf")
+        try? FileManager.default.moveItem(at: first, to: renamed)
+        model.fileChanged()
+        let told = renaming()
+        expect(told.answer?["opened"] as? String == "After.pdf", "renamed during the redaction: told by its name now (\(String(describing: told.answer?["opened"])) \(told.refusal ?? ""))")
+
+        // A reload begins while the answer is redacted: the answer made again says it's loading, and the page asked
+        // for isn't checked against the document before.
+        let pageCount = model.pageCount
+        let reloading = toolCall("petal_view", ["path": renamed.path, "page": pageCount + 7])
+        wait(0.2) { false }
+        ViewerLoader.duringRead = { _, _ in Thread.sleep(forTimeInterval: 4.0) }
+        try? pages(pageCount + 20, from: source)?.write(to: renamed)
+        model.load()
+        let during = reloading()
+        expect(during.answer?["loading"] as? Bool == true && (during.answer?["note"] as? String)?.contains("still being read") == true,
+               "made again while it reloads: says it's loading, no page checked against the document before (\(String(describing: during.answer ?? [:])))")
+        ViewerLoader.duringRead = nil
+        wait(20) { !model.loading }
+        app.viewers.closed(model)
+        print("twentyfifth: " + (ok ? "an answer made again while reloading says loading; a rename during the redaction is told by its name now" : "failed"))
+        return ok
+    }
+
     /// The eighth review: one path rule at every load and follow (a reload swapped to a link out of the home folder
     /// shows nothing); a refused save's snapshot is the whole note and comes back with its front matter; undoing the
     /// refused typing retires its snapshot.
@@ -2106,7 +2219,7 @@ enum ViewerCheck {
         var folder: URL?
         var exported = false
         Viewers.queue.async {
-            let pages = ViewerQuickLook.export(deck, unit: .slide)
+            let pages = ViewerQuickLook.export(bytes: (try? Data(contentsOf: deck)) ?? Data(), name: deck.lastPathComponent, unit: .slide).pages
             if case .web(let preview) = pages { folder = preview.export?.folder; exported = true }
             // Dropped here, unused.
         }

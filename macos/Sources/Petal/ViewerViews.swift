@@ -257,7 +257,8 @@ struct ViewerDocument: View {
             } else if let problem = model.problem {
                 Text(problem).font(.system(size: 13)).foregroundStyle(ViewerLook.caption).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if model.live {
-                ViewerQuickLookView(url: model.url, version: model.updated)
+                // Quick Look's own view is given Petal's private copy of the checked bytes, never the original's path.
+                if let copy = model.liveURL { ViewerQuickLookView(url: copy, version: model.updated) }
             } else if model.document != nil {
                 ViewerPDF(model: model, signature: signature)
             }
