@@ -111,7 +111,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
         <key>public.mime-type</key><array><string>application/x-petal</string></array>
       </dict>
     </dict>
+    <dict>
+      <key>UTTypeIdentifier</key><string>tech.edgetr.petal.note</string>
+      <key>UTTypeDescription</key><string>Petal Note</string>
+      <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+    </dict>
   </array>
+  <key>NSCalendarsWriteOnlyAccessUsageDescription</key><string>When you drop a note on Calendar in the dock, Petal adds it as an event, after asking you.</string>
   <key>NSAppleEventsUsageDescription</key><string>Petal reads which site a browser tab is on, to keep distracting ones in their mode, and closes one when you choose Stay. It also shows what's playing in Music and Spotify, and opens and empties the Trash in Finder.</string>
 </dict>
 </plist>

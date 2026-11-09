@@ -94,11 +94,12 @@ extension Capture {
     /// One picture of each note's window, by its window server number and process (covered windows too, and windows
     /// on another Desktop); only a note on all of an app falls back to that app's first ordinary window
     /// (NotePicture.pick). Each comes with the window it actually shows. Never a private app's.
-    static func notes(_ targets: [(id: UUID, seen: NotePicture.Seen)], height: CGFloat = 150) async
+    /// `excluding`: windows showing a Private notebook's note (NotePrivacy.excludedWindows): never pictured.
+    static func notes(_ targets: [(id: UUID, seen: NotePicture.Seen)], height: CGFloat = 150, excluding: Set<Int> = []) async
         -> [UUID: (image: NSImage, shot: NotePicture.Shot)] {
         guard allowed, !targets.isEmpty, let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         else { return [:] }
-        let windows = content.windows.compactMap { window in
+        let windows = content.windows.filter { NotePrivacy.mayCapture(window: Int($0.windowID), excluded: excluding) }.compactMap { window in
             window.owningApplication.map { (shot: NotePicture.Shot(pid: $0.processID, window: window.windowID), window: window) }
         }
         let byShot = Dictionary(windows.map { ($0.shot.window, $0.window) }, uniquingKeysWith: { first, _ in first })

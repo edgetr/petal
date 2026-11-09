@@ -221,6 +221,7 @@ enum ViewerCheck {
             failed = !twentythird(url, app: app) || failed
             failed = !twentyfourth(url, app: app) || failed
             failed = !twentyfifth(url, app: app) || failed
+            failed = !gate(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -711,6 +712,75 @@ enum ViewerCheck {
         app.paper.fresh.remove(key)
         app.viewers.closed(model)
         print("twelfth: " + (ok ? "a corrupt PDF reports its error; the viewer with the keyboard is here (listed, stuck to its file and page, ⌃⌥N in its margin)" : "failed"))
+        return ok
+    }
+
+    /// The viewer under the notes' readiness gate (NoteDesk.takesChanges, NoteStore.notesReady): while the notes'
+    /// folder is being entered (at launch, after a switch), its margin is read only, ⌃⌥N and New note make nothing,
+    /// the letterhead's Stick it here changes nothing, and its tools that tell or use the notes say notes are
+    /// getting ready; entered, they work.
+    private static func gate(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("gate: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let shown = URL(fileURLWithPath: ViewerPath.canonical(home.path) ?? home.path).appending(path: "Gate.pdf")
+        try? FileManager.default.copyItem(at: source, to: shown)
+        app.paper.previewReady()
+        app.paper.store.preview([], notebooks: [])
+        let model = app.viewers.show(shown, front: false)
+        wait(20) { !model.loading }
+        app.viewers.keyID = model.id
+        defer { app.viewers.keyID = nil; app.viewers.closed(model) }
+        var first = NoteStick(kind: .file)
+        first.path = model.url.path
+        first.page = 1
+        guard let paper = app.paper.make(on: first, body: "On the gate's file", open: false) else { expect(false, "a note on the file (set up)"); return false }
+        wait(2) { false }
+        func call(_ tool: String, _ args: [String: Any]) -> (answer: Bool, refusal: String?) {
+            var answered = false
+            var refusal: String?
+            var done = false
+            app.viewers.handle(tool, args, caller: "check", live: { true }, { _ in answered = true; done = true }, { text in refusal = text; done = true })
+            wait(60) { done }
+            return (answered, refusal)
+        }
+        // Not ready: the folder being entered.
+        app.paper.store.previewEntering(true)
+        let before = app.paper.store.notes.count
+        expect(!model.marginEditable && !app.paper.acceptsChanges, "notes not ready: the margin is read only")
+        model.openPaper(paper)
+        expect(model.openKey == nil, "a margin paper doesn't open for writing")
+        app.paper.newHere()
+        model.newNote()
+        wait(1.5) { false }
+        expect(app.paper.store.notes.count == before, "⌃⌥N in the viewer and New note make nothing")
+        var second = first
+        second.page = 2
+        app.paper.restick(paper.key, [second])
+        expect(app.paper.store.paper(paper.key)?.file.places.first?.page == 1, "the letterhead's Stick it here changes nothing")
+        let viewed = call("petal_view", ["path": shown.path])
+        let comments = call("petal_note_pdf_comments", ["path": shown.path])
+        expect(!viewed.answer && viewed.refusal == NoteStore.gettingReady && !comments.answer && comments.refusal == NoteStore.gettingReady,
+               "the tools that tell or use the notes say notes are getting ready (\(viewed.refusal ?? "answered"); \(comments.refusal ?? "answered"))")
+        // Entered: all of it works.
+        app.paper.store.previewEntering(false)
+        expect(model.marginEditable, "ready: the margin takes typing")
+        app.paper.restick(paper.key, [second])
+        expect(app.paper.store.paper(paper.key)?.file.places.first?.page == 2, "Stick it here works")
+        model.newNote()
+        wait(8) { app.paper.store.notes.count == before + 1 }
+        expect(app.paper.store.notes.count == before + 1 && model.openKey != nil, "New note makes a note, open in the margin")
+        let again = call("petal_view", ["path": shown.path])
+        expect(again.answer, "petal_view answers (\(again.refusal ?? "answered"))")
+        if let key = model.openKey { model.close(key, .transfer) }
+        app.paper.store.preview([], notebooks: [])
+        print("gate: " + (ok ? "the viewer's New note, ⌃⌥N, margin, Stick it here and note-telling tools wait for the notes to be ready" : "failed"))
         return ok
     }
 

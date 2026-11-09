@@ -186,11 +186,13 @@ struct PaperView: View {
                            save: { desk.write(paper.key, noteID: paper.noteID, instance: paper.instance, body: $0, base: $1) },
                            register: { [editorToken] in desk.editorRegistered(paper.key, $0, token: editorToken) },
                            importPictures: { desk.importPictures($0, into: paper.key) },
-                           escape: { if let folded { folded() } else { desk.fold(paper.key) } },
                            idle: { desk.store.takeDeferred(paper.key) },
                            sameNote: { desk.store.sameNote($0, instance: $1, $2) },
                            say: { desk.tell($0) },
                            acceptPictures: { desk.acceptCopiedPictures(paper.key, $0) },
+                           // In a paper's own panel, Escape goes up to the panel (handled once there); in Petal's viewer's
+                           // margin there's no such panel, so it folds the note there.
+                           escape: folded,
                            settled: { desk.settleUnsaved(paper.key, noteID: paper.noteID, instance: paper.instance, saved: $0) })
                 .frame(height: min(PaperLook.maxOpen - 70, max(PaperLook.minOpen - 70, editorHeight)))
                 .padding(.bottom, 18)

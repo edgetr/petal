@@ -57,6 +57,10 @@ struct NoteSelectionCheck {
         expect(NoteShield.find("Card (hidden)", rows: rows, index: vaultIndex) == .found(0) && NoteShield.find("n9f8e7d6c5b4a", rows: rows, index: vaultIndex) == .found(1),
                "a note found by what petal_notes showed of it: its title, or its handle")
         expect(NoteShield.find("n9f8e7d6c5b4a", rows: rows, index: .unavailable) == .unreadable, "the vault unreadable: nothing looked up")
+        // Two papers with one exact handle (a duplicated notebook's covers sharing an id, until one gets its own):
+        // never a guess between them.
+        let twins = [(handle: "nshared", body: "# About this notebook\nA", version: false), (handle: "nshared", body: "# About this notebook\nB", version: false)]
+        expect(NoteShield.find("nshared", rows: twins, index: vaultIndex) == .ambiguous([0, 1]), "an exact handle two papers share is refused as ambiguous")
 
         // Redacted whole before anything is cut: a secret straddling a cut leaves nothing of itself.
         let straddle = "# Door\n" + String(repeating: "a", count: 157) + " \(pin) more words after it"

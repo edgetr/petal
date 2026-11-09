@@ -30,6 +30,9 @@ extension Viewers {
             }
         }
         guard app.paper.on else { return fail("Petal Notes is off in Petal's settings (notes); the viewer is part of it.") }
+        // The viewer's tools that tell or use the notes (how many are on a document, a PDF's notes as comments) wait
+        // for the notes to be ready, as the note tools do: never a count or comments from notes not read yet.
+        if ["petal_view", "petal_note_pdf_comments"].contains(name), !app.paper.acceptsChanges { return fail(NoteStore.gettingReady) }
         let path = args["path"] as? String ?? ""
         switch name {
         case "petal_view":

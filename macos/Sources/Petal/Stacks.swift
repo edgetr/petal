@@ -199,9 +199,12 @@ enum Capture {
         guard allowed, let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         else { return [:] }
         var result: [String: NSImage] = [:]
+        // Other apps' windows only: never one of Petal's own (a note's paper, its fan, the Petal Notes window).
+        let me = ProcessInfo.processInfo.processIdentifier
+        let others = content.windows.filter { $0.owningApplication?.processID != me }
         for (window, number) in windows {
-            let byNumber = number.flatMap { number in content.windows.first { $0.windowID == number } }
-            guard let match = byNumber ?? content.windows.first(where: {
+            let byNumber = number.flatMap { number in others.first { $0.windowID == number } }
+            guard let match = byNumber ?? others.first(where: {
                 $0.owningApplication?.processID == window.pid && $0.windowLayer == 0
                     && abs($0.frame.minX - window.frame.minX) < 4 && abs($0.frame.minY - window.frame.minY) < 4
                     && abs($0.frame.width - window.frame.width) < 4

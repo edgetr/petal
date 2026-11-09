@@ -39,6 +39,10 @@ struct NoteStick: Equatable, Sendable {
         case app
         /// A Desktop (and its mode): the note sits on that Desktop.
         case desktop
+        /// A person: `title` their name, and what tells them apart from anyone else of that name, `contact` (a vault
+        /// contact's id) or `handle` (the chat's own address for them: an email or phone number). The note shows
+        /// beside their conversation in any chat app Petal reads a person from (PersonRead); a name alone never.
+        case person
 
         /// The ranked fallback: a passage, then its page, its file, its window, its app. Lower is more specific.
         var rank: Int {
@@ -46,9 +50,10 @@ struct NoteStick: Equatable, Sendable {
             case .passage: 0
             case .tab: 1
             case .file: 2
-            case .window: 3
-            case .app: 4
-            case .desktop: 5
+            case .person: 3
+            case .window: 4
+            case .app: 5
+            case .desktop: 6
             }
         }
     }
@@ -77,6 +82,10 @@ struct NoteStick: Equatable, Sendable {
     var tabElement: Int? = nil
     var desktop: Int? = nil
     var mode = ""
+    /// A person's vault contact, by the contact's id (never its details).
+    var contact = ""
+    /// A person's address in their chat (an email or phone number), when the app shows one.
+    var handle = ""
     /// Where in a file (Petal's viewer): its page or slide, counted from 1, and a PDF passage's bounds on that page
     /// (x, y, width, height in the page's points, from its bottom-left corner).
     var page: Int? = nil
@@ -93,7 +102,8 @@ struct NoteStick: Equatable, Sendable {
         a.kind == b.kind && a.app == b.app && a.appName == b.appName && a.url == b.url && a.title == b.title && a.path == b.path
             && a.bookmark == b.bookmark && a.quote == b.quote && a.before == b.before && a.after == b.after && a.mac == b.mac
             && a.pid == b.pid && a.window == b.window && a.tabID == b.tabID && a.shared == b.shared && a.tabElement == b.tabElement
-            && a.desktop == b.desktop && a.mode == b.mode && a.page == b.page && a.slide == b.slide && a.bounds == b.bounds && a.fileID == b.fileID
+            && a.desktop == b.desktop && a.mode == b.mode && a.contact == b.contact && a.handle == b.handle
+            && a.page == b.page && a.slide == b.slide && a.bounds == b.bounds && a.fileID == b.fileID
             && a.extra.map(\.key) == b.extra.map(\.key) && a.extra.map(\.lines) == b.extra.map(\.lines)
     }
 
@@ -106,6 +116,11 @@ struct NoteStick: Equatable, Sendable {
         s.mode = mode
         return s
     }
+
+    /// As a tool is told it: from an app kept private (`isPrivate`, by the app it was noted in), only what it is and
+    /// the app (`scrubbed`). A person noted in an app made private since is "a person": never their name, contact or
+    /// address. Whether a note fits what's in front never looks at this (NoteMatch.fits).
+    func told(private isPrivate: (String) -> Bool) -> NoteStick { isPrivate(app) ? scrubbed : self }
 
     /// The tab as NoteRules knows tabs.
     var noteTab: NoteTab { NoteTab(id: tabID, element: tabElement, shared: shared, url: url, title: title) }
@@ -141,6 +156,7 @@ struct NoteStick: Equatable, Sendable {
         case .window: return NoteShelf.sameWindow(self, other)
         case .app: return app == other.app
         case .desktop: return desktop == other.desktop
+        case .person: return PersonRead.samePerson(self, other)
         }
     }
 
@@ -175,6 +191,7 @@ struct NoteStick: Equatable, Sendable {
         case .window: return "A window of \(appName.isEmpty ? app : appName)" + (title.isEmpty ? "" : ": “\(title)”")
         case .app: return "Every window of \(appName.isEmpty ? app : appName)"
         case .desktop: return "Desktop \(desktop.map(String.init) ?? "")" + (mode.isEmpty ? "" : " (\(mode))")
+        case .person: return (title.isEmpty ? "A person" : title) + ", in any chat app"
         }
     }
 
@@ -199,6 +216,7 @@ struct NoteStick: Equatable, Sendable {
         case .window: return title.isEmpty ? (appName.isEmpty ? "a window" : "\(appName) window") : title
         case .app: return "all of \(appName.isEmpty ? app : appName)"
         case .desktop: return desktop.map { "Desktop \($0)" } ?? "the Desktop"
+        case .person: return title.isEmpty ? "a person" : title
         }
     }
 }
@@ -248,6 +266,11 @@ struct NoteScene: Equatable, Sendable {
     /// front, a place changed) means it's stale, and the file in front is read again (`resolves`).
     var resolved: Set<String> = []
     var desktop: Int? = nil
+    /// The person in the conversation in front (PersonRead), never read from an app kept private: their name, their
+    /// vault contact when exactly one contact has it, and their address when the chat shows one.
+    var person = ""
+    var personContact = ""
+    var personHandle = ""
 }
 
 extension NoteScene {
@@ -268,8 +291,34 @@ extension NoteScene {
         s.tab = nil
         s.file = ""
         s.fileBookmark = ""
+        s.person = ""
+        s.personContact = ""
+        s.personHandle = ""
         s.fileID = ""
         s.onFile = nil
+        return s
+    }
+
+    /// The scene as a drop on another window of its app sees it (not the window that was read): that window alone.
+    /// What was read of the window in front (its tab, its file, how many share its title, the person in its
+    /// conversation) is that window's and never carried to another. `person`: the person read from the target
+    /// window itself, or none; their contact is worked out again from that address. A wrong note is worse than a
+    /// missing one.
+    func retargeted(to window: UInt32, title: String, person: (name: String, handle: String)? = nil) -> NoteScene {
+        var s = self
+        s.window = window
+        s.title = title
+        s.titleTwins = nil
+        s.tab = nil
+        s.file = ""
+        s.fileBookmark = ""
+        // The file in front is the read window's too: its identity and which notes are on it go with it.
+        s.fileID = ""
+        s.onFile = nil
+        s.resolved = []
+        s.person = person?.name ?? ""
+        s.personHandle = person?.handle ?? ""
+        s.personContact = ""
         return s
     }
 }
@@ -400,6 +449,9 @@ enum NoteMatch {
             return !stick.app.isEmpty && stick.app == scene.app
         case .desktop:
             return false   // Desktop notes sit on their Desktop, never on a window
+        case .person:
+            // Their conversation in any chat app, by what tells them apart (their contact or address), never a name alone.
+            return scene.window != nil && PersonRead.matches(stick, scene)
         }
     }
 
@@ -581,6 +633,8 @@ struct NoteFile: Equatable, Sendable {
                 if let tab = place.tabID { fields.append(("tab", Self.quoted(tab))) }
                 if let shared = place.shared { fields.append(("shared", "\(shared)")) }
                 if let desktop = place.desktop { fields.append(("desktop", "\(desktop)")) }
+                if !place.contact.isEmpty { fields.append(("contact", Self.quoted(place.contact))) }
+                if !place.handle.isEmpty { fields.append(("handle", Self.quoted(place.handle))) }
                 if let page = place.page { fields.append(("page", "\(page)")) }
                 if let slide = place.slide { fields.append(("slide", "\(slide)")) }
                 if let bounds = place.bounds, let text = ViewerSpots.boundsText(bounds) { fields.append(("bounds", Self.quoted(text))) }
@@ -668,6 +722,8 @@ struct NoteFile: Equatable, Sendable {
                 case "tab": stick.tabID = value
                 case "shared": stick.shared = Int(value)
                 case "desktop": stick.desktop = Int(value)
+                case "contact": stick.contact = value
+                case "handle": stick.handle = value
                 // A spot this Petal can't read is kept as written, never dropped.
                 case "page" where (Int(value) ?? 0) > 0: stick.page = Int(value)
                 case "slide" where (Int(value) ?? 0) > 0: stick.slide = Int(value)
@@ -1677,8 +1733,11 @@ enum NoteShelf {
     /// Where a paper shows right now (its one placement): by the window in front when one of its places fits it, else
     /// on a Desktop showing now that it's stuck to (`desktops`: its Desktop places' numbers; `showing`: the Desktops the
     /// screens show), else nowhere.
-    static func placementNow(window: Int?, desktops: [Int?], showing: Set<Int>, windowValid: Bool = true) -> Placement {
-        placement(window: windowValid ? window : nil, onDesktopShowing: desktops.contains { $0.map(showing.contains) ?? false })
+    /// `standalone`: the person opened it on its own (from the Petal Notes window or a notebook's stack): it shows
+    /// there, before anything else, until it's folded or put away.
+    static func placementNow(window: Int?, desktops: [Int?], showing: Set<Int>, windowValid: Bool = true, standalone: Bool = false) -> Placement {
+        if standalone { return .standalone }
+        return placement(window: windowValid ? window : nil, onDesktopShowing: desktops.contains { $0.map(showing.contains) ?? false })
     }
 
     /// Whether a paper may be seen now: never while Mission Control is open (every surface hidden until it ends);
@@ -1687,14 +1746,14 @@ enum NoteShelf {
         guard !missionControl else { return false }
         switch placement {
         case .window: return !awaitingRead
-        case .desktop: return true
+        case .desktop, .standalone: return true
         case .none: return false
         }
     }
 
     /// Where a paper shows: by the window in front when one of its places fits it, else on the Desktop showing when
     /// it's stuck there, never both (the window wins).
-    enum Placement: Equatable { case window(Int), desktop, none }
+    enum Placement: Equatable { case window(Int), desktop, standalone, none }
 
     static func placement(window: Int?, onDesktopShowing: Bool) -> Placement {
         if let window { return .window(window) }

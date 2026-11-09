@@ -65,6 +65,8 @@ final class PetalApp {
     let routines = Routines()
     /// Petal Notes: the person's own notes on paper, stuck to places (NoteDesk.swift).
     let paper = NoteDesk()
+    /// The Petal Notes window: every note, its notebooks, their grid and canvas (NotesWindow.swift).
+    @ObservationIgnored let notesWindow = NotesWindow()
     /// Petal's viewer: documents with their notes in a margin (Viewer.swift).
     let viewers = Viewers()
     /// Reading and closing browser tabs (Browsers.swift).

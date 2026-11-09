@@ -458,8 +458,9 @@ final class ViewerModel: Identifiable {
         return [(visible && marginOn, face == .open, paper.url.deletingLastPathComponent().path, paper.file.body)]
     }
 
-    /// The margin takes typing: Petal Notes on and its folder not being switched.
-    var marginEditable: Bool { marginOn && !app.viewers.switchingFolder }
+    /// The margin takes typing: Petal Notes on, its folder not being switched, and notes ready to take a change
+    /// (NoteDesk.acceptsChanges: the folder entered, at launch and after a switch alike).
+    var marginEditable: Bool { marginOn && !app.viewers.switchingFolder && desk.acceptsChanges }
 
     /// The paper open in the margin saved and closed (its editor goes; never let go of).
     func closeEditor() {
@@ -1169,6 +1170,10 @@ final class ViewerModel: Identifiable {
     /// on the file (AXDocument). The page's whole text is checked against the vault before the passage is cut from
     /// it (off the main thread): a selection touching a secret, or a vault that can't be read, makes no note.
     func newNote() {
+        // The viewer's New note button and ⌃⌥N in a viewer: through the one readiness gate, before anything is read
+        // for it (NoteDesk.takesChanges says "getting ready").
+        guard desk.on else { return desk.tell("Petal Notes is off.") }
+        guard desk.takesChanges() else { return }
         herePlace { outcome in
             switch outcome {
             case .refused: self.desk.tell("That selection holds something from your vault, or the vault can't be read: Petal makes no note on it.")
@@ -1268,6 +1273,8 @@ final class ViewerModel: Identifiable {
     private func make(_ stick: NoteStick) {
         guard !closedNow else { return }
         guard desk.on else { return desk.tell("Petal Notes is off.") }
+        // Checked again as the note is made (the place took a moment to work out): the same gate.
+        guard desk.takesChanges() else { return }
         guard marginEditable else { return desk.tell("Your notes' folder is being switched: try again in a moment.") }
         guard let paper = desk.make(on: stick, open: false) else { return }
         openPaper(paper)

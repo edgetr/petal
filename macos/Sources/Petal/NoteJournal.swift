@@ -191,6 +191,66 @@ enum NoteJournal {
         return NoteShelf.journalFolders(names).map { parent.appending(path: $0) }
     }
 
+    /// A switch back to a notes' folder, on the journal's queue: that folder's note entries (by where each note was)
+    /// move aside into a "recovering" folder of their own, as a launch's do, so new snapshots never mix with them; the
+    /// session puts them back (`recover`) before it reads the folder. Entries of other folders stay where they are.
+    /// Nil when there are none.
+    nonisolated static func leftovers(forRoot root: URL, in folder: URL = folder) -> URL? {
+        let fm = FileManager.default
+        let names = ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".json") }.sorted()
+        // The folder however its path is spelled (/var and /private/var are one folder).
+        let spellings = Set([root.path, root.standardizedFileURL.path, root.resolvingSymlinksInPath().path])
+        let mine = names.filter { name in
+            guard let entry = read(folder.appending(path: name)) else { return false }
+            let paths = [entry.path, URL(fileURLWithPath: entry.path).resolvingSymlinksInPath().path]
+            return paths.contains { path in spellings.contains { NoteShelf.within(path, $0) != nil } }
+        }
+        guard !mine.isEmpty else { return nil }
+        let stamp = String(format: "%.0f", Date().timeIntervalSince1970 * 1000)
+        let holding = folder.deletingLastPathComponent().appending(path: "Notes journal, recovering \(stamp)")
+        try? fm.createDirectory(at: holding, withIntermediateDirectories: true)
+        for name in mine { _ = try? fm.moveItem(at: folder.appending(path: name), to: holding.appending(path: name)) }
+        return holding
+    }
+
+    /// What the journal holds for a notes' folder being entered (NoteStore.switchRoot's second step).
+    struct Prepared {
+        /// Recovering folders of note entries, oldest first: put back by `recover`.
+        var notes: [URL] = []
+        /// At launch: the canvas entries moved aside, put back by `recoverCanvas` after the notes.
+        var canvases: [URL] = []
+        /// Cover fields to wait again in the folder's session (at launch every folder's, with what to clear once
+        /// they're journaled again: `rejournalCovers`).
+        var covers: [CoverFields] = []
+        var coverHolding: [URL] = []
+        var coverSources: [(file: URL, key: String?)] = []
+        /// On a switch: the canvas edits made in this folder, to wait again in its session.
+        var canvas: [CanvasEntry] = []
+    }
+
+    /// On the journal's queue, as a folder is entered. At launch, the whole journal as a launch always took it: the
+    /// canvas entries moved aside first (the notes' recovery removes its own folder once its notes are back), the
+    /// cover fields, then the notes' journal as it was and any recovery a launch before didn't finish. On a switch,
+    /// only what was made in that folder: its note entries moved aside, and its cover fields and canvas edits read
+    /// where they are (they stay journaled until they land).
+    nonisolated static func prepare(for root: URL, launch: Bool, in folder: URL = folder) -> Prepared {
+        var out = Prepared()
+        if launch {
+            out.canvases = canvasLeftovers(in: folder)
+            let covers = coverLeftovers(in: folder)
+            out.covers = covers.entries
+            out.coverHolding = covers.holding
+            out.coverSources = covers.sources
+            out.notes = leftovers(in: folder)
+        } else {
+            out.notes = leftovers(forRoot: root, in: folder).map { [$0] } ?? []
+            let here = root.path
+            out.covers = coverEntries(in: folder).filter { !$0.root.isEmpty && NotebookBinding.sameRoot($0.root, here) }
+            out.canvas = canvasEntries(in: folder).filter { !$0.bound.root.isEmpty && NotebookBinding.sameRoot($0.bound.root, here) }
+        }
+        return out
+    }
+
     // MARK: Recovery (on the notes' queue)
 
     /// Puts back each entry of a recovering folder, one at a time: found by its note's id in the notes' folder as it
@@ -348,7 +408,8 @@ enum NoteJournal {
             let note = NoteFile.parse(entry.text, fallbackID: entry.noteID, fallbackDate: Date())
             // Named from its redacted title (never the old file's name, which may not be Petal's).
             _ = note
-            let stem = NoteStore.safeStem(for: entry.text, fallback: NoteStore.plainStem)
+            // A cover's recovery keeps the cover's name (NoteShelf.copyStem), so it's still a cover.
+            let stem = NoteShelf.copyStem(original: hint.lastPathComponent, title: NoteStore.safeStem(for: entry.text, fallback: NoteStore.plainStem))
             if NoteStore.safe(folder, root: root), picturesBeside(hint),
                let made = NoteStore.createNamed(entry.text, stem: entry.base == nil ? stem : stem + " (recovered)", in: folder, root: root) {
                 return made
@@ -357,5 +418,239 @@ enum NoteJournal {
         // Into "Unsaved notes", every picture it references with it (from where the note's links lead).
         let beside = found.count == 1 ? URL(fileURLWithPath: found[0]).deletingLastPathComponent() : URL(fileURLWithPath: entry.path).deletingLastPathComponent()
         return NoteStore.rescued(entry.text, noteID: entry.noteID, pictures: pictures, from: beside)
+    }
+}
+
+// MARK: - Canvas edits
+
+/// A notebook canvas's edits not saved yet, journaled like notes: on the journal's queue, on this Mac's own disk
+/// ("Notes journal/Canvas", one entry per notebook, bound to it by its NotebookBinding, with the whole canvas it makes, replaced atomically),
+/// so quitting never waits on iCloud for them. An entry goes once a write took its edits; at launch what's left is
+/// moved aside before the notes' journal is (`canvasLeftovers`: the notes' recovery removes its own folder) and put
+/// back by its binding (`recoverCanvas`): into that notebook's canvas wherever it is now (a rename followed), through
+/// the same merge, else, its notebook gone, into "Unsaved notes" with the whole canvas. Nothing is dropped.
+extension NoteJournal {
+    nonisolated static func canvasFolder(in folder: URL = folder) -> URL { folder.appending(path: "Canvas") }
+
+    nonisolated static func canvasFile(_ coverID: String, in folder: URL = folder) -> URL {
+        canvasFolder(in: folder).appending(path: file(coverID, in: folder).lastPathComponent)
+    }
+
+    /// The edits waiting in memory, added to the entry on disk (by id, in order): only an acknowledgement (`ackCanvas`)
+    /// takes an edit out, so no write of what's in memory (emptied by a drain, say) ever drops one. On the journal's
+    /// queue.
+    /// True once the entry on disk holds them (an entry there that can't be read is never written over: false).
+    @discardableResult
+    nonisolated static func keepCanvas(_ entry: CanvasEntry, in folder: URL = folder) -> Bool {
+        let url = canvasFile(entry.coverID, in: folder)
+        var entry = entry
+        if FileManager.default.fileExists(atPath: url.path) {
+            guard let there = readCanvas(url) else { return false }
+            let ids = Set(entry.edits.map(\.id))
+            entry.edits = there.edits.filter { !ids.contains($0.id) } + entry.edits
+            if entry.notebook.isEmpty { entry.notebook = there.notebook }
+            // The binding and whole canvas in memory are the newer ones; else what's there is kept.
+            entry.binding = entry.binding ?? there.binding
+            if let mine = entry.snapshot, let theirs = there.snapshot { entry.snapshot = NoteCanvas.merge(mine, theirs) }
+            else if entry.snapshot == nil { entry.snapshot = there.snapshot }
+        }
+        return write(entry, to: url, in: folder)
+    }
+
+    @discardableResult
+    private nonisolated static func write(_ entry: CanvasEntry, to url: URL, in folder: URL) -> Bool {
+        guard !entry.edits.isEmpty else {
+            try? FileManager.default.removeItem(at: url)
+            return !FileManager.default.fileExists(atPath: url.path)
+        }
+        try? FileManager.default.createDirectory(at: canvasFolder(in: folder), withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(entry) else { return false }
+        return (try? data.write(to: url, options: .atomic)) != nil
+    }
+
+    /// A write took these edits: only they leave the entry on disk (by id); the entry goes once none is left.
+    @discardableResult
+    nonisolated static func ackCanvas(_ coverID: String, wrote ids: Set<String>, in folder: URL = folder) -> Bool {
+        let url = canvasFile(coverID, in: folder)
+        guard var entry = readCanvas(url) else { return !FileManager.default.fileExists(atPath: url.path) }
+        entry.edits.removeAll { ids.contains($0.id) }
+        return write(entry, to: url, in: folder)
+    }
+
+    /// Edits moved from one key to another (re-keyed by a cover id once known): the old entry loses them only after
+    /// the new one was written; until then both are kept, and it's tried again (every 2 s, a few minutes at most;
+    /// after that both stay for the next launch, which puts each back by its key, merged). On the journal's queue.
+    nonisolated static func moveCanvas(_ target: CanvasEntry, from old: String, ids: Set<String>, in folder: URL = folder, attempt: Int = 0) {
+        if keepCanvas(target, in: folder) { ackCanvas(old, wrote: ids, in: folder); return }
+        guard attempt < 90 else { return }
+        queue.asyncAfter(deadline: .now() + 2) { moveCanvas(target, from: old, ids: ids, in: folder, attempt: attempt + 1) }
+    }
+
+    /// Every canvas entry the journal holds now (one that can't be read is left out, and left there).
+    nonisolated static func canvasEntries(in folder: URL = folder) -> [CanvasEntry] {
+        let dir = canvasFolder(in: folder)
+        return ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasSuffix(".json") }.sorted()
+            .compactMap { readCanvas(dir.appending(path: $0)) }
+    }
+
+    /// Every cover entry the journal holds now (one that can't be read is left out, and left there).
+    nonisolated static func coverEntries(in folder: URL = folder) -> [CoverFields] {
+        let dir = coverFolder(in: folder)
+        return ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).sorted().compactMap { name in
+            (try? Data(contentsOf: dir.appending(path: name))).flatMap { try? JSONDecoder().decode(CoverFields.self, from: $0) }
+        }
+    }
+
+    nonisolated static func readCanvas(_ url: URL) -> CanvasEntry? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(CanvasEntry.self, from: data)
+    }
+
+    /// At launch, on the journal's queue, before the notes' `leftovers`: the canvas entries (and any a recovering
+    /// folder of the notes' journal still holds) moved into a folder of their own, and every such folder a launch
+    /// before left. Oldest first.
+    nonisolated static func canvasLeftovers(in folder: URL = folder) -> [URL] {
+        let fm = FileManager.default
+        let parent = folder.deletingLastPathComponent()
+        let stamp = String(format: "%.0f", Date().timeIntervalSince1970 * 1000)
+        let names = (try? fm.contentsOfDirectory(atPath: parent.path)) ?? []
+        let sources = [canvasFolder(in: folder)] + NoteShelf.journalFolders(names).map { canvasFolder(in: parent.appending(path: $0)) }
+        for (n, source) in sources.enumerated() {
+            let entries = ((try? fm.contentsOfDirectory(atPath: source.path)) ?? []).filter { $0.hasSuffix(".json") }
+            guard !entries.isEmpty else { continue }
+            _ = try? fm.moveItem(at: source, to: parent.appending(path: "Canvas journal, recovering \(stamp)-\(n)"))
+        }
+        let after = (try? fm.contentsOfDirectory(atPath: parent.path)) ?? []
+        return after.filter { $0.hasPrefix("Canvas journal, recovering ") }.sorted().map { parent.appending(path: $0) }
+    }
+
+    /// Puts back a recovering folder's canvas entries, on the notes' queue: each into the notebook its binding finds (NoteStore.writeCanvas: merged, never over anything newer), else rescued into "Unsaved notes". An entry
+    /// goes only once one of those wrote; one that couldn't stays for the next launch. The folder goes once empty.
+    nonisolated static func recoverCanvas(_ holding: URL, root: URL) {
+        let fm = FileManager.default
+        // A folder that can't be listed is kept as it is, for the next launch.
+        guard let listed = try? fm.contentsOfDirectory(atPath: holding.path) else { return }
+        let names = listed.filter { $0.hasSuffix(".json") }.sorted()
+        let read = NoteStore.read(root)
+        let places = NoteStore.places(notes: read.notes, notebooks: read.notebooks)
+        for name in names {
+            let url = holding.appending(path: name)
+            guard let entry = readCanvas(url) else { continue }
+            if landCanvas(entry, places: places, notebooks: read.notebooks, complete: read.complete, root: root) { try? fm.removeItem(at: url) }
+        }
+        // Gone only once listed and empty: entries that couldn't be read stay, and so does their folder.
+        dropIfEmpty(holding)
+    }
+
+    /// One entry put somewhere safe: its notebook's canvas (found by its binding, NoteShelf.notebookFor), or "Unsaved
+    /// notes" with its whole canvas when, after a complete read, nothing matches it or it's still ambiguous (never
+    /// written to a notebook it can't tell surely). True once written. The folder not read completely: it waits.
+    nonisolated static func landCanvas(_ entry: CanvasEntry, places: [NotebookPlace], notebooks: [Notebook], complete: Bool, root: URL) -> Bool {
+        switch NoteShelf.notebookFor(entry.bound, places: places, complete: complete, root: root.path) {
+        case .found(let name):
+            guard let book = notebooks.first(where: { $0.name == name }) else { return false }
+            return NoteStore.writeCanvas(entry.edits, binding: entry.bound, in: book.folder, root: root) != nil
+        case .otherRoot:
+            // Made in another notes' folder than this launch's: never applied here; rescued whole at this launch.
+            return rescueCanvas(entry) != nil
+        case .gone:
+            return rescueCanvas(entry) != nil
+        case .ambiguous:
+            // Still ambiguous at the next launch's recovery: never written to a notebook, rescued whole, after a
+            // complete read (else it waits for the next launch).
+            return complete && rescueCanvas(entry) != nil
+        case .wait:
+            return false
+        }
+    }
+
+    // MARK: Cover fields
+
+    nonisolated static func coverFolder(in folder: URL = folder) -> URL { folder.appending(path: "Covers") }
+
+    nonisolated static func coverFile(_ key: String, in folder: URL = folder) -> URL {
+        coverFolder(in: folder).appending(path: file("cover:" + key, in: folder).lastPathComponent)
+    }
+
+    /// A notebook's cover fields waiting, written over its entry (the latest value of each field). On the journal's
+    /// queue.
+    /// True once the entry on disk says it.
+    @discardableResult
+    nonisolated static func keepCover(_ entry: CoverFields, in folder: URL = folder) -> Bool {
+        let url = coverFile(entry.key, in: folder)
+        guard !entry.isEmpty else {
+            try? FileManager.default.removeItem(at: url)
+            return !FileManager.default.fileExists(atPath: url.path)
+        }
+        try? FileManager.default.createDirectory(at: coverFolder(in: folder), withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(entry) else { return false }
+        return (try? data.write(to: url, options: .atomic)) != nil
+    }
+
+    /// Cover entries recovered at launch journaled again; each moved-aside file goes once the entry it held was
+    /// written again (by its key). One that couldn't be read or decoded, or whose entry couldn't be written, stays for
+    /// the next launch, and so does its folder. On the journal's queue.
+    nonisolated static func rejournalCovers(_ entries: [CoverFields], sources: [(file: URL, key: String?)], holding: [URL], in folder: URL = folder) {
+        let written = Set(entries.filter { keepCover($0, in: folder) }.map(\.key))
+        for source in sources { if let key = source.key, written.contains(key) { try? FileManager.default.removeItem(at: source.file) } }
+        for folder in holding { dropIfEmpty(folder) }
+    }
+
+    /// A write took these fields: each leaves the entry only while it still holds that value.
+    nonisolated static func ackCover(_ entry: CoverFields, wrote: [String: String], in folder: URL = folder) {
+        let url = coverFile(entry.key, in: folder)
+        guard let data = try? Data(contentsOf: url), let entry = try? JSONDecoder().decode(CoverFields.self, from: data) else { return }
+        keepCover(entry.after(wrote: wrote), in: folder)
+    }
+
+    /// At launch, on the journal's queue, before the notes' `leftovers`: the cover entries (and any a recovering
+    /// folder of the notes' journal holds) read and moved into a folder of their own, which goes once they're
+    /// journaled again by the store (`dropCoverLeftovers`).
+    /// `sources`: each file read (with its entry's key; nil when it couldn't be read or decoded: it stays). `whole`:
+    /// every moved-aside folder was listed.
+    nonisolated static func coverLeftovers(in folder: URL = folder) -> (entries: [CoverFields], holding: [URL], sources: [(file: URL, key: String?)]) {
+        let fm = FileManager.default
+        let parent = folder.deletingLastPathComponent()
+        let stamp = String(format: "%.0f", Date().timeIntervalSince1970 * 1000)
+        let names = (try? fm.contentsOfDirectory(atPath: parent.path)) ?? []
+        let sources = [coverFolder(in: folder)] + NoteShelf.journalFolders(names).map { coverFolder(in: parent.appending(path: $0)) }
+        for (n, source) in sources.enumerated() where !(((try? fm.contentsOfDirectory(atPath: source.path)) ?? []).isEmpty) {
+            _ = try? fm.moveItem(at: source, to: parent.appending(path: "Covers journal, recovering \(stamp)-\(n)"))
+        }
+        let holding = ((try? fm.contentsOfDirectory(atPath: parent.path)) ?? []).filter { $0.hasPrefix("Covers journal, recovering ") }.sorted()
+            .map { parent.appending(path: $0) }
+        var entries: [CoverFields] = []
+        var files: [(file: URL, key: String?)] = []
+        for folder in holding {
+            for name in ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).sorted() {
+                let file = folder.appending(path: name)
+                if let data = try? Data(contentsOf: file), let entry = try? JSONDecoder().decode(CoverFields.self, from: data) {
+                    entries.append(entry)
+                    files.append((file, entry.key))
+                } else {
+                    files.append((file, nil))
+                }
+            }
+        }
+        return (entries, holding, files)
+    }
+
+    /// A moved-aside folder goes only once it was listed and holds nothing (every file in it read and rewritten).
+    nonisolated static func dropIfEmpty(_ folder: URL) {
+        guard let left = try? FileManager.default.contentsOfDirectory(atPath: folder.path), left.isEmpty else { return }
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    /// A canvas entry whose notebook is gone, into "Unsaved notes": the whole canvas (the snapshot it journaled: the
+    /// last canvas Petal read for it with its edits merged in), in a folder of its own.
+    @discardableResult
+    nonisolated static func rescueCanvas(_ entry: CanvasEntry, in support: URL = Config.supportFolder) -> URL? {
+        let folder = support.appending(path: "Unsaved notes")
+            .appending(path: NoteShelf.rescueFolder(noteID: "canvas:" + entry.coverID, at: Date()))
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: NoteShelf.folderName(entry.notebook.isEmpty ? "A notebook" : entry.notebook) + " canvas.json")
+        let whole = (entry.snapshot ?? NoteCanvas()).applyingMerged(entry.edits)
+        guard (try? Data(whole.encoded().utf8).write(to: file, options: .withoutOverwriting)) != nil else { return nil }
+        return file
     }
 }
