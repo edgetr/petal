@@ -215,12 +215,14 @@ enum ViewerCheck {
             failed = !nineteenth(url, app: app) || failed
             failed = !pagingThenClosing(url, app: app) || failed
             failed = !twentyfirst(url, app: app, versionsRoot: versionsRoot) || failed
+            failed = !twentysecond(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
             failed = !cleanup(url) || failed
             failed = !closingMidExport(url, app: PetalApp.shared) || failed
             failed = !twentieth(deck: url, app: PetalApp.shared) || failed
+            failed = !refusedMidConversion(deck: url, app: PetalApp.shared) || failed
         }
         failed = !remote() || failed
         try? FileManager.default.removeItem(at: trashed)
@@ -1408,6 +1410,103 @@ enum ViewerCheck {
         expect(late == .closed, "asked after closing: closed at once")
         wait(2) { false }
         print("twentyfirst: " + (ok ? "closing a loading viewer settles every waiter (petal_view says it was closed); only the dock sweeps; the check's own versions root" : "failed"))
+        return ok
+    }
+
+    /// Round 22: one transition owns the document's state. A file that vanishes (its identity, bookmark and path
+    /// all gone) leaves no pages or place; closing during a slow vault check answers the place request at once, and
+    /// the late result is ignored.
+    private static func twentysecond(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("twentysecond: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let root = URL(fileURLWithPath: ViewerPath.canonical(home.path) ?? home.path)
+
+        // Vanished: deleted, nothing at its path, its bookmark finding nothing.
+        let gone = root.appending(path: "Gone.pdf")
+        try? FileManager.default.copyItem(at: source, to: gone)
+        let model = app.viewers.show(gone, front: false)
+        wait(20) { !model.loading }
+        expect(model.pageCount > 0 && model.fileAnchor() != nil, "loaded (set up)")
+        try? FileManager.default.removeItem(at: gone)
+        model.fileChanged()
+        wait(5) { model.problem != nil }
+        expect(model.problem == ViewerModel.notFoundText && model.pageCount == 0 && model.document == nil && model.thumbs.isEmpty && model.fileAnchor() == nil,
+               "a file that vanished: no pages, nothing to anchor to (\(model.problem ?? "no problem"), \(model.pageCount) pages)")
+        var vanished: ViewerModel.HereOutcome?
+        model.herePlace(passage: false) { vanished = $0 }
+        wait(2) { vanished != nil }
+        if case .unidentified? = vanished {} else { expect(false, "and no place (\(String(describing: vanished)))") }
+        app.viewers.closed(model)
+
+        // Closing during a slow vault check: the place request answered at once, closed, and only once.
+        let report = root.appending(path: "Report.pdf")
+        try? FileManager.default.copyItem(at: source, to: report)
+        let viewer = app.viewers.show(report, front: false)
+        wait(20) { !viewer.loading }
+        let text = PDFDocument(url: report)?.page(at: 0)?.string ?? ""
+        let word = (text as NSString).range(of: "sample")
+        viewer.selected(page: 0, bounds: CGRect(x: 72, y: 700, width: 60, height: 14), range: word, anchor: .zero)
+        wait(5) { viewer.selection != nil }
+        ViewerModel.vaultChecking = { Thread.sleep(forTimeInterval: 1.5) }
+        defer { ViewerModel.vaultChecking = nil }
+        var answers: [ViewerModel.HereOutcome] = []
+        viewer.herePlace(passage: true) { answers.append($0) }
+        wait(0.3) { false }
+        let closing = Date()
+        app.viewers.closed(viewer)
+        let took = Date().timeIntervalSince(closing)
+        let first = answers.first
+        wait(2.5) { false }
+        if case .closed? = first {} else { expect(false, "closed during the vault check: told closed (\(String(describing: first)))") }
+        expect(took < 0.2 && answers.count == 1, "at once, and the late vault result ignored (\(answers.count) answers)")
+        print("twentysecond: " + (ok ? "a vanished file leaves no pages or place; closing during a vault check answers the place at once, once" : "failed"))
+        return ok
+    }
+
+    /// Round 22: a move out of the allowed roots while a slow Office conversion runs stays refused: the conversion
+    /// finishing later never brings the pages back.
+    private static func refusedMidConversion(deck source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("refused: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        let outside = folder.appending(path: "Outside")
+        for made in [home, outside] { try? FileManager.default.createDirectory(at: made, withIntermediateDirectories: true) }
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let deck = URL(fileURLWithPath: ViewerPath.canonical(home.path) ?? home.path).appending(path: "Deck.\(source.pathExtension)")
+        try? FileManager.default.copyItem(at: source, to: deck)
+        let away = URL(fileURLWithPath: ViewerPath.canonical(outside.path) ?? outside.path).appending(path: deck.lastPathComponent)
+        let model = ViewerModel(url: deck, kind: ViewerKind.of(deck.path) ?? .quickLook(.slide))
+        let gauge = Gauge()
+        let moved = HangUp()
+        // As its conversion starts: moved out of the allowed roots (a link left at its path), and the viewer told.
+        ViewerLoads.converting = { step in
+            gauge.add(step)
+            guard step > 0, !moved.gone else { return }
+            moved.gone = true
+            try? FileManager.default.moveItem(at: deck, to: away)
+            try? FileManager.default.createSymbolicLink(atPath: deck.path, withDestinationPath: away.path)
+            model.fileChanged()
+        }
+        defer { ViewerLoads.converting = nil }
+        model.load()
+        wait(90) { moved.gone && gauge.running == 0 && !model.loading }
+        wait(2) { false }
+        expect(moved.gone, "moved during the conversion (set up)")
+        expect(model.problem == ViewerModel.cantShowText && model.pageCount == 0 && model.document == nil && !model.live && model.fileAnchor() == nil,
+               "moved out of the allowed roots mid-conversion: stays refused (\(model.problem ?? "no problem"), \(model.pageCount) pages)")
+        model.close()
+        print("refused: " + (ok ? "a move out of the allowed roots during a slow conversion stays refused" : "failed"))
         return ok
     }
 

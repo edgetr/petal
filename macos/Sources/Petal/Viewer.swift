@@ -346,18 +346,27 @@ final class ViewerModel: Identifiable {
     enum Settled: Equatable { case ready, closed }
     /// What can be waited for. Every waiter is in one registry, so closing settles them all (`settleAll`) and a new
     /// kind can't be missed.
-    enum WaitKind: Hashable, CaseIterable { case load, selection, identity }
-    @ObservationIgnored private var waiters: [WaitKind: [@MainActor (Settled) -> Void]] = [:]
+    enum WaitKind: Hashable, CaseIterable { case load, selection, identity, place }
+    @ObservationIgnored private var waiters: [WaitKind: [(id: Int, then: @MainActor (Settled) -> Void)]] = [:]
+    @ObservationIgnored private var waiterIDs = 0
 
-    /// `then` once `kind` settles; at once (closed) when the viewer already is.
-    private func wait(for kind: WaitKind, _ then: @escaping @MainActor (Settled) -> Void) {
-        guard !closedNow else { return then(.closed) }
-        waiters[kind, default: []].append(then)
+    /// `then` once `kind` settles; at once (closed) when the viewer already is. Returns its registration, which
+    /// `unwait` takes back once what it waited for finished on its own.
+    @discardableResult
+    private func wait(for kind: WaitKind, _ then: @escaping @MainActor (Settled) -> Void) -> Int {
+        waiterIDs += 1
+        guard !closedNow else { then(.closed); return waiterIDs }
+        waiters[kind, default: []].append((waiterIDs, then))
+        return waiterIDs
+    }
+
+    private func unwait(_ kind: WaitKind, _ id: Int) {
+        waiters[kind]?.removeAll { $0.id == id }
     }
 
     private func settle(_ kind: WaitKind, _ outcome: Settled = .ready) {
         let told = waiters.removeValue(forKey: kind) ?? []
-        for then in told { then(outcome) }
+        for waiter in told { waiter.then(outcome) }
     }
 
     /// Every waiter told at once (closing: `.closed`).
@@ -508,12 +517,7 @@ final class ViewerModel: Identifiable {
         // Watched before anything is read: the read starts only once the watch is armed (ViewerWatch.whenArmed),
         // so a change while it loads always starts a reload.
         if watcher == nil { watch() }
-        if !loading { loading = true }
-        // What finds the file again if it moves meanwhile (fileChanged), never anchor state.
-        if let fileID { lastSeen = (fileID, bookmark) }
-        fileID = nil
-        bookmark = nil
-        unselected()
+        transition(.loading)
         // One read at a time per viewer (ViewerLoads, Phase 1's ScanGate): changes while one runs make exactly one
         // follow-up, which reads the file as it is then; an older one's work stops at its next step.
         loads = documentLoads.request { [weak self] unit in self?.read(unit) }
@@ -537,7 +541,7 @@ final class ViewerModel: Identifiable {
                 MainActor.assumeIsolated {
                     guard current() else { return unit.finish() }
                     if let read { return self.loaded(read, unit) }
-                    unit.accept { self.cantShow() }
+                    unit.accept { self.transition(.failed(Self.cantShowText)) }
                     unit.finish()
                 }
             }
@@ -556,25 +560,86 @@ final class ViewerModel: Identifiable {
     static let cantShowText = "This file can't be shown."
 
     /// The file shown no longer passes the path rule: nothing of it is shown or kept.
-    private func cantShow() { failed(Self.cantShowText) }
+    static let notFoundText = "This file isn't there any more (moved somewhere Petal can't follow, or deleted)."
 
-    /// A load that failed (refused by the path rule, unreadable, gone): nothing of the file before it is kept, no
-    /// pages, no selection, no identity or bookmark to offer as a place, and what went wrong said before the load
-    /// ends (so whoever waits for it sees it).
-    private func failed(_ text: String) {
+    // MARK: The document's state
+
+    /// Every way the document's state changes. Only `transition` changes it.
+    enum DocumentOutcome {
+        /// A load or reload begins (the pages shown stay on screen meanwhile).
+        case loading
+        /// A load's pages accepted: only from the current generation (`unit`).
+        case loaded(PDFDocument, Data, ViewerLoader.Read, ViewerLoadUnit)
+        /// A load accepted as Quick Look's own view (nothing exported): only from the current generation.
+        case live(ViewerLoader.Read, ViewerLoadUnit)
+        /// It can't be shown: refused by the path rule, not found, unreadable, kept changing.
+        case failed(String)
+        /// The viewer closed.
+        case closed
+    }
+
+    /// The one function that owns the document's state. Entering "loaded" (or Quick Look's own view) takes the
+    /// current generation's unit and happens only through its `accept`. Leaving it for anything else (a failure, a
+    /// refusal, not found, closing) invalidates every outstanding load and drawing generation, clears the pages,
+    /// the selection and all anchor state (identity, bookmark, stamp), and settles every waiter with that outcome.
+    private func transition(_ outcome: DocumentOutcome) {
+        switch outcome {
+        case .loading:
+            if !loading { loading = true }
+            keepFollowing()
+            fileID = nil
+            bookmark = nil
+            unselected()
+        case .loaded(let document, let data, let read, let unit):
+            unit.accept {
+                self.adopt(read)
+                self.present(document, data)
+            }
+        case .live(let read, let unit):
+            unit.accept {
+                self.adopt(read)
+                self.goLive()
+            }
+        case .failed(let text):
+            leaveLoaded()
+            problem = text
+            // Ends the load: whoever waits for it, or for the file's identity, is told (and finds no identity).
+            loading = false
+            settle(.load)
+            settle(.identity)
+            settle(.selection)
+        case .closed:
+            closedNow = true
+            closing.on = true
+            leaveLoaded()
+            // Every waiter (a load, a selection, the file's identity, a place on its way) told at once: closed.
+            settleAll(.closed)
+        }
+    }
+
+    /// What finds the file again if it moves (fileChanged), never anchor state: the last accepted identity.
+    private func keepFollowing() {
+        if let fileID { lastSeen = (fileID, bookmark) }
+    }
+
+    /// Out of "loaded": every outstanding document load and thumbnail pass made stale (a load still under way can
+    /// never be accepted over what this says), and the pages, selection and all anchor state gone.
+    private func leaveLoaded() {
+        documentLoads.invalidate()
+        thumbLoads.invalidate()
+        keepFollowing()
         document = nil
         data = nil
-        self.text = nil
+        text = nil
         live = false
         pageCount = 0
         thumbs = [:]
         passages = [:]
         unselected()
+        selectionPending = false
         fileID = nil
         bookmark = nil
-        settle(.identity)
-        problem = text
-        loading = false
+        stamp = nil
     }
 
     /// A read in: its pages converted (WebKit, for Quick Look's HTML) and parsed, each step checking the unit is
@@ -583,10 +648,7 @@ final class ViewerModel: Identifiable {
     private func loaded(_ read: ViewerLoader.Read, _ unit: ViewerLoadUnit) {
         switch read.pages {
         case .failed(let text):
-            unit.accept {
-                self.adopt(read)
-                self.failed(text)
-            }
+            unit.accept { self.transition(.failed(text)) }
             unit.finish()
         case .pdf(let data): show(data, read, unit)
         case .web(let preview):
@@ -596,17 +658,11 @@ final class ViewerModel: Identifiable {
             ViewerWeb.pages(preview, current: unit.current) { data in
                 ViewerLoads.converting?(-1)
                 if let data { return self.show(data, read, unit) }
-                unit.accept {
-                    self.adopt(read)
-                    self.goLive()
-                }
+                self.transition(.live(read, unit))
                 unit.finish()
             }
         case .live:
-            unit.accept {
-                self.adopt(read)
-                self.goLive()
-            }
+            transition(.live(read, unit))
             unit.finish()
         }
     }
@@ -633,9 +689,10 @@ final class ViewerModel: Identifiable {
             let parsed = ViewerCarry(current() ? PDFDocument(data: data) : nil)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    unit.accept {
-                        self.adopt(read)
-                        if let document = parsed.value as? PDFDocument { self.present(document, data) } else { self.goLive() }
+                    if let document = parsed.value as? PDFDocument {
+                        self.transition(.loaded(document, data, read, unit))
+                    } else {
+                        self.transition(.live(read, unit))
                     }
                     unit.finish()
                 }
@@ -809,7 +866,10 @@ final class ViewerModel: Identifiable {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard !self.closedNow else { return }
-                    if refused { return self.cantShow() }
+                    // Refused by the path rule, or nowhere to be found (its identity, its bookmark and its path all
+                    // fail): a failed load, through the one transition.
+                    if refused { return self.transition(.failed(Self.cantShowText)) }
+                    if found == nil { return self.transition(.failed(Self.notFoundText)) }
                     if let moved { self.url = moved }
                     guard let now, now != before else { return }
                     // Replaced (a new file swapped in, as most apps save): the new one is watched from now on, and
@@ -837,14 +897,11 @@ final class ViewerModel: Identifiable {
 
     func close() {
         defer { NotePictures.shared.visibilityChanged() }
-        closedNow = true
-        closing.on = true
-        // Whatever the document's loads and its thumbnails still have going stops at its next step.
+        // Whatever the document's loads and its thumbnails still have going stops at its next step, and nothing
+        // more starts.
         documentLoads.close()
         thumbLoads.close()
-        // Every waiter (a load, a selection, the file's identity, a place on its way) told at once: closed.
-        selectionPending = false
-        settleAll(.closed)
+        transition(.closed)
         watcher = nil
         versionWatch = nil
         lensSoon?.cancel()
@@ -1120,7 +1177,19 @@ final class ViewerModel: Identifiable {
     /// (ViewerSecrets), off the main thread; a secret touching it, or a vault that can't be read, is `refused`. The
     /// place is used only while the viewer is open with the same document and selection it was made for
     /// (`hereContext`); else `changed`.
-    func herePlace(passage: Bool = true, _ done: @escaping @MainActor (HereOutcome) -> Void) {
+    func herePlace(passage: Bool = true, _ answer: @escaping @MainActor (HereOutcome) -> Void) {
+        // Registered as a waiter until it's answered (`.place`), so closing answers it at once (closed); answered
+        // exactly once, so a late result (a slow vault check) is ignored.
+        var answered = false
+        var registration: Int?
+        let done: @MainActor (HereOutcome) -> Void = { outcome in
+            guard !answered else { return }
+            answered = true
+            if let registration { self.unwait(.place, registration) }
+            answer(outcome)
+        }
+        registration = wait(for: .place) { settled in if settled == .closed { done(.closed) } }
+        guard !answered else { return }
         // The selection's read and the file's identity both in first: never a page note for a pending selection,
         // never a place without the file's identity.
         whenSelectionSettled { settled in
@@ -1137,6 +1206,7 @@ final class ViewerModel: Identifiable {
         let context = hereContext
         guard let chosen = passage ? selection : nil else { return done(.place(stick, selection: false)) }
         Viewers.queue.async {
+            ViewerModel.vaultChecking?()
             let cut = VaultIndex.settled { index -> (quote: String, before: String, after: String)? in
                 guard !index.unreadable else { return nil }
                 return ViewerSecrets.passage(chosen.pageText, range: chosen.range, secrets: index.spans(chosen.pageText))
@@ -1512,6 +1582,9 @@ final class ViewerModel: Identifiable {
         }
     }
 
+    /// Petal --viewer-check only: run just before a passage is checked against the vault (off the main thread).
+    nonisolated(unsafe) static var vaultChecking: (() -> Void)?
+
     /// Petal --viewer-check only: a version's picture starting (+1) and ending (-1) its drawing.
     nonisolated(unsafe) static var versionDrawing: ((Int) -> Void)?
 
@@ -1632,6 +1705,12 @@ final class ViewerLoads {
 
     func close() {
         token.close()
+        run = nil
+    }
+
+    /// Every outstanding unit made stale (a newer generation that starts nothing): what it would accept never is.
+    func invalidate() {
+        _ = token.bump()
         run = nil
     }
 
