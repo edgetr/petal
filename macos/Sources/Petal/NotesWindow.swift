@@ -164,12 +164,12 @@ final class NotesModel {
     func makeDefault(_ book: Notebook) { PetalApp.shared.config.set("notesNotebook", book.name) }
 
     func setPrivate(_ book: Notebook, _ on: Bool) {
-        store.setCover(book.name, { $0.setScalar("private", on ? "true" : nil) }) { $0.isPrivate = on }
+        store.setCover(book.name, fields: ["private": on ? "true" : ""])
         desk.refreshPanels()
     }
 
     func setView(_ book: Notebook, _ view: NoteLibrary.View) {
-        store.setCover(book.name, { $0.setScalar("view", view == .canvas ? "canvas" : nil) }) { $0.view = view }
+        store.setCover(book.name, fields: ["view": view == .canvas ? "canvas" : ""])
         if view == .canvas { loadCanvas(book.name) }
     }
 

@@ -146,6 +146,17 @@ final class NoteDesk {
                         // Canvas edits a launch before kept: moved aside first (the notes' recovery removes its own
                         // folder once its notes are back), then put back by their notebook's cover id after the notes.
                         let canvases = NoteJournal.canvasLeftovers()
+                        // Cover fields (a notebook made Private, its color or view) a launch before kept: waiting again
+                        // (shown at once), journaled again, then the moved-aside copies go.
+                        let covers = NoteJournal.coverLeftovers()
+                        if !covers.entries.isEmpty || !covers.holding.isEmpty {
+                            DispatchQueue.main.async {
+                                MainActor.assumeIsolated {
+                                    self.store.recoverCovers(covers.entries)
+                                    NoteJournal.queue.async { NoteJournal.dropCoverLeftovers(covers.holding) }
+                                }
+                            }
+                        }
                         // The journal as it was, and any recovery a launch before didn't finish: resumed, entry by entry.
                         let leftovers = NoteJournal.leftovers()
                         guard !leftovers.isEmpty || !canvases.isEmpty else { return }
@@ -1176,13 +1187,14 @@ final class NoteDesk {
         let corner = point ?? CGPoint(x: screen.midX - PaperLook.openWidth / 2, y: screen.midY + 220)
         // A note in a conflict opens with every other paper of it beside it (all read only, each with Keep this one),
         // through layout like any paper.
+        // Laid out to fit the visible screen first (wrapping to another row), then each paper placed.
         let group = NoteShelf.standaloneGroup(key, group: store.paper(key).flatMap { store.conflict(of: $0) }?.map(\.key) ?? [])
-        for (index, other) in group.enumerated() where other != key {
-            standalone[other] = CGPoint(x: corner.x + CGFloat(index) * (PaperLook.openWidth + 16), y: corner.y)
+        let spots = NoteShelf.groupLayout(count: group.count, corner: corner, paper: CGSize(width: PaperLook.openWidth, height: 380), visible: screen)
+        for (index, other) in group.enumerated() {
+            standalone[other] = spots[index]
             faces[other] = .open
             if fromLibrary { standaloneFromLibrary.insert(other) } else { standaloneFromLibrary.remove(other) }
         }
-        standalone[key] = corner
         faces[key] = .open
         keyboard = key
         layout()

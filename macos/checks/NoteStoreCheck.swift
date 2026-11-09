@@ -119,7 +119,9 @@ struct NoteStoreCheck {
         versionGroups(root: root)
         canvasFile(root: root)
         canvasRetry(root: root)
+        canvasDrain(root: root)
         privateCovers(root: root)
+        coverQuit(root: root)
         notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -1165,6 +1167,74 @@ struct NoteStoreCheck {
                && canvases.allSatisfy { !fm.fileExists(atPath: $0.path) }, "its notebook gone: rescued into Unsaved notes, nothing dropped", "\(rescued)")
     }
 
+    /// A write under way when the canvas drains (quit): its completion touches neither what's waiting nor the journal,
+    /// so the edit queued after it stays journaled.
+    @MainActor static func canvasDrain(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Drain board")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var coverFile = NoteFile(id: "COVER-DRAIN", body: "# About this notebook")
+        coverFile.cover = true
+        let coverURL = folder.appending(path: NoteShelf.coverName)
+        _ = NoteStore.create(coverFile.serialized(), at: coverURL, root: root)
+        let store = NoteStore(root: root)
+        store.preview([PaperNote(file: coverFile, url: coverURL, notebook: "Drain board", revision: coverFile.serialized())],
+                      notebooks: [Notebook(name: "Drain board", folder: folder, color: "", cover: coverURL.path, count: 0)])
+        // Hold the files' queue so the first write is under way when the drain comes.
+        let hold = DispatchSemaphore(value: 0)
+        NoteStore.io.async { hold.wait() }
+        store.editCanvas("Drain board", .move("first", .init(x: 1, y: 1))) { _ in }
+        store.editCanvas("Drain board", .move("second", .init(x: 2, y: 2))) { _ in }
+        NoteJournal.queue.sync {}
+        store.drainCanvas()
+        hold.signal()
+        NoteStore.io.sync {}
+        let until = Date().addingTimeInterval(1)
+        while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        NoteJournal.queue.sync {}
+        var left: [String] = []
+        for stamped in NoteJournal.readCanvas(NoteJournal.canvasFile("COVER-DRAIN"))?.edits ?? [] {
+            if case .move(let id, _) = stamped.edit { left.append(id) }
+        }
+        expect(left.contains("second"), "an edit queued behind a write under way at quit stays journaled", "\(left)")
+        try? fm.removeItem(at: NoteJournal.canvasFile("COVER-DRAIN"))
+    }
+
+    /// A coverless notebook made Private, then a quit before its cover is made: at the next launch it's Private at
+    /// once (from the journal), and the field lands on the cover.
+    @MainActor static func coverQuit(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Quit")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        _ = NoteStore.create("a note", at: folder.appending(path: "One.md"), root: root)
+        // What a quit leaves: the field journaled, no cover yet.
+        var pending = CoverFields(notebook: "Quit")
+        pending.fields["private"] = "true"
+        NoteJournal.keepCover(pending)
+        let left = NoteJournal.coverLeftovers()
+        expect(left.entries.map(\.notebook) == ["Quit"] && !fm.fileExists(atPath: NoteJournal.coverFolder().path), "at launch the cover fields move aside first")
+        let store = NoteStore(root: root)
+        store.recoverCovers(left.entries)
+        NoteJournal.queue.sync {}
+        NoteJournal.dropCoverLeftovers(left.holding)
+        expect(fm.fileExists(atPath: NoteJournal.coverFile("Quit").path) && left.holding.allSatisfy { !fm.fileExists(atPath: $0.path) },
+               "journaled again before the moved-aside copy goes")
+        store.reload()
+        var until = Date().addingTimeInterval(5)
+        while store.notebook("Quit") == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        expect(store.notebook("Quit")?.isPrivate == true, "Private at once after the launch, before any cover")
+        until = Date().addingTimeInterval(8)
+        func onDisk() -> NoteFile? { text(folder.appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) } }
+        while onDisk().map(NoteContract.isPrivate) != true && Date() < until {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            store.reload()
+        }
+        expect(onDisk().map(NoteContract.isPrivate) == true, "and it lands on the cover made for it")
+        until = Date().addingTimeInterval(3)
+        while fm.fileExists(atPath: NoteJournal.coverFile("Quit").path) && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)); NoteJournal.queue.sync {} }
+        expect(!fm.fileExists(atPath: NoteJournal.coverFile("Quit").path), "its journal entry goes once it landed")
+    }
+
     /// Making a notebook Private: shown at once, and written through its cover's session, also when it has no cover
     /// (one is made, never over a file) or a cover with no front matter (it gets its id and front matter).
     @MainActor static func privateCovers(root: URL) {
@@ -1180,8 +1250,8 @@ struct NoteStoreCheck {
         var until = Date().addingTimeInterval(5)
         while store.notebook("Plain") == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         expect(store.notebook("Plain")?.cover != nil && store.notebook("Bare")?.cover == nil, "a cover with no front matter is its notebook's cover")
-        store.setCover("Bare", { $0.setScalar("private", "true") }) { $0.isPrivate = true }
-        store.setCover("Plain", { $0.setScalar("private", "true") }) { $0.isPrivate = true }
+        store.setCover("Bare", fields: ["private": "true"])
+        store.setCover("Plain", fields: ["private": "true"])
         expect(store.notebook("Bare")?.isPrivate == true && store.notebook("Plain")?.isPrivate == true, "Private at once, in memory")
         until = Date().addingTimeInterval(8)
         func onDisk(_ folder: URL) -> NoteFile? { text(folder.appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) } }

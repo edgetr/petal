@@ -35,6 +35,10 @@ extension NoteDesk {
         // What's typed and not saved yet goes first, so the note is used as it is now.
         if let open = store.current(noteID) { editors[open.key]?.flush() }
         guard let paper = store.current(noteID) else { return }
+        // A note with two versions isn't used anywhere until one is kept: which words would go is the person's call.
+        guard NoteDrop.allowed(versions: store.conflict(of: paper)?.count ?? 1) else {
+            return tell("This note has two versions right now: keep one, then drop it again.")
+        }
         let text = NoteDrop.plain(paper.file.body)
         let title = paper.file.title
         switch NoteDrop.action(bundle) {
@@ -50,8 +54,10 @@ extension NoteDesk {
         let folder = paper.url.deletingLastPathComponent(), root = store.root
         // Where its pictures are, found off the main thread (the disk, and iCloud may bring them down first).
         NoteStore.io.async {
+            // Only pictures that are documents, as they really are (NoteTasks' rule): nothing else goes along.
             let files = links.compactMap { NoteStore.pictureFile($0, noteFolder: folder, root: root) }
                 .filter { FileManager.default.fileExists(atPath: $0.path) }
+                .map(NoteTasks.decide).filter { $0.1 == .open }.map(\.0)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let service = NSSharingService(named: .composeEmail) else { return self.clipboard(title: title, text: text, bundle: "com.apple.mail") }
@@ -115,28 +121,46 @@ extension NoteDesk {
 // MARK: - A task's parts
 
 extension NoteTasks {
-    /// Open all: each part of a task through the normal open paths (a tab in the person's browser, a file in its own
-    /// app, a mail in Mail by its message address), asynchronously (Launch Services never asked on the main thread to
-    /// wait), never moving the pointer; nothing is sent or changed. Returns how many parts it opened; a window has
-    /// nothing to reopen and is skipped.
+    /// Open all: each part of a task through the normal open paths: a tab (http or https only) in the person's
+    /// browser, a mail (a `message:` address only) in Mail, a file in its own app only once it's resolved (aliases and
+    /// symbolic links followed, off the main thread) and found to be a document (`fileAction`); anything else is shown
+    /// in Finder, selected, never opened, and said. Asynchronous throughout (Launch Services never asked on the main
+    /// thread to wait), never moving the pointer; nothing is sent or changed. Returns how many parts it will try.
     @MainActor @discardableResult
     static func openAll(_ items: [NoteContract.TaskItem], said: @escaping @MainActor (String) -> Void = { _ in }) -> Int {
         let urls = openable(items)
-        let failed = Counter()
-        let group = DispatchGroup()
-        for url in urls {
-            group.enter()
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = true
-            NSWorkspace.shared.open(url, configuration: configuration) { _, error in
-                if error != nil { failed.add() }
-                group.leave()
-            }
-        }
-        group.notify(queue: .main) {
-            MainActor.assumeIsolated {
-                let missed = failed.value + (items.count - urls.count)
-                if missed > 0 { said(missed == 1 ? "One part of the task couldn't be opened." : "\(missed) parts of the task couldn't be opened.") }
+        let skipped = items.count - urls.count
+        DispatchQueue.global(qos: .userInitiated).async {
+            let decided = urls.map { url in url.isFileURL ? decide(url) : (url, FileAction.open) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let failed = Counter()
+                    let group = DispatchGroup()
+                    var revealed: [URL] = []
+                    for (url, action) in decided {
+                        if action == .reveal { revealed.append(url); continue }
+                        group.enter()
+                        let configuration = NSWorkspace.OpenConfiguration()
+                        configuration.activates = true
+                        NSWorkspace.shared.open(url, configuration: configuration) { _, error in
+                            if error != nil { failed.add() }
+                            group.leave()
+                        }
+                    }
+                    if !revealed.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(revealed) }
+                    group.notify(queue: .main) {
+                        MainActor.assumeIsolated {
+                            var words: [String] = []
+                            if !revealed.isEmpty {
+                                words.append(revealed.count == 1 ? "\(revealed[0].lastPathComponent) isn't a document, so Petal showed it in Finder instead of opening it."
+                                                                 : "\(revealed.count) parts aren't documents, so Petal showed them in Finder instead of opening them.")
+                            }
+                            let missed = failed.value + skipped
+                            if missed > 0 { words.append(missed == 1 ? "One part couldn't be opened." : "\(missed) parts couldn't be opened.") }
+                            if !words.isEmpty { said(words.joined(separator: " ")) }
+                        }
+                    }
+                }
             }
         }
         return urls.count

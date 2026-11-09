@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import UniformTypeIdentifiers
 
 // Petal Notes' library, its pure side (checked by macos/checks/run.sh, no file or window): what the Petal Notes
 // window shows (its views, search, the grid, a notebook's cover), the shared contract's fields read from a note's
@@ -328,6 +329,15 @@ enum NoteLibrary {
 
 // MARK: - Private notebooks
 
+extension NoteLibrary {
+    /// A notebook's cover: "About this notebook.md" (any version of it), front matter or not, or a note that says it.
+    static func isCover(fileName: String, file: NoteFile) -> Bool { file.cover || fileName == NoteShelf.coverName }
+
+    /// Whether a notebook is Private, counted across every version of its cover: Private when any says so, or while
+    /// its cover is there and not read yet (unknown).
+    static func privateNotebook(covers: [NoteFile], unread: Bool) -> Bool { unread || covers.contains(where: NoteContract.isPrivate) }
+}
+
 /// A Private notebook (`private: true` on its cover) stays out of pictures, the AI button's previews and every other
 /// notebook's memory; tools read its notes only when asked from inside it (an @ in one of its notes).
 enum NotePrivacy {
@@ -361,6 +371,22 @@ extension NoteShelf {
     /// the note first, then the others in the group's order.
     static func standaloneGroup(_ key: String, group: [String]) -> [String] {
         [key] + group.filter { $0 != key }
+    }
+
+    /// Where each paper of a group opened on its own goes (AppKit's coordinates: each paper's top-left corner): side
+    /// by side from `corner`, wrapping to another row below when the next wouldn't fit the visible screen, the whole
+    /// group moved in to fit it.
+    static func groupLayout(count: Int, corner: CGPoint, paper: CGSize, gap: CGFloat = 16, visible: CGRect) -> [CGPoint] {
+        guard count > 0 else { return [] }
+        let across = max(1, min(count, Int((visible.width + gap) / (paper.width + gap))))
+        let rows = (count + across - 1) / across
+        let width = CGFloat(across) * paper.width + CGFloat(across - 1) * gap
+        let height = CGFloat(rows) * paper.height + CGFloat(rows - 1) * gap
+        let x = min(max(corner.x, visible.minX), max(visible.minX, visible.maxX - width))
+        let top = max(min(corner.y, visible.maxY), min(visible.maxY, visible.minY + height))
+        return (0..<count).map { n in
+            CGPoint(x: x + CGFloat(n % across) * (paper.width + gap), y: top - CGFloat(n / across) * (paper.height + gap))
+        }
     }
 
     /// A note opened on its own and put away: the keyboard goes back to the Petal Notes window only on Escape, when
@@ -418,8 +444,89 @@ enum NoteTasks {
         }
     }
 
-    /// The parts Open all opens, in order.
+    /// The parts Open all opens, in order (a file still to be checked by `fileAction` once it's resolved).
     static func openable(_ items: [NoteContract.TaskItem]) -> [URL] { items.compactMap(url) }
+
+    /// What Open all (or a note dropped on an app) may do with a file, decided on what it really is once its aliases
+    /// and symbolic links are resolved: opened only when it's a document (conforms to `UTType.content`) and nothing
+    /// that runs or points elsewhere (an app, an executable or script of any kind, a `.command`, `.tool`, `.workflow`
+    /// or `.terminal` file, an installer package, a disk image, an alias or link, a web, internet or file location).
+    /// Anything else is shown in Finder, selected, never opened.
+    enum FileAction: Equatable { case open, reveal }
+
+    static let neverOpened: Set<String> = ["app", "command", "tool", "workflow", "terminal", "pkg", "mpkg", "dmg", "sparseimage", "sparsebundle",
+                                            "webloc", "inetloc", "fileloc", "sh", "zsh", "bash", "csh", "ksh", "py", "rb", "pl", "scpt", "scptd",
+                                            "applescript", "action", "jar", "prefpane", "kext", "plugin", "bundle", "service", "framework", "dylib",
+                                            "so", "osax", "mobileconfig", "xpc", "appex", "url", "alias", "saver", "qlgenerator", "mdimporter"]
+
+    static let neverTypes: [String] = ["com.apple.application", "com.apple.application-bundle", "public.executable", "public.unix-executable",
+                                       "public.script", "public.shell-script", "com.apple.applescript.script", "com.apple.applescript.text",
+                                       "com.apple.terminal.shell-script", "com.apple.automator-workflow", "com.apple.terminal.session",
+                                       "com.apple.installer-package-archive", "com.apple.disk-image", "public.disk-image", "com.apple.alias-file",
+                                       "public.symlink", "com.apple.web-internet-location", "com.apple.internet-location",
+                                       "com.apple.file-internet-location"]
+
+    /// A file as it really is: its alias or symbolic links resolved, then what it is (`fileAction`). The resolved file
+    /// is what's opened or shown. Off the main thread.
+    nonisolated static func decide(_ url: URL) -> (URL, FileAction) {
+        let resolved = (try? URL(resolvingAliasFileAt: url, options: [.withoutUI, .withoutMounting])) ?? url
+        let real = resolved.resolvingSymlinksInPath()
+        let values = try? real.resourceValues(forKeys: [.contentTypeKey, .isDirectoryKey, .isSymbolicLinkKey, .isAliasFileKey])
+        guard FileManager.default.fileExists(atPath: real.path), values?.isSymbolicLink != true, values?.isAliasFile != true else { return (real, .reveal) }
+        return (real, fileAction(type: values?.contentType, ext: real.pathExtension, isDirectory: values?.isDirectory == true))
+    }
+
+    /// `type`: the resolved file's type; `isDirectory`: it's a folder (a document package, like Keynote's, is one).
+    static func fileAction(type: UTType?, ext: String, isDirectory: Bool) -> FileAction {
+        guard let type, type.conforms(to: .content), !neverOpened.contains(ext.lowercased()) else { return .reveal }
+        for id in neverTypes { if let never = UTType(id), type.conforms(to: never) { return .reveal } }
+        if isDirectory && !type.conforms(to: .package) { return .reveal }   // a folder is shown, never opened
+        return .open
+    }
+}
+
+// MARK: - A notebook's cover, field by field
+
+/// Changes to a notebook's cover waiting to land, field by field (`private`, `color`, `view`), journaled on this Mac
+/// at once like canvas edits, and made on whatever the cover is on disk when they land: a field never carries an old
+/// value of another. Shown in memory at once (Private first), and an unknown cover counts as Private.
+struct CoverFields: Codable, Equatable, Sendable {
+    var notebook: String
+    /// Each field's value ("" takes `private` or `view` off).
+    var fields: [String: String] = [:]
+
+    var isEmpty: Bool { fields.isEmpty }
+
+    static let names: Set<String> = ["private", "color", "view"]
+
+    /// The cover with these fields made on it, and nothing else.
+    static func apply(_ fields: [String: String], to file: inout NoteFile) {
+        for (field, value) in fields {
+            switch field {
+            case "private": file.setScalar("private", value == "true" ? "true" : nil)
+            case "view": file.setScalar("view", value == "canvas" ? "canvas" : nil)
+            case "color": file.color = value
+            default: break
+            }
+        }
+        file.cover = true
+    }
+
+    /// A notebook as shown: what its cover says, with each waiting field over it (only those), and an unknown cover
+    /// counting as Private.
+    func shown(isPrivate read: Bool, unknown: Bool, color: String, view: NoteLibrary.View) -> (isPrivate: Bool, color: String, view: NoteLibrary.View) {
+        let isPrivate = fields["private"].map { $0 == "true" } ?? read
+        let shownColor = fields["color"] ?? color
+        let shownView = fields["view"].map { $0 == "canvas" ? NoteLibrary.View.canvas : .grid } ?? view
+        return (isPrivate || unknown, shownColor, shownView)
+    }
+
+    /// After a write of `wrote` landed: the fields still waiting (one changed again meanwhile stays).
+    func after(wrote: [String: String]) -> CoverFields {
+        var next = self
+        for (field, value) in wrote where next.fields[field] == value { next.fields[field] = nil }
+        return next
+    }
 }
 
 // MARK: - Notes on people
@@ -609,10 +716,20 @@ struct NoteCanvas: Codable, Equatable, Sendable {
     struct Stamped: Codable, Equatable, Sendable {
         var edit: Edit
         var at: Double
+        /// Its own id: a write acknowledges exactly the edits it wrote, by id.
+        var id: String
 
-        init(_ edit: Edit, at: Double = Date().timeIntervalSince1970) {
+        init(_ edit: Edit, at: Double = Date().timeIntervalSince1970, id: String = UUID().uuidString) {
             self.edit = edit
             self.at = at
+            self.id = id
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            edit = try c.decode(Edit.self, forKey: .edit)
+            at = try c.decode(Double.self, forKey: .at)
+            id = try c.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
         }
     }
 
@@ -734,46 +851,80 @@ struct NoteCanvas: Codable, Equatable, Sendable {
 
     /// What a based write puts in the file now on disk (`disk`, nil when there's none): the file merged with iCloud's
     /// versions of it, then the edits (each at its own time), so what changed elsewhere meanwhile stays; everything
-    /// this Petal doesn't know (a later Petal's keys, on the file or on an item) is kept as it was. Nil when the file
-    /// isn't a canvas Petal can read (kept as it is).
-    static func write(_ edits: [Stamped], disk: String?, versions: [String] = []) -> String? {
-        guard let current = decode(disk), let base = merged(disk: disk, versions: versions) else { return nil }
+    /// this Petal doesn't know (a later Petal's keys, at the top or on an item) is kept, from the file and from every
+    /// version merged. `whole`: for each version, whether all of it is kept (one it can't read, or a key it doesn't
+    /// know holding another value than the file's, isn't): only those may be marked resolved. Nil when the file isn't
+    /// a canvas Petal can read.
+    static func merge(_ edits: [Stamped], disk: String?, versions: [String] = []) -> (text: String, whole: [Bool])? {
+        guard let current = decode(disk) else { return nil }
+        let readable = versions.map { decode($0) != nil }
+        let base = versions.indices.filter { readable[$0] }.compactMap { decode(versions[$0]) }.reduce(current, merge)
         let next = base.applyingMerged(edits)
-        if next == current, disk != nil { return disk }
-        var raw: [String: Any] = [:]
-        if let disk, !disk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            guard let object = try? JSONSerialization.jsonObject(with: Data(disk.utf8)) as? [String: Any] else { return nil }
-            raw = object
+        var whole = readable
+        func object(_ text: String?) -> [String: Any]? {
+            guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [:] }
+            return try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]
+        }
+        guard var raw = object(disk) else { return nil }
+        let others: [[String: Any]?] = versions.indices.map { readable[$0] ? object(versions[$0]) : nil }
+        let known: Set<String> = ["version", "notes", "areas", "arrows", "texts", "zoom", "zoomAt", "removed"]
+        for (i, other) in others.enumerated() {
+            guard let other else { continue }
+            for (key, value) in other where !known.contains(key) {
+                if let have = raw[key] { if !same(have, value) { whole[i] = false } } else { raw[key] = value }
+            }
         }
         guard let fresh = try? JSONSerialization.jsonObject(with: Data(next.encoded().utf8)) as? [String: Any] else { return nil }
+        let own: [String: Set<String>] = ["notes": ["x", "y", "at"], "areas": ["id", "label", "x", "y", "w", "h", "at"],
+                                          "arrows": ["id", "from", "to", "dashed", "at"], "texts": ["id", "text", "x", "y", "at"]]
+        /// One source's raw items by id.
+        func items(_ key: String, _ source: [String: Any]?) -> [String: [String: Any]] {
+            guard let source else { return [:] }
+            if key == "notes" { return (source[key] as? [String: Any] ?? [:]).compactMapValues { $0 as? [String: Any] } }
+            return Dictionary((source[key] as? [[String: Any]] ?? []).compactMap { item in (item["id"] as? String).map { ($0, item) } },
+                              uniquingKeysWith: { a, _ in a })
+        }
         for (key, value) in fresh {
-            switch key {
-            case "notes":
-                let old = raw[key] as? [String: Any] ?? [:]
+            guard let ownKeys = own[key] else { raw[key] = value; continue }
+            // The file's items first, then each version's: every key this Petal doesn't know kept, the known ones fresh.
+            let sources = [items(key, raw)] + others.map { items(key, $0) }
+            func kept(_ id: String, _ item: [String: Any]) -> [String: Any] {
+                var out: [String: Any] = [:]
+                for (n, source) in sources.enumerated() {
+                    guard let found = source[id] else { continue }
+                    for (field, v) in found where !ownKeys.contains(field) {
+                        if let have = out[field] { if !same(have, v), n > 0 { whole[n - 1] = false } } else { out[field] = v }
+                    }
+                }
+                for (field, v) in item { out[field] = v }
+                return out
+            }
+            if key == "notes" {
                 var merged: [String: Any] = [:]
-                for (id, spot) in value as? [String: Any] ?? [:] { merged[id] = keep(old[id], spot) }
+                for (id, spot) in value as? [String: Any] ?? [:] { merged[id] = kept(id, spot as? [String: Any] ?? [:]) }
                 raw[key] = merged
-            case "areas", "arrows", "texts":
-                let old = Dictionary((raw[key] as? [[String: Any]] ?? []).compactMap { item in (item["id"] as? String).map { ($0, item) } },
-                                     uniquingKeysWith: { a, _ in a })
-                raw[key] = (value as? [[String: Any]] ?? []).map { item in keep((item["id"] as? String).flatMap { old[$0] }, item) }
-            default:
-                raw[key] = value
+            } else {
+                raw[key] = (value as? [[String: Any]] ?? []).map { item in kept(item["id"] as? String ?? "", item) }
             }
         }
         guard let data = try? JSONSerialization.data(withJSONObject: raw, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else { return nil }
-        return String(decoding: data, as: UTF8.self) + "\n"
+        return (String(decoding: data, as: UTF8.self) + "\n", whole)
+    }
+
+    /// The text alone (see `merge`); the file as it is when nothing changes it.
+    static func write(_ edits: [Stamped], disk: String?, versions: [String] = []) -> String? {
+        if versions.isEmpty, let current = decode(disk), disk != nil, current.applyingMerged(edits) == current { return disk }
+        return merge(edits, disk: disk, versions: versions)?.text
     }
 
     static func write(_ edit: Edit, disk: String?, versions: [String] = [], at: Double = Date().timeIntervalSince1970) -> String? {
         write([Stamped(edit, at: at)], disk: disk, versions: versions)
     }
 
-    /// An item as this Petal writes it, over what the file had for it (the keys it doesn't know kept).
-    private static func keep(_ old: Any?, _ new: Any) -> Any {
-        guard var merged = old as? [String: Any], let fields = new as? [String: Any] else { return new }
-        for (key, value) in fields { merged[key] = value }
-        return merged
+    /// Two JSON values alike.
+    private static func same(_ a: Any, _ b: Any) -> Bool {
+        let options: JSONSerialization.WritingOptions = [.sortedKeys, .fragmentsAllowed]
+        return (try? JSONSerialization.data(withJSONObject: a, options: options)) == (try? JSONSerialization.data(withJSONObject: b, options: options))
     }
 
     static let zoomSteps: [Double] = [0.5, 0.67, 0.8, 1, 1.25, 1.5, 2]
@@ -831,11 +982,15 @@ enum CanvasQueue {
         return covers.first { $0.id == coverID }?.notebook
     }
 
-    /// After a write of the first `count` waiting edits: what's still waiting (the ones added meanwhile, and all of
-    /// them when it failed).
-    static func after(_ waiting: [NoteCanvas.Stamped], wrote count: Int, ok: Bool) -> [NoteCanvas.Stamped] {
-        ok ? Array(waiting.dropFirst(min(count, waiting.count))) : waiting
+    /// After a write: what's still waiting. Only the exact edits it wrote go (by id): the ones added meanwhile, and
+    /// everything when it failed, stay.
+    static func after(_ waiting: [NoteCanvas.Stamped], wrote ids: Set<String>, ok: Bool) -> [NoteCanvas.Stamped] {
+        ok ? waiting.filter { !ids.contains($0.id) } : waiting
     }
+
+    /// Whether a write's completion may touch what's waiting (and the journal): only when nothing drained or switched
+    /// folders since it started.
+    static func current(started: Int, now: Int) -> Bool { started == now }
 
     /// How long to wait before trying again after `failures` failed tries in a row (2 s, doubling, at most a minute).
     static func retry(after failures: Int) -> TimeInterval { min(60, 2 * pow(2, Double(max(0, failures - 1)))) }
@@ -891,6 +1046,10 @@ enum NoteDrop {
             }
         }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    /// A note with two versions or more (a conflict not kept yet) isn't used anywhere until one is kept: which
+    /// version's words would go is the person's to pick.
+    static func allowed(versions: Int) -> Bool { versions <= 1 }
 
     /// An event from a note: its title, and the first date-time its words name from now on (an hour long), else
     /// tomorrow at 9:00. `found`: the dates the text names, in order (NSDataDetector's, with their durations).

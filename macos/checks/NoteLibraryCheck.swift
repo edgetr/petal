@@ -62,6 +62,28 @@ struct NoteLibraryCheck {
         let unsafe = [NoteContract.TaskItem(kind: "tab", title: "", target: "file:///etc/passwd"), NoteContract.TaskItem(kind: "tab", title: "", target: "javascript:alert(1)"),
                       NoteContract.TaskItem(kind: "file", title: "", target: "relative/path"), NoteContract.TaskItem(kind: "mail", title: "", target: "https://evil.example")]
         expect(NoteTasks.openable(unsafe).isEmpty, "a tab only at a web address, a file only at a full path, a mail only by its message address")
+
+        // Open all's file rule, on real files in a throwaway folder: only documents open, as they really are.
+        let fm = FileManager.default
+        let things = fm.temporaryDirectory.appending(path: "petal-openall-\(UUID().uuidString)")
+        try? fm.createDirectory(at: things.appending(path: "Thing.app/Contents/MacOS"), withIntermediateDirectories: true)
+        try? Data("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleExecutable</key><string>Thing</string></dict></plist>".utf8)
+            .write(to: things.appending(path: "Thing.app/Contents/Info.plist"))
+        try? Data("#!/bin/sh\necho hi\n".utf8).write(to: things.appending(path: "Run me.command"))
+        try? fm.createSymbolicLink(at: things.appending(path: "Report.pdf"), withDestinationURL: things.appending(path: "Thing.app"))
+        try? Data(#"<?xml version="1.0"?><plist version="1.0"><dict><key>URL</key><string>https://example.com</string></dict></plist>"#.utf8)
+            .write(to: things.appending(path: "Link.webloc"))
+        try? Data("%PDF-1.4\n%%EOF\n".utf8).write(to: things.appending(path: "Real.pdf"))
+        try? Data("plain words".utf8).write(to: things.appending(path: "Words.txt"))
+        func action(_ name: String) -> NoteTasks.FileAction { NoteTasks.decide(things.appending(path: name)).1 }
+        expect(action("Thing.app") == .reveal, "an app: shown in Finder, never opened")
+        expect(action("Run me.command") == .reveal, "a .command: shown, never run")
+        expect(action("Report.pdf") == .reveal && NoteTasks.decide(things.appending(path: "Report.pdf")).0.lastPathComponent == "Thing.app",
+               "a link named like a PDF to an app: resolved first, and shown, never opened")
+        expect(action("Link.webloc") == .reveal, "a .webloc shortcut: shown, never followed")
+        expect(action("Real.pdf") == .open && action("Words.txt") == .open, "a PDF and a text file: opened")
+        expect(action("Missing.pdf") == .reveal, "a file that isn't there: nothing opened")
+        try? fm.removeItem(at: things)
         expect(NoteContract.fromPetal(file), "from: petal")
         expect(file.serialized() == text.replacingOccurrences(of: "\r\n", with: "\n"), "every one written back exactly as it was")
         var blockWatch = NoteFile(id: "W2", body: "")
@@ -226,6 +248,19 @@ struct NoteLibraryCheck {
         expect((kept?["later"] as? [String: Int])?["k"] == 1 && ((kept?["areas"] as? [[String: Any]])?.first?["tint"] as? String) == "green"
                && ((kept?["notes"] as? [String: [String: Any]])?["x"]?["pinned"] as? Bool) == true && (kept?["notes"] as? [String: Any])?["y"] != nil,
                "a write keeps what this Petal doesn't know, on the file and on its items")
+        // Merging versions keeps what this Petal doesn't know from each, at the top and on each item; a version whose
+        // unknown keys can't all be kept isn't whole (left unresolved).
+        let fileV = #"{"notes":{"n1":{"x":1,"y":1,"at":1,"pin":"a"}},"future":1}"#
+        let versionV = #"{"notes":{"n1":{"x":5,"y":5,"at":9,"glow":true},"n2":{"x":2,"y":2,"at":3,"tag":"v"}},"later":{"k":2}}"#
+        let clashV = #"{"notes":{"n1":{"x":1,"y":1,"at":1,"pin":"b"}},"future":1}"#
+        let keptAll = NoteCanvas.merge([], disk: fileV, versions: [versionV, clashV, "not json"])
+        let keptObject = keptAll.flatMap { try? JSONSerialization.jsonObject(with: Data($0.text.utf8)) as? [String: Any] }
+        let n1 = (keptObject?["notes"] as? [String: [String: Any]])?["n1"], n2 = (keptObject?["notes"] as? [String: [String: Any]])?["n2"]
+        expect(keptObject?["future"] as? Int == 1 && (keptObject?["later"] as? [String: Int])?["k"] == 2, "top-level keys from the file and each version kept")
+        expect(n1?["pin"] as? String == "a" && n1?["glow"] as? Bool == true && n1?["x"] as? Double == 5 && n2?["tag"] as? String == "v",
+               "each item keeps every version's unknown keys, the newer known ones winning", "\(String(describing: n1))")
+        expect(keptAll?.whole == [true, false, false], "a version with a clashing unknown key, or unreadable, isn't whole", "\(String(describing: keptAll?.whole))")
+
         expect(NoteCanvas.decode(#"{"areas":[{"id":"a"}]}"#) == nil && NoteCanvas.write(.move("y", .init(x: 1, y: 1)), disk: #"{"areas":[{"id":"a"}]}"#) == nil,
                "an area Petal can't read: the file isn't taken for empty, and isn't written")
         let placed = canvas.spots(for: ["n1", "n3", "n4"], columns: 2)
@@ -259,8 +294,13 @@ struct NoteLibraryCheck {
 
         // A save that failed keeps its edits, in order, until a write takes them.
         let waiting = [NoteCanvas.Stamped(.zoom(1), at: 1), NoteCanvas.Stamped(.zoom(2), at: 2), NoteCanvas.Stamped(.zoom(1.5), at: 3)]
-        expect(CanvasQueue.after(waiting, wrote: 2, ok: false) == waiting, "a failed write keeps every edit")
-        expect(CanvasQueue.after(waiting, wrote: 2, ok: true) == [waiting[2]], "a write that landed leaves the ones added meanwhile")
+        expect(CanvasQueue.after(waiting, wrote: [waiting[0].id, waiting[1].id], ok: false) == waiting, "a failed write keeps every edit")
+        expect(CanvasQueue.after(waiting, wrote: [waiting[0].id, waiting[1].id], ok: true) == [waiting[2]], "a write that landed leaves the ones added meanwhile")
+        expect(CanvasQueue.after([waiting[2]], wrote: [waiting[0].id, waiting[1].id], ok: true) == [waiting[2]],
+               "a write acknowledges only the edits it wrote, by id, whatever else is waiting now")
+        expect(!CanvasQueue.current(started: 1, now: 2) && CanvasQueue.current(started: 2, now: 2), "a completion from before a drain touches nothing")
+        let decoded = try? JSONDecoder().decode(NoteCanvas.Stamped.self, from: JSONEncoder().encode(waiting[0]))
+        expect(decoded?.id == waiting[0].id, "an edit's id is kept in the journal")
         expect(CanvasQueue.retry(after: 1) == 2 && CanvasQueue.retry(after: 3) == 8 && CanvasQueue.retry(after: 20) == 60, "tried again sooner, then less often")
         expect(NoteCanvas().applying(waiting).zoom == 1.5 && NoteCanvas().applying(waiting).zoomAt == 3, "edits kept with their own times")
         let newerThere = NoteCanvas().applying(.move("n1", .init(x: 9, y: 9)), at: 100).applying(.removeArea("gone"), at: 100)
@@ -293,6 +333,42 @@ struct NoteLibraryCheck {
                "a note moved into a Private notebook mid-read: not given")
         expect(NoteShelf.standaloneGroup("b", group: ["a", "b", "c"]) == ["b", "a", "c"] && NoteShelf.standaloneGroup("x", group: []) == ["x"],
                "a note in a conflict opens with every other paper of it beside it")
+        // The group fits the visible screen: from near its right edge, three papers wrap and move in.
+        let visible = CGRect(x: 0, y: 0, width: 1000, height: 900)
+        let paper = CGSize(width: 360, height: 380)
+        let laid = NoteShelf.groupLayout(count: 3, corner: CGPoint(x: 900, y: 850), paper: paper, visible: visible)
+        expect(laid.allSatisfy { $0.x >= visible.minX && $0.x + paper.width <= visible.maxX && $0.y <= visible.maxY && $0.y - paper.height >= visible.minY },
+               "every paper of the group on the screen", "\(laid)")
+        expect(Set(laid.map { "\($0.x),\($0.y)" }).count == 3 && laid[0].y == laid[1].y && laid[2].y < laid[0].y,
+               "side by side, the third wrapping to a row below, none overlapping", "\(laid)")
+        expect(!NoteDrop.allowed(versions: 2) && NoteDrop.allowed(versions: 1), "a note with two versions isn't dropped on an app until one is kept")
+        // Privacy across the cover's versions; a cover is its file whatever its front matter.
+        var publicCover = NoteFile(id: "C", body: "")
+        publicCover.cover = true
+        var privateVersion = publicCover
+        privateVersion.setScalar("private", "true")
+        expect(NoteLibrary.privateNotebook(covers: [publicCover, privateVersion], unread: false), "Private when any version of the cover says so")
+        expect(NoteLibrary.privateNotebook(covers: [], unread: true) && !NoteLibrary.privateNotebook(covers: [publicCover], unread: false),
+               "unknown counts as Private; one public cover is public")
+        expect(NoteLibrary.isCover(fileName: NoteShelf.coverName, file: NoteFile(id: "file:x", body: "hand written")), "a cover version without front matter is the cover")
+
+        // Cover fields, one by one: a field never carries an old value of another.
+        var synced = NoteFile(id: "C2", body: "")
+        synced.cover = true
+        synced.setScalar("private", "true")   // synced from another Mac
+        var waitingColor = CoverFields(notebook: "Garden")
+        waitingColor.fields["color"] = "#62ba46"
+        CoverFields.apply(waitingColor.fields, to: &synced)
+        expect(NoteContract.isPrivate(synced) && synced.color == "#62ba46", "a waiting color lands without touching a synced Private")
+        let shown = waitingColor.shown(isPrivate: true, unknown: false, color: "#007aff", view: .canvas)
+        expect(shown.isPrivate && shown.color == "#62ba46" && shown.view == .canvas, "shown: only the waiting field over what the cover says")
+        var waitingPrivate = CoverFields(notebook: "Garden")
+        waitingPrivate.fields["private"] = "true"
+        expect(waitingPrivate.shown(isPrivate: false, unknown: false, color: "", view: .grid).isPrivate, "Private shown at once")
+        var twice = waitingPrivate
+        twice.fields["private"] = ""
+        expect(twice.after(wrote: ["private": "true"]).fields["private"] == "" && waitingPrivate.after(wrote: ["private": "true"]).isEmpty,
+               "a write acknowledges a field only while it still holds what it wrote")
 
         // MARK: The dock
 
