@@ -35,20 +35,23 @@ extension NoteDesk {
         // Every notebook the answer tells of; checked again right before it's handed over (after the redaction's wait
         // and any other): one turned Private meanwhile, or the asker's note moved out of it, and nothing is told.
         let told = Told()
-        let send: (Any) -> Void = { [weak self] value in
+        // The one way every answer leaves, success or error: the vault's redaction, then the Private fence on every
+        // notebook and note it tells of (an error listing candidates included), right before it's handed over.
+        let deliver = { [weak self] (value: Any, isError: Bool) in
             Self.shielded(value) { out in
                 guard let out else { return refuse(NoteShield.unreadable) }
                 guard let self else { return }
                 let insideNow = asker.flatMap { self.store.current($0)?.notebook }
-                // Each note returned, by its identity, where it is now (moved into a Private notebook meanwhile counts).
+                // Each note told of, by its identity, where it is now (moved into a Private notebook meanwhile counts).
                 let now = told.books.union(NotePrivacy.currentNotebooks(of: told.notes, notes: self.store.notes.map { ($0.noteID, $0.notebook) }))
                 guard NotePrivacy.deliverable(notebooks: now, privateBooks: self.store.privateBooks, asker: insideNow) else {
                     return refuse(Self.turnedPrivate)
                 }
-                answer(out)
+                if isError { refuse(out as? String ?? NoteShield.unreadable) } else { answer(out) }
             }
         }
-        let fail: (String) -> Void = { text in Self.shielded(text) { out in refuse(out as? String ?? NoteShield.unreadable) } }
+        let send: (Any) -> Void = { deliver($0, false) }
+        let fail: (String) -> Void = { deliver($0, true) }
         guard on else { return fail("Petal Notes is off in Petal's settings (notes).") }
         switch name {
         case "petal_notes":
@@ -190,7 +193,12 @@ extension NoteDesk {
                 then(paper)
             case .none?: fail("No note with that id; petal_notes lists them.")
             case .ambiguous(let all)?:
-                // Never a guess between notes titled alike: their handles, to name one.
+                // Never a guess between notes titled alike: their handles, to name one; the candidates told of go
+                // through the same Private fence as any answer.
+                for index in all {
+                    told.books.insert(papers[index].notebook)
+                    told.notes.insert(papers[index].noteID)
+                }
                 fail("More than one note is titled that: name one by its id (" + all.map { rows[$0].handle }.joined(separator: ", ") + ").")
             case .unreadable?, nil: refuse(NoteShield.unreadable)
             }

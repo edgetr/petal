@@ -1358,10 +1358,14 @@ final class NoteDesk {
         // A note opened on its own has nowhere to rest: folding it puts it away.
         if standalone[key] != nil { return closeStandalone(key, escape: escape) }
         keyboardWanted.cancel(key)
-        guard faces[key] == .open || faces[key] == .back else { return }
+        let hadKeyboard = panels[key]?.isKeyWindow == true
+        // Nothing to fold (a folded paper that took the keyboard, say by being dragged): Escape still hands it back.
+        guard faces[key] == .open || faces[key] == .back else {
+            if escape && hadKeyboard { giveKeyboardBack() }
+            return
+        }
         Self.roomTurn.cancel()
         editors[key]?.flush()
-        let hadKeyboard = panels[key]?.isKeyWindow == true
         faces[key] = .folded
         if keyboard == key { keyboard = nil }
         letGoIfEmpty(key)

@@ -37,7 +37,11 @@ final class NotesWindow {
     var isOpen: Bool { window?.isVisible ?? false }
 
     func show(_ shelf: NoteLibrary.Shelf? = nil) {
-        if let shelf { model.shelf = shelf }
+        // An explicit shelf (a notebook's stack, its link) is shown as asked: never an earlier search over it.
+        if let shelf {
+            model.shelf = shelf
+            model.query = ""
+        }
         let window = self.window ?? make()
         if !window.isVisible { window.setGlassContent(NotesWindowView(model: model).environment(PetalApp.shared)) }
         PetalWindow.bringForward(window)
