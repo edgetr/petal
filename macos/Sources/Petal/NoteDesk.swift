@@ -1139,6 +1139,8 @@ final class NoteDesk {
     /// there doesn't drop its keyboard request.
     func open(_ key: String, expecting: NoteShelf.KeyboardRequests.Target? = nil) {
         guard let paper = store.paper(key) else { return }
+        // Open in Petal's viewer's margin: closed there first (one editor per note).
+        heldByViewer.removeValue(forKey: paper.noteID)?()
         faces[key] = .open
         keyboard = key
         local.shown = Array(Set(local.shown + [paper.noteID]))
@@ -1226,6 +1228,7 @@ final class NoteDesk {
     }
 
     func flip(_ key: String) {
+        if let paper = store.paper(key) { heldByViewer.removeValue(forKey: paper.noteID)?() }
         faces[key] = faces[key] == .back ? .open : .back
         if faces[key] == .open { wantKeyboard(key) }
         panels[key]?.refit()
@@ -1255,8 +1258,16 @@ final class NoteDesk {
 
     private func isDesktopNote(_ key: String) -> Bool { store.paper(key)?.file.places.contains { $0.kind == .desktop } == true }
 
+    /// Notes open for writing in Petal's viewer's margin (by note id): told to fold before the desk opens one, so a
+    /// note is never open in two editors.
+    @ObservationIgnored var heldByViewer: [String: () -> Void] = [:]
+
+    /// Petal's viewer came to the front: the notes on the window left behind hide, as for any other app coming
+    /// forward, until a fresh read of what's in front after it.
+    func viewerFront() { concealWindowNotes() }
+
     /// A note made just now and put away with nothing written goes (to the Trash: never deleted outright).
-    private func letGoIfEmpty(_ key: String) {
+    func letGoIfEmpty(_ key: String) {
         guard fresh.contains(key), let paper = store.paper(key), faces[key] != .open,
               NoteShelf.mayTrash(bodyEmpty: paper.file.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, picturesPending: store.picturesPending(key),
                                  importing: store.importing(key))
@@ -1764,8 +1775,9 @@ final class NoteDesk {
     @discardableResult
     /// `window`: the frame (Accessibility's coordinates) of the window it's made on, when that isn't the one in
     /// front (a drop on a window behind): its spot is recorded against that window.
+    /// `open` false: made without opening it on the desk (Petal's viewer opens it in its margin).
     func make(on stick: NoteStick, body: String = "", chat: String = "", at point: CGPoint? = nil, window: CGRect? = nil,
-              expecting: NoteShelf.KeyboardRequests.Target? = nil) -> PaperNote? {
+              expecting: NoteShelf.KeyboardRequests.Target? = nil, open opening: Bool = true) -> PaperNote? {
         var file = NoteFile(body: body)
         file.places = [stick]
         file.chat = chat
@@ -1780,6 +1792,7 @@ final class NoteDesk {
                 local.spots[paper.noteID] = NoteSpot.stick(panel: rect, window: NoteRules.appKitFrame(frame, primaryHeight: primaryHeight))
             }
         }
+        guard opening else { return paper }
         if let scene, stick.kind != .desktop, let index = NoteMatch.best([stick], scene) { here[paper.key] = index }
         open(paper.key, expecting: expecting)
         if stick.kind == .desktop { refreshSpaces() }
@@ -2131,11 +2144,13 @@ final class NoteDesk {
         for (index, stick) in paper.file.places.enumerated() {
             let item = NSMenuItem(title: Self.describe(stick), action: nil, keyEquivalent: "")
             item.state = here[key] == index ? .on : .off
-            if paper.file.places.count > 1 {
-                let sub = NSMenu()
-                sub.addItem(ActionItem("Take it off here") { [weak self] in self?.unstick(key, index) })
-                item.submenu = sub
+            let sub = NSMenu()
+            // A file's note: the file in Petal's viewer, at its page or slide, with its notes in the margin.
+            if stick.kind == .file, ViewerKind.of(stick.path) != nil {
+                sub.addItem(ActionItem("Open in Petal's viewer") { [weak self] in self?.openInViewer(stick) })
             }
+            if paper.file.places.count > 1 { sub.addItem(ActionItem("Take it off here") { [weak self] in self?.unstick(key, index) }) }
+            if !sub.items.isEmpty { item.submenu = sub }
             menu.addItem(item)
         }
         if let cached = scene, let cachedRead = front, cached.window != nil {
@@ -2168,6 +2183,24 @@ final class NoteDesk {
             }
         })
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    /// A file's place opened in Petal's viewer: its file found again through its bookmark (off the main thread),
+    /// then checked as any file the viewer opens.
+    func openInViewer(_ stick: NoteStick) {
+        let path = stick.path
+        let bookmark = Data(base64Encoded: stick.bookmark)
+        Self.queue.async {
+            let found = bookmark.flatMap(ViewerLoader.follow)?.path
+            let target = found.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil } ?? path
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.app.viewers.open(path: target, page: stick.page ?? stick.slide) { result in
+                        if case .failure(let refusal) = result { self.say(refusal.description) }
+                    }
+                }
+            }
+        }
     }
 
     private func restick(_ key: String, _ places: [NoteStick]) {

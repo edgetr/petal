@@ -38,6 +38,10 @@ swiftc -parse-as-library -O -o "$out/notestore" Sources/Petal/NoteFile.swift Sou
 # tell an agent is redacted with the vault's index, or not told while the vault can't be read (NoteShield).
 swiftc -parse-as-library -O -o "$out/noteselection" Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift checks/NoteSelectionCheck.swift
 "$out/noteselection"
+# Petal's viewer: a file anchor's page, slide and passage, the path an agent names (on throwaway folders in the
+# temporary folder), the margin's layout, a preview cut into pages, copies' names and comments (no window, no PDF).
+swiftc -parse-as-library -O -o "$out/viewer" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/ViewerFile.swift checks/ViewerFileCheck.swift
+"$out/viewer"
 swiftc -parse-as-library -O -o "$out/background" Sources/Petal/Background.swift Sources/Petal/UIMap.swift checks/BackgroundCheck.swift
 "$out/background"
 swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Petal/UIMap.swift checks/VaultCheck.swift

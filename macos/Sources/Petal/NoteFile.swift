@@ -29,7 +29,9 @@ struct NoteStick: Equatable, Sendable {
         /// A browser tab: its own id (Chromium) or its tab-strip button (Safari, Firefox, Zen) while the browser
         /// runs, and its page (url) after.
         case tab
-        /// A file open in any app: its path (AXDocument), kept with a bookmark so moves and renames follow.
+        /// A file open in any app: its path (AXDocument), kept with a bookmark so moves and renames follow. In Petal's
+        /// viewer it may also say where in the file: a page or slide (`page`, `slide`), and on a PDF's page a passage
+        /// (`quote`, `before`, `after` and its `bounds` on the page). In other apps it's the file, as before.
         case file
         /// One window: its number while its app runs; after, its app and title when only one window has it.
         case window
@@ -75,6 +77,11 @@ struct NoteStick: Equatable, Sendable {
     var tabElement: Int? = nil
     var desktop: Int? = nil
     var mode = ""
+    /// Where in a file (Petal's viewer): its page or slide, counted from 1, and a PDF passage's bounds on that page
+    /// (x, y, width, height in the page's points, from its bottom-left corner).
+    var page: Int? = nil
+    var slide: Int? = nil
+    var bounds: [Double]? = nil
     /// Keys this Petal doesn't know (a later one's, or the person's own), each with its lines exactly as written
     /// (nested ones too), written back as they were.
     var extra: [(key: String, lines: [String])] = []
@@ -83,7 +90,7 @@ struct NoteStick: Equatable, Sendable {
         a.kind == b.kind && a.app == b.app && a.appName == b.appName && a.url == b.url && a.title == b.title && a.path == b.path
             && a.bookmark == b.bookmark && a.quote == b.quote && a.before == b.before && a.after == b.after && a.mac == b.mac
             && a.pid == b.pid && a.window == b.window && a.tabID == b.tabID && a.shared == b.shared && a.tabElement == b.tabElement
-            && a.desktop == b.desktop && a.mode == b.mode
+            && a.desktop == b.desktop && a.mode == b.mode && a.page == b.page && a.slide == b.slide && a.bounds == b.bounds
             && a.extra.map(\.key) == b.extra.map(\.key) && a.extra.map(\.lines) == b.extra.map(\.lines)
     }
 
@@ -108,7 +115,7 @@ struct NoteStick: Equatable, Sendable {
         case .tab:
             if mac == other.mac, let a = pid, let b = other.pid { return NoteRules.sameTab(noteTab, pid: a, other.noteTab, pid: b) }
             return NoteRules.byAddress(noteTab, other.noteTab)
-        case .file: return path == other.path
+        case .file: return path == other.path && page == other.page && slide == other.slide && quote == other.quote
         case .window: return NoteShelf.sameWindow(self, other)
         case .app: return app == other.app
         case .desktop: return desktop == other.desktop
@@ -136,11 +143,24 @@ struct NoteStick: Equatable, Sendable {
             let quote = "“" + self.quote.prefix(60) + (self.quote.count > 60 ? "…”" : "”")
             return quote + " on " + (url.isEmpty ? (path as NSString).lastPathComponent : NoteText.shortAddress(url))
         case .tab: return "The page " + (NoteText.shortAddress(url).isEmpty ? title : NoteText.shortAddress(url))
-        case .file: return "The file " + (path as NSString).lastPathComponent + (appName.isEmpty ? "" : " (in any app)")
+        case .file:
+            let name = (path as NSString).lastPathComponent
+            if !self.quote.isEmpty {
+                let quote = "“" + self.quote.prefix(60) + (self.quote.count > 60 ? "…”" : "”")
+                return quote + " on " + name + (spot.isEmpty ? "" : ", " + spot)
+            }
+            return "The file " + name + (spot.isEmpty ? "" : ", " + spot) + (appName.isEmpty ? "" : " (in any app)")
         case .window: return "A window of \(appName.isEmpty ? app : appName)" + (title.isEmpty ? "" : ": “\(title)”")
         case .app: return "Every window of \(appName.isEmpty ? app : appName)"
         case .desktop: return "Desktop \(desktop.map(String.init) ?? "")" + (mode.isEmpty ? "" : " (\(mode))")
         }
+    }
+
+    /// Where in its file (Petal's viewer): "slide 3", "page 3", or nothing.
+    var spot: String {
+        if let slide { return "slide \(slide)" }
+        if let page { return "page \(page)" }
+        return ""
     }
 
     /// What the letterhead says for this place, in a few words.
@@ -148,11 +168,31 @@ struct NoteStick: Equatable, Sendable {
         switch kind {
         case .passage: return found ? "this sentence" : "passage moved"
         case .tab: return NoteText.shortAddress(url).isEmpty ? (title.isEmpty ? "a tab" : title) : NoteText.shortAddress(url)
-        case .file: return (path as NSString).lastPathComponent.isEmpty ? "a file" : (path as NSString).lastPathComponent
+        case .file:
+            let name = (path as NSString).lastPathComponent.isEmpty ? "a file" : (path as NSString).lastPathComponent
+            return spot.isEmpty ? name : name + " · " + spot
         case .window: return title.isEmpty ? (appName.isEmpty ? "a window" : "\(appName) window") : title
         case .app: return "all of \(appName.isEmpty ? app : appName)"
         case .desktop: return desktop.map { "Desktop \($0)" } ?? "the Desktop"
         }
+    }
+}
+
+/// A spot in a file as a file anchor writes it (Petal's viewer): a PDF passage's bounds on its page, "x y width
+/// height" in the page's points. Only finite numbers with a positive size; anything else is no bounds.
+enum ViewerSpots {
+    static func boundsText(_ bounds: [Double]) -> String? {
+        guard bounds.count == 4, bounds.allSatisfy(\.isFinite), bounds[2] > 0, bounds[3] > 0 else { return nil }
+        return bounds.map { value in
+            let rounded = (value * 100).rounded() / 100
+            return rounded == rounded.rounded() ? String(Int(rounded)) : String(rounded)
+        }.joined(separator: " ")
+    }
+
+    static func bounds(_ text: String) -> [Double]? {
+        let parts = text.split(separator: " ").compactMap { Double($0) }
+        guard parts.count == 4, text.split(separator: " ").count == 4, boundsText(parts) != nil else { return nil }
+        return parts
     }
 }
 
@@ -483,6 +523,9 @@ struct NoteFile: Equatable, Sendable {
                 if let tab = place.tabID { fields.append(("tab", Self.quoted(tab))) }
                 if let shared = place.shared { fields.append(("shared", "\(shared)")) }
                 if let desktop = place.desktop { fields.append(("desktop", "\(desktop)")) }
+                if let page = place.page { fields.append(("page", "\(page)")) }
+                if let slide = place.slide { fields.append(("slide", "\(slide)")) }
+                if let bounds = place.bounds, let text = ViewerSpots.boundsText(bounds) { fields.append(("bounds", Self.quoted(text))) }
                 for (offset, field) in fields.enumerated() {
                     head.append((offset == 0 ? "  - " : "    ") + "\(field.0): \(field.1)")
                 }
@@ -566,6 +609,10 @@ struct NoteFile: Equatable, Sendable {
                 case "tab": stick.tabID = value
                 case "shared": stick.shared = Int(value)
                 case "desktop": stick.desktop = Int(value)
+                // A spot this Petal can't read is kept as written, never dropped.
+                case "page" where (Int(value) ?? 0) > 0: stick.page = Int(value)
+                case "slide" where (Int(value) ?? 0) > 0: stick.slide = Int(value)
+                case "bounds" where ViewerSpots.bounds(value) != nil: stick.bounds = ViewerSpots.bounds(value)
                 default: stick.extra.append((key: field.key, lines: field.lines))
                 }
             }

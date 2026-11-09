@@ -98,7 +98,7 @@ SETTINGS_SCHEMA = {
     "dailySummary": ("", "A card with the day in the user's modes at this time each day (\"HH:MM\"; empty for none), with a line from Petal AI."),
     "aiNeverLook": (["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"], "Apps Petal AI never looks into (bundle ids): petal_look gives only their name, window lists leave out their titles, and screenshots leave them out."),
     "selectionAsk": (True, "macOS: selecting text in any app brings up a small \"Ask Petal AI\" button by it (and \"Note\", a new note on that sentence, when notes is on); clicking Ask quotes the text in the chat. (Also in every app's Services menu.) Never in apps kept private or password fields."),
-    "notes": (True, "macOS: Petal Notes, the user's own notes on paper stuck to places: a sentence, a browser tab, a window, all of an app, a file in any app, a Desktop. On a window they rest as tabs on its right edge at their line's height; ⌃⌥N, \"Note\" by selected text, dragging from the AI button or Stick here on a quick question makes one. Markdown files, one per note, a folder per notebook. petal_notes / petal_note_read / petal_note_write / petal_note_move / petal_note_stick."),
+    "notes": (True, "macOS: Petal Notes, the user's own notes on paper stuck to places: a sentence, a browser tab, a window, all of an app, a file in any app, a Desktop. On a window they rest as tabs on its right edge at their line's height; ⌃⌥N, \"Note\" by selected text, dragging from the AI button or Stick here on a quick question makes one. Markdown files, one per note, a folder per notebook. petal_notes / petal_note_read / petal_note_write / petal_note_move / petal_note_stick. Petal's viewer shows a document with its notes in a margin (petal_view, petal_view_versions, petal_view_pick, petal_note_pdf_comments)."),
     "notesLook": ("paper", "macOS: how notes look: paper (opaque paper tinted with the notebook's color) or glass (macOS's Liquid Glass)."),
     "notesFolder": ("", "macOS: where notes are kept (a folder path; empty: iCloud Drive's Petal Notes when iCloud Drive is on, else Petal's own folder in Application Support)."),
     "notesNotebook": ("Inbox", "macOS: the notebook new notes go to, unless one was last used on that site or app."),
@@ -958,6 +958,18 @@ ASSIST_TOOLS = {
     "petal_note_stick": (assist("petal_note_stick"), "Stick a note to what's in front now: to tab, window, app, file or desktop (else the most specific there is: the selected sentence, its tab, its file, its window). also: true keeps its other places; remove: an index from its places takes it off that one (a note keeps at least one).",
                          {"id": {"type": "string"}, "to": {"type": "string", "enum": ["passage", "tab", "window", "app", "file", "desktop"]},
                           "also": {"type": "boolean"}, "remove": {"type": "integer"}}),
+    "petal_view": (assist("petal_view"), "Open a document in Petal's viewer (macOS; part of Petal Notes): a PDF through PDFKit, or Word, PowerPoint, Keynote, Excel, Pages, Numbers, text and pictures through macOS's own Quick Look preview. "
+                   "The notes on that file show in the viewer's margin, lined up with their passage, page or slide; the person selects text and presses Note for an exact spot. path: the file's full path (~/ for the home folder); only a regular file the user owns, never through a link out of the home folder. page: which page or slide to show (from 1). "
+                   "It never moves or changes the file. Says how it's shown and how many pages or slides it has.",
+                   {"path": {"type": "string"}, "page": {"type": "integer"}}),
+    "petal_view_versions": (assist("petal_view_versions"), "Try changes to a document on copies first: makes a copy of the file for each of names (\"Shorter\", \"With numbers\") in a temporary folder and shows their pictures under the document in Petal's viewer, each with Use this. "
+                            "Change the copies (never the file itself); their pictures follow. The answer gives set (an id for petal_view_pick) and each version's name and path. Picking one only tells you: change the user's own file only after they allowed it.",
+                            {"path": {"type": "string"}, "names": {"type": "array", "items": {"type": "string"}}}),
+    "petal_view_pick": (assist("petal_view_pick"), "Which version the person picked with Use this (from your own petal_view_versions set): its name and copy's path, or null while they haven't. wait: seconds to wait for the pick (up to 120).",
+                        {"set": {"type": "string"}, "wait": {"type": "integer"}}),
+    "petal_note_pdf_comments": (assist("petal_note_pdf_comments"), "Write the user's notes on a PDF into it as comments (a passage's note as a highlight with its words, any other as a sticky note on its page), so they show in Preview, Acrobat and anywhere else. "
+                                "By default into a copy beside it (\"Name (with notes).pdf\"); into_original: true writes into the PDF itself, only after the user allows it, and keeps the original beside it (\"Name (before notes).pdf\"). Saved secrets are never written; nothing is written while the vault can't be read.",
+                                {"path": {"type": "string"}, "into_original": {"type": "boolean"}}),
 }
 
 
