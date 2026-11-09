@@ -2,7 +2,7 @@ import AppKit
 
 /// Petal's viewer for Petal AI and the person's other agents, through Assist's socket: `petal_view` opens a file
 /// the agent names (checked: a regular file the person owns, never through a link out of the home folder);
-/// `petal_view_versions` makes named copies in a temporary folder and shows them under the document;
+/// `petal_view_versions` makes named copies in Petal's own versions folder and shows them under the document;
 /// `petal_view_pick` tells the agent which one the person picked ("Use this"), only the agent that asked;
 /// `petal_note_pdf_comments` writes the notes on a PDF into it as comments (a copy beside it by default; the PDF
 /// itself only when asked, after the person allows it, keeping the original beside it). No note's words are told:
@@ -26,7 +26,9 @@ extension Viewers {
                 switch result {
                 case .failure(let refusal): fail(refusal.description)
                 case .success(let model):
-                    model.whenLoaded(within: Self.loadLimit) { _ in
+                    model.whenLoaded(within: Self.loadLimit) { answer in
+                        // Closed while it was read: said so, never a page count or "still loading".
+                        if answer == .closed { return fail(Self.closedText) }
                         var told = self.told(model)
                         if let page, !model.live, model.pageCount > 0, ViewerPages.index(page, count: model.pageCount) == nil {
                             told["note"] = "It has \(model.pageCount) \(model.unit.word)s; \(model.unit.word) \(page) isn't one, so it shows \(model.unit.word) \(model.current + 1)."
@@ -48,7 +50,7 @@ extension Viewers {
                         case .success(let set):
                             send(["set": set.id, "file": model.name,
                                   "versions": set.versions.map { ["id": $0.id, "name": $0.label, "path": $0.url.path] },
-                                  "note": "Copies in a temporary folder, shown under the document with Use this. Change the copies (never the file itself); their pictures follow. petal_view_pick tells you which one the person picks. Newer versions replace these (their copies go, but a picked one; one you changed goes to the Trash), and every copy goes when the viewer closes: read the picked one while it's open."])
+                                  "note": "Copies in a folder of Petal's own, shown under the document with Use this. Change the copies (never the file itself); their pictures follow. petal_view_pick tells you which one the person picks. Newer versions replace these (their copies go, but a picked one; one you changed goes to the Trash), and every copy goes when the viewer closes: read the picked one while it's open."])
                         }
                     }
                 }
@@ -105,6 +107,8 @@ extension Viewers {
     /// How long `petal_view` waits for a document to be read (Quick Look's export and WebKit's pages, a file iCloud
     /// brings down first), under the socket's own 150 seconds.
     static let loadLimit: Double = 120
+    /// What `petal_view` says when the viewer closed before the document was read.
+    nonisolated static let closedText = "The viewer was closed before the document was read: nothing to tell."
 
     /// What `petal_view` says about a file once it's shown: its name, how it's shown, and its pages or slides; still
     /// being read at the limit, that it's still loading (never a count of pages it hasn't read yet).

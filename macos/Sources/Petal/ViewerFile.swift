@@ -159,8 +159,6 @@ final class ViewerVersionStore: @unchecked Sendable {
 
     deinit { close(rootFD) }
 
-    /// Petal's own versions root in the temporary folder, opened once.
-    static let shared = ViewerVersionStore(root: FileManager.default.temporaryDirectory.appending(path: "Petal Versions"))
 
     /// A set's folder made and pinned: its device and inode, as opened from the root without following a link.
     func makeSet(_ name: String) -> Pin? {

@@ -26,12 +26,20 @@ final class Viewers {
     var app: PetalApp { PetalApp.shared }
 
     init() {
-        // Quick Look exports a Petal before this one left behind (it quit or crashed mid-load): swept away.
-        // So are version sets older than a day (a Petal that quit or crashed with a viewer open).
+        // Only the dock itself sweeps at launch (never a snapshot, bench, check or command, which may run beside it):
+        // Quick Look exports a Petal before this one left behind (it quit or crashed mid-load), and version sets
+        // older than a day (a Petal that quit or crashed with a viewer open).
+        guard Self.sweepsAtLaunch(arguments: CommandLine.arguments, headless: Headless.on) else { return }
         Self.queue.async {
             ViewerExport.sweep()
             ViewerVersionStore.shared?.sweep()
         }
+    }
+
+    /// Whether this process sweeps what a Petal before it left behind: only the real dock (`PetalProcess`), never
+    /// a headless run.
+    nonisolated static func sweepsAtLaunch(arguments: [String], headless: Bool) -> Bool {
+        !headless && PetalProcess.isDock(arguments: arguments)
     }
 
     /// Opens `path` (a note's file, a drop, an agent's path): checked off the main thread (ViewerPath: a regular file
@@ -326,27 +334,54 @@ final class ViewerModel: Identifiable {
     private(set) var loading = true {
         didSet {
             guard !loading, oldValue else { return }
-            let told = loadWaiters
-            loadWaiters = []
-            for wait in told { wait(true) }
-            // The load is over: whoever waited for the file's identity goes on, with it or without.
-            identified()
+            // The load is over: whoever waited for it, or for the file's identity (with it or without), goes on.
+            settle(.load)
+            settle(.identity)
         }
     }
-    @ObservationIgnored private var loadWaiters: [@MainActor (Bool) -> Void] = []
 
-    /// `done(true)` once the document is read (its pages, Quick Look's own view, or what went wrong), at once when it
-    /// already is; `done(false)` if it's still being read after `seconds`. Told once either way.
-    func whenLoaded(within seconds: Double, _ done: @escaping @MainActor (Bool) -> Void) {
-        guard loading else { return done(true) }
+    // MARK: Waiting
+
+    /// How a wait ended: what it waited for is in, or the viewer closed first.
+    enum Settled: Equatable { case ready, closed }
+    /// What can be waited for. Every waiter is in one registry, so closing settles them all (`settleAll`) and a new
+    /// kind can't be missed.
+    enum WaitKind: Hashable, CaseIterable { case load, selection, identity }
+    @ObservationIgnored private var waiters: [WaitKind: [@MainActor (Settled) -> Void]] = [:]
+
+    /// `then` once `kind` settles; at once (closed) when the viewer already is.
+    private func wait(for kind: WaitKind, _ then: @escaping @MainActor (Settled) -> Void) {
+        guard !closedNow else { return then(.closed) }
+        waiters[kind, default: []].append(then)
+    }
+
+    private func settle(_ kind: WaitKind, _ outcome: Settled = .ready) {
+        let told = waiters.removeValue(forKey: kind) ?? []
+        for then in told { then(outcome) }
+    }
+
+    /// Every waiter told at once (closing: `.closed`).
+    func settleAll(_ outcome: Settled) {
+        for kind in WaitKind.allCases { settle(kind, outcome) }
+    }
+
+    /// How `whenLoaded` ended.
+    enum LoadAnswer: Equatable { case loaded, stillLoading, closed }
+
+    /// `.loaded` once the document is read (its pages, Quick Look's own view, or what went wrong), at once when it
+    /// already is; `.stillLoading` if it's still being read after `seconds`; `.closed` when the viewer closes
+    /// first. Told once.
+    func whenLoaded(within seconds: Double, _ done: @escaping @MainActor (LoadAnswer) -> Void) {
+        guard !closedNow else { return done(.closed) }
+        guard loading else { return done(.loaded) }
         var answered = false
-        let once: @MainActor (Bool) -> Void = { ready in
+        let once: @MainActor (LoadAnswer) -> Void = { answer in
             guard !answered else { return }
             answered = true
-            done(ready)
+            done(answer)
         }
-        loadWaiters.append(once)
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { once(false) }
+        wait(for: .load) { once($0 == .closed ? .closed : .loaded) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { once(.stillLoading) }
     }
     private(set) var problem: String?
     /// When the file last changed on disk while it was showing ("Updated just now").
@@ -537,7 +572,7 @@ final class ViewerModel: Identifiable {
         unselected()
         fileID = nil
         bookmark = nil
-        identified()
+        settle(.identity)
         problem = text
         loading = false
     }
@@ -807,9 +842,9 @@ final class ViewerModel: Identifiable {
         // Whatever the document's loads and its thumbnails still have going stops at its next step.
         documentLoads.close()
         thumbLoads.close()
-        // Whoever waits for a selection or the file's identity goes on, and finds the viewer closed.
-        settleSelection()
-        identified()
+        // Every waiter (a load, a selection, the file's identity, a place on its way) told at once: closed.
+        selectionPending = false
+        settleAll(.closed)
         watcher = nil
         versionWatch = nil
         lensSoon?.cancel()
@@ -936,36 +971,25 @@ final class ViewerModel: Identifiable {
 
     /// A selection being read (its page's text, off the main thread): what's here waits for it.
     @ObservationIgnored private(set) var selectionPending = false
-    @ObservationIgnored private var selectionWaiters: [@MainActor () -> Void] = []
 
-    /// The selection's read is in (or replaced by none, or the viewer closed): whoever waited goes on.
+    /// The selection's read is in (or replaced by none): whoever waited goes on.
     private func settleSelection() {
         selectionPending = false
-        let waiting = selectionWaiters
-        selectionWaiters = []
-        for wait in waiting { wait() }
+        settle(.selection)
     }
-
-    @ObservationIgnored private var identityWaiters: [@MainActor () -> Void] = []
 
     /// `then` once the current load is over (a first load or a reload: its pages, page count and checked identity
-    /// all from it), or the viewer closed: a file place is offered only from a finished load (`fileAnchor`), never
-    /// with a load's identity and the pages or selection of the load before it.
-    func whenIdentified(_ then: @escaping @MainActor () -> Void) {
-        guard loading, !closedNow else { return then() }
-        identityWaiters.append(then)
+    /// all from it), or `.closed` when the viewer closes first: a file place is offered only from a finished load
+    /// (`fileAnchor`), never with a load's identity and the pages or selection of the load before it.
+    func whenIdentified(_ then: @escaping @MainActor (Settled) -> Void) {
+        guard loading || closedNow else { return then(.ready) }
+        wait(for: .identity, then)
     }
 
-    private func identified() {
-        let waiting = identityWaiters
-        identityWaiters = []
-        for wait in waiting { wait() }
-    }
-
-    /// `then` once no selection is being read: at once, or when the newest selection's read is in.
-    func whenSelectionSettled(_ then: @escaping @MainActor () -> Void) {
-        guard selectionPending, !closedNow else { return then() }
-        selectionWaiters.append(then)
+    /// `then` once no selection is being read: at once, when the newest selection's read is in, or `.closed`.
+    func whenSelectionSettled(_ then: @escaping @MainActor (Settled) -> Void) {
+        guard selectionPending || closedNow else { return then(.ready) }
+        wait(for: .selection, then)
     }
 
     /// What a place made here was made for: this document (its load) and this selection (its turn). Anything else by
@@ -983,6 +1007,8 @@ final class ViewerModel: Identifiable {
         case changed
         /// The file's checked identity isn't in (its load failed or was refused): no file place without it.
         case unidentified
+        /// The viewer closed before the place was made.
+        case closed
     }
 
     /// A paper's file got another name: what's kept about it here follows.
@@ -1058,6 +1084,7 @@ final class ViewerModel: Identifiable {
             case .refused: self.desk.tell("That selection holds something from your vault, or the vault can't be read: Petal makes no note on it.")
             case .changed: if !self.closedNow { self.desk.tell("What's in the viewer changed while Petal looked, so no note was made.") }
             case .unidentified: self.desk.tell("Petal can't tell which file this is yet, so no note was made.")
+            case .closed: break
             case .place(let stick, let used):
                 if used { self.selection = nil }
                 self.make(stick)
@@ -1096,9 +1123,10 @@ final class ViewerModel: Identifiable {
     func herePlace(passage: Bool = true, _ done: @escaping @MainActor (HereOutcome) -> Void) {
         // The selection's read and the file's identity both in first: never a page note for a pending selection,
         // never a place without the file's identity.
-        whenSelectionSettled {
-            self.whenIdentified {
-                guard !self.closedNow else { return done(.changed) }
+        whenSelectionSettled { settled in
+            guard settled == .ready, !self.closedNow else { return done(.closed) }
+            self.whenIdentified { settled in
+                guard settled == .ready, !self.closedNow else { return done(.closed) }
                 self.placeNow(passage: passage, done)
             }
         }
@@ -1126,7 +1154,8 @@ final class ViewerModel: Identifiable {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Made for this viewer as it was: closed, reloaded or another selection since, nothing is used.
-                    guard !self.closedNow, self.hereContext == context else { return done(.changed) }
+                    guard !self.closedNow else { return done(.closed) }
+                    guard self.hereContext == context else { return done(.changed) }
                     done(refused ? .refused : .place(made, selection: true))
                 }
             }
@@ -1522,6 +1551,16 @@ final class ViewerLoadToken: @unchecked Sendable {
     /// Whether load `generation` is still wanted: the newest asked for, and its owner open. Checked by work off
     /// the main thread before each step (a read, a retry, an export, WebKit's conversion, a thumbnail).
     func current(_ generation: Int) -> @Sendable () -> Bool { { [self] in lock.withLock { !shut && newest == generation } } }
+}
+
+extension ViewerVersionStore {
+    /// Where versions' copies are kept: Petal's own support folder (`Config.supportFolder`, so `PETAL_SUPPORT_DIR`
+    /// isolates it as it does everything else Petal keeps). `Petal --viewer-check` sets a throwaway root of its own
+    /// before anything uses it.
+    nonisolated(unsafe) static var location = Config.supportFolder.appending(path: "Versions")
+
+    /// The versions root, opened once (at its first use).
+    static let shared = ViewerVersionStore(root: location)
 }
 
 /// One load: one unit of work, from the read through export, WebKit's conversion or parsing, to the accepted

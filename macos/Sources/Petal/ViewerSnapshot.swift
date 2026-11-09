@@ -159,6 +159,10 @@ enum ViewerCheck {
     static func run(_ arguments: [String]) {
         Headless.on = true
         VaultStore.standIn([])
+        // Versions' copies in a throwaway root of the check's own (never a folder a running Petal keeps), set
+        // before anything opens the store.
+        let versionsRoot = FileManager.default.temporaryDirectory.appending(path: "petal-viewer-versions-\(UUID().uuidString)")
+        ViewerVersionStore.location = versionsRoot
         // Someone's work from a removed set of versions goes to a throwaway "Trash", never the person's.
         let trashed = FileManager.default.temporaryDirectory.appending(path: "petal-viewer-trash-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: trashed, withIntermediateDirectories: true)
@@ -210,6 +214,7 @@ enum ViewerCheck {
             failed = !eighteenth(url, app: app) || failed
             failed = !nineteenth(url, app: app) || failed
             failed = !pagingThenClosing(url, app: app) || failed
+            failed = !twentyfirst(url, app: app, versionsRoot: versionsRoot) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -219,6 +224,7 @@ enum ViewerCheck {
         }
         failed = !remote() || failed
         try? FileManager.default.removeItem(at: trashed)
+        try? FileManager.default.removeItem(at: versionsRoot)
         exit(failed ? 1 : 0)
     }
 
@@ -1354,6 +1360,57 @@ enum ViewerCheck {
         return ok
     }
 
+    /// Round 21: closing a viewer while it loads answers whoever waits at once (`petal_view` says it was closed;
+    /// a place on its way and a selection waited for are told closed); only the dock sweeps at launch, and this
+    /// check keeps versions' copies in a root of its own.
+    private static func twentyfirst(_ source: URL, app: PetalApp, versionsRoot: URL) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("twentyfirst: FAIL \(what)"); ok = false } }
+        expect(ViewerVersionStore.location == versionsRoot && ViewerVersionStore.shared?.root == versionsRoot,
+               "the check's versions in a throwaway root of its own (\(ViewerVersionStore.shared?.root.path ?? "none"))")
+        expect(Viewers.sweepsAtLaunch(arguments: ["/Applications/Petal.app/Contents/MacOS/Petal"], headless: false), "the dock sweeps at launch")
+        for words in [["--snapshot", "/tmp/x"], ["--viewer-check", "a.pdf"], ["--bench"], ["--mcp"], ["current"]] {
+            expect(!Viewers.sweepsAtLaunch(arguments: ["/Applications/Petal.app/Contents/MacOS/Petal"] + words, headless: false), "\(words[0]) never sweeps")
+        }
+        expect(!Viewers.sweepsAtLaunch(arguments: ["/Applications/Petal.app/Contents/MacOS/Petal"], headless: true), "a headless run never sweeps")
+
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let deck = URL(fileURLWithPath: ViewerPath.canonical(home.path) ?? home.path).appending(path: "Slow.pdf")
+        try? FileManager.default.copyItem(at: source, to: deck)
+        // A slow read: the viewer closes while it's still loading.
+        ViewerLoader.duringRead = { _, _ in Thread.sleep(forTimeInterval: 1.5) }
+        defer { ViewerLoader.duringRead = nil }
+        var answer: Any?
+        var refusal: String?
+        let asked = Date()
+        app.viewers.handle("petal_view", ["path": deck.path], caller: "check", live: { true }, { answer = $0 }, { refusal = $0 })
+        wait(5) { app.viewers.open.contains { $0.url.path == deck.path } }
+        guard let model = app.viewers.open.first(where: { $0.url.path == deck.path }) else { expect(false, "opened (set up)"); return false }
+        expect(model.loading, "still loading (set up)")
+        var place: ViewerModel.HereOutcome?
+        model.herePlace(passage: false) { place = $0 }
+        var selection: ViewerModel.Settled?
+        model.whenIdentified { selection = $0 }
+        app.viewers.closed(model)
+        wait(3) { answer != nil || refusal != nil }
+        expect(answer == nil && refusal == Viewers.closedText && Date().timeIntervalSince(asked) < 2.5,
+               "closed while loading: petal_view answered at once that the viewer was closed (\(refusal ?? String(describing: answer)))")
+        if case .closed? = place {} else { expect(false, "a place on its way: told closed (\(String(describing: place)))") }
+        expect(selection == .closed, "a wait for the file's identity: told closed")
+        var late: ViewerModel.LoadAnswer?
+        model.whenLoaded(within: 5) { late = $0 }
+        expect(late == .closed, "asked after closing: closed at once")
+        wait(2) { false }
+        print("twentyfirst: " + (ok ? "closing a loading viewer settles every waiter (petal_view says it was closed); only the dock sweeps; the check's own versions root" : "failed"))
+        return ok
+    }
+
     /// The eighth review: one path rule at every load and follow (a reload swapped to a link out of the home folder
     /// shows nothing); a refused save's snapshot is the whole note and comes back with its front matter; undoing the
     /// refused typing retires its snapshot.
@@ -1582,13 +1639,13 @@ enum ViewerCheck {
 
         // Still being read: told so, never as 0 pages.
         let slow = ViewerModel(url: source, kind: .pdf)
-        var ready: Bool?
+        var ready: ViewerModel.LoadAnswer?
         slow.whenLoaded(within: 0.3) { ready = $0 }
         wait(1) { ready != nil }
         let told = app.viewers.told(slow)
-        expect(ready == false && told["loading"] as? Bool == true && told["pages"] == nil && told["slides"] == nil, "still loading at the limit: said so, no page count")
+        expect(ready == .stillLoading && told["loading"] as? Bool == true && told["pages"] == nil && told["slides"] == nil, "still loading at the limit: said so, no page count")
         model.whenLoaded(within: 20) { ready = $0 }
-        wait(20) { ready == true }
+        wait(20) { ready == .loaded }
         let done = app.viewers.told(model)
         expect(done["loading"] == nil && (done["pages"] as? Int ?? 0) > 0, "read: its pages")
         model.close()
@@ -1601,7 +1658,7 @@ enum ViewerCheck {
     private static func versions(_ source: URL, app: PetalApp) -> Bool {
         var ok = true
         func expect(_ condition: Bool, _ what: String) { if !condition { print("versions: FAIL \(what)"); ok = false } }
-        let root = FileManager.default.temporaryDirectory.appending(path: "Petal Versions")
+        let root = ViewerVersionStore.location
         let before = Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
         func make(_ model: ViewerModel, live: @escaping @Sendable () -> Bool = { true }, closeAtOnce: Bool = false) -> Result<ViewerVersionSet, ViewerCopyError>? {
             var result: Result<ViewerVersionSet, ViewerCopyError>?
@@ -1695,7 +1752,7 @@ enum ViewerCheck {
                "petal_view through a link: the file's name told redacted (\(viewed.answer ?? viewed.refusal ?? "nothing"))")
         let made = call("petal_view_versions", ["path": link.path, "names": ["Draft \(secret)", "Short"]])
         expect(made.answer != nil && made.answer?.contains(secret) == false, "versions: labels and paths told redacted (\(made.answer ?? made.refusal ?? "nothing"))")
-        let copies = (try? FileManager.default.subpathsOfDirectory(atPath: FileManager.default.temporaryDirectory.appending(path: "Petal Versions").path)) ?? []
+        let copies = (try? FileManager.default.subpathsOfDirectory(atPath: ViewerVersionStore.location.path)) ?? []
         expect(!copies.contains { $0.contains(secret) } && copies.contains { $0.contains("(hidden)") }, "the copies' names never hold the secret")
         VaultStore.standUnreadable = true
         VaultStore.standIn([key])
