@@ -452,7 +452,9 @@ final class ViewerModel: Identifiable {
     /// checked read is in. The pages already shown stay on screen meanwhile.
     func load() {
         loads += 1
-        let ticket = loads
+        // The newest request, as work off the main thread sees it: a read, an export, a retry or a thumbnail pass
+        // for an older one stops at its next step.
+        generation.value = loads
         // Watched before anything is read: the read starts only once the watch is armed (ViewerWatch.whenArmed),
         // so a change while it loads always starts a reload.
         if watcher == nil { watch() }
@@ -462,28 +464,47 @@ final class ViewerModel: Identifiable {
         fileID = nil
         bookmark = nil
         unselected()
+        // One read at a time per viewer (Phase 1's ScanGate): changes while one runs make exactly one follow-up,
+        // which reads the file as it is then.
+        guard loadGate.request() else { return }
+        read()
+    }
+
+    @ObservationIgnored private var loadGate = NoteShelf.ScanGate()
+    /// Petal --viewer-check only: told as each thumbnail is drawn, with the load it's for.
+    nonisolated(unsafe) static var thumbnailDrawn: ((Int) -> Void)?
+    /// `loads` as work off the main thread reads it.
+    @ObservationIgnored private let generation = ViewerGeneration()
+    /// Reads started (Petal --viewer-check: changes during a slow load make at most one follow-up).
+    @ObservationIgnored private(set) var readsStarted = 0
+
+    private func read() {
+        readsStarted += 1
+        let ticket = loads
+        let generation = generation
+        let current: @Sendable () -> Bool = { generation.value == ticket }
         let url = url
         let kind = kind
-        let read: @Sendable () -> Void = {
-            // The one path rule again at every load and reload (a file swapped for a link out of the home folder,
-            // say): refused, nothing of it is read.
-            guard case .success = ViewerPath.check(url.path) else {
-                return DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard ticket == self.loads, !self.closedNow else { return }
-                        self.cantShow()
-                    }
-                }
-            }
-            let read = ViewerLoader.read(url, kind: kind)
+        let finish: @Sendable (ViewerLoader.Read?) -> Void = { read in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard ticket == self.loads, !self.closedNow else { return }
-                    self.loaded(read, ticket: ticket)
+                    let again = self.loadGate.finished()
+                    if !self.closedNow, ticket == self.loads {
+                        if let read { self.loaded(read, ticket: ticket) } else { self.cantShow() }
+                    }
+                    if again, !self.closedNow { self.read() }
                 }
             }
         }
-        if let watcher { watcher.whenArmed(read) } else { Viewers.queue.async(execute: read) }
+        let work: @Sendable () -> Void = {
+            // Superseded before it began: straight to the follow-up.
+            guard current() else { return finish(nil) }
+            // The one path rule again at every load and reload (a file swapped for a link out of the home folder,
+            // say): refused, nothing of it is read.
+            guard case .success = ViewerPath.check(url.path) else { return finish(nil) }
+            finish(ViewerLoader.read(url, kind: kind, current: current))
+        }
+        if let watcher { watcher.whenArmed(work) } else { Viewers.queue.async(execute: work) }
     }
 
     static let cantShowText = "This file can't be shown."
@@ -589,11 +610,15 @@ final class ViewerModel: Identifiable {
     /// The pages' thumbnails from a copy of the document of their own, off the main thread, a few at a time.
     private func renderThumbs(_ data: Data) {
         let ticket = loads
+        let generation = generation
         Viewers.queue.async {
             guard let document = PDFDocument(data: data) else { return }
             var batch: [Int: NSImage] = [:]
             for index in 0..<min(document.pageCount, 400) {
+                // A newer load since: this pass stops between pages.
+                guard generation.value == ticket else { return }
                 guard let page = document.page(at: index) else { continue }
+                ViewerModel.thumbnailDrawn?(ticket)
                 batch[index] = page.thumbnail(of: CGSize(width: 300, height: 170), for: .cropBox)
                 if batch.count == 8 || index == document.pageCount - 1 {
                     let sent = batch
@@ -1209,8 +1234,8 @@ final class ViewerModel: Identifiable {
                     self.versions = set
                     self.versionPages = [:]
                     self.app.viewers.versionSets[set.id] = set
+                    // Read once its watch is armed.
                     self.watchVersions(set)
-                    self.refreshVersions(set)
                     done(.success(set))
                 }
             }
@@ -1243,12 +1268,22 @@ final class ViewerModel: Identifiable {
 
     /// The set's folder and every copy in it watched; after any change the watches are opened again, so a copy
     /// replaced by an atomic save (a new file) is watched as it is now, and every later write to it is seen.
+    /// Its copies are read again only once that watch is armed (ViewerWatch.whenArmed), at the start and after every
+    /// change, so an edit right after a read is never missed.
     private func watchVersions(_ set: ViewerVersionSet) {
         guard !closedNow, set === versions else { return }
-        versionWatch = ViewerWatch(paths: [set.folder.path] + set.versions.map(\.url.path)) { [weak model = self, weak set] in
+        let watch = ViewerWatch(paths: [set.folder.path] + set.versions.map(\.url.path)) { [weak model = self, weak set] in
             guard let model, let set else { return }
             model.watchVersions(set)
-            model.refreshVersions(set)
+        }
+        versionWatch = watch
+        watch.whenArmed { [weak model = self, weak set, weak watch] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let model, let set, let watch, model.versionWatch === watch else { return }
+                    model.refreshVersions(set)
+                }
+            }
         }
     }
 
@@ -1361,6 +1396,16 @@ enum ViewerCopyError: Error, CustomStringConvertible {
 }
 
 /// A flag work on another thread reads (the viewer closed).
+/// A number work on another thread reads (the newest load asked for).
+final class ViewerGeneration: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = 0
+    var value: Int {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
+    }
+}
+
 final class ViewerFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var value = false
@@ -1416,6 +1461,8 @@ enum ViewerLoader {
     /// How many times a read is tried while the file keeps changing under it before the load fails.
     static let attempts = 3
     static let keptChanging = "The file kept changing while Petal read it. It's read again once it settles."
+    /// A read stopped for a newer one (never shown: its follow-up is).
+    static let superseded = "A newer read of the file took over."
     /// `Petal --viewer-check` only: run inside each read, between the identity read before and the bytes (a save
     /// that replaces the file then).
     nonisolated(unsafe) static var duringRead: ((URL, Int) -> Void)?
@@ -1425,10 +1472,13 @@ enum ViewerLoader {
     /// bytes and its identity and stamp again after them (and again after a Quick Look export, which reads the file
     /// itself); the load is used only when both agree. A save in between (a new file swapped in, or a write in
     /// place) is read again, `attempts` times at most, then the load fails (`keptChanging`).
-    static func read(_ url: URL, kind: ViewerKind) -> Read {
+    /// `current`: still the newest load asked for; checked before each try and before a Quick Look export, and a
+    /// superseded read stops there (`superseded`).
+    static func read(_ url: URL, kind: ViewerKind, current: @Sendable () -> Bool = { true }) -> Read {
         let app = NSWorkspace.shared.urlForApplication(toOpen: url)
         let appName = app.map { FileManager.default.displayName(atPath: $0.path).replacingOccurrences(of: ".app", with: "") } ?? ""
         for attempt in 0..<attempts {
+            guard current() else { return Read(pages: .failed(superseded), stamp: nil, appName: appName, appURL: app) }
             var before: (id: ViewerFileID?, stamp: ViewerUpdated.Stamp?) = (nil, nil)
             var after: (id: ViewerFileID?, stamp: ViewerUpdated.Stamp?) = (nil, nil)
             var mark: Data?
@@ -1451,6 +1501,7 @@ enum ViewerLoader {
                 }
                 return Read(pages: .pdf(data), stamp: stamp, bookmark: mark, fileID: id, appName: appName, appURL: app)
             case .quickLook(let unit):
+                guard current() else { return Read(pages: .failed(superseded), stamp: nil, appName: appName, appURL: app) }
                 let pages = ViewerQuickLook.export(url, unit: unit)
                 // Quick Look read the file itself: still that very file, unchanged, or read again.
                 guard ViewerFileID.of(url.path) == id, Self.stamp(url) == stamp else { continue }

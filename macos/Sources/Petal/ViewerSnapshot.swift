@@ -207,6 +207,7 @@ enum ViewerCheck {
             failed = !fifteenth(url, app: app) || failed
             failed = !sixteenth(url, app: app) || failed
             failed = !seventeenth(url, app: app) || failed
+            failed = !eighteenth(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -1098,6 +1099,65 @@ enum ViewerCheck {
             expect(text == ViewerLoader.keptChanging && restless.fileID == nil, "a file that keeps changing: the load fails, no identity")
         } else { expect(false, "a file that keeps changing: the load fails") }
         print("seventeenth: " + (ok ? "comments inside a cropped or turned page; a page asked for while loading kept for the finished document; a save mid-read read again" : "failed"))
+        return ok
+    }
+
+    /// Counts kept from other threads (thumbnails drawn per load).
+    final class Tally: @unchecked Sendable {
+        private let lock = NSLock()
+        private var counts: [Int: Int] = [:]
+        func add(_ key: Int) { lock.withLock { counts[key, default: 0] += 1 } }
+        var all: [Int: Int] { lock.withLock { counts } }
+    }
+
+    /// Round 18: one load at a time per viewer: ten quick changes during a slow load make at most one follow-up,
+    /// which shows the file as it ends up; a thumbnail pass for a load since superseded stops between pages.
+    private static func eighteenth(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("eighteenth: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let deck = URL(fileURLWithPath: ViewerPath.canonical(home.path) ?? home.path).appending(path: "Autosaved.pdf")
+        try? pages(1, from: source)?.write(to: deck)
+
+        // The first read slow (a big file, iCloud): ten saves meanwhile, each telling the viewer as the watcher does.
+        let slow = HangUp()
+        ViewerLoader.duringRead = { _, _ in
+            if !slow.gone { slow.gone = true; Thread.sleep(forTimeInterval: 1.0) }
+        }
+        defer { ViewerLoader.duringRead = nil }
+        let model = app.viewers.show(deck, front: false)
+        for save in 2...11 {
+            try? pages(save, from: source)?.write(to: deck)
+            model.load()
+        }
+        wait(30) { !model.loading }
+        expect(model.readsStarted <= 2, "ten changes during a slow load: at most one follow-up (\(model.readsStarted) reads)")
+        expect(model.pageCount == 11 && model.problem == nil, "the follow-up shows the file as it ended up (\(model.pageCount) pages)")
+        app.viewers.closed(model)
+
+        // A thumbnail pass for a load since superseded stops between pages.
+        let many = URL(fileURLWithPath: ViewerPath.canonical(home.path) ?? home.path).appending(path: "Many.pdf")
+        try? pages(150, from: source)?.write(to: many)
+        let tally = Tally()
+        // Each page made slow (a big PDF's thumbnails): the pass is still drawing when the reload comes.
+        ViewerModel.thumbnailDrawn = { tally.add($0); Thread.sleep(forTimeInterval: 0.02) }
+        defer { ViewerModel.thumbnailDrawn = nil }
+        let big = app.viewers.show(many, front: false)
+        wait(20) { !big.loading }
+        big.load()
+        wait(20) { !big.loading }
+        wait(20) { (tally.all.values.max() ?? 0) >= 150 }
+        let passes = tally.all.sorted { $0.key < $1.key }
+        expect(passes.count == 2 && passes[0].value < 150 && passes[1].value == 150,
+               "the superseded pass stopped, the newest drew every page (\(passes.map { "load \($0.key): \($0.value)" }))")
+        app.viewers.closed(big)
+        print("eighteenth: " + (ok ? "one load at a time: ten changes during a slow load make one follow-up; a superseded thumbnail pass stops" : "failed"))
         return ok
     }
 
