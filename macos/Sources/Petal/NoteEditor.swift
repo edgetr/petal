@@ -1361,41 +1361,52 @@ struct NoteEditorView: NSViewRepresentable {
             saveLater?.cancel()
             marker.typed()
             let work = DispatchWorkItem { [weak self, weak view] in
-                guard let self, let view, let storage = view.textStorage else { return }
-                // The save runs: no longer dirty, then a version that waited meanwhile is taken (the folder read again).
+                guard let self, let view else { return }
                 self.saveLater = nil
-                let body = NoteBlock.body(NoteRich.blocks(storage))
-                var landed = true
-                if body != self.body {
-                    // Refused (nil: the folder switching, a drain, the paper gone): the text stays dirty and isn't
-                    // taken as saved, and the save is tried again shortly.
-                    if let next = self.parent.save(body, self.base) {
-                        self.body = body
-                        self.base = next
-                    } else {
-                        landed = false
-                    }
-                }
-                _ = self.marker.saved(landed: landed)
-                guard landed else {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, weak view] in
-                        guard let self, let view, self.marker.dirty, self.saveLater == nil else { return }
-                        self.schedule(view)
-                    }
-                    return
-                }
-                self.parent.idle()
+                self.saveNow(view)
             }
             saveLater = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
         }
 
+        /// The save runs: landed, no longer dirty, then a version that waited meanwhile is taken (the folder read
+        /// again). Refused (nil: the folder switching, a drain, the paper gone), the text stays dirty and isn't taken
+        /// as saved (the desk's `write` has put it in the journal under its note's id), and it's tried again shortly.
+        @MainActor func saveNow(_ view: NoteTextView) {
+            guard let storage = view.textStorage else { return }
+            let body = NoteBlock.body(NoteRich.blocks(storage))
+            var landed = true
+            if body != self.body {
+                if let next = parent.save(body, base) {
+                    self.body = body
+                    base = next
+                } else {
+                    landed = false
+                }
+            }
+            _ = marker.saved(landed: landed)
+            guard landed else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, weak view] in
+                    guard let self, let view, self.marker.dirty, self.saveLater == nil else { return }
+                    self.schedule(view)
+                }
+                return
+            }
+            parent.idle()
+        }
+
+        /// What's typed handed over now (closing, quitting, another version coming): a save waiting runs at once, and
+        /// so does one for text still dirty with nothing waiting (a refused save between its tries), so a close or a
+        /// quit never leaves typing only in the editor.
         @MainActor func flush(_ view: NoteTextView) {
-            guard let work = saveLater else { return }
-            saveLater = nil
-            guard !work.isCancelled else { return }
-            work.perform()
-            work.cancel()
+            if let work = saveLater {
+                saveLater = nil
+                guard !work.isCancelled else { return }
+                work.perform()
+                work.cancel()
+                return
+            }
+            if marker.dirty { saveNow(view) }
         }
 
         @MainActor func measure(_ view: NoteTextView) {

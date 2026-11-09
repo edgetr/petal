@@ -1472,7 +1472,11 @@ final class NoteDesk {
     func write(_ key: String, noteID: String?, instance: String, body: String, base: String?) -> String? {
         let papers = store.notes.map { (key: $0.key, id: $0.noteID, version: $0.version) }
         let key = noteID.flatMap { id in NoteShelf.saveTarget(key: key, noteID: id, instance: instance, papers: papers, current: store.currentID) } ?? key
-        guard let paper = store.paper(key) else { return nil }
+        guard let paper = store.paper(key) else {
+            // Refused (the paper gone): the typing goes into the journal under its note's id at once.
+            if let noteID { store.journalUnsaved(noteID: noteID, path: key, base: base, text: body) }
+            return nil
+        }
         if store.readOnly(paper) {
             // Typed just as it became one of two papers: kept in the copy beside it, never dropped (handled: the
             // editor doesn't keep it as unsaved).
@@ -1487,7 +1491,11 @@ final class NoteDesk {
         // in the note (from sync) never is.
         let links = { (text: String) in Set(NoteBlock.blocks(text).compactMap { if case .link(let url) = $0 { url } else { nil } }) }
         for url in links(body).subtracting(links(paper.file.body)) { LinkPreviews.shared.requested(url) }
-        return store.change(key, base: base) { $0.body = body }
+        let next = store.change(key, base: base) { $0.body = body }
+        // Refused (the notes' folder switching, a drain): the typing goes into the journal under its note's id at
+        // once, made on what the editor had (put back at the next launch if it never lands).
+        if next == nil { store.journalUnsaved(noteID: paper.noteID, path: paper.url.path, base: base ?? paper.revision, text: body) }
+        return next
     }
 
     /// Pictures pasted or dropped on a note: their bytes read and decoded first (a file that's slow or not downloaded

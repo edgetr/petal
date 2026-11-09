@@ -372,6 +372,9 @@ final class ViewerModel: Identifiable {
     @ObservationIgnored private var stamp: ViewerUpdated.Stamp?
     /// A bookmark to the file, made with each read (the file replaced: made again), so a move or rename is followed.
     @ObservationIgnored private var bookmark: Data?
+    /// The file's incarnation as last read: a change follows it first (a renamed file stays the one shown, whatever
+    /// took its old path).
+    @ObservationIgnored private(set) var fileID: ViewerFileID?
     @ObservationIgnored private var loads = 0
     @ObservationIgnored private var closedNow = false
     /// `closedNow` as work off the main thread sees it.
@@ -424,6 +427,7 @@ final class ViewerModel: Identifiable {
         let first = stamp == nil
         stamp = read.stamp
         if let made = read.bookmark { bookmark = made }
+        if let read = read.fileID { fileID = read }
         if !first { updated = Date() }
         switch read.pages {
         case .pdf(let data): show(data, ticket: ticket)
@@ -570,20 +574,21 @@ final class ViewerModel: Identifiable {
     /// by its bookmark.
     private func watch() {
         guard !Headless.on else { return }
-        watcher = ViewerWatch(url: url) { [weak self] in self?.changed() }
+        watcher = ViewerWatch(url: url) { [weak self] in self?.fileChanged() }
     }
 
-    private func changed() {
+    /// The file or its folder changed: the file shown is found again (ViewerFiles' rule for the open file): its own
+    /// incarnation wherever it is now (renamed or moved, whatever file took its old path); that incarnation gone (a
+    /// save that made a new file), the file now at its path; nothing there, the file its bookmark finds.
+    func fileChanged() {
         let url = url
         let before = stamp
         let kept = bookmark
+        let own = fileID
         Viewers.queue.async {
-            var now = ViewerLoader.stamp(url)
-            var moved: URL?
-            if now == nil, let kept, let found = ViewerLoader.follow(kept), found.path != url.path {
-                moved = found
-                now = ViewerLoader.stamp(found)
-            }
+            let found = ViewerModel.follow(url: url, own: own, bookmark: kept)
+            let now = found.flatMap { ViewerLoader.stamp($0) }
+            let moved = found.flatMap { $0.path != url.path ? $0 : nil }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard !self.closedNow else { return }
@@ -595,6 +600,20 @@ final class ViewerModel: Identifiable {
                     self.load()
                 }
             }
+        }
+    }
+
+    /// Off the main thread: where the open file is now (ViewerFiles.way's order for it).
+    nonisolated static func follow(url: URL, own: ViewerFileID?, bookmark: Data?) -> URL? {
+        // Still where it was (spelled as it was opened).
+        if let own, ViewerFileID.of(url.path) == own { return url }
+        let ownPath = own.flatMap { $0.path() }
+        let atPath = ViewerLoader.stamp(url) != nil
+        let viaBookmark = ownPath == nil && !atPath ? bookmark.flatMap(ViewerLoader.follow) : nil
+        switch ViewerFiles.way(ownFound: ownPath != nil, hasBookmark: false, bookmarkFound: false, pathFound: atPath) {
+        case .own: return ownPath.map { URL(fileURLWithPath: $0) }
+        case .path: return url
+        default: return viaBookmark
         }
     }
 
@@ -1066,6 +1085,8 @@ enum ViewerLoader {
         var pages: Pages
         var stamp: ViewerUpdated.Stamp?
         var bookmark: Data?
+        /// The file's incarnation as read: what a change follows first.
+        var fileID: ViewerFileID? = nil
         var appName: String
         var appURL: URL?
     }
@@ -1092,6 +1113,7 @@ enum ViewerLoader {
         let stamp = stamp(url)
         guard stamp != nil else { return Read(pages: .failed("The file isn't there any more."), stamp: nil, appName: appName, appURL: app) }
         let mark = bookmark(url)
+        let incarnation = ViewerFileID.of(url.path)
         switch kind {
         case .pdf:
             var data: Data?
@@ -1102,9 +1124,9 @@ enum ViewerLoader {
             guard let data, PDFDocument(data: data) != nil else {
                 return Read(pages: .failed("Petal can't read this PDF."), stamp: stamp, bookmark: mark, appName: appName, appURL: app)
             }
-            return Read(pages: .pdf(data), stamp: stamp, bookmark: mark, appName: appName, appURL: app)
+            return Read(pages: .pdf(data), stamp: stamp, bookmark: mark, fileID: incarnation, appName: appName, appURL: app)
         case .quickLook(let unit):
-            return Read(pages: ViewerQuickLook.export(url, unit: unit), stamp: stamp, bookmark: mark, appName: appName, appURL: app)
+            return Read(pages: ViewerQuickLook.export(url, unit: unit), stamp: stamp, bookmark: mark, fileID: incarnation, appName: appName, appURL: app)
         }
     }
 }

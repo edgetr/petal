@@ -1201,6 +1201,20 @@ final class NoteStore {
     /// for the pictures its text references.
     @ObservationIgnored private var pendingPictures: [String: [String: Data]] = [:]
 
+    /// Typing a change refused (the notes' folder switching, a drain, the paper gone): its whole snapshot in the
+    /// journal at once, under its note's id, made on `base` (what the editor had), with the bytes of the pictures it
+    /// references that aren't saved yet. A save that lands later replaces and clears it as any snapshot; a close or a
+    /// quit before that leaves it for the next launch's recovery (into that note while it says `base`, else beside
+    /// it: an id-less note's path id never puts it into another file that took the path).
+    func journalUnsaved(noteID: String, path: String, base: String?, text: String) {
+        let pending = pendingPictures[noteID] ?? [:]
+        let pictures = NoteShelf.journalPictures(text: text, pending: Array(pending.keys)).compactMap { name in
+            pending[name].map { NoteJournal.Picture(name: name, data: $0) }
+        }
+        let entry = NoteJournal.Entry(noteID: noteID, path: path, base: base, text: text, pictures: pictures)
+        NoteJournal.queue.async { NoteJournal.snapshot(entry) }
+    }
+
     /// The journal's whole snapshot of a note as the person has it now: its text, the base of its oldest write not
     /// landed yet, and the bytes of the pictures that text references and that aren't in its folder yet.
     private func snapshot(_ paper: PaperNote, text: String, session: NoteSession, aside: Bool = false) {

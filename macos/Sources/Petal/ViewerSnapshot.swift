@@ -182,6 +182,7 @@ enum ViewerCheck {
             failed = !answers(url, app: app) || failed
             failed = !versions(url, app: app) || failed
             failed = !sixth(url, app: app) || failed
+            failed = !seventh(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -340,6 +341,88 @@ enum ViewerCheck {
     }
 
     final class HangUp: @unchecked Sendable { var gone = false }
+
+    /// The seventh review: refused typing in the journal at once and after a close or a quit (an editor dirty with no
+    /// save waiting still hands its text over), put back by the next launch's recovery; and the open file following its
+    /// own incarnation, whatever took its old path.
+    private static func seventh(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("seventh: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        // A note whose save is refused (its paper gone from the store meanwhile): what's typed goes into the journal.
+        let noteID = "J-\(UUID().uuidString.prefix(6))"
+        let paper = PaperNote(file: NoteFile(id: noteID, body: "Before"), url: folder.appending(path: "Notes/Inbox/Journal.md"), notebook: "Inbox")
+        app.paper.store.preview([], notebooks: [])
+        let editor = NoteEditorView(paper: paper, style: NoteRich.Style(ink: .black, dim: .gray, petal: .systemPink, accent: .systemBlue), focus: false,
+                                    height: { _ in }, save: { app.paper.write(paper.key, noteID: noteID, instance: "", body: $0, base: $1) },
+                                    register: { _ in }, importPictures: { _ in }, escape: {})
+        let coordinator = editor.makeCoordinator()
+        coordinator.body = "Before"
+        coordinator.base = "---\nid: \(noteID)\n---\nBefore"
+        let text = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        text.string = "Before, typed"
+        coordinator.schedule(text)
+        wait(1.2) { false }
+        let journal = NoteJournal.file(noteID)
+        let flushedJournal = { () -> String? in
+            var entry: NoteJournal.Entry?
+            NoteJournal.queue.sync { entry = NoteJournal.read(journal) }
+            return entry?.text
+        }
+        expect(coordinator.marker.dirty && flushedJournal() == "Before, typed", "refused: in the journal at once, under its note's id")
+        // More typed, then the editor closes before its next try (nothing waiting, still dirty): handed over now.
+        text.string = "Before, typed, and more"
+        coordinator.flush(text)
+        expect(flushedJournal() == "Before, typed, and more", "closing: the dirty text handed to the journal, though no save was waiting")
+        // Quitting (the desk flushes every editor's handle the same way).
+        text.string = "Before, typed, and more, then quit"
+        coordinator.flush(text)
+        expect(flushedJournal() == "Before, typed, and more, then quit", "quitting: the same")
+        // The next launch: put back from the journal into the notes' folder (a file of its own: its note isn't there).
+        let root = folder.appending(path: "Notes")
+        try? FileManager.default.createDirectory(at: root.appending(path: "Inbox"), withIntermediateDirectories: true)
+        let holding = folder.appending(path: "recovering")
+        try? FileManager.default.createDirectory(at: holding, withIntermediateDirectories: true)
+        NoteJournal.queue.sync { try? FileManager.default.moveItem(at: journal, to: holding.appending(path: journal.lastPathComponent)) }
+        NoteJournal.recover(holding, root: root)
+        let recovered = (FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?.allObjects as? [URL] ?? [])
+            .filter { $0.pathExtension == "md" }.compactMap { try? String(contentsOf: $0, encoding: .utf8) }
+        expect(recovered.contains { $0.contains("Before, typed, and more, then quit") }, "and put back by the next launch's recovery")
+
+        // The open file follows its own incarnation: renamed, and a new file at its old path, it stays the one shown.
+        let a = folder.appending(path: "A.pdf")
+        try? FileManager.default.copyItem(at: source, to: a)
+        let model = ViewerModel(url: a, kind: .pdf)
+        model.load()
+        wait(20) { !model.loading }
+        let pages = model.pageCount
+        let b = folder.appending(path: "B.pdf")
+        try? FileManager.default.moveItem(at: a, to: b)
+        if let one = PDFDocument(url: b) {
+            one.removePage(at: 0)
+            _ = one.write(to: a)
+        }
+        model.fileChanged()
+        wait(3) { model.url.lastPathComponent == "B.pdf" }
+        wait(1) { false }
+        expect(model.url.lastPathComponent == "B.pdf" && model.pageCount == pages, "renamed: it follows the file, not the new one at its old path")
+        // The original gone: the file at its path is accepted (as after a save that made a new file).
+        try? FileManager.default.removeItem(at: b)
+        let fresh = ViewerModel(url: a, kind: .pdf)
+        fresh.load()
+        wait(20) { !fresh.loading }
+        try? FileManager.default.removeItem(at: a)
+        try? FileManager.default.copyItem(at: source, to: a)
+        fresh.fileChanged()
+        wait(5) { fresh.pageCount == pages }
+        expect(fresh.url.lastPathComponent == "A.pdf" && fresh.pageCount == pages, "its own file gone: the file at its path")
+        model.close()
+        fresh.close()
+        print("seventh: " + (ok ? "refused typing journaled at once, after a close and a quit, and recovered; the open file follows its incarnation" : "failed"))
+        return ok
+    }
 
     /// The sixth review: a refused save keeping the real editor dirty until it lands; a folder switch saving and
     /// closing margin editors, the margin read only until it's done; viewer papers counted for picture retries; and

@@ -72,8 +72,13 @@ struct ViewerFileCheck {
         // MARK: The path an agent names
 
         let home = "/Users/someone"
-        expect(ViewerPath.standardized("~/Docs/../a.pdf", home: home) == "/Users/someone/a.pdf", "~ and .. resolved")
-        expect(ViewerPath.standardized("Docs/a.pdf", home: home) == nil, "a relative path isn't taken")
+        expect(ViewerPath.standardized("~/./Docs//a.pdf", home: home) == .success("/Users/someone/Docs/a.pdf"), "~, . and // normalized by their words alone")
+        expect(ViewerPath.standardized("~/Docs/../a.pdf", home: home) == .failure(.parentPart), "a .. is refused, never reduced through the disk")
+        expect(ViewerPath.standardized("Docs/a.pdf", home: home) == .failure(.notAbsolute), "a relative path isn't taken")
+        expect(ViewerPath.prefixes("/a/b/c") == ["/a", "/a/b", "/a/b/c"], "walked a component at a time")
+        expect(ViewerPath.decide(standardized: "/Users/someone/In/Report.pdf", resolved: "/Users/someone/Docs/Report.pdf", linkedOut: true,
+                                 homes: [home], regular: true, owner: 501, me: 501) == .failure(.linkOutOfHome),
+               "a link on the way that led out of home, even one that came back: refused")
         func decide(_ path: String, _ resolved: String?, regular: Bool = true, owner: UInt32 = 501) -> Result<String, ViewerPath.Refusal> {
             ViewerPath.decide(standardized: path, resolved: resolved, homes: [home], regular: regular, owner: owner, me: 501)
         }
@@ -106,6 +111,12 @@ struct ViewerFileCheck {
         expect(ViewerPath.check(h + "/Docs/Folder.pdf", home: h).failureValue == .notRegular, "a folder named like a PDF isn't a file")
         expect(ViewerPath.check(h + "/Docs/Missing.pdf", home: h).failureValue == .missing, "a missing file")
         expect(ViewerPath.check("Docs/Report.pdf", home: h).failureValue == .notAbsolute, "a relative path")
+        // ".." through a link out of home (Foundation's standardizing would follow Away to reduce it): refused.
+        expect(ViewerPath.check(h + "/Away/../Docs/Report.pdf", home: h).failureValue == .parentPart, ".. through a link out of home isn't reduced")
+        // A link out of home and one back in: the destination is inside, but the way went out.
+        try? FileManager.default.createSymbolicLink(atPath: outside.appending(path: "Back").path, withDestinationPath: fakeHome.appending(path: "Docs").path)
+        expect(ViewerPath.check(h + "/Away/Back/Report.pdf", home: h).failureValue == .linkOutOfHome, "out of home and back in: refused")
+        expect((try? ViewerPath.check(h + "/./Docs//Report.pdf", home: h).get())?.lastPathComponent == "Report.pdf", "./ and // are fine")
         try? FileManager.default.removeItem(at: base)
 
         // MARK: Notes in the margin
