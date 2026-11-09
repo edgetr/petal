@@ -440,6 +440,14 @@ extension NotePrivacy {
     /// Whether a picture of one window may be taken: never of one left out (then there's no picture at all).
     static func mayCapture(window: Int, excluded: Set<Int>) -> Bool { !excluded.contains(window) }
 
+    /// Whether an asker may write or move into a notebook it names: the name as given (an existing folder, by its own
+    /// name as read) and the notebook the store would use for it (`NoteShelf.folderName` cleaned, an existing one in
+    /// any case) must both be readable. Existing notebooks are never matched by a cleaned-up name alone.
+    static func destinationReadable(_ name: String, existing: [String], privateBooks: Set<String>, asker: String?) -> Bool {
+        let used = NoteShelf.canonicalNotebook(NoteShelf.folderName(name), existing: existing)
+        return readable(notebook: name, privateBooks: privateBooks, asker: asker) && readable(notebook: used, privateBooks: privateBooks, asker: asker)
+    }
+
     /// The notebooks counted Private: those whose cover says so (or is unknown), and any notebook a note is held in
     /// that the latest read of the folder didn't find (gone, renamed, not read): unknown, so Private, never readable.
     static func privateBooks(notebooks: [(name: String, isPrivate: Bool)], held: [String]) -> Set<String> {
@@ -513,10 +521,28 @@ extension NoteShelf {
         }
     }
 
-    /// A note opened on its own and put away: the keyboard goes back to the Petal Notes window only on Escape, when
-    /// it was opened from there and the window is still open; folded by a click elsewhere, the keyboard stays where
-    /// the person clicked.
-    static func standaloneKeyboard(escape: Bool, fromLibrary: Bool, libraryOpen: Bool) -> Bool { escape && fromLibrary && libraryOpen }
+    /// A write whose file already says exactly its text has landed (whatever id the session expected): never kept
+    /// beside as a conflict.
+    static func alreadyLanded(disk: String?, text: String) -> Bool { disk == text }
+
+    /// An id waiting to land, against its file as read: still to come (nothing read), landed (the file has it), or
+    /// dropped for the id the file has (its write was kept beside it, or a conflict was kept with the other version).
+    enum Reconcile: Equatable { case wait, landed, dropped(String) }
+
+    static func reconcileID(pending: String, diskID: String?) -> Reconcile {
+        guard let diskID else { return .wait }
+        return diskID == pending ? .landed : .dropped(diskID)
+    }
+
+    /// Where the keyboard goes when a note opened on its own is put away: on Escape, back to the Petal Notes window when
+    /// it was opened from there and the window is still open, else to the app the person was using (the regular fold's
+    /// handback, NoteShelf.keyboardBack); folded by a click elsewhere, it stays where the person clicked.
+    enum StandaloneKeyboard: Equatable { case library, app, stay }
+
+    static func standaloneKeyboard(escape: Bool, fromLibrary: Bool, libraryOpen: Bool) -> StandaloneKeyboard {
+        guard escape else { return .stay }
+        return fromLibrary && libraryOpen ? .library : .app
+    }
 }
 
 extension NoteRoom {

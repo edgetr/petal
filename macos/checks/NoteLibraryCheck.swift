@@ -322,9 +322,9 @@ struct NoteLibraryCheck {
         expect(NoteRoom.wanted([(.window(0), true, false)]), "a note open on the window by its placement wants room")
         expect(!NoteRoom.wanted([(.standalone, true, false), (.desktop, true, false), (.window(0), false, false), (.window(1), true, true)]),
                "never one opened on its own, on a Desktop, folded or moved off by the person")
-        expect(NoteShelf.standaloneKeyboard(escape: true, fromLibrary: true, libraryOpen: true), "Escape: back to the Petal Notes window it came from")
-        expect(!NoteShelf.standaloneKeyboard(escape: false, fromLibrary: true, libraryOpen: true), "a click elsewhere: the keyboard stays there")
-        expect(!NoteShelf.standaloneKeyboard(escape: true, fromLibrary: false, libraryOpen: true), "opened from the dock: not to the window")
+        expect(NoteShelf.standaloneKeyboard(escape: true, fromLibrary: true, libraryOpen: true) == .library, "Escape: back to the Petal Notes window it came from")
+        expect(NoteShelf.standaloneKeyboard(escape: false, fromLibrary: true, libraryOpen: true) == .stay, "a click elsewhere: the keyboard stays there")
+        expect(NoteShelf.standaloneKeyboard(escape: true, fromLibrary: false, libraryOpen: true) == .app, "opened from the dock: back to the app, not the window")
         expect(NotePrivacy.deliverable(notebooks: ["Garden"], privateBooks: ["Health"], asker: nil), "an answer about public notebooks is given")
         expect(!NotePrivacy.deliverable(notebooks: ["Garden", "health"], privateBooks: ["Health"], asker: nil),
                "one turned Private before it's handed over: not given")
@@ -387,6 +387,23 @@ struct NoteLibraryCheck {
         expect(landedLateFirst.notes["n1"]?.x == 2, "a gesture that waited for an id lands after a later one: the later one still wins")
         // A cover id in two notebook folders (a notebook duplicated in Finder): the later folder by name gets a new id,
         // the same on every Mac.
+        // Privacy by a notebook's actual folder: a Private folder renamed "Health." is that folder, never cleaned up.
+        expect(!NotePrivacy.readable(notebook: "Health.", privateBooks: ["Health."], asker: nil)
+               && !NotePrivacy.destinationReadable("Health.", existing: ["Health.", "Garden"], privateBooks: ["Health."], asker: nil)
+               && !NotePrivacy.destinationReadable("health.", existing: ["Health.", "Garden"], privateBooks: ["Health."], asker: nil),
+               "a renamed Private folder stays Private, and a move into it is refused")
+        expect(!NotePrivacy.destinationReadable("Secret.", existing: ["Secret"], privateBooks: ["Secret"], asker: nil)
+               && NotePrivacy.destinationReadable("Garden", existing: ["Health.", "Garden"], privateBooks: ["Health."], asker: nil),
+               "a destination cleaned into a Private notebook is refused; another is fine")
+        expect(NoteShelf.standaloneKeyboard(escape: true, fromLibrary: false, libraryOpen: true) == .app
+               && NoteShelf.standaloneKeyboard(escape: true, fromLibrary: true, libraryOpen: true) == .library
+               && NoteShelf.standaloneKeyboard(escape: true, fromLibrary: true, libraryOpen: false) == .app
+               && NoteShelf.standaloneKeyboard(escape: false, fromLibrary: false, libraryOpen: true) == .stay,
+               "Escape on a note opened from the dock gives the keyboard back to the app; a click elsewhere leaves it there")
+        expect(NoteShelf.alreadyLanded(disk: "same", text: "same") && !NoteShelf.alreadyLanded(disk: "other", text: "same"),
+               "a file already saying a write's text: landed")
+        expect(NoteShelf.reconcileID(pending: "NEW", diskID: "NEW") == .landed && NoteShelf.reconcileID(pending: "NEW", diskID: "OLD") == .dropped("OLD")
+               && NoteShelf.reconcileID(pending: "NEW", diskID: nil) == .wait, "a pending id reconciled with its file")
         let dupes = NoteLibrary.duplicateCovers([("SAME", "Trip"), ("SAME", "Trip copy"), ("ONLY", "Work")])
         expect(dupes.keys.sorted() == ["Trip copy"] && dupes["Trip copy"] == NoteLibrary.renewedID("SAME", folder: "Trip copy"),
                "only the later folder's cover is renewed", "\(dupes)")

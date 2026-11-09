@@ -1235,8 +1235,16 @@ final class NoteDesk {
         panels[key]?.conceal()
         layout()
         let library = app.notesWindow.window
-        if NoteShelf.standaloneKeyboard(escape: escape, fromLibrary: fromLibrary, libraryOpen: library?.isVisible == true) {
+        switch NoteShelf.standaloneKeyboard(escape: escape, fromLibrary: fromLibrary, libraryOpen: library?.isVisible == true) {
+        case .library:
+            handingBack = true   // the paper losing the keyboard now isn't a click away
             library?.makeKeyAndOrderFront(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { self.handingBack = false } }
+        case .app:
+            // Opened from the dock (or the window's gone): the regular fold's handback to the app the person was using.
+            giveKeyboardBack()
+        case .stay:
+            break
         }
     }
 

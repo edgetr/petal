@@ -20,10 +20,15 @@ extension NoteDesk {
     func handle(_ name: String, _ args: [String: Any], asker: String? = nil, live: @escaping @Sendable () -> Bool = { true },
                 _ answer: @escaping (Any) -> Void, _ refuse: @escaping (String) -> Void) {
         let inside = asker.flatMap { store.current($0)?.notebook }
-        // The notebook a name is as the store makes it (cleaned, any case): "Secret." or "secret" is Secret.
+        // An existing notebook by its actual folder (its name as read, never cleaned up: a Private folder renamed in
+        // Finder to "Health." is that folder).
         let readable = { [store] (notebook: String) in
-            let name = NoteShelf.canonicalNotebook(NoteShelf.folderName(notebook), existing: store.notebooks.map(\.name))
-            return NotePrivacy.readable(notebook: name, privateBooks: store.privateBooks, asker: inside)
+            NotePrivacy.readable(notebook: notebook, privateBooks: store.privateBooks, asker: inside)
+        }
+        // A destination named by the asker: the folder as given (an existing one), and the one the store would make
+        // or use for it (cleaned, any case: "Secret." or "secret" is Secret); both must be readable.
+        let destination = { [store] (notebook: String) in
+            NotePrivacy.destinationReadable(notebook, existing: store.notebooks.map(\.name), privateBooks: store.privateBooks, asker: inside)
         }
         // Everything told goes through the vault's redaction first (NoteShield, the rule petal_ui and petal_look
         // follow), off the main thread; while the vault can't be read, nothing of the notes is told.
@@ -96,11 +101,11 @@ extension NoteDesk {
                 var file = NoteFile(body: text)
                 let notebook = (args["notebook"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? defaultNotebook
                 // Into a Private notebook only from inside it: to anyone else it isn't there (a new one of its name is it).
-                guard readable(notebook) else { return fail("Petal can't write there. Pick another notebook.") }
+                guard destination(notebook) else { return fail("Petal can't write there. Pick another notebook.") }
                 let sticking = args["stick"] as? String == "here"
                 let make = { (place: NoteStick?) in
                     guard live() else { return fail(Self.hungUp) }
-                    guard readable(notebook) else { return fail("Petal can't write there. Pick another notebook.") }
+                    guard destination(notebook) else { return fail("Petal can't write there. Pick another notebook.") }
                     if let place { file.places = [place] }
                     self.store.make(file, in: notebook, live: live) { made in
                         guard let made else { return fail(Self.notMade) }
@@ -117,11 +122,11 @@ extension NoteDesk {
         case "petal_note_move":
             let notebook = (args["notebook"] as? String ?? "").trimmingCharacters(in: .whitespaces)
             guard !notebook.isEmpty else { return fail("Which notebook? (a new name makes one)") }
-            guard readable(notebook) else { return fail("Petal can't move notes there. Pick another notebook.") }
+            guard destination(notebook) else { return fail("Petal can't move notes there. Pick another notebook.") }
             resolve(args["id"] as? String ?? "", readable: readable, told: told, refuse, fail) { paper in
                 guard !self.store.readOnly(paper) else { return fail(Self.readOnlyWords) }
                 guard live() else { return fail(Self.hungUp) }
-                guard readable(notebook) else { return fail("Petal can't move notes there. Pick another notebook.") }
+                guard destination(notebook) else { return fail("Petal can't move notes there. Pick another notebook.") }
                 // The same move as the letterhead's: what's typed in it goes with it, and its panel and editor follow.
                 self.move(paper.key, to: notebook, live: live) { moved in
                     if let moved { told.books.insert(moved.notebook); told.notes.insert(moved.noteID) }

@@ -379,6 +379,9 @@ final class NoteStore {
                     if merged != self.notes { self.notes = merged }
                     if read.notebooks != self.notebooks { self.notebooks = read.notebooks }
                     self.readComplete = read.complete
+                    // Ids whose write ended without landing (kept beside as a conflict, a conflict since kept): the
+                    // session knows its note by what its file holds now, and nothing waits for an id that won't land.
+                    self.reconcileIdentities(read.notes)
                     // A cover id found in two notebook folders (a notebook duplicated in Finder): the later folder's
                     // cover gets its own id, through its session; that notebook is Private until it lands.
                     self.renewDuplicateCovers()
@@ -709,6 +712,9 @@ final class NoteStore {
             if there, disk == nil { return }   // there, but unreadable: never written over
             // A tool's asker gone by now: nothing changes (checked right before the change, inside the coordination).
             if let live, !live() { outcome = .cancelled; return }
+            // The file already says exactly this (another Mac made the same change, as two renewing one cover's id
+            // at once do): landed, whatever id the session expected; nothing is written and nothing kept beside it.
+            if NoteShelf.alreadyLanded(disk: disk, text: text) { outcome = .written; return }
             if let noteID, !NoteShelf.stillNote(found: disk.map { Self.noteID(of: $0, at: url, root: root) }, expected: noteID, missing: true) {
                 outcome = live != nil ? .notThisNote : keepBeside(text, original: url, root: root)
                 return
@@ -2020,6 +2026,38 @@ final class NoteStore {
             self.landCover(key)
         }
         if changed == nil { coverLanding.remove(key) }
+    }
+
+    /// After a read: every idle session still waiting for an id to land checked against its file as read
+    /// (NoteShelf.reconcileID): the id there, it's landed; another id there, it won't (its write was kept beside the
+    /// file, or a conflict was kept with the other version): dropped, its waiters told, and the session, the files
+    /// queue and the paper know the note by the id its file holds.
+    private func reconcileIdentities(_ read: [PaperNote]) {
+        for session in Array(sessions.values) where !session.busy {
+            guard let pending = session.idPending else { continue }
+            let onDisk = read.first { $0.key == session.key && $0.version == nil }
+            switch NoteShelf.reconcileID(pending: pending, diskID: onDisk?.noteID) {
+            case .wait: continue
+            case .landed:
+                session.idPending = nil
+                idWritten(pending, landed: true)
+            case .dropped(let id):
+                session.idPending = nil
+                pendingIDs.remove(pending)
+                idWritten(pending, landed: false)
+                for (name, renewed) in renewing where renewed == pending { renewing[name] = nil }
+                // An id-less note's old path no longer points at an id that never landed.
+                aliases = aliases.filter { $0.value != pending }
+                session.noteID = id
+                let sessionID = session.id, url = URL(fileURLWithPath: session.key), revision = onDisk?.revision
+                Self.io.async {
+                    NoteDisk.states[sessionID]?.noteID = id
+                    NoteDisk.states[sessionID]?.url = url
+                    NoteDisk.states[sessionID]?.revision = revision
+                }
+                if let onDisk, let index = notes.firstIndex(where: { $0.key == session.key && $0.version == nil }) { notes[index] = onDisk }
+            }
+        }
     }
 
     /// Notebooks whose cover is being given its own id (a duplicated cover), by name: Private until it lands.

@@ -131,6 +131,9 @@ struct NoteStoreCheck {
         keepPromotes(root: root)
         coverGroupsByFolder(root: root)
         duplicatedNotebook(root: root)
+        renamedPrivateFolder(root: root)
+        identicalRenewal(root: root)
+        reconcileAfterKeep(root: root)
         lowercaseCover(root: root)
         rekeyKeepsSource(root: root)
         canvasByFolder(root: root)
@@ -1574,6 +1577,94 @@ struct NoteStoreCheck {
         func privateOnDisk(_ folder: URL) -> Bool? { text(folder.appending(path: NoteShelf.coverName)).map { NoteContract.isPrivate(NoteFile.parse($0, fallbackID: "", fallbackDate: Date())) } }
         while privateOnDisk(b) != true && Date() < until { settle(0.1); store.reload() }
         expect(privateOnDisk(b) == true && privateOnDisk(a) == false, "a cover field lands only on its own notebook's cover")
+        for folder in [a, b] { try? fm.removeItem(at: folder) }
+    }
+
+    /// A Private notebook's folder renamed in Finder with a trailing dot is still that Private notebook.
+    static func renamedPrivateFolder(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Health.")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var cover = NoteFile(id: "HEALTH-DOT", body: "# About this notebook")
+        cover.cover = true
+        cover.setScalar("private", "true")
+        _ = NoteStore.create(cover.serialized(), at: folder.appending(path: NoteShelf.coverName), root: root)
+        let read = NoteStore.read(root)
+        let books = read.notebooks.map(\.name)
+        let privateBooks = NotePrivacy.privateBooks(notebooks: read.notebooks.map { ($0.name, $0.isPrivate) }, held: [])
+        expect(privateBooks.contains("Health.") && !NotePrivacy.readable(notebook: "Health.", privateBooks: privateBooks, asker: nil)
+               && !NotePrivacy.destinationReadable("Health.", existing: books, privateBooks: privateBooks, asker: nil),
+               "a renamed Private folder stays Private to the tools, and a move into it is refused")
+        try? fm.removeItem(at: folder)
+    }
+
+    /// Two Macs renewing one cover's id at once write the same text: the second write finds it there and counts it as
+    /// landed (never a conflict copy), and a pending id that won't land is reconciled with the file after a read.
+    @MainActor static func identicalRenewal(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Twice")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var cover = NoteFile(id: "OLD-ID", body: "# About this notebook\nTwice")
+        cover.cover = true
+        let url = folder.appending(path: NoteShelf.coverName)
+        let base = cover.serialized()
+        _ = NoteStore.create(base, at: url, root: root)
+        var renewed = cover
+        renewed.id = NoteLibrary.renewedID("OLD-ID", folder: "Twice")
+        let text = renewed.serialized()
+        // The other Mac's identical renewal is already there.
+        try? Data(text.utf8).write(to: url)
+        let outcome = NoteStore.save(text, to: url, base: base, root: root, noteID: "OLD-ID")
+        let copies = ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.contains("conflicted") }
+        expect(outcome == .written && copies.isEmpty && (try? String(contentsOf: url, encoding: .utf8)) == text,
+               "an identical renewal finds itself there: landed, no conflict copy", "\(outcome) \(copies)")
+        try? fm.removeItem(at: folder)
+    }
+
+    /// A renewal whose write was kept beside the cover (its file changed meanwhile, as on another Mac): the pending id
+    /// is reconciled with the file after the next read, the conflict shows, and after Keep the cover gets its id
+    /// cleanly, with nothing left waiting.
+    @MainActor static func reconcileAfterKeep(root: URL) {
+        let fm = FileManager.default
+        let a = root.appending(path: "Rec"), b = root.appending(path: "Rec copy")
+        for folder in [a, b] { try? fm.createDirectory(at: folder, withIntermediateDirectories: true) }
+        var cover = NoteFile(id: "REC-COVER", body: "# About this notebook\nRec")
+        cover.cover = true
+        _ = NoteStore.create(cover.serialized(), at: a.appending(path: NoteShelf.coverName), root: root)
+        let coverB = b.appending(path: NoteShelf.coverName)
+        _ = NoteStore.create(cover.serialized(), at: coverB, root: root)
+        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        store.reload()
+        let hold = DispatchSemaphore(value: 0)
+        NoteStore.io.async { hold.wait() }
+        var until = Date().addingTimeInterval(8)
+        while store.renewing["Rec copy"] == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let renewed = NoteLibrary.renewedID("REC-COVER", folder: "Rec copy")
+        // Meanwhile the file changes elsewhere: the renewal's write is kept beside it.
+        var elsewhere = cover
+        elsewhere.body = "# About this notebook\nRec, edited elsewhere"
+        try? Data(elsewhere.serialized().utf8).write(to: coverB)
+        hold.signal()
+        until = Date().addingTimeInterval(8)
+        let copyB = b.appending(path: "About this notebook (conflicted copy).md")
+        while !fm.fileExists(atPath: copyB.path) && Date() < until { settle(0.1) }
+        store.reload()
+        settle(1.5)
+        expect(fm.fileExists(atPath: copyB.path) && !store.pendingIDs.contains(renewed) && store.renewing["Rec copy"] == nil,
+               "a renewal kept beside the file: reconciled after a read, nothing left waiting for it")
+        guard let canonical = store.notes.first(where: { $0.notebook == "Rec copy" && NoteLibrary.isCanonicalCover($0.url.lastPathComponent) && $0.version == nil }) else {
+            return expect(false, "the cover is read")
+        }
+        expect(store.conflict(of: canonical)?.count == 2, "the copy shows as the cover's conflict")
+        store.keep(canonical)
+        until = Date().addingTimeInterval(10)
+        func idOnDisk() -> String? { text(coverB).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()).id } }
+        while (fm.fileExists(atPath: copyB.path) || idOnDisk() != renewed) && Date() < until { settle(0.2); store.reload() }
+        settle(1)
+        expect(!fm.fileExists(atPath: copyB.path) && idOnDisk() == renewed && text(coverB)?.contains("edited elsewhere") == true
+               && !store.pendingIDs.contains(renewed) && store.coverID("Rec copy") == renewed,
+               "after Keep, the cover gets its own id cleanly (its words kept) and nothing waits", "\(idOnDisk() ?? "nil")")
         for folder in [a, b] { try? fm.removeItem(at: folder) }
     }
 
