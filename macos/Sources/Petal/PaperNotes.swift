@@ -27,8 +27,10 @@ struct PaperNote: Identifiable, Equatable {
     var key: String { version.map { url.path + "#" + $0 } ?? url.path }
     var id: String { key }
     var noteID: String { file.id }
-    func resolve(_ path: String) -> URL {
-        path.hasPrefix("/") ? URL(fileURLWithPath: path) : url.deletingLastPathComponent().appending(path: path)
+    /// Where one of its picture links leads, by the words alone (NoteShelf.pictureTarget: inside the notes' root,
+    /// never absolute or out by ".."); nil is a broken picture. The disk's check is NoteStore.pictureFile.
+    func picture(_ link: String) -> URL? {
+        NoteShelf.pictureTarget(link, noteFolder: url.deletingLastPathComponent().path).map { URL(fileURLWithPath: $0) }
     }
 }
 
@@ -537,6 +539,51 @@ final class NoteStore {
             at = at.appending(path: String(part))
             var info = stat()
             if lstat(at.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFLNK { return false }
+        }
+        return true
+    }
+
+    /// The one rule for a picture link, wherever it's read or written (the editor, the read-only paper, journal
+    /// recovery, rescue): resolved from the note's folder and standardized (NoteShelf.pictureTarget), inside `root`
+    /// (else the folder above the note's notebook), and no symbolic link on the way (`safe`). Nil: never read or
+    /// written; a broken picture shows instead. Off the main thread (it looks at the disk).
+    nonisolated static func pictureFile(_ link: String, noteFolder: URL, root: URL? = nil) -> URL? {
+        let base = root ?? noteFolder.deletingLastPathComponent()
+        // The folder and the root however each is spelled (/var is /private/var): the link must stay inside the
+        // root in one consistent spelling; `safe` then checks every part for a symbolic link.
+        let real = { (path: String) in realpath(path, nil).map { pointer in defer { free(pointer) }; return String(cString: pointer) } ?? path }
+        for folder in [noteFolder.path, real(noteFolder.path)] {
+            for rootPath in [base.path, real(base.path)] {
+                guard let path = NoteShelf.pictureTarget(link, noteFolder: folder, root: rootPath) else { continue }
+                let url = URL(fileURLWithPath: path)
+                return safe(url, root: base) ? url : nil
+            }
+        }
+        return nil
+    }
+
+    /// A journal's picture bytes put back exactly where its saved text's links point, whatever layout wrote them (an
+    /// older `pictures-….assets/p.png` too), each place checked by `pictureFile`; bytes no link names go to the
+    /// note's own folder in Pictures. One already there counts only with the same bytes. True once all are there.
+    nonisolated static func restorePictures(_ pictures: [NotePictureBytes], text: String, noteFile: URL, noteID: String, root: URL) -> Bool {
+        guard !pictures.isEmpty else { return true }
+        let fm = FileManager.default
+        let folder = noteFile.deletingLastPathComponent()
+        let links = NoteShelf.referencedPictures(text)
+        for picture in pictures {
+            let named = links.filter { ($0 as NSString).lastPathComponent == picture.name }
+            // A link that leads out of the notes' root (or through a symbolic link) is never written to: those
+            // bytes go to the note's own folder in Pictures instead, so nothing is lost.
+            let allowed = named.filter { pictureFile($0, noteFolder: folder, root: root) != nil }
+            for link in allowed.isEmpty ? [NoteShelf.pictureLink(id: noteID, name: picture.name)] : allowed {
+                guard let into = pictureFile(link, noteFolder: folder, root: root) else { return false }
+                if fm.fileExists(atPath: into.path) {
+                    guard NoteShelf.acceptExisting(existing: try? Data(contentsOf: into), wanted: picture.data) else { return false }
+                    continue
+                }
+                try? fm.createDirectory(at: into.deletingLastPathComponent(), withIntermediateDirectories: true)
+                guard (try? picture.data.write(to: into, options: .withoutOverwriting)) != nil else { return false }
+            }
         }
         return true
     }
@@ -1255,13 +1302,14 @@ final class NoteStore {
         let referenced = NoteShelf.referencedPictures(text)
         var present = Set<String>()
         for path in referenced {
-            guard let intoPath = NoteShelf.resolvedLink(path, from: noteDir.path), NoteShelf.within(intoPath, folder.path) != nil else { continue }
-            let into = URL(fileURLWithPath: intoPath)
+            // Both ends by the one rule (pictureFile): the copy inside the rescue's folder, the source inside the
+            // notes' root, never through a symbolic link.
+            // A link that leads out of where its note is shows a broken picture anywhere: nothing to carry for it.
+            guard let into = pictureFile(path, noteFolder: noteDir, root: folder) else { present.insert(path); continue }
             let wanted: Data?
             if let bytes = pictures.first(where: { $0.name == (path as NSString).lastPathComponent }) { wanted = bytes.data }
-            else if let noteFolder, let sourcePath = NoteShelf.resolvedLink(path, from: noteFolder.path),
-                    NoteShelf.within(sourcePath, noteFolder.deletingLastPathComponent().path) != nil {
-                wanted = picture(at: URL(fileURLWithPath: sourcePath))
+            else if let noteFolder, let source = pictureFile(path, noteFolder: noteFolder) {
+                wanted = picture(at: source)
             } else { wanted = nil }
             guard let wanted else { continue }
             if fm.fileExists(atPath: into.path) {
@@ -1519,7 +1567,8 @@ final class NoteStore {
     /// through a session of its own and only where no cover is. Returns the notebook's folder name.
     @discardableResult
     func ensureNotebook(_ name: String, color: String) -> String {
-        let folderName = NoteShelf.folderName(name)
+        // A notebook already there by another case ("inbox" for Inbox) is that notebook, by its own name.
+        let folderName = NoteShelf.canonicalNotebook(NoteShelf.folderName(name), existing: notebooks.map(\.name))
         guard notebook(folderName) == nil, !switching else { return folderName }
         let folder = root.appending(path: folderName)
         var cover = NoteFile(body: "# About this notebook\n\nWhat \(folderName) is for.")

@@ -1668,6 +1668,17 @@ enum NoteShelf {
     /// A picture's link as a note writes it (relative to its notebook folder).
     static func pictureLink(id: String, name: String) -> String { "../" + pictureFolder(id: id) + "/" + name }
 
+    /// Where a note's picture link may be read or written, by the words alone: resolved from the folder its file is
+    /// in and standardized, and only inside the notes' root (`root`, else the folder above the note's notebook, since
+    /// every note sits one level down). Never an absolute path, a web address, "~", or anything that climbs out;
+    /// nil shows a broken picture. The disk's half (no symbolic link on the way) is NoteStore.pictureFile.
+    static func pictureTarget(_ link: String, noteFolder: String, root: String? = nil) -> String? {
+        guard !link.isEmpty, !link.hasPrefix("/"), !link.hasPrefix("~"), !link.contains("://"), !link.contains("\0") else { return nil }
+        let base = root ?? (noteFolder as NSString).deletingLastPathComponent
+        guard let path = resolvedLink(link, from: noteFolder), within(path, base) != nil else { return nil }
+        return path
+    }
+
     /// A note's relative link as a path, from the folder its file is in, ".." taken by the words alone (never through
     /// the disk): "../Pictures/<hash>/p.png" from "/n/Inbox" is "/n/Pictures/<hash>/p.png". Nil for an absolute
     /// link, or one that climbs above "/".
@@ -1956,9 +1967,18 @@ enum NoteInk {
 /// What Petal Notes' tools tell an agent of a note, each derived from its source after the vault's redaction
 /// (`redact`), never cut first: a secret straddling a cut can't leave part of itself behind.
 enum NoteTold {
-    static func title(_ body: String, _ redact: (String) -> String) -> String { NoteText.title(redact(body)) }
+    static func title(_ body: String, _ redact: (String) -> String) -> String { NoteText.title(derivable(body, redact)) }
 
-    static func preview(_ body: String, _ redact: (String) -> String) -> String { String(NoteText.preview(redact(body)).prefix(160)) }
+    static func preview(_ body: String, _ redact: (String) -> String) -> String { String(NoteText.preview(derivable(body, redact)).prefix(160)) }
+
+    /// What titles and previews are made from: every picture line neutralized on the original text first (so
+    /// redaction can never turn a picture's file name into words), then redacted, then each neutral line read again
+    /// as a picture (which titles and previews skip), the lines kept where they were.
+    static func derivable(_ body: String, _ redact: (String) -> String) -> String {
+        redact(neutralPictures(body)).components(separatedBy: "\n").map { isNeutralPicture($0) ? "![](picture)" : $0 }.joined(separator: "\n")
+    }
+
+    static func isNeutralPicture(_ line: String) -> Bool { line.range(of: #"^!\[picture \d+\]$"#, options: .regularExpression) != nil }
 
     /// A note's text for a tool: every picture line as `![picture N]` (in order), so no folder or file name of a
     /// picture is ever told.

@@ -292,7 +292,7 @@ struct NoteBodyView: View {
                 case .link(let url):
                     LinkCardView(url: url).padding(.vertical, 8)
                 case .image(let path, let caption):
-                    PictureView(file: paper.resolve(path), caption: caption).padding(.vertical, 8)
+                    PictureView(link: path, folder: paper.url.deletingLastPathComponent(), caption: caption).padding(.vertical, 8)
                 case .ink(let text):
                     Text(NoteText.plain(text)).font(.system(size: 13.5)).foregroundStyle(glass ? .primary : PaperLook.color(NoteInk.ink(tint)))
                         .padding(.leading, 9)
@@ -335,13 +335,21 @@ struct LinkCardView: View {
 }
 
 struct PictureView: View {
-    let file: URL
+    /// Its link as the note writes it, and the note's folder it's read from (NotePictures: inside the notes' root
+    /// only, else a broken picture).
+    let link: String
+    let folder: URL
     let caption: String
 
     var body: some View {
         Group {
-            if let image = NotePictures.shared.image(file) {
+            if let image = NotePictures.shared.image(link, in: folder) {
                 Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+            } else if NotePictures.shared.isBroken(link, in: folder) {
+                Color.black.opacity(0.06).overlay {
+                    Image(systemName: "photo.badge.exclamationmark").font(.system(size: 18)).foregroundStyle(.black.opacity(0.35))
+                        .accessibilityLabel("Picture can't be shown")
+                }
             } else {
                 Color.black.opacity(0.06)
             }

@@ -73,29 +73,57 @@ final class LinkPreviews {
     func preview(_ url: String, title: String) { titles[url] = title }
 }
 
-/// Pictures beside notes, read off the main thread and kept while Petal runs.
+/// Notes' pictures, read off the main thread and kept while Petal runs, by where their link leads
+/// (NoteShelf.pictureTarget). A link that leads out of the notes' root, through a symbolic link or to nothing that
+/// reads as a picture is broken: a placeholder shows, never another file. Every arrival (a picture, or that it's
+/// broken) is said with `arrived`, so the editors showing it lay it out and draw it again.
 @MainActor @Observable
 final class NotePictures {
     static let shared = NotePictures()
-    private(set) var images: [URL: NSImage] = [:]
-    @ObservationIgnored private var asked: Set<URL> = []
+    static let arrived = Notification.Name("petal.notePictureArrived")
+    private(set) var images: [String: NSImage] = [:]
+    /// Broken, and when: asked again only after a while (a file iCloud is still bringing down).
+    private(set) var broken: [String: Date] = [:]
+    @ObservationIgnored private var asked: Set<String> = []
 
-    func image(_ url: URL) -> NSImage? {
-        if let image = images[url] { return image }
-        guard !asked.contains(url) else { return nil }
-        asked.insert(url)
+    /// Where a link leads from a note's folder, by the words alone: nil never reads anything.
+    nonisolated static func target(_ link: String, in folder: URL) -> String? { NoteShelf.pictureTarget(link, noteFolder: folder.path) }
+
+    func image(_ link: String, in folder: URL) -> NSImage? {
+        guard let key = Self.target(link, in: folder) else { return nil }
+        if let image = images[key] { return image }
+        if let when = broken[key], Date().timeIntervalSince(when) < 10 { return nil }
+        guard !asked.contains(key) else { return nil }
+        asked.insert(key)
         NoteStore.io.async {
-            let data = NoteStore.coordinatedData(url)
+            // The one rule for a picture link (NoteStore.pictureFile): inside the notes' root, no symbolic link.
+            let data = NoteStore.pictureFile(link, noteFolder: folder).flatMap { NoteStore.coordinatedData($0) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if let data, let image = NSImage(data: data) { self.images[url] = image } else { self.asked.remove(url) }
+                    self.asked.remove(key)
+                    if let data, let image = NSImage(data: data) {
+                        self.store(image, key)
+                    } else {
+                        // Said once, when it turns broken: a redraw that asks again never loops.
+                        let fresh = self.broken[key] == nil
+                        self.broken[key] = Date()
+                        if fresh { NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["target": key]) }
+                    }
                 }
             }
         }
         return nil
     }
 
-    func preview(_ url: URL, _ image: NSImage) { images[url] = image }
+    func isBroken(_ link: String, in folder: URL) -> Bool { Self.target(link, in: folder).map { broken[$0] != nil } ?? true }
+
+    func preview(_ file: URL, _ image: NSImage) { store(image, file.path) }
+
+    private func store(_ image: NSImage, _ key: String) {
+        images[key] = image
+        broken[key] = nil
+        NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["target": key])
+    }
 }
 
 extension NoteStore {
@@ -148,6 +176,15 @@ enum NoteRich {
         }
     }
 
+    /// The ranges of the pictures in `text` whose link leads to `target`: what a picture's arrival lays out again.
+    static func pictureRanges(in text: NSAttributedString, target: String) -> [NSRange] {
+        var ranges: [NSRange] = []
+        text.enumerateAttribute(.attachment, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+            if let cell = (value as? NSTextAttachment)?.attachmentCell as? PictureCell, cell.leadsTo == target { ranges.append(range) }
+        }
+        return ranges
+    }
+
     /// The editor's text for a note's body. `base`: the note's folder, for its pictures.
     @MainActor static func attributed(_ blocks: [NoteBlock], base: URL, style: Style) -> NSAttributedString {
         let result = NSMutableAttributedString()
@@ -164,8 +201,7 @@ enum NoteRich {
             case .link(let url):
                 result.append(attachment(LinkCell(url: url), attributes("link", style)))
             case .image(let path, let caption):
-                let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : base.appending(path: path)
-                result.append(attachment(PictureCell(path: path, file: url, caption: caption), attributes("image", style)))
+                result.append(attachment(PictureCell(path: path, folder: base, caption: caption), attributes("image", style)))
             case .ink(let text):
                 result.append(inline(text, attributes("ink", style)))
             case .bullet(let text):
@@ -427,18 +463,24 @@ final class LinkCell: NSTextAttachmentCell {
 /// A picture beside the note (pasted or dropped), with its caption.
 final class PictureCell: NSTextAttachmentCell {
     let path: String
-    let file: URL
+    /// The note's folder its link is read from.
+    let folder: URL
     let caption: String
-    init(path: String, file: URL, caption: String) {
+    /// Where its link leads (nil: out of the notes' root, absolute, or a web address; never read).
+    let leadsTo: String?
+    init(path: String, folder: URL, caption: String) {
         self.path = path
-        self.file = file
+        self.folder = folder
         self.caption = caption
+        self.leadsTo = NotePictures.target(path, in: folder)
         super.init(textCell: "")
     }
     required init(coder: NSCoder) { fatalError() }
 
+    private var picture: NSImage? { MainActor.assumeIsolated { NotePictures.shared.image(path, in: folder) } }
+
     private func size(width: CGFloat) -> NSSize {
-        let image = MainActor.assumeIsolated { NotePictures.shared.image(file) }
+        let image = picture
         guard let image, image.size.width > 0 else { return NSSize(width: width, height: 96) }
         return NSSize(width: width, height: min(200, max(60, width * image.size.height / image.size.width)))
     }
@@ -454,11 +496,18 @@ final class PictureCell: NSTextAttachmentCell {
         let shape = NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9)
         NSGraphicsContext.saveGraphicsState()
         shape.addClip()
-        if let image = MainActor.assumeIsolated({ NotePictures.shared.image(file) }) {
+        if let image = picture {
             image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
         } else {
             NSColor(white: 0, alpha: 0.06).setFill()
             rect.fill()
+            // Broken (it leads out of the notes, or isn't there): a mark, never another file.
+            if MainActor.assumeIsolated({ NotePictures.shared.isBroken(path, in: folder) }),
+               let mark = NSImage(systemSymbolName: "photo.badge.exclamationmark", accessibilityDescription: "Picture can't be shown") {
+                let size = NSSize(width: 22, height: 18)
+                mark.draw(in: NSRect(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2, width: size.width, height: size.height),
+                          from: .zero, operation: .sourceOver, fraction: 0.35, respectFlipped: true, hints: nil)
+            }
         }
         NSGraphicsContext.restoreGraphicsState()
         NSColor(white: 0, alpha: 0.15).setStroke()
@@ -484,6 +533,39 @@ final class NoteTextView: NSTextView {
     var style = NoteRich.Style(ink: .black, dim: .gray, petal: .black, accent: .systemBlue)
     var changed: () -> Void = {}
     var escape: () -> Void = {}
+    /// The note's folder, which its picture links are read from.
+    var noteFolder = URL(fileURLWithPath: "/")
+    /// Measures the paper again (a picture that arrived changes its height).
+    var remeasure: () -> Void = {}
+    private var pictureObserver: NSObjectProtocol?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let pictureObserver { NotificationCenter.default.removeObserver(pictureObserver) }
+        pictureObserver = nil
+        guard window != nil else { return }
+        pictureObserver = NotificationCenter.default.addObserver(forName: NotePictures.arrived, object: nil, queue: .main) { [weak self] note in
+            guard let target = note.userInfo?["target"] as? String else { return }
+            MainActor.assumeIsolated { _ = self?.pictureArrived(target) }
+        }
+    }
+
+    /// A picture this editor shows arrived (or turned out broken): its attachment laid out, measured and drawn again,
+    /// and the paper measured again. Returns the ranges it did that for.
+    @discardableResult
+    func pictureArrived(_ target: String) -> [NSRange] {
+        guard let storage = textStorage, let layoutManager else { return [] }
+        let ranges = NoteRich.pictureRanges(in: storage, target: target)
+        guard !ranges.isEmpty else { return [] }
+        for range in ranges {
+            layoutManager.invalidateLayout(forCharacterRange: range, actualCharacterRange: nil)
+            layoutManager.invalidateDisplay(forCharacterRange: range)
+        }
+        if let textContainer { layoutManager.ensureLayout(for: textContainer) }
+        needsDisplay = true
+        remeasure()
+        return ranges
+    }
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
@@ -624,7 +706,7 @@ final class NoteTextView: NSTextView {
     func insertPicture(path: String, file: URL, caption: String, at: Int) -> Bool {
         guard let storage = textStorage else { return false }
         if at >= 0 { setSelectedRange(NSRange(location: min(at, storage.length), length: 0)) }
-        insertLine(PictureCell(path: path, file: file, caption: caption), kind: "image")
+        insertLine(PictureCell(path: path, folder: noteFolder, caption: caption), kind: "image")
         return true
     }
 
@@ -804,6 +886,11 @@ struct NoteEditorView: NSViewRepresentable {
         }
         register(handle)
         let base = paper.url.deletingLastPathComponent()
+        text.noteFolder = base
+        text.remeasure = { [weak coordinator, weak text] in
+            guard let coordinator, let text else { return }
+            MainActor.assumeIsolated { coordinator.measure(text) }
+        }
         text.textStorage?.setAttributedString(NoteRich.attributed(NoteBlock.blocks(paper.file.body), base: base, style: style))
         text.typingAttributes = NoteRich.attributes("text", style)
         text.insertionPointColor = style.ink
@@ -814,6 +901,7 @@ struct NoteEditorView: NSViewRepresentable {
         guard let text = scroll.documentView as? NoteTextView else { return }
         // The callbacks follow the note (moved, renamed on disk) on every update; the text is left alone.
         text.importPictures = importPictures
+        text.noteFolder = paper.url.deletingLastPathComponent()
         text.escape = escape
         let coordinator = context.coordinator
         // Another note in this paper, or the file changed elsewhere while the person isn't typing here: read again.

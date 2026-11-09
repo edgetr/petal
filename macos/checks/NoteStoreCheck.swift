@@ -113,6 +113,7 @@ struct NoteStoreCheck {
         idFirst(root: root)
         moveAfterConflict(root: root)
         picturesStay(root: root)
+        pictureLinks(root: root)
         caseMove(root: root)
         versionGroups(root: root)
         try? fm.removeItem(at: Config.supportFolder)
@@ -654,6 +655,77 @@ struct NoteStoreCheck {
         expect(local.handle("U2") == firstLook && local.handles?[plainHolder] == nil, "an id-less note given its id keeps its handle, and its path's is retired")
     }
 
+    /// The one rule for picture links (NoteStore.pictureFile), journal recovery putting bytes exactly where each saved
+    /// link points (an older layout too), and a new note's notebook named as the one already there.
+    @MainActor static func pictureLinks(root: URL) {
+        let fm = FileManager.default
+        let inbox = root.appending(path: "Links")
+        try? fm.createDirectory(at: inbox, withIntermediateDirectories: true)
+        let inside = NoteStore.pictureFile("../Pictures/abc/p.png", noteFolder: inbox)
+        expect(inside?.path == root.appending(path: "Pictures/abc/p.png").path, "a link inside the notes' root: allowed", inside?.path ?? "nil")
+        expect(NoteStore.pictureFile("../Pictures/../../private.png", noteFolder: inbox) == nil, "out by .., however it's spelled: refused")
+        expect(NoteStore.pictureFile("/etc/hosts", noteFolder: inbox) == nil && NoteStore.pictureFile("~/x.png", noteFolder: inbox) == nil
+               && NoteStore.pictureFile("file:///etc/hosts", noteFolder: inbox) == nil, "absolute, home or an address: refused")
+        // A symbolic link on the way (a folder in the notes that points elsewhere): refused, never read through.
+        let outside = root.deletingLastPathComponent().appending(path: "Outside")
+        try? fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        try? Data("private".utf8).write(to: outside.appending(path: "secret.png"))
+        try? fm.createSymbolicLink(at: inbox.appending(path: "linked"), withDestinationURL: outside)
+        expect(NoteStore.pictureFile("linked/secret.png", noteFolder: inbox) == nil, "through a symbolic link: refused")
+        expect(NoteStore.pictureFile("../Links/linked/secret.png", noteFolder: inbox) == nil, "a symbolic link reached by ..: refused too")
+
+        // Recovering a journal written with older links ("pictures-….assets/p.png" beside the note): the bytes go back
+        // exactly where the link points, so the link works.
+        let journal = Config.supportFolder.appending(path: "Notes journal, links")
+        try? fm.createDirectory(at: journal, withIntermediateDirectories: true)
+        let note = inbox.appending(path: "Old layout.md")
+        let base = NoteFile(id: "OLD1", body: "before").serialized()
+        _ = NoteStore.create(base, at: note, root: root)
+        let typed = NoteFile(id: "OLD1", body: "after\n![](pictures-feed.assets/p.png)").serialized()
+        let entry = NoteJournal.Entry(noteID: "OLD1", path: note.path, base: base, text: typed, pictures: [NoteJournal.Picture(name: "p.png", data: Data("old pic".utf8))])
+        let at = NoteJournal.recoverEntry(entry, notes: NoteStore.read(root).notes, root: root)
+        expect(at?.lastPathComponent == note.lastPathComponent && text(note) == typed && text(inbox.appending(path: "pictures-feed.assets/p.png")) == "old pic"
+               && !fm.fileExists(atPath: root.appending(path: NoteShelf.pictureFolder(id: "OLD1") + "/p.png").path),
+               "an old journal's picture restored where its link points, not into Pictures", text(note) ?? "nil")
+        // The same through continueAt, in the notes and in Unsaved notes.
+        let cont = inbox.appending(path: "Continued.md")
+        let contBase = NoteFile(id: "OLD2", body: "c0").serialized()
+        _ = NoteStore.create(contBase, at: cont, root: root)
+        var rest = NoteJournal.Entry(noteID: "OLD2", path: cont.path, base: contBase, text: NoteFile(id: "OLD2", body: "c1\n![](pictures-beef.assets/q.png)").serialized(),
+                                     pictures: [NoteJournal.Picture(name: "q.png", data: Data("q".utf8))])
+        expect(NoteJournal.continueAt(rest, cont, root: root)?.lastPathComponent == cont.lastPathComponent && text(inbox.appending(path: "pictures-beef.assets/q.png")) == "q",
+               "continued in the notes: the picture where the old link points")
+        let rescueNote = Config.supportFolder.appending(path: "Unsaved notes/note-old/Note/Continued.md")
+        try? fm.createDirectory(at: rescueNote.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? Data(contBase.utf8).write(to: rescueNote)
+        rest.path = rescueNote.path
+        expect(NoteJournal.continueAt(rest, rescueNote, root: root)?.lastPathComponent == rescueNote.lastPathComponent
+               && text(rescueNote.deletingLastPathComponent().appending(path: "pictures-beef.assets/q.png")) == "q",
+               "continued in Unsaved notes: the picture where the old link points there too")
+        // A saved link that leads out is never written to: its bytes go to the note's own folder instead.
+        let escapeNote = inbox.appending(path: "Escape.md")
+        let escapeBase = NoteFile(id: "OLD3", body: "e0").serialized()
+        _ = NoteStore.create(escapeBase, at: escapeNote, root: root)
+        let escaping = NoteJournal.Entry(noteID: "OLD3", path: escapeNote.path, base: escapeBase, text: NoteFile(id: "OLD3", body: "e1\n![](../../escaped.png)").serialized(),
+                                         pictures: [NoteJournal.Picture(name: "escaped.png", data: Data("e".utf8))])
+        _ = NoteJournal.recoverEntry(escaping, notes: NoteStore.read(root).notes, root: root)
+        expect(!fm.fileExists(atPath: root.deletingLastPathComponent().appending(path: "escaped.png").path)
+               && text(root.appending(path: NoteShelf.pictureFolder(id: "OLD3") + "/escaped.png")) == "e",
+               "a link leading out: nothing written there, the bytes kept in the note's own folder")
+
+        // A new note in "inbox" when Inbox exists: Inbox, never a second notebook.
+        let store = NoteStore(root: root)
+        let read = NoteStore.read(root)
+        store.preview(read.notes, notebooks: read.notebooks)
+        let before = store.notebooks.count
+        let existing = store.notebooks.first { $0.name == "Links" }?.name
+        expect(existing == "Links" && store.ensureNotebook("links", color: "") == "Links" && store.ensureNotebook("LINKS", color: "") == "Links"
+               && store.notebooks.count == before, "a notebook by another case: the one already there, by its own name")
+        let made = store.make(NoteFile(body: "# Case"), in: "links")
+        expect(made?.notebook == "Links" && made?.url.deletingLastPathComponent().lastPathComponent == "Links" && store.notebooks.count == before,
+               "a new note made in \"links\" goes in Links", made?.notebook ?? "nil")
+    }
+
     /// A move that only changes a notebook's case does nothing (the same folder by identity).
     @MainActor static func caseMove(root: URL) {
         let fm = FileManager.default
@@ -718,12 +790,12 @@ struct NoteStoreCheck {
         let oldNote = older.appending(path: "Old.md")
         _ = NoteStore.create(NoteFile(id: "OL", body: "![](pictures-0123456789abcdef.assets/p.png)").serialized(), at: oldNote, root: root)
         let paper = NoteStore.read(root).notes.first { $0.noteID == "OL" }
-        expect(paper.map { text($0.resolve("pictures-0123456789abcdef.assets/p.png")) == "old" } == true, "an older link still finds its picture")
+        expect(paper.flatMap { $0.picture("pictures-0123456789abcdef.assets/p.png") }.map { text($0) == "old" } == true, "an older link still finds its picture")
         let oldLanded = NoteStore.move(oldNote, noteID: "OL", into: root.appending(path: "OlderMoved"), root: root)
         expect(oldLanded.map(linksHold) == true && text(oldFolder.appending(path: "p.png")) == "old", "moved: the older picture copied along, the original kept")
         // A note's own picture shows from the editor's base, the folder its file is in.
         if let paper = NoteStore.read(root).notes.first(where: { $0.noteID == "ST" }) {
-            expect(text(paper.resolve(link)) == "p", "a paper resolves its own picture's link to the notes' Pictures")
+            expect(paper.picture(link).flatMap { text($0) } == "p", "a paper resolves its own picture's link to the notes' Pictures")
         }
     }
 

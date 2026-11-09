@@ -46,7 +46,7 @@ extension Snapshot {
             for row in 0..<3 { NSRect(x: 40, y: 110 - CGFloat(row) * 22, width: CGFloat(300 - row * 40), height: 10).fill() }
             return true
         }
-        NotePictures.shared.preview(open.resolve("Talk outline.assets/crop-1.png"), crop)
+        if let file = open.picture("Talk outline.assets/crop-1.png") { NotePictures.shared.preview(file, crop) }
 
         var lunch = NoteFile(id: "S3", created: day, body: "Lunch near the venue: the place with the long table")
         lunch.places = [page]

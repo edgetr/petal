@@ -714,6 +714,18 @@ struct NotesCheck {
                && NoteShelf.resolvedLink("./a/./b.png", from: "/n/Inbox") == "/n/Inbox/a/b.png", "a handwritten link: beside the note")
         expect(NoteShelf.resolvedLink("../../../../x.png", from: "/n/Inbox") == nil && NoteShelf.resolvedLink("/abs.png", from: "/n/Inbox") == nil,
                "above /, or absolute: none")
+        // Where a picture link may be read or written: inside the notes' root, by the words alone.
+        expect(NoteShelf.pictureTarget("../Pictures/abc/p.png", noteFolder: "/n/Inbox") == "/n/Pictures/abc/p.png"
+               && NoteShelf.pictureTarget("Trip.assets/p.png", noteFolder: "/n/Inbox") == "/n/Inbox/Trip.assets/p.png"
+               && NoteShelf.pictureTarget("../Work/x.png", noteFolder: "/n/Inbox") == "/n/Work/x.png", "inside the notes: allowed")
+        expect(NoteShelf.pictureTarget("../Pictures/../../private.png", noteFolder: "/n/Inbox") == nil
+               && NoteShelf.pictureTarget("../../etc/passwd", noteFolder: "/n/Inbox") == nil
+               && NoteShelf.pictureTarget("..", noteFolder: "/n/Inbox") == nil, "out by .., however it's spelled: never")
+        expect(NoteShelf.pictureTarget("/etc/hosts", noteFolder: "/n/Inbox") == nil && NoteShelf.pictureTarget("~/x.png", noteFolder: "/n/Inbox") == nil
+               && NoteShelf.pictureTarget("https://example.com/x.png", noteFolder: "/n/Inbox") == nil && NoteShelf.pictureTarget("", noteFolder: "/n/Inbox") == nil,
+               "absolute, home, an address or nothing: never")
+        expect(NoteShelf.pictureTarget("../x.png", noteFolder: "/u/r1/Note", root: "/u/r1") == "/u/r1/x.png"
+               && NoteShelf.pictureTarget("../../x.png", noteFolder: "/u/r1/Note", root: "/u/r1") == nil, "a rescue's own folder as its root")
         expect(NoteShelf.folderName("Pictures") == "Pictures notes" && NoteShelf.folderName("pictures") == "pictures notes" && NoteShelf.folderName("Trips") == "Trips",
                "a notebook is never called Pictures")
 

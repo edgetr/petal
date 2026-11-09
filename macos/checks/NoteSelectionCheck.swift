@@ -92,6 +92,16 @@ struct NoteSelectionCheck {
         expect(back == "Tickets\n![](\(assets)/picture-3c4d.png)\nnew line\n![boarding pass](\(assets)/picture-1a2b.png)\n![picture 7]",
                "an agent's `![picture N]` written back is that picture again; one there isn't stays words", back)
 
+        // Picture lines are neutralized on the original text before redaction: a picture whose file name holds a secret
+        // (redaction would break the line into words) never shows its folder or name in a title or preview.
+        let pictured = "![](receipts/\(card).png)\nHotel booking\nPaid in full"
+        let pTitle = NoteTold.title(pictured, { vaultIndex.redacted($0) }), pPreview = NoteTold.preview(pictured, { vaultIndex.redacted($0) })
+        expect(pTitle == "Hotel booking" && !pPreview.contains("receipts") && !pPreview.contains(".png") && pPreview.contains("Paid in full"),
+               "a picture's file name never in a title or preview", pTitle + " | " + pPreview)
+        let redactedFirst = NoteText.title(vaultIndex.redacted(pictured))
+        expect(redactedFirst != "Hotel booking" && redactedFirst.contains(".png"), "the case is real: redacting first breaks the picture line into words", redactedFirst)
+        expect(NoteTold.derivable("a\n![x](p.png)\nb", { $0 }) == "a\n![](picture)\nb", "the lines kept where they were, each picture still a picture")
+
         // A title names a note only when exactly one has it, as the tools tell titles: never a guess.
         let alike = [(handle: "naaa", body: "# Shopping\nmilk", version: false), (handle: "nbbb", body: "# Shopping\nbread", version: false),
                      (handle: "nccc", body: "# PIN \(pin)", version: false), (handle: "nddd", body: "# PIN (hidden)", version: false)]

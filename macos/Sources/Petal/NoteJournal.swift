@@ -264,20 +264,14 @@ enum NoteJournal {
         let fm = FileManager.default
         let pictures = entry.pictures.map { NotePictureBytes(name: $0.name, data: $0.data, caption: "") }
         if NoteShelf.within(file.path, root.path) != nil {
-            guard pictures.isEmpty || NoteStore.writePictures(pictures, noteID: entry.noteID, root: root).count == pictures.count else { return nil }
+            guard NoteStore.restorePictures(pictures, text: entry.text, noteFile: file, noteID: entry.noteID, root: root) else { return nil }
             return landing(NoteStore.save(entry.text, to: file, base: entry.base, root: root, noteID: entry.noteID), at: file)
         }
-        // In "Unsaved notes" (outside the notes' folder): the same, by hand, where its links lead from that file.
-        let assets = file.deletingLastPathComponent().deletingLastPathComponent().appending(path: NoteShelf.pictureFolder(id: entry.noteID))
-        try? fm.createDirectory(at: assets, withIntermediateDirectories: true)
-        for picture in pictures {
-            let into = assets.appending(path: picture.name)
-            if fm.fileExists(atPath: into.path) {
-                // Another picture by that name there: never taken for this one; the rest goes to a rescue of its own.
-                if !NoteShelf.acceptExisting(existing: try? Data(contentsOf: into), wanted: picture.data) {
-                    return NoteStore.rescued(entry.text, noteID: entry.noteID, pictures: pictures, from: file.deletingLastPathComponent())
-                }
-            } else if (try? picture.data.write(to: into, options: .withoutOverwriting)) == nil { return nil }
+        // In "Unsaved notes" (outside the notes' folder): the same, inside that rescue's own folder. Another picture
+        // in the way (never taken for this one), or a link that leads out: the rest goes to a rescue of its own.
+        let rescueFolder = file.deletingLastPathComponent().deletingLastPathComponent()
+        if !NoteStore.restorePictures(pictures, text: entry.text, noteFile: file, noteID: entry.noteID, root: rescueFolder) {
+            return NoteStore.rescued(entry.text, noteID: entry.noteID, pictures: pictures, from: file.deletingLastPathComponent())
         }
         // Nothing there, or what landed there: written; a file that can't be read, or changed since: kept, and the
         // rest goes to a file of its own (NoteShelf.continueWrite).
@@ -304,9 +298,9 @@ enum NoteJournal {
     nonisolated static func recoverEntry(_ entry: Entry, notes: [PaperNote], root: URL) -> URL? {
         let found = notes.filter { $0.noteID == entry.noteID && $0.version == nil }.map(\.url.path)
         let pictures = entry.pictures.map { NotePictureBytes(name: $0.name, data: $0.data, caption: "") }
-        // Its pictures' bytes into the notes' Pictures (the same place from every notebook).
+        // Its pictures' bytes exactly where its saved links point from that note (NoteStore.restorePictures).
         func picturesBeside(_ note: URL) -> Bool {
-            pictures.isEmpty || NoteStore.writePictures(pictures, noteID: entry.noteID, root: root).count == pictures.count
+            NoteStore.restorePictures(pictures, text: entry.text, noteFile: note, noteID: entry.noteID, root: root)
         }
         switch NoteShelf.journalTarget(found: found) {
         case .note(let path):
