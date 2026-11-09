@@ -111,7 +111,7 @@ extension Snapshot {
             """)
         plan.places = [page]
         plan.back = friday
-        plan.ink = [NoteHelp.Ink(who: "✦ Petal", text: "This note and Slides will be in front of you \(NoteHelp.backLine(friday, now: now).dropFirst(5)).")]
+        plan.ink = [NoteHelp.Ink(who: "✦ Petal", text: "This note and Slides will be in front of you Friday 9:00.")]
         plan.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", asked: "@Petal bring @this back @Friday with @[Slides]", at: now)
         let planned = PaperNote(file: plan, url: root.appending(path: "Work/Garden talk.md"), notebook: "Work")
         let menu = MentionMenuView(choices: MentionChoice.choices("", notes: ["Slides", "Venue"], notebooks: ["Work", "Home"]), selected: 0,

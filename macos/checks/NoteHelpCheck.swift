@@ -530,8 +530,7 @@ struct NoteHelpCheck {
         noteC.hold("always:computer:com.apple.Safari")
         expect(grants.revoke("always:computer:com.apple.Safari") == ["B", "C"], "a real Always is shared: every run using it stops")
         let rulesGrant = NoteHelp.rulesGrant(["Bash(git push)", "Bash(npm test)"], note: "A", run: "r1")
-        expect(NoteHelp.Stamp(label: "x", grant: rulesGrant, mac: "m").parsed == .rules(["Bash(git push)", "Bash(npm test)"]), "a run's rules: scoped, and read back")
-        expect(NoteHelp.Stamp(label: "x", grant: "rules:Bash(petal doctor:*)", mac: "m").parsed == .rules(["Bash(petal doctor:*)"]), "an older unscoped rule still reads")
+        expect(NoteHelp.Stamp(label: "x", grant: rulesGrant, mac: "m").parsed == .rules(rulesGrant) && rulesGrant.hasPrefix("rules:A:r1:"), "a run's rules: scoped, by an opaque id")
         expect(NoteHelp.Stamp(label: "x", grant: onceA, mac: "m").parsed == .once(onceA) && NoteHelp.Stamp(label: "x", grant: "always:trash", mac: "m").parsed == .always("trash"), "grants read")
         expect(NoteHelp.watchVerdict(crossed: true, alreadyHit: false, confirmation: nil, asked: false) == .unconfirmed, "the quick AI off: crossed, but not confirmed (never a hit)")
         expect(NoteHelp.watchVerdict(crossed: true, alreadyHit: false, confirmation: nil, asked: true) == .unconfirmed, "no answer: not confirmed")
@@ -691,7 +690,7 @@ struct NoteHelpCheck {
         let added = NoteHelp.withOpinion(objectionsInk, held: nil, carried: [primaryInk])
         expect(added.count == 2 && added[0] == primaryInk && added[1].opinion && added[1].objections == 1,
                "a second opinion's objections are added after the primary it carries (ink, PR link, proof)", "\(added)")
-        let failed = NoteHelp.withOpinion(NoteHelp.Ink(who: "GPT 6.1 Sol", text: "No second opinion: Codex isn't set up in Petal.", link: NoteHelp.settingsLink),
+        let failed = NoteHelp.withOpinion(NoteHelp.Ink(who: "GPT 6.1 Sol", text: "No second opinion: Codex isn't set up in Petal.", link: NoteHelp.settingsInk),
                                           held: nil, carried: [primaryInk])
         expect(failed.count == 2 && failed[0] == primaryInk && failed[1].opinion && failed[1].link == NoteHelp.settingsLink,
                "a second opinion that fails (not set up, sign-in, launch) is added too, never in the primary's place")
@@ -819,8 +818,8 @@ struct NoteHelpCheck {
         expect(NoteHelp.coverChoice([coverHere, copyCover], unread: 0) == .conflict, "a cover with a conflict copy needs a choice first: no memory written")
         var versioned = coverHere; versioned.version = true
         expect(NoteHelp.coverChoice([coverHere, versioned], unread: 0) == .conflict, "a cover with an iCloud version needs a choice first")
-        expect(NoteHelp.coverChoice([], unread: 1) == .notHere && NoteHelp.coverChoice([coverHere], unread: 1) == .conflict,
-               "a cover not downloaded yet is not here; one beside it read makes two")
+        expect(NoteHelp.coverChoice([], unread: 1) == .notHere && NoteHelp.coverChoice([coverHere], unread: 1) == .notHere,
+               "a cover not downloaded yet, or one beside it not read yet: not here (waited for, never skipped)")
 
         expect(NoteHelp.bare("@Petal") && NoteHelp.bare("@Petal   ") && NoteHelp.bare("  @petal"), "a bare @Petal asks nothing: refused before a run")
         expect(!NoteHelp.bare("@Petal summarize this") && !NoteHelp.bare("@Petal remember the door code is on the card"), "a request isn't bare")
@@ -950,6 +949,50 @@ struct NoteHelpCheck {
         chainFacts.sources = [("R1", "Diary")]
         chainFacts.privacy = { $0 == "Diary" ? .closed : .open }
         if case .fail = NoteHelp.admit(chainFacts) { expect(true, "") } else { expect(false, "a predecessor moved into a private notebook: the gate fails the chain's run") }
+
+        // MARK: Round sixteen: a helper's output shielded as it arrives, one gate for local routes, kept watcher values
+
+        let apiKey = "saved-vault-key-Q7mA2ZdF91kLpXw3RtYv"
+        let keyIndex = UIMap.SecretIndex([apiKey])
+        let echoed = Said(who: "Codex", text: "Fixed it. The config had ANTHROPIC_API_KEY=\(apiKey).\nProof: tests pass with \(apiKey)\nhttps://github.com/o/r/pull/9",
+                          steps: ["Read .env: \(apiKey)", "Ran the tests"], form: .code, asked: "@Petal fix it. Done means \(apiKey) works")
+        guard let made = NoteHelp.shielded(echoed, index: keyIndex) else { return expect(false, "shielded output") }
+        var landedFile = NoteFile(id: "S1", created: now)
+        landedFile.ink = [made.ink]
+        landedFile.steps = made.steps.map(\.text)
+        let landedText = landedFile.serialized()
+        let journalEntry = HelperJournal.Entry(noteID: "S1", answer: landedText, at: now)
+        let journalData = String(data: (try? JSONEncoder().encode([journalEntry])) ?? Data(), encoding: .utf8) ?? ""
+        expect(!landedText.contains("Q7mA2Zd") && !journalData.contains("Q7mA2Zd") && made.ink.proof.allSatisfy { !$0.contains("Q7mA2Zd") } && !made.ink.finish.contains("Q7mA2Zd"),
+               "an answer echoing a saved key lands redacted in its ink, its proof, its finish line, on the back and in the journal", landedText)
+        expect(made.ink.link == "https://github.com/o/r/pull/9" && made.ink.code, "its PR link and proof derived from the shielded words")
+        expect(NoteHelp.shielded(echoed, index: .unavailable) == nil, "the vault unreadable: nothing is written (it waits, unshown)")
+        let rulesGrant16 = NoteHelp.rulesGrant(["Bash(curl -H 'x-api-key: \(apiKey)')"], note: "S1", run: "R1")
+        expect(!rulesGrant16.contains("curl") && !rulesGrant16.contains("Q7m") && NoteHelp.Stamp(label: "x", grant: rulesGrant16, mac: "m").parsed == .rules(rulesGrant16),
+               "a stamp keeps an opaque id for the rules allowed, never the rules")
+        let gated: [(String, Bool)] = [
+            ("@Petal don't leave me a note every morning", false), ("@Petal leave me a note every morning", true),
+            ("@Petal can you check this every morning, tell me if it's under $300", false), ("@Petal check this every morning, tell me if it's under $300", true),
+            ("@Petal when @Research is done, don't draft @Proposal", false), ("@Petal when @Research is done, draft @Proposal", true),
+            ("@Petal should I bring this back Friday", false), ("@Petal don't keep this calculated", false), ("@Petal keep this calculated", true),
+            ("@Petal remember the code isn't 1234", true)]
+        for (line, local) in gated {
+            let got = NoteHelp.request(line, now: now)
+            let isAsk: Bool = if case .ask = got { true } else { false }
+            expect(isAsk == !local, "“\(line)” \(local ? "is" : "isn't") a local route (one gate for all of them)", "\(got)")
+        }
+        var kept16: NoteHelp.Watch? = { var w = NoteHelp.Watch(every: "1d", line: "under $100", mac: "m"); w.id = "K"; w.last = "$120"; w.amount = 120; return w }()
+        _ = NoteHelp.applyLook(&kept16, id: "K", shown: "$90", amount: 90, hint: nil, past: true, confirmed: false, verdict: .refuted, at: now)
+        expect(kept16?.last == "$120" && kept16?.amount == 120 && kept16?.unconfirmed == false, "a refuted reading never becomes the shown value")
+        _ = NoteHelp.applyLook(&kept16, id: "K", shown: "$90", amount: 90, hint: nil, past: true, confirmed: false, verdict: .unconfirmed, at: now)
+        expect(kept16?.last == "$120" && kept16?.amount == 120 && kept16?.unconfirmed == true, "an unconfirmed one keeps the last accepted value, and says couldn't confirm")
+        _ = NoteHelp.applyLook(&kept16, id: "K", shown: "$110", amount: 110, hint: nil, past: false, confirmed: false, verdict: .plain, at: now)
+        expect(kept16?.last == "$110" && kept16?.unconfirmed == false, "the next accepted reading clears it")
+        let exact: Shielded = "\(11_899.5) and \(11_900.0)"
+        expect(exact.text == "11899.5 and 11900", "a watcher's value goes on exactly, never rounded before a decision", exact.text)
+        let downloading = NoteHelp.CoverCandidate(key: "/n/T/About this notebook.md", name: "About this notebook.md", inFolder: true)
+        expect(NoteHelp.coverChoice([downloading], unread: 1) == .notHere && NoteHelp.coverChoice([], unread: 0) == .none,
+               "a cover that can't be read yet is told apart from no cover (waited for, never skipped)")
 
         // MARK: Open all never launches an app or a script (NoteTasks)
 

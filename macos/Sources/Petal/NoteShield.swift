@@ -102,6 +102,10 @@ struct Shielded: Equatable, Sendable, CustomStringConvertible, ExpressibleByStri
         mutating func appendLiteral(_ literal: StaticString) { text += literal.description }
         mutating func appendInterpolation(_ value: Shielded) { text += value.text }
         mutating func appendInterpolation(_ value: Int) { text += String(value) }
+        /// A number exactly as it is (never rounded: a watcher's value is decided on, rounded only when drawn).
+        mutating func appendInterpolation(_ value: Double) {
+            text += value == value.rounded() && abs(value) < 1e15 ? String(Int64(value)) : String(value)
+        }
     }
 
     var description: String { text }
@@ -121,6 +125,10 @@ struct Shielded: Equatable, Sendable, CustomStringConvertible, ExpressibleByStri
 
     /// The finish line ("done means …") in the redacted words.
     var finishLine: Shielded? { NoteHelp.finishLine(text).map { Shielded(verified: $0) } }
+
+    /// Anything derived from the redacted text (a proof line, a link, a count's words): never from raw text.
+    func derive(_ make: (String) -> String) -> Shielded { Shielded(verified: make(text)) }
+    func deriveAll(_ make: (String) -> [String]) -> [Shielded] { make(text).map { Shielded(verified: $0) } }
 
     /// Its first sentence (derived after redaction).
     var firstSentence: Shielded { Shielded(verified: text.components(separatedBy: CharacterSet(charactersIn: ".\n")).first ?? text) }

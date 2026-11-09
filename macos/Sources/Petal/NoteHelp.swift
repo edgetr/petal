@@ -233,6 +233,7 @@ enum NoteHelp {
     static let stepsKept = 40
     /// An ink's link that is Settings › AI (a key or a sign-in to fix), not an address.
     static let settingsLink = "petal:settings/ai"
+    static let settingsInk: Shielded = "petal:settings/ai"
     static let historyKept = 5
 
     /// What the person's helper is called in a note, and its mark.
@@ -288,15 +289,22 @@ enum NoteHelp {
         /// ink, never in its place.
         var opinion = false
 
-        init(who: String, text: String, proof: [String] = [], link: String = "", objections: Int? = nil, code: Bool = false, finish: String = "",
+        /// The only way new ink is made: its words, proof, link and finish line `Shielded` (a helper's output shielded
+        /// whole as it arrived, and derived after: `NoteHelp.shielded`), so nothing raw is ever written as ink.
+        init(who: String, text: Shielded, proof: [Shielded] = [], link: Shielded = "", objections: Int? = nil, code: Bool = false, finish: Shielded = "",
              opinion: Bool = false) {
+            self.init(stored: who, text.text, proof: proof.map(\.text), link: link.text, objections: objections, code: code, finish: finish.text, opinion: opinion)
+        }
+
+        /// Ink already in the note, read back.
+        private init(stored who: String, _ text: String, proof: [String], link: String, objections: Int?, code: Bool, finish: String, opinion: Bool) {
             self.who = who; self.text = text; self.proof = proof; self.link = link; self.objections = objections; self.code = code; self.finish = finish
             self.opinion = opinion || objections != nil
         }
 
         init?(_ value: NoteValue) {
             guard case .map = value else { return nil }
-            self.init(who: value.text("who"), text: value.text("text"), proof: value.texts("proof"), link: value.text("link"),
+            self.init(stored: value.text("who"), value.text("text"), proof: value.texts("proof"), link: value.text("link"),
                       objections: Int(value.text("objections")), code: value.text("code") == "true", finish: value.text("finish"),
                       opinion: value.text("opinion") == "true")
         }
@@ -341,17 +349,12 @@ enum NoteHelp {
 
         /// What a grant is: `always:<kind>` (a real Always, the only grant shared between notes and runs),
         /// `once:<note>:<run>:<kind>` (Allow once, Buy, this reply: its note's and run's alone),
-        /// `rules:<note>:<run>:<rule>\n…` (Claude's per-part rules allowed in that run), `project:<grant id>`.
-        enum Grant: Equatable { case always(String), rules([String]), project(String), once(String) }
+        /// `rules:<note>:<run>:<id>` (Claude's per-part rules allowed in that run, by an opaque id: the rules themselves
+        /// are kept only in memory, never in the note), `project:<grant id>`.
+        enum Grant: Equatable { case always(String), rules(String), project(String), once(String) }
         var parsed: Grant {
             if grant.hasPrefix("always:") { return .always(String(grant.dropFirst(7))) }
-            if grant.hasPrefix("rules:") {
-                let rest = grant.dropFirst(6)
-                // Scoped: past its note and run.
-                let parts = rest.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false)
-                let rules = parts.count == 3 && !rest.hasPrefix("Bash(") ? String(parts[2]) : String(rest)
-                return .rules(rules.components(separatedBy: "\n").filter { !$0.isEmpty })
-            }
+            if grant.hasPrefix("rules:") { return .rules(grant) }
             if grant.hasPrefix("project:") { return .project(String(grant.dropFirst(8))) }
             return .once(grant)
         }
@@ -409,6 +412,9 @@ enum NoteHelp {
         /// The newest value exactly as read (`last` is it rounded for the corner): every threshold and delivery
         /// decision is made on this, never on `last`.
         var amount: Double? = nil
+        /// The last reading couldn't be confirmed: its value isn't taken (the corner keeps the last accepted one), and
+        /// the corner says so faintly.
+        var unconfirmed = false
 
         init(every: String, line: String, mac: String, at: String = "", url: String = "") {
             self.every = every; self.line = line; self.mac = mac; self.at = at; self.url = url
@@ -430,6 +436,7 @@ enum NoteHelp {
             id = value.text("id")
             tz = value.text("tz")
             amount = Double(value.text("amount"))
+            unconfirmed = value.text("unconfirmed") == "true"
         }
 
         var value: NoteValue {
@@ -446,6 +453,7 @@ enum NoteHelp {
             if !id.isEmpty { pairs.append(("id", .text(id))) }
             if !tz.isEmpty { pairs.append(("tz", .text(tz))) }
             if let amount { pairs.append(("amount", .text(String(amount)))) }
+            if unconfirmed { pairs.append(("unconfirmed", .text("true"))) }
             return .map(pairs)
         }
 
@@ -957,12 +965,40 @@ enum NoteHelp {
     /// put away, stop, pause, bring back, the worktree's removal) are taken only for a plain instruction
     /// (`imperative`); a question, a condition or a negation is an ordinary request for the helper.
     static func request(_ line: String, now: Date, calendar: Calendar = .current) -> Request {
+        // One gate every local route passes (anything that creates, changes or removes work or data: watchers,
+        // morning notes, bring back, chains, recalculation, put away, stop, pause, forget, the worktree's removal):
+        // only a plain instruction is taken; a question, a condition or a negation is an ordinary request.
+        let words = spoken(line)
+        let route = candidate(line, now: now, calendar: calendar)
+        if case .ask = route { return route }
+        return imperative(instruction(route, line: line, words: words)) ? route : .ask(words)
+    }
+
+    /// The instruction a route's words make, as the gate weighs it: a watcher's words before what it watches for
+    /// ("check this every morning", not "tell me if it's under $300"), a chain's request after what it waits for,
+    /// "remember" and "forget" by their verb (what follows is what's kept, not an instruction), else the words.
+    static func instruction(_ route: Request, line: String, words: String) -> String {
+        switch route {
+        case .remember: return "remember"
+        case .forget: return "forget"
+        case .chain: return chainWords(line)?.ask ?? words
+        case .watch:
+            let lower = words.lowercased() as NSString
+            var end = lower.length
+            for marker in [", tell me", " tell me", ", let me know", " let me know", ", alert me", " alert me", " if ", " when ", " whenever "] {
+                let at = lower.range(of: marker)
+                if at.location != NSNotFound { end = min(end, at.location) }
+            }
+            return (words as NSString).substring(to: end)
+        default: return words
+        }
+    }
+
+    /// What `line` would ask, before the gate.
+    private static func candidate(_ line: String, now: Date, calendar: Calendar) -> Request {
         if let chain = chainWords(line) { return .chain(after: chain.after, ask: chain.ask, then: chain.then) }
         let words = spoken(line)
         let lower = words.lowercased()
-        // Routes found by a phrase anywhere in the line act only on a plain instruction ("remember …" and
-        // "forget …" are one by how they start).
-        let plain = imperative(words)
         if lower.hasPrefix("remember ") || lower == "remember" {
             var item = String(words.dropFirst(9)).trimmingCharacters(in: .whitespaces)
             if item.lowercased().hasPrefix("that ") { item = String(item.dropFirst(5)) }
@@ -973,15 +1009,15 @@ enum NoteHelp {
             if item.lowercased().hasPrefix("that ") { item = String(item.dropFirst(5)) }
             return .forget(trimmed(item))
         }
-        if plain, lower.contains("put this away") || lower.contains("put it away") || lower.hasPrefix("put away") { return .putAway }
-        if plain, (lower.contains("stop") || lower.contains("no more")) && lower.contains("morning") { return .stopMorning }
-        if plain, lower.contains("stop watching") || lower.contains("stop checking") { return .stopWatching }
-        if plain, ["pause", "pause it", "pause this", "pause that", "pause it for now", "hold on"].contains(lower.trimmingCharacters(in: .punctuationCharacters)) { return .pause }
-        if plain, ["it's done", "it is done", "we're done", "all done", "remove the worktree", "clean up the worktree", "done with this"].contains(where: lower.contains) { return .done }
+        if lower.contains("put this away") || lower.contains("put it away") || lower.hasPrefix("put away") { return .putAway }
+        if (lower.contains("stop") || lower.contains("no more")) && lower.contains("morning") { return .stopMorning }
+        if lower.contains("stop watching") || lower.contains("stop checking") { return .stopWatching }
+        if ["pause", "pause it", "pause this", "pause that", "pause it for now", "hold on"].contains(lower.trimmingCharacters(in: .punctuationCharacters)) { return .pause }
+        if ["it's done", "it is done", "we're done", "all done", "remove the worktree", "clean up the worktree", "done with this"].contains(where: lower.contains) { return .done }
         if lower.contains("recalculate") || lower.contains("keep this calculated") || lower.contains("keep it calculated") || lower.contains("keep the total") {
             return .recalculate
         }
-        if plain, lower.contains("bring") && lower.contains("back") || plain && lower.hasPrefix("remind me") {
+        if lower.contains("bring") && lower.contains("back") || lower.hasPrefix("remind me") {
             if let when = when(words, now: now, calendar: calendar) {
                 let others = mentions(line).map(\.name).filter { $0.caseInsensitiveCompare(petal) != .orderedSame && !["this", "here"].contains($0.lowercased()) && self.when($0, now: now, calendar: calendar) == nil }
                 return .bringBack(when.date, label: when.label, others: others)
@@ -1717,15 +1753,20 @@ extension NoteHelp {
     /// goes in the corner (the newest, the ones before struck); `hit` is kept only once the person has been told
     /// (`told`), so a crossing they never saw is told again by the next look. A hit stays while the value stays past
     /// the line (never said again) and clears only once it comes back.
-    static func applyLook(_ watch: inout Watch?, id: String, shown: String?, amount: Double? = nil, hint: String?, past: Bool, confirmed: Bool, at time: Date) -> Bool? {
+    /// `verdict`: a reading refuted keeps the last accepted value; one that couldn't be confirmed keeps it too, and
+    /// marks the corner "couldn't confirm" (never a new number).
+    static func applyLook(_ watch: inout Watch?, id: String, shown: String?, amount: Double? = nil, hint: String?, past: Bool, confirmed: Bool,
+                          verdict: WatchVerdict = .plain, at time: Date) -> Bool? {
         guard var current = watch, current.id == id, !current.paused else { return nil }
-        guard let shown else {
+        guard let shown, verdict != .refuted, verdict != .unconfirmed else {
             current.checked = time
+            current.unconfirmed = shown != nil && verdict == .unconfirmed
             watch = current
             return false
         }
         current.record(shown, at: time)
         current.amount = amount
+        current.unconfirmed = false
         if let hint, !hint.isEmpty { current.hint = hint }
         let newly = past && confirmed && !current.hit
         current.hit = past && current.hit
@@ -1934,7 +1975,8 @@ extension NoteHelp {
     /// A one-time grant (Allow once, Buy, this reply's rules): scoped to its note and run, so taking it back stops
     /// that run only. Only a real Always is shared (`always:<kind>`).
     static func onceGrant(kind: String, note: String, run: String) -> String { "once:\(note):\(run):\(kind)" }
-    static func rulesGrant(_ rules: [String], note: String, run: String) -> String { "rules:\(note):\(run):" + rules.joined(separator: "\n") }
+    /// A run's rules as a grant: an opaque id (the rules stay in memory, `NoteHelpers.allowedRules`).
+    static func rulesGrant(_ rules: [String], note: String, run: String) -> String { "rules:\(note):\(run):" + hash8(rules.joined(separator: "\n")) }
 
     /// Where a follow-up to a coding helper goes: to its run when it names no checkout or the run's own; a new run
     /// (its own checkout choice and Allow) when it names another.
@@ -2111,8 +2153,9 @@ extension NoteHelp {
 
     static func coverChoice(_ candidates: [CoverCandidate], unread: Int) -> CoverChoice {
         let covers = candidates.filter { $0.inFolder && isCoverName($0.name) }
-        if covers.count > 1 || covers.contains(where: { $0.version || $0.readOnly }) || (!covers.isEmpty && unread > 0) { return .conflict }
+        // One not read yet (not downloaded, unreadable): not here, waited for; two versions: needs a choice.
         if unread > 0 { return .notHere }
+        if covers.count > 1 || covers.contains(where: { $0.version || $0.readOnly }) { return .conflict }
         return covers.first.map { .one($0.key) } ?? .none
     }
 
@@ -2208,6 +2251,65 @@ struct QuickQueue<Job, AI> {
     }
 }
 
+/// What a helper said, as it arrived (an answer and its steps, a second opinion, an error, a quick call's line): it's
+/// written nowhere, not the note and not the journal's note-bound entries, until it's shielded whole
+/// (`NoteHelp.shielded`). While the vault can't be read it waits, unshown, in the helpers' journal on this Mac.
+struct Said: Codable, Equatable, Sendable {
+    enum Form: String, Codable, Sendable { case answer, code, opinion, failure, words }
+    var who: String
+    var text: String
+    var steps: [String] = []
+    var form: Form = .answer
+    /// The person's line it answered (a coding helper's finish line is derived from it, after redaction).
+    var asked = ""
+    /// A failure Settings › AI fixes: its button on the ink.
+    var settings = false
+}
+
+/// A helper's output that couldn't be shown yet (the vault unreadable): kept on this Mac only, never in the note,
+/// until it can be shielded; what it ends as (done, failed, cleared, or a turn on the way that keeps the line).
+struct Unshown: Codable, Equatable {
+    enum End: String, Codable { case done, failed, keep, clear }
+    var noteID: String
+    var said: Said
+    var end: End
+    var asked: String
+    var at: Date
+    var opinion = false
+}
+
+extension NoteHelp {
+    /// A helper's output shielded whole the moment it arrives (each part through the vault's redaction, the index
+    /// `petal_ui` uses), its ink, proof, link, objections and steps derived only from that; nil while the vault can't
+    /// be read (it waits; it's never written raw).
+    static func shielded(_ said: Said, index: UIMap.SecretIndex) -> (ink: Ink, steps: [Shielded])? {
+        guard let parts = NoteShield.shield([said.text, said.asked] + said.steps, index: index) else { return nil }
+        let text = parts[0], asked = parts[1], steps = Array(parts.dropFirst(2))
+        let ink: Ink
+        switch said.form {
+        case .answer: ink = Ink(who: said.who, text: text.derive(inkText))
+        case .code: ink = codeInk(who: said.who, answer: text, finish: asked.finishLine)
+        case .opinion: ink = Ink(who: said.who, text: text.derive(inkText), objections: objections(in: text.text))
+        case .failure: ink = Ink(who: said.who, text: text, link: said.settings ? settingsInk : "")
+        case .words: ink = Ink(who: said.who, text: text)
+        }
+        return (ink, steps)
+    }
+}
+
+extension HelperJournal {
+    static func loadUnshown(_ file: URL) -> [Unshown] {
+        guard let data = try? Data(contentsOf: file) else { return [] }
+        return (try? JSONDecoder().decode([Unshown].self, from: data)) ?? []
+    }
+
+    static func saveUnshown(_ entries: [Unshown], to file: URL) -> Bool {
+        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard let data = try? JSONEncoder().encode(entries) else { return false }
+        return (try? data.write(to: file, options: .atomic)) != nil
+    }
+}
+
 /// A value belonging to one run (the command rules Claude was allowed): kept for continuations of that run, empty
 /// for any other (a new run on the same note starts with none).
 struct RunScoped<Value> {
@@ -2239,9 +2341,10 @@ extension NoteHelp {
     }
 
     /// A coding helper's ink: its answer, its proof only from its own "Proof:" line, its finish line apart.
-    static func codeInk(who: String, answer: String, finish: String?) -> Ink {
-        Ink(who: who, text: inkText(answer), proof: proof(in: answer), link: pullRequest(in: answer) ?? "", code: true, finish: finish ?? "")
+    static func codeInk(who: String, answer: Shielded, finish: Shielded?) -> Ink {
+        Ink(who: who, text: answer.derive(inkText), proof: answer.deriveAll(proof(in:)), link: answer.derive { pullRequest(in: $0) ?? "" }, code: true, finish: finish ?? "")
     }
+
 
     /// What a watcher's look comes to when its value crossed the line (and wasn't a hit already): a hit only with
     /// an explicit yes; unconfirmed when nothing could confirm it (the quick AI off or silent): shown as "looks
