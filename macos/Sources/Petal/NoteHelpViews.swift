@@ -51,6 +51,9 @@ struct InkView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
                 .help(ink.text.count > 600 ? "Drag it out for the whole answer" : "")
+            if ink.link == NoteHelp.settingsLink {
+                NoteButton(title: "Open Settings › AI") { PetalApp.shared.settings.show(.claude) }.padding(.top, 6)
+            }
             if !ink.proof.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(Array(ink.proof.enumerated()), id: \.offset) { _, item in

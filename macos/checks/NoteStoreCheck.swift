@@ -115,6 +115,7 @@ struct NoteStoreCheck {
         picturesStay(root: root)
         pictureLinks(root: root)
         removeRefusedReadOnly(root: root)
+        helperAnswerDrained(root: root)
         caseMove(root: root)
         versionGroups(root: root)
         try? fm.removeItem(at: Config.supportFolder)
@@ -658,6 +659,33 @@ struct NoteStoreCheck {
 
     /// Remove (pictures that couldn't be saved) is refused on a read-only paper, its recovery bytes kept; on a
     /// note that can change, they go only once the note without their references has landed.
+    /// A helper's answer (Petal's own change of metadata, NoteHelpers.write): in the notes journal the moment it's
+    /// made, and on disk once quitting drains the session's work.
+    @MainActor static func helperAnswerDrained(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Helped")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Helped.md")
+        _ = NoteStore.create(NoteFile(id: "HJ1", body: "My words").serialized(), at: file, root: root)
+        let store = NoteStore(root: root)
+        let read = NoteStore.read(root)
+        store.preview(read.notes, notebooks: read.notebooks)
+        guard let paper = store.notes.first(where: { $0.noteID == "HJ1" }) else { return expect(false, "the note is read") }
+        let made = store.change(paper.key, touch: false) { file in
+            file.ink = [NoteHelp.Ink(who: "✦ Petal", text: "The answer")]
+            file.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", at: Date())
+        }
+        expect(made?.contains("The answer") == true && store.paper(paper.key)?.file.ink.first?.text == "The answer", "in memory at once")
+        NoteJournal.queue.sync {}
+        let journaled = NoteJournal.read(NoteJournal.file("HJ1"))
+        expect(journaled?.text.contains("The answer") == true && journaled?.text.contains("My words") == true, "in the notes journal the moment it's made (a whole snapshot)")
+        let drained = DispatchSemaphore(value: 0)
+        store.drain { drained.signal() }
+        let until = Date().addingTimeInterval(10)
+        while drained.wait(timeout: .now()) == .timedOut && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        expect(text(file)?.contains("The answer") == true && text(file)?.contains("My words") == true, "drained at quit: the answer is on disk, with the person's words", text(file) ?? "nil")
+    }
+
     @MainActor static func removeRefusedReadOnly(root: URL) {
         let fm = FileManager.default
         let folder = root.appending(path: "Removal")

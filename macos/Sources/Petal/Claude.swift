@@ -108,6 +108,8 @@ final class Agent {
     private func submit(_ text: String) {
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else { return }
+        // A helper's agent never queues or steers by itself: its follow-ups wait with their run's token (NoteHelpers).
+        if running, helperSystem != nil { return }
         if running {
             // While it works: steer (the run stops where it is and carries on from this message, in the same
             // session), or queue (sent when it's done), as `chatWhileWorking` says.
@@ -153,6 +155,7 @@ final class Agent {
         if !waiting.isEmpty || app.claude.working >= ClaudePanel.atOnce || !admitted {
             if waiting.isEmpty {
                 waitingFrom = index
+                waitingToken = token
                 if admitted { messages.append(Message(kind: .step, text: "Waiting: \(ClaudePanel.atOnce) other notes are working. This starts when one is done.")) }
             }
             waiting.append(prompt)
@@ -164,7 +167,16 @@ final class Agent {
 
     /// The messages that waited for room, all in one turn (each is in the chat once already).
     func runWaiting() {
-        guard !waiting.isEmpty, !running, admitted else { return }
+        guard !waiting.isEmpty, !running else { return }
+        // Sent under another run, or one that's stopped: never started (paused, it keeps waiting for Go on).
+        if let sent = waitingToken, sent !== token || sent.state == .cancelled || sent.state == .finished {
+            waiting = []
+            waitingFrom = nil
+            waitingToken = nil
+            return
+        }
+        guard admitted else { return }
+        waitingToken = nil
         let prompt = waiting.joined(separator: "\n\n")
         waiting = []
         waitingFrom = nil
@@ -179,6 +191,7 @@ final class Agent {
         if let from = waitingFrom, from < messages.count { messages.removeSubrange(from...) }
         waiting = []
         waitingFrom = nil
+        waitingToken = nil
         messages.append(Message(kind: .step, text: "Stopped before it started"))
         keep()
         return unsent
@@ -239,6 +252,7 @@ final class Agent {
         queued = []
         waiting = []
         waitingFrom = nil
+        waitingToken = nil
         // Its place among the notes working is free: one waiting for it starts.
         if freed { DispatchQueue.main.async { PetalApp.shared.claude.startWaiting() } }
     }
@@ -339,14 +353,19 @@ final class Agent {
         messages.append(Message(kind: .error, text: reason, opensSettings: opensSettings))
         outcome = .failed
         failure = reason
+        failureOpensSettings = opensSettings
         DispatchQueue.main.async { MainActor.assumeIsolated { self.app.claude.agentFinished(self) } }
     }
 
-    /// Why its last turn failed, when it said.
+    /// Why its last turn failed, when it said, and whether Settings › AI fixes it (a key or a sign-in).
     @ObservationIgnored private(set) var failure: String?
+    @ObservationIgnored private(set) var failureOpensSettings = false
+    /// The run its waiting turn was sent under: started only while that is still its run (paused, it keeps waiting).
+    @ObservationIgnored private var waitingToken: RunToken?
 
     private func run(_ prompt: String) {
         failure = nil
+        failureOpensSettings = false
         guard let provider = ownProvider ?? app.chatProvider else { return refuse("Choose an AI in Petal's settings first.") }
         guard let path = app.paths[provider] else { return refuse("Petal couldn't find \(provider.appName). Set it up in Petal's settings, under AI.") }
         // On an API key with none saved, say so rather than quietly using the subscription.
@@ -371,7 +390,7 @@ final class Agent {
         // before the count moves on), and this one asks again.
         app.assist.computer.end(noteID.uuidString)
         // Its run's token, checked once more as the process starts (bound below: pausing or cancelling ends it).
-        guard admitted else { waiting.append(prompt); return }
+        guard admitted else { if waiting.isEmpty { waitingToken = token }; waiting.append(prompt); return }
         outcome = nil
         turnErrored = false
         turn += 1
@@ -425,8 +444,9 @@ final class Agent {
                     self.running = false
                     // The turn's outcome, said explicitly: a clean exit with no error event, or not.
                     let code = finished.terminationStatus
-                    self.outcome = finished.terminationReason == .uncaughtSignal || code == 15 ? .interrupted
-                        : code == 0 && !self.turnErrored && !self.authFailed ? .succeeded : .failed
+                    // An authentication failure first (its process was stopped for it, which isn't an interruption).
+                    self.outcome = RunToken.classify(authFailed: self.authFailed, errored: self.turnErrored,
+                                                     signaled: finished.terminationReason == .uncaughtSignal, status: code)
                     self.activity = ""
                     // The turn is over: its tools can't answer anymore, so nothing it asked of Petal goes ahead.
                     self.app.assist.computer.end(self.noteID.uuidString)
@@ -442,7 +462,7 @@ final class Agent {
                     if status != 0 && status != 15 && !detail.isEmpty && !self.authFailed {
                         self.messages.append(Message(kind: .error, text: String(detail.suffix(300))))
                     }
-                    if self.outcome == .failed { self.failure = self.messages.last { $0.kind == .error }?.text ?? "It stopped with an error." }
+                    if self.outcome == .failed, !self.authFailed { self.failure = self.messages.last { $0.kind == .error }?.text ?? "It stopped with an error." }
                     // The turn is over (not carried on by a queued message): a note's nudge, and room for one waiting.
                     if !more { self.app.claude.agentFinished(self) }
                 }
@@ -489,9 +509,12 @@ final class Agent {
             guard !authFailed, let provider = sessionProvider else { return }
             authFailed = true
             stop()
-            messages.append(Message(kind: .error, text: app.usesAPIKey(provider)
+            let reason = app.usesAPIKey(provider)
                 ? "\(provider.keyMaker) didn't accept your API key. Check it in Settings › AI."
-                : "\(provider.appName) isn't signed in anymore. Sign in again from Settings › AI.", opensSettings: true))
+                : "\(provider.appName) isn't signed in anymore. Sign in again from Settings › AI."
+            messages.append(Message(kind: .error, text: reason, opensSettings: true))
+            failure = reason
+            failureOpensSettings = true
         case .cost(let dollars):
             if let provider = sessionProvider, app.usesAPIKey(provider) { app.usage.addSpend(dollars, for: provider) }
         case .tokens(let input, let cached, let output):

@@ -155,6 +155,10 @@ final class ComputerUse {
         sweep()
         if let refusal = refusal() { return fail(refusal) }
         guard let caller, !caller.isEmpty else { return fail(Self.oldTools) }
+        // A note's helper whose note moved to a place that isn't in front: its default look and act wait for it,
+        // never taken from what was there before (or what's in front now).
+        if (args["app"] as? String ?? "").trimmingCharacters(in: .whitespaces).isEmpty, args["front"] as? Bool != true,
+           let waiting = app.claude.helperWaiting(caller) { return fail(waiting) }
         if name == "petal_ui" { look(args, caller: caller, gone: gone, send, fail) } else { act(args, caller: caller, gone: gone, send, fail) }
     }
 

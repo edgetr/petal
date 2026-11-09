@@ -82,7 +82,12 @@ final class Assist {
              allow: String = "Allow", owner: String?, keep: String? = nil, mark: AgentAccess.Agent? = nil, kept: (() -> Void)? = nil,
              typed: ((VaultForm.Answer) -> Void)? = nil, done: @escaping (Bool) -> Void) {
         // `always` (the vault) asks every time: neither Full access nor an earlier Always skips it.
-        if form == nil, !always, !warn, config.string("claudeAccess") == "full" || config.strings("aiAllowed").contains(kind) { return done(true) }
+        // An automatic approval (an Always given earlier, or Full access) is registered on the asking helper's run
+        // first: taking that Always back cancels every run using it. A run that isn't going on is refused.
+        if form == nil, !always, !warn,
+           let grant = NoteHelp.autoGrant(kind: kind, fullAccess: config.string("claudeAccess") == "full", allowed: config.strings("aiAllowed")) {
+            return done(app.paper.helpers.authorized(owner, grant))
+        }
         settle(false)   // one question at a time: a newer one replaces an older one, which is declined
         formTyped = typed
         keptAlways = keep == nil ? nil : kept
@@ -195,7 +200,10 @@ final class Assist {
         let fail = { (text: String) in send(["error": text]) }
         switch name {
         // The note's window as it is now (a note stuck to none, or notes off: what's in front).
-        case "petal_look": look(args, place: app.claude.placed(note), note: note, send)
+        case "petal_look":
+            // A note's helper waiting for its note's place: never what was there before, or what's in front now.
+            if (args["app"] as? String ?? "").isEmpty, args["front"] as? Bool != true, let waiting = app.claude.helperWaiting(note) { return fail(waiting) }
+            look(args, place: app.claude.placed(note), note: note, send)
         case "petal_apps": apps(args, caller: note, live: live, send, fail)
         case "petal_windows": windows(args, caller: note, live: live, send, fail)
         case "petal_trash": trash(args, caller: note, live: live, send, fail)

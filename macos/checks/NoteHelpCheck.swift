@@ -450,6 +450,56 @@ struct NoteHelpCheck {
         expect(NoteFile.parse(withTree.serialized(), fallbackID: "x", fallbackDate: now).worktree == withTree.worktree, "a note's worktree reads back")
         expect(ask("@Petal it's done") == .done, "it's done")
 
+        // MARK: Round four: follow-ups, auth, automatic approvals, checkout choice, quick calls, place follow
+
+        var queue = FollowUpQueue()
+        let first = RunToken(), later = RunToken()
+        guard let said = NoteShield.shield(["and also this"], index: index) else { return expect(false, "said") }
+        queue.add(said[0], note: "N", token: first)
+        queue.add(said[0], note: "N", token: first)
+        expect(queue.next(note: "N", current: first) == said[0] && queue.count(note: "N") == 1, "a follow-up goes in its own run")
+        first.complete(.stopped)
+        queue.clear(first)
+        expect(queue.count(note: "N") == 0, "Stop clears what was said to its run")
+        queue.add(said[0], note: "N", token: first)
+        expect(queue.next(note: "N", current: later) == nil && queue.count(note: "N") == 0, "said to a stopped run: never sent in a later one (dropped)")
+        let pausedFollow = RunToken()
+        pausedFollow.pause()
+        queue.add(said[0], note: "N", token: pausedFollow)
+        expect(queue.next(note: "N", current: pausedFollow) == nil, "a run not running admits none")
+        expect(RunToken.classify(authFailed: true, errored: false, signaled: true, status: 15) == .failed, "a sign-in failure is a failure, though its process was stopped for it")
+        expect(RunToken.classify(authFailed: false, errored: false, signaled: true, status: 15) == .interrupted, "a plain stop is an interruption")
+        expect(RunToken.classify(authFailed: false, errored: true, signaled: false, status: 0) == .failed
+               && RunToken.classify(authFailed: false, errored: false, signaled: false, status: 0) == .succeeded, "an error event fails; a clean exit succeeds")
+        expect(NoteHelp.autoGrant(kind: "computer:com.example", fullAccess: false, allowed: ["computer:com.example"]) == "always:computer:com.example",
+               "an Always given earlier is registered as that grant")
+        expect(NoteHelp.autoGrant(kind: "trash", fullAccess: true, allowed: []) == "full-access" && NoteHelp.autoGrant(kind: "trash", fullAccess: false, allowed: []) == nil,
+               "Full access, or asked")
+        let autoRun = RunToken()
+        autoRun.hold(NoteHelp.autoGrant(kind: "computer:com.example", fullAccess: false, allowed: ["computer:com.example"])!)
+        expect(autoRun.revoke("always:computer:com.example") && autoRun.state == .cancelled, "taking that Always back cancels a run that used it automatically")
+        let home2 = "/Users/someone"
+        expect(NoteHelp.chooseCheckout(["/Users/someone/garden"], words: "fix it in ~/garden-old", home: home2) == .mismatch("/Users/someone/garden-old"),
+               "one candidate, another named: fails, never the one candidate")
+        expect(NoteHelp.chooseCheckout(["/Users/someone/garden"], words: "fix it in ~/garden", home: home2) == .one("/Users/someone/garden"), "one candidate, named: it")
+        expect(NoteHelp.chooseCheckout(["/Users/someone/garden"], words: "fix it", home: home2) == .one("/Users/someone/garden"), "one candidate, none named: it")
+        expect(NoteHelp.chooseCheckout(["/a", "/b"], words: "fix it", home: home2) == .ask(["/a", "/b"]) && NoteHelp.chooseCheckout([], words: "fix it", home: home2) == .none,
+               "several, none named: asked; none: none")
+        let calcValues = NoteHelp.values("Flights: 400\nHotel: 200")
+        expect(NoteHelp.formulaOutcome(["label": "Total", "formula": "[Flights] + [Hotel]"], values: calcValues).calc?.formula == "[Flights] + [Hotel]", "a formula that adds up: succeeded")
+        expect(NoteHelp.formulaOutcome(nil, values: calcValues).calc == nil && NoteHelp.formulaOutcome(nil, values: calcValues).failure != nil, "no answer: failed")
+        expect(NoteHelp.formulaOutcome(["label": "Total"], values: calcValues).calc == nil, "no formula: failed (never sum() instead)")
+        expect(NoteHelp.formulaOutcome(["formula": "[Taxi] * 2"], values: calcValues).calc == nil, "a formula that doesn't add up here: failed")
+        expect(NoteHelp.confirmed(["yes": true]) && !NoteHelp.confirmed(nil) && !NoteHelp.confirmed(["yes": "true"]) && !NoteHelp.confirmed(["say": "it is"]) && !NoteHelp.confirmed(["yes": false]),
+               "a watcher's hit needs an explicit, valid yes")
+        var oldTab = NoteStick(kind: .tab)
+        oldTab.url = "https://old.example"; oldTab.mac = "m"; oldTab.pid = 5; oldTab.tabID = "t1"
+        var newTab = oldTab
+        newTab.url = "https://new.example"; newTab.tabID = "t2"
+        expect(NoteHelp.follow(seen: [oldTab], now: [newTab], here: nil) == .waiting("new.example"), "re-stuck to a tab not in front: it waits (its look and act refused)")
+        expect(NoteHelp.follow(seen: [oldTab], now: [newTab], here: 0) == .placed(0), "once here says it's in front: that place")
+        expect(NoteHelp.follow(seen: [oldTab], now: [oldTab], here: 0) == .unchanged, "unchanged")
+
         // MARK: Open all never launches an app or a script (NoteTasks)
 
         let scratch = FileManager.default.temporaryDirectory.appending(path: "petal-notetasks-\(UUID().uuidString)")

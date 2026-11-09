@@ -79,7 +79,28 @@ perl -ne '
     if (/\bguard\b.*\brun\b.*else \{ return \}/ && !/live\(|admits|token\.|runs\[/) { print "NoteHelpers:$.: a run guard that returns without an outcome: $_"; $bad++ }
     END { exit 1 if $bad; print "outcomes: every helper run guard reports one or checks its token\n" }
 ' Sources/Petal/NoteHelpers.swift
-swiftc -parse-as-library -O -o "$out/notestore" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/PaperNotes.swift Sources/Petal/NoteJournal.swift checks/NoteStoreCheck.swift
+# A helper's writes go only through the note's session as Petal's own change (journaled at once, drained at quit):
+# no queue of its own, and never a tool's write that shows only once it lands.
+if grep -nE 'queued\[|store\.change\([^)]*live:' Sources/Petal/NoteHelpers.swift; then echo "NoteHelpers: a write outside the note's session"; exit 1; fi
+# Nothing of a helper's setup reads the disk on the main thread: every file read in NoteHelpers is in a static
+# function (they run off the main thread).
+perl -ne '
+    $func = $_ if /^\s*(?:private |nonisolated |@MainActor )*(?:static )?func /;
+    if (/contentsOf:/ && $func !~ /\bstatic func\b/) { print "NoteHelpers:$.: a file read on the main thread: $_"; $bad++ }
+    END { exit 1 if $bad; print "helpers: no file read on the main thread\n" }
+' Sources/Petal/NoteHelpers.swift
+# A running helper follows its note's places only after `here` is recomputed (in apply, right after it).
+perl -0777 -ne '
+    my @calls = (/helpers\.placesFollow\(\)/g);
+    unless (@calls == 1 && /if fits != here \{ here = fits \}\n[^\n]*\n\s*helpers\.placesFollow\(\)/) { print "NoteDesk: placesFollow must come right after here is recomputed\n"; exit 1 }
+    print "helpers: places followed after here is known\n";
+' Sources/Petal/NoteDesk.swift
+# An automatic approval (an earlier Always, Full access) is registered on the asking helper run's token first.
+perl -0777 -ne '
+    unless (/let grant = NoteHelp\.autoGrant\(.*?\) \{\s*return done\(app\.paper\.helpers\.authorized\(owner, grant\)\)/s) { print "Assist.ask: an automatic approval must register on the run first\n"; exit 1 }
+    print "helpers: automatic approvals register on the run\n";
+' Sources/Petal/Assist.swift
+swiftc -parse-as-library -O -o "$out/notestore" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/PaperNotes.swift Sources/Petal/NoteJournal.swift checks/NoteStoreCheck.swift
 "$out/notestore"
 # A passage for Petal AI follows petal_look's rule for selected text (UIMap.selectionHidden), and what the note tools
 # tell an agent is redacted with the vault's index, or not told while the vault can't be read (NoteShield).

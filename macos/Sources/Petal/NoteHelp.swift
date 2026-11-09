@@ -231,6 +231,8 @@ extension NoteFile {
 
 enum NoteHelp {
     static let stepsKept = 40
+    /// An ink's link that is Settings › AI (a key or a sign-in to fix), not an address.
+    static let settingsLink = "petal:settings/ai"
     static let historyKept = 5
 
     /// What the person's helper is called in a note, and its mark.
@@ -1626,6 +1628,94 @@ extension NoteHelp {
 
     /// The ref a PR's head is fetched into for one run (never FETCH_HEAD, which runs side by side would share).
     static func fetchRef(_ token: String) -> String { "refs/petal/" + token.lowercased().filter { $0.isLetter || $0.isNumber || $0 == "-" } }
+}
+
+/// Follow-ups said while a run works, each with the token of the run it was said to: one is admitted only while
+/// that token is still the note's run's and running; Stop clears its run's, so nothing said to a stopped run is ever
+/// sent in a later one.
+struct FollowUpQueue {
+    private(set) var entries: [(note: String, token: RunToken, text: Shielded)] = []
+
+    mutating func add(_ text: Shielded, note: String, token: RunToken) { entries.append((note, token, text)) }
+
+    /// The next follow-up for `note` its current run may send; entries of any other token are dropped.
+    mutating func next(note: String, current: RunToken?) -> Shielded? {
+        entries.removeAll { $0.note == note && ($0.token !== current || !$0.token.admits) }
+        guard let index = entries.firstIndex(where: { $0.note == note }) else { return nil }
+        return entries.remove(at: index).text
+    }
+
+    /// A run stopped: everything said to it goes.
+    mutating func clear(_ token: RunToken) { entries.removeAll { $0.token === token } }
+
+    func count(note: String) -> Int { entries.filter { $0.note == note }.count }
+}
+
+extension RunToken {
+    /// A turn's outcome from how its process ended: an authentication failure is a failure (with its explanation
+    /// and Settings › AI), whatever ended the process; then a signal is an interruption; then a clean exit with no
+    /// error event succeeds.
+    static func classify(authFailed: Bool, errored: Bool, signaled: Bool, status: Int32) -> Outcome {
+        if authFailed { return .failed }
+        if signaled || status == 15 { return .interrupted }
+        return status == 0 && !errored ? .succeeded : .failed
+    }
+}
+
+extension NoteHelp {
+    /// The authorization an automatic approval stands for (registered on the asking run's token before it goes on):
+    /// an Always given earlier, or Full access; nil when the person must be asked.
+    static func autoGrant(kind: String, fullAccess: Bool, allowed: [String]) -> String? {
+        if allowed.contains(kind) { return "always:" + kind }
+        return fullAccess ? "full-access" : nil
+    }
+
+    /// Which checkout a coding helper works in. A checkout named in the person's words is always checked, however
+    /// many fit: the one it names among them, else a failure; with none named, the one that fits, else ask.
+    enum CheckoutChoice: Equatable { case one(String), ask([String]), none, mismatch(String) }
+
+    static func chooseCheckout(_ candidates: [String], words: String, home: String) -> CheckoutChoice {
+        let said = namedPaths(words, home: home)
+        if !said.isEmpty {
+            let hits = candidates.filter { said.contains(standard($0)) }
+            return hits.count == 1 ? .one(hits[0]) : .mismatch(said.joined(separator: ", "))
+        }
+        if candidates.isEmpty { return .none }
+        return candidates.count == 1 ? .one(candidates[0]) : .ask(candidates)
+    }
+
+    /// The paths in the person's words ("~/garden", "/Users/…"), expanded and standardized.
+    static func namedPaths(_ words: String, home: String) -> [String] {
+        words.split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "\t" }).map { String($0).trimmingCharacters(in: CharacterSet(charactersIn: ".,;:!?\"“”'()")) }
+            .filter { $0.hasPrefix("~/") || $0.hasPrefix("/") }
+            .map { standard($0.hasPrefix("~/") ? home + String($0.dropFirst(1)) : $0) }
+    }
+
+    /// A recalculation's quick call: a formula that adds up on the note's values succeeds; no reply, no formula, or
+    /// one that doesn't add up fails, with its reason.
+    static func formulaOutcome(_ reply: [String: Any]?, values: [(label: String, value: Double)]) -> (calc: Calc?, failure: String?) {
+        guard let reply else { return (nil, "The quick AI didn't answer.") }
+        guard let formula = reply["formula"] as? String, !formula.trimmingCharacters(in: .whitespaces).isEmpty else { return (nil, "No formula came back.") }
+        guard evaluate(formula, values: values) != nil else { return (nil, "The formula it proposed doesn't add up on this note: \(formula)") }
+        let label = (reply["label"] as? String).map { String($0.prefix(30)) } ?? "Total"
+        return (Calc(label: label.isEmpty ? "Total" : label, formula: formula), nil)
+    }
+
+    /// A watcher's confirmation: only an explicit, valid yes is a hit.
+    static func confirmed(_ reply: [String: Any]?) -> Bool { reply?["yes"] as? Bool == true }
+
+    /// Following a note's places once `here` is known: unchanged, on the place in front now, waiting for one not in
+    /// front (its default look and act refused meanwhile), or free (only a Desktop, or nowhere).
+    enum Follow: Equatable { case unchanged, placed(Int), waiting(String), free }
+
+    static func follow(seen: [NoteStick], now: [NoteStick], here: Int?) -> Follow {
+        guard placesMoved(seen, now) else { return .unchanged }
+        switch anchor(now, here: here) {
+        case .placed(let index): return .placed(index)
+        case .away(let label): return .waiting(label)
+        case .free: return .free
+        }
+    }
 }
 
 // MARK: - Rule B: prompts are made only from Shielded

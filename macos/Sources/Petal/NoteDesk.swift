@@ -511,6 +511,8 @@ final class NoteDesk {
             }
         }
         if fits != here { here = fits }
+        // Only now that `here` says what's in front: a running helper follows its note's places.
+        helpers.placesFollow()
         followTitles(scene, fits)
         followTabs(scene)
         followFiles(scene)
@@ -2297,8 +2299,6 @@ final class NoteDesk {
     /// The files changed (here or on another Mac): papers and tabs show what they say now.
     func refresh() {
         guard on else { return }
-        // A running helper follows its note's places when they changed.
-        helpers.placesFollow()
         WindowEvents.shared.titles("papernotes", pagesStuck || windowsStuck)
         // Notes shown on this Mac before it last quit show again.
         for paper in store.notes where local.shown.contains(paper.noteID) && faces[paper.key] == nil { faces[paper.key] = .folded }
