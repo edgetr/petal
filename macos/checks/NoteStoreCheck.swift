@@ -140,6 +140,7 @@ struct NoteStoreCheck {
         canvasByFolder(root: root)
         folderReplaced(root: root)
         deletedNotebookRescue(root: root)
+        ambiguousRescue(root: root)
         notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -1871,6 +1872,77 @@ struct NoteStoreCheck {
         let kept = rescued()
         expect(kept?.notes["d1"]?.x == 3 && kept?.areas.first?.id == "kept", "a notebook really deleted: rescued with the whole canvas, its areas and the edit",
                kept.map { $0.encoded() } ?? "nil")
+    }
+
+    /// A different notebook at the old path (and a copy elsewhere keeping the old cover id) while canvas edits wait:
+    /// ambiguous, so they're written into neither; they wait, and once ambiguous for the limit over complete reads
+    /// they're rescued whole into Unsaved notes and leave the journal. At a launch's recovery, an ambiguous entry is
+    /// rescued the same way.
+    @MainActor static func ambiguousRescue(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Unsure"), copy = root.appending(path: "Unsure elsewhere")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var cover = NoteFile(id: "COVER-UNSURE", body: "# About this notebook")
+        cover.cover = true
+        _ = NoteStore.create(cover.serialized(), at: folder.appending(path: NoteShelf.coverName), root: root)
+        let canvasFile = folder.appending(path: NoteStore.canvasName)
+        let held = NoteCanvas().applying(.area(.init(id: "kept", label: "Kept", x: 0, y: 0, w: 10, h: 10)), at: 1)
+        try? Data(held.encoded().utf8).write(to: canvasFile)
+        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        store.reload()
+        settle(1)
+        var read: NoteCanvas?
+        store.canvas("Unsure") { read = $0 }
+        settle(0.5)
+        expect(read?.areas.first?.id == "kept", "the canvas read")
+        try? fm.removeItem(at: canvasFile)
+        try? fm.createDirectory(at: canvasFile, withIntermediateDirectories: true)   // writes fail for now
+        store.editCanvas("Unsure", .move("u1", .init(x: 6, y: 6))) { _ in }
+        settle(0.3)
+        let key = store.canvasWaiting.keys.first ?? ""
+        // Replaced by a different notebook at the same path, and a copy elsewhere keeping the old cover id.
+        try? fm.removeItem(at: folder)
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var other = NoteFile(id: "COVER-OTHER", body: "# About this notebook")
+        other.cover = true
+        _ = NoteStore.create(other.serialized(), at: folder.appending(path: NoteShelf.coverName), root: root)
+        try? fm.createDirectory(at: copy, withIntermediateDirectories: true)
+        _ = NoteStore.create(cover.serialized(), at: copy.appending(path: NoteShelf.coverName), root: root)
+        store.reload()
+        settle(2)
+        let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
+        func rescued(_ name: String) -> NoteCanvas? {
+            for dir in (try? fm.contentsOfDirectory(at: unsaved, includingPropertiesForKeys: nil)) ?? [] {
+                if let saved = text(dir.appending(path: name + " canvas.json")), let canvas = NoteCanvas.decode(saved) { return canvas }
+            }
+            return nil
+        }
+        func untouched() -> Bool {
+            [folder, copy].allSatisfy { NoteCanvas.decode(text($0.appending(path: NoteStore.canvasName)))?.notes["u1"] == nil }
+        }
+        expect(store.readComplete && store.canvasWaiting[key] != nil && store.canvasAmbiguousSince[key] != nil && rescued("Unsure") == nil && untouched(),
+               "ambiguous: written into neither notebook, and it waits")
+        // Ten minutes of complete reads later.
+        store.canvasAmbiguousSince[key] = Date().addingTimeInterval(-NoteShelf.ambiguityLimit - 1)
+        store.reload()
+        let until = Date().addingTimeInterval(10)
+        while rescued("Unsure") == nil && Date() < until { settle(0.2) }
+        NoteJournal.queue.sync {}
+        let kept = rescued("Unsure")
+        expect(kept?.notes["u1"]?.x == 6 && kept?.areas.first?.id == "kept" && untouched() && store.canvasWaiting[key] == nil
+               && !fm.fileExists(atPath: NoteJournal.canvasFile(key).path),
+               "still ambiguous after the limit: rescued whole into Unsaved notes, out of the journal, never written into either notebook")
+        // At a launch's recovery: an ambiguous entry is rescued; one only waiting on an incomplete read is kept.
+        let places = [NotebookPlace(name: "Unsure", path: "Unsure", instance: "1:2", coverID: "COVER-OTHER")]
+        let entry = CanvasEntry(coverID: "folder:9:9", notebook: "Launch unsure", edits: [NoteCanvas.Stamped(.move("l1", .init(x: 1, y: 1)))],
+                                binding: NotebookBinding(coverID: "COVER-LAUNCH", path: "Unsure", instance: "9:9"), snapshot: held)
+        expect(!NoteJournal.landCanvas(entry, places: places, notebooks: [], complete: false, root: root) && rescued("Launch unsure") == nil,
+               "at recovery, ambiguous on an incomplete read: kept for the next launch")
+        expect(NoteJournal.landCanvas(entry, places: places, notebooks: [], complete: true, root: root)
+               && rescued("Launch unsure")?.notes["l1"] != nil && rescued("Launch unsure")?.areas.first?.id == "kept",
+               "at recovery, still ambiguous: rescued whole, never written into a notebook")
+        for f in [folder, copy] { try? fm.removeItem(at: f) }
     }
 
     /// Making a notebook Private: shown at once, and written through its cover's session, also when it has no cover

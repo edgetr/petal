@@ -476,18 +476,25 @@ struct NoteLibraryCheck {
         let renewedTrip = NoteLibrary.renewedID("X", folder: "Trip")
         expect(NoteShelf.notebookFor(trip, places: [place("Trip", "1:99", renewedTrip), place("Alpha", "1:20", "X")], complete: true) == .found("Trip"),
                "replaced and renewed: by its path and the renewal of its id, never the duplicate that kept the old id")
-        expect(NoteShelf.notebookFor(trip, places: [place("Alpha", "1:20", "X")], complete: true) == .wait,
-               "only a duplicate with its id, elsewhere: it waits, never goes there and is never gone")
-        expect(NoteShelf.notebookFor(trip, places: [place("Trip", "1:99", "OTHER")], complete: true) == .wait,
-               "another notebook at its path: it waits")
+        expect(NoteShelf.notebookFor(trip, places: [place("Alpha", "1:20", "X")], complete: true) == .ambiguous,
+               "only a duplicate with its id, elsewhere: ambiguous, never goes there and is never gone")
+        expect(NoteShelf.notebookFor(trip, places: [place("Trip", "1:99", "OTHER")], complete: true) == .ambiguous
+               && NoteShelf.notebookFor(trip, places: [place("Trip", "1:99", "OTHER")], complete: false) == .ambiguous,
+               "another notebook at its path: ambiguous")
         expect(NoteShelf.notebookFor(trip, places: [place("Work", "1:30", "W")], complete: true) == .gone
                && NoteShelf.notebookFor(trip, places: [place("Work", "1:30", "W")], complete: false) == .wait,
                "gone only when nothing matches by folder, path or id, after a complete read")
-        expect(NoteShelf.notebookFor(trip, places: [place("Trip", "1:10", "X"), place("trip", "1:10", "X")], complete: true) == .wait
-               && NoteShelf.notebookFor(NotebookBinding(coverID: "X", path: "Trip", instance: ""), places: [place("Trip", "1:1", "X"), place("trip", "1:2", "X")], complete: true) == .wait,
-               "two candidates: it waits, never picks")
+        expect(NoteShelf.notebookFor(trip, places: [place("Trip", "1:10", "X"), place("trip", "1:10", "X")], complete: true) == .ambiguous
+               && NoteShelf.notebookFor(NotebookBinding(coverID: "X", path: "Trip", instance: ""), places: [place("Trip", "1:1", "X"), place("trip", "1:2", "X")], complete: true) == .ambiguous,
+               "two candidates: ambiguous, never a pick")
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        expect(!NoteShelf.ambiguityExpired(since: start, now: start.addingTimeInterval(599), complete: true)
+               && NoteShelf.ambiguityExpired(since: start, now: start.addingTimeInterval(600), complete: true)
+               && !NoteShelf.ambiguityExpired(since: start, now: start.addingTimeInterval(9999), complete: false)
+               && !NoteShelf.ambiguityExpired(since: nil, now: start, complete: true),
+               "ambiguous for 10 minutes, decided on a complete read: rescued; before that, or on an incomplete read, not yet")
         expect(NoteShelf.notebookFor(NotebookBinding(coverID: "", path: "Bare", instance: "1:40"), places: [place("Bare", "1:41", "")], complete: true) == .found("Bare")
-               && NoteShelf.notebookFor(NotebookBinding(coverID: "", path: "Bare", instance: "1:40"), places: [place("Bare", "1:41", "COV")], complete: true) == .wait,
+               && NoteShelf.notebookFor(NotebookBinding(coverID: "", path: "Bare", instance: "1:40"), places: [place("Bare", "1:41", "COV")], complete: true) == .ambiguous,
                "no cover id recorded: the same path with no cover id either")
         // A renewal moves what's bound to that folder, never what's bound to the duplicate.
         let dupPlaces = [place("Alpha", "1:20", "X"), place("Zed", "1:30", "X")]

@@ -223,6 +223,10 @@ final class NoteStore {
     /// The last canvas Petal read or wrote for each notebook, by its folder (volume and inode): what a canvas edit's
     /// whole snapshot starts from (CanvasEntry.snapshot), so a rescue keeps the whole canvas.
     @ObservationIgnored var lastCanvas: [String: NoteCanvas] = [:]
+    /// When each canvas entry was first found ambiguous on a complete read (NoteShelf.ambiguityExpired), by its key.
+    @ObservationIgnored var canvasAmbiguousSince: [String: Date] = [:]
+    /// Entries with a look again scheduled for when their ambiguity runs out.
+    @ObservationIgnored var canvasAmbiguityTimers: Set<String> = []
     /// Papers whose work keeps failing: the paper says it isn't saved yet.
     private(set) var failed: Set<String> = []
     @ObservationIgnored private(set) var root: URL
@@ -2427,11 +2431,37 @@ extension NoteStore {
     private func pumpCanvas(_ id: String) {
         guard !canvasWriting.contains(id), !switching, !draining, let entry = canvasWaiting[id], !entry.edits.isEmpty, loaded else { return }
         let found = resolve(entry.bound)
+        if case .found = found { canvasAmbiguousSince[id] = nil }
         guard case .found(let name) = found, let book = notebook(name) else {
-            // Not found surely (two candidates, or the folder not read completely: a cover still downloading could be
-            // it): it waits for the next read. Rescued only when nothing matches by folder, path or id.
-            guard found == .gone else { return }
-            // Its notebook is gone (trashed): rescued into Unsaved notes with the whole canvas, never dropped.
+            switch found {
+            case .gone:
+                // Its notebook is gone (trashed): rescued into Unsaved notes with the whole canvas, never dropped.
+                break
+            case .ambiguous:
+                // Never written to any notebook. Ambiguous over complete reads for the limit: rescued like a deletion
+                // (never left waiting where nobody sees it); resolved before that, it lands as usual.
+                guard readComplete else { return }
+                let since = canvasAmbiguousSince[id] ?? Date()
+                canvasAmbiguousSince[id] = since
+                guard NoteShelf.ambiguityExpired(since: since, now: Date(), complete: readComplete) else {
+                    if !canvasAmbiguityTimers.contains(id) {
+                        canvasAmbiguityTimers.insert(id)
+                        let left = max(1, NoteShelf.ambiguityLimit - Date().timeIntervalSince(since) + 1)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + left) {
+                            MainActor.assumeIsolated {
+                                self.canvasAmbiguityTimers.remove(id)
+                                // A fresh read decides (it pumps every entry once it's in).
+                                if self.canvasWaiting[id] != nil { self.reload() }
+                            }
+                        }
+                    }
+                    return
+                }
+            default:
+                // The folder not read completely (a cover still downloading could be it): the next read decides.
+                return
+            }
+            canvasAmbiguousSince[id] = nil
             canvasWaiting[id] = nil
             canvasDone[id] = nil
             canvasWriting.insert(id)
@@ -2441,7 +2471,8 @@ extension NoteStore {
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         self.canvasWriting.remove(id)
-                        self.onProblem(kept ? "\(entry.notebook)'s canvas changes are kept in Unsaved notes: the notebook is gone."
+                        let why = found == .gone ? "the notebook is gone" : "Petal couldn't tell which notebook they belong to"
+                        self.onProblem(kept ? "\(entry.notebook)'s canvas changes are kept in Unsaved notes: \(why)."
                                             : "\(entry.notebook)'s canvas changes are kept on this Mac until Petal can save them.")
                     }
                 }
@@ -2504,6 +2535,7 @@ extension NoteStore {
         canvasWaiting = [:]
         canvasDone = [:]
         lastCanvas = [:]
+        canvasAmbiguousSince = [:]
     }
 
     /// The canvas file merged with iCloud's versions of it; with `resolve`, versions there are merged into the file

@@ -453,9 +453,9 @@ extension NoteJournal {
         dropIfEmpty(holding)
     }
 
-    /// One entry put somewhere safe: its notebook's canvas (found by its binding, NoteShelf.notebookFor), or, only
-    /// when nothing matches it by folder, path or id after a complete read, "Unsaved notes". True once written.
-    /// Anything uncertain (two candidates, the folder not read completely) waits.
+    /// One entry put somewhere safe: its notebook's canvas (found by its binding, NoteShelf.notebookFor), or "Unsaved
+    /// notes" with its whole canvas when, after a complete read, nothing matches it or it's still ambiguous (never
+    /// written to a notebook it can't tell surely). True once written. The folder not read completely: it waits.
     nonisolated static func landCanvas(_ entry: CanvasEntry, places: [NotebookPlace], notebooks: [Notebook], complete: Bool, root: URL) -> Bool {
         switch NoteShelf.notebookFor(entry.bound, places: places, complete: complete) {
         case .found(let name):
@@ -463,6 +463,10 @@ extension NoteJournal {
             return NoteStore.writeCanvas(entry.edits, to: book.folder.appending(path: NoteStore.canvasName), root: root) != nil
         case .gone:
             return rescueCanvas(entry) != nil
+        case .ambiguous:
+            // Still ambiguous at the next launch's recovery: never written to a notebook, rescued whole, after a
+            // complete read (else it waits for the next launch).
+            return complete && rescueCanvas(entry) != nil
         case .wait:
             return false
         }

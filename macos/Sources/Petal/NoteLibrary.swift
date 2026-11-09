@@ -1215,15 +1215,27 @@ struct NotebookPlace: Equatable, Sendable {
 }
 
 extension NoteShelf {
-    enum BindingResult: Equatable { case found(String), wait, gone }
+    /// `found`: its notebook. `ambiguous`: something matches it (its folder, path or cover id) but not surely, or twice:
+    /// never written anywhere, and rescued once it stays so (`ambiguityExpired`). `wait`: nothing matches while the
+    /// notes' folder wasn't read completely. `gone`: nothing matches after a complete read.
+    enum BindingResult: Equatable { case found(String), ambiguous, wait, gone }
+
+    /// How long an ambiguous binding is given, over complete reads, before its edits are rescued.
+    static let ambiguityLimit: TimeInterval = 600
+
+    /// Whether edits ambiguous since `since` are rescued now: only on a complete read, once the limit has passed.
+    static func ambiguityExpired(since: Date?, now: Date, complete: Bool) -> Bool {
+        guard complete, let since else { return false }
+        return now.timeIntervalSince(since) >= ambiguityLimit
+    }
 
     /// The one rule for finding the notebook pending work was made for:
     /// 1. the same folder (inode), when exactly one has it;
     /// 2. else the same path whose cover id is the recorded one or its renewal (NoteLibrary.renewedID; none recorded:
     ///    a notebook there with no cover id either);
     /// 3. else the recorded cover id, when exactly one notebook has it and its path or folder matches too.
-    /// Two candidates at any step: it waits, never picks. Gone only when nothing matches by folder, path or id, after a
-    /// complete read of the notes' folder (`complete`); else it waits.
+    /// Two candidates at any step, or a partial match only: ambiguous, never a pick. Gone only when nothing matches by
+    /// folder, path or id, after a complete read of the notes' folder (`complete`); else it waits.
     static func notebookFor(_ binding: NotebookBinding, places: [NotebookPlace], complete: Bool) -> BindingResult {
         func samePath(_ place: NotebookPlace) -> Bool { place.path.compare(binding.path, options: .caseInsensitive) == .orderedSame }
         func idMatches(_ place: NotebookPlace) -> Bool {
@@ -1232,18 +1244,18 @@ extension NoteShelf {
         if !binding.instance.isEmpty {
             let byFolder = places.filter { $0.instance == binding.instance }
             if byFolder.count == 1 { return .found(byFolder[0].name) }
-            if byFolder.count > 1 { return .wait }
+            if byFolder.count > 1 { return .ambiguous }
         }
         // The same path whose cover id is the recorded one (none recorded: none there either) or its renewal.
         let byPath = places.filter { samePath($0) && ($0.coverID == binding.coverID || idMatches($0)) }
         if byPath.count == 1 { return .found(byPath[0].name) }
-        if byPath.count > 1 { return .wait }
+        if byPath.count > 1 { return .ambiguous }
         if !binding.coverID.isEmpty {
             let byID = places.filter { $0.coverID == binding.coverID }
             if byID.count == 1, samePath(byID[0]) || (!binding.instance.isEmpty && byID[0].instance == binding.instance) { return .found(byID[0].name) }
         }
         let anything = places.contains { (!binding.instance.isEmpty && $0.instance == binding.instance) || samePath($0) || idMatches($0) }
-        return complete && !anything ? .gone : .wait
+        return anything ? .ambiguous : complete ? .gone : .wait
     }
 
     /// The one rule applied to a cover id renewed on a folder: every pending binding that resolves to that folder now
