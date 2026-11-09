@@ -181,6 +181,7 @@ enum ViewerCheck {
             failed = !opening(url, app: app) || failed
             failed = !answers(url, app: app) || failed
             failed = !versions(url, app: app) || failed
+            failed = !sixth(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -339,6 +340,79 @@ enum ViewerCheck {
     }
 
     final class HangUp: @unchecked Sendable { var gone = false }
+
+    /// The sixth review: a refused save keeping the real editor dirty until it lands; a folder switch saving and
+    /// closing margin editors, the margin read only until it's done; viewer papers counted for picture retries; and
+    /// a document still being read told as still loading, never as 0 pages.
+    private static func sixth(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("sixth: FAIL \(what)"); ok = false } }
+        // The editor: its save refused (the folder switching), then taken.
+        let accept = HangUp()
+        var saved: [String] = []
+        let paper = PaperNote(file: NoteFile(id: "E1", body: "Before"), url: FileManager.default.temporaryDirectory.appending(path: "E1.md"), notebook: "Inbox")
+        let editor = NoteEditorView(paper: paper, style: NoteRich.Style(ink: .black, dim: .gray, petal: .systemPink, accent: .systemBlue), focus: false,
+                                    height: { _ in }, save: { body, _ in
+                                        guard accept.gone else { return nil }
+                                        saved.append(body)
+                                        return "landed"
+                                    }, register: { _ in }, importPictures: { _ in }, escape: {})
+        let coordinator = editor.makeCoordinator()
+        coordinator.body = "Before"
+        let text = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        text.string = "Before and typed"
+        coordinator.schedule(text)
+        wait(1.2) { false }
+        expect(coordinator.marker.dirty && coordinator.body == "Before" && saved.isEmpty, "a refused save keeps the editor dirty, its words not taken as saved")
+        accept.gone = true
+        wait(4) { !saved.isEmpty }
+        expect(saved == ["Before and typed"] && !coordinator.marker.dirty && coordinator.body == "Before and typed", "tried again, it lands")
+
+        // The notes' folder switching: the margin's editor saved and closed first, the margin read only meanwhile.
+        let model = app.viewers.show(source, front: false)
+        var stick = NoteStick(kind: .file)
+        stick.path = source.path
+        var file = NoteFile(id: "S1", body: "A note with a picture\n![x](../Pictures/abc/p.png)")
+        file.places = [stick]
+        let note = PaperNote(file: file, url: FileManager.default.temporaryDirectory.appending(path: "Inbox/S1.md"), notebook: "Inbox")
+        app.paper.store.preview([note], notebooks: [])
+        model.openPaper(note)
+        let flushed = HangUp()
+        let handle = NoteEditorHandle()
+        handle.flush = { flushed.gone = true }
+        app.paper.editors[note.key] = handle
+        expect(model.openKey == note.key && model.marginEditable, "open in the margin (set up)")
+        // Pictures: the paper open in a margin on screen counts; covered, or turned over, it doesn't.
+        expect(!NoteShelf.picturesOnScreen(model.picturesShown(visible: true)).isEmpty, "a viewer paper on screen counts for picture retries")
+        expect(NoteShelf.picturesOnScreen(model.picturesShown(visible: false)).isEmpty, "covered or closed, it doesn't")
+        model.face = .back
+        expect(NoteShelf.picturesOnScreen(model.picturesShown(visible: true)).isEmpty, "turned over, its pictures aren't showing")
+        model.face = .open
+        app.viewers.folderSwitching(true)
+        expect(flushed.gone && model.openKey == nil && !model.marginEditable, "a folder switch saves and closes the margin's editor first")
+        model.openPaper(note)
+        expect(model.openKey == nil, "read only until the new folder is ready")
+        app.viewers.folderSwitching(false)
+        model.openPaper(note)
+        expect(model.openKey == note.key, "then it takes typing again")
+        model.close(note.key, .transfer)
+        app.paper.editors[note.key] = nil
+
+        // Still being read: told so, never as 0 pages.
+        let slow = ViewerModel(url: source, kind: .pdf)
+        var ready: Bool?
+        slow.whenLoaded(within: 0.3) { ready = $0 }
+        wait(1) { ready != nil }
+        let told = app.viewers.told(slow)
+        expect(ready == false && told["loading"] as? Bool == true && told["pages"] == nil && told["slides"] == nil, "still loading at the limit: said so, no page count")
+        model.whenLoaded(within: 20) { ready = $0 }
+        wait(20) { ready == true }
+        let done = app.viewers.told(model)
+        expect(done["loading"] == nil && (done["pages"] as? Int ?? 0) > 0, "read: its pages")
+        model.close()
+        print("sixth: " + (ok ? "a refused save stays dirty until it lands, a folder switch closes margin editors, viewer papers count for pictures, still loading is said" : "failed"))
+        return ok
+    }
 
     /// Versions made only while their asker is there and the viewer open: a hang-up or the viewer closing makes
     /// nothing show, and the copies go.

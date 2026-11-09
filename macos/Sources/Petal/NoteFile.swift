@@ -1522,7 +1522,13 @@ enum NoteShelf {
         }
 
         /// Its save ran: true to take the version that waited.
-        mutating func saved() -> Bool {
+        mutating func saved() -> Bool { saved(landed: true) }
+
+        /// Its save ran and landed (`landed`), or was refused (the notes' folder switching, a drain under way, the
+        /// paper gone): refused, it stays dirty (what's typed is still only in the editor, tried again, and no other
+        /// version replaces it); landed, clean, and true to take the version that waited.
+        mutating func saved(landed: Bool) -> Bool {
+            guard landed else { return false }
             dirty = false
             defer { deferred = false }
             return deferred

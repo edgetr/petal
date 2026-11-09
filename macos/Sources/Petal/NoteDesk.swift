@@ -344,6 +344,9 @@ final class NoteDesk {
         lookSoon?.cancel()
         looks += 1
         giveBackAll {}
+        // Petal's viewer first: what's typed in a margin is saved and its editor closed before the store stops taking
+        // changes, and the margin stays read only until the new folder is ready.
+        app.viewers.folderSwitching(true)
         for editor in editors.values { editor.flush() }
         editors = [:]
         for panel in panels.values { panel.conceal() }
@@ -357,6 +360,7 @@ final class NoteDesk {
         keyboard = nil
         fresh = []
         store.switchRoot(to: root) { [weak self] in
+            self?.app.viewers.folderSwitching(false)
             self?.look()
             self?.followFolderSetting()
         }
@@ -1007,9 +1011,10 @@ final class NoteDesk {
     /// The pictures on screen: those of papers whose panel is revealed (not hidden by going clear) and open
     /// (NoteShelf.picturesOnScreen), editors and read-only papers alike.
     func picturesOnScreen() -> Set<String> {
+        // The desk's papers, and those open in a margin of Petal's viewer whose window is on screen.
         NoteShelf.picturesOnScreen(panels.compactMap { key, panel in
             store.paper(key).map { (panel.unveiled, faces[key] == .open, $0.url.deletingLastPathComponent().path, $0.file.body) }
-        })
+        } + app.viewers.picturesShown())
     }
 
     /// The sketch's dashed line in the notebook's color from each showing note to its sentence, wherever the
@@ -1469,9 +1474,10 @@ final class NoteDesk {
         let key = noteID.flatMap { id in NoteShelf.saveTarget(key: key, noteID: id, instance: instance, papers: papers, current: store.currentID) } ?? key
         guard let paper = store.paper(key) else { return nil }
         if store.readOnly(paper) {
-            // Typed just as it became one of two papers: kept in the copy beside it, never dropped.
+            // Typed just as it became one of two papers: kept in the copy beside it, never dropped (handled: the
+            // editor doesn't keep it as unsaved).
             if paper.version == nil, paper.file.body != body { store.keepAside(key, body: body) }
-            return nil
+            return paper.revision ?? base ?? ""
         }
         // Petal's own changes since (a place followed or added) don't make this a conflict; words changed do.
         let base = NoteShelf.rebase(editor: base, current: paper.revision, currentBody: paper.file.body)

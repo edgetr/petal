@@ -322,12 +322,19 @@ enum ViewerFiles {
         return pathFound ? .path : .none
     }
 
+    /// Whether a place was made on another Mac: its file's record says so, else (a place Phase 1 made, with no
+    /// `fileID`) the Mac it records it was seen on. Neither: this Mac's (a bookmark that finds nothing finds nothing).
+    static func isForeign(_ stick: NoteStick, mac: String) -> Bool {
+        let seenOn = ViewerFileID.parse(stick.fileID)?.mac ?? (stick.mac.isEmpty ? nil : stick.mac)
+        return seenOn.map { $0 != mac } ?? false
+    }
+
     /// The file a place names now, where it is and which it is (off the main thread: the disk is asked); nil when it
     /// names none it can be sure of. `mac`: this Mac's id (a record made on another Mac isn't looked up here).
     static func locate(_ stick: NoteStick, mac: String, follow: (Data) -> URL?) -> (path: String, id: ViewerFileID)? {
         guard namesFile(stick) else { return nil }
         let record = ViewerFileID.parse(stick.fileID)
-        let foreign = record.map { $0.mac != mac } ?? false
+        let foreign = isForeign(stick, mac: mac)
         let own = record.flatMap { record -> (String, ViewerFileID)? in
             guard record.mac == mac, let path = record.id.path() else { return nil }
             return (path, record.id)

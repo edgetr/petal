@@ -51,6 +51,9 @@ final class ViewerWindow: NSWindow, NSWindowDelegate {
 
     func windowDidBecomeKey(_ notification: Notification) { PetalApp.shared.paper.viewerFront() }
 
+    /// Shown, hidden, covered or minimized: the margin's pictures count as on screen or not (NotePictures' retry).
+    func windowDidChangeOcclusionState(_ notification: Notification) { NotePictures.shared.visibilityChanged() }
+
     func windowWillClose(_ notification: Notification) { onClose?() }
 }
 
@@ -618,7 +621,7 @@ struct ViewerMarginView: View {
         PaperView(paper: paper, color: color, glass: desk.glass, face: face, place: open ? longWhere : shortWhere, notebook: paper.notebook,
                   others: others == 1 ? paper.file.places.first { !$0.samePlace(place) }?.label() ?? "" : others > 1 ? "\(others) places" : "",
                   footer: model.lensKey == paper.key ? "Follows your selection" : desk.footer(paper),
-                  keyboard: open, editorHeight: desk.heights[paper.key] ?? 0, desk: snapshotting ? nil : desk,
+                  keyboard: open, editorHeight: desk.heights[paper.key] ?? 0, desk: snapshotting || !model.marginEditable ? nil : desk,
                   conflict: desk.store.readOnly(paper), unsaved: desk.store.failed.contains(paper.key), pictureTrouble: desk.troubleCount(paper),
                   width: ViewerLook.openWidth, flipped: { model.flip(paper) }, folded: { model.fold(paper.key) })
             .background(GeometryReader { box in

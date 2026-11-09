@@ -82,9 +82,26 @@ final class Viewers {
         windows[model.id] = nil
     }
 
+    /// The notes' folder being switched: margins read only meanwhile (nothing in them takes typing the store would
+    /// refuse).
+    private(set) var switchingFolder = false
+
+    /// The notes' folder switching (`true`, before the store stops taking changes): every margin's editor saved and
+    /// closed; switched (`false`), the margins take typing again.
+    func folderSwitching(_ now: Bool) {
+        if now { for model in open { model.closeEditor() } }
+        switchingFolder = now
+    }
+
     /// Petal Notes turned on or off: every viewer's margin follows (ViewerModel.notesChanged).
     func notesChanged() {
         for model in open { model.notesChanged() }
+    }
+
+    /// The papers open in every viewer's margin whose window is on screen, as NoteShelf.picturesOnScreen counts papers
+    /// (the pictures' retry and memory follow them as they do the desk's).
+    func picturesShown() -> [(revealed: Bool, open: Bool, folder: String, body: String)] {
+        open.flatMap { $0.picturesShown(visible: windows[$0.id]?.occlusionState.contains(.visible) == true) }
     }
 
     /// A note's file got another name (NoteStore's rekey): every viewer's records of that paper follow it.
@@ -251,7 +268,29 @@ final class ViewerModel: Identifiable {
     /// Selections read and pictures drawn, the latest of each kept.
     @ObservationIgnored private var turns = ViewerTurns()
     private(set) var thumbs: [Int: NSImage] = [:]
-    private(set) var loading = true
+    private(set) var loading = true {
+        didSet {
+            guard !loading, oldValue else { return }
+            let told = loadWaiters
+            loadWaiters = []
+            for wait in told { wait(true) }
+        }
+    }
+    @ObservationIgnored private var loadWaiters: [@MainActor (Bool) -> Void] = []
+
+    /// `done(true)` once the document is read (its pages, Quick Look's own view, or what went wrong), at once when it
+    /// already is; `done(false)` if it's still being read after `seconds`. Told once either way.
+    func whenLoaded(within seconds: Double, _ done: @escaping @MainActor (Bool) -> Void) {
+        guard loading else { return done(true) }
+        var answered = false
+        let once: @MainActor (Bool) -> Void = { ready in
+            guard !answered else { return }
+            answered = true
+            done(ready)
+        }
+        loadWaiters.append(once)
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { once(false) }
+    }
     private(set) var problem: String?
     /// When the file last changed on disk while it was showing ("Updated just now").
     private(set) var updated: Date?
@@ -262,8 +301,8 @@ final class ViewerModel: Identifiable {
     /// A PDF selection that may become a note's passage.
     var selection: ViewerSelection?
     /// The margin paper open for writing (by paper key: one of a conflict's papers is its own), turned over or not.
-    var openKey: String?
-    var face: PaperFace = .open
+    var openKey: String? { didSet { if openKey != oldValue { NotePictures.shared.visibilityChanged() } } }
+    var face: PaperFace = .open { didSet { if face != oldValue { NotePictures.shared.visibilityChanged() } } }
     /// Each margin note's passage, found again by its words in the pages shown (by paper key).
     private(set) var passages: [String: ViewerFound] = [:]
     /// Where each passage's highlight and each page shown's top are, in the window (top-left origin), by paper key and
@@ -289,6 +328,21 @@ final class ViewerModel: Identifiable {
     /// The margin shows (with its notes, highlights, New note and Note) only while Petal Notes is on; the document
     /// itself shows either way.
     var marginOn: Bool { app.config.bool("notes") }
+
+    /// The paper open in this margin as a picture's visibility counts it: revealed while the window is on screen and
+    /// the margin shows, open while it's turned face up.
+    func picturesShown(visible: Bool) -> [(revealed: Bool, open: Bool, folder: String, body: String)] {
+        guard let key = openKey, let paper = desk.store.paper(key) else { return [] }
+        return [(visible && marginOn, face == .open, paper.url.deletingLastPathComponent().path, paper.file.body)]
+    }
+
+    /// The margin takes typing: Petal Notes on and its folder not being switched.
+    var marginEditable: Bool { marginOn && !app.viewers.switchingFolder }
+
+    /// The paper open in the margin saved and closed (its editor goes; never let go of).
+    func closeEditor() {
+        if let key = openKey { close(key, .transfer) }
+    }
 
     /// Petal Notes turned off: the paper open in the margin is saved and closed (its editor goes with the margin;
     /// never let go of), the selection's Note and the lens with it. On again, the margin shows again by itself.
@@ -545,6 +599,7 @@ final class ViewerModel: Identifiable {
     }
 
     func close() {
+        defer { NotePictures.shared.visibilityChanged() }
         closedNow = true
         closing.on = true
         watcher = nil
@@ -659,6 +714,8 @@ final class ViewerModel: Identifiable {
     /// Opens a margin paper here: closed wherever else it was open (one editor per note), and this one let go if the
     /// desk opens it (`heldByViewer`).
     func openPaper(_ paper: PaperNote) {
+        // Read only while the notes' folder is switched (the store takes no changes then).
+        guard marginEditable else { return }
         if let key = openKey, key != paper.key { fold(key) }
         // Open in another viewer (a note on two files) or on the desk: handed over from there, never let go of (a
         // transfer, not a fold: an empty new note stays).
@@ -756,6 +813,7 @@ final class ViewerModel: Identifiable {
 
     private func make(_ stick: NoteStick) {
         guard desk.on else { return desk.tell("Petal Notes is off.") }
+        guard marginEditable else { return desk.tell("Your notes' folder is being switched: try again in a moment.") }
         guard let paper = desk.make(on: stick, open: false) else { return }
         openPaper(paper)
         resolvePassages()

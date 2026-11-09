@@ -1365,11 +1365,25 @@ struct NoteEditorView: NSViewRepresentable {
                 // The save runs: no longer dirty, then a version that waited meanwhile is taken (the folder read again).
                 self.saveLater = nil
                 let body = NoteBlock.body(NoteRich.blocks(storage))
+                var landed = true
                 if body != self.body {
-                    self.body = body
-                    if let next = self.parent.save(body, self.base) { self.base = next }
+                    // Refused (nil: the folder switching, a drain, the paper gone): the text stays dirty and isn't
+                    // taken as saved, and the save is tried again shortly.
+                    if let next = self.parent.save(body, self.base) {
+                        self.body = body
+                        self.base = next
+                    } else {
+                        landed = false
+                    }
                 }
-                _ = self.marker.saved()
+                _ = self.marker.saved(landed: landed)
+                guard landed else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, weak view] in
+                        guard let self, let view, self.marker.dirty, self.saveLater == nil else { return }
+                        self.schedule(view)
+                    }
+                    return
+                }
                 self.parent.idle()
             }
             saveLater = work

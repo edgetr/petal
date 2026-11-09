@@ -26,7 +26,7 @@ extension Viewers {
                 switch result {
                 case .failure(let refusal): fail(refusal.description)
                 case .success(let model):
-                    self.loaded(model) {
+                    model.whenLoaded(within: Self.loadLimit) { _ in
                         var told = self.told(model)
                         if let page, !model.live, model.pageCount > 0, ViewerPages.index(page, count: model.pageCount) == nil {
                             told["note"] = "It has \(model.pageCount) \(model.unit.word)s; \(model.unit.word) \(page) isn't one, so it shows where it was."
@@ -103,9 +103,19 @@ extension Viewers {
         }
     }
 
-    /// What `petal_view` says about a file once it's shown: its name, how it's shown, and its pages or slides.
-    private func told(_ model: ViewerModel) -> [String: Any] {
+    /// How long `petal_view` waits for a document to be read (Quick Look's export and WebKit's pages, a file iCloud
+    /// brings down first), under the socket's own 150 seconds.
+    static let loadLimit: Double = 120
+
+    /// What `petal_view` says about a file once it's shown: its name, how it's shown, and its pages or slides; still
+    /// being read at the limit, that it's still loading (never a count of pages it hasn't read yet).
+    func told(_ model: ViewerModel) -> [String: Any] {
         var result: [String: Any] = ["opened": model.name]
+        if model.loading {
+            result["loading"] = true
+            result["note"] = "It's open in Petal's viewer and still being read (Quick Look or iCloud is still working on it); ask again with petal_view for its pages."
+            return result
+        }
         if let problem = model.problem { result["note"] = problem; return result }
         if model.live {
             result["shown"] = "through Quick Look (notes go on the file)"
@@ -117,11 +127,6 @@ extension Viewers {
         return result
     }
 
-    /// Waits (a few seconds at most) for a model to finish loading.
-    private func loaded(_ model: ViewerModel, tries: Int = 0, _ done: @escaping @MainActor () -> Void) {
-        if !model.loading || tries > 40 { return done() }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.loaded(model, tries: tries + 1, done) }
-    }
 
     /// The notes on a PDF as comments (ViewerPDFComments): into a copy beside it, or into the PDF itself once the
     /// person allows it.

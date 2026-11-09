@@ -361,6 +361,18 @@ struct ViewerFileCheck {
             var elsewhere = made
             elsewhere.bookmark = recycled.bookmark
             expect(ViewerFiles.locate(elsewhere, mac: "ANOTHER-MAC", follow: follow)?.id == reused, "another Mac's record isn't looked up here: the bookmark")
+            // A place Phase 1 made (no fileID) on another Mac, whose bookmark finds nothing here: its path decides; made
+            // on this Mac: nothing (by the Mac the place records).
+            let lost = aliasBase.appending(path: "Lost.pdf")
+            try? Data("%PDF-1.4 lost".utf8).write(to: lost)
+            var phaseOne = NoteStick(kind: .file)
+            phaseOne.path = realPDF.path
+            phaseOne.bookmark = (try? lost.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil))?.base64EncodedString() ?? ""
+            try? FileManager.default.removeItem(at: lost)
+            phaseOne.mac = "ANOTHER-MAC"
+            expect(ViewerFiles.locate(phaseOne, mac: mac, follow: follow)?.id == reused, "another Mac's Phase 1 place: its path, by the Mac it records")
+            phaseOne.mac = mac
+            expect(ViewerFiles.locate(phaseOne, mac: mac, follow: follow) == nil, "this Mac's: a bookmark that finds nothing finds nothing")
         } else { expect(false, "a throwaway file") }
         try? FileManager.default.removeItem(at: aliasBase)
 
@@ -422,6 +434,24 @@ struct ViewerFileCheck {
         unknownKind.path = "/Users/someone/run.sh"
         expect(ViewerFiles.offersViewer(sentenceInPDF) && ViewerFiles.offersViewer(onPath) && !ViewerFiles.offersViewer(sentenceOnPage)
                && !ViewerFiles.offersViewer(unknownKind) && !ViewerFiles.offersViewer(tab), "Open in Petal's viewer offered for a sentence noted in Preview")
+
+        // MARK: Sixth review
+
+        var marker = NoteShelf.EditorMarker()
+        marker.typed()
+        expect(!marker.saved(landed: false) && marker.dirty, "a refused save keeps the editor dirty")
+        expect(!marker.newer() && marker.dirty, "and no newer version replaces what's typed meanwhile")
+        expect(marker.saved(landed: true) && !marker.dirty, "landed: clean, and the version that waited is taken")
+        var foreignPlace = NoteStick(kind: .file)
+        foreignPlace.mac = "OTHER"
+        expect(ViewerFiles.isForeign(foreignPlace, mac: "ME"), "a place recording another Mac is that Mac's")
+        foreignPlace.mac = "ME"
+        expect(!ViewerFiles.isForeign(foreignPlace, mac: "ME"), "this Mac's")
+        foreignPlace.mac = ""
+        expect(!ViewerFiles.isForeign(foreignPlace, mac: "ME"), "recording none: taken as this Mac's (strict)")
+        foreignPlace.mac = "ME"
+        foreignPlace.fileID = ViewerFileID(volume: "V", inode: 1, created: 1).record(mac: "OTHER")
+        expect(ViewerFiles.isForeign(foreignPlace, mac: "ME"), "its file's record decides first")
 
         print("viewer: \(passed) passed" + (failures > 0 ? ", \(failures) failed" : ""))
         if failures > 0 { exit(1) }
