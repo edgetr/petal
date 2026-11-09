@@ -15,6 +15,10 @@ struct NoteImport: @unchecked Sendable {
     /// The selection it replaces when it's in (its length, and the text it held then).
     var length: Int = 0
     var selected: String = ""
+    /// A picture from a note's fragment (a paste): its spot in the open editor (an anchor that follows edits; the
+    /// end once the editor is gone), and its caption. A paste's picture that can't be read is said in words there.
+    var anchor: Int? = nil
+    var captions: [String]? = nil
 }
 
 // MARK: - Places
@@ -1712,6 +1716,15 @@ enum NoteShelf {
     static func respelled(_ path: String) -> String {
         for top in ["/private/var/", "/private/tmp/", "/private/etc/"] where path.hasPrefix(top) { return String(path.dropFirst("/private".count)) }
         return path
+    }
+
+    /// A spot in an editor's text (a pasted picture still being read) after an edit replaced `oldLength`
+    /// characters at `at` with `newLength`: unchanged when the edit is at or after it, moved by the difference when
+    /// it's before, and to the edit's end when the spot was inside what was replaced (a reload).
+    static func shiftAnchor(_ spot: Int, at: Int, oldLength: Int, newLength: Int) -> Int {
+        if spot <= at { return spot }
+        if spot >= at + oldLength { return spot + newLength - oldLength }
+        return at + newLength
     }
 
     /// Where pasted pictures go when they're in: the selection they were pasted over when the text there still says
