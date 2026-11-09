@@ -198,6 +198,20 @@ struct NoteRichCheck {
         expect(atEnd() == nil, "the same words from a sync, a reload or a tool never run")
         lines.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("intro\n@Petal summarize this"), folder: lines.folderRef, style: style))
         expect(atEnd() == nil, "words that ran before, brought back from outside, never run")
+        // Backspace from a blank line onto an answered line, then Undo: neither makes the old command runnable.
+        lines.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("intro"), folder: lines.folderRef, style: style))
+        typeAtEnd("\n@Petal check the side door")
+        atEnd()?.take()
+        typeAtEnd("\n")
+        lines.breakUndoCoalescing()
+        toEnd()
+        lines.deleteBackward(nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        expect(lines.string.hasSuffix("side door") && atEnd() == nil, "joining a blank line onto an answered line doesn't make it runnable", lines.string)
+        lines.undoManager?.undo()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        lines.setSelectedRange(NSRange(location: (lines.string as NSString).length - 1, length: 0))
+        expect(lines.string.hasSuffix("side door\n") && lines.helperLine() == nil, "undoing the join doesn't either", lines.string)
 
         // The Edit menu, never shown: its items, selectors and keys; the app menu empty (nothing acts unexpectedly).
         let menu = EditMenu.make()

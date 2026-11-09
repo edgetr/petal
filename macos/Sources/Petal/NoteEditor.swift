@@ -923,16 +923,17 @@ final class NoteTextView: NSTextView {
         super.handleTextCheckingResults(results, forRange: range, types: checkingTypes, options: options, orthography: orthography, wordCount: wordCount)
     }
 
-    /// The lines a change touched lose their mark (it can't run any more); the person's own change gives each a new
-    /// one that can.
+    /// The lines a change touched lose their mark (they can't run any more); the lines the person's own typing or
+    /// pasting put characters on get a new one that can (NoteHelp.editedLines).
     private func remark(_ edits: [(location: Int, inserted: String, person: Bool)]) {
         guard let storage = textStorage else { return }
         let text = string
         for edit in edits {
-            for line in NoteHelp.editedLines(after: text, location: edit.location, inserted: edit.inserted) where NSMaxRange(line) <= storage.length {
+            for (line, marks) in NoteHelp.editedLines(after: text, location: edit.location, inserted: edit.inserted, person: edit.person)
+            where NSMaxRange(line) <= storage.length {
                 storage.enumerateAttribute(NoteLine.key, in: line) { value, _, _ in if let old = value as? String { runnable.remove(old) } }
                 storage.removeAttribute(NoteLine.key, range: line)
-                guard edit.person, line.length > 0 else { continue }
+                guard marks, line.length > 0 else { continue }
                 let mark = UUID().uuidString
                 storage.addAttribute(NoteLine.key, value: mark, range: line)
                 runnable.insert(mark)

@@ -177,12 +177,15 @@ final class NoteHelpers {
     }
 
     /// A helper's answer: one block of ink (replacing the last), the helper done.
-    private func answer(_ noteID: String, _ ink: [NoteHelp.Ink], who: String, asked: String, steps: [String]? = nil) {
+    /// A run that succeeded: its ink (replacing the last) and `helper: done`. Only a run whose token completed
+    /// `.succeeded` writes `done` (what chains and morning notes wait for); Petal's own words never do (`say`).
+    private func succeeded(_ run: Run, _ ink: [NoteHelp.Ink], who: String? = nil, steps: [String]? = nil) {
+        guard run.token.completion == .succeeded else { return }
         let mac = self.mac
-        keep(noteID) { file in
+        keep(run.noteID) { file in
             file.ink = ink
             if let steps { file.steps = steps }
-            file.helper = NoteHelp.Helper(state: .done, who: who, step: "", asked: asked, mac: mac, at: Date())
+            file.helper = NoteHelp.Helper(state: .done, who: who ?? run.who, step: "", asked: run.asked, mac: mac, at: Date())
         }
     }
 
@@ -267,18 +270,22 @@ final class NoteHelpers {
         NoteJournal.queue.async { _ = HelperJournal.save(entries, to: file) }
     }
 
-    /// Petal's own words on the note: its ink, or, while a helper works there, a faint word that leaves the
-    /// helper's ink and line alone.
-    private func say(_ noteID: String, _ text: String, asked: String) {
+    /// Petal's own words on the note (something done there without a run: remembered, watching, put back): its ink,
+    /// and no helper line (never `done`, so nothing waiting on the note starts); while a helper works there, a faint
+    /// word that leaves the helper's ink and line alone.
+    private func say(_ noteID: String, _ text: String, asked: String, who: String = NoteHelpers.petalWho) {
         if runs[noteID] != nil { return hint(noteID, text) }
-        answer(noteID, [NoteHelp.Ink(who: Self.petalWho, text: text)], who: Self.petalWho, asked: asked)
+        keep(noteID) { file in
+            file.ink = [NoteHelp.Ink(who: who, text: text)]
+            NoteHelp.HelperChange.clear.apply(to: &file)
+        }
     }
 
-    /// Refused on the note (nothing done): said, and the line being taken may run again, so Return asks once it can
-    /// be done.
+    /// Refused on the note (nothing done): a faint word, the note's ink and helper line left as they are, and the
+    /// line being taken may run again, so Return asks once it can be done.
     private func refuse(_ noteID: String, _ text: String, asked: String) {
         taking?.again()
-        say(noteID, text, asked: asked)
+        hint(noteID, text)
     }
 
     /// A run that failed (a refusal, a launch error, a guard, nothing found): its reason as failure ink on the paper
@@ -748,7 +755,7 @@ final class NoteHelpers {
                 self.runs[paper.noteID] = nil
                 self.tokens.finish(paper.noteID, run.token)
                 self.write(paper.noteID) { $0.calc = calc }
-                self.answer(paper.noteID, [], who: Self.petalWho, asked: asked)
+                self.succeeded(run, [])
             }
         }
     }
@@ -785,7 +792,7 @@ final class NoteHelpers {
                         self.runs[paper.noteID] = nil
                         self.tokens.finish(paper.noteID, run.token)
                         let who = Self.petalWho + " · put away " + NoteHelp.dayLabel(Date(), now: Date())
-                        self.answer(paper.noteID, [NoteHelp.Ink(who: who, text: line)], who: who, asked: asked)
+                        self.succeeded(run, [NoteHelp.Ink(who: who, text: line)], who: who)
                     }
                     guard self.app.focus.brain.enabled else { return finish(plain) }
                     // Where they stopped, from the titles only (shielded), by the quick AI.
@@ -1259,38 +1266,52 @@ final class NoteHelpers {
         // A coding helper's proof is only its own "Proof:" line; its finish line is kept apart (NoteHelp.codeInk).
         if case .code = run.kind { ink = NoteHelp.codeInk(who: run.who, answer: answer, finish: NoteHelp.finishLine(run.asked)) }
         // The next answer replaces the last: one block of ink (a second opinion's comes after it).
-        self.answer(noteID, [ink], who: run.who, asked: run.asked, steps: steps)
-        // The answer replaced the ink: [ink] is the complete latest ink the second opinion carries.
-        if let holes = run.holes, let paper = paper(noteID) { secondOpinion(paper, holes, after: run, carried: [ink], answer: answer) }
+        succeeded(run, [ink], steps: steps)
+        // The answer replaced the ink: [ink] is the complete latest ink a second opinion carries. One asked while it
+        // worked (with its line, held by the reviewer's run until that succeeds), else one asked in its own line.
+        guard let paper = paper(noteID) else { return }
+        if let asked = followUps.review(note: noteID, current: run.token) {
+            taking = asked.line
+            defer { taking = nil }
+            secondOpinion(paper, asked.model, asked: asked.asked, tree: run.tree, carried: [ink], answer: answer)
+        } else if let holes = run.holes {
+            secondOpinion(paper, holes, asked: run.asked, tree: run.tree, carried: [ink], answer: answer)
+        }
     }
 
     /// A second opinion asked for in a follow-up: after the run at work succeeds, or now, against the note's last
     /// answer and its worktree.
     private func review(_ paper: PaperNote, _ model: NoteHelp.Model, asked: String) {
-        if let run = runs[paper.noteID], run.carried == nil, run.token.admits || run.token.paused {
-            run.holes = model
-            write(paper.noteID) { $0.helper?.asked = asked }
+        let running = runs[paper.noteID].flatMap { $0.carried == nil && ($0.token.admits || $0.token.paused) ? $0 : nil }
+        // The checkout it looks at is the work's own (the run at work's, else the note's saved worktree's), chosen as
+        // a primary request's is: another one named is refused, plainly.
+        let current = running != nil ? running?.checkout : paper.file.worktree?.checkout
+        if case .refuse(let named) = NoteHelp.reviewCheckout(current: current, words: asked, home: NSHomeDirectory()) {
+            let work = current.map { " in " + ($0 as NSString).abbreviatingWithTildeInPath } ?? ""
+            return refuse(paper.noteID, "A second opinion looks at this note's own work\(work), not \(named). Ask for it on a note about \(named).", asked: asked)
+        }
+        // Joins the run at work: asked of it with its line (given back if that run doesn't succeed), run once it does.
+        if let run = running {
+            followUps.addReview(model, asked: asked, note: paper.noteID, token: run.token, line: taking)
             return
         }
         // Against the note's complete latest ink (held, or on the paper), carried with it.
         let carried = latestInk(paper.noteID)
-        let first = Run(token: RunToken(), noteID: paper.noteID, asked: asked, who: model.name)
-        first.tree = paper.file.worktree?.path
-        secondOpinion(paper, model, after: first, carried: carried, answer: carried.first { !$0.opinion }?.text ?? "")
+        secondOpinion(paper, model, asked: asked, tree: paper.file.worktree?.path, carried: carried, answer: carried.first { !$0.opinion }?.text ?? "")
     }
 
     /// "and have <model> look for holes": a run of its own, after the first succeeded, reading the cover and the note
     /// first, then its answer (and in a worktree, the change), listing objections as its own ink with a count.
-    private func secondOpinion(_ paper: PaperNote, _ model: NoteHelp.Model, after first: Run, carried: [NoteHelp.Ink], answer: String) {
+    private func secondOpinion(_ paper: PaperNote, _ model: NoteHelp.Model, asked: String, tree: String?, carried: [NoteHelp.Ink], answer: String) {
         guard case .use(let id) = provider(for: model), let provider = Provider(rawValue: id) else {
             // Asked for, but that AI isn't set up: said under the answer (the answer stands), never another instead.
             let name = model.provider == .claude ? "Claude Code" : "Codex"
             return opinion(paper.noteID, carried: carried,
                            NoteHelp.Ink(who: model.name, text: "No second opinion: \(name) isn't set up in Petal.", link: NoteHelp.settingsLink),
-                           helper: .set(NoteHelp.Helper(state: .done, who: Self.petalWho, step: "", asked: first.asked, mac: mac, at: Date())))
+                           helper: .keep)
         }
         let who = model.name.isEmpty ? provider.name : model.name
-        let run = begin(paper, asked: first.asked, step: "Looking for holes", who: who)
+        let run = begin(paper, asked: asked, step: "Looking for holes", who: who)
         // Part of its primary run: the note's complete ink goes with it, and its outcome is added to it.
         run.carried = carried
         let reviewer = sticky(for: paper)
@@ -1305,7 +1326,7 @@ final class NoteHelpers {
                             told: told, brief: NoteHelp.reviewBrief(told), folder: tree, placed: tree == nil)
             }
         }
-        guard let tree = first.tree else { return start(nil) }
+        guard let tree else { return start(nil) }
         // In a worktree only once it's checked, as a coding follow-up's is: where this note's worktree of its saved
         // checkout belongs, that checkout's, on the branch stored.
         guard let stored = self.paper(paper.noteID)?.file.worktree, NoteHelp.standard(stored.path) == NoteHelp.standard(tree) else {
@@ -1567,11 +1588,11 @@ final class NoteHelpers {
                 let asked = self.paper(noteID)?.file.helper?.asked ?? ""
                 if newly.value, verdict == .hit {
                     let words = said ?? "Now \(shown): \(watch.line). Petal never buys by itself: say “@Petal buy it” and you'll see a Buy card first."
-                    self.answer(noteID, [NoteHelp.Ink(who: who, text: words)], who: Self.petalWho, asked: asked)
+                    self.say(noteID, words, asked: asked, who: who)
                     self.summon(noteID, open: true)
                 } else if verdict == .unconfirmed {
                     let words = "Looks \(watch.line) (\(shown)), not confirmed."
-                    if self.paper(noteID)?.file.ink.first?.text != words { self.answer(noteID, [NoteHelp.Ink(who: who, text: words)], who: Self.petalWho, asked: asked) }
+                    if self.paper(noteID)?.file.ink.first?.text != words { self.say(noteID, words, asked: asked, who: who) }
                 }
             }
         }

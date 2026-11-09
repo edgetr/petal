@@ -663,29 +663,46 @@ enum NoteHelp {
     }
 
     /// The lines one change in an editor touched, as ranges of the text after it (`location` and the inserted text's
-    /// length in UTF-16, as NSString counts), each without its line break: every line the inserted text (or a
-    /// deletion's spot) is on, and a line split by it on both sides. A Return at the very end of a line touches nothing
-    /// (it only makes a new line).
-    static func editedLines(after text: String, location: Int, inserted: String) -> [NSRange] {
+    /// length in UTF-16, as NSString counts), each without its line break, and whether each may get a new mark that
+    /// can run (`marks`). Only the person's own change marks, and only the lines its inserted characters land on:
+    /// deleting (a newline too: joining onto a line isn't writing it) never marks. The person's own Return at the very
+    /// end of a line touches nothing; any other change clears every line it touches, and one that isn't the person's
+    /// (undo, redo, autocorrect) the line before it too.
+    static func editedLines(after text: String, location: Int, inserted: String, person: Bool) -> [(range: NSRange, marks: Bool)] {
         let ns = text as NSString
         let length = (inserted as NSString).length
         guard location >= 0, location + length <= ns.length else { return [] }
-        if inserted == "\n" {
+        if person, inserted == "\n" {
             let next = location + 1
             if next >= ns.length || ns.character(at: next) == 10 { return [] }
         }
-        let range = ns.lineRange(for: NSRange(location: location, length: min(length + 1, ns.length - location)))
-        var lines: [NSRange] = []
+        let from = person ? location : max(0, location - 1)
+        let range = ns.lineRange(for: NSRange(location: from, length: min(location + length + 1, ns.length) - from))
+        let landed = NSRange(location: location, length: length)
+        var lines: [(range: NSRange, marks: Bool)] = []
         var at = range.location
         while at < NSMaxRange(range) {
             let line = ns.lineRange(for: NSRange(location: at, length: 0))
             var content = line
             if content.length > 0, ns.character(at: NSMaxRange(content) - 1) == 10 { content.length -= 1 }
-            lines.append(content)
+            lines.append((content, person && NSIntersectionRange(content, landed).length > 0))
             at = NSMaxRange(line)
             if line.length == 0 { break }
         }
+        if lines.isEmpty, range.length == 0 { lines.append((range, false)) }
         return lines
+    }
+
+    /// Which checkout a second opinion looks at: the work it reviews (the run at work's checkout, else the note's saved
+    /// worktree's), through the same choice as a primary request (`chooseCheckout`). A checkout named in its words
+    /// must be that one; another is refused, plainly (ask on a note about it).
+    enum ReviewCheckout: Equatable { case join, refuse(String) }
+
+    static func reviewCheckout(current: String?, words: String, home: String) -> ReviewCheckout {
+        let said = namedPaths(words, home: home)
+        guard !said.isEmpty else { return .join }
+        if case .one = chooseCheckout(current.map { [$0] } ?? [], words: words, home: home) { return .join }
+        return .refuse(said.joined(separator: ", "))
     }
 
     /// What an output does to the note's helper line, said explicitly: keep it (a turn on the way), clear it (stopped:
@@ -1748,23 +1765,42 @@ extension NoteHelp {
 /// that token is still the note's run's and running; Stop clears its run's, so nothing said to a stopped run is ever
 /// sent in a later one.
 struct FollowUpQueue<Line> {
-    typealias Entry = (note: String, token: RunToken, text: Shielded, line: Line?)
+    /// What was asked of a run while it worked: words that steer it (a turn of their own), or a second opinion of
+    /// its work once it succeeds.
+    enum Item { case say(Shielded), review(NoteHelp.Model, asked: String) }
+    typealias Entry = (note: String, token: RunToken, item: Item, line: Line?)
     private(set) var entries: [Entry] = []
-    /// The lines of follow-ups dropped without being sent (their run ended): runnable again.
+    /// The lines of requests dropped without being run (their run ended): runnable again.
     private(set) var dropped: [Line] = []
 
-    mutating func add(_ text: Shielded, note: String, token: RunToken, line: Line? = nil) { entries.append((note, token, text, line)) }
+    mutating func add(_ text: Shielded, note: String, token: RunToken, line: Line? = nil) { entries.append((note, token, .say(text), line)) }
+
+    mutating func addReview(_ model: NoteHelp.Model, asked: String, note: String, token: RunToken, line: Line? = nil) {
+        entries.append((note, token, .review(model, asked: asked), line))
+    }
 
     /// The next follow-up for `note` its current run may send, with its line (held by the run until that turn
     /// succeeds); entries of any other token are dropped.
     mutating func next(note: String, current: RunToken?) -> (text: Shielded, line: Line?)? {
         drop { $0.note == note && ($0.token !== current || !$0.token.admits) }
-        guard let index = entries.firstIndex(where: { $0.note == note }) else { return nil }
+        guard let index = entries.firstIndex(where: { if $0.note == note, case .say = $0.item { true } else { false } }),
+              case .say(let text) = entries[index].item else { return nil }
         let entry = entries.remove(at: index)
-        return (entry.text, entry.line)
+        return (text, entry.line)
     }
 
-    /// A run ended: everything said to it goes, never sent.
+    /// Its run succeeded: the second opinion asked of it (the latest; an earlier one's line is given back), with its
+    /// line, held by the reviewer's run until that succeeds. Entries of any other run are dropped.
+    mutating func review(note: String, current: RunToken) -> (model: NoteHelp.Model, asked: String, line: Line?)? {
+        drop { $0.note == note && $0.token !== current }
+        guard let index = entries.lastIndex(where: { if $0.note == note, case .review = $0.item { true } else { false } }),
+              case .review(let model, let asked) = entries[index].item else { return nil }
+        let entry = entries.remove(at: index)
+        drop { if $0.note == note, case .review = $0.item { true } else { false } }
+        return (model, asked, entry.line)
+    }
+
+    /// A run ended: everything asked of it goes, never run.
     mutating func clear(_ token: RunToken) { drop { $0.token === token } }
 
     /// The lines dropped since last asked, taken.

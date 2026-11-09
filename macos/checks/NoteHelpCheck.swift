@@ -709,16 +709,51 @@ struct NoteHelpCheck {
         let opinionBack = NoteFile.parse(opinionFile.serialized(), fallbackID: "OP1", fallbackDate: now).ink
         expect(opinionBack == failed, "a failed opinion stays an opinion through the front matter", "\(opinionBack)")
 
-        // Which lines an edit touches (the editor's runnable marks follow them; checked on a real editor in NoteRichCheck).
+        // Which lines an edit touches, and which may get a mark that runs (checked on a real editor in NoteRichCheck).
         let typedText = "intro\n@Petal summarize this page\nmore"
         let at = ("intro\n@Petal summarize this pag" as NSString).length
         let lineRange = NSRange(location: 6, length: ("@Petal summarize this page" as NSString).length)
-        expect(NoteHelp.editedLines(after: typedText, location: at, inserted: "e") == [lineRange], "typing a character touches its line")
+        let typedLines = NoteHelp.editedLines(after: typedText, location: at, inserted: "e", person: true)
+        expect(typedLines.count == 1 && typedLines[0].range == lineRange && typedLines[0].marks, "typing a character marks its line")
         let returnedText = "intro\n@Petal summarize this page\n\nmore"
         let end = ("intro\n@Petal summarize this page" as NSString).length
-        expect(NoteHelp.editedLines(after: returnedText, location: end, inserted: "\n").isEmpty, "Return at the end of a line touches nothing (pressing it never makes its line run)")
+        expect(NoteHelp.editedLines(after: returnedText, location: end, inserted: "\n", person: true).isEmpty, "the person's Return at the end of a line touches nothing")
+        let undoneReturn = NoteHelp.editedLines(after: returnedText, location: end, inserted: "\n", person: false)
+        expect(undoneReturn.contains { $0.range == lineRange } && undoneReturn.allSatisfy { !$0.marks },
+               "undo or redo putting a line break back clears the line before it too, and marks nothing", "\(undoneReturn)")
+        let joined = "intro\n@Petal summarize this page"
+        let joinedLines = NoteHelp.editedLines(after: joined, location: end, inserted: "", person: true)
+        expect(joinedLines.contains { $0.range == lineRange } && joinedLines.allSatisfy { !$0.marks },
+               "Backspace joining a blank line onto an answered line clears it and marks nothing (deleting isn't writing)", "\(joinedLines)")
+        let deletedChar = NoteHelp.editedLines(after: "intro\n@Petal summarize this pag\nmore", location: at, inserted: "", person: true)
+        expect(deletedChar.count == 1 && !deletedChar[0].marks, "a deletion clears its line without marking it")
         let split = "intro\n@Petal summarize\n this page"
-        expect(NoteHelp.editedLines(after: split, location: ("intro\n@Petal summarize" as NSString).length, inserted: "\n").count == 2, "Return inside a line edits both halves")
+        let splitLines = NoteHelp.editedLines(after: split, location: ("intro\n@Petal summarize" as NSString).length, inserted: "\n", person: true)
+        expect(splitLines.count == 2 && splitLines.allSatisfy { !$0.marks }, "Return inside a line clears both halves (no characters written)")
+        let pasted = NoteHelp.editedLines(after: "intro\n@Petal one\n@Petal two", location: 5, inserted: "\n@Petal one\n@Petal two", person: true)
+        expect(pasted.filter(\.marks).count == 2, "a paste marks the lines its characters land on")
+
+        // A second opinion's checkout: the work it reviews, chosen as a primary request's is.
+        expect(NoteHelp.reviewCheckout(current: "/u/checkout-a", words: "@Petal have GPT 6.1 Sol look for holes", home: "/u") == .join, "no checkout named: it joins the work")
+        expect(NoteHelp.reviewCheckout(current: "/u/checkout-a", words: "@Petal have GPT 6.1 Sol look for holes in ~/checkout-a", home: "/u") == .join, "the work's own checkout: it joins")
+        expect(NoteHelp.reviewCheckout(current: "/u/checkout-a", words: "@Petal have GPT 6.1 Sol look for holes in ~/checkout-b", home: "/u") == .refuse("/u/checkout-b"),
+               "another checkout is refused, never reviewed in the run's worktree")
+        expect(NoteHelp.reviewCheckout(current: nil, words: "@Petal have GPT 6.1 Sol look for holes in ~/checkout-b", home: "/u") == .refuse("/u/checkout-b"),
+               "work in no checkout: a named one is refused")
+        var reviewQueue = FollowUpQueue<String>()
+        let reviewed = RunToken()
+        let sol = NoteHelp.models("GPT 6.1 Sol look for holes").first { $0.holes }!
+        reviewQueue.addReview(sol, asked: "@Petal have GPT 6.1 Sol look for holes", note: "N1", token: reviewed, line: "reviewer line")
+        reviewQueue.clear(reviewed)
+        expect(reviewQueue.takeDropped() == ["reviewer line"], "a review asked of a run that's stopped gives its line back (it can run again)")
+        reviewQueue.addReview(sol, asked: "first", note: "N1", token: reviewed, line: "older review")
+        reviewQueue.addReview(sol, asked: "second", note: "N1", token: reviewed, line: "newer review")
+        let taken = reviewQueue.review(note: "N1", current: reviewed)
+        expect(taken?.asked == "second" && taken?.line == "newer review" && reviewQueue.takeDropped() == ["older review"],
+               "once the run succeeds, the latest review runs holding its line; an earlier one's line is given back")
+        reviewQueue.addReview(sol, asked: "x", note: "N1", token: reviewed, line: "said meanwhile")
+        expect(reviewQueue.next(note: "N1", current: reviewed) == nil, "a queued review is never sent to the run as a turn")
+
         var followQueue = FollowUpQueue<String>()
         let followToken = RunToken()
         followQueue.add("go on", note: "N1", token: followToken, line: "second line")

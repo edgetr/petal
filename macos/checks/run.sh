@@ -166,7 +166,7 @@ echo "forms: fields scroll, buttons stay on the screen"
 # A reviewer outside a worktree is bound to the note's place like any run.
 perl -0777 -ne '
     unless (/run\.carried = carried/ && /private func output\(_ run: Run.*?if let carried = run\.carried \{\s*return opinion\(/s
-            && /private func opinion\(.*?NoteHelp\.withOpinion\(/s && /secondOpinion\(paper, holes, after: run, carried: \[ink\]/
+            && /private func opinion\(.*?NoteHelp\.withOpinion\(/s && /secondOpinion\(paper, holes, asked: run\.asked, tree: run\.tree, carried: \[ink\]/
             && /folder: tree, placed: tree == nil\)/ && /where run\.launched && run\.kind\.placed/ && /= run\.kind\.placed \? NoteHelp\.requirement\(/
             && /if run\.kind\.placed \{\s*facts\.document/) { print "NoteHelpers: a second opinion must add to its primary and be bound to its place\n"; exit 1 }
     for my $f (qw(fail stopped)) { unless (/func $f\(.*?\n    \}/s && $& =~ /output\(run,/) { print "NoteHelpers: $f must report through output\n"; exit 1 } }
@@ -189,7 +189,7 @@ perl -0777 -ne '
 ' Sources/Petal/NoteHelpers.swift
 perl -0777 -ne '
     unless (/let person = !history\.isUndoing && !history\.isRedoing && !correcting/ && /override func handleTextCheckingResults\(.*?correcting = true/s
-            && /private func remark\(.*?storage\.removeAttribute\(NoteLine\.key, range: line\)\s*guard edit\.person/s
+            && /private func remark\(.*?NoteHelp\.editedLines\(after: text, location: edit\.location, inserted: edit\.inserted, person: edit\.person\).*?storage\.removeAttribute\(NoteLine\.key, range: line\)\s*guard marks/s
             && /func replaceFromOutside\(_ text: NSAttributedString\) \{\s*textStorage\?\.setAttributedString\(text\)\s*\/\/[^\n]*\n\s*runnable\.removeAll\(\)/) {
         print "NoteEditor: only the person'"'"'s own typing or pasting may make a line runnable\n"; exit 1 }
     print "helpers: lines are runnable by identity, only from the person'"'"'s own edits\n";
@@ -217,6 +217,23 @@ perl -0777 -ne '
         print "Brain: each call picks its own AI before checking it is ready\n"; exit 1 }
     print "brain: each call picks its own AI first\n";
 ' Sources/Petal/Focus.swift
+# Only a run that succeeded writes `done` (what chains and morning notes wait for): Petal's own words write no helper
+# line, a refusal is a faint word that leaves the note as it is.
+perl -0777 -ne '
+    my $done = () = /state: \.done/g;
+    unless ($done == 2 && /private func succeeded\(_ run: Run.*?guard run\.token\.completion == \.succeeded else \{ return \}/s
+            && /private func say\(.*?NoteHelp\.HelperChange\.clear\.apply/s && /private func refuse\(.*?taking\?\.again\(\)\s*hint\(noteID, text\)\s*\}/s
+            && !/func answer\(/) { print "NoteHelpers: only a succeeded run writes done; refusals stay faint\n"; exit 1 }
+    print "helpers: only a succeeded run writes done; refusals are faint\n";
+' Sources/Petal/NoteHelpers.swift
+# A second opinion goes through the same checkout choice as a primary request, and one asked while a run works rides
+# with its line (the same queue as follow-ups: given back if that run doesn't succeed, held by the reviewer until it does).
+perl -0777 -ne '
+    unless (/private func review\(.*?NoteHelp\.reviewCheckout\(current: current, words: asked.*?followUps\.addReview\(model, asked: asked, note: paper\.noteID, token: run\.token, line: taking\)/s
+            && /if let asked = followUps\.review\(note: noteID, current: run\.token\) \{\s*taking = asked\.line/) {
+        print "NoteHelpers: reviews choose their checkout and carry their line\n"; exit 1 }
+    print "helpers: reviews choose their checkout like a request and carry their line\n";
+' Sources/Petal/NoteHelpers.swift
 # Every reviewer output, its turns on the way included, goes through opinion (output).
 perl -0777 -ne '
     if (/Something said meanwhile.*?\n\s*return\n/s && $& !~ /output\(run,/) { print "NoteHelpers: a reviewer turn must go through output\n"; exit 1 }
