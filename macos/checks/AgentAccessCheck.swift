@@ -464,6 +464,40 @@ struct AgentAccessCheck {
         folder("evil/sub")
         file("evil/.git", "gitdir: \(root)/trusted/.git/worktrees/wt\n")
         expect(project("evil/sub") == root + "/evil", "a forged .git file naming a real worktree entry: its own folder", project("evil/sub"))
+
+        // The git repository a note's file is really in (AgentAccess.repository, what a file's note is routed by): a
+        // file under a linked worktree is in its main checkout's repository; a forged `.git` file is in none.
+        func repository(_ path: String) -> String? { AgentAccess.repository(root + "/" + path, files: AgentCallers.disk) }
+        expect(repository("wt/src") == root + "/trusted", "a file in a linked worktree: its repository is the main checkout", repository("wt/src") ?? "nil")
+        expect(repository("side/rel") == root + "/trusted" && repository("trusted") == root + "/trusted", "a worktree with relative links, and the main checkout itself")
+        expect(repository("evil/sub") == nil, "a forged .git file: no repository (never coding in the one it names)", repository("evil/sub") ?? "nil")
+        folder("loose/docs")
+        expect(repository("loose/docs") == nil, "a folder in no repository: none", repository("loose/docs") ?? "nil")
+        try? fm.createSymbolicLink(atPath: root + "/loose/.git", withDestinationPath: root + "/trusted/.git")
+        expect(repository("loose/docs") == nil, "a .git that is a symbolic link is never followed")
+        // The same with a repository and a linked worktree git itself made (when git is here).
+        if fm.isExecutableFile(atPath: "/usr/bin/git") {
+            func git(_ arguments: [String]) -> Bool {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                process.arguments = ["-c", "user.name=check", "-c", "user.email=check@example.invalid", "-c", "commit.gpgsign=false"] + arguments
+                process.standardOutput = FileHandle.nullDevice
+                process.standardError = FileHandle.nullDevice
+                guard (try? process.run()) != nil else { return false }
+                process.waitUntilExit()
+                return process.terminationStatus == 0
+            }
+            folder("made")
+            if git(["init", "-q", root + "/made/repo"]), git(["-C", root + "/made/repo", "commit", "-q", "--allow-empty", "-m", "start"]),
+               git(["-C", root + "/made/repo", "worktree", "add", "-q", "-b", "linked", root + "/made/linked"]) {
+                folder("made/linked/Sources")
+                expect(repository("made/linked/Sources") == root + "/made/repo", "git's own linked worktree: a file in it routes to its main checkout's repository",
+                       repository("made/linked/Sources") ?? "nil")
+                expect(repository("made/repo") == root + "/made/repo", "and git's own main checkout is itself")
+            } else {
+                expect(false, "git made a repository and a linked worktree in the throwaway folder")
+            }
+        }
         // Forged: an entry that doesn't exist.
         folder("ghost")
         file("ghost/.git", "gitdir: \(root)/trusted/.git/worktrees/none\n")

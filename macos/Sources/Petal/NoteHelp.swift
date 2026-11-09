@@ -288,6 +288,9 @@ enum NoteHelp {
         /// A second opinion's (its objections, its answer, or why it couldn't give one): added after its primary's
         /// ink, never in its place.
         var opinion = false
+        /// A second opinion's: the answer it reviewed (`NoteHelp.inkHash` of the primary ink then). The note's answer
+        /// changed since (a newer one, from this Mac or another): the paper says it reviewed an earlier answer.
+        var reviewed = ""
 
         /// The only way new ink is made: its words, proof, link and finish line `Shielded` (a helper's output shielded
         /// whole as it arrived, and derived after: `NoteHelp.shielded`), so nothing raw is ever written as ink.
@@ -307,6 +310,7 @@ enum NoteHelp {
             self.init(stored: value.text("who"), value.text("text"), proof: value.texts("proof"), link: value.text("link"),
                       objections: Int(value.text("objections")), code: value.text("code") == "true", finish: value.text("finish"),
                       opinion: value.text("opinion") == "true")
+            reviewed = value.text("reviewed")
         }
 
         var value: NoteValue {
@@ -317,6 +321,7 @@ enum NoteHelp {
             if code { pairs.append(("code", .text("true"))) }
             if !finish.isEmpty { pairs.append(("finish", .text(finish))) }
             if opinion && objections == nil { pairs.append(("opinion", .text("true"))) }
+            if !reviewed.isEmpty { pairs.append(("reviewed", .text(reviewed))) }
             return .map(pairs)
         }
 
@@ -328,6 +333,11 @@ enum NoteHelp {
         var heading: String {
             guard let objections else { return who }
             return who + " · " + (objections == 0 ? "no objections" : objections == 1 ? "1 objection" : "\(objections) objections")
+        }
+
+        /// The heading among a note's ink: a second opinion of another answer than the one there now says so.
+        func heading(among inks: [Ink]) -> String {
+            NoteHelp.reviewedEarlier(self, among: inks) ? heading + " · " + NoteHelp.earlierWords : heading
         }
     }
 
@@ -1487,10 +1497,8 @@ enum NoteHelp {
         return out
     }
 
-    /// The checkout a file is in: the deepest candidate that holds it.
-    static func checkout(holding file: String, among candidates: [String]) -> String? {
-        candidates.filter { file == $0 || file.hasPrefix($0.hasSuffix("/") ? $0 : $0 + "/") }.max { $0.count < $1.count }
-    }
+    /// Whether a path is inside the home folder (not the home folder itself).
+    static func inHome(_ path: String, home: String) -> Bool { standard(path).hasPrefix(standard(home) + "/") }
 
     /// A note's coding worktree: one per note, reused for its follow-ups. Its branch is the note's id with a few
     /// words for the person ("petal/fix-date-picker-3f2a9c1d"): unique by construction, whatever was asked.
@@ -1591,8 +1599,19 @@ final class RunToken: @unchecked Sendable {
     private var _grants: Set<String> = []
     private var stoppers: [Int: @Sendable () -> Void] = [:]
     private var nextStopper = 0
+    /// What the run was doing in the person's apps, ended first on every change of its state (`changed`).
+    private var _actions: (@Sendable () -> Void)?
 
     init(id: String = UUID().uuidString) { self.id = id }
+
+    /// The run's actions in the person's apps (ComputerUse): `end` is called first, synchronously, on every change of
+    /// the token's state (paused, parked, stopped, failed, finished), whichever path made it; so nothing can pause a
+    /// token without ending its actions. Every pending effect also reads `halted` right before it acts.
+    func actions(_ end: @escaping @Sendable () -> Void) { lock.withLock { _actions = end } }
+
+    /// Not running now (paused, parked, stopped, failed or finished), read from any thread: what every pending press,
+    /// key or fill of the run checks right before it acts (`Acting.Cancel(run:)`).
+    var halted: Bool { state != .running }
 
     var state: State { lock.withLock { _state } }
     var grants: Set<String> { lock.withLock { _grants } }
@@ -1638,7 +1657,10 @@ final class RunToken: @unchecked Sendable {
         _state = to
         let stop = Array(stoppers.values)
         stoppers = [:]
+        let actions = _actions
         lock.unlock()
+        // Its actions in apps first, then its processes.
+        actions?()
         for each in stop { each() }
         return true
     }
@@ -1647,18 +1669,13 @@ final class RunToken: @unchecked Sendable {
     /// because some text appeared); paused and stopped runs advance nothing.
     func ending(outcome: Outcome?, asking: Bool) -> Ending {
         switch state {
-        case .paused: return .paused
+        // A turn that finished cleanly before the pause reached it is a finished answer: it lands, paused or not.
+        case .paused: return outcome == .succeeded && !asking ? .succeeded : .paused
         case .cancelled, .finished: return .stopped
         case .running:
             if asking { return .waitingOnPerson }
             return outcome == .succeeded ? .succeeded : outcome == .interrupted ? .stopped : .failed
         }
-    }
-
-    /// The run ended: finished when it succeeded (it then advances), else left as it was.
-    func end(_ ending: Ending) -> Bool {
-        guard ending == .succeeded else { return false }
-        return lock.withLock { guard _state == .running else { return false }; _state = .finished; return true }
     }
 
     /// How a run ends, exactly once: succeeded (a clean exit), failed (with its reason, shown on the paper), or
@@ -1669,17 +1686,20 @@ final class RunToken: @unchecked Sendable {
     private var _completion: Completion?
     var completion: Completion? { lock.withLock { _completion } }
 
-    /// Reports the run's end: true the first time only. Succeeded only while it runs (a paused or stopped run can't
-    /// succeed); failing or stopping ends what it has running.
+    /// Reports the run's end: true the first time only. Succeeded while it runs or is paused (a finished answer lands,
+    /// paused or not; Pause stops only what would happen next), never once stopped; failing or stopping ends what it
+    /// has running. Its actions in apps end first, however it ends.
     @discardableResult func complete(_ completion: Completion) -> Bool {
         lock.lock()
         guard _completion == nil else { lock.unlock(); return false }
-        if completion == .succeeded, _state != .running { lock.unlock(); return false }
+        if completion == .succeeded, _state != .running, _state != .paused { lock.unlock(); return false }
         _completion = completion
         let stop = completion == .succeeded ? [] : Array(stoppers.values)
         if completion != .succeeded { stoppers = [:] }
         _state = completion == .succeeded ? .finished : .cancelled
+        let actions = _actions
         lock.unlock()
+        actions?()
         for each in stop { each() }
         return true
     }
@@ -1864,13 +1884,15 @@ extension NoteHelp {
 struct FollowUpQueue<Line> {
     /// What was asked of a run while it worked: words that steer it (a turn of their own), or a second opinion of
     /// its work once it succeeds.
-    enum Item { case say(Shielded), review(NoteHelp.Model, asked: String) }
+    /// `say`: the person's line as they wrote it (a raw source, like every waiting call's): shielded, with the rest
+    /// of its turn's sources as they are then, only when its turn starts (`NoteHelpers.start`), never while it waits.
+    enum Item { case say(String), review(NoteHelp.Model, asked: String) }
     typealias Entry = (note: String, token: RunToken, item: Item, line: Line?)
     private(set) var entries: [Entry] = []
     /// The lines of requests dropped without being run (their run ended): runnable again.
     private(set) var dropped: [Line] = []
 
-    mutating func add(_ text: Shielded, note: String, token: RunToken, line: Line? = nil) { entries.append((note, token, .say(text), line)) }
+    mutating func add(_ text: String, note: String, token: RunToken, line: Line? = nil) { entries.append((note, token, .say(text), line)) }
 
     mutating func addReview(_ model: NoteHelp.Model, asked: String, note: String, token: RunToken, line: Line? = nil) {
         entries.append((note, token, .review(model, asked: asked), line))
@@ -1878,7 +1900,7 @@ struct FollowUpQueue<Line> {
 
     /// The next follow-up for `note` its current run may send, with its line (held by the run until that turn
     /// succeeds); entries of any other token are dropped.
-    mutating func next(note: String, current: RunToken?) -> (text: Shielded, line: Line?)? {
+    mutating func next(note: String, current: RunToken?) -> (text: String, line: Line?)? {
         drop { $0.note == note && ($0.token !== current || !$0.token.admits) }
         guard let index = entries.firstIndex(where: { if $0.note == note, case .say = $0.item { true } else { false } }),
               case .say(let text) = entries[index].item else { return nil }
@@ -2072,6 +2094,9 @@ extension NoteHelp {
         var builtPrivacy = 0
         var nowPrivacy = 0
         var placePrivate = false
+        /// Asked for a finished result about to land (`NoteHelpers.end`), not for something about to be sent: the
+        /// destination note and every source as they are now decide; its AI and its place showing don't matter any more.
+        var landing = false
     }
 
     static func admit(_ f: GateFacts) -> Admission {
@@ -2084,6 +2109,7 @@ extension NoteHelp {
             guard let book = source.notebook else { return .fail("A note it was checking against is gone. Ask again.") }
             guard mayRead(f.privacy(book), notebook: book, asking: f.notebook) else { return .fail("A note it was checking against is private now (or its notebook's cover isn't here). Ask again.") }
         }
+        if f.landing { return .go }
         guard f.available.contains(f.provider) else {
             return .fail("\(f.provider == "codex" ? "Codex" : "Claude Code") isn't set up in Petal.")
         }
@@ -2135,17 +2161,6 @@ extension NoteHelp {
     enum AnswerTarget: Equatable { case write, hold }
     static func answerTarget(papers: Int, readOnly: Bool) -> AnswerTarget { papers == 1 && !readOnly ? .write : .hold }
 
-    /// A second opinion is part of its primary run: its outcome (objections, an answer, a turn of it, or a
-    /// failure) is added to the note's complete latest ink (the primary answer, with its PR link and proof, and every
-    /// opinion), replacing only an earlier opinion of the same reviewer. Built on the latest held answer when there
-    /// is one, else on the complete ink the run carries.
-    static func withOpinion(_ ink: Ink, held: [Ink]?, carried: [Ink]) -> [Ink] {
-        var added = ink
-        added.opinion = true
-        let base = held ?? carried
-        return base.filter { !($0.opinion && $0.who == ink.who) } + [added]
-    }
-
     /// Where a note's worktree must be: Petal's own folder of worktrees, named for the checkout and the note.
     static func expectedTree(checkout canonical: String, noteID: String, worktrees: String) -> String {
         standard(worktrees) + "/" + worktreeName(checkout: canonical, noteID: noteID)
@@ -2178,12 +2193,120 @@ extension NoteHelp {
         return covers.first.map { .one($0.key) } ?? .none
     }
 
-    /// The keys a helper's answer sets, carried from a held answer onto the note it's applied to.
-    static let answerKeys = ["helper", "ink", "steps"]
+    /// What a second opinion knows the answer it reviewed by: a hash of the primary ink (its words, proof and link).
+    static func inkHash(_ ink: Ink?) -> String {
+        guard let ink else { return "" }
+        return hash8(([ink.who, ink.text, ink.link, ink.finish] + ink.proof).joined(separator: "\u{1}"))
+    }
+
+    /// A note's primary answer: its ink that isn't a second opinion's.
+    static func primary(_ inks: [Ink]) -> Ink? { inks.first { !$0.opinion } }
+
+    /// A second opinion that reviewed another answer than the one on the note now (a newer one landed, or synced in
+    /// from another Mac): the paper and the note tools say "reviewed an earlier answer" with it.
+    static func reviewedEarlier(_ ink: Ink, among inks: [Ink]) -> Bool {
+        ink.opinion && !ink.reviewed.isEmpty && ink.reviewed != inkHash(primary(inks))
+    }
+    static let earlierWords = "reviewed an earlier answer"
+
+    /// Everything a run produced, as one value: its ink, a second opinion's own opinion, steps, a recalculation's
+    /// `calc`, a task put away, and what becomes of the note's helper line. It lands as one journal entry and one
+    /// based write (`apply`), or not at all: nothing of a run is ever written beside it.
+    struct Result: Equatable {
+        /// A primary run's answer: the note's ink becomes it (the opinions of the answer before go with that answer).
+        private(set) var ink: Ink?
+        /// A reviewer's own opinion, and nothing else of the ink: added onto the paper's ink as it is when this lands
+        /// (never ink the reviewer captured earlier), replacing only an earlier opinion of the same reviewer.
+        private(set) var opinions: [Ink] = []
+        private(set) var steps: [String]?
+        /// A reviewer's steps: added after the steps there.
+        private(set) var said: [String] = []
+        private(set) var calc: Calc?
+        private(set) var task: [TaskItem]?
+        private(set) var helper: HelperChange
+
+        /// A primary run's result (a chat helper's, a coding one's, a quick one's).
+        init(answer ink: Ink?, steps: [Shielded]? = nil, calc: Calc? = nil, task: [TaskItem]? = nil, helper: HelperChange) {
+            self.ink = ink
+            self.steps = steps.map { $0.map(\.text) }
+            self.calc = calc
+            self.task = task
+            self.helper = helper
+        }
+
+        /// A reviewer's result: only its own opinion, with the answer it reviewed (`reviewed`: that primary ink's hash).
+        init(opinion ink: Ink?, reviewed: String, steps: [Shielded]? = nil, helper: HelperChange) {
+            if var ink {
+                ink.opinion = true
+                ink.reviewed = reviewed
+                opinions = [ink]
+                said = (steps ?? []).map { "\(ink.who): \($0.text)" }
+            }
+            self.helper = helper
+        }
+
+        /// On the note as it is now, all of it in one change.
+        func apply(to file: inout NoteFile) {
+            if let ink { file.ink = [ink] }
+            for opinion in opinions { file.ink = file.ink.filter { !($0.opinion && $0.who == opinion.who) } + [opinion] }
+            if let steps { file.steps = steps }
+            if !said.isEmpty { file.steps += said }
+            if let calc { file.calc = calc }
+            if let task { file.task = task }
+            helper.apply(to: &file)
+        }
+
+        /// This, then `later`, as one result: what landing each in turn would leave (two held for one note are one entry).
+        func then(_ later: Result) -> Result {
+            var all = self
+            if let ink = later.ink { all.ink = ink; all.opinions = [] }
+            for opinion in later.opinions { all.opinions = all.opinions.filter { $0.who != opinion.who } + [opinion] }
+            if let steps = later.steps { all.steps = steps; all.said = [] }
+            all.said += later.said
+            if let calc = later.calc { all.calc = calc }
+            if let task = later.task { all.task = task }
+            if later.helper != .keep { all.helper = later.helper }
+            return all
+        }
+
+        /// As the helpers' journal keeps it: a note's front matter holding only the result.
+        func held(noteID: String) -> NoteFile {
+            var file = NoteFile(id: noteID, created: Date(timeIntervalSince1970: 0))
+            if let ink { file.ink = [ink] }
+            if !opinions.isEmpty { file.set("opinions", .list(opinions.map(\.value))) }
+            if let steps { file.set("steps", .list(steps.map { .text($0) })) }
+            if !said.isEmpty { file.set("said", .list(said.map { .text($0) })) }
+            file.calc = calc
+            if let task { file.task = task }
+            switch helper {
+            case .keep: file.set("result", .text("keep"))
+            case .clear: file.set("result", .text("clear"))
+            case .set(let line): file.helper = line; file.set("result", .text("set"))
+            }
+            return file
+        }
+
+        /// Read back from the journal. (An entry an earlier Petal kept holds the note's whole answer: its ink with
+        /// every opinion, its steps and its helper line.)
+        init(held file: NoteFile) {
+            let mode = file.value("result")?.string
+            ink = NoteHelp.primary(file.ink)
+            opinions = mode == nil ? file.ink.filter(\.opinion) : file.value("opinions")?.items.compactMap(Ink.init) ?? []
+            steps = file.value("steps").map { $0.items.compactMap(\.string) }
+            said = file.value("said")?.items.compactMap(\.string) ?? []
+            calc = file.calc
+            task = file.task.isEmpty ? nil : file.task
+            switch mode {
+            case "keep": helper = .keep
+            case "clear": helper = .clear
+            default: helper = file.helper.map { .set($0) } ?? .clear
+            }
+        }
+    }
 
     static func applyAnswer(_ held: NoteFile, to file: inout NoteFile, kind: HelperJournal.Kind = .answer) {
         switch kind {
-        case .answer: for key in answerKeys { file.set(key, held.value(key)) }
+        case .answer: Result(held: held).apply(to: &file)
         // A watcher's look lands only on the watcher it was made for (a newer one, or none, is left as it is).
         case .watch: if let watch = held.watch, file.watch?.id == watch.id { file.watch = watch }
         }
@@ -2210,6 +2333,10 @@ enum HelperJournal {
         var answer: String
         var at: Date
         var kind: Kind? = nil
+        /// A run's result: the notebook its note was in and the notes it read, so the gate is asked again, from what's
+        /// true then, right before a result held through a conflict lands (`NoteHelpers.applyHeld`).
+        var notebook: String? = nil
+        var sources: [String]? = nil
 
         var of: Kind { kind ?? .answer }
     }
@@ -2229,6 +2356,21 @@ enum HelperJournal {
     /// look, nor the other way).
     static func adding(_ entry: Entry, to entries: [Entry]) -> [Entry] {
         entries.filter { !($0.noteID == entry.noteID && $0.of == entry.of) } + [entry]
+    }
+
+    /// A run's result, held for its note: one entry per note, a later result composed onto the one still held
+    /// (`Result.then`), so what lands is what landing each in turn would have left, in one write.
+    static func adding(_ result: NoteHelp.Result, note: String, notebook: String?, sources: [String], at: Date, to entries: [Entry],
+                       busy: Set<Date> = []) -> [Entry] {
+        let fresh = { (all: NoteHelp.Result, read: [String]) in
+            Entry(noteID: note, answer: all.held(noteID: note).serialized(), at: at, kind: .answer, notebook: notebook, sources: read)
+        }
+        // One being written now (`busy`) is left to land first: this one goes after it, as an entry of its own.
+        guard let before = entries.last(where: { $0.noteID == note && $0.of == .answer }), !busy.contains(before.at) else {
+            return entries + [fresh(result, sources)]
+        }
+        let all = NoteHelp.Result(held: NoteFile.parse(before.answer, fallbackID: note, fallbackDate: before.at)).then(result)
+        return entries.filter { $0 != before } + [fresh(all, Array(Set((before.sources ?? []) + sources)).sorted())]
     }
 }
 
@@ -2490,6 +2632,123 @@ extension NoteHelp {
         \(t.extra.prefix(6000))
         Which value is it now? Reply with ONLY JSON: {"value": <number or null>, "before": "<the 1-3 words right before it on the page>"}
         """
+    }
+}
+
+// MARK: - Rule A: one launch order for every paid call
+
+extension NoteHelp {
+    /// Whether a call's run is still there to launch for.
+    enum Live: Equatable { case running, paused, gone }
+
+    /// What reading a call's sources gave (step 2): them, with its notebook's cover resolved; a refusal already said
+    /// on the note (its cover couldn't be read in time); or why it can't go.
+    enum Gathered<Raw> { case read(Raw), refused, failed(String) }
+
+    /// How a launch came out.
+    enum Launched<Told, Words> {
+        /// Its words, made just now, with what they were made from: it goes at once.
+        case go(Words, Told)
+        /// The gate holds it (its place or document isn't showing): started again, and made again, once it admits.
+        case wait(String)
+        /// Its run was paused meanwhile: it waits as it was (its sources), for Go on.
+        case paused
+        /// Its run ended meanwhile.
+        case gone
+        case vaultUnreadable
+        case refused
+        case failed(String)
+        case rebuild
+        /// Its words came to nothing (with what it was told).
+        case nothing(Told)
+    }
+
+    /// The steps of a launch, each asked only when its turn comes, from what's true then.
+    struct LaunchSteps<Raw, Told, Words> {
+        var live: () -> Live
+        /// 1. Whether the vault's redaction is settled and readable.
+        var vault: (@escaping (Bool) -> Void) -> Void
+        /// 2. The call's sources as they are now, its cover resolved.
+        var sources: (@escaping (Gathered<Raw>) -> Void) -> Void
+        /// 3. The admission gate (rule C), on the run and its sources as they are now.
+        var gate: () -> Admission
+        /// 4. Those sources shielded (nil: the vault can't be read); `current`: the vault is still as it was when
+        /// they were shielded.
+        var build: (Raw, @escaping (Told?, _ current: Bool) -> Void) -> Void
+        var words: (Told) -> Words?
+    }
+
+    /// The one order every paid call launches in (`NoteHelpers.prepare` runs its steps through this): the vault, then
+    /// the sources and the cover, then the gate, and only then are the words built, last, from the sources just read.
+    /// The first step that says no ends it there: nothing after it is asked, and no words are made. Words shielded
+    /// under a vault that changed before they're handed on (a secret saved meanwhile) are thrown away and everything
+    /// is done again, a few times at most.
+    static func launch<Raw, Told, Words>(_ steps: LaunchSteps<Raw, Told, Words>, tries: Int = 3, _ then: @escaping (Launched<Told, Words>) -> Void) {
+        func stopped() -> Launched<Told, Words>? {
+            switch steps.live() {
+            case .running: return nil
+            case .paused: return .paused
+            case .gone: return .gone
+            }
+        }
+        if let stopped = stopped() { return then(stopped) }
+        steps.vault { ready in
+            if let stopped = stopped() { return then(stopped) }
+            guard ready else { return then(.vaultUnreadable) }
+            steps.sources { gathered in
+                if let stopped = stopped() { return then(stopped) }
+                let raw: Raw
+                switch gathered {
+                case .read(let read): raw = read
+                case .refused: return then(.refused)
+                case .failed(let why): return then(.failed(why))
+                }
+                switch steps.gate() {
+                case .go: break
+                case .wait(let reason): return then(.wait(reason))
+                case .fail(let reason): return then(.failed(reason))
+                case .rebuild: return then(.rebuild)
+                }
+                steps.build(raw) { told, current in
+                    if let stopped = stopped() { return then(stopped) }
+                    guard let told else { return then(.vaultUnreadable) }
+                    guard current else { return tries > 0 ? launch(steps, tries: tries - 1, then) : then(.vaultUnreadable) }
+                    guard let words = steps.words(told) else { return then(.nothing(told)) }
+                    then(.go(words, told))
+                }
+            }
+        }
+    }
+}
+
+/// How an agent's events reach the main thread. A helper's (a note's run) are shielded whole, in order, on its
+/// ingestion queue before anything reads them. An ordinary chat's go straight to the main thread, parsed there, as
+/// they always did: never through that queue, never through `shield`, never waiting on a vault read.
+enum AgentIngest {
+    static func deliver<Event>(_ lines: [String], helper: Bool, queue: DispatchQueue, parse: @escaping ([String]) -> [Event],
+                               shield: @escaping ([Event]) -> [(Event, Shielded?)]?,
+                               apply: @escaping @MainActor ([(Event, Shielded?)]?) -> Void) {
+        guard !lines.isEmpty else { return }
+        guard helper else {
+            DispatchQueue.main.async { MainActor.assumeIsolated { apply(parse(lines).map { ($0, nil) }) } }
+            return
+        }
+        queue.async {
+            let shown = Carried(shield(parse(lines)))
+            DispatchQueue.main.async { MainActor.assumeIsolated { apply(shown.value) } }
+        }
+    }
+
+    /// After every event delivered before it: a helper's passes its queue first; a chat's is the main thread's next
+    /// turn, as its events are.
+    static func after(helper: Bool, queue: DispatchQueue, _ done: @escaping @MainActor () -> Void) {
+        guard helper else { return DispatchQueue.main.async { MainActor.assumeIsolated { done() } } }
+        queue.async { DispatchQueue.main.async { MainActor.assumeIsolated { done() } } }
+    }
+
+    private final class Carried<Value>: @unchecked Sendable {
+        let value: Value
+        init(_ value: Value) { self.value = value }
     }
 }
 

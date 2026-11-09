@@ -96,7 +96,7 @@ extension NoteDesk {
             if !paper.file.ink.isEmpty {
                 result["helper"] = ["note": "Written on the note by its helper (Petal), not by the user.",
                                     "ink": paper.file.ink.map { ink -> [String: Any] in
-                                        var out: [String: Any] = ["who": ink.heading, "text": ink.text]
+                                        var out: [String: Any] = ["who": ink.heading(among: paper.file.ink), "text": ink.text]
                                         if !ink.link.isEmpty { out["link"] = ink.link }
                                         if !ink.proof.isEmpty { out["proof"] = ink.proof }
                                         return out

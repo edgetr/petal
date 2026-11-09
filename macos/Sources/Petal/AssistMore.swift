@@ -184,6 +184,25 @@ enum VaultIndex {
         return index
     }
 
+    nonisolated(unsafe) private static var warming = false
+
+    /// The index made in the background when there's none yet, one read at a time: so a line that couldn't be checked
+    /// without waiting (`cached` nil) can be the next time. Nobody waits for it.
+    static func warm() {
+        guard !Headless.on else { return }
+        lock.lock()
+        let start = index == nil && !warming
+        if start { warming = true }
+        lock.unlock()
+        guard start else { return }
+        DispatchQueue.global(qos: .utility).async {
+            _ = current()
+            lock.lock()
+            warming = false
+            lock.unlock()
+        }
+    }
+
     static func current() -> UIMap.SecretIndex {
         lock.lock()
         if let index { lock.unlock(); return index }
@@ -213,4 +232,12 @@ enum VaultIndex {
     static func settled<T>(_ work: (UIMap.SecretIndex) -> T) -> T? {
         UIMap.settled(generation: { now }) { work(current()) }?.value
     }
+
+    /// `settled`, with the generation it was made under: `unchanged(since:)` then says whether the vault and what
+    /// Petal typed are still as they were (a prompt built a moment ago is still built with every secret there is).
+    static func stamped<T>(_ work: (UIMap.SecretIndex) -> T) -> (value: T, stamp: Int)? {
+        UIMap.settled(generation: { now }) { work(current()) }.map { ($0.value, $0.generation) }
+    }
+
+    static func unchanged(since stamp: Int) -> Bool { now == stamp }
 }

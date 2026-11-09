@@ -9,12 +9,19 @@ import Observation
 /// back Friday, remember, put this away, check this every morning, recalculate, chains, morning notes) are done here,
 /// most without any AI.
 ///
-/// Two rules hold it together, each one that nothing can go around:
+/// Four rules hold it together, each one that nothing can go around:
+/// - **Every paid call starts through one function** (`start`): what waits (for room, its gate, Go on, the quick AI's
+///   line) is the call's raw sources, never words; right before launch the vault is checked, the cover resolved, the
+///   gate asked and the prompt built, in that order, from the sources as they are then (`prepare`, `NoteHelp.launch`).
 /// - **Every helper run is one `RunToken`**, made before any setup and carried by everything the run starts:
 ///   Brain's queue, the chat's waiting queue, each git step and each process are admitted only while it runs and
-///   end when it's paused or stopped. Every Stop (the note's, the AI button's preview, the pointer's) goes through
-///   `stop`; a stamp taken back cancels a run holding it (a run holds every authorization its note was given); only
-///   the agent's explicit successful outcome finishes a run, and only a finished run advances anything.
+///   end when it's paused or stopped, and what it does in the person's apps ends first on every change of its state.
+///   Every Stop (the note's, the AI button's preview, the pointer's) goes through `stop`; a stamp taken back cancels
+///   a run holding it (a run holds every authorization its note was given); only the agent's explicit successful
+///   outcome finishes a run, and only a finished run advances anything.
+/// - **Every run ends through `end`, with one result** (`NoteHelp.Result`: all it produced, one journal entry and
+///   one based write, or nothing), after the gate is asked again right before it lands; a second opinion's holds only
+///   its own opinion.
 /// - **What a helper tells an AI is `Shielded`**, a type only NoteShield makes (redacted whole, places filtered for
 ///   private apps first); `Agent.send`, Brain's helper calls and every prompt builder take nothing else.
 ///
@@ -56,11 +63,12 @@ final class NoteHelpers {
         var from = 0
         /// "and have <model> look for holes": run once this one succeeded.
         var holes: NoteHelp.Model?
-        /// A second opinion's: the note's complete latest ink it carries (the primary answer, with its PR link and
-        /// proof, and every opinion); its outcome is added to it.
-        var carried: [NoteHelp.Ink]?
-        /// A chain's run: the whole body of the note it waited for (told shielded, its title derived after).
-        var afterBody = ""
+        /// A second opinion's (nil: not one): the answer it reviews, by the hash of the primary ink it was last told
+        /// (`NoteHelp.inkHash`). Its result is only its own opinion, with this; never any ink it captured.
+        var reviewed: String?
+        /// A chain's run: the note it waited for (its whole body read again whenever a turn starts, shielded, its
+        /// title derived after).
+        var after: String?
         /// The line of the turn at work (the first, then each follow-up's once it's sent): runnable again if that turn
         /// fails or is stopped, so Return runs it again (its identity in the editor, NoteLine).
         var line: NoteLine?
@@ -77,15 +85,21 @@ final class NoteHelpers {
         var startNotebook = ""
         var requiredPlace: NoteStick?
         var sources: [String] = []
-        /// A prompt the gate held (its place or document not showing): delivered once it admits.
-        var held: Shielded?
+        /// The call it's starting or waiting to start (for room, for its gate, for Go on): its raw sources and how
+        /// its words are made from them, never a finished prompt. Nil once that call began.
+        @ObservationIgnored var call: Call?
+        /// That call is being made now (`start`): asked again meanwhile, it isn't started twice.
+        var starting = false
+        /// The gate held that call (its place or document not showing): started again once it admits.
+        var gateHeld = false
+        /// What every turn of its agent is made from: its own sources read again each time (`gather`), and how its
+        /// agent is launched (`launch`); set once its setup is done (`setUp`).
+        @ObservationIgnored var gather: (@MainActor (PaperNote, inout Raw) -> String?)?
+        @ObservationIgnored var launch: Launch?
         /// The private apps' generation what it was told was made under (a change rebuilds it, `admit`).
         var privacy = 0
         /// Parked by a tool's admission (its place or document not showing): paused, going on once the gate admits.
         var parked = false
-        /// Waiting for the note's own place to be in front (never looking at whatever else is), and what goes on then.
-        var awaitingPlace = false
-        @ObservationIgnored var placedResume: (() -> Void)?
         /// Its agent was started (a turn sent): Go on carries that session on; before it, the request begins again.
         var launched = false
         /// Go on for a run paused before its agent started: the request is begun again.
@@ -193,73 +207,71 @@ final class NoteHelpers {
     @ObservationIgnored private var applying: Set<Date> = []
     nonisolated static var journalFile: URL { NoteJournal.folder.appending(path: "helper-answers.json") }
 
-    /// Every helper output (an answer, a second opinion's result, a failure, a stop): journaled the moment it's made,
-    /// whatever the paper's state, then written to its note when that's one writable paper, and let go from the
-    /// journal only once that write landed there (`.written`; a copy kept beside it, `.keptBoth`, isn't: it stays
-    /// held); in conflict (or not here), held and applied to whichever paper the person keeps. Never dropped.
-    private func keep(_ noteID: String, kind: HelperJournal.Kind = .answer, _ edit: @escaping (inout NoteFile) -> Void) {
-        // Made on the note as it is now (a second opinion's ink after the answer, say), so what's held is whole.
-        var answer = store?.notes.first(where: { $0.noteID == noteID && $0.version == nil })?.file ?? NoteFile(id: noteID, created: Date(timeIntervalSince1970: 0))
-        // On the latest held output of its kind, when one is waiting (what's added is never added to an older one).
-        if let held = heldAnswer(noteID, kind: kind) { NoteHelp.applyAnswer(held, to: &answer, kind: kind) }
-        edit(&answer)
-        let entry = HelperJournal.Entry(noteID: noteID, answer: answer.serialized(), at: Date(), kind: kind)
-        heldAnswers = HelperJournal.adding(entry, to: heldAnswers)
+    /// A run's result (`NoteHelp.Result`: everything it produced, as one value): journaled the moment it's made,
+    /// whatever the paper's state, as one entry (composed onto one still held for that note), then written to its
+    /// note in one based write when that's one writable paper, and let go from the journal only once that write
+    /// landed there (`.written`; a copy kept beside it, `.keptBoth`, isn't: it stays held); in conflict (or not
+    /// here), held whole and applied to whichever paper the person keeps. All of it lands, or none of it does.
+    private func keep(_ run: Run, _ result: NoteHelp.Result) {
+        heldAnswers = HelperJournal.adding(result, note: run.noteID, notebook: run.startNotebook, sources: run.sources, at: Date(),
+                                           to: heldAnswers, busy: applying)
         saveHeld()
         applyHeld()
-    }
-
-    /// The latest output of a kind held for a note, if any.
-    private func heldAnswer(_ noteID: String, kind: HelperJournal.Kind = .answer) -> NoteFile? {
-        heldAnswers.last { $0.noteID == noteID && $0.of == kind }.map { NoteFile.parse($0.answer, fallbackID: noteID, fallbackDate: $0.at) }
     }
 
     /// A watcher's look, through the journal as its own kind of output: only its `watch` fields (never ink, never the
     /// helper line, so it can never release a chain), landing only on the watcher it was made for.
     private func keepWatch(_ noteID: String, _ edit: @escaping (inout NoteHelp.Watch?) -> Void) {
-        keep(noteID, kind: .watch) { file in
-            var watch = file.watch
-            edit(&watch)
-            file.watch = watch
+        // Made on the note as it is now, and on the latest look held for it.
+        var answer = store?.notes.first(where: { $0.noteID == noteID && $0.version == nil })?.file ?? NoteFile(id: noteID, created: Date(timeIntervalSince1970: 0))
+        if let held = heldAnswers.last(where: { $0.noteID == noteID && $0.of == .watch }) {
+            NoteHelp.applyAnswer(NoteFile.parse(held.answer, fallbackID: noteID, fallbackDate: held.at), to: &answer, kind: .watch)
+        }
+        var watch = answer.watch
+        edit(&watch)
+        answer.watch = watch
+        heldAnswers = HelperJournal.adding(HelperJournal.Entry(noteID: noteID, answer: answer.serialized(), at: Date(), kind: .watch), to: heldAnswers)
+        saveHeld()
+        applyHeld()
+    }
+
+    /// A note's ink as it will be: the paper's, with every result still held for it.
+    private func latestInk(_ noteID: String) -> [NoteHelp.Ink] {
+        var file = paper(noteID)?.file ?? NoteFile(id: noteID, created: Date(timeIntervalSince1970: 0))
+        for entry in heldAnswers where entry.noteID == noteID && entry.of == .answer {
+            NoteHelp.applyAnswer(NoteFile.parse(entry.answer, fallbackID: noteID, fallbackDate: entry.at), to: &file)
+        }
+        return file.ink
+    }
+
+    /// What a run made, as its one result. A second opinion's holds only its own opinion (with the answer it
+    /// reviewed), applied onto the paper's ink as it is when it lands; any other run's answer becomes the note's ink.
+    private func result(_ run: Run, ink: NoteHelp.Ink?, steps: [Shielded]? = nil, also: Made = Made(), helper: NoteHelp.HelperChange) -> NoteHelp.Result {
+        if let reviewed = run.reviewed { return NoteHelp.Result(opinion: ink, reviewed: reviewed, steps: steps, helper: helper) }
+        return NoteHelp.Result(answer: ink, steps: steps, calc: also.calc, task: also.task, helper: helper)
+    }
+
+    /// The admission gate again, on the main actor, right before something a run produced lands: its destination note
+    /// and every source as they are now (a source moved into a Private notebook while the AI worked, the note moved,
+    /// an app made private). Nil: it lands; else why not: the run ends failed with that, and what it produced is
+    /// dropped. (A note in conflict isn't a refusal: its result is held whole, and asked about again when it's applied.)
+    private func landing(_ run: Run) -> String? {
+        switch admit(run, landing: true) {
+        case .go, .wait: return nil
+        case .fail(let reason): return reason
+        case .rebuild: return "The apps you keep private changed while it worked. Ask again."
         }
     }
 
-    /// A note's ink as it is now: the latest held answer's, else the paper's.
-    private func latestInk(_ noteID: String) -> [NoteHelp.Ink] { heldAnswer(noteID)?.ink ?? paper(noteID)?.file.ink ?? [] }
-
-    /// What goes on a note from a helper, through the journal (`keep`): ink (only ever made from `Shielded`), steps
-    /// (only `Shielded`), and its helper line. A run's ink replaces the last; a second opinion's (an answer,
-    /// objections, or why it couldn't give one) is added to the complete latest ink, never in the primary's place.
-    private func post(_ noteID: String, _ ink: [NoteHelp.Ink]?, steps: [Shielded]?, helper: NoteHelp.HelperChange, opinionBy who: String? = nil,
-                      carried: [NoteHelp.Ink]? = nil) {
-        if let who {
-            let held = heldAnswer(noteID)?.ink
-            let base = carried ?? latestInk(noteID)
-            return keep(noteID) { file in
-                file.ink = ink?.first.map { NoteHelp.withOpinion($0, held: held, carried: base) } ?? held ?? base
-                if let steps { file.steps += steps.map { "\(who): \($0.text)" } }
-                helper.apply(to: &file)
-            }
-        }
-        keep(noteID) { file in
-            if let ink { file.ink = ink }
-            if let steps { file.steps = steps.map(\.text) }
-            helper.apply(to: &file)
-        }
-    }
-
-    private func output(_ run: Run, _ ink: [NoteHelp.Ink]?, helper: NoteHelp.HelperChange, steps: [Shielded]? = nil) {
-        post(run.noteID, ink, steps: steps, helper: helper, opinionBy: run.carried == nil ? nil : run.who, carried: run.carried)
-    }
-
-    /// A run's turn on the way (its answer so far): shielded whole before anything touches it, then on the note,
-    /// its helper line kept. While the vault can't be read nothing is held: the run fails (`end`), the output dropped
-    /// unshown, its line runnable again.
+    /// A run's turn on the way (its answer so far): shielded whole before anything touches it, then through the gate
+    /// and on the note, its helper line kept. While the vault can't be read nothing is held: the run fails (`end`),
+    /// the output dropped unshown, its line runnable again.
     private func turnOutput(_ run: Run, _ said: Said) {
         Self.shieldSaid(said) { made in
             guard run.token.completion == nil, self.runs[run.noteID] === run else { return }
             guard let made else { return self.end(run, .failed(Self.vaultWords.text)) }
-            self.output(run, [made.ink], helper: .keep, steps: made.steps)
+            if let refused = self.landing(run) { return self.end(run, .failed(refused)) }
+            self.keep(run, self.result(run, ink: made.ink, steps: made.steps, helper: .keep))
         }
     }
 
@@ -270,8 +282,8 @@ final class NoteHelpers {
         Self.shieldSaid(said) { made in
             var ink = made?.ink ?? NoteHelp.Ink(who: said.who, text: Self.vaultWords)
             if made == nil, said.settings { ink.link = NoteHelp.settingsLink }
-            self.output(run, [ink], helper: .set(NoteHelp.Helper(state: .failed, who: run.who, step: ink.text, asked: run.asked, mac: mac, at: Date())),
-                        steps: made?.steps)
+            let failed = NoteHelp.Helper(state: .failed, who: run.who, step: ink.text, asked: run.asked, mac: mac, at: Date())
+            self.keep(run, self.result(run, ink: ink, steps: made?.steps, helper: .set(failed)))
         }
     }
 
@@ -301,22 +313,59 @@ final class NoteHelpers {
         init(_ value: (ink: NoteHelp.Ink, steps: [Shielded])?) { self.value = value }
     }
 
-    /// Held answers whose note is one writable paper now: applied (only the answer's keys), and let go once landed.
+    /// Held results whose note is one writable paper now: applied in order, each in one write, and let go once it
+    /// landed. A run's result is asked about once more right before it lands here (it may have waited through a
+    /// conflict): its note still in the notebook it ran in, every note it read still readable from there; else it's
+    /// dropped, and the note says why.
     func applyHeld() {
+        var busy = Set(heldAnswers.filter { applying.contains($0.at) && $0.of == .answer }.map(\.noteID))
         for entry in heldAnswers where !applying.contains(entry.at) {
+            // One at a time per note, in the order they were made.
+            if entry.of == .answer, busy.contains(entry.noteID) { continue }
             let papers = store?.notes.filter { $0.noteID == entry.noteID } ?? []
             let readOnly = papers.first.map { desk?.store.readOnly($0) ?? true } ?? true
             guard NoteHelp.answerTarget(papers: papers.count, readOnly: readOnly) == .write else { continue }
+            if entry.of == .answer, let refused = heldRefusal(entry, on: papers[0]) {
+                heldAnswers.removeAll { $0 == entry }
+                saveHeld()
+                refuseHeld(entry, refused)
+                continue
+            }
             let held = NoteFile.parse(entry.answer, fallbackID: entry.noteID, fallbackDate: entry.at)
-            // One write per held answer at a time (a read of the folder meanwhile doesn't write it again).
             applying.insert(entry.at)
+            if entry.of == .answer { busy.insert(entry.noteID) }
             write(entry.noteID, { NoteHelp.applyAnswer(held, to: &$0, kind: entry.of) }) { landed in
                 self.applying.remove(entry.at)
                 guard landed else { return }
-                // Let go only if it's still that answer (a newer one for the note stays).
                 self.heldAnswers.removeAll { $0 == entry }
                 self.saveHeld()
+                // What was made after it for the same note goes next.
+                if self.heldAnswers.contains(where: { $0.noteID == entry.noteID }) { self.applyHeld() }
             }
+        }
+    }
+
+    /// Why a held result may not land on `paper` now (the same gate as at its run's end, from what's true now), or nil.
+    private func heldRefusal(_ entry: HelperJournal.Entry, on paper: PaperNote) -> String? {
+        var facts = NoteHelp.GateFacts()
+        facts.landing = true
+        facts.notebook = paper.notebook
+        facts.startNotebook = entry.notebook ?? paper.notebook
+        facts.privacy = { self.privacy(of: $0) }
+        facts.sources = (entry.sources ?? []).map { id in (id, self.paper(id)?.notebook) }
+        if case .fail(let reason) = NoteHelp.admit(facts) { return reason }
+        return nil
+    }
+
+    /// A held result refused at the last moment: dropped, the note saying why (Petal's own words) and that no helper
+    /// is at work there any more.
+    private func refuseHeld(_ entry: HelperJournal.Entry, _ reason: String) {
+        let mac = self.mac
+        let who = Self.petalWho + " · couldn't finish"
+        Self.shieldSaid(Said(who: who, text: reason, form: .failure)) { made in
+            let ink = made?.ink ?? NoteHelp.Ink(who: who, text: Self.vaultWords)
+            let failed = NoteHelp.Helper(state: .failed, who: Self.petalWho, step: ink.text, asked: "", mac: mac, at: Date())
+            self.write(entry.noteID) { NoteHelp.Result(answer: ink, helper: .set(failed)).apply(to: &$0) }
         }
     }
 
@@ -350,35 +399,42 @@ final class NoteHelpers {
 
     // MARK: How every run ends
 
+    /// What a run made besides its words: a recalculation's formula, a task put away. Part of its one result.
+    struct Made {
+        var calc: NoteHelp.Calc?
+        var task: [NoteHelp.TaskItem]?
+    }
+
     /// How a run ends: what it said as it arrived (`Said`, shielded before anything touches it; nil: nothing to
-    /// say), why it failed (shielded the same way), or Petal's own words when it was stopped.
+    /// say) with whatever else it made, why it failed (shielded the same way), or Petal's own words when it was stopped.
     enum Ending {
-        case succeeded(Said?)
+        case succeeded(Said?, Made = Made())
         case failed(String, settings: Bool = false)
         case stopped(Shielded?)
     }
 
     /// The one way every run ends, whatever its kind (a chat helper, a coding one, a second opinion, a quick one:
     /// recalculate or put away, a watcher's look): its token completes exactly once; it's let go (its agent, its
-    /// place in `runs` or among the looks); what it says goes through the journal (`output`: a second opinion's is
-    /// added to the ink it carries), with `helper: done` only on success, `failed` with its reason, cleared when
-    /// stopped (a look writes only a hit, and never over another run at work there); and its lines are passed on:
-    /// success keeps its own line used and hands on what was asked of it (a second opinion, with that one's line),
-    /// while anything said to it and never sent gives its line back; a failure or stop gives its own line back too.
+    /// place in `runs` or among the looks); everything it produced lands as one result (`keep`: one journal entry,
+    /// one based write, or nothing; a second opinion's is only its own opinion), with `helper: done` only on success,
+    /// `failed` with its reason, cleared when stopped (a look writes only a hit, and never over another run at work
+    /// there); and its lines are passed on: success keeps its own line used and hands on what was asked of it (a
+    /// second opinion, with that one's line), while anything said to it and never sent gives its line back; a failure
+    /// or stop gives its own line back too.
     private func end(_ run: Run, _ ending: Ending) {
         let noteID = run.noteID
         let look = run.kind == .look
         // Once per token: an end for a run that already ended returns at once.
         guard run.token.completion == nil, runs[noteID] === run || look else { return }
         switch ending {
-        case .succeeded(let said):
+        case .succeeded(let said, let also):
             // A run succeeds when its answer is accepted and shown, not when its AI finished: shielded first. While
             // the vault can't be read nothing is held: it fails, the answer dropped unshown, its line runnable again.
-            guard !look, let said else { return complete(run, made: nil) }
+            guard !look, let said else { return complete(run, made: nil, also) }
             Self.shieldSaid(said) { made in
                 guard run.token.completion == nil, self.runs[noteID] === run else { return }
                 guard let made else { return self.end(run, .failed(Self.vaultWords.text)) }
-                self.complete(run, made: made)
+                self.complete(run, made: made, also)
             }
         case .failed(let reason, let settings):
             guard run.token.complete(.failed(reason)) else { return }
@@ -386,30 +442,37 @@ final class NoteHelpers {
             letGo(run)
             guard !look else { return }
             // Its reason is shielded like anything a helper produced (a key, a sign-in: Settings › AI's button on it).
-            failureOutput(run, Said(who: run.carried == nil ? run.who + " · couldn't finish" : run.who, text: run.carried == nil ? reason : "No second opinion: " + reason,
+            let opinion = run.reviewed != nil
+            failureOutput(run, Said(who: opinion ? run.who : run.who + " · couldn't finish", text: opinion ? "No second opinion: " + reason : reason,
                                     form: .failure, settings: settings))
         case .stopped(let words):
             halt(run)
             letGo(run)
             guard !look else { return }
-            output(run, words.map { [NoteHelp.Ink(who: run.who, text: $0)] }, helper: .clear)
+            keep(run, result(run, ink: words.map { NoteHelp.Ink(who: run.who, text: $0) }, helper: .clear))
         }
     }
 
-    /// The success completion, once its answer is accepted and shown (`made`: shielded; nil: nothing to say): its
-    /// token completes, it's let go, its line stays used, its answer goes on the note with `helper: done`, and then
-    /// what was asked of it is handed on (a second opinion, with its own line) while anything else asked of it gives
-    /// its line back (`FollowUpQueue.settle`).
-    private func complete(_ run: Run, made: (ink: NoteHelp.Ink, steps: [Shielded])?) {
+    /// The success completion, once its answer is shielded (`made`; nil: nothing to say), on the main actor: the gate
+    /// is asked again from what's true now (`landing`: a source that went Private while the AI worked, the note
+    /// moved: the run ends failed with a plain reason and nothing it produced is published); then its token
+    /// completes, it's let go, its line stays used, and everything it made lands as one result with `helper: done`.
+    /// A finished answer always lands, paused or not: Pause stops only what would happen next, so a paused run hands
+    /// nothing on (every line asked of it is given back); otherwise what was asked of it is handed on (a second
+    /// opinion, with its own line) while anything else asked of it gives its line back (`FollowUpQueue.settle`).
+    private func complete(_ run: Run, made: (ink: NoteHelp.Ink, steps: [Shielded])?, _ also: Made) {
         let look = run.kind == .look
-        guard run.token.completion == nil, runs[run.noteID] === run || look, run.token.complete(.succeeded) else { return }
+        guard run.token.completion == nil, runs[run.noteID] === run || look else { return }
+        if !look, let refused = landing(run) { return end(run, .failed(refused)) }
+        let paused = run.token.paused
+        guard run.token.complete(.succeeded) else { return }
         release(run)
         run.line = nil
-        let next = handOn(run)
+        let next = handOn(run, paused: paused)
         // A watcher's look never writes ink or the helper line (its output is its `watch`, `keepWatch`).
         guard !look else { return }
         let done = NoteHelp.Helper(state: .done, who: run.who, step: "", asked: run.asked, mac: mac, at: Date())
-        if let made { output(run, [made.ink], helper: .set(done), steps: made.steps) } else { output(run, nil, helper: .set(done)) }
+        keep(run, result(run, ink: made?.ink, steps: made?.steps, also: also, helper: .set(done)))
         next?()
     }
 
@@ -432,26 +495,24 @@ final class NoteHelpers {
     }
 
     /// What was asked of a run while it worked, handed on once it succeeded: a second opinion asked meanwhile (with
-    /// its own line, held by the reviewer's run until that succeeds), else the one its own line asked for; against
-    /// the note's complete latest ink.
-    /// Taken now; started once the answer is on the note (its complete latest ink carried then).
-    private func handOn(_ run: Run) -> (@MainActor () -> Void)? {
+    /// its own line, held by the reviewer's run until that succeeds), else the one its own line asked for. Taken now;
+    /// started once the answer is on the note. `paused`: nothing is handed on, and every line asked of it is given back.
+    private func handOn(_ run: Run, paused: Bool) -> (@MainActor () -> Void)? {
         // (A look has nothing asked of it; this only hands on, the run already ended.)
         let noteID = run.noteID
         if run.kind == .look { dropFollowUps(run.token); return nil }
-        let settled = followUps.settle(note: noteID, token: run.token, succeeded: true)
+        let settled = followUps.settle(note: noteID, token: run.token, succeeded: !paused)
         for line in settled.dropped { line.again() }
+        guard !paused else { return nil }
         let asked = settled.review
         guard let model = asked?.model ?? run.holes else { return nil }
         let line = asked?.line
         let words = asked?.asked ?? run.asked
         return {
             guard let paper = self.paper(noteID) else { line?.again(); return }
-            let carried = self.latestInk(noteID)
-            let answer = carried.first { !$0.opinion }?.text ?? ""
             self.taking = line
             defer { self.taking = nil }
-            self.secondOpinion(paper, model, asked: words, tree: run.tree, carried: carried, answer: answer)
+            self.secondOpinion(paper, model, asked: words, tree: run.tree)
         }
     }
 
@@ -475,6 +536,7 @@ final class NoteHelpers {
     private func begin(_ paper: PaperNote, asked: String, step: String, who: String = NoteHelpers.petalWho) -> Run {
         if let old = runs[paper.noteID] { end(old, .stopped(nil)) }
         let run = Run(token: tokens.start(paper.noteID), noteID: paper.noteID, asked: asked, who: who)
+        bindActions(run)
         run.line = taking
         taking = nil
         run.startNotebook = paper.notebook
@@ -484,14 +546,39 @@ final class NoteHelpers {
         return run
     }
 
+    /// What the run does in the person's apps ends first, synchronously, on every change of its token's state
+    /// (`RunToken.actions`: Pause, a tool's park, Stop, a failure, its end), whichever path changed it: ComputerUse
+    /// closes its turn there, fails what it had waiting and answers its card Don't. (Every press, key and fill of the
+    /// run also reads the token itself right before it acts: `Acting.Cancel(run:)`.)
+    private func bindActions(_ run: Run) {
+        run.token.actions { [weak self, weak run] in
+            // Synchronously where the state changed (the main thread, for Pause, park, Stop and every end); from
+            // anywhere else, as soon as the main thread can (the token itself already stops every effect).
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { self?.endActions(run) }
+            } else {
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.endActions(run) } }
+            }
+        }
+    }
+
+    private func endActions(_ run: Run?) {
+        guard let caller = run?.sticky?.id.uuidString else { return }
+        app.assist.computer.end(caller)
+    }
+
     /// Whether a continuation of `run` may go on: it's still the note's run, and its token admits.
     private func live(_ run: Run) -> Bool { runs[run.noteID] === run && run.token.admits }
+
+    /// Still that run (the note's, or a watcher's look), not ended: paused or not. What a finished answer needs to land.
+    private func mine(_ run: Run) -> Bool { run.token.completion == nil && (runs[run.noteID] === run || run.kind == .look) }
 
     /// Stops a run where it is: its token cancelled (its processes ended, nothing of it admitted again), its card
     /// answered Don't, its turn still waiting withdrawn.
     private func halt(_ run: Run) {
         run.token.complete(.stopped)
         dropFollowUps(run.token)
+        run.call = nil
         if let sticky = run.sticky {
             app.assist.decline(owner: sticky.id.uuidString)
             _ = sticky.agent.withdrawWaiting()
@@ -551,21 +638,22 @@ final class NoteHelpers {
         restart?()
     }
 
-    /// Go on: the token admits again; a turn that waited is started, a call that waited goes, and a turn the pause
-    /// ended goes on in the same session (with `words`, shielded, when the person said something).
-    private func goOn(_ run: Run, saying words: Shielded? = nil, line: NoteLine? = nil) {
-        let action = NoteHelp.goOn(launched: run.launched && run.sticky != nil, waitingTurn: run.sticky?.agent.waiting.isEmpty == false,
-                                   restartable: run.restart != nil)
+    /// Go on: the token admits again; a turn that never started (it waited for room or its gate, or was paused while
+    /// it was being made) is started now, from its sources as they are now; a turn the pause ended goes on in the same
+    /// session (with `words`, the person's line as written, when they said something).
+    private func goOn(_ run: Run, saying words: String? = nil, line: NoteLine? = nil) {
+        let action = NoteHelp.goOn(launched: run.launched && run.sticky != nil, waitingTurn: run.call != nil, restartable: run.restart != nil)
         switch action {
         case .restart, .stopped:
             // Its agent never started (a quick run, or one paused in setup): begun again from its line, as a new run.
             again(run)
         case .startWaiting:
-            guard run.token.goOn() else { return }
+            guard run.token.goOn(), let call = run.call else { return }
             write(run.noteID) { file in file.helper?.state = .working; file.helper?.step = "Going on" }
             app.focus.brain.resume()
-            app.claude.startWaiting()
-            if let words { followUp(run, words, line: line) }
+            // What's said now is said after the turn that waited.
+            if let words { followUps.add(words, note: run.noteID, token: run.token, line: line) }
+            start(run, call)
         case .carryOn:
             guard run.token.goOn(), let sticky = run.sticky else { return }
             write(run.noteID) { file in file.helper?.state = .working; file.helper?.step = "Going on" }
@@ -575,15 +663,15 @@ final class NoteHelpers {
             } else if let words {
                 followUp(run, words, line: line)
             } else {
-                deliver(run, "Go on where you stopped.")
+                start(run, turn(run, said: nil))
             }
         }
     }
 
-    /// A follow-up's turn sent: the run now holds its line, until that turn succeeds (runnable again if it fails).
-    private func followUp(_ run: Run, _ words: Shielded, line: NoteLine?) {
+    /// A follow-up's turn started: the run now holds its line, until that turn succeeds (runnable again if it fails).
+    private func followUp(_ run: Run, _ words: String, line: NoteLine?) {
         if let line { run.line = line }
-        deliver(run, words)
+        start(run, turn(run, said: words))
     }
 
     // MARK: Return on an @ line
@@ -633,16 +721,13 @@ final class NoteHelpers {
         // "not set up"), never steering the current one.
         if let run = runs[noteID], run.launched, run.sticky != nil, run.token.admits || run.token.paused,
            NoteHelp.followUpTarget(runCheckout: run.checkout, runProvider: run.provider, runModel: run.model, words: trimmed, home: NSHomeDirectory()) == .same {
-            // At work (or paused): what's said now steers it in the same session, shielded first.
-            var raw = Raw()
-            raw.ask = trimmed
-            return Self.tell(raw) { told in
-                guard let told, self.runs[noteID] === run else { return ticket.again() }
-                if run.token.paused { return self.goOn(run, saying: told.ask, line: ticket) }
-                guard run.token.admits, let agent = run.sticky?.agent else { return ticket.again() }
-                // While it works, said after its turn (with its run's token and its line); else at once.
-                if agent.running { self.followUps.add(told.ask, note: noteID, token: run.token, line: ticket) } else { self.followUp(run, told.ask, line: ticket) }
-            }
+            // At work (or paused): what's said now steers it in the same session. Kept as the person wrote it (a raw
+            // source, like every waiting call's) and shielded only when its turn starts (`start`).
+            if run.token.paused { return goOn(run, saying: trimmed, line: ticket) }
+            guard let agent = run.sticky?.agent else { return ticket.again() }
+            // While it works (or its turn waits to start), said after that turn, with its run's token and its line; else now.
+            if agent.running || run.call != nil { followUps.add(trimmed, note: noteID, token: run.token, line: ticket) } else { followUp(run, trimmed, line: ticket) }
+            return
         }
         // "Have <model> look for holes" is its own request: a second opinion against the run's work (scheduled after a
         // run at work, else now against its last answer and worktree), or "not set up"; never steering the agent.
@@ -745,7 +830,7 @@ final class NoteHelpers {
         let line = taking
         var raw = Raw()
         raw.ask = asked
-        Self.tell(raw) { told in
+        Self.tell(raw) { told, _ in
             guard let told else { return self.reply(paper.noteID, giveBack: line) { _ in Self.vaultWords } }
             guard let words = told.ask.watch else {
                 return self.reply(paper.noteID, giveBack: line) { _ in "Petal couldn't tell what to watch for in those words." }
@@ -796,7 +881,7 @@ final class NoteHelpers {
         var raw = Raw()
         raw.ask = asked
         raw.sources = [first.file.body, target.file.body]
-        Self.tell(raw) { told in
+        Self.tell(raw) { told, _ in
             guard let told, told.sources.count == 2 else { return self.reply(paper.noteID, giveBack: line) { _ in Self.vaultWords } }
             guard let ask = told.ask.chainAsk else { return self.reply(paper.noteID, giveBack: line) { _ in "Petal couldn't tell what to do then." } }
             let afterTitle = told.sources[0].title
@@ -849,11 +934,12 @@ final class NoteHelpers {
 
     /// `raw` through NoteShield, off the main thread: every part redacted whole (the place filtered for a private
     /// app first, then its words and sentence derived); nil while the vault can't be read.
-    static func tell(_ raw: Raw, _ done: @escaping @MainActor (NoteHelp.Told?) -> Void) {
+    /// `stamp`: the vault's generation it was made under (`VaultIndex.unchanged(since:)` says whether it still is).
+    static func tell(_ raw: Raw, _ done: @escaping @MainActor (NoteHelp.Told?, _ stamp: Int) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             // Off the main thread: the person's notes for the AI read from disk here, never on the main thread.
             let instructions = raw.instructionsFile.flatMap { try? String(contentsOf: $0, encoding: .utf8) }?.trimmingCharacters(in: .whitespacesAndNewlines) ?? raw.instructions
-            let made = VaultIndex.settled { index -> NoteHelp.Told? in
+            let made = VaultIndex.stamped { index -> NoteHelp.Told? in
                 let parts = [raw.ask, raw.body, raw.notebook, raw.cover, raw.extra, raw.answer, raw.line, raw.last, instructions, raw.memory, raw.sourceBook, raw.after]
                 guard let shown = NoteShield.shield(parts, index: index), let titles = NoteShield.shield(raw.titles, index: index),
                       let paths = NoteShield.shield(raw.paths, index: index), let sources = NoteShield.shield(raw.sources, index: index) else { return nil }
@@ -867,9 +953,10 @@ final class NoteHelpers {
                     told.quote = place.quote
                 }
                 return told
-            } ?? nil
-            let carried = ToldBox(made)
-            DispatchQueue.main.async { MainActor.assumeIsolated { done(carried.value) } }
+            }
+            let carried = ToldBox(made?.value ?? nil)
+            let stamp = made?.stamp ?? -1
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(carried.value, stamp) } }
         }
     }
 
@@ -892,36 +979,206 @@ final class NoteHelpers {
         init(_ value: NoteHelp.Told?) { self.value = value }
     }
 
-    /// Told for `run`, then `then` while it's still live; the vault unreadable ends it saying so. Its notebook's
-    /// cover is read first: no cover, none; one that's there but can't be read right now (not downloaded, unreadable,
-    /// two versions) is asked of iCloud and waited for, at most `NoteHelpers.coverWait` seconds; still unreadable,
-    /// the run is refused with a faint line and ends (its line given back), never run without it.
-    private func told(_ run: Run, _ raw: Raw, waited: Int = 0, _ then: @escaping @MainActor (NoteHelp.Told) -> Void) {
-        guard live(run) else { return }
-        var raw = raw
+    // MARK: Starting (rule A): one way in for every paid call
+
+    /// How a run's agent is launched: set once its setup is done (`setUp`), used by every turn of it.
+    struct Launch {
+        var kind: Run.Kind
+        var provider: Provider
+        var model: String
+        /// Its brief, from what it's told when a turn starts.
+        var brief: (NoteHelp.Told) -> Shielded
+        var folder: String?
+        var placed: Bool
+    }
+
+    /// A paid call as it waits (for its turn, for room, for its gate, for Go on): how its sources are read when it
+    /// starts, and how its words are made from them once they're shielded. Never a finished prompt: nothing that
+    /// waits holds words.
+    final class Call {
+        enum To {
+            /// A turn of the run's own agent (`Run.launch`).
+            case agent
+            /// The quick AI, once: its answer, with what it was told (nil: it never started).
+            case quick(key: String, provider: Provider?, done: @MainActor ([String: Any]?, NoteHelp.Told?) -> Void)
+            /// No AI: only what it's made from, shielded (a quick run that says its words itself).
+            case local(done: @MainActor (NoteHelp.Told) -> Void)
+        }
+        /// The call's own sources as they are now, on top of the note and its cover (`raw(paper)`). Nil: read; else why
+        /// it can't go (one is gone).
+        let sources: @MainActor (PaperNote, inout Raw) -> String?
+        /// Its words, from what the sources were shielded into (nil: nothing to send).
+        let words: (NoteHelp.Told) -> Shielded?
+        let to: To
+
+        init(sources: @escaping @MainActor (PaperNote, inout Raw) -> String?, words: @escaping (NoteHelp.Told) -> Shielded?, to: To) {
+            self.sources = sources
+            self.words = words
+            self.to = to
+        }
+    }
+
+    /// A turn of a run's agent (its first, a follow-up, Go on): the run's own sources read again (`Run.gather`), with
+    /// what was said as the person wrote it. `words`: the first turn's request; else the line said, or Go on.
+    private func turn(_ run: Run, said: String?, words: ((NoteHelp.Told) -> Shielded?)? = nil) -> Call {
+        Call(sources: { [weak run] paper, raw in
+            guard let run, let gather = run.gather else { return "This helper isn't running any more." }
+            if let problem = gather(paper, &raw) { return problem }
+            raw.ask = said ?? ""
+            return nil
+        }, words: words ?? { said == nil ? "Go on where you stopped." : $0.ask }, to: .agent)
+    }
+
+    /// The one way a paid call starts: a chat helper's turn (its first, a follow-up, Go on), a coding helper's, a
+    /// second opinion's, a recalculation's, a task put away, a watcher's question, a chain's run. What waits is the
+    /// call (`Run.call`, the agent's waiting mark, the quick AI's line), never words; right before launch `prepare`
+    /// checks the vault, resolves the cover, asks the gate and builds the prompt, in that order, from the sources as
+    /// they are then, and the call goes at once or not at all.
+    private func start(_ run: Run, _ call: Call) {
+        guard mine(run) else { return }
+        run.call = call
+        run.gateHeld = false
+        // Paused: it waits as it is; Go on starts it. Being made already: not twice.
+        guard run.token.admits, !run.starting else { return }
+        switch call.to {
+        case .agent:
+            run.starting = true
+            prepare(run, call) { prepared in
+                run.starting = false
+                guard self.mine(run), run.call === call, case .go(let words, let told) = prepared else { return }
+                guard let launch = run.launch, let agent = run.sticky?.agent else { return self.fail(run, "This helper has no AI to send to. Ask again.") }
+                // Nothing to say (an agent sends nothing empty): the run ends here, never left at work.
+                guard !words.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return self.fail(run, NoteHelp.bareHint.text + ".") }
+                // Its whole system prompt, made only of Shielded parts (no window or tab title, no raw text), as told now.
+                agent.helperSystem = NoteHelp.system(told, provider: launch.provider == .claude ? "Claude" : "Codex",
+                                                     computerUse: self.app.config.bool("computerUse"), brief: launch.brief(told))
+                if !run.launched {
+                    run.from = agent.messages.count
+                    run.launched = true
+                    self.working(run.noteID, step: "Starting", asked: run.asked, who: run.who)
+                }
+                agent.send(words)
+                // Begun: nothing waits. Else its agent kept only the wait (for room, or its gate at the very start),
+                // and `again` starts it from its sources as they are then.
+                if agent.running { run.call = nil }
+            }
+        case .local(let done):
+            run.starting = true
+            prepare(run, call) { prepared in
+                run.starting = false
+                guard self.mine(run), case .go(_, let told) = prepared else { return }
+                run.call = nil
+                done(told)
+            }
+        case .quick(let key, let provider, let done):
+            // In the quick AI's line from here on, which holds how it's made (`make`), never its words: made when its
+            // turn there comes.
+            run.call = nil
+            let told = ToldRef()
+            app.focus.brain.ask(key: key, token: run.token, provider: provider, gate: quickGate(run), make: { [weak self] ready in
+                guard let self else { return ready(.over) }
+                self.prepare(run, call) { prepared in
+                    switch prepared {
+                    case .go(let words, let made):
+                        told.value = made
+                        ready(.go(words))
+                    case .wait: ready(.wait)
+                    case .over(let made):
+                        told.value = made
+                        ready(.over)
+                    }
+                }
+            }, done: { reply in done(reply, told.value) })
+        }
+    }
+
+    private final class ToldRef { var value: NoteHelp.Told? }
+
+    /// What `prepare` made of a call: its words (with what it was told), a wait (paused, or its gate; it's started
+    /// again later), or nothing to send (the run ended, or its words came to nothing).
+    private enum Prepared {
+        case go(Shielded, NoteHelp.Told)
+        case wait
+        case over(NoteHelp.Told?)
+    }
+
+    /// Right before launch, in the one order `NoteHelp.launch` keeps, each step from what's true then; a step that
+    /// fails refuses through `reply` or fails the run through `end`, and nothing after it happens:
+    /// 1. the vault's redaction is settled and readable;
+    /// 2. the call's sources are read, and its notebook's cover resolved through `raw(paper)` (`gather`);
+    /// 3. the admission gate (rule C), on the run and its sources as they are now;
+    /// 4. the prompt is built and shielded from those sources, and is still made under the vault as it is when it's
+    ///    handed on (made again when a secret was saved meanwhile).
+    private func prepare(_ run: Run, _ call: Call, _ then: @escaping @MainActor (Prepared) -> Void) {
+        let steps = NoteHelp.LaunchSteps<Raw, NoteHelp.Told, Shielded>(
+            live: { !self.mine(run) ? .gone : run.token.admits ? .running : .paused },
+            vault: { ready in Self.vaultReady { ready($0) } },
+            sources: { read in self.gather(run, call) { read($0) } },
+            gate: {
+                // What it's told is made under these private apps: a change before it's used (or lands) makes it again.
+                if !run.launched { run.privacy = ClaudePanel.privacy.now }
+                return self.admit(run)
+            },
+            build: { raw, built in
+                let privacy = ClaudePanel.privacy.now
+                Self.tell(raw) { told, stamp in
+                    if told != nil { run.privacy = privacy }
+                    built(told, VaultIndex.unchanged(since: stamp))
+                }
+            },
+            words: call.words)
+        NoteHelp.launch(steps) { launched in
+            MainActor.assumeIsolated {
+                switch launched {
+                case .go(let words, let told): then(.go(words, told))
+                case .paused: then(.wait)
+                case .wait(let reason):
+                    run.gateHeld = true
+                    if run.kind != .look { self.write(run.noteID) { file in file.helper?.state = .waiting; file.helper?.step = reason } }
+                    then(.wait)
+                case .gone, .refused: then(.over(nil))
+                case .vaultUnreadable:
+                    self.end(run, .failed(Self.vaultWords.text))
+                    then(.over(nil))
+                case .failed(let reason):
+                    self.fail(run, reason, settings: reason.contains("isn't set up"))
+                    then(.over(nil))
+                case .rebuild:
+                    self.rebuild(run)
+                    then(.over(nil))
+                case .nothing(let told): then(.over(told))
+                }
+            }
+        }
+    }
+
+    /// Step 2: the call's sources as they are now, on top of the note and its notebook's cover (`raw(paper)`). No
+    /// cover is none; one that's there but can't be read right now (not downloaded, unreadable, two versions) is asked
+    /// of iCloud and waited for, at most `coverWait` seconds; still unreadable, the run is refused with a faint line
+    /// and ends (its line given back), never run without it.
+    private func gather(_ run: Run, _ call: Call, waited: Int = 0, _ done: @escaping @MainActor (NoteHelp.Gathered<Raw>) -> Void) {
+        guard mine(run) else { return done(.refused) }
+        guard let paper = paper(run.noteID) else { return done(.failed("This note isn't here as one paper now (gone, or changed in two places): nothing was sent.")) }
+        var raw = raw(paper)
+        if let problem = call.sources(paper, &raw) { return done(.failed(problem)) }
         if let notebook = raw.coverOf {
             switch coverChoice(of: notebook) {
             case .none: raw.cover = ""
             case .one(let key): raw.cover = store?.paper(key)?.file.body ?? ""
             case .notHere, .conflict:
                 guard waited < Self.coverWait else {
-                    reply(run.noteID, giveBack: nil, [notebook]) { "Couldn't read \($0[0])'s cover yet." }
-                    return end(run, .stopped(nil))
+                    if run.kind != .look { reply(run.noteID, giveBack: nil, [notebook]) { "Couldn't read \($0[0])'s cover yet." } }
+                    end(run, .stopped(nil))
+                    return done(.refused)
                 }
                 if waited == 0 { askForCover(notebook) }
-                write(run.noteID) { file in if file.helper?.state == .working { file.helper?.step = "Waiting for the notebook's cover" } }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { self.told(run, raw, waited: waited + 1, then) } }
+                if run.kind != .look { write(run.noteID) { file in if file.helper?.state == .working { file.helper?.step = "Waiting for the notebook's cover" } } }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { self.gather(run, call, waited: waited + 1, done) } }
                 return
             }
             raw.coverOf = nil
         }
-        // What it's told is made under these private apps: a change before it's used makes it again.
-        run.privacy = ClaudePanel.privacy.now
-        Self.tell(raw) { told in
-            guard self.live(run) else { return }
-            guard let told else { return self.fail(run, Self.vaultWords.text) }
-            then(told)
-        }
+        done(.read(raw))
     }
 
     /// The note and its notebook's cover (only when the note may read it), as every helper reads them first.
@@ -929,7 +1186,7 @@ final class NoteHelpers {
         var raw = Raw()
         raw.body = paper.file.body
         raw.notebook = paper.notebook
-        // Its cover is read when it's told (`told`): none, its words, or waited for when it can't be read yet.
+        // Its cover is read when a call starts (`gather`): none, its words, or waited for when it can't be read yet.
         raw.coverOf = mayRead(paper.notebook, from: paper) ? paper.notebook : nil
         // The person's own notes for the AI and what Petal remembers: shielded too, in the helper's own system prompt.
         raw.instructionsFile = app.config.instructionsFile
@@ -975,30 +1232,29 @@ final class NoteHelpers {
         run.kind = .quick
         run.restart = { [weak self] in if let self, let paper = self.paper(paper.noteID) { self.recalculate(paper, asked: asked) } }
         guard let provider = quickProviderOrFail(run) else { return }
-        var raw = Raw()
-        raw.body = paper.file.body
-        raw.ask = asked
-        told(run, raw) { told in
+        // Through `start`, like every paid call: the vault, the cover, the gate, then its words from the note as it is then.
+        start(run, Call(sources: { _, raw in
+            raw.ask = asked
+            return nil
+        }, words: { $0.body.rows.isEmpty ? nil : NoteHelp.formulaRequest($0) },
+        to: .quick(key: "calc|\(paper.noteID)|\(run.token.id)", provider: provider) { reply, told in
+            guard self.mine(run), let told else { return }
             // Every row read from the redacted body: those left are the formula's only inputs.
             let rows = told.body.rows.map { (label: $0.label.text, value: $0.value) }
             guard !rows.isEmpty else { return self.fail(run, "Every labelled number here holds something from your vault, so nothing was sent.") }
-            self.app.focus.brain.ask(NoteHelp.formulaRequest(told), key: "calc|\(paper.noteID)|\(run.token.id)", token: run.token,
-                                    provider: provider, gate: self.quickGate(run)) { reply in
-                guard self.live(run) else { return }
-                // Its own outcome: a formula that adds up on the note's values, else a failure with its reason.
-                let outcome = NoteHelp.formulaOutcome(reply, values: rows)
-                guard var calc = outcome.calc else { return self.fail(run, outcome.failure ?? "No formula came back.") }
-                // What the quick AI produced is shielded whole before it's kept (its label too).
-                Self.shield([calc.formula, calc.label]) { shown in
-                    guard self.live(run) else { return }
-                    guard let shown, shown.allSatisfy({ !$0.text.contains(UIMap.hidden) }) else { return self.fail(run, "The formula couldn't be checked against your vault, so it wasn't kept.") }
-                    calc.formula = shown[0].text
-                    calc.label = shown[1].text
-                    self.write(paper.noteID) { $0.calc = calc }
-                    self.end(run, .succeeded(nil))
-                }
+            // Its own outcome: a formula that adds up on the note's values, else a failure with its reason.
+            let outcome = NoteHelp.formulaOutcome(reply, values: rows)
+            guard var calc = outcome.calc else { return self.fail(run, outcome.failure ?? "No formula came back.") }
+            // What the quick AI produced is shielded whole before it's kept (its label too).
+            Self.shield([calc.formula, calc.label]) { shown in
+                guard self.mine(run) else { return }
+                guard let shown, shown.allSatisfy({ !$0.text.contains(UIMap.hidden) }) else { return self.fail(run, "The formula couldn't be checked against your vault, so it wasn't kept.") }
+                calc.formula = shown[0].text
+                calc.label = shown[1].text
+                // Part of the run's one result: the formula lands with `done`, in one write, or neither does.
+                self.end(run, .succeeded(nil, Made(calc: calc)))
             }
-        }
+        }))
     }
 
     /// "Put this away": the window in front's tabs, the file it shows and the mail it came from become the note's
@@ -1026,31 +1282,34 @@ final class NoteHelpers {
                 MainActor.assumeIsolated {
                     guard self.live(run) else { return }
                     guard !items.isEmpty else { return self.fail(run, "There was nothing to put away in that window.") }
-                    self.write(paper.noteID) { $0.task = items }
-                    // What was open (each whole: a tab's title, a file's path, a mail's subject) shielded first; the
-                    // ink's chips derived from that, never from the raw titles.
-                    var raw = Raw()
-                    raw.titles = items.map { $0.kind == .file ? $0.target : $0.title }
-                    raw.body = paper.file.body
-                    self.told(run, raw) { told in
+                    // What was open (each whole: a tab's title, a file's path, a mail's subject), shielded when the
+                    // call starts; the ink's chips derived from that, never from the raw titles.
+                    let sources = { @MainActor (_: PaperNote, raw: inout Raw) -> String? in
+                        raw.titles = items.map { $0.kind == .file ? $0.target : $0.title }
+                        return nil
+                    }
+                    let finish = { (line: String?, told: NoteHelp.Told) in
+                        guard self.mine(run) else { return }
                         let shown = zip(items, told.titles).map { item, words -> NoteHelp.TaskItem in
                             var item = item
                             if item.kind == .file { item.target = words.text } else { item.title = words.text }
                             return item
                         }
                         let plain = "Put away: \(NoteHelp.taskChips(shown).joined(separator: ", ")). Open all brings them back."
-                        let finish = { (line: String) in
-                            guard self.live(run) else { return }
-                            let who = Self.petalWho + " · put away " + NoteHelp.dayLabel(Date(), now: Date())
-                            self.end(run, .succeeded(Said(who: who, text: line, form: .words)))
-                        }
-                        guard self.app.focus.brain.enabled else { return finish(plain) }
-                        // Where they stopped, from what was open only, by the quick AI.
-                        self.app.focus.brain.ask(NoteHelp.awayRequest(told), key: "away|\(paper.noteID)|\(run.token.id)", token: run.token,
-                                                 provider: provider, gate: self.quickGate(run)) { reply in
-                            finish((reply?["line"] as? String) ?? plain)
-                        }
+                        let who = Self.petalWho + " · put away " + NoteHelp.dayLabel(Date(), now: Date())
+                        // The task is part of the run's one result: it lands with its line and `done`, or none does.
+                        self.end(run, .succeeded(Said(who: who, text: line ?? plain, form: .words), Made(task: items)))
                     }
+                    // With no quick AI (or none that answers): its own plain words, from the same shielded sources.
+                    let plainly = { self.start(run, Call(sources: sources, words: { _ in "" }, to: .local { told in finish(nil, told) })) }
+                    guard self.app.focus.brain.enabled else { return plainly() }
+                    // Where they stopped, from what was open only, by the quick AI.
+                    self.start(run, Call(sources: sources, words: { NoteHelp.awayRequest($0) },
+                                         to: .quick(key: "away|\(paper.noteID)|\(run.token.id)", provider: provider) { reply, told in
+                        guard self.mine(run) else { return }
+                        guard let told else { return self.live(run) ? plainly() : () }
+                        finish(reply?["line"] as? String, told)
+                    }))
                 }
             }
         }
@@ -1068,7 +1327,7 @@ final class NoteHelpers {
     /// Anything else asked: a run registered at once (or the one a chain made before it fired); then, on a page tied
     /// to a repository or a file in a checkout, the person's own coding AI in a worktree; else the chat AI on the
     /// note's place.
-    private func ask(_ paper: PaperNote, _ text: String, asked: String, compare: (book: String, notes: [String], ids: [String])? = nil, run given: Run? = nil) {
+    private func ask(_ paper: PaperNote, _ text: String, asked: String, compare: (book: String, ids: [String])? = nil, run given: Run? = nil) {
         let models = NoteHelp.models(asked)
         let pick = models.first { !$0.holes }
         let run = given ?? begin(paper, asked: asked, step: "Starting", who: pick.map { "\(Self.petalWho) · \($0.name)" } ?? Self.petalWho)
@@ -1082,11 +1341,12 @@ final class NoteHelpers {
             return code(run, paper, text, slug: repo.slug, number: NoteHelp.pullNumber(repo), file: nil, pick: pick)
         }
         if compare == nil, let stick, stick.kind == .file || stick.kind == .passage, !stick.path.isEmpty {
-            let path = stick.path
-            return Self.checkouts { all in
+            // The file's real git repository, as AgentAccess resolves a project: the nearest one above it, a linked
+            // worktree's main checkout only when git made it one (so a file under a T3 worktree of ~/petal is ~/petal's).
+            return Self.repository(holding: stick.path) { found in
                 guard self.live(run) else { return }
-                if let folder = NoteHelp.checkout(holding: path, among: all.map(\.path)) {
-                    self.code(run, paper, text, slug: nil, number: nil, file: folder, pick: pick)
+                if let found {
+                    self.code(run, paper, text, slug: nil, number: nil, file: found, pick: pick)
                 } else {
                     self.think(run, paper, text, pick: pick, compare: compare)
                 }
@@ -1096,43 +1356,38 @@ final class NoteHelpers {
     }
 
     /// @Petal: the chat AI with Petal's tools, on the note's own place (never what happens to be in front: a note
-    /// away from its window waits for it), the notebook's cover read first.
-    private func think(_ run: Run, _ paper: PaperNote, _ text: String, pick: NoteHelp.Model?, compare: (book: String, notes: [String], ids: [String])?) {
+    /// away from its window waits for it, at the gate), the notebook's cover read first.
+    private func think(_ run: Run, _ paper: PaperNote, _ text: String, pick: NoteHelp.Model?, compare: (book: String, ids: [String])?) {
         guard live(run) else { return }
         guard let provider = providerOrFail(run, for: pick) else { return }
         let paper = self.paper(run.noteID) ?? paper
-        let anchor = NoteHelp.anchor(paper.file.places, here: desk?.here[paper.key])
-        if case .away = anchor {
-            run.awaitingPlace = true
-            run.placedResume = { [weak self] in self?.think(run, paper, text, pick: pick, compare: compare) }
-            write(run.noteID) { file in file.helper?.state = .waiting; file.helper?.step = "Waiting for this note's place to be in front" }
-            return
-        }
-        run.awaitingPlace = false
-        var raw = raw(paper)
-        raw.ask = text
-        raw.after = run.afterBody
-        // A notebook to check against: each of its notes shielded whole, its titles derived after (NoteHelp.comparison);
-        // their ids held on the run, so the gate checks each one's access again right before anything goes.
-        raw.sourceBook = compare?.book ?? ""
-        raw.sources = compare?.notes ?? []
-        // (A chain's run keeps its predecessor among them.)
+        // A notebook to check against: its notes' ids held on the run, so the gate checks each one's access again
+        // right before anything goes, and again before anything lands. (A chain's run keeps its predecessor among them.)
         run.sources = (compare?.ids ?? []) + run.sources.filter { !(compare?.ids ?? []).contains($0) }
-        if case .placed(let index) = anchor {
-            raw.place = paper.file.places[index]
-            raw.placePrivate = app.assist.neverLook(paper.file.places[index].app)
+        // Its sources, read again whenever a turn of it starts: a chain's done note and a notebook's notes each whole,
+        // as they are then, and only those this note may read then (shielded one by one before any title is taken or
+        // anything cut: NoteHelp.comparison); the note's own place.
+        run.gather = { [weak self, weak run] paper, raw in
+            guard let self, let run else { return "This helper isn't running any more." }
+            let readable = { (id: String) in self.paper(id).flatMap { self.mayRead($0.notebook, from: paper) ? $0.file.body : nil } }
+            raw.after = run.after.flatMap(readable) ?? ""
+            raw.sourceBook = compare?.book ?? ""
+            raw.sources = (compare?.ids ?? []).compactMap(readable)
+            if case .placed(let index) = NoteHelp.anchor(paper.file.places, here: self.desk?.here[paper.key]) {
+                raw.place = paper.file.places[index]
+                raw.placePrivate = self.app.assist.neverLook(paper.file.places[index].app)
+            }
+            return nil
         }
-        told(run, raw) { told in
-            self.launch(run, paper, prompt: told.ask, kind: .petal, provider: provider, model: pick?.id ?? "",
-                        told: told, brief: NoteHelp.brief(told), folder: nil, placed: true)
-        }
+        setUp(run, paper, Launch(kind: .petal, provider: provider, model: pick?.id ?? "", brief: { NoteHelp.brief($0) }, folder: nil, placed: true))
+        start(run, turn(run, said: text, words: { $0.ask }))
     }
 
     /// The notes or what's in front changed: each running helper's requirement and its tools' target are bound again
     /// in one step (`bind`): re-stuck, both follow; its place or document not showing now, its tools have no target
     /// and the gate waits (`waitingForPlace`). Called once `here` is recomputed (NoteDesk.apply), never before.
     func placesFollow() {
-        for (noteID, run) in runs where run.launched && run.kind.placed {
+        for (noteID, run) in runs where run.launch != nil && run.kind.placed {
             guard let paper = paper(noteID), run.sticky != nil else { continue }
             bind(run, paper)
         }
@@ -1165,31 +1420,28 @@ final class NoteHelpers {
 
     /// Layout placed notes: a run waiting for its note's place goes on once its note is on the window in front.
     func placedNow() {
-        // Prompts the gate held, and turns waiting before their process started: once it admits, they go.
         // Runs parked by a tool's admission go on once it admits.
         for run in runs.values where run.parked && run.token.paused {
             if case .go = admit(run) { run.parked = false; goOn(run) }
         }
         // Quick calls waiting on their gate are asked again.
         app.focus.brain.resume()
+        // Calls the gate held, and turns that waited before their process started: once it admits, they start (and
+        // are made then, from their sources as they are then).
         for run in runs.values where run.token.admits {
-            if let held = run.held, case .go = admit(run) { deliver(run, held) }
+            if run.gateHeld, let call = run.call, case .go = admit(run) { start(run, call) }
             if run.sticky?.agent.waiting.isEmpty == false, !(run.sticky?.agent.running ?? true), case .go = admit(run) { app.claude.startWaiting() }
-        }
-        for run in runs.values where run.awaitingPlace && run.token.admits {
-            guard let paper = paper(run.noteID), case .placed = NoteHelp.anchor(paper.file.places, here: desk?.here[paper.key]) else { continue }
-            run.awaitingPlace = false
-            run.placedResume?()
         }
     }
 
     /// A coding helper: the person's own Claude Code or Codex in their checkout, in the note's own worktree (made
     /// once, reused for its follow-ups once it's verified to be that checkout's on the note's branch), after Allow
     /// on the note once per project. `number`: a pull request's only (an issue starts from the default branch).
-    private func code(_ run: Run, _ paper: PaperNote, _ text: String, slug: String?, number: Int?, file folder: String?, pick: NoteHelp.Model?) {
+    private func code(_ run: Run, _ paper: PaperNote, _ text: String, slug: String?, number: Int?, file folder: (path: String, remotes: [(name: String, url: String)])?,
+                      pick: NoteHelp.Model?) {
         Self.checkouts { all in
             guard self.live(run) else { return }
-            let candidates = folder.map { [$0] } ?? slug.map { NoteHelp.checkouts(for: $0, among: all) } ?? []
+            let candidates = folder.map { [$0.path] } ?? slug.map { NoteHelp.checkouts(for: $0, among: all) } ?? []
             // A checkout named in the person's words is always checked, however many fit.
             let checkout: String
             switch NoteHelp.chooseCheckout(candidates, words: run.asked, home: NSHomeDirectory()) {
@@ -1201,7 +1453,7 @@ final class NoteHelpers {
                 let names = several.map { ($0 as NSString).abbreviatingWithTildeInPath }
                 return self.fail(run, "Which checkout: " + names.joined(separator: " or ") + "? Say “@Petal … in \(names[0])”.")
             }
-            let remotes = all.first { $0.path == checkout }?.remotes ?? []
+            let remotes = folder.flatMap { $0.path == checkout ? $0.remotes : nil } ?? all.first { $0.path == checkout }?.remotes ?? []
             let remote = slug.flatMap { NoteHelp.remote(for: $0, in: remotes) } ?? remotes.first { $0.name == "origin" }?.name ?? remotes.first?.name ?? ""
             guard let provider = self.providerOrFail(run, for: pick) else { return }
             run.who = pick?.name ?? provider.name
@@ -1236,14 +1488,15 @@ final class NoteHelpers {
                     }
                     run.tree = tree
                     self.write(run.noteID) { $0.worktree = NoteHelp.Worktree(path: tree, branch: branch, checkout: checkout, remote: remote) }
-                    // The coding helper reads the cover first, as every helper does.
-                    var raw = self.raw(paper)
-                    raw.ask = text
-                    raw.paths = [short, tree, branch, number.map { "\(slug ?? "")'s #\($0) (fetched from \(remote))" } ?? ""]
-                    self.told(run, raw) { told in
-                        self.launch(run, paper, prompt: NoteHelp.codeRequest(told), kind: .code(folder: tree), provider: provider, model: pick?.id ?? "",
-                                    told: told, brief: NoteHelp.codeBrief(told), folder: tree, placed: false)
+                    // The coding helper reads the cover first, as every helper does (`start`), then the note.
+                    let paths = [short, tree, branch, number.map { "\(slug ?? "")'s #\($0) (fetched from \(remote))" } ?? ""]
+                    run.gather = { _, raw in
+                        raw.paths = paths
+                        return nil
                     }
+                    self.setUp(run, paper, Launch(kind: .code(folder: tree), provider: provider, model: pick?.id ?? "", brief: { NoteHelp.codeBrief($0) },
+                                                  folder: tree, placed: false))
+                    self.start(run, self.turn(run, said: text, words: { NoteHelp.codeRequest($0) }))
                 }
             }
         }
@@ -1255,9 +1508,9 @@ final class NoteHelpers {
         guard let book = store?.notebook(name) else { return reply(paper.noteID, giveBack: taking, [name]) { "There's no notebook called “\($0[0])”." } }
         guard mayRead(book.name, from: paper) else { return reply(paper.noteID, giveBack: taking) { _ in "That notebook is private (or its cover isn't here yet): only a note inside it can read it." } }
         let notes = (store?.notes ?? []).filter { $0.notebook == book.name && $0.version == nil && $0.noteID != paper.noteID }.prefix(40)
-        // Each note's whole text: shielded one by one before any title is taken or anything is cut.
+        // Each note by its id: its whole text is read when the helper's turn starts, as it is then.
         ask(paper, "Check this note against the notebook below. Flag anything that contradicts it, each as a short question (\"Is it … or …?\"). If nothing does, say so in one line.",
-            asked: asked, compare: (book.name, notes.map(\.file.body), notes.map(\.noteID)))
+            asked: asked, compare: (book.name, notes.map(\.noteID)))
     }
 
     // MARK: Running
@@ -1321,23 +1574,23 @@ final class NoteHelpers {
                          mode: desk.modeID(desktop: scene.desktop), desktop: scene.desktop, scope: scope, tab: scope == .tab ? scene.tab : nil)
     }
 
-    /// The run's agent starts: its brief and prompt `Shielded`, its turns carried by the run's token.
-    private func launch(_ run: Run, _ paper: PaperNote, prompt: Shielded, kind: Run.Kind, provider: Provider, model: String, told: NoteHelp.Told,
-                        brief: Shielded, folder: String?, placed: Bool) {
+    /// A run's agent, set up once the run's own setup is done (its AI chosen, its worktree made): its token, its
+    /// folder, its exact AI and model, its requirement and its tools' target bound together, its gate. Nothing is told
+    /// yet: every turn's words, and its system prompt, are made when that turn starts (`start`).
+    private func setUp(_ run: Run, _ paper: PaperNote, _ launch: Launch) {
         guard live(run) else { return }
         let sticky = run.sticky ?? sticky(for: paper)
         let agent = sticky.agent
-        // Its whole system prompt, made only of Shielded parts (no window or tab title, no raw text).
-        agent.helperSystem = NoteHelp.system(told, provider: provider == .claude ? "Claude" : "Codex", computerUse: app.config.bool("computerUse"), brief: brief)
         agent.token = run.token
-        agent.folder = folder.map { URL(fileURLWithPath: $0) }
-        agent.pinned = (provider, model)
-        run.provider = provider.rawValue
-        run.model = model
-        run.kind = kind
+        agent.folder = launch.folder.map { URL(fileURLWithPath: $0) }
+        agent.pinned = (launch.provider, launch.model)
+        run.provider = launch.provider.rawValue
+        run.model = launch.model
+        run.kind = launch.kind
         run.sticky = sticky
+        run.launch = launch
         // Its requirement and its tools' target, bound together (and again on every re-stick, `placesFollow`).
-        if placed { bind(run, paper) } else { run.requiredPlace = nil; run.document = nil; agent.place = nil }
+        if launch.placed { bind(run, paper) } else { run.requiredPlace = nil; run.document = nil; agent.place = nil }
         // Its process starts only through the gate, too.
         agent.gate = { [weak self, weak run] in
             guard let self, let run else { return .fail("This helper isn't running any more.") }
@@ -1349,10 +1602,11 @@ final class NoteHelpers {
             }
             return admission
         }
-        run.from = agent.messages.count
-        run.launched = true
-        working(run.noteID, step: "Starting", asked: run.asked, who: run.who)
-        deliver(run, prompt)
+        // A turn of it that waited (for room, or its gate at the very start) is made again when it may start.
+        agent.again = { [weak self, weak run] in
+            guard let self, let run, let call = run.call else { return }
+            self.start(run, call)
+        }
     }
 
     // MARK: Rule C: one admission gate
@@ -1360,12 +1614,16 @@ final class NoteHelpers {
     /// Everything a helper's prompt, its process and every tool answer depend on, re-derived from what's true now:
     /// the note's current paper and notebook (and that it didn't move since the run began), each source note's
     /// notebook access, the run's own required place and document, and its exact AI being available.
-    func admit(_ run: Run) -> NoteHelp.Admission {
-        guard runs[run.noteID] === run, run.token.admits || run.token.paused else { return .fail("This helper isn't running any more.") }
+    /// `landing`: asked for a finished result about to land (`landing`), not for something about to be sent.
+    func admit(_ run: Run, landing: Bool = false) -> NoteHelp.Admission {
+        guard runs[run.noteID] === run || run.kind == .look, run.token.admits || run.token.paused else { return .fail("This helper isn't running any more.") }
         var facts = NoteHelp.GateFacts()
+        facts.landing = landing
         let paper = paper(run.noteID)
-        facts.paperFound = paper.map { !(desk?.store.readOnly($0) ?? true) } ?? false
-        facts.notebook = paper?.notebook ?? ""
+        // (A finished result whose note isn't one writable paper now is held whole, and asked about again when it's
+        // applied: `applyHeld`. That isn't a refusal.)
+        facts.paperFound = landing || (paper.map { !(desk?.store.readOnly($0) ?? true) } ?? false)
+        facts.notebook = paper?.notebook ?? (landing ? run.startNotebook : "")
         facts.startNotebook = run.startNotebook
         facts.privacy = { self.privacy(of: $0) }
         facts.sources = run.sources.map { id in (id, self.paper(id)?.notebook) }
@@ -1394,26 +1652,6 @@ final class NoteHelpers {
         guard runs[run.noteID] === run else { return }
         guard run.restart != nil else { return fail(run, "The apps you keep private changed while it worked. Ask again.") }
         again(run)
-    }
-
-    /// The one way a helper's prompt reaches its agent: through the gate, from what's true now. Waiting, it's held
-    /// (and delivered once the gate admits); failing, the run fails with the reason. Never a fallback.
-    private func deliver(_ run: Run, _ prompt: Shielded) {
-        guard let agent = run.sticky?.agent else { return fail(run, "This helper has no AI to send to. Ask again.") }
-        // Nothing to say (an agent sends nothing empty): the run ends here, never left at work.
-        guard !prompt.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return fail(run, NoteHelp.bareHint.text + ".") }
-        switch admit(run) {
-        case .go:
-            run.held = nil
-            agent.send(prompt)
-        case .wait(let reason):
-            run.held = prompt
-            write(run.noteID) { file in file.helper?.state = .waiting; file.helper?.step = reason }
-        case .fail(let reason):
-            fail(run, reason, settings: reason.contains("isn't set up"))
-        case .rebuild:
-            rebuild(run)
-        }
     }
 
     /// Before a tool answers a helper (Assist.handle): the gate, from what's true now. Nil: answer; else what the
@@ -1502,7 +1740,7 @@ final class NoteHelpers {
         for line in followUps.takeDropped() { line.again() }
         if let next {
             // A second opinion's turn goes through `opinion` like its end: added to the complete ink, never replacing it.
-            turnOutput(run, Said(who: run.who, text: answer, steps: steps, form: run.carried == nil ? .answer : .opinion))
+            turnOutput(run, Said(who: run.who, text: answer, steps: steps, form: run.reviewed == nil ? .answer : .opinion))
             run.from = agent.messages.count
             // This turn succeeded; the follow-up's line is the one held now, until its own turn succeeds.
             followUp(run, next.text, line: next.line)
@@ -1510,7 +1748,7 @@ final class NoteHelpers {
         }
         // As it arrived: shielded whole before anything is derived (a coding helper's proof only from its own "Proof:"
         // line, its finish line kept apart: NoteHelp.codeInk; a second opinion's objections).
-        var form: Said.Form = run.carried == nil ? .answer : .opinion
+        var form: Said.Form = run.reviewed == nil ? .answer : .opinion
         if case .code = run.kind { form = .code }
         let said = Said(who: run.who, text: answer, steps: steps, form: form, asked: run.asked)
         // The next answer replaces the last (a second opinion's is added to it), and what was asked meanwhile goes on.
@@ -1520,7 +1758,7 @@ final class NoteHelpers {
     /// A second opinion asked for in a follow-up: after the run at work succeeds, or now, against the note's last
     /// answer and its worktree.
     private func review(_ paper: PaperNote, _ model: NoteHelp.Model, asked: String) {
-        let running = runs[paper.noteID].flatMap { $0.carried == nil && ($0.token.admits || $0.token.paused) ? $0 : nil }
+        let running = runs[paper.noteID].flatMap { $0.reviewed == nil && ($0.token.admits || $0.token.paused) ? $0 : nil }
         // The checkout it looks at is the work's own (the run at work's, else the note's saved worktree's), chosen as
         // a primary request's is: another one named is refused, plainly.
         let current = running != nil ? running?.checkout : paper.file.worktree?.checkout
@@ -1540,19 +1778,19 @@ final class NoteHelpers {
             followUps.addReview(model, asked: asked, note: paper.noteID, token: run.token, line: taking)
             return
         }
-        // Against the note's complete latest ink (held, or on the paper), carried with it.
-        let carried = latestInk(paper.noteID)
-        secondOpinion(paper, model, asked: asked, tree: paper.file.worktree?.path, carried: carried, answer: carried.first { !$0.opinion }?.text ?? "")
+        // Now, against the note's answer as it is when the reviewer's turn starts.
+        secondOpinion(paper, model, asked: asked, tree: paper.file.worktree?.path)
     }
 
     /// "and have <model> look for holes": a run of its own, after the first succeeded, reading the cover and the note
-    /// first, then its answer (and in a worktree, the change), listing objections as its own ink with a count.
-    private func secondOpinion(_ paper: PaperNote, _ model: NoteHelp.Model, asked: String, tree: String?, carried: [NoteHelp.Ink], answer: String) {
+    /// first, then the note's answer as it is when its turn starts (and in a worktree, the change), listing objections
+    /// as its own ink with a count. Its result is only its own opinion, with the answer it reviewed.
+    private func secondOpinion(_ paper: PaperNote, _ model: NoteHelp.Model, asked: String, tree: String?) {
         // Registered first (holding its line), so every way it can't go, its AI not set up too, ends through `end`
-        // and gives its line back. Part of its primary run: the note's complete ink goes with it, and its outcome
-        // (a failure too) is added to it, the answer standing.
+        // and gives its line back. Part of its primary run: its outcome (a failure too) is added to the note's ink
+        // as its own opinion, the answer standing.
         let run = begin(paper, asked: asked, step: "Looking for holes", who: model.name.isEmpty ? "Second opinion" : model.name)
-        run.carried = carried
+        run.reviewed = ""
         guard case .use(let id) = provider(for: model), let provider = Provider(rawValue: id) else {
             // Never another instead.
             return fail(run, "\(model.provider == .claude ? "Claude Code" : "Codex") isn't set up in Petal.", settings: true)
@@ -1561,14 +1799,22 @@ final class NoteHelpers {
         let reviewer = sticky(for: paper)
         reviewer.reviewer = true
         run.sticky = reviewer
-        let start = { (tree: String?) in
-            var raw = self.raw(paper)
-            raw.answer = answer
-            raw.paths = tree.map { [$0] } ?? []
-            self.told(run, raw) { told in
-                self.launch(run, paper, prompt: NoteHelp.reviewRequest(told, tree: told.paths.first), kind: .holes(folder: tree), provider: provider, model: model.id,
-                            told: told, brief: NoteHelp.reviewBrief(told), folder: tree, placed: tree == nil)
+        let noteID = paper.noteID
+        let start = { [weak self, weak run] (tree: String?) in
+            guard let self, let run else { return }
+            // The answer it reviews: the note's primary ink as it is when a turn of it starts (never ink captured
+            // earlier), known by its hash, which its opinion carries (`reviewed`).
+            run.gather = { [weak self, weak run] _, raw in
+                guard let self, let run else { return "This helper isn't running any more." }
+                let primary = NoteHelp.primary(self.latestInk(noteID))
+                run.reviewed = NoteHelp.inkHash(primary)
+                raw.answer = primary?.text ?? ""
+                raw.paths = tree.map { [$0] } ?? []
+                return nil
             }
+            self.setUp(run, paper, Launch(kind: .holes(folder: tree), provider: provider, model: model.id, brief: { NoteHelp.reviewBrief($0) },
+                                          folder: tree, placed: tree == nil))
+            self.start(run, self.turn(run, said: asked, words: { NoteHelp.reviewRequest($0, tree: $0.paths.first) }))
         }
         guard let tree else { return start(nil) }
         // In a worktree only once it's checked, as a coding follow-up's is: where this note's worktree of its saved
@@ -1772,7 +2018,7 @@ final class NoteHelpers {
                 self.reply(paper.noteID, giveBack: nil) { _ in "The note this one was waiting for can't be read from here now (private, or gone), so it didn't start." }
                 return self.stopped(run)
             }
-            run.afterBody = first.file.body
+            run.after = first.noteID
             self.ask(now, chain.ask, asked: asked, run: run)
         }
     }
@@ -1838,6 +2084,7 @@ final class NoteHelpers {
         // A run of its own (kind `look`, never in `runs`: it doesn't stop the helper at work there), ended like any.
         let run = Run(token: token, noteID: noteID, asked: paper.file.helper?.asked ?? "", who: Self.petalWho + " · " + NoteHelp.dayLabel(Date(), now: Date()))
         run.kind = .look
+        run.startNotebook = paper.notebook
         let task = Task.detached {
             guard token.admits else { return }
             let data = await Sites.get(url, .page)
@@ -1849,10 +2096,12 @@ final class NoteHelpers {
                 raw.extra = text
                 raw.line = watch.line
                 raw.last = watch.last
-                Self.tell(raw) { told in
+                // Read plainly from the shielded page (no AI); what the quick AI is asked, if anything, goes through
+                // `start`, made again then from the page (`text`, the look's source) and the watcher as they are then.
+                Self.tell(raw) { told, _ in
                     guard token.admits else { return self.end(run, .stopped(nil)) }
                     guard let told else { return self.end(run, .failed(NoteShield.unreadable)) }
-                    self.read(run, id: id, told: told)
+                    self.read(run, id: id, told: told, page: text)
                 }
             }
         }
@@ -1865,7 +2114,7 @@ final class NoteHelpers {
         return watch
     }
 
-    private func read(_ run: Run, id: String, told: NoteHelp.Told) {
+    private func read(_ run: Run, id: String, told: NoteHelp.Told, page: String) {
         let noteID = run.noteID
         let token = run.token
         guard let watch = current(noteID, id), token.admits else { return end(run, .stopped(nil)) }
@@ -1890,34 +2139,47 @@ final class NoteHelpers {
             self.end(run, .succeeded(nil))
             if newly.value, let value { self.tellHit(noteID, watchID: id, amount: value) }
         }
+        // The quick AI's part of a look is a paid call like any other (`start`): its sources are the page and the
+        // watcher as they are when it starts; its AI is the chat's.
+        run.provider = app.chatProvider?.rawValue ?? ""
+        let sources = { @MainActor (_: PaperNote, raw: inout Raw) -> String? in
+            guard let now = self.current(noteID, id) else { return "This watcher changed while it looked." }
+            raw.extra = page
+            raw.line = now.line
+            raw.last = now.last
+            return nil
+        }
         // A value that crossed the line (and wasn't a hit already) is confirmed first, whichever way it was read.
-        let decide = { (value: Double?, hint: String?, found: Shielded, hintWords: Shielded) in
+        // `plainly`: read from the page (what's asked about is then that range of the page as it's shielded when the
+        // question is made; not found there again, nothing is asked); else the number the quick AI found.
+        let decide = { (value: Double?, hint: String?, plainly: Bool) in
             guard let value, NoteHelp.crossed(value, line: watch.line), !watch.hit else { return finish(value, hint, .plain) }
             guard self.app.focus.brain.enabled else {
                 return finish(value, hint, NoteHelp.watchVerdict(crossed: true, alreadyHit: false, confirmation: nil, asked: false))
             }
-            let prompt = NoteHelp.watchConfirm(told, found: found, hint: hintWords)
-            self.app.focus.brain.ask(prompt, key: "watch|\(noteID)|\(id)|\(value)|\(Date().timeIntervalSince1970)", token: token) { reply in
-                let verdict = NoteHelp.watchVerdict(crossed: true, alreadyHit: false, confirmation: reply, asked: true)
-                finish(value, hint, verdict)
-            }
+            self.start(run, Call(sources: sources, words: { told in
+                guard plainly else { return NoteHelp.watchConfirm(told, found: "\(value)", hint: "") }
+                let text = told.extra.text
+                guard let found = NoteHelp.pick(text, line: watch.line, hint: watch.hint, last: last), found.value == value else { return nil }
+                let before = NoteHelp.hint(before: found, in: text)
+                let range = (text as NSString).range(of: before, options: .backwards, range: NSRange(location: 0, length: found.range.location))
+                return NoteHelp.watchConfirm(told, found: told.extra.substring(found.range), hint: range.location == NSNotFound ? "" : told.extra.substring(range))
+            }, to: .quick(key: "watch|\(noteID)|\(id)|\(value)|\(Date().timeIntervalSince1970)", provider: nil) { reply, _ in
+                finish(value, hint, NoteHelp.watchVerdict(crossed: true, alreadyHit: false, confirmation: reply, asked: true))
+            }))
         }
         if !text.isEmpty, let found = NoteHelp.pick(text, line: watch.line, hint: watch.hint, last: last) {
-            let hintWords = NoteHelp.hint(before: found, in: text)
-            let ns = text as NSString
-            let hintRange = ns.range(of: hintWords, options: .backwards, range: NSRange(location: 0, length: found.range.location))
-            // What the quick AI is told is the shielded page and ranges of it.
-            return decide(found.value, hintWords, told.extra.substring(found.range), hintRange.location == NSNotFound ? Shielded("") : told.extra.substring(hintRange))
+            return decide(found.value, NoteHelp.hint(before: found, in: text), true)
         }
         guard !text.isEmpty, app.focus.brain.enabled else { return finish(nil, nil, .plain) }
         // Couldn't tell plainly: the quick AI finds it once (and the words before it for next time); a value it finds
         // that crosses the line is confirmed like any other.
-        app.focus.brain.ask(NoteHelp.watchFind(told), key: "watchfind|\(noteID)|\(id)|\(Date().timeIntervalSince1970)", token: token) { reply in
-            let value = (reply?["value"] as? NSNumber)?.doubleValue
+        start(run, Call(sources: sources, words: { NoteHelp.watchFind($0) },
+                        to: .quick(key: "watchfind|\(noteID)|\(id)|\(Date().timeIntervalSince1970)", provider: nil) { reply, _ in
             // Its exact value told on (never rounded before a decision); the words it found before it shielded too.
-            let found: Shielded = value.map { "\($0)" } ?? ""
-            Self.shield([reply?["before"] as? String ?? ""]) { before in decide(value, before?.first?.text, found, "") }
-        }
+            let value = (reply?["value"] as? NSNumber)?.doubleValue
+            Self.shield([reply?["before"] as? String ?? ""]) { before in decide(value, before?.first?.text, false) }
+        }))
     }
 
     private final class Flag { var value = false }
@@ -2070,6 +2332,22 @@ final class NoteHelpers {
                 found.append((canonical, NoteHelp.remotes(config: config)))
             }
             nonisolated(unsafe) let result = found
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(result) } }
+        }
+    }
+
+    /// The git repository a file is really in, as AgentAccess resolves a project (`AgentAccess.repository`: the
+    /// nearest one above it, a linked worktree's main checkout only when git made it one), with its remotes from its
+    /// own .git/config; only one in the home folder. Off the main thread, no git run.
+    static func repository(holding file: String, _ done: @escaping @MainActor ((path: String, remotes: [(name: String, url: String)])?) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let folder = (URL(fileURLWithPath: file).resolvingSymlinksInPath().path as NSString).deletingLastPathComponent
+            var found: (path: String, remotes: [(name: String, url: String)])?
+            if let repository = AgentAccess.repository(folder, files: AgentCallers.disk), NoteHelp.inHome(repository, home: NSHomeDirectory()),
+               let config = try? String(contentsOf: URL(fileURLWithPath: repository).appending(path: ".git/config"), encoding: .utf8) {
+                found = (NoteHelp.standard(repository), NoteHelp.remotes(config: config))
+            }
+            let result = found
             DispatchQueue.main.async { MainActor.assumeIsolated { done(result) } }
         }
     }

@@ -118,6 +118,7 @@ struct NoteStoreCheck {
         helperAnswerDrained(root: root)
         carriedOntoCopy(root: root)
         heldThroughKeptBoth(root: root)
+        resultThroughConflict(root: root)
         coverPrivacy(root: root)
         caseMove(root: root)
         versionGroups(root: root)
@@ -742,6 +743,83 @@ struct NoteStoreCheck {
         let landed = text(file) ?? ""
         expect(landed.contains("Elsewhere") && landed.contains("The answer") && landed.contains("A hole"),
                "the kept paper has its own words, the answer and the second opinion's result", landed)
+    }
+
+    /// A run's result is one value through the journal and one based write (the store's own `change`, as NoteHelpers
+    /// writes): a recalculation whose note went into conflict leaves no "done" without its formula, on either paper,
+    /// and both land together on the paper kept. A reviewer's result, landing on a note whose answer changed on
+    /// another Mac meanwhile, adds only its own opinion: the newer answer on disk stays as it is.
+    @MainActor static func resultThroughConflict(root outer: URL) {
+        let fm = FileManager.default
+        let root = outer.appending(path: "ResultRoot")
+        let folder = root.appending(path: "Results")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Sums.md")
+        var working = NoteFile(id: "RS1", body: "Flights: 412\nHotel: 300")
+        working.helper = NoteHelp.Helper(state: .working, who: "✦ Petal", step: "Working out the formula", at: Date())
+        _ = NoteStore.create(working.serialized(), at: file, root: root)
+        let store = NoteStore(root: root)
+        func reread() { let read = NoteStore.read(root); store.preview(read.notes, notebooks: read.notebooks) }
+        func settle(_ until: () -> Bool) {
+            let end = Date().addingTimeInterval(10)
+            while !until() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        }
+        reread()
+        guard let paper = store.notes.first(where: { $0.noteID == "RS1" }) else { return expect(false, "the note is read") }
+        // The recalculation's one result: its formula and `done`, journaled as one entry.
+        let done = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", asked: "@Petal make this recalculate", at: Date())
+        let result = NoteHelp.Result(answer: nil, calc: NoteHelp.Calc(label: "Total", formula: "sum()"), helper: .set(done))
+        var journal = HelperJournal.adding(result, note: "RS1", notebook: "Results", sources: [], at: Date(), to: [])
+        guard journal.count == 1 else { return expect(false, "a result is one journal entry") }
+        let entry = journal[0]
+        let held = NoteFile.parse(entry.answer, fallbackID: "RS1", fallbackDate: entry.at)
+        // The note changes on another Mac before it lands: conflict.
+        var elsewhere = working
+        elsewhere.body = "Flights: 412\nHotel: 300\nTrain: 80"
+        try? Data(elsewhere.serialized().utf8).write(to: file)
+        var outcome: NoteStore.Outcome?
+        _ = store.change(paper.key, edit: { NoteHelp.applyAnswer(held, to: &$0) }, done: { outcome = $0 })
+        settle { outcome != nil }
+        guard case .keptBoth(let copy)? = outcome else { return expect(false, "the result's write was kept beside the file", "\(String(describing: outcome))") }
+        if outcome == .written { journal.removeAll { $0 == entry } }
+        let original = NoteFile.parse(text(file) ?? "", fallbackID: "x", fallbackDate: Date())
+        expect(original.calc == nil && original.helper?.state != .done, "in conflict: the note says neither done nor a formula", text(file) ?? "")
+        let beside = NoteFile.parse(text(copy) ?? "", fallbackID: "x", fallbackDate: Date())
+        expect((beside.calc != nil) == (beside.helper?.state == .done), "the copy kept beside it never has done without the formula either", text(copy) ?? "")
+        expect(journal == [entry], "and the whole result is still held")
+        // Keep this one (the other Mac's file): the held result lands whole, in one write.
+        try? fm.removeItem(at: copy)
+        reread()
+        guard let kept = store.notes.first(where: { $0.noteID == "RS1" }) else { return expect(false, "the kept paper is read") }
+        outcome = nil
+        _ = store.change(kept.key, edit: { NoteHelp.applyAnswer(held, to: &$0) }, done: { outcome = $0 })
+        settle { outcome != nil }
+        let landed = NoteFile.parse(text(file) ?? "", fallbackID: "x", fallbackDate: Date())
+        expect(outcome == .written && landed.calc?.formula == "sum()" && landed.helper?.state == .done && landed.body.contains("Train: 80"),
+               "kept: the formula and done land together on the paper kept, its words as they were", text(file) ?? "")
+
+        // A reviewer's result on a note whose answer was replaced from another Mac while it worked.
+        let reviewedFile = folder.appending(path: "Reviewed.md")
+        let first = NoteHelp.Ink(who: "✦ Petal", text: "It adds up to 712.")
+        var before = NoteFile(id: "RS2", body: "Question")
+        before.ink = [first]
+        _ = NoteStore.create(before.serialized(), at: reviewedFile, root: root)
+        reread()
+        let opinion = NoteHelp.Result(opinion: NoteHelp.Ink(who: "GPT 6.1 Sol", text: "1. Is the train in it?", objections: 1), reviewed: NoteHelp.inkHash(first), helper: .keep)
+        let newer = NoteHelp.Ink(who: "✦ Petal", text: "It adds up to 792, with the train.")
+        var synced = before
+        synced.ink = [newer]
+        try? Data(synced.serialized().utf8).write(to: reviewedFile)
+        reread()
+        guard let reviewed = store.notes.first(where: { $0.noteID == "RS2" }) else { return expect(false, "the reviewed note is read") }
+        outcome = nil
+        _ = store.change(reviewed.key, edit: { opinion.apply(to: &$0) }, done: { outcome = $0 })
+        settle { outcome != nil }
+        let after = NoteFile.parse(text(reviewedFile) ?? "", fallbackID: "x", fallbackDate: Date()).ink
+        expect(outcome == .written && after.count == 2 && after[0] == newer && after[1].who == "GPT 6.1 Sol" && after[1].opinion,
+               "a reviewer's result on disk: the newer answer untouched, only its opinion added", text(reviewedFile) ?? "")
+        expect(after.count == 2 && NoteHelp.reviewedEarlier(after[1], among: after) && after[1].heading(among: after).hasSuffix(NoteHelp.earlierWords),
+               "and its opinion says it reviewed an earlier answer")
     }
 
     /// A session's writes after a conflict copy: the person's typing and a helper's metadata go in one snapshot (one

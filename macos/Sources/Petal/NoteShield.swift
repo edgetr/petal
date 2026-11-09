@@ -160,6 +160,17 @@ struct Shielded: Equatable, Sendable, CustomStringConvertible, ExpressibleByStri
 }
 
 extension NoteShield {
+    /// What a line says when it can't be checked right now.
+    static let working: Shielded = "Working…"
+
+    /// A line shown outside its own chat (the AI button's preview, a note's status line, the pointer's caption), with
+    /// no wait: redacted now, where it's made, with the vault's index when that's already made and readable
+    /// (`VaultIndex.cached`, which never reads the Keychain); else a plain generic line. Never a hop, never a wait.
+    static func now(_ text: String, index: UIMap.SecretIndex?) -> Shielded {
+        guard let index, !index.unreadable, let made = shield([text], index: index)?.first else { return working }
+        return made
+    }
+
     /// The one way to make `Shielded`: each text redacted whole with the vault's index (nothing cut or derived
     /// before); nil while the vault can't be read.
     static func shield(_ texts: [String], index: UIMap.SecretIndex) -> [Shielded]? {

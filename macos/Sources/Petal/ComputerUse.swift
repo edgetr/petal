@@ -69,7 +69,13 @@ final class ComputerUse {
         var apps: Set<String> = []
         var stopped = false
         var last = Date()
-        let cancel = Acting.Cancel()
+        /// For a note's helper, bound to its run (`Acting.Cancel(run:)`): stopped whenever that run isn't running.
+        let cancel: Acting.Cancel
+
+        init(turn: String, run: RunToken? = nil) {
+            self.turn = turn
+            cancel = Acting.Cancel(run: run)
+        }
         /// The Buy cards the person answered Buy in this reply: each lets payment info fill on its exact host, in its
         /// window, with its card (Vault.Checkout).
         var checkouts: [Vault.Checkout] = []
@@ -630,7 +636,8 @@ final class ComputerUse {
 
     private func fresh(_ caller: String, turn: String, task: String = "") -> Session {
         if sessions[caller] != nil { cancelWork(of: caller) }
-        var made = Session(turn: turn)
+        // A note's helper: every action of the reply is bound to its run's token, checked right before it acts.
+        var made = Session(turn: turn, run: app.claude.note(withID: caller)?.agent.token)
         made.task = task
         sessions[caller] = made
         return made
@@ -743,9 +750,11 @@ final class ComputerUse {
         sessions[job.caller]?.last = Date()
         if let error = stale(job) { job.fail(error); return finished() }
         let map = maps[job.caller] ?? job.map
-        // What it's doing, said as its activity only once shielded (the same boundary as the agent's own steps).
-        let caller = job.caller
-        NoteHelpers.shield([job.caption]) { [weak self] shown in self?.agent(caller)?.activity = shown?.first ?? "" }
+        // What it's doing, as its chat's activity: shielded here, where it's made, with no wait and no hop (so
+        // captions can't arrive out of order), and only for the turn this job belongs to (`stale` just said it isn't over).
+        if let agent = agent(job.caller), sessions[job.caller].map({ $0.turn == "\(agent.turn)" }) ?? false {
+            agent.caption(job.caption, turn: agent.turn)
+        }
         guard map.ownPlace else { return show(job, map) }
         decide(job, map, since: Date())
     }

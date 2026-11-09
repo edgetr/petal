@@ -63,10 +63,12 @@ final class Agent {
     @ObservationIgnored private var runID = UUID()   // a stopped run's late lines don't belong to the next chat
     /// Counts the runs (each reply is one): what Petal AI may use in an app lasts one reply (ComputerUse.swift).
     @ObservationIgnored private(set) var turn = 0
-    /// What it's doing now, in plain words (its latest step): the AI button's preview and the note say it. Only ever
-    /// `Shielded`: every event is shielded the moment it arrives (`Agent.shield`, the boundary), before anything reads it.
+    /// What it's doing now, in plain words (its latest step): the AI button's preview and the note say it, outside the
+    /// chat's own panel, so it's only ever `Shielded`. A helper's is shielded with its events as they arrive
+    /// (`Agent.shield`, the boundary); an ordinary chat's with no wait, where it's set (`Agent.shown`).
     var activity: Shielded = ""
-    /// Events are shielded in order, on a queue of their own, before they reach the main thread (`ingest`).
+    /// A helper's events are shielded in order, on a queue of their own, before they reach the main thread
+    /// (`AgentIngest`). An ordinary chat's never pass it.
     @ObservationIgnored private let ingest = DispatchQueue(label: "tech.edgetr.petal.agent.ingest")
     /// A helper's run whose events can't be shielded (the vault unreadable): it's failed, and its later events dropped.
     @ObservationIgnored private var dropping = false
@@ -120,8 +122,44 @@ final class Agent {
         submit(text)
     }
 
-    /// A helper's turn: words NoteShield made (the note's line, a follow-up, Go on).
-    func send(_ text: Shielded) { submit(text.text) }
+    /// A helper's turn: words NoteShield made just now, from its sources as they are (`NoteHelpers.start`). It starts
+    /// at once or not at all: a turn that has to wait (for room, for its run to go on, for its gate) keeps only the
+    /// wait, a mark in `waiting`, never the words; when it may start, `again` has its run make them again from what's
+    /// true then.
+    func send(_ text: Shielded) {
+        // This try stands for any earlier wait of the same turn (its mark goes; it waits again only if it must).
+        waiting = []
+        waitingFrom = nil
+        waitingToken = nil
+        submit(text.text)
+    }
+
+    /// A helper's turn waiting holds this in `waiting`, never its words.
+    static let helperTurn = "\u{0}a helper's turn"
+    /// A helper's waiting turn may start: its run starts it again from its sources (`NoteHelpers.start`).
+    @ObservationIgnored var again: (() -> Void)?
+
+    /// A helper's turn that can't start now: only the wait is kept.
+    private func holdTurn() {
+        if waiting.isEmpty { waitingToken = token; waitingFrom = messages.count }
+        waiting = [Self.helperTurn]
+    }
+
+    /// What a chat is doing, for a line shown outside its own panel (the AI button's preview, a note's status line),
+    /// with no wait: redacted now with the vault's index when it's already made, else a plain "Working…" (and the
+    /// index is made in the background for the lines after it). Never a vault read on the way.
+    static func shown(_ text: String) -> Shielded {
+        let index = VaultIndex.cached()
+        if index == nil { VaultIndex.warm() }
+        return NoteShield.now(text, index: index)
+    }
+
+    /// What Petal AI is doing in an app for this chat (ComputerUse's caption), made where the action starts, for the
+    /// turn it belongs to: dropped when that turn is over.
+    func caption(_ text: String, turn: Int) {
+        guard turn == self.turn, running else { return }
+        activity = Self.shown(text)
+    }
 
     private func submit(_ text: String) {
         let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -146,7 +184,8 @@ final class Agent {
         steering = max(0, steering - 1)
         if sessionID == nil, askedWith == nil { askedWith = app.chatProvider }
         let index = messages.count
-        messages.append(Message(kind: .user, text: prompt))
+        // (A helper's words are kept nowhere but its process's input: its chat shows only what it does and says.)
+        if helperSystem == nil { messages.append(Message(kind: .user, text: prompt)) }
         admit(prompt, from: index)
     }
 
@@ -171,6 +210,7 @@ final class Agent {
         // A helper's run that's stopped admits nothing; paused, its turn waits (Go on restores it).
         if let token, token.state == .cancelled || token.state == .finished { return }
         if !waiting.isEmpty || app.claude.working >= ClaudePanel.atOnce || !admitted {
+            if helperSystem != nil { return holdTurn() }
             if waiting.isEmpty {
                 waitingFrom = index
                 waitingToken = token
@@ -198,6 +238,8 @@ final class Agent {
         let prompt = waiting.joined(separator: "\n\n")
         waiting = []
         waitingFrom = nil
+        // A helper's: nothing was kept to send; its run makes the turn again, from its sources as they are now.
+        if helperSystem != nil { again?(); return }
         run(prompt)
     }
 
@@ -205,7 +247,7 @@ final class Agent {
     /// Its waiting messages come out of the chat and back as text for the note's draft; nil when nothing waited.
     func withdrawWaiting() -> String? {
         guard !running, !waiting.isEmpty else { return nil }
-        let unsent = waiting.filter { $0 != Self.approved }.joined(separator: "\n\n")
+        let unsent = waiting.filter { $0 != Self.approved && $0 != Self.helperTurn }.joined(separator: "\n\n")
         if let from = waitingFrom, from < messages.count { messages.removeSubrange(from...) }
         waiting = []
         waitingFrom = nil
@@ -409,13 +451,13 @@ final class Agent {
         // before the count moves on), and this one asks again.
         app.assist.computer.end(noteID.uuidString)
         // Its run's token, checked once more as the process starts (bound below: pausing or cancelling ends it).
-        guard admitted else { if waiting.isEmpty { waitingToken = token }; waiting.append(prompt); return }
+        guard admitted else { if helperSystem != nil { return holdTurn() }; if waiting.isEmpty { waitingToken = token }; waiting.append(prompt); return }
         // A helper's admission gate (NoteHelpers.admit), from what's true now, right before its process starts:
         // waiting (its place or document isn't showing) keeps the turn waiting; a failure ends it with its reason.
         if let gate {
             switch gate() {
             case .go: break
-            case .wait, .rebuild: if waiting.isEmpty { waitingToken = token }; waiting.append(prompt); return
+            case .wait, .rebuild: return holdTurn()
             case .fail(let reason): return refuse(reason, opensSettings: reason.contains("isn't set up"))
             }
         }
@@ -443,22 +485,18 @@ final class Agent {
         let id = UUID()
         runID = id
         dropping = false
-        // The boundary: every event shielded whole as it arrives, in order, before anything reads it (a helper's text,
-        // steps, errors and the labels of what it asks to run; any chat's step, which its preview shows). A helper's
-        // event that can't be shielded (the vault unreadable) fails its run; nothing raw goes on.
+        // The boundary, for a helper (a note's run) only: every event shielded whole as it arrives, in order, on its
+        // ingestion queue, before anything reads it (its text, steps, errors and the labels of what it asks to run);
+        // one that can't be shielded (the vault unreadable) fails its run, and nothing raw goes on. An ordinary chat's
+        // events and its end go straight to the main thread, as they always did: never waiting on a vault read
+        // (`AgentIngest`); only its step, shown outside its panel, is shielded, with no wait (`Agent.shown`).
         let helper = helperSystem != nil
         let ingest = self.ingest
         let deliver = { (lines: [String]) in
-            guard !lines.isEmpty else { return }
-            ingest.async {
-                let shown = Agent.shield(lines.flatMap { provider.events($0) }, helper: helper)
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard self.runID == id, !self.dropping else { return }
-                        guard let shown else { return self.vaultLost() }
-                        for (event, words) in shown { self.apply(event, words: words) }
-                    }
-                }
+            AgentIngest.deliver(lines, helper: helper, queue: ingest, parse: { $0.flatMap { provider.events($0) } }, shield: Agent.shield) { shown in
+                guard self.runID == id, !self.dropping else { return }
+                guard let shown else { return self.vaultLost() }
+                for (event, words) in shown { self.apply(event, words: words) }
             }
         }
         output.fileHandleForReading.readabilityHandler = { handle in
@@ -475,41 +513,39 @@ final class Agent {
             output.fileHandleForReading.readabilityHandler = nil
             error.fileHandleForReading.readabilityHandler = nil
             deliver(buffer.lines(adding: output.fileHandleForReading.readDataToEndOfFile() + Data("\n".utf8)))
-            // After every event before it (they pass the same queue).
-            ingest.async { DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard self.runID == id else { return }
-                    self.token?.unbind(self.bound)
-                    self.bound = nil
-                    self.running = false
-                    // The turn's outcome, said explicitly: a clean exit with no error event, or not.
-                    let code = finished.terminationStatus
-                    // An authentication failure first (its process was stopped for it, which isn't an interruption).
-                    self.outcome = RunToken.classify(authFailed: self.authFailed, errored: self.turnErrored,
-                                                     signaled: finished.terminationReason == .uncaughtSignal, status: code)
-                    self.activity = ""
-                    // The turn is over: its tools can't answer anymore, so nothing it asked of Petal goes ahead.
-                    self.app.assist.computer.end(self.noteID.uuidString)
-                    // What was written while it worked goes now (steering: straight after it stopped).
-                    let more = !self.queued.isEmpty && self.pendingAsk.isEmpty
-                    if more {
-                        let next = self.queued.removeFirst()
-                        DispatchQueue.main.async { self.submit(next) }
-                    }
-                    self.process = nil
-                    let status = finished.terminationStatus
-                    let detail = self.errorText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    // (A helper's stderr isn't kept raw: its reason goes to its run's failure, shielded there before it's shown.)
-                    if status != 0 && status != 15 && !detail.isEmpty && !self.authFailed && !helper {
-                        self.messages.append(Message(kind: .error, text: String(detail.suffix(300))))
-                    }
-                    if self.outcome == .failed, !self.authFailed {
-                        self.failure = helper && status != 0 && !detail.isEmpty ? String(detail.suffix(300)) : self.messages.last { $0.kind == .error }?.text ?? "It stopped with an error."
-                    }
-                    // The turn is over (not carried on by a queued message): a note's nudge, and room for one waiting.
-                    if !more { self.app.claude.agentFinished(self) }
+            // After every event before it (a helper's pass the same queue; a chat's the main thread's).
+            AgentIngest.after(helper: helper, queue: ingest) {
+                guard self.runID == id else { return }
+                self.token?.unbind(self.bound)
+                self.bound = nil
+                self.running = false
+                // The turn's outcome, said explicitly: a clean exit with no error event, or not.
+                let code = finished.terminationStatus
+                // An authentication failure first (its process was stopped for it, which isn't an interruption).
+                self.outcome = RunToken.classify(authFailed: self.authFailed, errored: self.turnErrored,
+                                                 signaled: finished.terminationReason == .uncaughtSignal, status: code)
+                self.activity = ""
+                // The turn is over: its tools can't answer anymore, so nothing it asked of Petal goes ahead.
+                self.app.assist.computer.end(self.noteID.uuidString)
+                // What was written while it worked goes now (steering: straight after it stopped).
+                let more = !self.queued.isEmpty && self.pendingAsk.isEmpty
+                if more {
+                    let next = self.queued.removeFirst()
+                    DispatchQueue.main.async { self.submit(next) }
                 }
-            } }
+                self.process = nil
+                let status = finished.terminationStatus
+                let detail = self.errorText.trimmingCharacters(in: .whitespacesAndNewlines)
+                // (A helper's stderr isn't kept raw: its reason goes to its run's failure, shielded there before it's shown.)
+                if status != 0 && status != 15 && !detail.isEmpty && !self.authFailed && !helper {
+                    self.messages.append(Message(kind: .error, text: String(detail.suffix(300))))
+                }
+                if self.outcome == .failed, !self.authFailed {
+                    self.failure = helper && status != 0 && !detail.isEmpty ? String(detail.suffix(300)) : self.messages.last { $0.kind == .error }?.text ?? "It stopped with an error."
+                }
+                // The turn is over (not carried on by a queued message): a note's nudge, and room for one waiting.
+                if !more { self.app.claude.agentFinished(self) }
+            }
         }
         do {
             try process.run()
@@ -530,27 +566,25 @@ final class Agent {
         }
     }
 
-    /// Events shielded whole (the vault's redaction `petal_ui` uses), off the main thread: a helper's every text; any
-    /// chat's step as its `activity`. Nil when a helper's can't be (the vault unreadable): its run fails. A chat's
-    /// events go on as they were, its step saying nothing then.
-    nonisolated static func shield(_ events: [Event], helper: Bool) -> [(Event, Shielded?)]? {
-        let made = VaultIndex.settled { index -> [(Event, Shielded?)]? in
+    /// A helper's events shielded whole (the vault's redaction `petal_ui` uses), on its ingestion queue: every text,
+    /// step, error and label. Nil when they can't be (the vault unreadable): its run fails. Never called for an
+    /// ordinary chat (`AgentIngest.deliver`).
+    nonisolated static func shield(_ events: [Event]) -> [(Event, Shielded?)]? {
+        VaultIndex.settled { index -> [(Event, Shielded?)]? in
             guard !index.unreadable else { return nil }
             func one(_ text: String) -> Shielded { NoteShield.shield([text], index: index)?.first ?? "" }
             return events.map { event in
                 switch event {
                 case .step(let text):
                     let words = one(text)
-                    return (helper ? .step(words.text) : event, words)
-                case .text(let text) where helper: return (.text(one(text).text), nil)
-                case .error(let text) where helper: return (.error(one(text).text), nil)
-                case .denials(let denials) where helper: return (.denials(denials.map { Denial(tool: $0.tool, label: one($0.label).text, rules: $0.rules) }), nil)
+                    return (.step(words.text), words)
+                case .text(let text): return (.text(one(text).text), nil)
+                case .error(let text): return (.error(one(text).text), nil)
+                case .denials(let denials): return (.denials(denials.map { Denial(tool: $0.tool, label: one($0.label).text, rules: $0.rules) }), nil)
                 default: return (event, nil)
                 }
             }
         } ?? nil
-        if let made { return made }
-        return helper ? nil : events.map { event in if case .step = event { (event, Shielded("")) } else { (event, nil) } }
     }
 
     /// A helper's event arrived while the vault can't be read: its run fails (`end`, Petal's own words), what it said
@@ -569,7 +603,8 @@ final class Agent {
             if !trimmed.isEmpty { messages.append(Message(kind: .claude, text: trimmed)) }
         case .step(let text):
             messages.append(Message(kind: .step, text: text))
-            activity = words ?? ""
+            // A helper's came shielded with the event; a chat's is shielded here, with no wait.
+            activity = words ?? Self.shown(text)
             if helperSystem != nil, let note = app.claude.notes.first(where: { $0.agent === self }) { app.paper.helpers.stepped(note) }
         case .denials(let denials):
             pendingAsk = denials

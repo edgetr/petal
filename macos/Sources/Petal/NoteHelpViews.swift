@@ -36,7 +36,7 @@ struct HelperFront: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if !file.task.isEmpty { TaskChips(paper: paper, tint: tint, desk: desk).padding(.vertical, 6) }
                     if let calc = file.calc { CalcLine(calc: calc, body: file.body, tint: tint, glass: glass) }
-                    ForEach(Array(file.ink.enumerated()), id: \.offset) { _, ink in InkView(ink: ink, tint: !ink.opinion ? tint : NoteInk.hex("#a550a7") ?? tint, glass: glass) }
+                    ForEach(Array(file.ink.enumerated()), id: \.offset) { _, ink in InkView(ink: ink, heading: ink.heading(among: file.ink), tint: !ink.opinion ? tint : NoteInk.hex("#a550a7") ?? tint, glass: glass) }
                 }
             }
             // Allow, Don't, Buy, Stop and Pause: pinned outside the scroll, always on the screen.
@@ -81,12 +81,14 @@ struct BoundedHeight: PreferenceKey {
 /// a Markdown file where a file is wanted); its proof's link is the pull request's address.
 struct InkView: View {
     let ink: NoteHelp.Ink
+    /// Who wrote it, as it reads among the note's ink (a second opinion of an earlier answer says so).
+    var heading: String? = nil
     let tint: NoteInk.RGB
     let glass: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(ink.heading).font(.system(size: 11, weight: .semibold)).opacity(0.85)
+            Text(heading ?? ink.heading).font(.system(size: 11, weight: .semibold)).opacity(0.85)
             // The whole answer is kept in the note; only the paper shortens it (dragging it out gives all of it).
             Text(ink.text).font(.system(size: 13.5)).lineSpacing(13.5 * 0.45 - 3).lineLimit(14).truncationMode(.tail)
                 .fixedSize(horizontal: false, vertical: true)

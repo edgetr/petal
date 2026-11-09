@@ -183,7 +183,7 @@ struct NoteHelpCheck {
                                                                                     (path: "/u/petal-old", remotes: [(name: "origin", url: "https://github.com/edgetr/petal")]),
                                                                                     (path: "/u/site", remotes: [(name: "origin", url: "git@github.com:edgetr/edgetr.git")])]
         expect(NoteHelp.checkouts(for: "edgetr/petal", among: candidates) == ["/u/petal", "/u/petal-old"], "two checkouts: asked")
-        expect(NoteHelp.checkout(holding: "/u/petal/macos/a.swift", among: ["/u/petal", "/u/petal/macos/vendor", "/u/pet"]) == "/u/petal", "the checkout a file is in")
+        expect(NoteHelp.inHome("/u/petal", home: "/u") && !NoteHelp.inHome("/u", home: "/u") && !NoteHelp.inHome("/tmp/x", home: "/u"), "a repository in the home folder")
         let answer = "Opened https://github.com/example/garden/pull/43 into #42.\nProof: run.sh ✓ · diff +4 −2 · PR #43"
         expect(NoteHelp.pullRequest(in: answer) == "https://github.com/example/garden/pull/43" && NoteHelp.proof(in: answer) == ["run.sh ✓", "diff +4 −2", "PR #43"], "the result and its proof")
         expect(NoteHelp.inkText(answer) == "Opened https://github.com/example/garden/pull/43 into #42.", "ink without the proof line")
@@ -207,8 +207,10 @@ struct NoteHelpCheck {
         expect(token.pause() && !token.admits && token.paused, "paused: nothing of it is admitted")
         expect(lock.withLock { stopped.list } == ["agent"], "pausing ends what it has running (a finished step isn't touched)", "\(stopped.list)")
         expect(token.bind(kill("late")) == nil, "a step that starts while it's paused isn't admitted (and stops at once)")
-        expect(token.ending(outcome: .succeeded, asking: false) == .paused && !token.end(.paused) && token.paused,
-               "a turn ending while paused is a pause: nothing advances, and Go on is still there")
+        expect(token.ending(outcome: .interrupted, asking: false) == .paused && token.ending(outcome: nil, asking: false) == .paused && token.paused,
+               "a turn the pause ended is a pause: nothing advances, and Go on is still there")
+        expect(token.ending(outcome: .succeeded, asking: false) == .succeeded && token.ending(outcome: .succeeded, asking: true) == .paused,
+               "a turn that finished cleanly before the pause reached it is a finished answer (it lands)")
         expect(token.goOn() && token.admits && !token.goOn(), "Go on: admitted again, once")
         _ = token.bind(kill("brain"))
         token.hold("always:code:/u/garden")
@@ -216,15 +218,15 @@ struct NoteHelpCheck {
         expect(token.revoke("always:code:/u/garden") && !token.admits && token.state == .cancelled, "taking back a grant it holds cancels it")
         expect(lock.withLock { stopped.list }.contains("brain"), "and ends what it has running")
         expect(!token.goOn() && token.bind(kill("again")) == nil, "cancelled: never admitted again")
-        expect(token.ending(outcome: .succeeded, asking: false) == .stopped && !token.end(.stopped), "a stopped run's answer counts for nothing")
+        expect(token.ending(outcome: .succeeded, asking: false) == .stopped && !token.complete(.succeeded), "a stopped run's answer counts for nothing")
         // Success only on an explicit successful outcome.
         let fresh = RunToken()
         expect(fresh.ending(outcome: nil, asking: false) == .failed, "no outcome (text, but no clean exit): failed")
         expect(fresh.ending(outcome: .failed, asking: false) == .failed, "an error event or a bad exit: failed")
         expect(fresh.ending(outcome: .interrupted, asking: false) == .stopped, "interrupted: stopped, nothing advances")
         expect(fresh.ending(outcome: .succeeded, asking: true) == .waitingOnPerson, "asking the person: not done yet")
-        expect(fresh.ending(outcome: .succeeded, asking: false) == .succeeded && fresh.end(.succeeded) && fresh.state == .finished, "a clean exit with no error: succeeded")
-        expect(!fresh.end(.succeeded) && !fresh.admits && fresh.bind({}) == nil, "finished once, never admitted again")
+        expect(fresh.ending(outcome: .succeeded, asking: false) == .succeeded && fresh.complete(.succeeded) && fresh.state == .finished, "a clean exit with no error: succeeded")
+        expect(!fresh.complete(.succeeded) && !fresh.admits && fresh.bind({}) == nil, "finished once, never admitted again")
         // A watcher's look writes back only its own fields, and only under its own id (a UUID), not paused.
         let watchID = UUID().uuidString
         var watched: NoteHelp.Watch? = NoteHelp.Watch(every: "1d", line: "under $100", mac: "m", at: "09:00")
@@ -333,7 +335,7 @@ struct NoteHelpCheck {
         expect(lock.withLock { failedStop.list } == ["x"] && !failing.complete(.succeeded), "failing ends what it has running, and can't succeed after")
         let pausedRun = RunToken()
         pausedRun.pause()
-        expect(!pausedRun.complete(.succeeded) && pausedRun.complete(.stopped) && pausedRun.completion == .stopped, "a paused run can't succeed; it can be stopped")
+        expect(pausedRun.complete(.stopped) && pausedRun.completion == .stopped && !pausedRun.complete(.succeeded), "a paused run can be stopped, and can't succeed after")
         // Chains and reviewers consume only succeeded.
         let chainAfter = NoteHelp.Chain(after: "A", afterTitle: "Research", then: "B", ask: "draft", mac: "m", since: now)
         expect(!chainAfter.ready(mac: "m", after: NoteHelp.Helper(state: .failed, who: "", step: "no API key", at: now.addingTimeInterval(60))), "a chain ignores a failed note")
@@ -465,7 +467,8 @@ struct NoteHelpCheck {
 
         var queue = FollowUpQueue<String>()
         let first = RunToken(), later = RunToken()
-        guard let said = NoteShield.shield(["and also this"], index: index) else { return expect(false, "said") }
+        // (What's said waits as the person wrote it, a raw source: shielded only when its turn starts.)
+        let said = ["and also this"]
         queue.add(said[0], note: "N", token: first)
         queue.add(said[0], note: "N", token: first)
         expect(queue.next(note: "N", current: first)?.text == said[0] && queue.count(note: "N") == 1, "a follow-up goes in its own run")
@@ -687,23 +690,29 @@ struct NoteHelpCheck {
 
         let primaryInk = NoteHelp.Ink(who: "✦ Petal · Codex", text: "Fixed it.", proof: ["tests pass"], link: "https://github.com/o/r/pull/7", code: true)
         let objectionsInk = NoteHelp.Ink(who: "GPT 6.1 Sol", text: "1. Is the week view covered?", objections: 1)
-        let added = NoteHelp.withOpinion(objectionsInk, held: nil, carried: [primaryInk])
-        expect(added.count == 2 && added[0] == primaryInk && added[1].opinion && added[1].objections == 1,
-               "a second opinion's objections are added after the primary it carries (ink, PR link, proof)", "\(added)")
-        let failed = NoteHelp.withOpinion(NoteHelp.Ink(who: "GPT 6.1 Sol", text: "No second opinion: Codex isn't set up in Petal.", link: NoteHelp.settingsInk),
-                                          held: nil, carried: [primaryInk])
+        // A second opinion's result is only its own opinion, applied onto the note's ink as it is when it lands.
+        let reviewedHash = NoteHelp.inkHash(primaryInk)
+        let apply = { (result: NoteHelp.Result, onto: [NoteHelp.Ink]) -> [NoteHelp.Ink] in
+            var file = NoteFile(id: "OP0", created: now)
+            file.ink = onto
+            result.apply(to: &file)
+            return file.ink
+        }
+        let added = apply(NoteHelp.Result(opinion: objectionsInk, reviewed: reviewedHash, helper: .keep), [primaryInk])
+        expect(added.count == 2 && added[0] == primaryInk && added[1].opinion && added[1].objections == 1 && added[1].reviewed == reviewedHash,
+               "a second opinion's objections are added after the primary on the note (its ink, PR link, proof), with the answer it reviewed", "\(added)")
+        let failed = apply(NoteHelp.Result(opinion: NoteHelp.Ink(who: "GPT 6.1 Sol", text: "No second opinion: Codex isn't set up in Petal.", link: NoteHelp.settingsInk),
+                                           reviewed: reviewedHash, helper: .keep), [primaryInk])
         expect(failed.count == 2 && failed[0] == primaryInk && failed[1].opinion && failed[1].link == NoteHelp.settingsLink,
                "a second opinion that fails (not set up, sign-in, launch) is added too, never in the primary's place")
         let heldInk = [primaryInk, NoteHelp.Ink(who: "Opus 5.5", text: "1. One more?", objections: 1)]
-        let again = NoteHelp.withOpinion(NoteHelp.Ink(who: "GPT 6.1 Sol", text: "No objections.", objections: 0), held: heldInk, carried: [])
+        let again = apply(NoteHelp.Result(opinion: NoteHelp.Ink(who: "GPT 6.1 Sol", text: "No objections.", objections: 0), reviewed: reviewedHash, helper: .keep), heldInk)
         expect(again.count == 3 && again[0] == primaryInk && again[1].who == "Opus 5.5" && again[2].objections == 0,
-               "built on the latest held answer: the primary and another reviewer's opinion stay", "\(again)")
-        let redo = NoteHelp.withOpinion(NoteHelp.Ink(who: "Opus 5.5", text: "No objections.", objections: 0), held: heldInk, carried: [])
+               "on the note's ink as it is: the primary and another reviewer's opinion stay", "\(again)")
+        let redo = apply(NoteHelp.Result(opinion: NoteHelp.Ink(who: "Opus 5.5", text: "No objections.", objections: 0), reviewed: reviewedHash, helper: .keep), heldInk)
         expect(redo.count == 2 && redo[0] == primaryInk && redo[1].objections == 0, "the same reviewer again replaces only its own opinion")
-        let carriedBoth = NoteHelp.withOpinion(objectionsInk, held: nil, carried: [primaryInk, NoteHelp.Ink(who: "Opus 5.5", text: "1. One more?", objections: 1)])
-        expect(carriedBoth.count == 3 && carriedBoth[0] == primaryInk && carriedBoth[1].who == "Opus 5.5" && carriedBoth[2].who == "GPT 6.1 Sol",
-               "the carried state is the complete ink: the primary and another reviewer's opinion stay", "\(carriedBoth)")
-        let turn = NoteHelp.withOpinion(NoteHelp.Ink(who: "GPT 6.1 Sol", text: "Looking at the week view next."), held: carriedBoth, carried: [])
+        let turn = apply(NoteHelp.Result(opinion: NoteHelp.Ink(who: "GPT 6.1 Sol", text: "Looking at the week view next."), reviewed: reviewedHash, helper: .keep),
+                         heldInk + [objectionsInk])
         expect(turn.count == 3 && turn[0] == primaryInk && turn[1].who == "Opus 5.5" && turn[2].text.hasPrefix("Looking"),
                "a reviewer's turn on the way replaces only its own earlier opinion")
         var opinionFile = NoteFile(id: "OP1", created: now)
@@ -1088,6 +1097,223 @@ struct NoteHelpCheck {
         expect(NoteTasks.action(NoteHelp.TaskItem(kind: .window, title: "", target: "com.example.app"), resolved: nil, type: nil) == .skip, "a window never launches its app")
         expect(NoteTasks.web("https://github.com/a/b/pull/1") != nil && NoteTasks.web("file:///etc/hosts") == nil && NoteTasks.web("x-man-page://ls") == nil,
                "a helper's link: http or https only")
+
+        // MARK: Round eighteen: one launch order, one result, pause ends app actions, ordinary chats never wait
+
+        // A. `NoteHelp.launch`, the order `NoteHelpers.prepare` runs every paid call's launch through. What waits is
+        // the call's sources; its words are made last, only when every step before passed.
+        final class LaunchWorld {
+            var vaultReadable = true
+            var cover: NoteHelp.Gathered<String> = .read("the note as it is now")
+            var gate: NoteHelp.Admission = .go
+            var live: NoteHelp.Live = .running
+            /// The vault changes while the words are shielded, this many times.
+            var changes = 0
+            var asked: [String] = []
+            var built: [String] = []
+        }
+        let world = LaunchWorld()
+        let launchSteps = NoteHelp.LaunchSteps<String, String, String>(
+            live: { world.live },
+            vault: { ready in world.asked.append("vault"); ready(world.vaultReadable) },
+            sources: { read in world.asked.append("sources"); read(world.cover) },
+            gate: { world.asked.append("gate"); return world.gate },
+            build: { raw, done in
+                world.asked.append("build")
+                let current = world.changes == 0
+                if !current { world.changes -= 1 }
+                world.built.append(raw)
+                done("shielded: " + raw, current)
+            },
+            words: { $0.isEmpty ? nil : "prompt from " + $0 })
+        var launched: NoteHelp.Launched<String, String>?
+        let launchNow = { launched = nil; world.asked = []; NoteHelp.launch(launchSteps) { launched = $0 } }
+        launchNow()
+        if case .go(let words, let told)? = launched {
+            expect(words == "prompt from shielded: the note as it is now" && told == "shielded: the note as it is now" && world.asked == ["vault", "sources", "gate", "build"],
+                   "a launch: the vault, the sources and cover, the gate, then the words, in that order", "\(world.asked)")
+        } else { expect(false, "a launch goes", "\(String(describing: launched))") }
+        // A run that waited (for room, its gate, Go on) holds only its sources. The vault becomes unreadable before it
+        // launches: refused at the first step, and its prompt was never built.
+        world.built = []
+        world.vaultReadable = false
+        launchNow()
+        if case .vaultUnreadable? = launched { expect(world.asked == ["vault"] && world.built.isEmpty, "the vault unreadable before launch: refused, no source read, no prompt built", "\(world.asked)") }
+        else { expect(false, "the vault unreadable before launch is refused", "\(String(describing: launched))") }
+        world.vaultReadable = true
+        // Its sources changed while it waited: the words are made from them as they are at launch.
+        world.cover = .read("the note, edited while it waited")
+        launchNow()
+        if case .go(let words, _)? = launched { expect(words.hasSuffix("edited while it waited"), "what waited is the sources: the prompt is made from them as they are at launch") }
+        else { expect(false, "a waiting call launches from its sources as they are then") }
+        // A secret saved while the words were being shielded: those words are thrown away and everything is done again.
+        world.built = []
+        world.changes = 1
+        launchNow()
+        if case .go? = launched {
+            expect(world.asked == ["vault", "sources", "gate", "build", "vault", "sources", "gate", "build"] && world.built.count == 2,
+                   "the vault changed under the words: made again from the start, never sent as they were", "\(world.asked)")
+        } else { expect(false, "words made under a vault that changed are made again") }
+        world.changes = 9
+        launchNow()
+        if case .vaultUnreadable? = launched { expect(true, "a vault that keeps changing: refused") } else { expect(false, "a vault that keeps changing is refused, never sent") }
+        world.changes = 0
+        // Recalculate with a cover that can't be read: step 2 refuses, and nothing after it is asked (it doesn't start).
+        expect(NoteHelp.coverChoice([], unread: 1) == .notHere, "a cover there but not readable yet isn't no cover")
+        world.cover = .refused
+        world.built = []
+        launchNow()
+        if case .refused? = launched { expect(world.asked == ["vault", "sources"] && world.built.isEmpty, "an unreadable cover: the call doesn't start (no gate, no prompt)", "\(world.asked)") }
+        else { expect(false, "an unreadable cover refuses the launch") }
+        world.cover = .read("the note as it is now")
+        // The gate, from what's true at launch: a refusal, a wait and a rebuild all come before any words.
+        for (gate, name) in [(NoteHelp.Admission.fail("A note it was checking against is private now."), "fail"), (.wait("Waiting for this note's place to be in front."), "wait"), (.rebuild, "rebuild")] {
+            world.gate = gate
+            world.built = []
+            launchNow()
+            let stopped: Bool
+            switch launched {
+            case .failed?: stopped = name == "fail"
+            case .wait?: stopped = name == "wait"
+            case .rebuild?: stopped = name == "rebuild"
+            default: stopped = false
+            }
+            expect(stopped && world.asked == ["vault", "sources", "gate"] && world.built.isEmpty, "the gate says \(name): nothing is built", "\(world.asked)")
+        }
+        world.gate = .go
+        world.live = .paused
+        launchNow()
+        if case .paused? = launched { expect(world.asked.isEmpty, "paused: it waits as it was, nothing asked, nothing built") } else { expect(false, "a paused run's call waits") }
+        world.live = .gone
+        launchNow()
+        if case .gone? = launched { expect(world.asked.isEmpty, "its run ended: nothing") } else { expect(false, "an ended run launches nothing") }
+        // A follow-up waits as the person wrote it (a raw line), never as shielded words.
+        var rawQueue = FollowUpQueue<String>()
+        let rawToken = RunToken()
+        rawQueue.add("@Petal and the saved-vault-key-12345 too", note: "N", token: rawToken)
+        let waitingLine: String? = rawQueue.next(note: "N", current: rawToken)?.text
+        expect(waitingLine == "@Petal and the saved-vault-key-12345 too", "a follow-up waits as the person's line (shielded only when its turn starts)")
+
+        // B. One result. A recalculation whose note went into conflict: its formula and `done` are one journal entry,
+        // held whole, and land in one change (or not at all); nothing says "done" without the formula.
+        let doneLine = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", asked: "@Petal make this recalculate", mac: "m", at: now)
+        let recalculated = NoteHelp.Result(answer: nil, calc: NoteHelp.Calc(label: "Total", formula: "sum()"), helper: .set(doneLine))
+        let journaled = HelperJournal.adding(recalculated, note: "RC1", notebook: "Inbox", sources: [], at: now, to: [])
+        expect(journaled.count == 1 && journaled[0].of == .answer, "a run's result is one journal entry")
+        expect(NoteHelp.answerTarget(papers: 2, readOnly: true) == .hold, "its note in conflict: the entry is held, nothing of it written")
+        var conflicted = NoteFile(id: "RC1", created: now)
+        conflicted.helper = NoteHelp.Helper(state: .working, who: "✦ Petal", step: "Working out the formula", at: now)
+        expect(conflicted.calc == nil && conflicted.helper?.state == .working, "while it's held the note says neither done nor a formula")
+        NoteHelp.applyAnswer(NoteFile.parse(journaled[0].answer, fallbackID: "RC1", fallbackDate: now), to: &conflicted)
+        expect(conflicted.calc?.formula == "sum()" && conflicted.helper?.state == .done, "kept: the formula and done land together, in one change")
+        let putAwayResult = NoteHelp.Result(answer: NoteHelp.Ink(who: "✦ Petal · put away today", text: "Put away: 2 tabs."),
+                                            task: [NoteHelp.TaskItem(kind: .tab, title: "Docs", target: "https://example.com/docs")], helper: .set(doneLine))
+        var away = NoteFile(id: "PA1", created: now)
+        putAwayResult.apply(to: &away)
+        expect(away.task.count == 1 && away.ink.count == 1 && away.helper?.state == .done, "a task put away is part of the same result as its line and done")
+        let resultBack = NoteHelp.Result(held: NoteFile.parse(putAwayResult.held(noteID: "PA1").serialized(), fallbackID: "PA1", fallbackDate: now))
+        expect(resultBack == putAwayResult, "a result reads back from the journal exactly", "\(resultBack)")
+        // Two results for one note are one entry: what landing each in turn would leave; one being written is left alone.
+        let answerInk = NoteHelp.Ink(who: "✦ Petal", text: "It's the 14th.")
+        let firstResult = NoteHelp.Result(answer: answerInk, steps: ["Looking at the page"], helper: .keep)
+        let opinionInk = NoteHelp.Ink(who: "GPT 6.1 Sol", text: "1. Which month?", objections: 1)
+        let opinionResult = NoteHelp.Result(opinion: opinionInk, reviewed: NoteHelp.inkHash(answerInk), steps: ["Reading the note"], helper: .set(doneLine))
+        var oneByOne = NoteFile(id: "TW1", created: now), together = NoteFile(id: "TW1", created: now)
+        firstResult.apply(to: &oneByOne)
+        opinionResult.apply(to: &oneByOne)
+        firstResult.then(opinionResult).apply(to: &together)
+        expect(oneByOne.serialized() == together.serialized() && together.ink.count == 2 && together.steps == ["Looking at the page", "GPT 6.1 Sol: Reading the note"],
+               "two results held for one note compose into what landing each in turn leaves", together.serialized())
+        let heldFirst = HelperJournal.adding(firstResult, note: "TW1", notebook: "Inbox", sources: ["S1"], at: now, to: [])
+        let bothHeld = HelperJournal.adding(opinionResult, note: "TW1", notebook: "Inbox", sources: ["S2"], at: now.addingTimeInterval(1), to: heldFirst)
+        expect(bothHeld.count == 1 && bothHeld[0].sources == ["S1", "S2"], "held together as one entry, with every note either read", "\(bothHeld.map(\.sources))")
+        let inFlight = HelperJournal.adding(opinionResult, note: "TW1", notebook: "Inbox", sources: [], at: now.addingTimeInterval(1), to: heldFirst, busy: [heldFirst[0].at])
+        expect(inFlight.count == 2 && inFlight[0] == heldFirst[0], "one being written now is left to land; the next goes after it")
+        // An entry an earlier Petal kept (the note's whole answer) still lands.
+        var legacy = NoteFile(id: "LG1", created: now)
+        legacy.ink = [answerInk, { var ink = opinionInk; ink.opinion = true; return ink }()]
+        legacy.helper = doneLine
+        var legacyTarget = NoteFile(id: "LG1", created: now)
+        NoteHelp.applyAnswer(NoteFile.parse(legacy.serialized(), fallbackID: "LG1", fallbackDate: now), to: &legacyTarget)
+        expect(legacyTarget.ink.count == 2 && legacyTarget.helper?.state == .done, "an older held answer lands as it was")
+        // A source moved into a Private notebook while the AI worked: the gate, asked again right before the result
+        // lands, refuses it (the run then fails with this reason, and nothing it produced is published).
+        var landingFacts = NoteHelp.GateFacts()
+        landingFacts.landing = true
+        landingFacts.notebook = "Inbox"
+        landingFacts.startNotebook = "Inbox"
+        landingFacts.sources = [(id: "S1", notebook: "Research")]
+        landingFacts.privacy = { _ in .open }
+        expect(NoteHelp.admit(landingFacts) == .go, "its sources still readable: the result lands (its AI or its place don't matter any more)")
+        landingFacts.privacy = { $0 == "Research" ? .closed : .open }
+        if case .fail(let why) = NoteHelp.admit(landingFacts) { expect(why.contains("private now"), "a source made Private mid-run: the result is refused at landing, plainly", why) }
+        else { expect(false, "a source made Private mid-run fails the run at landing") }
+        landingFacts.privacy = { _ in .open }
+        landingFacts.sources = [(id: "S1", notebook: nil)]
+        if case .fail = NoteHelp.admit(landingFacts) { expect(true, "a source gone") } else { expect(false, "a source gone mid-run fails the run at landing") }
+        landingFacts.sources = []
+        landingFacts.notebook = "Elsewhere"
+        if case .fail = NoteHelp.admit(landingFacts) { expect(true, "moved") } else { expect(false, "the destination moved to another notebook mid-run: refused at landing") }
+        // A reviewer never changes the primary ink: its result holds only its own opinion, applied onto the paper's
+        // ink as it is when it lands. A newer answer synced in from another Mac meanwhile stays, and the opinion says
+        // it reviewed an earlier one.
+        let newerAnswer = NoteHelp.Ink(who: "✦ Petal", text: "It's the 21st, the page changed.")
+        var synced = NoteFile(id: "RV1", created: now)
+        synced.ink = [newerAnswer]
+        opinionResult.apply(to: &synced)
+        expect(synced.ink.count == 2 && synced.ink[0] == newerAnswer && synced.ink[1].opinion && synced.ink[1].who == "GPT 6.1 Sol",
+               "a reviewer's result never touches the primary ink: the newer answer stays", "\(synced.ink)")
+        expect(NoteHelp.reviewedEarlier(synced.ink[1], among: synced.ink), "and its opinion says it reviewed an earlier answer")
+        var same = NoteFile(id: "RV2", created: now)
+        same.ink = [answerInk]
+        opinionResult.apply(to: &same)
+        expect(same.ink[0] == answerInk && !NoteHelp.reviewedEarlier(same.ink[1], among: same.ink), "the answer it reviewed still there: said plainly, nothing added")
+        let reviewedBack = NoteFile.parse(same.serialized(), fallbackID: "RV2", fallbackDate: now).ink
+        expect(reviewedBack == same.ink && reviewedBack[1].reviewed == NoteHelp.inkHash(answerInk), "which answer it reviewed is kept with the opinion")
+        var emptyInk = NoteFile(id: "RV3", created: now)
+        NoteHelp.Result(opinion: opinionInk, reviewed: "", helper: .keep).apply(to: &emptyInk)
+        expect(emptyInk.ink.count == 1 && emptyInk.ink[0].opinion, "an opinion alone never becomes the primary")
+        // A finished answer lands, paused or not: a paused run completes as succeeded; a stopped one never does.
+        let pausedDone = RunToken()
+        pausedDone.pause()
+        expect(pausedDone.complete(.succeeded) && pausedDone.completion == .succeeded && pausedDone.state == .finished, "Pause during the last hop: the finished answer still lands")
+        var pausedQueue = FollowUpQueue<String>()
+        let pausedAsked = RunToken()
+        pausedQueue.add("and then this", note: "N1", token: pausedAsked, line: "follow-up line")
+        pausedQueue.addReview(sol, asked: "@Petal have GPT 6.1 Sol look for holes", note: "N1", token: pausedAsked, line: "review line")
+        let pausedSettled = pausedQueue.settle(note: "N1", token: pausedAsked, succeeded: false)
+        expect(pausedSettled.review == nil && Set(pausedSettled.dropped) == ["follow-up line", "review line"],
+               "paused at its end: nothing asked of it is handed on, every line is given back (Pause stops what would happen next)")
+
+        // D. An ordinary chat's events are delivered with the vault index unsettled, with no wait: they never pass the
+        // ingestion queue or `shield` (which, here, would never come back).
+        let never = DispatchSemaphore(value: 0)
+        let ingest = DispatchQueue(label: "check.ingest")
+        final class Delivered: @unchecked Sendable { var chat: [String] = []; var helper: [String] = []; var shielded = 0 }
+        let delivered = Delivered()
+        AgentIngest.deliver(["one", "two"], helper: false, queue: ingest, parse: { $0 }, shield: { (events: [String]) -> [(String, Shielded?)]? in
+            delivered.shielded += 1
+            never.wait()
+            return nil
+        }, apply: { shown in delivered.chat += (shown ?? []).map(\.0) })
+        AgentIngest.after(helper: false, queue: ingest) { delivered.chat.append("ended") }
+        // The vault's read blocked for good on the ingestion queue: a chat never notices.
+        ingest.async { never.wait() }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        expect(delivered.chat == ["one", "two", "ended"] && delivered.shielded == 0, "a chat's events and its end arrive in order with the vault blocked, never shielded on the way", "\(delivered.chat)")
+        never.signal()
+        // A helper's pass its queue, shielded whole, in order, before anything reads them.
+        let helperQueue = DispatchQueue(label: "check.helper")
+        AgentIngest.deliver(["a secret step"], helper: true, queue: helperQueue, parse: { $0 }, shield: { $0.map { ("shielded " + $0, nil) } },
+                            apply: { shown in delivered.helper += (shown ?? []).map(\.0) })
+        AgentIngest.after(helper: true, queue: helperQueue) { delivered.helper.append("ended") }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        expect(delivered.helper == ["shielded a secret step", "ended"], "a helper's events are shielded on its queue first, its end after them", "\(delivered.helper)")
+        // What a chat is doing, shown outside its panel: redacted now with a settled index, else a plain line; no wait.
+        expect(NoteShield.now("Running  deploy --token \(secret)", index: nil).text == "Working…", "the index not made yet: a plain line, never the raw step")
+        expect(NoteShield.now("Running  deploy --token \(secret)", index: .unavailable).text == "Working…", "the vault unreadable: a plain line")
+        let shownNow = NoteShield.now("Running  deploy --token \(secret)", index: index).text
+        expect(shownNow.hasPrefix("Running  deploy") && !shownNow.contains(secret), "the index settled: redacted at once, synchronously", shownNow)
 
         print("note helpers: \(passed) passed" + (failures > 0 ? ", \(failures) failed" : ""))
         if failures > 0 { exit(1) }
