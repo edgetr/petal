@@ -15,20 +15,6 @@ struct NoteImport: @unchecked Sendable {
     /// The selection it replaces when it's in (its length, and the text it held then).
     var length: Int = 0
     var selected: String = ""
-    /// A picture from a note's fragment (a paste): its spot's marker in the open editor (a token unique everywhere:
-    /// only the editor holding that very marker puts it there; anywhere else it goes at the end), its caption, and
-    /// the link it was copied with (read only through NoteStore.pictureFile). One picture, one import. A paste's
-    /// picture that can't be read is said in words at its spot.
-    var anchor: String? = nil
-    var captions: [String]? = nil
-    var pasted: PastedLink? = nil
-}
-
-/// A pasted picture's link as it was copied: the link, the folder of the note it was in, and that note's root.
-struct PastedLink: Equatable, Sendable {
-    var link: String
-    var folder: String
-    var root: String
 }
 
 // MARK: - Places
@@ -719,6 +705,9 @@ enum NoteText {
     static func unpasted(_ caption: String) -> String {
         caption.isEmpty ? "(A picture couldn't be pasted.)" : "(The picture “\(caption)” couldn't be pasted.)"
     }
+
+    /// What a copied picture whose bytes aren't in memory (it never loaded) becomes in the copy.
+    static let uncopied = "(A picture couldn't be copied.)"
 
     static func plain(_ text: String) -> String {
         guard text.contains("](") else { return text }
@@ -1713,33 +1702,18 @@ enum NoteShelf {
         return keys
     }
 
-    /// What a pasted picture becomes in the note it's pasted into (one rule, no other cases): kept as it is only
-    /// when the file recorded at copy is under this notes' root and already in this note's own folder (`own`,
-    /// "<root>/Pictures/<hash>"); else copied into that folder under a fresh name; no file recorded (it couldn't be
-    /// resolved when copied): not pasted as a link at all.
-    enum PastedPicture: Equatable { case keep(String), copy, missing }
-
-    static func pastePicture(recorded: String?, root: String, own: String) -> PastedPicture {
-        guard let recorded else { return .missing }
-        if within(recorded, root) != nil, let name = within(recorded, own), !name.contains("/") { return .keep(name) }
-        return .copy
+    /// A picture link that already points into this note's own folder ("Pictures/<hash>", one file directly in it),
+    /// by the words alone: its file name; nil otherwise. A paste into the same note keeps such a line as it is.
+    static func ownPicture(_ link: String, noteFolder: String, noteID: String) -> String? {
+        guard !noteID.isEmpty, let target = pictureTarget(link, noteFolder: noteFolder) else { return nil }
+        let own = (noteFolder as NSString).deletingLastPathComponent + "/" + pictureFolder(id: noteID)
+        guard let name = within(target, own), !name.contains("/") else { return nil }
+        return name
     }
-
-    /// Two paths for the same file however each is spelled (/private/var is /var).
-    static func samePath(_ a: String, _ b: String) -> Bool { respelled(a) == respelled(b) }
 
     static func respelled(_ path: String) -> String {
         for top in ["/private/var/", "/private/tmp/", "/private/etc/"] where path.hasPrefix(top) { return String(path.dropFirst("/private".count)) }
         return path
-    }
-
-    /// A spot in an editor's text (a pasted picture still being read) after an edit replaced `oldLength`
-    /// characters at `at` with `newLength`: unchanged when the edit is at or after it, moved by the difference when
-    /// it's before, and to the edit's end when the spot was inside what was replaced (a reload).
-    static func shiftAnchor(_ spot: Int, at: Int, oldLength: Int, newLength: Int) -> Int {
-        if spot <= at { return spot }
-        if spot >= at + oldLength { return spot + newLength - oldLength }
-        return at + newLength
     }
 
     /// Where pasted pictures go when they're in: the selection they were pasted over when the text there still says

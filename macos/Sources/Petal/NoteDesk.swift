@@ -1482,13 +1482,7 @@ final class NoteDesk {
                         return self.say("That picture isn't downloaded yet: Try again on the note once it is.")
                     case .nothingRead:
                         self.store.endImport(noteID, token, journal: true)
-                        let now = self.store.notes.first { $0.noteID == noteID && $0.version == nil }?.key ?? ""
-                        // A pasted picture that can't be read is said in words where it went (or at the end).
-                        if let captions = items.captions {
-                            for caption in captions { self.putWords(NoteRich.unpasted(caption).markdown, into: now, anchor: items.anchor) }
-                            return
-                        }
-                        self.letGoIfEmpty(now)
+                        self.letGoIfEmpty(self.store.notes.first { $0.noteID == noteID && $0.version == nil }?.key ?? "")
                         return self.say("Petal couldn't read that picture.")
                     case .putIn:
                         return self.store.putIn(noteID, token, root: pastedIn) { stored, left in
@@ -1502,9 +1496,9 @@ final class NoteDesk {
                     case .accepted: break
                     }
                     guard let (nowKey, accepted) = taken else { return }
-                    NotePictures.shared.previewBatch(accepted.enumerated().map { ($1.file, readyImages[$0]) })
+                    NotePictures.shared.previewBatch(accepted.enumerated().map { ($1.file, readyImages[$0], ready[$0].data) })
                     self.fresh.remove(nowKey)
-                    if self.insertPictures(nowKey, accepted, at: items.at, length: items.length, selected: items.selected, anchor: items.anchor) {
+                    if self.insertPictures(nowKey, accepted, at: items.at, length: items.length, selected: items.selected) {
                         // Into the note now (and its snapshot), not a moment later.
                         self.editors[nowKey]?.flush()
                     } else {
@@ -1528,13 +1522,6 @@ final class NoteDesk {
         store.retryPictures(key)
         guard let paper = store.paper(key) else { return }
         for (token, sources) in store.takeWaiting(paper.noteID) {
-            // A pasted picture tried again keeps its link (read only through the one rule), caption and marker.
-            if let source = sources.first, sources.count == 1, let link = source.link, let path = source.path, let folder = source.folder {
-                let item = NoteImport(files: [URL(fileURLWithPath: path)], png: nil, tiff: nil, at: -1, anchor: source.anchor, captions: [source.caption],
-                                      pasted: PastedLink(link: link, folder: folder, root: source.root ?? URL(fileURLWithPath: folder).deletingLastPathComponent().path))
-                if importPictures(item, into: key) { store.endImport(paper.noteID, token, journal: true) } else { store.keepWaiting(paper.noteID, token, sources) }
-                continue
-            }
             let files = sources.compactMap { $0.path.map(URL.init(fileURLWithPath:)) }
             if !files.isEmpty, importPictures(NoteImport(files: files, png: nil, tiff: nil, at: -1), into: key) {
                 store.endImport(paper.noteID, token, journal: true)
@@ -1558,29 +1545,27 @@ final class NoteDesk {
     /// Pictures' references into a note's open editor, as ordinary text, at the cursor's place then; false when no
     /// editor is open on it.
     private func insertPictures(_ key: String, _ pictures: [(path: String, file: URL, caption: String)], at: Int, length: Int = 0,
-                                selected: String = "", anchor: String? = nil) -> Bool {
+                                selected: String = "") -> Bool {
         guard let editor = editors[key] else { return false }
         var at = at, length = length
         for picture in pictures {
             // The first replaces the selection it was pasted over (when it's still that text), or goes at a pasted
             // picture's spot.
-            guard editor.insert(picture.path, picture.file, picture.caption, at, length, selected, anchor) else { return false }
+            guard editor.insert(picture.path, picture.file, picture.caption, at, length, selected) else { return false }
             at = -1   // the next one after it, at the cursor
             length = 0
         }
         return true
     }
 
-    /// A line of words into a note: at a pasted picture's spot in its open editor, else at the end through a based
-    /// write (as a picture's line would go).
-    private func putWords(_ line: String, into key: String, anchor: String?) {
-        if let editor = editors[key], editor.insertWords(line, anchor) {
-            editor.flush()
-            return
-        }
-        store.change(key) { file in
-            file.body += (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + line
-        }
+    /// Pictures pasted as bytes (a copy from a note), taken as a pasted screenshot's are: accepted in memory and
+    /// journaled at once (their files written through the note's session), and shown at once.
+    func acceptCopiedPictures(_ key: String, _ items: [(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? {
+        guard let accepted = store.acceptPictures(key, items) else { return nil }
+        NotePictures.shared.previewBatch(accepted.enumerated().compactMap { n, picture in
+            NSImage(data: items[n].data).map { (picture.file, $0, items[n].data) }
+        })
+        return accepted
     }
 
     /// A note's file got another name on disk than it was shown with: everything showing it follows.

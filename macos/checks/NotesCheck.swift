@@ -714,16 +714,14 @@ struct NotesCheck {
                && NoteShelf.resolvedLink("./a/./b.png", from: "/n/Inbox") == "/n/Inbox/a/b.png", "a handwritten link: beside the note")
         expect(NoteShelf.resolvedLink("../../../../x.png", from: "/n/Inbox") == nil && NoteShelf.resolvedLink("/abs.png", from: "/n/Inbox") == nil,
                "above /, or absolute: none")
-        // A pasted picture: kept only when it's already in this note's own folder under this root; else copied in;
-        // nothing recorded, said in words.
-        expect(NoteShelf.pastePicture(recorded: "/n/Pictures/h1/p.png", root: "/n", own: "/n/Pictures/h1") == .keep("p.png"), "already its own: kept")
-        expect(NoteShelf.pastePicture(recorded: "/n/Pictures/h2/p.png", root: "/n", own: "/n/Pictures/h1") == .copy
-               && NoteShelf.pastePicture(recorded: "/n/Inbox/Trip.assets/p.png", root: "/n", own: "/n/Pictures/h1") == .copy
-               && NoteShelf.pastePicture(recorded: "/other/Pictures/h1/p.png", root: "/n", own: "/n/Pictures/h1") == .copy
-               && NoteShelf.pastePicture(recorded: "/n/Pictures/h1/sub/p.png", root: "/n", own: "/n/Pictures/h1") == .copy,
-               "another note's, a handwritten one, another root's, or deeper: copied in")
-        expect(NoteShelf.pastePicture(recorded: nil, root: "/n", own: "/n/Pictures/h1") == .missing, "nothing recorded: not pasted as a link")
-        expect(NoteShelf.samePath("/private/var/x/p.png", "/var/x/p.png") && !NoteShelf.samePath("/var/x/p.png", "/var/y/p.png"), "one file however it's spelled")
+        // A pasted picture's line kept as it is only when it already points into this note's own folder (words alone).
+        let ownN1 = NoteShelf.pictureFolder(id: "N1")
+        expect(NoteShelf.ownPicture("../\(ownN1)/p.png", noteFolder: "/n/Work", noteID: "N1") == "p.png", "its own picture: kept, from any notebook")
+        expect(NoteShelf.ownPicture("../\(NoteShelf.pictureFolder(id: "N2"))/p.png", noteFolder: "/n/Work", noteID: "N1") == nil
+               && NoteShelf.ownPicture("Trip.assets/p.png", noteFolder: "/n/Work", noteID: "N1") == nil
+               && NoteShelf.ownPicture("../\(ownN1)/sub/p.png", noteFolder: "/n/Work", noteID: "N1") == nil
+               && NoteShelf.ownPicture("../\(ownN1)/p.png", noteFolder: "/n/Work", noteID: "") == nil,
+               "another note's, a handwritten one, deeper, or no note: taken from its bytes")
         // A paste's range: the selection when it still holds what was selected; else no replacing, at that place.
         expect(NoteShelf.pasteRange(at: 5, length: 7, selected: "REPLACE", text: "keep REPLACE end") == NSRange(location: 5, length: 7), "still there: replaced")
         expect(NoteShelf.pasteRange(at: 5, length: 7, selected: "REPLACE", text: "keep OTHERED end") == NSRange(location: 5, length: 0)

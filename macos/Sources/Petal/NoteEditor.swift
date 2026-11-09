@@ -120,7 +120,12 @@ final class NotePictures {
 
     func isBroken(_ link: String, in folder: URL) -> Bool { Self.target(link, in: folder).map { broken[$0] != nil } ?? true }
 
-    func preview(_ file: URL, _ image: NSImage) { previewBatch([(file, image)]) }
+    func preview(_ file: URL, _ image: NSImage, data: Data? = nil) { previewBatch([(file, image, data)]) }
+
+    /// A picture's bytes as read or accepted, by where its link leads: what a copy carries (never read from disk
+    /// when it's copied).
+    func bytes(_ key: String) -> Data? { bytes[key] }
+    @ObservationIgnored private var bytes: [String: Data] = [:]
 
     /// Read (again) what `key` was asked for with; an image already shown stays until the new one is in.
     private func read(_ key: String) {
@@ -133,6 +138,7 @@ final class NotePictures {
                 MainActor.assumeIsolated {
                     self.asked.remove(key)
                     if let data, let image = NSImage(data: data) {
+                        self.bytes[key] = data
                         self.store(image, key)
                     } else if self.images[key] == nil {
                         // Said once, when it turns broken: a redraw never asks again by itself.
@@ -173,9 +179,10 @@ final class NotePictures {
 
     /// Many pictures in at once (a paste, an import), their images made off the main thread: stored together and
     /// said with one arrival, so each editor scans its pictures once for all of them.
-    func previewBatch(_ items: [(file: URL, image: NSImage)]) {
+    func previewBatch(_ items: [(file: URL, image: NSImage, data: Data?)]) {
         guard !items.isEmpty else { return }
         for item in items {
+            if let data = item.data { bytes[item.file.path] = data }
             images[item.file.path] = item.image
             broken[item.file.path] = nil
         }
@@ -364,13 +371,13 @@ enum NoteRich {
     /// them. Other apps get plain text (`plainText`) beside it.
     static let fragmentType = NSPasteboard.PasteboardType("tech.edgetr.petal.note-fragment")
 
+    /// A copied selection: its Markdown, the folder and id of the note it came from, and every picture's bytes in
+    /// the order of its picture lines (pictures travel as bytes, like a pasted screenshot).
     struct Fragment: Codable, Equatable {
         var markdown: String
         var folder: String
         var note: String
-        /// The notes' root it was copied in, and each picture line's file in order, resolved (contained) when copied.
-        var root: String?
-        var files: [String?]?
+        var pictures: [Data] = []
     }
 
     /// What a picture that can't be pasted becomes: a short line of words, never a link to something else.
@@ -863,21 +870,24 @@ final class NoteTextView: NSTextView {
     /// The note this editor shows (its id): whether a pasted picture is already its own.
     var noteID = ""
 
-    /// The selection, written as the note's own fragment and as plain text for other apps. False with nothing
-    /// selected (nothing written).
+    /// The selection, written as the note's own fragment and as plain text for other apps, with no disk access:
+    /// each picture's bytes from memory (the picture this editor shows, or a paste's bytes still being written);
+    /// one never loaded is copied as a line saying so. False with nothing selected (nothing written).
     @discardableResult
     func copySelection(to board: NSPasteboard) -> Bool {
         let range = selectedRange()
         guard range.length > 0, let storage = textStorage, NSMaxRange(range) <= storage.length else { return false }
         let blocks = NoteRich.blocks(storage.attributedSubstring(from: range))
-        // Each picture's file beside its line, by the one link rule (NoteStore.pictureFile: contained in this notes'
-        // root, no symbolic link on the way); one it refuses is recorded as none (it can't be pasted as a picture).
-        let files: [String?] = blocks.compactMap { block -> String?? in
-            guard case .image(let path, _) = block else { return nil }
-            return .some(NoteStore.pictureFile(path, noteFolder: noteFolder)?.path)
+        var pictures: [Data] = []
+        let copied = blocks.map { block -> NoteBlock in
+            guard case .image(let path, _) = block else { return block }
+            guard let key = NotePictures.target(path, in: noteFolder), let bytes = MainActor.assumeIsolated({ NotePictures.shared.bytes(key) }) else {
+                return .text(NoteText.uncopied)
+            }
+            pictures.append(bytes)
+            return block
         }
-        let fragment = NoteRich.Fragment(markdown: NoteBlock.body(blocks), folder: noteFolder.path, note: noteID,
-                                         root: noteFolder.deletingLastPathComponent().path, files: files)
+        let fragment = NoteRich.Fragment(markdown: NoteBlock.body(copied), folder: noteFolder.path, note: noteID, pictures: pictures)
         guard let data = try? JSONEncoder().encode(fragment) else { return false }
         board.declareTypes([NoteRich.fragmentType, .string], owner: nil)
         board.setData(data, forType: NoteRich.fragmentType)
@@ -894,120 +904,44 @@ final class NoteTextView: NSTextView {
         if copySelection(to: .general) { delete(sender) } else { super.cut(sender) }
     }
 
-    /// A note's fragment on the pasteboard, put in at once over the selection, as one undoable change: its words and
-    /// cards, and every picture by one rule (NoteShelf.pastePicture): already in this note's own folder, its line
-    /// as it is; nothing recorded for it, a line saying it couldn't be pasted; else it needs its bytes copied in,
-    /// and becomes an ordinary import owned by the note (`importPictures`: journaled before it's read, keeping a
-    /// new note from being put away as empty, landing at its spot here or at the end once this editor is gone, and
-    /// said in words if it can't be read). False when there's no fragment.
+    /// How pictures pasted as bytes are taken by this note: the screenshot paste's path (the desk's accept: in
+    /// memory and journaled at once, the file written in the background), giving each its line.
+    var acceptPictures: ([(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? = { _ in nil }
+    /// Saves what's here now (and its journal snapshot), not a moment later.
+    var flushNow: () -> Void = {}
+
+    /// A note's fragment on the pasteboard, put in at once over the selection as one undoable change: its words,
+    /// cards and pictures. Into the same note, a picture line already pointing into this note's own folder stays as
+    /// it is (by the words alone); every other picture is taken from its bytes by the screenshot paste's path and
+    /// goes in with the rest. Undo takes it out like any text; redo puts it back. False when there's no fragment.
     @discardableResult
     func pasteNote(from board: NSPasteboard) -> Bool {
         guard let data = board.data(forType: NoteRich.fragmentType), let fragment = try? JSONDecoder().decode(NoteRich.Fragment.self, from: data) else { return false }
-        let blocks = NoteBlock.blocks(fragment.markdown)
-        let root = noteFolder.deletingLastPathComponent().path
-        let own = noteID.isEmpty ? "" : root + "/" + NoteShelf.pictureFolder(id: noteID)
-        // What goes in now, and the pictures still to copy in (each by where it goes among what goes in now).
-        var now: [NoteBlock] = []
-        var copies: [(before: Int, file: String, caption: String, link: PastedLink)] = []
+        var blocks = NoteBlock.blocks(fragment.markdown)
+        var items: [(ext: String, data: Data, caption: String)] = []
+        var at: [Int] = []
         var n = 0
-        let sourceRoot = fragment.root ?? URL(fileURLWithPath: fragment.folder).deletingLastPathComponent().path
-        for block in blocks {
-            guard case .image(let path, let caption) = block else { now.append(block); continue }
-            let recorded = fragment.files.map { $0.indices.contains(n) ? $0[n] : nil } ?? NoteShelf.pictureTarget(path, noteFolder: fragment.folder)
+        for (index, block) in blocks.enumerated() {
+            guard case .image(let path, let caption) = block else { continue }
+            let bytes = n < fragment.pictures.count ? fragment.pictures[n] : nil
             n += 1
-            switch own.isEmpty ? .missing : NoteShelf.pastePicture(recorded: recorded, root: root, own: own) {
-            case .keep(let name): now.append(.image(path: NoteShelf.pictureLink(id: noteID, name: name), caption: caption))
-            case .missing: now.append(NoteRich.unpasted(caption))
-            case .copy:
-                if let recorded { copies.append((now.count, recorded, caption, PastedLink(link: path, folder: fragment.folder, root: sourceRoot))) }
-                else { now.append(NoteRich.unpasted(caption)) }
+            if fragment.note == noteID, let name = NoteShelf.ownPicture(path, noteFolder: noteFolder.path, noteID: noteID) {
+                blocks[index] = .image(path: NoteShelf.pictureLink(id: noteID, name: name), caption: caption)
+            } else if let bytes {
+                let ext = (path as NSString).pathExtension.lowercased()
+                items.append((ext.isEmpty ? "png" : ext, bytes, caption))
+                at.append(index)
+            } else {
+                blocks[index] = NoteRich.unpasted(caption)
             }
         }
-        // Each block's start in the text that goes in, for the spots of the pictures still to come.
-        var starts: [Int] = []
-        var offset = 0
-        for block in now {
-            starts.append(offset)
-            offset += NoteRich.attributed([block], folder: folderRef, style: style).length + 1
+        let accepted = items.isEmpty ? [] : acceptPictures(items).flatMap { $0.count == items.count ? $0 : nil }
+        for (k, index) in at.enumerated() {
+            guard case .image(_, let caption) = blocks[index] else { continue }
+            blocks[index] = accepted.map { .image(path: $0[k].path, caption: caption) } ?? NoteRich.unpasted(caption)
         }
-        let at = selectedRange().location
-        let text = NoteRich.attributed(now, folder: folderRef, style: style)
-        insertText(text, replacementRange: selectedRange())
-        // One picture, one import, one marker: each lands (or is said in words) at its own spot, in order.
-        for copy in copies {
-            // Before the block it came before (at its line's start), or after everything that went in.
-            let spot = at + (copy.before < starts.count ? starts[copy.before] : text.length)
-            importPictures?(NoteImport(files: [URL(fileURLWithPath: copy.file)], png: nil, tiff: nil, at: -1,
-                                       anchor: anchor(at: spot), captions: [copy.caption], pasted: copy.link))
-        }
-        return true
-    }
-
-    // MARK: Spots for pictures on their way
-
-    /// Spots in this text for pasted pictures still being read, by marker (a token unique everywhere, so a marker
-    /// from another editor, or this one before it reopened, is never taken for one here). They follow every edit
-    /// (NoteShelf.shiftAnchor); a reload moves them to the end. `order`: their order in the paste.
-    private(set) var anchors: [String: Int] = [:]
-    private var order: [String: Int] = [:]
-    private var nextOrder = 0
-    private var editing: NSObjectProtocol?
-
-    func anchor(at spot: Int) -> String {
-        let token = UUID().uuidString
-        nextOrder += 1
-        anchors[token] = spot
-        order[token] = nextOrder
-        if editing == nil, let storage = textStorage {
-            editing = NotificationCenter.default.addObserver(forName: NSTextStorage.didProcessEditingNotification, object: storage, queue: nil) { [weak self] note in
-                guard let storage = note.object as? NSTextStorage, storage.editedMask.contains(.editedCharacters) else { return }
-                let range = storage.editedRange, delta = storage.changeInLength
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    for (token, spot) in self.anchors {
-                        self.anchors[token] = NoteShelf.shiftAnchor(spot, at: range.location, oldLength: range.length - delta, newLength: range.length)
-                    }
-                }
-            }
-        }
-        return token
-    }
-
-    /// Where a picture on its way goes now: at its marker only when this editor holds that very marker (let go
-    /// then); otherwise at the end.
-    private func take(_ token: String?) -> Int {
-        let length = textStorage?.length ?? 0
-        guard let token, let spot = anchors.removeValue(forKey: token) else { return length }
-        order[token] = nil
-        return min(spot, length)
-    }
-
-    /// Something goes in at `spot`, never moving the person's cursor or selection: the markers waiting at that very
-    /// spot later in the paste move past it, so pictures land in their order whichever is read first.
-    private func keepOrder(_ rank: Int?, spot: Int, inserting: () -> Void) {
-        let later = anchors.filter { $0.value == spot && (order[$0.key] ?? 0) > (rank ?? Int.max) }.map(\.key)
-        let saved = selectedRange()
-        let before = textStorage?.length ?? 0
-        setSelectedRange(NSRange(location: spot, length: 0))
-        inserting()
-        let added = (textStorage?.length ?? 0) - before
-        for key in later { anchors[key] = (anchors[key] ?? spot) + added }
-        setSelectedRange(saved.location >= spot ? NSRange(location: saved.location + added, length: saved.length) : saved)
-    }
-
-    /// A line of words (a pasted picture that couldn't be read) at its marker's spot, else at the end.
-    @discardableResult
-    func insertWords(_ words: String, anchor token: String?) -> Bool {
-        guard let storage = textStorage else { return false }
-        let rank = token.flatMap { order[$0] }
-        let spot = take(token)
-        let ns = storage.string as NSString
-        let line = NSMutableAttributedString()
-        if spot > 0, ns.character(at: spot - 1) != 10 { line.append(NSAttributedString(string: "\n", attributes: NoteRich.attributes("text", style))) }
-        line.append(NoteRich.attributed([.text(words)], folder: folderRef, style: style))
-        if spot < storage.length { line.append(NSAttributedString(string: "\n", attributes: NoteRich.attributes("text", style))) }
-        keepOrder(rank, spot: spot) { insertText(line, replacementRange: selectedRange()) }
-        changed()
+        insertText(NoteRich.attributed(blocks, folder: folderRef, style: style), replacementRange: selectedRange())
+        if !items.isEmpty { flushNow() }
         return true
     }
 
@@ -1049,18 +983,8 @@ final class NoteTextView: NSTextView {
     /// A picture saved for the note, on its own line at `at` (the end, past it; -1: at the cursor), replacing the
     /// `length` characters there when they still say `selected` (what was selected when it was pasted; text that
     /// changed meanwhile is never replaced: NoteShelf.pasteRange). False when it can't be.
-    func insertPicture(path: String, file: URL, caption: String, at: Int, length: Int = 0, selected: String = "", anchor token: String? = nil) -> Bool {
+    func insertPicture(path: String, file: URL, caption: String, at: Int, length: Int = 0, selected: String = "") -> Bool {
         guard let storage = textStorage else { return false }
-        if let token {
-            // A pasted picture: at its marker's spot (it followed every edit), in its order with the others there;
-            // a marker this editor doesn't hold (another editor's, or from before it reopened): at the end.
-            let rank = order[token]
-            let spot = take(token)
-            // At the very end, no empty line after it (nobody is typing there).
-            let trailing = spot < storage.length
-            keepOrder(rank, spot: spot) { insertLine(PictureCell(path: path, folder: folderRef, caption: caption), kind: "image", trailing: trailing) }
-            return true
-        }
         if at >= 0 { setSelectedRange(NoteShelf.pasteRange(at: at, length: length, selected: selected, text: storage.string)) }
         insertLine(PictureCell(path: path, folder: folderRef, caption: caption), kind: "image")
         return true
@@ -1073,7 +997,7 @@ final class NoteTextView: NSTextView {
     }
 
     /// An attachment on a line of its own, at the cursor.
-    private func insertLine(_ cell: NSTextAttachmentCell, kind: String, trailing: Bool = true) {
+    private func insertLine(_ cell: NSTextAttachmentCell, kind: String) {
         let attachment = NSTextAttachment()
         attachment.attachmentCell = cell
         let line = NSMutableAttributedString()
@@ -1083,7 +1007,7 @@ final class NoteTextView: NSTextView {
         let card = NSMutableAttributedString(attachment: attachment)
         card.addAttributes(NoteRich.attributes(kind, style), range: NSRange(location: 0, length: card.length))
         line.append(card)
-        if trailing { line.append(NSAttributedString(string: "\n", attributes: NoteRich.attributes(kind, style))) }
+        line.append(NSAttributedString(string: "\n", attributes: NoteRich.attributes(kind, style)))
         insertText(line, replacementRange: selectedRange())
         typingAttributes = NoteRich.attributes("text", style)
         changed()
@@ -1098,9 +1022,7 @@ final class NoteEditorHandle {
     var flush: () -> Void = {}
     /// Typed and not saved yet: the note is fenced against a read of the folder only then (NoteShelf.fenceEditor).
     var busy: () -> Bool = { false }
-    var insert: (String, URL, String, Int, Int, String, String?) -> Bool = { _, _, _, _, _, _, _ in false }
-    /// A line of words at a pasted picture's spot (one that couldn't be read).
-    var insertWords: (String, String?) -> Bool = { _, _ in false }
+    var insert: (String, URL, String, Int, Int, String) -> Bool = { _, _, _, _, _, _ in false }
 }
 
 /// The editor in SwiftUI: the note's lines in, the note's lines out (saved a moment after the person stops typing).
@@ -1121,6 +1043,8 @@ struct NoteEditorView: NSViewRepresentable {
 
     /// Whether two note ids are the same note now (an id-less note given its own is followed: NoteShelf.editorKeeps).
     var sameNote: (String, String, String) -> Bool = { a, _, b in a == b }
+    /// Pictures pasted as bytes (a copy from a note): taken by the screenshot paste's path.
+    var acceptPictures: ([(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? = { _ in nil }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         /// The Edit menu's Undo and Redo (and typing's undo) use the editor's own history.
@@ -1235,6 +1159,7 @@ struct NoteEditorView: NSViewRepresentable {
         coordinator.body = paper.file.body
         coordinator.base = paper.revision
         text.importPictures = importPictures
+        text.acceptPictures = acceptPictures
         text.noteID = paper.noteID
         let handle = NoteEditorHandle()
         handle.flush = { [weak coordinator, weak text] in
@@ -1242,13 +1167,13 @@ struct NoteEditorView: NSViewRepresentable {
             MainActor.assumeIsolated { coordinator.flush(text) }
         }
         handle.busy = { [weak coordinator] in MainActor.assumeIsolated { coordinator?.marker.dirty == true } }
-        handle.insert = { [weak text] path, file, caption, at, length, selected, anchor in
+        handle.insert = { [weak text] path, file, caption, at, length, selected in
             guard let text else { return false }
-            return MainActor.assumeIsolated { text.insertPicture(path: path, file: file, caption: caption, at: at, length: length, selected: selected, anchor: anchor) }
+            return MainActor.assumeIsolated { text.insertPicture(path: path, file: file, caption: caption, at: at, length: length, selected: selected) }
         }
-        handle.insertWords = { [weak text] words, anchor in
-            guard let text else { return false }
-            return MainActor.assumeIsolated { text.insertWords(words, anchor: anchor) }
+        text.flushNow = { [weak coordinator, weak text] in
+            guard let coordinator, let text else { return }
+            MainActor.assumeIsolated { coordinator.flush(text) }
         }
         register(handle)
         let base = paper.url.deletingLastPathComponent()
@@ -1268,6 +1193,7 @@ struct NoteEditorView: NSViewRepresentable {
         guard let text = scroll.documentView as? NoteTextView else { return }
         // The callbacks follow the note (moved, renamed on disk) on every update; the text is left alone.
         text.importPictures = importPictures
+        text.acceptPictures = acceptPictures
         text.noteID = paper.noteID
         text.noteFolder = paper.url.deletingLastPathComponent()
         text.escape = escape

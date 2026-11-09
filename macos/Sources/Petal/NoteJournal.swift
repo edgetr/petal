@@ -40,31 +40,17 @@ enum NoteJournal {
         var data: Data? = nil
         var ext: String
         var caption = ""
-        /// A pasted picture: the link it was copied with, that note's folder and root (read only through
-        /// NoteStore.pictureFile, and only the very file `path` names), and its spot's marker.
-        var link: String? = nil
-        var folder: String? = nil
-        var root: String? = nil
-        var anchor: String? = nil
     }
 
     /// What reading one source gives: its bytes (a picture), still there but not readable yet (waiting), or gone.
     enum SourceRead: Equatable { case bytes(Data), waiting, gone }
 
-    /// One source read, the one way, live and in recovery. A pasted picture only through the one link rule from
-    /// where it was copied (NoteStore.pictureFile: contained in its root, no symbolic link), and only the very file
-    /// recorded; refused, it's gone. A dropped file by its path. A file that's there but isn't a picture yet (still
-    /// downloading) waits; one that isn't there is gone.
+    /// One dropped or pasted source read, live and in recovery: a file by its path, or bytes. A file that's there
+    /// but isn't a picture yet (still downloading) waits; one that isn't there is gone.
     nonisolated static func read(_ source: Import) -> SourceRead {
         if let data = source.data { return NSImage(data: data) != nil ? .bytes(data) : .gone }
         guard let path = source.path else { return .gone }
-        var url = URL(fileURLWithPath: path)
-        if let link = source.link {
-            guard let folder = source.folder,
-                  let file = NoteStore.pictureFile(link, noteFolder: URL(fileURLWithPath: folder), root: source.root.map { URL(fileURLWithPath: $0) }),
-                  NoteShelf.samePath(file.path, path) else { return .gone }
-            url = file
-        }
+        let url = URL(fileURLWithPath: path)
         if let data = try? Data(contentsOf: url), NSImage(data: data) != nil { return .bytes(data) }
         return FileManager.default.fileExists(atPath: url.path) ? .waiting : .gone
     }
@@ -155,8 +141,6 @@ enum NoteJournal {
             let outcome = read(source)
             guard case .bytes(var data) = outcome else {
                 if outcome == .waiting { waiting.append(source) }
-                // A pasted picture that's gone (or refused) is said in words where it would have gone.
-                else if source.link != nil { lines.append(NoteText.unpasted(source.caption)) }
                 continue
             }
             var ext = source.ext.isEmpty ? "png" : source.ext

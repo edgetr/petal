@@ -234,15 +234,24 @@ struct NoteRichCheck {
         expect(!body(carded).contains("hello") && !body(carded).contains("example.com"), "cut: gone from the note", body(carded))
         expect(board.string(forType: .string) == "hello\nhttps://example.com/page", "another app gets plain text: the words and the address",
                board.string(forType: .string) ?? "nil")
-        var imports: [NoteImport] = []
+        // Pictures travel as bytes, like a pasted screenshot. A paste takes them by the screenshot paste's path (here,
+        // a stand-in recording what it was given) and goes in at once.
+        var accepted: [[Data]] = []
         func paste(_ view: NoteTextView) {
-            view.importPictures = { imports.append($0) }
+            view.acceptPictures = { items in
+                accepted.append(items.map(\.data))
+                let own = NoteShelf.pictureFolder(id: view.noteID)
+                return items.enumerated().map { n, item in
+                    ("../\(own)/picture-new\(n).\(item.ext)", URL(fileURLWithPath: "/tmp/petal-rich/\(own)/picture-new\(n).\(item.ext)"), item.caption)
+                }
+            }
             expect(view.pasteNote(from: board), "a note's fragment on the pasteboard")
         }
+        let pngData = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                       colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?.representation(using: .png, properties: [:]) ?? Data()
         carded.setSelectedRange(NSRange(location: (carded.string as NSString).length, length: 0))
         paste(carded)
-        let cardBlocks = NoteBlock.blocks(body(carded))
-        expect(cardBlocks.contains(.link("https://example.com/page")) && body(carded) == "\nafterhello\nhttps://example.com/page" && imports.isEmpty,
+        expect(NoteBlock.blocks(body(carded)).contains(.link("https://example.com/page")) && body(carded) == "\nafterhello\nhttps://example.com/page" && accepted.isEmpty,
                "the card comes back as a card at once, after the words", body(carded))
 
         // Another app gets the words and a picture's caption, never its path.
@@ -251,144 +260,94 @@ struct NoteRichCheck {
         captioned.copySelection(to: board)
         expect(board.string(forType: .string) == "caption line\nshot", "another app gets plain text, never a picture's path", board.string(forType: .string) ?? "nil")
 
-        // A paste into the same note after it moved (Inbox → Work): words and its own picture go in at once; the
-        // picture beside it in the old notebook becomes an import owned by the note (its recorded file, its caption,
-        // its spot), and lands there.
-        let ownN1 = NoteShelf.pictureFolder(id: "N1")
-        for path in ["/tmp/petal-rich/\(ownN1)/p.png", "/tmp/petal-rich/Inbox/Trip.assets/q.png"] { NoteStore.files[path] = URL(fileURLWithPath: path) }
-        let source = editor("words\n![shot](../\(ownN1)/p.png)\n![trip](Trip.assets/q.png)", note: "N1", folder: inbox)
-        source.selectAll(nil)
-        source.copySelection(to: board)
-        let moved = editor("", note: "N1", folder: work)
-        imports = []
-        paste(moved)
-        expect(body(moved) == "words\n![shot](\(NoteShelf.pictureLink(id: "N1", name: "p.png")))" && imports.count == 1
-               && imports.first?.files.map(\.path) == ["/tmp/petal-rich/Inbox/Trip.assets/q.png"] && imports.first?.captions == ["trip"],
-               "same note after a move: its own picture at once, the old notebook's an import of its recorded file", body(moved))
-        if let token = imports.first?.anchor {
-            _ = moved.insertPicture(path: "../\(ownN1)/picture-new.png", file: URL(fileURLWithPath: "/tmp/x.png"), caption: "trip", at: -1, anchor: token)
-            expect(body(moved) == "words\n![shot](\(NoteShelf.pictureLink(id: "N1", name: "p.png")))\n![trip](../\(ownN1)/picture-new.png)",
-                   "it lands at its spot when it's read", body(moved))
-        } else { expect(false, "the import has its spot") }
+        // A picture just pasted (its file not written yet) is cut and pasted into another note: its bytes travel with
+        // the copy, and the picture comes out whole there. Copying reads nothing from disk.
+        let ownN1 = NoteShelf.pictureFolder(id: "N1"), ownN2 = NoteShelf.pictureFolder(id: "N2")
+        let fresh = URL(fileURLWithPath: "/tmp/petal-rich/\(ownN1)/picture-fresh.png")
+        NotePictures.shared.preview(fresh, NSImage(data: pngData) ?? NSImage(), data: pngData)   // as an accepted paste is: bytes in memory, file not yet
+        let cutFrom = editor("words\n![shot](../\(ownN1)/picture-fresh.png)", note: "N1", folder: inbox)
+        cutFrom.selectAll(nil)
+        let readsBeforeCopy = NoteStore.reads
+        expect(cutFrom.copySelection(to: board), "copied")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        expect(NoteStore.reads == readsBeforeCopy, "copy reads nothing from disk", "\(NoteStore.reads - readsBeforeCopy) reads")
+        cutFrom.delete(nil)
+        let other = editor("", note: "N2", folder: work)
+        accepted = []
+        paste(other)
+        expect(body(other) == "words\n![shot](../\(ownN2)/picture-new0.png)" && accepted == [[pngData]],
+               "cut before its file was saved, pasted into another note: the picture whole there", body(other))
 
-        // A fragment whose picture has no file recorded: a line saying so, no import, no link.
-        let unrecorded = NoteRich.Fragment(markdown: "before\n![](../../../../outside.png)", folder: inbox.path, note: "N9", root: "/tmp/petal-rich", files: [nil])
+        // Into the same note, a picture already its own keeps its line; nothing is copied.
+        let mine = editor("![shot](../\(ownN1)/picture-fresh.png)", note: "N1", folder: work)
+        mine.selectAll(nil)
+        mine.copySelection(to: board)
+        mine.setSelectedRange(NSRange(location: (mine.string as NSString).length, length: 0))
+        accepted = []
+        paste(mine)
+        expect(body(mine).components(separatedBy: "![shot](../\(ownN1)/picture-fresh.png)").count == 3 && accepted.isEmpty,
+               "the same note: its own picture's line again, no copy", body(mine))
+
+        // A picture that never loaded (its bytes not in memory) copies as a line saying so, without waiting.
+        let unloaded = editor("before\n![](../\(ownN1)/never-loaded.png)", note: "N1", folder: inbox)
+        unloaded.selectAll(nil)
+        unloaded.copySelection(to: board)
+        let unloadedFragment = board.data(forType: NoteRich.fragmentType).flatMap { try? JSONDecoder().decode(NoteRich.Fragment.self, from: $0) }
+        expect(unloadedFragment?.markdown == "before\n(A picture couldn't be copied.)" && unloadedFragment?.pictures.isEmpty == true,
+               "a never-loaded picture: copied as a line saying so", unloadedFragment?.markdown ?? "nil")
+        let unloadedTarget = editor("", note: "N2", folder: work)
+        accepted = []
+        paste(unloadedTarget)
+        expect(body(unloadedTarget) == "before\n(A picture couldn't be copied.)" && accepted.isEmpty, "and pasted as that line", body(unloadedTarget))
+
+        // Undo takes a paste with pictures out like any text; redo puts it back.
+        let undoing = editor("start", note: "N2", folder: work)
+        undoing.delegate = undoDelegate
+        undoing.allowsUndo = true
+        let withPictures = NoteRich.Fragment(markdown: "![a](../Pictures/x/a.png)\nmiddle\n![b](../Pictures/x/b.png)", folder: inbox.path, note: "N9",
+                                             pictures: [pngData, pngData])
         board.declareTypes([NoteRich.fragmentType, .string], owner: nil)
-        board.setData(try! JSONEncoder().encode(unrecorded), forType: NoteRich.fragmentType)
-        let target = editor("", note: "N2", folder: work)
-        imports = []
-        paste(target)
-        expect(body(target) == "before\n(A picture couldn't be pasted.)" && imports.isEmpty, "no file for it: said in words, nothing linked", body(target))
+        board.setData(try! JSONEncoder().encode(withPictures), forType: NoteRich.fragmentType)
+        undoing.setSelectedRange(NSRange(location: 5, length: 0))
+        accepted = []
+        paste(undoing)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        let afterPaste = body(undoing)
+        expect(afterPaste == "start![a](../\(ownN2)/picture-new0.png)\nmiddle\n![b](../\(ownN2)/picture-new1.png)" || afterPaste.contains("picture-new1.png"),
+               "pasted with both pictures at once", afterPaste)
+        undoing.history.undo()
+        expect(body(undoing) == "start", "undo: the paste and its pictures gone", body(undoing))
+        undoing.history.redo()
+        expect(body(undoing) == afterPaste, "redo: back, pictures and all", body(undoing))
 
-        // From another root (another Mac, another notes folder), even with the same note's id: never kept as a link;
-        // one picture, one import, one marker, each carrying the link it was copied with.
-        let foreign = NoteRich.Fragment(markdown: "![cap](../Pictures/x/p.png)\n![gone](../Pictures/x/q.png)", folder: "/other-mac/Notes/Inbox", note: "N1",
-                                        root: "/other-mac/Notes", files: ["/other-mac/Notes/Pictures/x/p.png", "/other-mac/Notes/Pictures/x/q.png"])
-        board.declareTypes([NoteRich.fragmentType, .string], owner: nil)
-        board.setData(try! JSONEncoder().encode(foreign), forType: NoteRich.fragmentType)
-        let local = editor("", note: "N1", folder: work)
-        imports = []
-        paste(local)
-        expect(body(local).isEmpty && imports.map { $0.files.map(\.path) } == [["/other-mac/Notes/Pictures/x/p.png"], ["/other-mac/Notes/Pictures/x/q.png"]]
-               && imports.map { $0.captions ?? [] } == [["cap"], ["gone"]]
-               && imports.first?.pasted == PastedLink(link: "../Pictures/x/p.png", folder: "/other-mac/Notes/Inbox", root: "/other-mac/Notes"),
-               "another root: one import per picture, each with its recorded file and the link it was copied with", body(local))
-        if imports.count == 2, let one = imports[0].anchor, let two = imports[1].anchor {
-            // The second's outcome first: still at its own spot, after the first.
-            local.insertWords(NoteRich.unpasted("gone").markdown, anchor: two)
-            _ = local.insertPicture(path: "../\(ownN1)/picture-a.png", file: URL(fileURLWithPath: "/tmp/x.png"), caption: "cap", at: -1, anchor: one)
-            expect(body(local) == "![cap](../\(ownN1)/picture-a.png)\n(The picture “gone” couldn't be pasted.)", "each outcome at its own spot, in order", body(local))
-        }
-
-        // Mixed outcomes side by side, landing out of order: one lands, one is missing (words), one waits and lands
-        // later; all three in the paste's order, before the words after them.
-        let mixed = NoteRich.Fragment(markdown: "![a](../Pictures/m/a.png)\n![b](../Pictures/m/b.png)\n![c](../Pictures/m/c.png)\nafter", folder: inbox.path,
-                                      note: "N9", root: "/tmp/petal-rich", files: ["/tmp/petal-rich/Pictures/m/a.png", "/tmp/petal-rich/Pictures/m/b.png", "/tmp/petal-rich/Pictures/m/c.png"])
-        board.declareTypes([NoteRich.fragmentType, .string], owner: nil)
-        board.setData(try! JSONEncoder().encode(mixed), forType: NoteRich.fragmentType)
-        let mixedEditor = editor("", note: "N2", folder: work)
-        imports = []
-        paste(mixedEditor)
-        if imports.count == 3, let a = imports[0].anchor, let b = imports[1].anchor, let c = imports[2].anchor {
-            expect(Set([a, b, c]).count == 3, "one marker per picture")
-            _ = mixedEditor.insertPicture(path: "../Pictures/n2/a.png", file: URL(fileURLWithPath: "/tmp/x.png"), caption: "a", at: -1, anchor: a)   // landed
-            mixedEditor.insertWords(NoteRich.unpasted("b").markdown, anchor: b)                                                               // missing
-            // c waits (not downloaded yet); the person types meanwhile; then c lands.
-            mixedEditor.setSelectedRange(NSRange(location: (mixedEditor.string as NSString).length, length: 0))
-            mixedEditor.insertText(" more", replacementRange: mixedEditor.selectedRange())
-            _ = mixedEditor.insertPicture(path: "../Pictures/n2/c.png", file: URL(fileURLWithPath: "/tmp/x.png"), caption: "c", at: -1, anchor: c)   // landed later
-            expect(body(mixedEditor) == "![a](../Pictures/n2/a.png)\n(The picture “b” couldn't be pasted.)\n![c](../Pictures/n2/c.png)\nafter more",
-                   "landed, missing, waiting then landed: each at its own spot, in order", body(mixedEditor))
-        } else { expect(false, "three imports", "\(imports.count)") }
-
-        // Markers are unique everywhere: after the editor reopens (a new editor on the note), an old completion's
-        // marker isn't one it holds, so that picture goes at the end, never at a new paste's spot.
-        let first = editor("x\ny", note: "N2", folder: work)
-        let old = first.anchor(at: 1)
-        let reopened = editor("x\ny", note: "N2", folder: work)
-        let fresh = reopened.anchor(at: 1)
-        expect(old != fresh && reopened.anchors[old] == nil, "a new marker is never an old one")
-        _ = reopened.insertPicture(path: "../Pictures/n2/old.png", file: URL(fileURLWithPath: "/tmp/x.png"), caption: "", at: -1, anchor: old)
-        expect(body(reopened) == "x\ny\n![](../Pictures/n2/old.png)" && reopened.anchors[fresh] == 1, "an old completion goes at the end; the new paste's spot stays", body(reopened))
-
-        // Copy records nothing the link rule refuses (a symbolic link on the way, outside the root): such a picture
-        // pastes as words, never as an import or a link.
-        let refusedLink = editor("![](linked/secret.png)", note: "N1", folder: inbox)
-        refusedLink.selectAll(nil)
-        refusedLink.copySelection(to: board)
-        let refusedFragment = board.data(forType: NoteRich.fragmentType).flatMap { try? JSONDecoder().decode(NoteRich.Fragment.self, from: $0) }
-        expect(refusedFragment?.files == [nil], "a picture the link rule refuses: no file recorded")
-        let refusedTarget = editor("", note: "N2", folder: work)
-        imports = []
-        paste(refusedTarget)
-        expect(body(refusedTarget) == "(A picture couldn't be pasted.)" && imports.isEmpty, "pasted as words, nothing read", body(refusedTarget))
-
-        // Spots follow the person's typing, landing never moves their cursor, and pictures land in their order
-        // whichever is read first.
-        let spaced = NoteRich.Fragment(markdown: "a\n![one](../Pictures/zz/1.png)\nmid\n![two](../Pictures/zz/2.png)\nb", folder: inbox.path, note: "N9",
-                                       root: "/tmp/petal-rich", files: ["/tmp/petal-rich/Pictures/zz/1.png", "/tmp/petal-rich/Pictures/zz/2.png"])
-        board.declareTypes([NoteRich.fragmentType, .string], owner: nil)
-        board.setData(try! JSONEncoder().encode(spaced), forType: NoteRich.fragmentType)
-        let typing2 = editor("", note: "N2", folder: work)
-        imports = []
-        paste(typing2)
-        typing2.setSelectedRange(NSRange(location: 0, length: 0))
-        typing2.insertText("TYPED ", replacementRange: typing2.selectedRange())
-        let cursor = typing2.selectedRange()
-        if imports.count == 2, let one = imports[0].anchor, let two = imports[1].anchor {
-            _ = typing2.insertPicture(path: "../Pictures/n2/2.png", file: URL(fileURLWithPath: "/tmp/x.png"), caption: "two", at: -1, anchor: two)
-            _ = typing2.insertPicture(path: "../Pictures/n2/1.png", file: URL(fileURLWithPath: "/tmp/x.png"), caption: "one", at: -1, anchor: one)
-            expect(body(typing2) == "TYPED a\n![one](../Pictures/n2/1.png)\nmid\n![two](../Pictures/n2/2.png)\nb", "each at its spot after the typing, in order", body(typing2))
-            expect(typing2.selectedRange() == cursor, "the person's cursor stays where it was")
-        } else { expect(false, "two imports, one per spot", "\(imports.count)") }
-
-        // 2,000 pictures pasted: 2,000 imports, each its own marker; their completions, coming one by one, make one
-        // arrival (or a few) and one scan of the editor showing them.
+        // 2,000 pictures pasted at once: taken in one go, and their arrivals coming one by one make one (or a few)
+        // notifications, one scan each.
         let many = (0..<2000).map { "![](../Pictures/bulk/p\($0).png)" }.joined(separator: "\n")
         board.declareTypes([NoteRich.fragmentType, .string], owner: nil)
-        board.setData(try! JSONEncoder().encode(NoteRich.Fragment(markdown: many, folder: inbox.path, note: "NB", root: "/tmp/petal-rich",
-                                                                    files: (0..<2000).map { "/tmp/petal-rich/Pictures/bulk/p\($0).png" })), forType: NoteRich.fragmentType)
+        board.setData(try! JSONEncoder().encode(NoteRich.Fragment(markdown: many, folder: inbox.path, note: "NB", pictures: Array(repeating: pngData, count: 2000))),
+                      forType: NoteRich.fragmentType)
         let bulk = editor("", note: "N2", folder: work)
-        imports = []
+        accepted = []
         paste(bulk)
-        expect(imports.count == 2000 && Set(imports.compactMap(\.anchor)).count == 2000, "2,000 pictures: one import and one marker each", "\(imports.count)")
+        expect(accepted.count == 1 && accepted.first?.count == 2000
+               && NoteBlock.blocks(body(bulk)).filter { if case .image = $0 { true } else { false } }.count == 2000, "2,000 pictures: one accept, all in", "\(accepted.count)")
         let bulkShown = editor((0..<2000).map { "![](../Pictures/landed/p\($0).png)" }.joined(separator: "\n"), note: "N2", folder: work)
         let shownWindow = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: 300, height: 200), styleMask: [.borderless], backing: .buffered, defer: true)
-        let landedFiles = (0..<2000).map { (URL(fileURLWithPath: "/tmp/petal-rich/Pictures/landed/p\($0).png"), NSImage(size: NSSize(width: 2, height: 2))) }
+        let landedFiles = (0..<2000).map { (URL(fileURLWithPath: "/tmp/petal-rich/Pictures/landed/p\($0).png"), NSImage(size: NSSize(width: 2, height: 2)), Optional<Data>.none) }
         NotePictures.shared.previewBatch(landedFiles)
         shownWindow.contentView = bulkShown
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         var bulkArrivals = 0
         let bulkCounting = NotificationCenter.default.addObserver(forName: NotePictures.arrived, object: nil, queue: nil) { _ in bulkArrivals += 1 }
         let bulkScans = bulkShown.scans
-        for file in landedFiles { NotePictures.shared.previewBatch([file]) }   // 2,000 completions, one by one
+        for file in landedFiles { NotePictures.shared.previewBatch([file]) }   // 2,000 arrivals, one by one
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         NotificationCenter.default.removeObserver(bulkCounting)
         expect(bulkArrivals >= 1 && bulkArrivals <= 3 && bulkShown.scans - bulkScans == bulkArrivals,
-               "2,000 completions: one arrival or a few, one scan each", "\(bulkArrivals) arrivals, \(bulkShown.scans - bulkScans) scans")
+               "2,000 arrivals: one notification or a few, one scan each", "\(bulkArrivals) arrivals, \(bulkShown.scans - bulkScans) scans")
 
         // One arrival for a batch of pictures: each editor scans its pictures once.
-        let batchFiles = (0..<50).map { (URL(fileURLWithPath: "/tmp/petal-rich/Pictures/batch/p\($0).png"), NSImage(size: NSSize(width: 2, height: 2))) }
+        let batchFiles = (0..<50).map { (URL(fileURLWithPath: "/tmp/petal-rich/Pictures/batch/p\($0).png"), NSImage(size: NSSize(width: 2, height: 2)), Optional<Data>.none) }
         NotePictures.shared.previewBatch(batchFiles)   // in memory first, so drawing them reads nothing
         let batchEditor = editor((0..<50).map { "![](../Pictures/batch/p\($0).png)" }.joined(separator: "\n"), note: "N2", folder: work)
         let batchWindow = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: 300, height: 200), styleMask: [.borderless], backing: .buffered, defer: true)
