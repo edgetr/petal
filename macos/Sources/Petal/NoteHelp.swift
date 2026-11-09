@@ -412,9 +412,10 @@ enum NoteHelp {
         /// The newest value exactly as read (`last` is it rounded for the corner): every threshold and delivery
         /// decision is made on this, never on `last`.
         var amount: Double? = nil
-        /// The last reading couldn't be confirmed: its value isn't taken (the corner keeps the last accepted one), and
-        /// the corner says so faintly.
-        var unconfirmed = false
+        /// A crossing that couldn't be confirmed (no AI set up, or no explicit yes): its number, shown faintly beside the
+        /// corner as "couldn't confirm"; it isn't taken (the corner keeps the last accepted value) and never opens the
+        /// note. Empty when the last reading was accepted.
+        var unconfirmed = ""
 
         init(every: String, line: String, mac: String, at: String = "", url: String = "") {
             self.every = every; self.line = line; self.mac = mac; self.at = at; self.url = url
@@ -436,7 +437,7 @@ enum NoteHelp {
             id = value.text("id")
             tz = value.text("tz")
             amount = Double(value.text("amount"))
-            unconfirmed = value.text("unconfirmed") == "true"
+            unconfirmed = value.text("unconfirmed")
         }
 
         var value: NoteValue {
@@ -453,7 +454,7 @@ enum NoteHelp {
             if !id.isEmpty { pairs.append(("id", .text(id))) }
             if !tz.isEmpty { pairs.append(("tz", .text(tz))) }
             if let amount { pairs.append(("amount", .text(String(amount)))) }
-            if unconfirmed { pairs.append(("unconfirmed", .text("true"))) }
+            if !unconfirmed.isEmpty { pairs.append(("unconfirmed", .text(unconfirmed))) }
             return .map(pairs)
         }
 
@@ -1760,13 +1761,14 @@ extension NoteHelp {
         guard var current = watch, current.id == id, !current.paused else { return nil }
         guard let shown, verdict != .refuted, verdict != .unconfirmed else {
             current.checked = time
-            current.unconfirmed = shown != nil && verdict == .unconfirmed
+            // Unconfirmed: its number shown faintly; refuted: nothing of it.
+            current.unconfirmed = verdict == .unconfirmed ? (shown ?? "") : ""
             watch = current
             return false
         }
         current.record(shown, at: time)
         current.amount = amount
-        current.unconfirmed = false
+        current.unconfirmed = ""
         if let hint, !hint.isEmpty { current.hint = hint }
         let newly = past && confirmed && !current.hit
         current.hit = past && current.hit
@@ -1889,6 +1891,16 @@ struct FollowUpQueue<Line> {
 
     /// A run ended: everything asked of it goes, never run.
     mutating func clear(_ token: RunToken) { drop { $0.token === token } }
+
+    /// A run's completion, the one place what was asked of it is settled: once its answer is accepted and shown
+    /// (`succeeded`), the second opinion asked meanwhile is handed on with its line; otherwise (it failed or was
+    /// stopped, or its answer never got shown) nothing is, and every line asked of it is given back. A run whose
+    /// answer waits for the vault isn't complete yet: nothing here is settled until it is.
+    mutating func settle(note: String, token: RunToken, succeeded: Bool) -> (review: (model: NoteHelp.Model, asked: String, line: Line?)?, dropped: [Line]) {
+        let review = succeeded ? self.review(note: note, current: token) : nil
+        clear(token)
+        return (review, takeDropped())
+    }
 
     /// The lines dropped since last asked, taken.
     mutating func takeDropped() -> [Line] {
@@ -2276,6 +2288,9 @@ struct Unshown: Codable, Equatable {
     var asked: String
     var at: Date
     var opinion = false
+    /// The run whose answer this is (its completion waits for it while Petal runs); nil for a turn on the way or a
+    /// failure, and after a restart (shown on its own then).
+    var runID: String? = nil
 }
 
 extension NoteHelp {

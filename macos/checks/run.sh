@@ -222,7 +222,7 @@ perl -0777 -ne '
 perl -0777 -ne '
     my $done = () = /state: \.done/g;
     my $doneEnds = () = /end: \.done/g;
-    unless ($done == 2 && $doneEnds == 1 && /case \.succeeded\(let said\):\s*guard run\.token\.complete\(\.succeeded\) else \{ return \}.*?state: \.done.*?end: \.done/s
+    unless ($done == 2 && $doneEnds == 1 && /private func complete\(_ run: Run, made:.*?run\.token\.complete\(\.succeeded\).*?state: \.done/s
             && /private func reply\(_ noteID: String, giveBack line: NoteLine\?.*?\{\s*line\?\.again\(\)\s*guard !parts\.isEmpty else \{ return hint\(noteID, words\(\[\]\)\) \}/s) {
         print "NoteHelpers: only a succeeded run writes done; replies stay faint\n"; exit 1 }
     print "helpers: only a succeeded run writes done; replies are faint\n";
@@ -231,7 +231,7 @@ perl -0777 -ne '
 # with its line (the same queue as follow-ups: given back if that run doesn't succeed, held by the reviewer until it does).
 perl -0777 -ne '
     unless (/private func review\(.*?NoteHelp\.reviewCheckout\(current: current, words: asked.*?followUps\.addReview\(model, asked: asked, note: paper\.noteID, token: run\.token, line: taking\)/s
-            && /let asked = followUps\.review\(note: noteID, current: run\.token\).*?let line = asked\?\.line.*?self\.taking = line/s) {
+            && /let settled = followUps\.settle\(note: noteID, token: run\.token, succeeded: true\).*?let asked = settled\.review.*?let line = asked\?\.line.*?self\.taking = line/s) {
         print "NoteHelpers: reviews choose their checkout and carry their line\n"; exit 1 }
     print "helpers: reviews choose their checkout like a request and carry their line\n";
 ' Sources/Petal/NoteHelpers.swift
@@ -243,7 +243,7 @@ perl -0777 -ne '
     my $direct = () = /token\.complete\(/g;
     my $nil = () = /runs\[[^\]]*\] = nil/g;
     my $hints = () = /(?<!\.)\bhint\(/g;
-    unless ($direct == 3 && $nil == 1 && /private func end\(_ run: Run, _ ending: Ending\).*?let next = handOn\(run\)\s*dropFollowUps\(run\.token\)/s
+    unless ($direct == 3 && $nil == 1 && /private func complete\(_ run: Run, made:.*?let next = handOn\(run\)/s && /let settled = followUps\.settle\(note: noteID, token: run\.token, succeeded: true\)\s*for line in settled\.dropped \{ line\.again\(\) \}/
             && /private func release\(_ run: Run\) \{\s*if runs\[run\.noteID\] === run \{\s*runs\[run\.noteID\] = nil/
             && !/func say\(|func refuse\(|func succeeded\(|func answer\(|desk\.tell\(/ && $hints == 2
             && /self\.end\(run, \.succeeded\(nil\)\)/ && /self\.end\(run, \.succeeded\(Said\(who: who, text: line, form: \.words\)\)\)/
@@ -341,7 +341,8 @@ perl -0777 -ne '
 ' Sources/Petal/NoteHelp.swift
 perl -0777 -ne '
     unless (/private func post\(_ noteID: String, _ ink: \[NoteHelp\.Ink\]\?, steps: \[Shielded\]\?/ && /private func publish\(.*?Self\.shieldSaid\(said\) \{ made in\s*guard let made else \{\s*self\.unshown\.append/s
-            && /case \.succeeded\(let said\):.*?publish\(noteID, said, end: \.done/s && /case \.failed\(let reason, let settings\):.*?publish\(noteID, said, end: \.failed/s
+            && /case \.succeeded\(let said\):\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*guard !look, let said else \{ return complete\(run, made: nil\) \}\s*Self\.shieldSaid\(said\) \{ made in.*?guard let made else \{ return self\.holdForVault\(run, said\) \}.*?self\.complete\(run, made: made\)/s
+            && /func showUnshown\(\) \{.*?if let said = run\.waitingForVault \{ end\(run, \.succeeded\(said\)\) \}/s && !/private func holdForVault\((?:(?!\n    \}).)*token\.complete/s && /case \.failed\(let reason, let settings\):.*?publish\(noteID, said, end: \.failed/s
             && /publish\(noteID, Said\(who: run\.who, text: answer, steps: steps/ && /private func stamp\(.*?Self\.shield\(\[label\]\)/s
             && /grantedRules\[grant\] = rules/ && /Self\.shield\(\[calc\.formula, calc\.label\]\)/ && /Self\.shield\(\[reply\?\["before"\]/ && /showUnshown\(\)/) {
         print "NoteHelpers: every helper output is shielded whole as it arrives\n"; exit 1 }
@@ -350,7 +351,8 @@ perl -0777 -ne '
 # A watcher decides on its exact value: a refuted or unconfirmed reading never becomes the shown value; nothing about
 # its value is rounded but the drawing.
 ! grep -n 'Int(\$0.rounded())' Sources/Petal/NoteHelpers.swift && grep -q 'guard let shown, verdict != .refuted, verdict != .unconfirmed else' Sources/Petal/NoteHelp.swift \
-    && grep -q 'if watch.unconfirmed' Sources/Petal/NoteHelpViews.swift || { echo "watchers: exact values; rejected readings never shown"; exit 1; }
+    && grep -q 'if !watch.unconfirmed.isEmpty' Sources/Petal/NoteHelpViews.swift && grep -q 'current.unconfirmed = verdict == .unconfirmed ? (shown ?? "") : ""' Sources/Petal/NoteHelp.swift \
+    && grep -q 'if newly.value, let value { self.tellHit' Sources/Petal/NoteHelpers.swift || { echo "watchers: exact values; rejected readings never shown; an unconfirmed crossing faint, never opening the note"; exit 1; }
 echo "helpers: rejected readings keep the last accepted value; only drawing rounds"
 # A cover that can't be read yet is waited for (iCloud asked), then refused; never skipped.
 perl -0777 -ne '

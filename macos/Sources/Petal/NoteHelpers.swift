@@ -61,6 +61,8 @@ final class NoteHelpers {
         var carried: [NoteHelp.Ink]?
         /// A chain's run: the whole body of the note it waited for (told shielded, its title derived after).
         var afterBody = ""
+        /// Its answer, waiting for the vault before it can be shown (the run isn't complete until it is).
+        var waitingForVault: Said?
         /// The line of the turn at work (the first, then each follow-up's once it's sent): runnable again if that turn
         /// fails or is stopped, so Return runs it again (its identity in the editor, NoteLine).
         var line: NoteLine?
@@ -284,9 +286,13 @@ final class NoteHelpers {
 
     /// Outputs that waited for the vault: shown once it can be read (the clock asks).
     func showUnshown() {
-        guard !unshown.isEmpty else { return }
-        let waiting = unshown
-        unshown = []
+        // A run whose answer waits: asked again through `end` (it completes only once shown).
+        for run in runs.values { if let said = run.waitingForVault { end(run, .succeeded(said)) } }
+        // Anything else (a failure, a turn on the way, or an answer whose run is gone after a restart): shown on its own.
+        let live = Set(runs.values.map(\.token.id))
+        let waiting = unshown.filter { $0.runID.map { !live.contains($0) } ?? true }
+        guard !waiting.isEmpty else { return }
+        unshown.removeAll { entry in waiting.contains(entry) }
         saveUnshown()
         for entry in waiting { publish(entry.noteID, entry.said, end: entry.end, asked: entry.asked, opinion: entry.opinion) }
     }
@@ -386,25 +392,22 @@ final class NoteHelpers {
         guard run.token.completion == nil, runs[noteID] === run || look else { return }
         switch ending {
         case .succeeded(let said):
-            guard run.token.complete(.succeeded) else { return }
-            release(run)
-            run.line = nil
-            // What was asked of it is taken now (a second opinion, with its own line); anything else said to it and
-            // never sent gives its line back. The second opinion starts once the answer is on the note.
-            let next = handOn(run)
-            dropFollowUps(run.token)
-            // A watcher's look never writes ink or the helper line (its output is its `watch`, `keepWatch`).
-            guard !look else { return }
-            guard let said else {
-                output(run, nil, helper: .set(NoteHelp.Helper(state: .done, who: run.who, step: "", asked: run.asked, mac: mac, at: Date())))
-                next?()
-                return
+            // A run succeeds when its answer is accepted and shown, not when its AI finished: shielded first; while
+            // the vault can't be read it stays registered (Stop still ends it) and waits, and the clock asks `end` again.
+            guard !look, let said else { return complete(run, made: nil) }
+            Self.shieldSaid(said) { made in
+                guard run.token.completion == nil, self.runs[noteID] === run else { return }
+                guard let made else { return self.holdForVault(run, said) }
+                run.waitingForVault = nil
+                self.unshown.removeAll { $0.runID == run.token.id }
+                self.saveUnshown()
+                self.complete(run, made: made)
             }
-            publish(noteID, said, end: .done, asked: run.asked, opinion: run.carried != nil, carried: run.carried) { next?() }
         case .failed(let reason, let settings):
             guard run.token.complete(.failed(reason)) else { return }
             release(run)
             letGo(run)
+            forgetHeld(run)
             guard !look else { return }
             // Its reason is shielded like anything a helper produced (a key, a sign-in: Settings › AI's button on it).
             let said = Said(who: run.carried == nil ? run.who + " · couldn't finish" : run.who, text: run.carried == nil ? reason : "No second opinion: " + reason,
@@ -413,9 +416,51 @@ final class NoteHelpers {
         case .stopped(let words):
             halt(run)
             letGo(run)
+            forgetHeld(run)
             guard !look else { return }
             output(run, words.map { [NoteHelp.Ink(who: run.who, text: $0)] }, helper: .clear)
         }
+    }
+
+    /// The success completion, once its answer is accepted and shown (`made`: shielded; nil: nothing to say): its
+    /// token completes, it's let go, its line stays used, its answer goes on the note with `helper: done`, and then
+    /// what was asked of it is handed on (a second opinion, with its own line) while anything else asked of it gives
+    /// its line back (`FollowUpQueue.settle`).
+    private func complete(_ run: Run, made: (ink: NoteHelp.Ink, steps: [Shielded])?) {
+        let look = run.kind == .look
+        guard run.token.completion == nil, runs[run.noteID] === run || look, run.token.complete(.succeeded) else { return }
+        release(run)
+        run.line = nil
+        let next = handOn(run)
+        // A watcher's look never writes ink or the helper line (its output is its `watch`, `keepWatch`).
+        guard !look else { return }
+        let done = NoteHelp.Helper(state: .done, who: run.who, step: "", asked: run.asked, mac: mac, at: Date())
+        if let made { output(run, [made.ink], helper: .set(done), steps: made.steps) } else { output(run, nil, helper: .set(done)) }
+        next?()
+    }
+
+    /// An answer that can't be shown yet (the vault unreadable): its run stays registered, its answer waits unshown on
+    /// this Mac (`helper-unshown.json`, for a restart) and the note says only that it's waiting for the vault.
+    private func holdForVault(_ run: Run, _ said: Said) {
+        // (Once: a retry that still can't show it changes nothing.)
+        let held = run.waitingForVault
+        if held != nil { return }
+        run.waitingForVault = said
+        unshown.append(Unshown(noteID: run.noteID, said: said, end: .done, asked: run.asked, at: Date(), opinion: run.carried != nil, runID: run.token.id))
+        saveUnshown()
+        let mac = self.mac
+        keep(run.noteID) { file in
+            file.helper = NoteHelp.Helper(state: .waiting, who: said.who, step: "Waiting for the vault to show this", asked: file.helper?.asked ?? "", mac: mac, at: Date())
+        }
+    }
+
+    /// A run that ended otherwise: its held answer goes (never shown later).
+    private func forgetHeld(_ run: Run) {
+        let held = run.waitingForVault
+        if held == nil { return }
+        run.waitingForVault = nil
+        unshown.removeAll { $0.runID == run.token.id }
+        saveUnshown()
     }
 
     /// A run that failed (a refusal, a launch error, a guard, nothing found): `end` with its reason.
@@ -443,8 +488,10 @@ final class NoteHelpers {
     private func handOn(_ run: Run) -> (@MainActor () -> Void)? {
         // (A look has nothing asked of it; this only hands on, the run already ended.)
         let noteID = run.noteID
-        if run.kind == .look { return nil }
-        let asked = followUps.review(note: noteID, current: run.token)
+        if run.kind == .look { dropFollowUps(run.token); return nil }
+        let settled = followUps.settle(note: noteID, token: run.token, succeeded: true)
+        for line in settled.dropped { line.again() }
+        let asked = settled.review
         guard let model = asked?.model ?? run.holes else { return nil }
         let line = asked?.line
         let words = asked?.asked ?? run.asked
@@ -468,8 +515,7 @@ final class NoteHelpers {
 
     /// What was said to a run that ended, never sent: its lines may run again.
     private func dropFollowUps(_ token: RunToken) {
-        followUps.clear(token)
-        for line in followUps.takeDropped() { line.again() }
+        for line in followUps.settle(note: "", token: token, succeeded: false).dropped { line.again() }
     }
 
     // MARK: Runs (rule A)

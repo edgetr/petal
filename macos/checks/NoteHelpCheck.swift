@@ -983,16 +983,39 @@ struct NoteHelpCheck {
         }
         var kept16: NoteHelp.Watch? = { var w = NoteHelp.Watch(every: "1d", line: "under $100", mac: "m"); w.id = "K"; w.last = "$120"; w.amount = 120; return w }()
         _ = NoteHelp.applyLook(&kept16, id: "K", shown: "$90", amount: 90, hint: nil, past: true, confirmed: false, verdict: .refuted, at: now)
-        expect(kept16?.last == "$120" && kept16?.amount == 120 && kept16?.unconfirmed == false, "a refuted reading never becomes the shown value")
+        expect(kept16?.last == "$120" && kept16?.amount == 120 && kept16?.unconfirmed == "", "a refuted reading never becomes the shown value")
         _ = NoteHelp.applyLook(&kept16, id: "K", shown: "$90", amount: 90, hint: nil, past: true, confirmed: false, verdict: .unconfirmed, at: now)
-        expect(kept16?.last == "$120" && kept16?.amount == 120 && kept16?.unconfirmed == true, "an unconfirmed one keeps the last accepted value, and says couldn't confirm")
+        expect(kept16?.last == "$120" && kept16?.amount == 120 && kept16?.unconfirmed == "$90", "an unconfirmed crossing keeps the last accepted value; its number shown faintly, couldn't confirm")
         _ = NoteHelp.applyLook(&kept16, id: "K", shown: "$110", amount: 110, hint: nil, past: false, confirmed: false, verdict: .plain, at: now)
-        expect(kept16?.last == "$110" && kept16?.unconfirmed == false, "the next accepted reading clears it")
+        expect(kept16?.last == "$110" && kept16?.unconfirmed == "", "the next accepted reading clears it")
         let exact: Shielded = "\(11_899.5) and \(11_900.0)"
         expect(exact.text == "11899.5 and 11900", "a watcher's value goes on exactly, never rounded before a decision", exact.text)
         let downloading = NoteHelp.CoverCandidate(key: "/n/T/About this notebook.md", name: "About this notebook.md", inFolder: true)
         expect(NoteHelp.coverChoice([downloading], unread: 1) == .notHere && NoteHelp.coverChoice([], unread: 0) == .none,
                "a cover that can't be read yet is told apart from no cover (waited for, never skipped)")
+
+        // MARK: After round sixteen: completion is "accepted and shown"; watchers with no AI
+
+        var heldQueue = FollowUpQueue<String>()
+        let heldRun = RunToken()
+        heldQueue.addReview(sol, asked: "@Petal have GPT 6.1 Sol look for holes", note: "N1", token: heldRun, line: "review line")
+        // Its answer waits for the vault: the run isn't complete, nothing asked of it is settled.
+        expect(heldQueue.entries.count == 1 && heldRun.admits, "an answer waiting for the vault: the run isn't complete, its queued review waits with it")
+        let shownSettled = heldQueue.settle(note: "N1", token: heldRun, succeeded: true)
+        expect(shownSettled.review?.line == "review line" && shownSettled.dropped.isEmpty && heldQueue.entries.isEmpty,
+               "once shown, it completes like any run: the queued review starts, holding its own line")
+        let failingRun = RunToken()
+        heldQueue.addReview(sol, asked: "@Petal have GPT 6.1 Sol look for holes", note: "N1", token: failingRun, line: "review line")
+        let failedSettled = heldQueue.settle(note: "N1", token: failingRun, succeeded: false)
+        expect(failedSettled.review == nil && failedSettled.dropped == ["review line"], "that run fails instead: the review's line is runnable again")
+        var noAI: NoteHelp.Watch? = { var w = NoteHelp.Watch(every: "1d", line: "under $100", mac: "m"); w.id = "N"; return w }()
+        let quiet = NoteHelp.watchVerdict(crossed: false, alreadyHit: false, confirmation: nil, asked: false)
+        expect(NoteHelp.applyLook(&noAI, id: "N", shown: "$130", amount: 130, hint: nil, past: false, confirmed: false, verdict: quiet, at: now) == false
+               && noAI?.last == "$130" && noAI?.unconfirmed == "", "no AI set up: a reading that doesn't cross the line updates the corner as usual")
+        let unsure = NoteHelp.watchVerdict(crossed: true, alreadyHit: false, confirmation: nil, asked: false)
+        expect(NoteHelp.applyLook(&noAI, id: "N", shown: "$95", amount: 95, hint: nil, past: true, confirmed: false, verdict: unsure, at: now) == false
+               && noAI?.last == "$130" && noAI?.unconfirmed == "$95" && noAI?.hit == false,
+               "no AI: a crossing shows its number faintly, couldn't confirm, never a hit (so it never opens the note)")
 
         // MARK: Open all never launches an app or a script (NoteTasks)
 

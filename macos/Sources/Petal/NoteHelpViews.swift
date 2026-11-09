@@ -379,8 +379,8 @@ struct WatchCorner: View {
                 Text(watch.history.prefix(2).joined(separator: " · ")).font(.system(size: 11)).strikethrough().foregroundStyle(Color(white: 0.6)).lineLimit(1)
             }
             // A reading that couldn't be confirmed: the last accepted value stays, and the corner says so faintly.
-            if watch.unconfirmed {
-                Text("couldn't confirm").font(.system(size: 10.5)).foregroundStyle(Color(white: 0.6)).lineLimit(1)
+            if !watch.unconfirmed.isEmpty {
+                Text(watch.unconfirmed + " · couldn't confirm").font(.system(size: 10.5)).foregroundStyle(Color(white: 0.6)).lineLimit(1)
             }
         }
     }
