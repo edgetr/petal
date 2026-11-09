@@ -237,6 +237,49 @@ struct ViewerFileCheck {
         expect(String(page[ViewerLens.paragraph(page, around: range)]) == "The first paragraph has words.", "the paragraph a selection is in")
         expect(ViewerLens.short(String(repeating: "a", count: 400)).count == 280, "an answer kept short")
 
+        // MARK: Versions, the margin's open paper, fences, pages, a file's other names
+
+        let labels = ViewerCopies.labels(["Draft", "Draft", "draft", "Other"])
+        expect(labels == ["Draft", "Draft (2)", "draft (3)", "Other"], "the same label twice is told apart for the person", "\(labels)")
+        let ids = labels.indices.map(ViewerCopies.versionID)
+        expect(Set(ids).count == ids.count && ids == ["v1", "v2", "v3", "v4"], "every version has an id of its own, never its label")
+        let copies = labels.reduce(into: [String]()) { names, label in names.append(ViewerCopies.version(original: "Deck.pptx", label: label, taken: Set(names.map { $0.lowercased() }))) }
+        expect(Set(copies.map { $0.lowercased() }).count == copies.count, "and a file of its own", "\(copies)")
+
+        let laidOut = ViewerMargin.cascade([("a", 170, false), ("open", 300, true), ("b", 170, false), ("c", 170, false)], floor: 100)
+        let open = laidOut["open"]!
+        expect(open.x == 18 && open.x + 310 <= 350 && open.tilt == 0, "an open paper is at the margin's full width, never in the right column")
+        expect(open.y >= laidOut["a"]!.y + 170 && laidOut["b"]!.y >= open.y + 300, "on a row of its own, clear of the papers around it", "\(laidOut)")
+        expect(laidOut["b"]!.x == 30 && laidOut["c"]!.x == 165 && laidOut["c"]!.y == laidOut["b"]!.y + 70, "folded ones still cascade")
+        let second = ViewerMargin.cascade([("a", 170, false), ("open", 300, true)], floor: 0)
+        expect(second["open"]!.x == 18, "even where a right-column paper would have gone")
+
+        var turns = ViewerTurns()
+        let older = turns.begin("version:s:v1")
+        let newer = turns.begin("version:s:v1")
+        let otherTurn = turns.begin("version:s:v2")
+        expect(turns.isLatest("version:s:v1", newer) && !turns.isLatest("version:s:v1", older) && turns.isLatest("version:s:v2", otherTurn),
+               "an older drawing never lands over a newer one; each version its own")
+
+        expect(ViewerPages.index(Int.min, count: 5) == nil && ViewerPages.index(0, count: 5) == nil && ViewerPages.index(6, count: 5) == nil
+               && ViewerPages.index(Int.max, count: 5) == nil && ViewerPages.index(5, count: 5) == 4 && ViewerPages.index(nil, count: 5) == nil,
+               "only a page the document has, checked before any arithmetic")
+        expect(ViewerPages.requested(NSNumber(value: 3)) == 3 && ViewerPages.requested(NSNumber(value: Int.min)) == nil && ViewerPages.requested(NSNumber(value: 0)) == nil
+               && ViewerPages.requested(NSNumber(value: 1e300)) == nil && ViewerPages.requested(NSNumber(value: 2.5)) == nil && ViewerPages.requested("3") == nil,
+               "a page an agent gives: a whole number from 1")
+
+        let aliasBase = FileManager.default.temporaryDirectory.appending(path: "petal-viewer-alias-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: aliasBase.appending(path: "Real"), withIntermediateDirectories: true)
+        let realPDF = aliasBase.appending(path: "Real/Report.pdf")
+        try? Data("%PDF-1.4".utf8).write(to: realPDF)
+        try? Data("%PDF-1.4".utf8).write(to: aliasBase.appending(path: "Real/Other.pdf"))
+        try? FileManager.default.createSymbolicLink(atPath: aliasBase.appending(path: "Link.pdf").path, withDestinationPath: realPDF.path)
+        try? FileManager.default.createSymbolicLink(atPath: aliasBase.appending(path: "Folder").path, withDestinationPath: aliasBase.appending(path: "Real").path)
+        let candidates = ["Real/Report.pdf", "Link.pdf", "Folder/Report.pdf", "Real/Other.pdf", "Missing.pdf"].map { aliasBase.appending(path: $0).path }
+        let found = ViewerFileID.of(realPDF.path).map { ViewerFileID.aliases(of: $0, candidates, identify: ViewerFileID.of) } ?? []
+        expect(found == Set(candidates.prefix(3)), "a note's path through a link is the same file; another file isn't", "\(found.map { ($0 as NSString).lastPathComponent })")
+        try? FileManager.default.removeItem(at: aliasBase)
+
         print("viewer: \(passed) passed" + (failures > 0 ? ", \(failures) failed" : ""))
         if failures > 0 { exit(1) }
     }

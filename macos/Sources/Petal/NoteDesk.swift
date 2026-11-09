@@ -98,6 +98,7 @@ final class NoteDesk {
         }
         store.onIdentity = { [weak self] old, holder, new in
             guard let self else { return }
+            self.identityChanged(holder: holder, new)
             self.local.rekeyID(old, holder: holder, new)
             self.local.save(pending: store.pendingIDs)
         }
@@ -1140,7 +1141,7 @@ final class NoteDesk {
     func open(_ key: String, expecting: NoteShelf.KeyboardRequests.Target? = nil) {
         guard let paper = store.paper(key) else { return }
         // Open in Petal's viewer's margin: closed there first (one editor per note).
-        heldByViewer.removeValue(forKey: paper.noteID)?()
+        releaseFromViewer(paper)
         faces[key] = .open
         keyboard = key
         local.shown = Array(Set(local.shown + [paper.noteID]))
@@ -1228,7 +1229,7 @@ final class NoteDesk {
     }
 
     func flip(_ key: String) {
-        if let paper = store.paper(key) { heldByViewer.removeValue(forKey: paper.noteID)?() }
+        if let paper = store.paper(key) { releaseFromViewer(paper) }
         faces[key] = faces[key] == .back ? .open : .back
         if faces[key] == .open { wantKeyboard(key) }
         panels[key]?.refit()
@@ -1258,9 +1259,21 @@ final class NoteDesk {
 
     private func isDesktopNote(_ key: String) -> Bool { store.paper(key)?.file.places.contains { $0.kind == .desktop } == true }
 
-    /// Notes open for writing in Petal's viewer's margin (by note id): told to fold before the desk opens one, so a
-    /// note is never open in two editors.
+    /// Notes open for writing in Petal's viewer's margin, by the note's identity (its holder key, NoteShelf.holderKey:
+    /// an id-less note's is its path id with its file's instance): told to fold before the desk opens one, so a note
+    /// is never open in two editors. An id given to an id-less note moves its entry (`identityChanged`).
     @ObservationIgnored var heldByViewer: [String: () -> Void] = [:]
+
+    /// A note open in a viewer's margin folded there first (before the desk opens or turns it).
+    func releaseFromViewer(_ paper: PaperNote) {
+        heldByViewer.removeValue(forKey: paper.holder)?()
+    }
+
+    /// Phase 1's identity change (`store.onIdentity`): an id-less note got its own id; what's held by its old
+    /// identity follows it.
+    func identityChanged(holder: String, _ new: String) {
+        heldByViewer = NoteShelf.rekeyed(heldByViewer, holder, new)
+    }
 
     /// Petal's viewer came to the front: the notes on the window left behind hide, as for any other app coming
     /// forward, until a fresh read of what's in front after it.

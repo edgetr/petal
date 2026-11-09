@@ -168,6 +168,31 @@ enum ViewerMargin {
         return placed
     }
 
+    /// Papers below the lined-up ones, from `floor` down: folded ones as paper on a desk, a cascade of two columns;
+    /// an open one always at the margin's left inset, its full width, on a row of its own (an editor is never pushed
+    /// into the right column and cut off).
+    static func cascade(_ items: [(id: String, height: CGFloat, open: Bool)], floor start: CGFloat) -> [String: (x: CGFloat, y: CGFloat, tilt: Double)] {
+        var out: [String: (x: CGFloat, y: CGFloat, tilt: Double)] = [:]
+        var floor = start
+        var right = false
+        var rowBottom = start
+        for item in items {
+            if item.open {
+                floor = max(floor, rowBottom)
+                out[item.id] = (18, floor, 0)
+                floor += item.height + 12
+                rowBottom = floor
+                right = false
+                continue
+            }
+            out[item.id] = (right ? 165 : 30, floor, right ? 2 : 0)
+            rowBottom = max(rowBottom, floor + item.height + 12)
+            floor = right ? rowBottom : floor + 70
+            right.toggle()
+        }
+        return out
+    }
+
     /// The sketch's dashed line from a passage's highlight (its right edge, halfway down) to its paper (its left
     /// edge, 28 points down), as a curve's four points.
     static func pin(from words: CGRect, to paper: CGRect) -> [CGPoint] {
@@ -179,6 +204,54 @@ enum ViewerMargin {
 }
 
 // MARK: - A preview's pages
+
+extension ViewerPages {
+    /// A page or slide asked for (from 1, as a person or an agent says it) as an index into a document of `count`:
+    /// nil unless it's one the document has. Checked before any arithmetic.
+    static func index(_ page: Int?, count: Int) -> Int? {
+        guard let page, page >= 1, page <= count else { return nil }
+        return page - 1
+    }
+
+    /// A page as an agent gives it: a whole number from 1 that an Int holds; nil otherwise (never trapping).
+    static func requested(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber, let page = Int(exactly: number.doubleValue), page >= 1 else { return nil }
+        return page
+    }
+}
+
+/// Answers that come back later (a picture drawn, a selection's text read off the main thread): each request takes a
+/// turn per key, and only the latest one started for that key is kept.
+struct ViewerTurns {
+    private var latest: [String: Int] = [:]
+
+    mutating func begin(_ key: String) -> Int {
+        let turn = (latest[key] ?? 0) + 1
+        latest[key] = turn
+        return turn
+    }
+
+    func isLatest(_ key: String, _ turn: Int) -> Bool { latest[key] == turn }
+}
+
+/// A file as the disk knows it, whatever path spells it (a link, another spelling): its volume and inode.
+struct ViewerFileID: Equatable, Hashable, Sendable {
+    var device: UInt64
+    var inode: UInt64
+
+    /// The file a path leads to (every link followed); nil when nothing's there.
+    static func of(_ path: String) -> ViewerFileID? {
+        var info = stat()
+        guard !path.isEmpty, stat(path, &info) == 0 else { return nil }
+        return ViewerFileID(device: UInt64(bitPattern: Int64(info.st_dev)), inode: UInt64(info.st_ino))
+    }
+
+    /// The paths among `candidates` that are `file`, by identity, never by spelling: the path the document was
+    /// opened by, the one the disk spells, a link to it, a note's path written through another link.
+    static func aliases(of file: ViewerFileID, _ candidates: [String], identify: (String) -> ViewerFileID?) -> Set<String> {
+        Set(candidates.filter { identify($0) == file })
+    }
+}
 
 /// A document Quick Look shows as one long page (Word's, a spreadsheet's) cut into pages at the ends of its blocks,
 /// never through a line.
@@ -250,10 +323,19 @@ enum ViewerCopies {
         return free(stem + " (before notes)", ext: "pdf", taken: taken)
     }
 
-    /// At most 6 versions, each with a label (its name in a few words).
+    /// At most 6 versions, each with a label (its name in a few words) shown as it is; the same label twice is
+    /// told apart for the person ("Draft", "Draft (2)"). A version is known by its id (`versionID`), never its label.
     static func labels(_ wanted: [String]) -> [String] {
-        Array(wanted.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.prefix(6))
+        var seen: [String: Int] = [:]
+        return wanted.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }.prefix(6).map { label in
+            let n = (seen[label.lowercased()] ?? 0) + 1
+            seen[label.lowercased()] = n
+            return n == 1 ? label : "\(label) (\(n))"
+        }
     }
+
+    /// A version's id in its set: the order it was made in, never its label.
+    static func versionID(_ index: Int) -> String { "v\(index + 1)" }
 }
 
 /// What a note says as a comment in a PDF: its words as plain text (checkboxes as ☐ and ☑, a link as its address,

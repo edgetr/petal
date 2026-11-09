@@ -52,12 +52,14 @@ final class Viewers {
     @discardableResult
     func show(_ url: URL, page: Int? = nil, front: Bool = true) -> ViewerModel {
         if let model = open.first(where: { $0.url.path == url.path }) {
-            if let page { model.go(to: page - 1) }
+            // Only a page the document has (checked before any arithmetic).
+            if let index = ViewerPages.index(page, count: model.pageCount) { model.go(to: index) }
             if front, let window = windows[model.id] { PetalWindow.bringForward(window) }
             return model
         }
         let model = ViewerModel(url: url, kind: ViewerKind.of(url.path) ?? .quickLook(.page))
-        model.wanted = page.map { $0 - 1 }
+        // Checked against the document once it's read (ViewerPages.index).
+        model.wantedPage = page
         open.append(model)
         if !Headless.on {
             let window = ViewerWindow(model: model)
@@ -110,6 +112,32 @@ struct ViewerSelection: Equatable {
     var anchor: CGPoint
 }
 
+/// A page's text read off the main thread from a copy of the document of its own (one per load, its pages' text
+/// kept once read): what a selection or a passage needs of a page is never extracted on the main thread.
+final class ViewerText: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "petal.viewer.text", qos: .userInitiated)
+    private let data: Data
+    private var document: PDFDocument?
+    private var texts: [Int: String] = [:]
+
+    init(_ data: Data) { self.data = data }
+
+    /// A page's text and, for `paragraph` in it, its bounds on the page; off the main thread, then `done` on it.
+    func read(page: Int, paragraph: @escaping @Sendable (String) -> NSRange?, _ done: @escaping @MainActor (String?, CGRect?) -> Void) {
+        queue.async {
+            if self.document == nil { self.document = PDFDocument(data: self.data) }
+            guard let document = self.document, let page = document.page(at: page) else {
+                return DispatchQueue.main.async { MainActor.assumeIsolated { done(nil, nil) } }
+            }
+            let index = document.index(for: page)
+            let text = self.texts[index] ?? (page.string ?? "")
+            self.texts[index] = text
+            let box = paragraph(text).flatMap { page.selection(for: $0)?.bounds(for: page) }
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(text, box) } }
+        }
+    }
+}
+
 /// Where a margin note's passage is in the document now: found again by its words (its page and bounds there), or
 /// moved (it shows on the file, with no highlight).
 enum ViewerFound: Equatable {
@@ -117,14 +145,15 @@ enum ViewerFound: Equatable {
     case moved
 }
 
-/// One version made on a copy: its label ("Shorter"), the copy, and its picture of the page shown.
+/// One version made on a copy: its id in its set ("v2", what files, pictures and picks go by), its label for the
+/// person ("Shorter", "Draft (2)"), the copy, and its picture of the page shown.
 struct ViewerVersion: Identifiable, Equatable {
+    var id: String
     var label: String
     var url: URL
     var thumb: NSImage?
-    var id: String { label }
 
-    static func == (a: ViewerVersion, b: ViewerVersion) -> Bool { a.label == b.label && a.url == b.url && a.thumb === b.thumb }
+    static func == (a: ViewerVersion, b: ViewerVersion) -> Bool { a.id == b.id && a.label == b.label && a.url == b.url && a.thumb === b.thumb }
 }
 
 /// Versions made on copies, for whoever asked (a helper, an agent): the original is never changed by the viewer;
@@ -135,6 +164,7 @@ final class ViewerVersionSet {
     let asker: String
     let folder: URL
     var versions: [ViewerVersion]
+    /// The id of the version picked.
     var picked: String?
     /// Waiting for the pick (`petal_view_pick` with `wait`, or Phase 2's helper): told once it's made or the
     /// viewer closes.
@@ -151,7 +181,7 @@ final class ViewerVersionSet {
     /// Phase 2's helpers: `done` once the person picks a version (nil: the viewer closed first, or newer versions
     /// replaced these). At once when that's already so.
     func whenPicked(_ done: @escaping (ViewerVersion?) -> Void) {
-        if let picked, let version = versions.first(where: { $0.label == picked }) { return done(version) }
+        if let picked, let version = versions.first(where: { $0.id == picked }) { return done(version) }
         if closed { return done(nil) }
         waiting.append(done)
     }
@@ -203,8 +233,15 @@ final class ViewerModel: Identifiable {
     var current = 0 {
         didSet { if current != oldValue, let set = versions { drawVersions(set) } }
     }
-    /// The page to show once loaded (0-based).
-    @ObservationIgnored var wanted: Int?
+    /// The page or slide asked for (from 1), shown once the document is read and only if it has it.
+    @ObservationIgnored var wantedPage: Int?
+    /// Every path this file goes by among the notes' places (its own two spellings, links to it), by the file's
+    /// identity, never by spelling (ViewerFileID).
+    private(set) var aliases: Set<String> = []
+    /// What a page's text is read from, off the main thread (ViewerText), for the pages shown now.
+    @ObservationIgnored private(set) var text: ViewerText?
+    /// Selections read and pictures drawn, the latest of each kept.
+    @ObservationIgnored private var turns = ViewerTurns()
     private(set) var thumbs: [Int: NSImage] = [:]
     private(set) var loading = true
     private(set) var problem: String?
@@ -343,9 +380,10 @@ final class ViewerModel: Identifiable {
     }
 
     private func present(_ document: PDFDocument, _ data: Data) {
-        let keep = document.pageCount > 0 ? min(wanted ?? current, document.pageCount - 1) : 0
-        wanted = nil
+        let keep = ViewerPages.index(wantedPage, count: document.pageCount) ?? min(current, max(0, document.pageCount - 1))
+        wantedPage = nil
         self.data = data
+        text = ViewerText(data)
         self.document = document
         live = false
         pageCount = document.pageCount
@@ -363,6 +401,7 @@ final class ViewerModel: Identifiable {
     private func goLive() {
         document = nil
         data = nil
+        text = nil
         live = true
         pageCount = 0
         loading = false
@@ -498,7 +537,7 @@ final class ViewerModel: Identifiable {
 
     func go(to index: Int) {
         guard index >= 0 else { return }
-        guard let document else { wanted = index; return }
+        guard let document else { wantedPage = index + 1; return }
         guard index < document.pageCount, let page = document.page(at: index) else { return }
         current = index
         pdfView?.go(to: page)
@@ -523,9 +562,64 @@ final class ViewerModel: Identifiable {
     /// most specific place first.
     var notes: [(paper: PaperNote, place: NoteStick)] {
         desk.store.notes.compactMap { paper in
-            guard let index = ViewerMatch.place(paper.file.places, path: url.path, also: [opened]) else { return nil }
+            guard let index = ViewerMatch.place(paper.file.places, path: url.path, also: [opened] + aliases) else { return nil }
             return (paper, paper.file.places[index])
         }
+    }
+
+    /// The notes' file places, by path and bookmark: what `aliases` is worked out from.
+    var anchorSignature: String {
+        let paths = Set(desk.store.notes.flatMap { $0.file.places.filter { $0.kind == .file }.map(\.path) })
+        return url.path + "\u{1}" + paths.sorted().joined(separator: "\u{1}")
+    }
+
+    /// Which of the notes' file paths are this file, by its identity (off the main thread): a note made through a link,
+    /// or the document opened through one, still shows. A path gone from the disk is found by its bookmark.
+    func refreshAliases() {
+        let file = url
+        let candidates = Array(Set(desk.store.notes.flatMap { $0.file.places.filter { $0.kind == .file }.map { ($0.path, $0.bookmark) } }
+            .map { "\($0.0)\u{1}\($0.1)" }))
+        Viewers.queue.async {
+            guard let id = ViewerFileID.of(file.path) else { return }
+            let pairs = candidates.map { $0.components(separatedBy: "\u{1}") }
+            let marks = Dictionary(pairs.map { ($0[0], $0.count > 1 ? $0[1] : "") }, uniquingKeysWith: { a, _ in a })
+            let found = ViewerFileID.aliases(of: id, Array(marks.keys)) { path in
+                ViewerFileID.of(path) ?? Data(base64Encoded: marks[path] ?? "").flatMap(ViewerLoader.follow).flatMap { ViewerFileID.of($0.path) }
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard file == self.url, found != self.aliases else { return }
+                    self.aliases = found
+                    self.resolvePassages()
+                }
+            }
+        }
+    }
+
+    /// A selection made in PDFKit's view: its page's text read off the main thread (ViewerText), then offered as a
+    /// Note; an older selection's answer, or one from pages since replaced, is dropped.
+    func selected(page: Int, bounds: CGRect, words: String, range: NSRange, anchor: CGPoint) {
+        guard let source = text else { return }
+        let turn = turns.begin("selection")
+        let lens = lensKey != nil
+        source.read(page: page, paragraph: { text in
+            guard lens, NSMaxRange(range) <= (text as NSString).length, let swift = Range(range, in: text) else { return nil }
+            return NSRange(ViewerLens.paragraph(text, around: swift), in: text)
+        }) { pageText, box in
+            guard self.turns.isLatest("selection", turn), source === self.text, let pageText, NSMaxRange(range) <= (pageText as NSString).length else { return }
+            self.selection = ViewerSelection(page: page, bounds: bounds, quote: words, pageText: pageText, range: range, anchor: anchor)
+            // The reading lens: the paragraph the selection is in, for the note that follows it.
+            if lens, let swift = Range(range, in: pageText) {
+                let paragraph = NSRange(ViewerLens.paragraph(pageText, around: swift), in: pageText)
+                self.selectionSettled(page: page, text: pageText, paragraph: paragraph, selected: range, bounds: box ?? bounds)
+            }
+        }
+    }
+
+    /// No selection (or one the viewer doesn't offer a Note for): an answer still on its way is dropped.
+    func unselected() {
+        _ = turns.begin("selection")
+        if selection != nil { selection = nil }
     }
 
     /// A paper's file got another name: what's kept about it here follows.
@@ -543,11 +637,12 @@ final class ViewerModel: Identifiable {
     func openPaper(_ paper: PaperNote) {
         if let key = openKey, key != paper.key { fold(key) }
         // Open in another viewer (a note on two files): closed there first.
-        desk.heldByViewer.removeValue(forKey: paper.noteID)?()
+        desk.releaseFromViewer(paper)
         if desk.faces[paper.key] == .open || desk.faces[paper.key] == .back { desk.fold(paper.key) }
         openKey = paper.key
         face = .open
-        desk.heldByViewer[paper.noteID] = { [weak self] in
+        // Held by the note's identity, which follows an id given to an id-less note (NoteDesk.identityChanged).
+        desk.heldByViewer[paper.holder] = { [weak self] in
             guard let self, let key = self.openKey else { return }
             self.fold(key)
         }
@@ -560,7 +655,7 @@ final class ViewerModel: Identifiable {
     func fold(_ key: String) {
         guard key == openKey else { return }
         desk.editors[key]?.flush()
-        if let paper = desk.store.paper(key) { desk.heldByViewer[paper.noteID] = nil }
+        if let paper = desk.store.paper(key) { desk.heldByViewer[paper.holder] = nil }
         openKey = nil
         desk.letGoIfEmpty(key)
     }
@@ -687,7 +782,7 @@ final class ViewerModel: Identifiable {
             do {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                 var taken: Set<String> = []
-                for label in labels {
+                for (index, label) in labels.enumerated() {
                     let name = ViewerCopies.version(original: url.lastPathComponent, label: label, taken: taken)
                     taken.insert(name.lowercased())
                     let copy = folder.appending(path: name)
@@ -698,7 +793,7 @@ final class ViewerModel: Identifiable {
                         copied = (try? FileManager.default.copyItem(at: readable, to: copy)) != nil
                     }
                     guard copied else { failure = .copy; break }
-                    made.append(ViewerVersion(label: label, url: copy))
+                    made.append(ViewerVersion(id: ViewerCopies.versionID(index), label: label, url: copy))
                 }
             } catch { failure = .copy }
             let versions = made
@@ -727,11 +822,11 @@ final class ViewerModel: Identifiable {
     }
 
     @ObservationIgnored private var versionWatch: ViewerWatch?
-    /// Each copy's pages as last read (by label), and the turn they and the pictures drawn from them belong to: a
-    /// newer read, or another page shown, makes an older answer stand down.
+    /// Each copy's pages as last read (by version id), and the read they came from: a newer read makes an older one
+    /// stand down; each picture drawn is fenced by its version's latest drawing (`turns`), which always uses the
+    /// newest pages, and by the page shown.
     @ObservationIgnored private var versionPages: [String: Data] = [:]
     @ObservationIgnored private var versionReads = 0
-    @ObservationIgnored private var versionDraws = 0
 
     /// Each copy read again (through the same loader: Quick Look for decks), off the main thread, then its picture
     /// of the page shown drawn.
@@ -746,8 +841,8 @@ final class ViewerModel: Identifiable {
                     MainActor.assumeIsolated {
                         let keep: @MainActor (Data?) -> Void = { data in
                             guard turn == self.versionReads, set === self.versions else { return }
-                            self.versionPages[version.label] = data
-                            self.drawVersion(set, version.label)
+                            self.versionPages[version.id] = data
+                            self.drawVersion(set, version.id)
                         }
                         switch read.pages {
                         case .pdf(let data): keep(data)
@@ -762,24 +857,24 @@ final class ViewerModel: Identifiable {
 
     /// Every copy's picture of the page shown now (another page shown: drawn again from what was read).
     private func drawVersions(_ set: ViewerVersionSet) {
-        versionDraws += 1
-        for version in set.versions { drawVersion(set, version.label) }
+        for version in set.versions { drawVersion(set, version.id) }
     }
 
-    /// One copy's picture of the page shown, drawn off the main thread; kept only while that page and these copies
-    /// are still the ones shown.
-    private func drawVersion(_ set: ViewerVersionSet, _ label: String) {
+    /// One copy's picture of the page shown, drawn off the main thread from its newest pages; kept only if it's that
+    /// version's latest drawing (never an older read's or another page's over a newer one) and that page and these
+    /// copies are still the ones shown.
+    private func drawVersion(_ set: ViewerVersionSet, _ id: String) {
         let page = current
-        let turn = versionDraws
-        let carried = ViewerCarry(versionPages[label])
+        let turn = turns.begin("version:" + set.id + ":" + id)
+        let carried = ViewerCarry(versionPages[id])
         Viewers.queue.async {
             let image = (carried.value as? Data).flatMap { PDFDocument(data: $0) }.flatMap { $0.page(at: min(page, $0.pageCount - 1)) }?
                 .thumbnail(of: CGSize(width: 400, height: 224), for: .cropBox)
             let picture = ViewerCarry(image)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard turn == self.versionDraws, page == self.current, set === self.versions,
-                          let index = set.versions.firstIndex(where: { $0.label == label }) else { return }
+                    guard self.turns.isLatest("version:" + set.id + ":" + id, turn), page == self.current, set === self.versions,
+                          let index = set.versions.firstIndex(where: { $0.id == id }) else { return }
                     set.versions[index].thumb = picture.value as? NSImage
                 }
             }
@@ -788,8 +883,8 @@ final class ViewerModel: Identifiable {
 
     /// "Use this": the pick reported to whatever asked for it. Nothing is changed by the viewer itself.
     func use(_ version: ViewerVersion) {
-        guard let set = versions, set.picked == nil else { return }
-        set.picked = version.label
+        guard let set = versions, set.picked == nil, set.versions.contains(where: { $0.id == version.id }) else { return }
+        set.picked = version.id
         set.settle(version)
     }
 }

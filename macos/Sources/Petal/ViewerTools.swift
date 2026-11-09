@@ -14,12 +14,21 @@ extension Viewers {
         let path = args["path"] as? String ?? ""
         switch name {
         case "petal_view":
-            let page = (args["page"] as? NSNumber)?.intValue
+            // A page counts from 1; a number that isn't one is refused before anything is worked out from it.
+            let page = ViewerPages.requested(args["page"])
+            if args["page"] != nil, page == nil { return fail("page counts from 1 (a whole number).") }
             open(path: path, page: page) { result in
                 guard live() else { return }
                 switch result {
                 case .failure(let refusal): fail(refusal.description)
-                case .success(let model): self.loaded(model) { send(self.told(model)) }
+                case .success(let model):
+                    self.loaded(model) {
+                        var told = self.told(model)
+                        if let page, !model.live, model.pageCount > 0, ViewerPages.index(page, count: model.pageCount) == nil {
+                            told["note"] = "It has \(model.pageCount) \(model.unit.word)s; \(model.unit.word) \(page) isn't one, so it shows where it was."
+                        }
+                        send(told)
+                    }
                 }
             }
         case "petal_view_versions":
@@ -34,7 +43,7 @@ extension Viewers {
                         case .failure(let error): fail(error.description)
                         case .success(let set):
                             send(["set": set.id, "file": model.name,
-                                  "versions": set.versions.map { ["name": $0.label, "path": $0.url.path] },
+                                  "versions": set.versions.map { ["id": $0.id, "name": $0.label, "path": $0.url.path] },
                                   "note": "Copies in a temporary folder, shown under the document with Use this. Change the copies (never the file itself); their pictures follow. petal_view_pick tells you which one the person picks."])
                         }
                     }
@@ -45,10 +54,10 @@ extension Viewers {
                 return fail("No versions by that id were made for you (petal_view_versions makes them).")
             }
             let answer = { (picked: ViewerVersion?) in
-                if let picked { send(["picked": ["name": picked.label, "path": picked.url.path]]) }
+                if let picked { send(["picked": ["id": picked.id, "name": picked.label, "path": picked.url.path]]) }
                 else { send(["picked": NSNull(), "note": set.closed ? "The viewer was closed without a pick." : "Not picked yet."]) }
             }
-            if let label = set.picked, let version = set.versions.first(where: { $0.label == label }) { return answer(version) }
+            if let id = set.picked, let version = set.versions.first(where: { $0.id == id }) { return answer(version) }
             let wait = min(120, max(0, (args["wait"] as? NSNumber)?.doubleValue ?? 0))
             guard wait > 0, !set.closed else { return answer(nil) }
             var answered = false
@@ -105,7 +114,22 @@ extension Viewers {
     /// person allows it.
     func comments(_ pdf: URL, opened: String, intoOriginal: Bool, caller: String?, live: @escaping @Sendable () -> Bool = { true },
                   _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
-        let paths = [pdf.path, opened]
+        // The notes on this PDF by its identity, whatever path spells it (a link, the path it was opened by), worked
+        // out off the main thread.
+        let candidates = Array(Set(app.paper.store.notes.flatMap { $0.file.places.filter { $0.kind == .file }.map(\.path) }))
+        Self.queue.async {
+            let found = ViewerFileID.of(pdf.path).map { id in ViewerFileID.aliases(of: id, candidates, identify: ViewerFileID.of) } ?? []
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard live() else { return fail(NoteDesk.hungUp) }
+                    self.comments(pdf, paths: [pdf.path, opened] + found, intoOriginal: intoOriginal, caller: caller, live: live, send, fail)
+                }
+            }
+        }
+    }
+
+    private func comments(_ pdf: URL, paths: [String], intoOriginal: Bool, caller: String?, live: @escaping @Sendable () -> Bool,
+                          _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let comments = app.paper.store.notes.compactMap { paper -> ViewerPDFComments.Comment? in
             guard paper.version == nil, let index = ViewerMatch.place(paper.file.places, path: pdf.path, also: paths) else { return nil }
             // The words as written: the writer redacts them whole before anything is cut.

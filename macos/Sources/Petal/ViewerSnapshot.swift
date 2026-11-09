@@ -66,8 +66,8 @@ extension Snapshot {
 
         // Versions on copies under the slide, each with Use this.
         let set = ViewerVersionSet(id: "sample", asker: "snapshot", folder: root, versions: [
-            ViewerVersion(label: "Short title", url: root.appending(path: "Quarterly plan (Short title).pptx"), thumb: sampleSlide(2, title: "Plan: faster")),
-            ViewerVersion(label: "With figures", url: root.appending(path: "Quarterly plan (With figures).pptx"), thumb: sampleSlide(2, title: "Plan: five wins in a row", dark: true)),
+            ViewerVersion(id: "v1", label: "Short title", url: root.appending(path: "Quarterly plan (Short title).pptx"), thumb: sampleSlide(2, title: "Plan: faster")),
+            ViewerVersion(id: "v2", label: "With figures", url: root.appending(path: "Quarterly plan (With figures).pptx"), thumb: sampleSlide(2, title: "Plan: five wins in a row", dark: true)),
         ])
         deck.versions = set
         lay(deck, size: size, strip: true)
@@ -404,10 +404,16 @@ enum ViewerCheck {
         var ok = true
         func expect(_ condition: Bool, _ what: String) { if !condition { print("window: FAIL \(what)"); ok = false } }
         expect(model.pageCount == 2 && model.current == 0, "two pages, the first shown")
-        // A selection offers a Note with its page, bounds, and the page's whole text.
+        // A selection offers a Note with its page, bounds, and the page's whole text, read off the main thread; an
+        // older selection's answer never lands over a newer one's.
+        if let other = text.range(of: "A sample report") {
+            view.setCurrentSelection(page.selection(for: NSRange(other, in: text)), animate: false)
+        }
         let selection = page.selection(for: NSRange(found, in: text))
         view.setCurrentSelection(selection, animate: false)
-        wait(1) { model.selection != nil }
+        expect(model.selection == nil, "the page's text isn't read on the main thread (the selection waits for it)")
+        wait(3) { model.selection != nil }
+        wait(0.5) { false }
         expect(model.selection?.page == 0 && model.selection?.quote == "Growth held steady" && model.selection?.pageText == text, "the selection's page and words")
         // The passage as the vault check cuts it from the whole page.
         if let chosen = model.selection, let cut = ViewerSecrets.passage(chosen.pageText, range: chosen.range, secrets: []) {
@@ -457,7 +463,33 @@ enum ViewerCheck {
         expect(abs((mark.minY - moved.minY) - (120 - start)) < 1.5, "the passage moved up with them (\(mark.minY) → \(moved.minY), from \(start))")
         model.marginScrolled(0)
         wait(1) { model.docScroll < 1 }
-        print("window: " + (ok ? "PDF view, selection, passages found by their words, highlight, margin and pages in step" : "failed"))
+        // A note made through a link to the PDF is on this file (by its identity, never its path's spelling).
+        let linkFolder = scratch()
+        defer { try? FileManager.default.removeItem(at: linkFolder) }
+        let link = linkFolder.appending(path: "Linked.pdf")
+        try? FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: url.path)
+        var linked = NoteStick(kind: .file)
+        linked.path = link.path
+        var throughLink = NoteFile(id: "W3", body: "A note made through a link")
+        throughLink.places = [linked]
+        // An id-less note (a Markdown file made elsewhere): open in the margin, then given its own id.
+        var idless = NoteFile(id: NoteShelf.fallbackID(relativePath: "Inbox/Handwritten.md"), body: "Written by hand")
+        idless.places = [linked]
+        var handwritten = PaperNote(file: idless, url: FileManager.default.temporaryDirectory.appending(path: "Handwritten.md"), notebook: "Inbox")
+        handwritten.instance = "1:42"
+        app.paper.store.preview(notes + [PaperNote(file: throughLink, url: FileManager.default.temporaryDirectory.appending(path: "W3.md"), notebook: "Inbox"), handwritten],
+                                notebooks: [])
+        model.refreshAliases()
+        wait(3) { model.aliases.contains(link.path) }
+        expect(model.notes.contains { $0.paper.noteID == "W3" }, "a note made through a link shows")
+        model.openPaper(handwritten)
+        expect(model.openKey == handwritten.key && app.paper.heldByViewer[handwritten.holder] != nil, "open in the margin, held by its identity")
+        app.paper.identityChanged(holder: handwritten.holder, "W4")
+        var given = handwritten
+        given.file.id = "W4"
+        app.paper.releaseFromViewer(given)
+        expect(model.openKey == nil && app.paper.heldByViewer.isEmpty, "given its own id, the desk opening it still closes it in the margin")
+        print("window: " + (ok ? "PDF view, selection read off the main thread, passages found by their words, highlight, margin and pages in step, a link's note, ownership across an id change" : "failed"))
         window.close()
         return ok
     }

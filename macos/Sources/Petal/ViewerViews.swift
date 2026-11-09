@@ -95,6 +95,9 @@ struct ViewerView: View {
         }
         .environment(\.colorScheme, .light)
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in ViewerDrop.take(providers) }
+        // The notes' file places that are this file by its identity (a link, another spelling), again whenever they
+        // or the file's path change.
+        .task(id: model.anchorSignature) { model.refreshAliases() }
     }
 }
 
@@ -263,14 +266,23 @@ struct ViewerQuickLookView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: QLPreviewView, context: Context) {
+        // Renamed or moved: Quick Look shows the file where it is now, then it's read again.
+        if context.coordinator.url != url {
+            context.coordinator.url = url
+            view.previewItem = url as NSURL
+        }
         if context.coordinator.version != version {
             context.coordinator.version = version
             view.refreshPreviewItem()
         }
     }
 
-    func makeCoordinator() -> Holder { Holder() }
-    final class Holder { var version: Date? }
+    func makeCoordinator() -> Holder { Holder(url: url) }
+    final class Holder {
+        var url: URL
+        var version: Date?
+        init(url: URL) { self.url = url }
+    }
 }
 
 /// PDFKit's view: one slide at a time for a deck, the pages scrolling for anything else. It tells the model the page
@@ -410,33 +422,21 @@ struct ViewerPDF: NSViewRepresentable {
             if model.lensAnswer != nil { model.lensPlaced() }
         }
 
-        /// A selection on one page offers a Note (its page and bounds, and the page's whole text with where it is,
-        /// so the passage is cut only after the whole page was checked), and, while a note follows the selection,
-        /// asks the lens about its paragraph.
+        /// A selection on one page offers a Note: its page, bounds and where it is in the page's text; the page's
+        /// text itself is read off the main thread (ViewerModel.selected), so the passage is cut only after the whole
+        /// page was checked, and, while a note follows the selection, the lens is asked about its paragraph.
         @objc private func selectionChanged() {
             guard let view, let model else { return }
             guard let selection = view.currentSelection, selection.pages.count == 1, let page = selection.pages.first, let document = view.document,
                   let words = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines), !words.isEmpty else {
-                if model.selection != nil { model.selection = nil }
-                return
+                return model.unselected()
             }
-            let index = document.index(for: page)
-            let bounds = selection.bounds(for: page)
-            let text = page.string ?? ""
             let range = selection.range(at: 0, on: page)
-            guard range.location != NSNotFound, NSMaxRange(range) <= (text as NSString).length else {
-                if model.selection != nil { model.selection = nil }
-                return
-            }
+            guard range.location != NSNotFound else { return model.unselected() }
+            let bounds = selection.bounds(for: page)
             let rect = ViewerGeometry.window(view.convert(bounds, from: page), in: view)
-            model.selection = ViewerSelection(page: index, bounds: bounds, quote: words, pageText: text, range: range, anchor: CGPoint(x: rect.maxX, y: rect.minY))
             if let key = model.openKey { model.fold(key) }
-            // The reading lens: the paragraph the selection is in, for the note that follows it.
-            if model.lensKey != nil, let swift = Range(range, in: text) {
-                let paragraph = NSRange(ViewerLens.paragraph(text, around: swift), in: text)
-                let box = page.selection(for: paragraph)?.bounds(for: page) ?? bounds
-                model.selectionSettled(page: index, text: text, paragraph: paragraph, selected: range, bounds: box)
-            }
+            model.selected(page: document.index(for: page), bounds: bounds, words: words, range: range, anchor: CGPoint(x: rect.maxX, y: rect.minY))
         }
     }
 }
@@ -588,17 +588,13 @@ struct ViewerMarginView: View {
         var spots: [String: Spot] = [:]
         for (id, y) in ViewerMargin.layout(aligned.map { ($0.id, max($0.y, top), $0.height) }, top: top) { spots[id] = Spot(x: 18, y: y, tilt: 0) }
         // The rest below, as paper on a desk: a cascade of two columns, notes on other pages first, then those on
-        // the whole file.
-        var floor = (aligned.compactMap { item in spots[item.id].map { $0.y + item.height } }.max() ?? top) + (aligned.isEmpty ? 0 : 40)
-        var bottom = floor
-        for (offset, id) in ViewerMatch.order(others, current: single ? model.current : nil).enumerated() {
-            let right = offset % 2 == 1
-            let height = model.heights[id] ?? PaperLook.folded
-            spots[id] = Spot(x: right ? 165 : (model.openKey == id ? 18 : 30), y: floor, tilt: right ? 2 : 0)
-            bottom = max(bottom, floor + height)
-            floor += right ? height + 12 : 70
+        // the whole file; an open one at the margin's full width on a row of its own (ViewerMargin.cascade).
+        let floor = (aligned.compactMap { item in spots[item.id].map { $0.y + item.height } }.max() ?? top) + (aligned.isEmpty ? 0 : 40)
+        let rest = ViewerMatch.order(others, current: single ? model.current : nil)
+        for (id, spot) in ViewerMargin.cascade(rest.map { ($0, model.heights[$0] ?? PaperLook.folded, model.openKey == $0) }, floor: floor) {
+            spots[id] = Spot(x: spot.x, y: spot.y, tilt: spot.tilt)
         }
-        let notesEnd = max(bottom, spots.compactMap { id, spot in model.heights[id].map { spot.y + $0 } }.max() ?? 0) + 40
+        let notesEnd = (spots.map { id, spot in spot.y + (model.heights[id] ?? PaperLook.folded) }.max() ?? 0) + 40
         return (spots, max(notesEnd, model.scrolls ? model.docHeight : 0, visible))
     }
 
@@ -735,13 +731,13 @@ struct ViewerVersionsStrip: View {
                     .background(.white)
                     .shadow(color: .black.opacity(0.18), radius: 2, y: 1)
                     .overlay {
-                        if set.picked == version.label {
+                        if set.picked == version.id {
                             Rectangle().stroke(Color(nsColor: .controlAccentColor), lineWidth: 3).padding(-3)
                         }
                     }
                     HStack(spacing: 0) {
                         Text(version.label + " · ").foregroundStyle(ViewerLook.caption)
-                        if set.picked == version.label {
+                        if set.picked == version.id {
                             Text("Picked").foregroundStyle(ViewerLook.caption).fontWeight(.semibold)
                         } else if set.picked == nil {
                             Button { model.use(version) } label: { Text("Use this").underline().foregroundStyle(ViewerLook.caption) }
