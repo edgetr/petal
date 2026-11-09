@@ -187,7 +187,8 @@ enum NoteDisk {
 final class NoteStore {
     private(set) var notes: [PaperNote] = []
     private(set) var notebooks: [Notebook] = []
-    /// Notes with more than one paper (iCloud conflicts, or an edit kept beside a file changed elsewhere), by note id.
+    /// Notes with more than one paper (iCloud conflicts, or an edit kept beside a file changed elsewhere), by paper key:
+    /// each paper's whole group (NoteShelf.conflictGroups).
     private(set) var conflicts: [String: [PaperNote]] = [:]
     private(set) var loaded = false
     /// Papers whose work keeps failing: the paper says it isn't saved yet.
@@ -381,10 +382,20 @@ final class NoteStore {
         }
     }
 
+    /// Conflicts by paper key (NoteShelf.conflictGroups): papers with one id, and each file with all its iCloud
+    /// versions whatever their ids, so every paper of the group shows Keep this one and a keep plan holds it all.
     private func regroup() {
-        let groups = Dictionary(grouping: notes, by: \.noteID).filter { $0.value.count > 1 }
-        if groups != conflicts { conflicts = groups }
+        let groups = NoteShelf.conflictGroups(notes.map { ($0.noteID, $0.url.path) })
+        var next: [String: [PaperNote]] = [:]
+        for group in groups {
+            let papers = group.map { notes[$0] }
+            for paper in papers { next[paper.key] = papers }
+        }
+        if next != conflicts { conflicts = next }
     }
+
+    /// The conflict a paper is in (two papers or more), or nil.
+    func conflict(of paper: PaperNote) -> [PaperNote]? { conflicts[paper.key] }
 
     /// Every notebook and note under `root`, with Inbox (and its cover) made the first time. Files iCloud hasn't
     /// downloaded yet are asked for and read once they arrive (the folder changes then). Symbolic links (a notebook
@@ -1250,7 +1261,7 @@ final class NoteStore {
 
     /// A paper that can't be written: a version iCloud kept, or one of a note's papers while it has two. Each shows
     /// read only, with Keep this one.
-    func readOnly(_ paper: PaperNote) -> Bool { paper.version != nil || (conflicts[paper.noteID]?.count ?? 0) > 1 }
+    func readOnly(_ paper: PaperNote) -> Bool { paper.version != nil || (conflicts[paper.key]?.count ?? 0) > 1 }
 
     // MARK: Changing notes (every path comes here)
 
@@ -1580,7 +1591,7 @@ final class NoteStore {
     /// A conflict settled, through the session of the note's file, on the papers exactly as they were shown: each
     /// candidate checked again inside its own coordinated write or trash (`NoteStore.keep`).
     func keep(_ kept: PaperNote) {
-        let shown = conflicts[kept.noteID] ?? [kept]
+        let shown = conflicts[kept.key] ?? [kept]
         // Always the current file at every path shown (a version's own id may differ from it): its text and id, as
         // last read; one not known, nothing is done.
         var current: [String: (revision: String?, id: String)] = [:]

@@ -358,6 +358,32 @@ struct NotesCheck {
                "a video, a download, no type, or not found: refused before any of it is read")
         expect(NoteShelf.linkLimit == 300_000, "read no more than 300 KB")
 
+        // Conflicts by file and by id: a file and its iCloud versions are one group whatever their ids.
+        let grouped = NoteShelf.conflictGroups([("MAC-A", "/n/Inbox/T.md"), ("MAC-B", "/n/Inbox/T.md"), ("MAC-C", "/n/Inbox/T.md"),
+                                                ("U1", "/n/Work/Todo.md"), ("U1", "/n/Home/Todo.md"), ("U9", "/n/Inbox/Alone.md")])
+        expect(grouped == [[0, 1, 2], [3, 4]], "a file with versions of other ids: one group (each shows Keep this one); one id in two files: one group",
+               "\(grouped)")
+        expect(NoteShelf.conflictGroups([("A", "/n/a.md"), ("B", "/n/b.md")]).isEmpty, "unrelated notes: no conflict")
+        expect(NoteShelf.conflictGroups([("A", "/n/a.md"), ("B", "/n/a.md"), ("B", "/n/b.md")]) == [[0, 1, 2]], "joined through a version and an id")
+
+        // A focus change hides the shown window's notes at once (until the new read is in).
+        expect(NoteShelf.concealOnFocus(.activated, pid: 20, window: nil, shownPID: 10, shownWindow: 5, own: 1), "another app in front: hidden at once")
+        expect(NoteShelf.concealOnFocus(.focused, pid: 10, window: 6, shownPID: 10, shownWindow: 5, own: 1), "another window of the app: hidden")
+        expect(!NoteShelf.concealOnFocus(.focused, pid: 10, window: 5, shownPID: 10, shownWindow: 5, own: 1), "the same window again: stays")
+        expect(NoteShelf.concealOnFocus(.gone, pid: 10, window: 5, shownPID: 10, shownWindow: 5, own: 1)
+               && !NoteShelf.concealOnFocus(.gone, pid: 10, window: 9, shownPID: 10, shownWindow: 5, own: 1), "its own window closed: hidden; another closed: stays")
+        expect(!NoteShelf.concealOnFocus(.activated, pid: 1, window: nil, shownPID: 10, shownWindow: 5, own: 1), "Petal's own windows: stay")
+        expect(!NoteShelf.concealOnFocus(.activated, pid: 20, window: nil, shownPID: nil, shownWindow: nil, own: 1), "nothing shown on a window: nothing to hide")
+
+        // Icons: fetched only with a link's allowed fetch (pasted or typed), streamed, images only, small.
+        expect(!NoteShelf.linkFetch("https://example.com", own: false, cached: false), "drawing a card (not the person's adding): no fetch")
+        expect(NoteShelf.fetchAccepts(.image, status: 200, contentType: "image/png") && NoteShelf.fetchAccepts(.image, status: 200, contentType: "image/x-icon"),
+               "an image: read")
+        expect(!NoteShelf.fetchAccepts(.image, status: 200, contentType: "text/html") && !NoteShelf.fetchAccepts(.image, status: 200, contentType: "video/mp4")
+               && !NoteShelf.fetchAccepts(.image, status: 200, contentType: nil) && !NoteShelf.fetchAccepts(.image, status: 302, contentType: "image/png"),
+               "a page, a video, no type, not 200: refused before reading")
+        expect(NoteShelf.fetchLimit(.image) == 512_000 && NoteShelf.fetchLimit(.page) == 300_000, "an icon at most 512 KB, a page's start 300 KB")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

@@ -21,6 +21,8 @@ final class LinkPreviews {
         guard !Headless.on, NoteShelf.linkFetch(address, own: true, cached: titles[address] != nil || asked.contains(address)),
               let url = URL(string: address) else { return }
         asked.insert(address)
+        // Its site's icon with it (the same rule: a link the person added).
+        Sites.shared.requestIcon(address)
         Task.detached(priority: .utility) {
             let title = await Self.fetchTitle(url)
             await MainActor.run { if let title { LinkPreviews.shared.titles[address] = title } }
@@ -392,7 +394,7 @@ final class LinkCell: NSTextAttachmentCell {
         let icon = NSRect(x: card.minX + 9, y: card.midY - 15, width: 30, height: 30)
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(roundedRect: icon, xRadius: 7, yRadius: 7).addClip()
-        if let image = MainActor.assumeIsolated({ Sites.shared.icon(url) }) {
+        if let image = MainActor.assumeIsolated({ Sites.shared.cachedIcon(url) }) {
             NSColor.white.setFill()
             icon.fill()
             image.draw(in: icon.insetBy(dx: 3, dy: 3), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)

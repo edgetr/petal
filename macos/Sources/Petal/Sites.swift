@@ -66,18 +66,31 @@ final class Sites {
 
     // MARK: Icons
 
-    /// The site's icon, or a globe while it's fetched (or when it has none).
+    /// The site's icon, or a globe while it's fetched (or when it has none): a website shortcut the person put in
+    /// their dock.
     func icon(_ id: String) -> NSImage? {
+        if let image = cachedIcon(id) { return image }
+        requestIcon(id)
+        return nil
+    }
+
+    /// The site's icon only if it's already here (in memory or in Petal's cache): drawing a note's link card never
+    /// fetches anything.
+    func cachedIcon(_ id: String) -> NSImage? {
         guard let host = Self.domain(id) else { return nil }
         _ = arrived
         if let image = images[host] { return image }
-        let file = Self.folder.appending(path: host + ".png")
-        if let image = NSImage(contentsOf: file) {
+        if let image = NSImage(contentsOf: Self.folder.appending(path: host + ".png")) {
             images[host] = image
             return image
         }
-        fetch(id, host: host, to: file)
         return nil
+    }
+
+    /// Fetches the site's icon (bounded, streamed): for a dock shortcut, or a link the person pasted or typed.
+    func requestIcon(_ id: String) {
+        guard let host = Self.domain(id), images[host] == nil else { return }
+        fetch(id, host: host, to: Self.folder.appending(path: host + ".png"))
     }
 
     private func fetch(_ id: String, host: String, to file: URL) {
@@ -99,23 +112,42 @@ final class Sites {
 
     /// The site's own icon, in the order a browser would look for a good one.
     nonisolated private static func download(_ base: URL) async -> Data? {
-        if let data = await get(base.appending(path: "apple-touch-icon.png")), isImage(data) { return data }
-        if let page = await get(base), let html = String(data: page.prefix(200_000), encoding: .utf8) ?? String(data: page.prefix(200_000), encoding: .isoLatin1) {
-            for href in iconLinks(html) {
+        if let data = await get(base.appending(path: "apple-touch-icon.png"), .image), isImage(data) { return data }
+        if let page = await get(base, .page), let html = String(data: page, encoding: .utf8) ?? String(data: page, encoding: .isoLatin1) {
+            for href in iconLinks(html).prefix(4) {
                 guard let url = URL(string: href, relativeTo: base)?.absoluteURL, ["http", "https"].contains(url.scheme ?? "") else { continue }
-                if let data = await get(url), isImage(data) { return data }
+                if let data = await get(url, .image), isImage(data) { return data }
             }
         }
-        if let data = await get(base.appending(path: "favicon.ico")), isImage(data) { return data }
+        if let data = await get(base.appending(path: "favicon.ico"), .image), isImage(data) { return data }
         return nil
     }
 
-    nonisolated private static func get(_ url: URL) async -> Data? {
+    /// One response, streamed and bounded (NoteShelf.fetchAccepts, fetchLimit): an image or an HTML page by its
+    /// content type before anything is read, no more than its limit (too big: nothing), within 10 seconds.
+    nonisolated static func get(_ url: URL, _ kind: NoteShelf.FetchKind) async -> Data? {
         var request = URLRequest(url: url, timeoutInterval: 8)
         request.setValue("Petal", forHTTPHeaderField: "User-Agent")
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200, data.count < 2_000_000 else { return nil }
-        return data
+        let deadline = Date().addingTimeInterval(10)
+        guard let (bytes, response) = try? await URLSession.shared.bytes(for: request) else { return nil }
+        let http = response as? HTTPURLResponse
+        guard NoteShelf.fetchAccepts(kind, status: http?.statusCode ?? 0, contentType: http?.value(forHTTPHeaderField: "Content-Type")) else {
+            bytes.task.cancel()
+            return nil
+        }
+        let limit = NoteShelf.fetchLimit(kind)
+        if let length = http?.expectedContentLength, length > Int64(limit), kind == .image { bytes.task.cancel(); return nil }
+        var data = Data()
+        var complete = true
+        do {
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count >= limit || Date() > deadline { complete = false; break }
+            }
+        } catch { complete = false }
+        bytes.task.cancel()
+        // A page is read for its head (its start will do); an image only whole.
+        return kind == .page || complete ? data : nil
     }
 
     nonisolated private static func isImage(_ data: Data) -> Bool {

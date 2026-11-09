@@ -315,7 +315,8 @@ struct LinkCardView: View {
     var body: some View {
         HStack(spacing: 9) {
             Group {
-                if let icon = Sites.shared.icon(url) { Image(nsImage: icon).resizable().padding(3).background(.white) } else { Color(white: 0.85) }
+                // Cache only: a card never fetches (NoteShelf.linkFetch decides, when the person adds a link).
+                if let icon = Sites.shared.cachedIcon(url) { Image(nsImage: icon).resizable().padding(3).background(.white) } else { Color(white: 0.85) }
             }
             .frame(width: 30, height: 30).clipShape(.rect(cornerRadius: 7))
             VStack(alignment: .leading, spacing: 1) {

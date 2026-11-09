@@ -109,6 +109,7 @@ struct NoteStoreCheck {
         idBeforeChange(root: root)
         identityFollowed(root: root)
         idFirst(root: root)
+        versionGroups(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
     }
@@ -480,6 +481,19 @@ struct NoteStoreCheck {
                "a new file at an id-less note's path gets a handle of its own")
         local.rekeyID("file:Inbox/Plain.md", holder: plainHolder, "U2")
         expect(local.handle("U2") == firstLook && local.handles?[plainHolder] == nil, "an id-less note given its id keeps its handle, and its path's is retired")
+    }
+
+    /// A file and its iCloud version with another id: one conflict, both papers read only with Keep this one.
+    @MainActor static func versionGroups(root: URL) {
+        let url = root.appending(path: "Groups/T.md")
+        let current = PaperNote(file: NoteFile(id: "MAC-A", body: "mine"), url: url, notebook: "Groups", revision: "mine")
+        var version = PaperNote(file: NoteFile(id: "MAC-B", body: "theirs"), url: url, notebook: "Groups", revision: "theirs")
+        version.version = "v1"
+        let other = PaperNote(file: NoteFile(id: "MAC-C", body: "other"), url: root.appending(path: "Groups/U.md"), notebook: "Groups", revision: "other")
+        let store = NoteStore(root: root)
+        store.preview([current, version, other], notebooks: [])
+        expect(store.conflict(of: current)?.count == 2 && store.conflict(of: version)?.count == 2, "the file and its version: one group")
+        expect(store.readOnly(current) && store.readOnly(version) && !store.readOnly(other), "both shown read only with Keep this one; others not")
     }
 
     /// Nothing lasting for an id-less note before its own id is in its file: a paste waits for it, records of it stay

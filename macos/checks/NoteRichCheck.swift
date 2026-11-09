@@ -6,7 +6,9 @@ import AppKit
 // macos/checks/run.sh.
 enum Headless { nonisolated(unsafe) static var on = true }
 final class NoteStore { nonisolated static let io = DispatchQueue(label: "petal.check.notes") }
-@MainActor final class Sites { static let shared = Sites(); func icon(_ id: String) -> NSImage? { nil } }
+// Only what a card may use: what's cached, and a fetch for a link the person added. No `icon` (which fetches), so
+// drawing a card through it wouldn't compile.
+@MainActor final class Sites { static let shared = Sites(); func cachedIcon(_ id: String) -> NSImage? { nil }; func requestIcon(_ id: String) {} }
 struct PaperNote { var file: NoteFile; var url: URL; var revision: String? = nil; var instance = ""; var key: String { url.path }; var noteID: String { file.id } }
 
 @main

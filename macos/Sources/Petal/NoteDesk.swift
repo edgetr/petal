@@ -131,6 +131,18 @@ final class NoteDesk {
     }
 
     private func event(_ event: WindowEvents.Event) {
+        // The window shown losing the front: its notes hide at once (clear and mouse-through), narrowing waiting for
+        // it is cancelled, and nothing shows again until the new front window's read is in (NoteShelf.concealOnFocus).
+        let change: NoteShelf.FocusChange? = switch event.kind {
+        case .activated: .activated
+        case .focused: .focused
+        case .closed, .minimized, .hidden, .quit: .gone
+        default: nil
+        }
+        if let change, NoteShelf.concealOnFocus(change, pid: event.pid, window: event.window, shownPID: scene?.window != nil ? scene?.pid : nil,
+                                                 shownWindow: scene?.window, own: getpid()) {
+            concealWindowNotes()
+        }
         switch event.kind {
         case .moved, .resized: lookAgain(after: 0.03)
         case .activated, .focused, .closed, .titleChanged, .tabSwitched, .created, .minimized, .unminimized, .shown, .hidden, .quit: lookAgain(after: 0.12)
@@ -140,6 +152,19 @@ final class NoteDesk {
         default: break
         }
     }
+
+    /// Notes on the window that was in front: hidden now, and kept hidden (`awaitingRead`) until `apply` has the new
+    /// front window's read; Desktop notes stay.
+    private func concealWindowNotes() {
+        awaitingRead = true
+        Self.roomTurn.cancel()
+        for (key, panel) in panels where !isDesktop(key) { panel.conceal() }
+        for panel in tabPanels.values { panel.conceal() }
+        for panel in pinPanels.values { panel.conceal() }
+    }
+
+    /// Set by a focus change, cleared by the next read applied: layout shows no window's notes meanwhile.
+    @ObservationIgnored private var awaitingRead = false
 
     func lookAgain(after delay: Double) {
         lookSoon?.cancel()
@@ -331,7 +356,9 @@ final class NoteDesk {
     }
 
     /// `scan`: look for the passages again (not when only the files changed: the person typing in a note).
-    private func apply(_ scene: NoteScene, read: ClaudePanel.FrontRead, scan: Bool = true) {
+    /// `fresh`: a new read of what's in front (it ends a wait after a focus change); false for one kept from before.
+    private func apply(_ scene: NoteScene, read: ClaudePanel.FrontRead, scan: Bool = true, fresh: Bool = true) {
+        if fresh { awaitingRead = false }
         let moved = self.scene?.window != scene.window || self.scene?.pid != scene.pid
         let (scene, read) = Self.filtered(scene, read, since: ClaudePanel.privacy.now)
         self.scene = scene
@@ -689,6 +716,13 @@ final class NoteDesk {
 
     /// The tabs on the window in front, and its notes that are showing beside it.
     func layout() {
+        // The front window changed and its read isn't in yet: nothing of the old window shows again meanwhile.
+        if awaitingRead {
+            for (key, panel) in panels where !isDesktop(key) { panel.conceal() }
+            for panel in tabPanels.values { panel.conceal() }
+            for panel in pinPanels.values { panel.conceal() }
+            return
+        }
         defer { reconcileRoom() }
         guard on, let frame, let scene, scene.window != nil else {
             for panel in tabPanels.values { panel.conceal() }
@@ -1660,7 +1694,8 @@ final class NoteDesk {
         let (scene, read) = Self.filtered(captured.scene, captured.read, since: captured.privacy)
         let offers = places(for: scene, read: read, appName: captured.name)
         guard let place = offers.first(where: { $0.kind != .passage }) else { return say(Self.unknownFront) }
-        apply(scene, read: read)
+        // Captured before: never the read that ends a wait after a focus change (the next look is).
+        apply(scene, read: read, fresh: false)
         if let paper = make(on: place, body: lines.joined(separator: "\n"), chat: chat.uuidString) { fresh.remove(paper.key) }
     }
 
@@ -1813,7 +1848,7 @@ final class NoteDesk {
         }
         if let scene, let front {
             let (scene, read) = Self.filtered(scene, front, since: scenePrivacy)
-            apply(scene, read: read, scan: false)
+            apply(scene, read: read, scan: false, fresh: false)
         } else { look() }
         // From the Spaces last read; read (off the main thread) when none were yet and a note is on a Desktop.
         if Self.spaces.isEmpty { refreshSpaces() } else { placeDesktop() }

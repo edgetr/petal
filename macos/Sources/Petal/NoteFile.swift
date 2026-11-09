@@ -1112,6 +1112,54 @@ enum NoteShelf {
         return type.hasPrefix("text/html") || type.hasPrefix("application/xhtml+xml")
     }
 
+    /// The papers that are one note's conflict, each group shown read only with Keep this one: papers with one id
+    /// (iCloud's "Name 2.md"), and each file with all its unresolved iCloud versions whatever their ids (two Macs may
+    /// each have given an imported note its own). `papers`: each paper's id and the file it's at. Groups of two or
+    /// more, by their papers' places.
+    static func conflictGroups(_ papers: [(id: String, path: String)]) -> [[Int]] {
+        var parent = Array(papers.indices)
+        func root(_ i: Int) -> Int {
+            var i = i
+            while parent[i] != i { parent[i] = parent[parent[i]]; i = parent[i] }
+            return i
+        }
+        func join(_ a: Int, _ b: Int) { let ra = root(a), rb = root(b); if ra != rb { parent[rb] = ra } }
+        var byID: [String: Int] = [:], byPath: [String: Int] = [:]
+        for (i, paper) in papers.enumerated() {
+            if let other = byID[paper.id] { join(other, i) } else { byID[paper.id] = i }
+            if let other = byPath[paper.path] { join(other, i) } else { byPath[paper.path] = i }
+        }
+        let groups = Dictionary(grouping: papers.indices, by: root)
+        return groups.values.filter { $0.count > 1 }.map { $0.sorted() }.sorted { $0[0] < $1[0] }
+    }
+
+    /// Whether a focus change hides the notes of the window shown now, at once (until the new front window's read is
+    /// validated): another app activated; another window focused; or the shown window closed, minimized or hidden,
+    /// or its app quit. Petal's own windows never do.
+    enum FocusChange { case activated, focused, gone }
+
+    static func concealOnFocus(_ change: FocusChange, pid: Int32, window: UInt32?, shownPID: Int32?, shownWindow: UInt32?, own: Int32) -> Bool {
+        guard pid != own, let shownPID else { return false }
+        switch change {
+        case .activated: return pid != shownPID
+        case .focused: return pid != shownPID || (window != nil && window != shownWindow)
+        case .gone: return pid == shownPID && (window == nil || window == shownWindow)
+        }
+    }
+
+    /// What a fetch for a card or an icon may read: a page (for its title, or its icons' links) or an image, by
+    /// its content type before anything is read, and no more than its limit.
+    enum FetchKind { case page, image }
+
+    static func fetchLimit(_ kind: FetchKind) -> Int { kind == .page ? linkLimit : 512_000 }
+
+    static func fetchAccepts(_ kind: FetchKind, status: Int, contentType: String?) -> Bool {
+        switch kind {
+        case .page: return linkResponse(status: status, contentType: contentType)
+        case .image: return status == 200 && (contentType?.lowercased().hasPrefix("image/") ?? false)
+        }
+    }
+
     /// A passage found to have moved is looked for again, but no more than every `movedRetry` seconds.
     static let movedRetry: TimeInterval = 2
 
