@@ -158,6 +158,9 @@ enum ViewerCheck {
     static func run(_ arguments: [String]) {
         Headless.on = true
         VaultStore.standIn([])
+        // The throwaway files (the samples, the checks' own folders) stand outside the real home folder: one folder
+        // above both stands in for it (the path rule's own checks point it at their folders).
+        ViewerPath.home = "/private"
         var files: [String] = []
         var out: String?
         var words = arguments.drop { $0 != "--viewer-check" }.dropFirst().makeIterator()
@@ -183,6 +186,7 @@ enum ViewerCheck {
             failed = !versions(url, app: app) || failed
             failed = !sixth(url, app: app) || failed
             failed = !seventh(url, app: app) || failed
+            failed = !eighth(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -342,6 +346,92 @@ enum ViewerCheck {
 
     final class HangUp: @unchecked Sendable { var gone = false }
 
+    /// The eighth review: one path rule at every load and follow (a reload swapped to a link out of the home folder
+    /// shows nothing); a refused save's snapshot is the whole note and comes back with its front matter; undoing the
+    /// refused typing retires its snapshot.
+    private static func eighth(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("eighth: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        // A file in the home folder, swapped for a link to one outside it: the reload refuses, nothing is shown.
+        let home = folder.appending(path: "Home")
+        let outside = folder.appending(path: "Outside")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let a = home.appending(path: "A.pdf")
+        try? FileManager.default.copyItem(at: source, to: a)
+        try? FileManager.default.copyItem(at: source, to: outside.appending(path: "X.pdf"))
+        let model = ViewerModel(url: URL(fileURLWithPath: ViewerPath.canonical(a.path) ?? a.path), kind: .pdf)
+        model.load()
+        wait(20) { !model.loading }
+        expect(model.pageCount > 0 && model.problem == nil, "a file in the home folder shows (set up)")
+        try? FileManager.default.removeItem(at: a)
+        try? FileManager.default.createSymbolicLink(atPath: a.path, withDestinationPath: outside.appending(path: "X.pdf").path)
+        model.fileChanged()
+        wait(5) { model.problem != nil }
+        expect(model.problem == ViewerModel.cantShowText && model.document == nil && model.pageCount == 0, "swapped for a link out of home: \"This file can't be shown\", nothing loaded")
+        model.load()
+        wait(5) { model.loading == false }
+        expect(model.problem == ViewerModel.cantShowText && model.document == nil, "and a reload refuses it too")
+        model.close()
+        ViewerPath.home = kept
+
+        // A refused save: the whole note in the journal (its front matter too), and back with it after recovery.
+        let noteID = "R-\(UUID().uuidString.prefix(6))"
+        var file = NoteFile(id: noteID, created: Date().addingTimeInterval(-3600), body: "Before")
+        var stick = NoteStick(kind: .file)
+        stick.path = source.path
+        file.places = [stick]
+        let paper = PaperNote(file: file, url: folder.appending(path: "Notes/Inbox/Full.md"), notebook: "Inbox")
+        app.paper.store.preview([], notebooks: [])
+        func editor() -> (NoteEditorView.Coordinator, NoteTextView) {
+            let view = NoteEditorView(paper: paper, style: NoteRich.Style(ink: .black, dim: .gray, petal: .systemPink, accent: .systemBlue), focus: false,
+                                      height: { _ in }, save: { app.paper.write(paper.key, noteID: noteID, instance: "", body: $0, base: $1) },
+                                      register: { _ in }, importPictures: { _ in }, escape: {},
+                                      settled: { app.paper.settleUnsaved(paper.key, noteID: noteID, instance: "", saved: $0) })
+            let coordinator = view.makeCoordinator()
+            coordinator.body = "Before"
+            coordinator.base = file.serialized()
+            return (coordinator, NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 200)))
+        }
+        let journal = NoteJournal.file(noteID)
+        let entry = { () -> NoteJournal.Entry? in
+            var read: NoteJournal.Entry?
+            NoteJournal.queue.sync { read = NoteJournal.read(journal) }
+            return read
+        }
+        let (coordinator, text) = editor()
+        text.string = "Before, typed"
+        coordinator.flush(text)
+        coordinator.marker.typed()
+        coordinator.flush(text)
+        let snapshot = entry().map { NoteFile.parse($0.text, fallbackID: "x", fallbackDate: Date()) }
+        expect(snapshot?.id == noteID && snapshot?.places == file.places && snapshot?.body == "Before, typed", "refused: the whole note in the journal, front matter and all")
+        let root = folder.appending(path: "Notes")
+        try? FileManager.default.createDirectory(at: root.appending(path: "Inbox"), withIntermediateDirectories: true)
+        let holding = folder.appending(path: "recovering")
+        try? FileManager.default.createDirectory(at: holding, withIntermediateDirectories: true)
+        NoteJournal.queue.sync { try? FileManager.default.copyItem(at: journal, to: holding.appending(path: journal.lastPathComponent)) }
+        NoteJournal.recover(holding, root: root)
+        let recovered = (FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?.allObjects as? [URL] ?? [])
+            .filter { $0.pathExtension == "md" }.compactMap { try? String(contentsOf: $0, encoding: .utf8) }
+            .map { NoteFile.parse($0, fallbackID: "x", fallbackDate: Date()) }
+        expect(recovered.contains { $0.id == noteID && $0.places == file.places && $0.body == "Before, typed" }, "put back with its front matter (its id and places)")
+
+        // Undone back to what's saved: the refused typing's snapshot is retired.
+        text.string = "Before"
+        coordinator.marker.typed()
+        coordinator.flush(text)
+        expect(entry() == nil && !coordinator.marker.dirty, "undone to what's saved: its snapshot retired")
+        print("eighth: " + (ok ? "one path rule at every load and follow, a refused save journaled whole and recovered with its front matter, an undo retiring it" : "failed"))
+        return ok
+    }
+
     /// The seventh review: refused typing in the journal at once and after a close or a quit (an editor dirty with no
     /// save waiting still hands its text over), put back by the next launch's recovery; and the open file following its
     /// own incarnation, whatever took its old path.
@@ -366,10 +456,11 @@ enum ViewerCheck {
         coordinator.schedule(text)
         wait(1.2) { false }
         let journal = NoteJournal.file(noteID)
+        // The snapshot is the whole note (its front matter too): its body is what's compared here.
         let flushedJournal = { () -> String? in
             var entry: NoteJournal.Entry?
             NoteJournal.queue.sync { entry = NoteJournal.read(journal) }
-            return entry?.text
+            return entry.map { NoteFile.parse($0.text, fallbackID: "x", fallbackDate: Date()).body }
         }
         expect(coordinator.marker.dirty && flushedJournal() == "Before, typed", "refused: in the journal at once, under its note's id")
         // More typed, then the editor closes before its next try (nothing waiting, still dirty): handed over now.

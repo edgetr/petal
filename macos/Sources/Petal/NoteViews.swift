@@ -190,7 +190,8 @@ struct PaperView: View {
                            idle: { desk.store.takeDeferred(paper.key) },
                            sameNote: { desk.store.sameNote($0, instance: $1, $2) },
                            say: { desk.tell($0) },
-                           acceptPictures: { desk.acceptCopiedPictures(paper.key, $0) })
+                           acceptPictures: { desk.acceptCopiedPictures(paper.key, $0) },
+                           settled: { desk.settleUnsaved(paper.key, noteID: paper.noteID, instance: paper.instance, saved: $0) })
                 .frame(height: min(PaperLook.maxOpen - 70, max(PaperLook.minOpen - 70, editorHeight)))
                 .padding(.bottom, 18)
         }

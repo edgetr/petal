@@ -46,98 +46,73 @@ enum ViewerKind: Equatable, Sendable {
 
 // MARK: - The path an agent names
 
-/// A path an agent names for the viewer (`petal_view`, the PDF comments tool): only a regular file the person owns,
-/// and never one reached through a symbolic link from inside the home folder to outside it.
+/// The one path rule, at every open and every reload or file followed: only a regular file the person owns, of a
+/// kind the viewer shows, whose final destination (every link followed) is inside the home folder, compared by
+/// canonical paths (the file system's own casing) component by component. Where the file is is what matters, not the
+/// way there: a link out and back to a file in the home folder is fine; a destination outside it is refused.
 enum ViewerPath {
     enum Refusal: Error, Equatable, CustomStringConvertible {
-        case notAbsolute, parentPart, missing, notRegular, notOwned, linkOutOfHome, notShown
+        case notAbsolute, missing, notRegular, notOwned, outsideHome, notShown
 
         var description: String {
             switch self {
             case .notAbsolute: "Give the file's full path (it starts with / or ~/)."
-            case .parentPart: "Give the file's path without \"..\" in it."
             case .missing: "There's no file there."
             case .notRegular: "That isn't a file Petal's viewer can open (a folder, a package or something else)."
             case .notOwned: "That file isn't the person's own: Petal's viewer opens only their files."
-            case .linkOutOfHome: "That path goes through a link out of the home folder: Petal doesn't follow it."
+            case .outsideHome: "That file isn't in the person's home folder: Petal's viewer shows only files there."
             case .notShown: ViewerKind.shows
             }
         }
     }
 
-    /// The path as written, "~/" for the home folder, its components normalized by their words alone, the disk never
-    /// asked (Foundation's standardizing follows links to reduce ".."): empty ones and "." dropped. A ".." is refused
-    /// (`.parentPart`): undoing a component could undo a link the path went through.
-    static func standardized(_ given: String, home: String) -> Result<String, Refusal> {
+    /// The home folder the rule holds to (Petal --viewer-check points it at a throwaway folder).
+    nonisolated(unsafe) static var home: String = NSHomeDirectory()
+
+    /// The path as given: "~/" for the home folder; nil when it isn't absolute. Nothing else is done to it by its
+    /// words: the destination is resolved by the disk.
+    static func absolute(_ given: String, home: String) -> String? {
         var path = given.trimmingCharacters(in: .whitespacesAndNewlines)
         if path == "~" { path = home } else if path.hasPrefix("~/") { path = home + String(path.dropFirst(1)) }
-        guard path.hasPrefix("/") else { return .failure(.notAbsolute) }
-        let parts = path.split(separator: "/", omittingEmptySubsequences: true).filter { $0 != "." }
-        guard !parts.contains("..") else { return .failure(.parentPart) }
-        return .success("/" + parts.joined(separator: "/"))
+        return path.hasPrefix("/") ? path : nil
     }
 
-    /// The paths a check walks, one component at a time: "/a", "/a/b", "/a/b/c".
-    static func prefixes(_ path: String) -> [String] {
-        var out: [String] = []
-        var current = ""
-        for part in path.split(separator: "/") {
-            current += "/" + part
-            out.append(current)
-        }
-        return out
-    }
+    /// A path's components, for comparing by component (never by a prefix of characters: "/Users/a" isn't in "/Users/ab").
+    static func components(_ path: String) -> [Substring] { path.split(separator: "/") }
 
-    static func within(_ path: String, _ folder: String) -> Bool {
-        let folder = folder.hasSuffix("/") ? String(folder.dropLast()) : folder
-        return path == folder || path.hasPrefix(folder + "/")
-    }
+    static func inside(_ path: String, _ folder: String) -> Bool { components(path).starts(with: components(folder)) }
 
-    /// The decision, from what the disk said: `resolved` is the path with every link followed (nil: nothing there),
-    /// `linkedOut` whether any link on the way, inside the home folder, led out of it (even one that led back),
-    /// `regular` and `owner` what the file it leads to is. A path inside the home folder must stay inside it all the
-    /// way (a link there never leads Petal out); a path outside it is the system's own (/tmp, /var).
-    /// `homes`: the home folder as written and as the disk spells it (a home under a link).
-    static func decide(standardized: String, resolved: String?, linkedOut: Bool = false, homes: [String], regular: Bool, owner: UInt32, me: UInt32) -> Result<String, Refusal> {
-        guard let resolved else { return .failure(.missing) }
-        let inside = { (path: String) in homes.contains { within(path, $0) } }
-        if inside(standardized), linkedOut || !inside(resolved) { return .failure(.linkOutOfHome) }
+    /// The decision, from what the disk said: `destination` the final destination's canonical path (nil: nothing
+    /// there), `home` the home folder's, and what the file there is.
+    static func decide(destination: String?, home: String, regular: Bool, owner: UInt32, me: UInt32) -> Result<String, Refusal> {
+        guard let destination else { return .failure(.missing) }
+        guard inside(destination, home) else { return .failure(.outsideHome) }
         guard regular else { return .failure(.notRegular) }
         guard owner == me else { return .failure(.notOwned) }
-        guard ViewerKind.of(resolved) != nil else { return .failure(.notShown) }
-        return .success(resolved)
+        guard ViewerKind.of(destination) != nil else { return .failure(.notShown) }
+        return .success(destination)
     }
 
-    /// Checks `given` on the disk (off the main thread): the file it leads to, every link followed, or why not.
-    static func check(_ given: String, home: String = NSHomeDirectory()) -> Result<URL, Refusal> {
-        let path: String
-        switch standardized(given, home: home) {
-        case .failure(let refusal): return .failure(refusal)
-        case .success(let normalized): path = normalized
+    /// A path's final destination, every link followed, as the file system spells it (its own casing); nil when
+    /// nothing's there.
+    static func canonical(_ path: String) -> String? {
+        let real: String? = path.withCString { pointer in
+            guard let resolved = realpath(pointer, nil) else { return nil }
+            defer { free(resolved) }
+            return String(cString: resolved)
         }
-        func real(_ path: String) -> String? {
-            path.withCString { pointer in
-                guard let real = realpath(pointer, nil) else { return nil }
-                defer { free(real) }
-                return String(cString: real)
-            }
-        }
-        let resolved = real(path)
-        // The home folder as the disk spells it too (a home under a link): compared both ways.
-        let homes = [home, real(home) ?? home]
-        let inside = { (path: String) in homes.contains { within(path, $0) } }
-        // Each component on the way, in order: a link inside the home folder whose destination is outside it.
-        var linkedOut = false
-        for prefix in prefixes(path) where inside(prefix) {
-            var info = stat()
-            guard lstat(prefix, &info) == 0 else { break }
-            if (info.st_mode & S_IFMT) == S_IFLNK, let target = real(prefix), !inside(target) { linkedOut = true; break }
-        }
+        guard let real else { return nil }
+        return (try? URL(fileURLWithPath: real).resourceValues(forKeys: [.canonicalPathKey]).canonicalPath) ?? real
+    }
+
+    /// Checks `given` on the disk (off the main thread): the file it leads to (its canonical path), or why not.
+    static func check(_ given: String, home: String = ViewerPath.home) -> Result<URL, Refusal> {
+        guard let path = absolute(given, home: home) else { return .failure(.notAbsolute) }
+        let destination = canonical(path)
         var info = stat()
-        let found = resolved.map { stat($0, &info) == 0 } ?? false
+        let found = destination.map { stat($0, &info) == 0 } ?? false
         let regular = found && (info.st_mode & S_IFMT) == S_IFREG
-        let decided = decide(standardized: path, resolved: found ? resolved : nil, linkedOut: linkedOut, homes: homes,
-                             regular: regular, owner: info.st_uid, me: getuid())
+        let decided = decide(destination: found ? destination : nil, home: canonical(home) ?? home, regular: regular, owner: info.st_uid, me: getuid())
         return decided.map { URL(fileURLWithPath: $0) }
     }
 }

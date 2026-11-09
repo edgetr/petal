@@ -1474,7 +1474,10 @@ final class NoteDesk {
         let key = noteID.flatMap { id in NoteShelf.saveTarget(key: key, noteID: id, instance: instance, papers: papers, current: store.currentID) } ?? key
         guard let paper = store.paper(key) else {
             // Refused (the paper gone): the typing goes into the journal under its note's id at once.
-            if let noteID { store.journalUnsaved(noteID: noteID, path: key, base: base, text: body) }
+            if let noteID {
+                store.journalUnsaved(noteID: noteID, path: key, base: base,
+                                     text: NoteShelf.unsavedText(current: nil, base: base, noteID: noteID, body: body, now: Date()))
+            }
             return nil
         }
         if store.readOnly(paper) {
@@ -1494,8 +1497,20 @@ final class NoteDesk {
         let next = store.change(key, base: base) { $0.body = body }
         // Refused (the notes' folder switching, a drain): the typing goes into the journal under its note's id at
         // once, made on what the editor had (put back at the next launch if it never lands).
-        if next == nil { store.journalUnsaved(noteID: paper.noteID, path: paper.url.path, base: base ?? paper.revision, text: body) }
+        if next == nil {
+            store.journalUnsaved(noteID: paper.noteID, path: paper.url.path, base: base ?? paper.revision,
+                                 text: NoteShelf.unsavedText(current: paper.file, base: base, noteID: paper.noteID, body: body, now: Date()))
+        }
         return next
+    }
+
+    /// An editor back at what's saved after a refused save (the person undid it): the journal's snapshot of that
+    /// refused typing replaced by the note as it is (what's still waiting to be written kept), or retired when
+    /// nothing differs, keeping any picture or paste recovery still pending.
+    func settleUnsaved(_ key: String, noteID: String, instance: String, saved: String?) {
+        let papers = store.notes.map { (key: $0.key, id: $0.noteID, version: $0.version) }
+        let key = NoteShelf.saveTarget(key: key, noteID: noteID, instance: instance, papers: papers, current: store.currentID) ?? key
+        store.settleUnsaved(key, noteID: noteID, saved: saved)
     }
 
     /// Pictures pasted or dropped on a note: their bytes read and decoded first (a file that's slow or not downloaded

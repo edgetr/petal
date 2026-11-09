@@ -34,9 +34,8 @@ final class Viewers {
     /// the person owns, never through a link out of the home folder, of a kind the viewer shows), then shown in its
     /// own window, or the one already showing it brought forward. `page`: counted from 1.
     func open(path: String, page: Int? = nil, show: Bool = true, done: @escaping @MainActor (Result<ViewerModel, ViewerPath.Refusal>) -> Void = { _ in }) {
-        let home = NSHomeDirectory()
         Self.queue.async {
-            let checked = ViewerPath.check(path, home: home)
+            let checked = ViewerPath.check(path)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     switch checked {
@@ -412,6 +411,16 @@ final class ViewerModel: Identifiable {
         let url = url
         let kind = kind
         Viewers.queue.async {
+            // The one path rule again at every load and reload (a file swapped for a link out of the home folder,
+            // say): refused, nothing of it is read.
+            guard case .success = ViewerPath.check(url.path) else {
+                return DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard ticket == self.loads, !self.closedNow else { return }
+                        self.cantShow()
+                    }
+                }
+            }
             let read = ViewerLoader.read(url, kind: kind)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -420,6 +429,22 @@ final class ViewerModel: Identifiable {
                 }
             }
         }
+    }
+
+    static let cantShowText = "This file can't be shown."
+
+    /// The file shown no longer passes the path rule: nothing of it is shown or kept.
+    private func cantShow() {
+        document = nil
+        data = nil
+        text = nil
+        live = false
+        pageCount = 0
+        thumbs = [:]
+        passages = [:]
+        selection = nil
+        problem = Self.cantShowText
+        loading = false
     }
 
     private func loaded(_ read: ViewerLoader.Read, ticket: Int) {
@@ -587,11 +612,15 @@ final class ViewerModel: Identifiable {
         let own = fileID
         Viewers.queue.async {
             let found = ViewerModel.follow(url: url, own: own, bookmark: kept)
+            // The file followed passes the path rule before it's adopted or loaded.
+            let allowed = found.map { ViewerPath.check($0.path) }
+            let refused = { if case .failure? = allowed { return true } else { return false } }()
             let now = found.flatMap { ViewerLoader.stamp($0) }
             let moved = found.flatMap { $0.path != url.path ? $0 : nil }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard !self.closedNow else { return }
+                    if refused { return self.cantShow() }
                     if let moved { self.url = moved }
                     guard let now, now != before else { return }
                     // Replaced (a new file swapped in, as most apps save): the new one is watched from now on, and

@@ -1671,6 +1671,18 @@ enum NoteShelf {
         return onDesktopShowing ? .desktop : .none
     }
 
+    /// What a refused save puts in the journal: the whole note, as a normal save writes it (its front matter, its
+    /// id, places and dates, everything) with the edited body: the note as the store has it (`current`), else as the
+    /// editor last had its file (`base`). A note with no id of its own (known by its path) has no front matter to
+    /// keep: its text is its body, as its file is.
+    static func unsavedText(current: NoteFile?, base: String?, noteID: String, body: String, now: Date) -> String {
+        if needsID(noteID) { return body }
+        var file = current ?? base.map { NoteFile.parse($0, fallbackID: noteID, fallbackDate: now) } ?? NoteFile(id: noteID, created: now)
+        file.body = body
+        file.modified = now
+        return file.serialized()
+    }
+
     /// Where an editor's save goes: the paper it was typed in when it's still there, else (renamed or moved while
     /// the editor was open) the one paper of that note now, by its identity (`current`: an id given since followed);
     /// nil when no paper, or more than one, is that note (never a guess).

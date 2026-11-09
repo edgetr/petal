@@ -69,30 +69,25 @@ struct ViewerFileCheck {
         expect(ViewerKind.of("/a/b.docx") == .quickLook(.page) && ViewerKind.of("/a/b.xlsx") == .quickLook(.page), "documents have pages")
         expect(ViewerKind.of("/a/id_rsa") == nil && ViewerKind.of("/a/b.html") == nil && ViewerKind.of("/a/b.app") == nil, "nothing else")
 
-        // MARK: The path an agent names
+        // MARK: The path rule: where the file is, by canonical path
 
         let home = "/Users/someone"
-        expect(ViewerPath.standardized("~/./Docs//a.pdf", home: home) == .success("/Users/someone/Docs/a.pdf"), "~, . and // normalized by their words alone")
-        expect(ViewerPath.standardized("~/Docs/../a.pdf", home: home) == .failure(.parentPart), "a .. is refused, never reduced through the disk")
-        expect(ViewerPath.standardized("Docs/a.pdf", home: home) == .failure(.notAbsolute), "a relative path isn't taken")
-        expect(ViewerPath.prefixes("/a/b/c") == ["/a", "/a/b", "/a/b/c"], "walked a component at a time")
-        expect(ViewerPath.decide(standardized: "/Users/someone/In/Report.pdf", resolved: "/Users/someone/Docs/Report.pdf", linkedOut: true,
-                                 homes: [home], regular: true, owner: 501, me: 501) == .failure(.linkOutOfHome),
-               "a link on the way that led out of home, even one that came back: refused")
-        func decide(_ path: String, _ resolved: String?, regular: Bool = true, owner: UInt32 = 501) -> Result<String, ViewerPath.Refusal> {
-            ViewerPath.decide(standardized: path, resolved: resolved, homes: [home], regular: regular, owner: owner, me: 501)
+        expect(ViewerPath.absolute("~/Docs/a.pdf", home: home) == "/Users/someone/Docs/a.pdf" && ViewerPath.absolute("Docs/a.pdf", home: home) == nil,
+               "~/ is the home folder; a relative path isn't taken")
+        expect(ViewerPath.inside("/Users/someone/Docs/a.pdf", home) && !ViewerPath.inside("/Users/someoneelse/a.pdf", home) && !ViewerPath.inside("/etc/a.pdf", home),
+               "inside by components, never by a prefix of characters")
+        func decide(_ destination: String?, regular: Bool = true, owner: UInt32 = 501) -> Result<String, ViewerPath.Refusal> {
+            ViewerPath.decide(destination: destination, home: home, regular: regular, owner: owner, me: 501)
         }
-        expect(decide("/Users/someone/a.pdf", "/Users/someone/a.pdf") == .success("/Users/someone/a.pdf"), "the person's own file")
-        expect(decide("/Users/someone/link.pdf", "/etc/secret.pdf") == .failure(.linkOutOfHome), "never through a link out of the home folder")
-        expect(decide("/Users/someone/link.pdf", "/Users/someone/real.pdf") == .success("/Users/someone/real.pdf"), "a link inside it is fine")
-        expect(decide("/private/tmp/a.pdf", "/private/tmp/a.pdf") == .success("/private/tmp/a.pdf"), "the system's own folders are the system's")
-        expect(decide("/Users/someone/a.pdf", "/Users/someone/a.pdf", owner: 0) == .failure(.notOwned), "someone else's file isn't opened")
-        expect(decide("/Users/someone/a.pdf", "/Users/someone/a.pdf", regular: false) == .failure(.notRegular), "a folder or package isn't a file")
-        expect(decide("/Users/someone/a.pdf", nil) == .failure(.missing), "nothing there")
-        expect(decide("/Users/someone/a.txt.exe", "/Users/someone/a.txt.exe") == .failure(.notShown), "only what the viewer shows")
+        expect(decide("/Users/someone/a.pdf") == .success("/Users/someone/a.pdf"), "the person's own file in the home folder")
+        expect(decide("/etc/secret.pdf") == .failure(.outsideHome) && decide("/private/tmp/a.pdf") == .failure(.outsideHome), "a destination outside it: refused")
+        expect(decide("/Users/someone/a.pdf", owner: 0) == .failure(.notOwned), "someone else's file isn't opened")
+        expect(decide("/Users/someone/a.pdf", regular: false) == .failure(.notRegular), "a folder or package isn't a file")
+        expect(decide(nil) == .failure(.missing), "nothing there")
+        expect(decide("/Users/someone/a.txt.exe") == .failure(.notShown), "only what the viewer shows")
         // On the disk, in a throwaway folder standing in for the home folder.
         let base = FileManager.default.temporaryDirectory.appending(path: "petal-viewer-check-\(UUID().uuidString)")
-        let fakeHome = base.appending(path: "home")
+        let fakeHome = base.appending(path: "Home")
         let outside = base.appending(path: "outside")
         try? FileManager.default.createDirectory(at: fakeHome.appending(path: "Docs"), withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
@@ -102,21 +97,31 @@ struct ViewerFileCheck {
         try? FileManager.default.createSymbolicLink(atPath: fakeHome.appending(path: "Docs/Out.pdf").path, withDestinationPath: outside.appending(path: "Elsewhere.pdf").path)
         try? FileManager.default.createSymbolicLink(atPath: fakeHome.appending(path: "Docs/In.pdf").path, withDestinationPath: fakeHome.appending(path: "Docs/Report.pdf").path)
         try? FileManager.default.createSymbolicLink(atPath: fakeHome.appending(path: "Away").path, withDestinationPath: outside.path)
+        try? FileManager.default.createSymbolicLink(atPath: outside.appending(path: "Back").path, withDestinationPath: fakeHome.appending(path: "Docs").path)
         let h = fakeHome.path
-        expect((try? ViewerPath.check(h + "/Docs/Report.pdf", home: h).get())?.lastPathComponent == "Report.pdf", "a regular file of the person's opens")
-        expect((try? ViewerPath.check("~/Docs/Report.pdf", home: h).get())?.lastPathComponent == "Report.pdf", "~/ is the home folder")
-        expect((try? ViewerPath.check(h + "/Docs/In.pdf", home: h).get())?.lastPathComponent == "Report.pdf", "a link inside the home folder is followed")
-        expect(ViewerPath.check(h + "/Docs/Out.pdf", home: h).failureValue == .linkOutOfHome, "a link out of it isn't")
-        expect(ViewerPath.check(h + "/Away/Elsewhere.pdf", home: h).failureValue == .linkOutOfHome, "nor a linked folder out of it")
+        let report = ViewerPath.canonical(fakeHome.appending(path: "Docs/Report.pdf").path)
+        expect((try? ViewerPath.check(h + "/Docs/Report.pdf", home: h).get())?.path == report, "a regular file of the person's opens, by its canonical path")
+        expect((try? ViewerPath.check("~/Docs/Report.pdf", home: h).get())?.path == report, "~/ is the home folder")
+        expect((try? ViewerPath.check(h + "/Docs/In.pdf", home: h).get())?.path == report, "a link to a file in the home folder is followed")
+        expect((try? ViewerPath.check(h + "/Away/Back/Report.pdf", home: h).get())?.path == report, "a link out and back in: it's where the file is that counts")
+        expect((try? ViewerPath.check(h + "/Docs/../Docs/Report.pdf", home: h).get())?.path == report, "a .. inside the home folder is fine")
+        // ".." after a link out of home goes up from where the link leads (outside): a file there is outside, refused.
+        try? FileManager.default.createDirectory(at: base.appending(path: "Docs"), withIntermediateDirectories: true)
+        try? Data("%PDF-1.4".utf8).write(to: base.appending(path: "Docs/Report.pdf"))
+        expect(ViewerPath.check(h + "/Away/../Docs/Report.pdf", home: h).failureValue == .outsideHome, "a .. through a link out of home: where it really leads, outside, refused")
+        expect(ViewerPath.check(h + "/Docs/Out.pdf", home: h).failureValue == .outsideHome, "a link out of it: the destination is outside, refused")
+        expect(ViewerPath.check(h + "/Away/Elsewhere.pdf", home: h).failureValue == .outsideHome, "nor through a linked folder")
+        expect(ViewerPath.check(outside.appending(path: "Elsewhere.pdf").path, home: h).failureValue == .outsideHome, "nor named directly")
+        // Other casing (macOS's disks don't care; the canonical path is the file system's own spelling).
+        let otherCasing = base.appending(path: "home/docs/REPORT.pdf").path
+        expect(FileManager.default.fileExists(atPath: otherCasing), "(a disk that ignores case, as macOS's do)")
+        if FileManager.default.fileExists(atPath: otherCasing) {
+            expect((try? ViewerPath.check(otherCasing, home: h).get())?.path == report, "the path in other casing: the same file, inside")
+            expect((try? ViewerPath.check(h + "/Docs/Report.pdf", home: base.appending(path: "HOME").path).get())?.path == report, "the home folder in other casing too")
+        }
         expect(ViewerPath.check(h + "/Docs/Folder.pdf", home: h).failureValue == .notRegular, "a folder named like a PDF isn't a file")
         expect(ViewerPath.check(h + "/Docs/Missing.pdf", home: h).failureValue == .missing, "a missing file")
         expect(ViewerPath.check("Docs/Report.pdf", home: h).failureValue == .notAbsolute, "a relative path")
-        // ".." through a link out of home (Foundation's standardizing would follow Away to reduce it): refused.
-        expect(ViewerPath.check(h + "/Away/../Docs/Report.pdf", home: h).failureValue == .parentPart, ".. through a link out of home isn't reduced")
-        // A link out of home and one back in: the destination is inside, but the way went out.
-        try? FileManager.default.createSymbolicLink(atPath: outside.appending(path: "Back").path, withDestinationPath: fakeHome.appending(path: "Docs").path)
-        expect(ViewerPath.check(h + "/Away/Back/Report.pdf", home: h).failureValue == .linkOutOfHome, "out of home and back in: refused")
-        expect((try? ViewerPath.check(h + "/./Docs//Report.pdf", home: h).get())?.lastPathComponent == "Report.pdf", "./ and // are fine")
         try? FileManager.default.removeItem(at: base)
 
         // MARK: Notes in the margin
@@ -445,6 +450,20 @@ struct ViewerFileCheck {
         unknownKind.path = "/Users/someone/run.sh"
         expect(ViewerFiles.offersViewer(sentenceInPDF) && ViewerFiles.offersViewer(onPath) && !ViewerFiles.offersViewer(sentenceOnPage)
                && !ViewerFiles.offersViewer(unknownKind) && !ViewerFiles.offersViewer(tab), "Open in Petal's viewer offered for a sentence noted in Preview")
+
+        // MARK: Eighth review: a refused save's snapshot is the whole note
+
+        var full = NoteFile(id: "R1", created: when, body: "Before")
+        var place = NoteStick(kind: .file)
+        place.path = "/Users/someone/Report.pdf"
+        full.places = [place]
+        let journaled = NoteShelf.unsavedText(current: nil, base: full.serialized(), noteID: "R1", body: "Before, typed", now: when.addingTimeInterval(60))
+        let parsedBack = NoteFile.parse(journaled, fallbackID: "x", fallbackDate: when)
+        expect(parsedBack.id == "R1" && parsedBack.places == full.places && parsedBack.created == when && parsedBack.body == "Before, typed" && journaled.hasPrefix("---"),
+               "a refused save's snapshot is the whole note: its front matter kept, its body edited")
+        expect(NoteShelf.unsavedText(current: full, base: nil, noteID: "R1", body: "x", now: when).contains("places:"), "from the note as the store has it too")
+        expect(NoteShelf.unsavedText(current: nil, base: "Written by hand", noteID: "file:Inbox/Hand.md", body: "Written by hand, typed", now: when) == "Written by hand, typed",
+               "a note with no id of its own: its text is its body, as its file is")
 
         // MARK: Sixth review
 

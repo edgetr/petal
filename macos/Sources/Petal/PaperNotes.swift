@@ -1215,6 +1215,17 @@ final class NoteStore {
         NoteJournal.queue.async { NoteJournal.snapshot(entry) }
     }
 
+    /// A refused save's snapshot settled (the editor is back at what's saved): with writing still waiting for the
+    /// note, the journal holds the note as it is now (its own snapshot, as every change makes); else the refused
+    /// typing goes, leaving only picture or paste recovery still pending (NoteJournal.retire).
+    func settleUnsaved(_ key: String, noteID: String, saved: String?) {
+        if let paper = paper(key), let session = session(for: key), let revision = paper.revision, !session.pending.isEmpty {
+            return snapshot(paper, text: revision, session: session)
+        }
+        let current = paper(key)?.revision ?? saved
+        NoteJournal.queue.async { NoteJournal.retire(noteID: noteID, current: current) }
+    }
+
     /// The journal's whole snapshot of a note as the person has it now: its text, the base of its oldest write not
     /// landed yet, and the bytes of the pictures that text references and that aren't in its folder yet.
     private func snapshot(_ paper: PaperNote, text: String, session: NoteSession, aside: Bool = false) {

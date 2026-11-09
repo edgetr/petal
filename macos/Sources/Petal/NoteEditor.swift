@@ -1333,6 +1333,9 @@ struct NoteEditorView: NSViewRepresentable {
     var say: (String) -> Void = { _ in }
     /// Pictures pasted as bytes (a copy from a note): taken by the screenshot paste's path.
     var acceptPictures: ([(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? = { _ in nil }
+    /// Back at what's saved after a refused save (the person undid it): the journal's snapshot of the refused typing
+    /// is settled (`saved`: the note's file as this editor last had it).
+    var settled: (String?) -> Void = { _ in }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         /// The Edit menu's Undo and Redo (and typing's undo) use the editor's own history.
@@ -1349,6 +1352,8 @@ struct NoteEditorView: NSViewRepresentable {
         var parent: NoteEditorView
         /// Typed and not saved yet (NoteShelf.EditorMarker): set as the person types, cleared when the save runs.
         var marker = NoteShelf.EditorMarker()
+        /// A refused save's typing is in the journal (NoteStore.journalUnsaved) and hasn't landed or been settled.
+        var refusedInJournal = false
         init(_ parent: NoteEditorView) { self.parent = parent }
 
         @MainActor func textDidChange(_ notification: Notification) {
@@ -1380,9 +1385,15 @@ struct NoteEditorView: NSViewRepresentable {
                 if let next = parent.save(body, base) {
                     self.body = body
                     base = next
+                    refusedInJournal = false
                 } else {
                     landed = false
+                    refusedInJournal = true
                 }
+            } else if refusedInJournal {
+                // Undone back to what's saved: the refused typing's snapshot goes (or is replaced by the note as it is).
+                refusedInJournal = false
+                parent.settled(base)
             }
             _ = marker.saved(landed: landed)
             guard landed else {

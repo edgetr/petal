@@ -74,9 +74,8 @@ extension Viewers {
             DispatchQueue.main.asyncAfter(deadline: .now() + wait) { once(nil) }
         case "petal_note_pdf_comments":
             let original = args["into_original"] as? Bool ?? false
-            let home = NSHomeDirectory()
             Self.queue.async {
-                let checked = ViewerPath.check(path, home: home)
+                let checked = ViewerPath.check(path)
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         guard live() else { return }
