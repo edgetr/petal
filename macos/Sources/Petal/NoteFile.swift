@@ -1683,14 +1683,18 @@ enum NoteShelf {
         return file.serialized()
     }
 
-    /// Where an editor's save goes: the paper it was typed in when it's still there, else (renamed or moved while
-    /// the editor was open) the one paper of that note now, by its identity (`current`: an id given since followed);
-    /// nil when no paper, or more than one, is that note (never a guess).
-    static func saveTarget(key: String, noteID: String, instance: String, papers: [(key: String, id: String, version: String?)],
+    /// Where an editor's save goes: the paper it was typed in, when the paper at that key is still that note (its
+    /// identity, by holder keys: an id given since followed from that very file, and an id-less note's path id only
+    /// with its own file); else (renamed or moved while the editor was open) the one paper of that note now. nil
+    /// when no paper, or more than one, is that note, and when another note took its key: never a guess, never the
+    /// key alone (the typing is then journaled under the note it was typed in).
+    static func saveTarget(key: String, noteID: String, instance: String, papers: [(key: String, id: String, instance: String, version: String?)],
                            current: (String, String) -> String) -> String? {
-        if papers.contains(where: { $0.key == key }) { return key }
         let id = current(noteID, instance)
-        let found = papers.filter { $0.id == id && $0.version == nil }
+        let holder = id == noteID ? holderKey(id: noteID, instance: instance) : id
+        let isNote = { (paper: (key: String, id: String, instance: String, version: String?)) in holderKey(id: paper.id, instance: paper.instance) == holder }
+        if let atKey = papers.first(where: { $0.key == key }), isNote(atKey) { return key }
+        let found = papers.filter { $0.version == nil && isNote($0) }
         return found.count == 1 ? found[0].key : nil
     }
 

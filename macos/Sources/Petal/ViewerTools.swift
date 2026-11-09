@@ -21,7 +21,7 @@ extension Viewers {
             // A page counts from 1; a number that isn't one is refused before anything is worked out from it.
             let page = ViewerPages.requested(args["page"])
             if args["page"] != nil, page == nil { return fail("page counts from 1 (a whole number).") }
-            open(path: path, page: page) { result in
+            open(path: path, page: page, live: live) { result in
                 guard live() else { return }
                 switch result {
                 case .failure(let refusal): fail(refusal.description)
@@ -37,7 +37,7 @@ extension Viewers {
             }
         case "petal_view_versions":
             let labels = (args["names"] as? [Any] ?? []).compactMap { $0 as? String }
-            open(path: path, show: true) { result in
+            open(path: path, show: true, live: live) { result in
                 guard live() else { return }
                 switch result {
                 case .failure(let refusal): fail(refusal.description)
@@ -48,7 +48,7 @@ extension Viewers {
                         case .success(let set):
                             send(["set": set.id, "file": model.name,
                                   "versions": set.versions.map { ["id": $0.id, "name": $0.label, "path": $0.url.path] },
-                                  "note": "Copies in a temporary folder, shown under the document with Use this. Change the copies (never the file itself); their pictures follow. petal_view_pick tells you which one the person picks."])
+                                  "note": "Copies in a temporary folder, shown under the document with Use this. Change the copies (never the file itself); their pictures follow. petal_view_pick tells you which one the person picks. Newer versions replace these (their copies go, but a picked one), and every copy goes when the viewer closes: read the picked one while it's open."])
                         }
                     }
                 }

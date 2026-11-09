@@ -426,8 +426,8 @@ struct ViewerFileCheck {
 
         // MARK: Fifth review: identity of papers and saves, names, the desk's match, the viewer offered
 
-        let papersNow = [(key: "/n/Inbox/Renamed.md", id: "N1", version: String?.none), (key: "/n/Inbox/Other.md", id: "N2", version: nil),
-                         (key: "/n/Inbox/Twin.md", id: "N3", version: nil), (key: "/n/Work/Twin.md", id: "N3", version: nil)]
+        let papersNow = [(key: "/n/Inbox/Renamed.md", id: "N1", instance: "", version: String?.none), (key: "/n/Inbox/Other.md", id: "N2", instance: "", version: nil),
+                         (key: "/n/Inbox/Twin.md", id: "N3", instance: "", version: nil), (key: "/n/Work/Twin.md", id: "N3", instance: "", version: nil)]
         let same = { (id: String, _: String) in id }
         expect(NoteShelf.saveTarget(key: "/n/Inbox/Other.md", noteID: "N2", instance: "", papers: papersNow, current: same) == "/n/Inbox/Other.md", "its own paper")
         expect(NoteShelf.saveTarget(key: "/n/Inbox/Old name.md", noteID: "N1", instance: "", papers: papersNow, current: same) == "/n/Inbox/Renamed.md",
@@ -435,6 +435,16 @@ struct ViewerFileCheck {
         expect(NoteShelf.saveTarget(key: "/n/Inbox/Gone.md", noteID: "N3", instance: "", papers: papersNow, current: same) == nil, "two papers of one id: never a guess")
         expect(NoteShelf.saveTarget(key: "/n/Inbox/Handwritten.md", noteID: "file:Inbox/Handwritten.md", instance: "1:2", papers: papersNow,
                                     current: { id, _ in id == "file:Inbox/Handwritten.md" ? "N1" : id }) == "/n/Inbox/Renamed.md", "an id given meanwhile, followed")
+        // Eleventh review: another note took the old path while the editor was open: never saved into it.
+        expect(NoteShelf.saveTarget(key: "/n/Inbox/Other.md", noteID: "N9", instance: "", papers: papersNow, current: same) == nil,
+               "another note (N2) at the old path: refused, journaled under the note it was typed in")
+        expect(NoteShelf.saveTarget(key: "/n/Inbox/Other.md", noteID: "N1", instance: "", papers: papersNow, current: same) == "/n/Inbox/Renamed.md",
+               "another note at the old path, its own note renamed: the save goes to its own note, never the old path")
+        let handPapers = [(key: "/n/Inbox/Hand.md", id: "file:Inbox/Hand.md", instance: "7:99", version: String?.none)]
+        expect(NoteShelf.saveTarget(key: "/n/Inbox/Hand.md", noteID: "file:Inbox/Hand.md", instance: "7:42", papers: handPapers, current: same) == nil,
+               "an id-less note: another file at its path (another instance) is never it")
+        expect(NoteShelf.saveTarget(key: "/n/Inbox/Hand.md", noteID: "file:Inbox/Hand.md", instance: "7:99", papers: handPapers, current: same) == "/n/Inbox/Hand.md",
+               "the same file: its own key")
         expect(ViewerPaperID.of(key: "/n/Old.md", holder: "N1", readOnly: false) == ViewerPaperID.of(key: "/n/New.md", holder: "N1", readOnly: false)
                && ViewerPaperID.of(key: "/n/A.md", holder: "N3", readOnly: true) != ViewerPaperID.of(key: "/n/B.md", holder: "N3", readOnly: true),
                "a margin paper's editor kept across a rename; each read-only copy its own")
@@ -535,6 +545,47 @@ struct ViewerFileCheck {
         } else {
             expect(false, "a versions store opens on a throwaway folder")
         }
+        // Eleventh review: a set retired removes its copies through its pin (all but a picked one), and a launch
+        // sweeps away sets untouched for a day.
+        if let store = ViewerVersionStore(root: gateBase.appending(path: "Retire")) {
+            if let pin = store.makeSet("s1") {
+                _ = store.write(pin, file: "A.pdf", data: Data("a".utf8))
+                _ = store.write(pin, file: "B.pdf", data: Data("b".utf8))
+                try? FileManager.default.createDirectory(at: store.path(pin).appending(path: "~lock"), withIntermediateDirectories: true)
+                expect(store.remove(pin, keeping: "B.pdf") && (try? FileManager.default.contentsOfDirectory(atPath: store.path(pin).path)) == ["B.pdf"],
+                       "a replaced set: every copy removed but the picked one")
+                expect(store.remove(pin) && !FileManager.default.fileExists(atPath: store.path(pin).path), "its viewer closed: the set's folder gone")
+            }
+            if let pin = store.makeSet("s2") {
+                _ = store.write(pin, file: "A.pdf", data: Data("a".utf8))
+                let folder = store.path(pin)
+                let decoy = gateBase.appending(path: "Decoy")
+                try? FileManager.default.createDirectory(at: decoy, withIntermediateDirectories: true)
+                try? Data("keep".utf8).write(to: decoy.appending(path: "A.pdf"))
+                try? FileManager.default.removeItem(at: folder)
+                try? FileManager.default.createSymbolicLink(atPath: folder.path, withDestinationPath: decoy.path)
+                expect(!store.remove(pin) && FileManager.default.fileExists(atPath: decoy.appending(path: "A.pdf").path),
+                       "a set's folder swapped for a link: nothing removed through it")
+                try? FileManager.default.removeItem(at: folder)
+            }
+            let now = Date()
+            expect(ViewerVersionStore.stale(newest: now.addingTimeInterval(-25 * 3600), now: now) && !ViewerVersionStore.stale(newest: now.addingTimeInterval(-3600), now: now),
+                   "stale after a day, not before")
+            if let old = store.makeSet("old"), let fresh = store.makeSet("fresh"), let touched = store.makeSet("touched") {
+                _ = store.write(old, file: "A.pdf", data: Data("a".utf8))
+                _ = store.write(fresh, file: "A.pdf", data: Data("a".utf8))
+                _ = store.write(touched, file: "A.pdf", data: Data("a".utf8))
+                let dayAgo = now.addingTimeInterval(-30 * 3600)
+                for path in [store.path(old).appending(path: "A.pdf"), store.path(old), store.path(touched)] {
+                    try? FileManager.default.setAttributes([.modificationDate: dayAgo], ofItemAtPath: path.path)
+                }
+                let removed = store.sweep(now: now)
+                expect(removed == ["old"] && !FileManager.default.fileExists(atPath: store.path(old).path)
+                       && FileManager.default.fileExists(atPath: store.path(fresh).path) && FileManager.default.fileExists(atPath: store.path(touched).path),
+                       "a launch sweeps sets older than a day; a set whose copy changed since stays (\(removed))")
+            }
+        } else { expect(false, "a versions store for retiring (set up)") }
+
         // The versions root itself a link: never opened.
         let linkedRoot = gateBase.appending(path: "Linked Versions")
         try? FileManager.default.createSymbolicLink(atPath: linkedRoot.path, withDestinationPath: elsewhere.path)

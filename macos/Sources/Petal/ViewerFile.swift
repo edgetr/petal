@@ -212,6 +212,61 @@ final class ViewerVersionStore: @unchecked Sendable {
 
     /// The pinned folder's path, for whoever edits the copies (the agent) and for watching it.
     func path(_ pin: Pin) -> URL { root.appending(path: pin.name) }
+
+    /// A set's copies removed through its pinned folder (never a folder swapped in for it), all but `keeping` (the
+    /// copy picked, still the asker's to read); with nothing kept, the folder itself goes too. What an agent added
+    /// there (a lock file, a folder of its own) goes with them. False when the folder isn't the pinned one.
+    @discardableResult
+    func remove(_ pin: Pin, keeping: String? = nil) -> Bool {
+        guard let dir = openSet(pin) else { return false }
+        defer { close(dir) }
+        let folder = path(pin)
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [] where name != keeping {
+            var info = stat()
+            guard fstatat(dir, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
+            if (info.st_mode & S_IFMT) == S_IFDIR {
+                // Its own folders: never followed through a link (FileManager doesn't), the pinned folder checked above.
+                try? FileManager.default.removeItem(at: folder.appending(path: name))
+            } else {
+                _ = unlinkat(dir, name, 0)
+            }
+        }
+        if keeping == nil { _ = unlinkat(rootFD, pin.name, AT_REMOVEDIR) }
+        return true
+    }
+
+    /// Whether a set left in the versions root is stale: its newest change (the folder or anything directly in it)
+    /// older than `age` (a day). A launch removes those (a Petal that quit or crashed with a viewer open).
+    static func stale(newest: Date, now: Date, age: TimeInterval = 24 * 60 * 60) -> Bool {
+        now.timeIntervalSince(newest) > age
+    }
+
+    /// Every stale set in the root removed (at launch); a link or a file there is only unlinked, never followed.
+    /// Returns the names removed.
+    @discardableResult
+    func sweep(now: Date = Date(), age: TimeInterval = 24 * 60 * 60) -> [String] {
+        var removed: [String] = []
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [] {
+            var info = stat()
+            guard fstatat(rootFD, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
+            func time(_ info: stat) -> Date {
+                Date(timeIntervalSince1970: TimeInterval(info.st_mtimespec.tv_sec) + TimeInterval(info.st_mtimespec.tv_nsec) / 1e9)
+            }
+            var newest = time(info)
+            let isFolder = (info.st_mode & S_IFMT) == S_IFDIR
+            if isFolder {
+                let folder = root.appending(path: name)
+                for inner in (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? [] {
+                    var innerInfo = stat()
+                    if lstat(folder.appending(path: inner).path, &innerInfo) == 0 { newest = max(newest, time(innerInfo)) }
+                }
+            }
+            guard Self.stale(newest: newest, now: now, age: age) else { continue }
+            if isFolder { try? FileManager.default.removeItem(at: root.appending(path: name)) } else { _ = unlinkat(rootFD, name, 0) }
+            removed.append(name)
+        }
+        return removed
+    }
 }
 
 // MARK: - Notes in the margin

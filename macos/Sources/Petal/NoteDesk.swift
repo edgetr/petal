@@ -1470,16 +1470,19 @@ final class NoteDesk {
     /// (Petal's viewer's margin, a final save as it closes), the save goes to that note as it is now, by its identity
     /// (NoteShelf.saveTarget, NoteStore.currentID): never lost to a key that's gone, never a guess.
     func write(_ key: String, noteID: String?, instance: String, body: String, base: String?) -> String? {
-        let papers = store.notes.map { (key: $0.key, id: $0.noteID, version: $0.version) }
-        let key = noteID.flatMap { id in NoteShelf.saveTarget(key: key, noteID: id, instance: instance, papers: papers, current: store.currentID) } ?? key
-        guard let paper = store.paper(key) else {
-            // Refused (the paper gone): the typing goes into the journal under its note's id at once.
+        let papers = store.notes.map { (key: $0.key, id: $0.noteID, instance: $0.instance, version: $0.version) }
+        // With the note it was typed in known, only a paper that is that note (never another note that took its key).
+        let target = noteID.map { id in NoteShelf.saveTarget(key: key, noteID: id, instance: instance, papers: papers, current: store.currentID) } ?? key
+        guard let target, let paper = store.paper(target) else {
+            // Refused (the paper gone, or no paper is surely that note): the typing goes into the journal under the
+            // note it was typed in, at once.
             if let noteID {
                 store.journalUnsaved(noteID: noteID, path: key, base: base,
                                      text: NoteShelf.unsavedText(current: nil, base: base, noteID: noteID, body: body, now: Date()))
             }
             return nil
         }
+        let key = target
         if store.readOnly(paper) {
             // Typed just as it became one of two papers: kept in the copy beside it, never dropped (handled: the
             // editor doesn't keep it as unsaved).
@@ -1508,9 +1511,10 @@ final class NoteDesk {
     /// refused typing replaced by the note as it is (what's still waiting to be written kept), or retired when
     /// nothing differs, keeping any picture or paste recovery still pending.
     func settleUnsaved(_ key: String, noteID: String, instance: String, saved: String?) {
-        let papers = store.notes.map { (key: $0.key, id: $0.noteID, version: $0.version) }
-        let key = NoteShelf.saveTarget(key: key, noteID: noteID, instance: instance, papers: papers, current: store.currentID) ?? key
-        store.settleUnsaved(key, noteID: noteID, saved: saved)
+        let papers = store.notes.map { (key: $0.key, id: $0.noteID, instance: $0.instance, version: $0.version) }
+        // No paper surely that note: nothing of another note's is read for it (only what the editor saved).
+        let target = NoteShelf.saveTarget(key: key, noteID: noteID, instance: instance, papers: papers, current: store.currentID)
+        store.settleUnsaved(target, noteID: noteID, saved: saved)
     }
 
     /// Pictures pasted or dropped on a note: their bytes read and decoded first (a file that's slow or not downloaded

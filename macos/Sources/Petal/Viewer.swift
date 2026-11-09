@@ -27,17 +27,26 @@ final class Viewers {
 
     init() {
         // Quick Look exports a Petal before this one left behind (it quit or crashed mid-load): swept away.
-        Self.queue.async { ViewerExport.sweep() }
+        // So are version sets older than a day (a Petal that quit or crashed with a viewer open).
+        Self.queue.async {
+            ViewerExport.sweep()
+            ViewerVersionStore.shared?.sweep()
+        }
     }
 
     /// Opens `path` (a note's file, a drop, an agent's path): checked off the main thread (ViewerPath: a regular file
     /// the person owns, never through a link out of the home folder, of a kind the viewer shows), then shown in its
-    /// own window, or the one already showing it brought forward. `page`: counted from 1.
-    func open(path: String, page: Int? = nil, show: Bool = true, done: @escaping @MainActor (Result<ViewerModel, ViewerPath.Refusal>) -> Void = { _ in }) {
+    /// own window, or the one already showing it brought forward. `page`: counted from 1. `live`: whoever asked is
+    /// still there (an agent's request), checked right before anything is shown: gone, nothing opens and `done`
+    /// isn't called.
+    func open(path: String, page: Int? = nil, show: Bool = true, live: @escaping @Sendable () -> Bool = { true },
+              done: @escaping @MainActor (Result<ViewerModel, ViewerPath.Refusal>) -> Void = { _ in }) {
+        guard live() else { return }
         Self.queue.async {
             let checked = ViewerPath.check(path)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    guard live() else { return }
                     switch checked {
                     case .failure(let refusal): done(.failure(refusal))
                     case .success(let url): done(.success(self.show(url, page: page, front: show)))
@@ -75,7 +84,8 @@ final class Viewers {
         open.first { $0.url.path == path || $0.opened == path }
     }
 
-    private func closed(_ model: ViewerModel) {
+    /// A viewer's window closed (or `--viewer-check` done with it): the model closes and is let go.
+    func closed(_ model: ViewerModel) {
         model.close()
         open.removeAll { $0 === model }
         windows[model.id] = nil
@@ -143,19 +153,29 @@ final class ViewerText: @unchecked Sendable {
 
     init(_ data: Data) { self.data = data }
 
-    /// A page's text and, for `paragraph` in it, its bounds on the page; off the main thread, then `done` on it.
-    func read(page: Int, paragraph: @escaping @Sendable (String) -> NSRange?, _ done: @escaping @MainActor (String?, CGRect?) -> Void) {
+    /// A page's text, the words in `selected` (trimmed; empty when there are none: no selection to offer) and, for
+    /// `paragraph` in it, its bounds on the page; all off the main thread, then `done` on it.
+    func read(page: Int, selected: NSRange, paragraph: @escaping @Sendable (String) -> NSRange?,
+              _ done: @escaping @MainActor (_ text: String?, _ words: String, _ box: CGRect?) -> Void) {
         queue.async {
             if self.document == nil { self.document = PDFDocument(data: self.data) }
             guard let document = self.document, let page = document.page(at: page) else {
-                return DispatchQueue.main.async { MainActor.assumeIsolated { done(nil, nil) } }
+                return DispatchQueue.main.async { MainActor.assumeIsolated { done(nil, "", nil) } }
             }
             let index = document.index(for: page)
             let text = self.texts[index] ?? (page.string ?? "")
             self.texts[index] = text
+            let words = ViewerText.words(text, selected)
             let box = paragraph(text).flatMap { page.selection(for: $0)?.bounds(for: page) }
-            DispatchQueue.main.async { MainActor.assumeIsolated { done(text, box) } }
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(text, words, box) } }
         }
+    }
+
+    /// The selected words in a page's text: its range there, trimmed; empty when the range isn't in it.
+    static func words(_ text: String, _ range: NSRange) -> String {
+        let ns = text as NSString
+        guard range.location != NSNotFound, NSMaxRange(range) <= ns.length else { return "" }
+        return ns.substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
@@ -676,10 +696,10 @@ final class ViewerModel: Identifiable {
         versionWatch = nil
         lensSoon?.cancel()
         if let key = openKey { fold(key) }
-        if let set = versions {
-            set.closed = true
-            set.settle(nil)
-        }
+        // Every set this viewer made goes with it: told, its pictures dropped, its copies removed (the picked one
+        // too: the asker reads it while the viewer is open).
+        for set in (versions.map { [$0] } ?? []) + keptSets { retire(set, keepPick: false) }
+        keptSets = []
     }
 
     // MARK: Pages
@@ -745,17 +765,19 @@ final class ViewerModel: Identifiable {
 
     /// A selection made in PDFKit's view: its page's text read off the main thread (ViewerText), then offered as a
     /// Note; an older selection's answer, or one from pages since replaced, is dropped.
-    func selected(page: Int, bounds: CGRect, words: String, range: NSRange, anchor: CGPoint) {
+    func selected(page: Int, bounds: CGRect, range: NSRange, anchor: CGPoint) {
         // The selection before is gone at once (its Note with it); the new one is offered only once its read is in.
         let turn = turns.begin("selection")
         if selection != nil { selection = nil }
         guard let source = text else { return }
         let lens = lensKey != nil
-        source.read(page: page, paragraph: { text in
+        source.read(page: page, selected: range, paragraph: { text in
             guard lens, NSMaxRange(range) <= (text as NSString).length, let swift = Range(range, in: text) else { return nil }
             return NSRange(ViewerLens.paragraph(text, around: swift), in: text)
-        }) { pageText, box in
-            guard self.turns.isLatest("selection", turn), source === self.text, let pageText, NSMaxRange(range) <= (pageText as NSString).length else { return }
+        }) { pageText, words, box in
+            // Only words offer a Note: whitespace alone is no selection.
+            guard self.turns.isLatest("selection", turn), source === self.text, let pageText, !words.isEmpty,
+                  NSMaxRange(range) <= (pageText as NSString).length else { return }
             self.selection = ViewerSelection(page: page, bounds: bounds, quote: words, pageText: pageText, range: range, anchor: anchor)
             // The reading lens: the paragraph the selection is in, for the note that follows it.
             if lens, let swift = Range(range, in: pageText) {
@@ -1008,9 +1030,10 @@ final class ViewerModel: Identifiable {
                         Viewers.queue.async { try? FileManager.default.removeItem(at: folder) }
                         return done(.failure(.cancelled))
                     }
+                    // Only the newest set per viewer: the one it replaces is told, its pictures dropped at once, and
+                    // its copies removed (but the one picked, which its asker may still read, until the viewer closes).
                     if let older = self.versions {
-                        older.closed = true
-                        older.settle(nil)
+                        if self.retire(older, keepPick: true) { self.keptSets.append(older) }
                     }
                     let set = ViewerVersionSet(id: String(id), asker: asker, folder: folder, versions: versions)
                     set.pin = pin
@@ -1026,6 +1049,28 @@ final class ViewerModel: Identifiable {
     }
 
     @ObservationIgnored private var versionWatch: ViewerWatch?
+    /// Sets replaced by newer ones whose picked copy is still kept for their asker (removed when the viewer closes).
+    @ObservationIgnored private(set) var keptSets: [ViewerVersionSet] = []
+
+    /// A set no longer shown (replaced, or the viewer closing): whoever waits for its pick told (nil), its pictures
+    /// dropped, and its copies removed through its pinned folder (ViewerVersionStore.remove), all but the picked one
+    /// when `keepPick` and there is one. Without a copy kept it's forgotten (`petal_view_pick` no longer knows it).
+    /// Returns whether a picked copy was kept.
+    @discardableResult
+    func retire(_ set: ViewerVersionSet, keepPick: Bool) -> Bool {
+        set.closed = true
+        set.settle(nil)
+        let picked = keepPick ? set.picked.flatMap { id in set.versions.first { $0.id == id } } : nil
+        set.versions = picked.map { [ViewerVersion(id: $0.id, label: $0.label, url: $0.url)] } ?? set.versions.map {
+            ViewerVersion(id: $0.id, label: $0.label, url: $0.url)
+        }
+        if set === versions { versionPages = [:] }
+        let pin = set.pin
+        let keeping = picked?.url.lastPathComponent
+        Viewers.queue.async { if let pin { ViewerVersionStore.shared?.remove(pin, keeping: keeping) } }
+        if picked == nil { app.viewers.versionSets[set.id] = nil }
+        return picked != nil
+    }
 
     /// The set's folder and every copy in it watched; after any change the watches are opened again, so a copy
     /// replaced by an atomic save (a new file) is watched as it is now, and every later write to it is seen.

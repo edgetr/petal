@@ -190,6 +190,7 @@ enum ViewerCheck {
             failed = !eighth(url, app: app) || failed
             failed = !ninth(url, app: app) || failed
             failed = !tenth(url, app: app) || failed
+            failed = !eleventh(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -521,6 +522,79 @@ enum ViewerCheck {
                "exported quadrilaterals don't cover the unselected words")
         expect(zip(quads, viewerLines).allSatisfy { abs($0.midY - $1.midY) < 2 && abs($0.minX - $1.minX) < 2 }, "each quadrilateral is its line")
         print("tenth: " + (ok ? "versions read through their pinned folder and followed after a replace; two-line passages marked line by line" : "failed"))
+        return ok
+    }
+
+    /// The eleventh review: only the newest set of versions per viewer (one it replaces told, its pictures dropped and
+    /// its copies removed, all but a picked one, which goes when the viewer closes); a request that hangs up before
+    /// its file is checked opens nothing.
+    private static func eleventh(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("eleventh: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let deck = home.appending(path: "Deck.pdf")
+        try? FileManager.default.copyItem(at: source, to: deck)
+        let exists = { (url: URL) in FileManager.default.fileExists(atPath: url.path) }
+
+        let model = ViewerModel(url: URL(fileURLWithPath: ViewerPath.canonical(deck.path) ?? deck.path), kind: .pdf)
+        model.load()
+        wait(20) { !model.loading }
+        func make(_ labels: [String]) -> ViewerVersionSet? {
+            var made: ViewerVersionSet?
+            model.makeVersions(labels, asker: "check") { if case .success(let set) = $0 { made = set } }
+            wait(20) { made != nil }
+            wait(20) { made?.versions.allSatisfy { $0.thumb != nil } == true }
+            return made
+        }
+        guard let first = make(["One", "Two"]) else { expect(false, "versions made (set up)"); return false }
+        var told = false
+        var toldWith: ViewerVersion?? = .none
+        first.whenPicked { told = true; toldWith = .some($0) }
+        guard let second = make(["Three", "Four"]) else { expect(false, "newer versions made (set up)"); return false }
+        wait(5) { exists(first.folder) == false }
+        expect(model.versions === second && app.viewers.versionSets[first.id] == nil && app.viewers.versionSets[second.id] === second,
+               "only the newest set is kept; the one it replaced is forgotten")
+        expect(told && toldWith == .some(nil), "whoever waited on the replaced set's pick is told: none")
+        expect(first.versions.allSatisfy { $0.thumb == nil }, "the replaced set's pictures dropped at once")
+        expect(!exists(first.folder), "the replaced set's copies removed (no pick pending)")
+        // Picked, then replaced: only the picked copy stays (its asker may still read it), until the viewer closes.
+        let picked = second.versions[1]
+        model.use(picked)
+        guard let third = make(["Five"]) else { expect(false, "a third set (set up)"); return false }
+        wait(5) { ((try? FileManager.default.contentsOfDirectory(atPath: second.folder.path)) ?? []).count == 1 }
+        expect(app.viewers.versionSets[second.id] === second && second.versions.map(\.id) == [picked.id] && second.versions.allSatisfy { $0.thumb == nil },
+               "a replaced set with a pick: kept for its asker with only the picked version, pictures dropped")
+        let left = (try? FileManager.default.contentsOfDirectory(atPath: second.folder.path)) ?? []
+        expect(left == [picked.url.lastPathComponent], "its other copies removed, the picked one kept (\(left))")
+        // The viewer closes: every set's copies go, picked or not.
+        model.close()
+        wait(5) { !exists(second.folder) && !exists(third.folder) }
+        expect(!exists(second.folder) && !exists(third.folder), "the viewer closed: every set's copies removed")
+        expect(app.viewers.versionSets[second.id] == nil && app.viewers.versionSets[third.id] == nil, "and forgotten")
+
+        // A cancelled request opens nothing: hung up before it's asked, or while its file is being checked.
+        let shown = { app.viewers.open.contains { $0.url.lastPathComponent == "Deck.pdf" } }
+        var answered = false
+        app.viewers.open(path: deck.path, live: { false }) { _ in answered = true }
+        wait(2) { answered || shown() }
+        expect(!answered && !shown(), "a request already gone: nothing opened")
+        let gone = HangUp()
+        app.viewers.open(path: deck.path, live: { !gone.gone }) { _ in answered = true }
+        gone.gone = true
+        wait(3) { answered || shown() }
+        expect(!answered && !shown(), "hung up while its file was checked: no window")
+        var opened: ViewerModel?
+        app.viewers.open(path: deck.path, live: { true }) { if case .success(let model) = $0 { opened = model } }
+        wait(5) { opened != nil }
+        expect(opened != nil && shown(), "still there: it opens")
+        for model in app.viewers.open where model.url.lastPathComponent == "Deck.pdf" { app.viewers.closed(model) }
+        print("eleventh: " + (ok ? "only the newest versions kept (a picked copy until the viewer closes, all gone then); a cancelled open shows nothing" : "failed"))
         return ok
     }
 
@@ -1185,7 +1259,7 @@ enum ViewerCheck {
         renamedPaper.url = FileManager.default.temporaryDirectory.appending(path: "W3 renamed.md")
         app.paper.store.preview([renamedPaper, handwritten], notebooks: [])
         expect(model.paperID(renamedPaper) == before, "renamed: the same margin paper, so its editor and what's typed stay")
-        let target = NoteShelf.saveTarget(key: linkPaper.key, noteID: "W3", instance: "", papers: app.paper.store.notes.map { ($0.key, $0.noteID, $0.version) },
+        let target = NoteShelf.saveTarget(key: linkPaper.key, noteID: "W3", instance: "", papers: app.paper.store.notes.map { ($0.key, $0.noteID, $0.instance, $0.version) },
                                           current: app.paper.store.currentID)
         expect(target == renamedPaper.key, "the editor's final save goes to the renamed note")
         print("window: " + (ok ? "PDF view, selection read off the main thread, passages found by their words, highlight, margin and pages in step, a link's note, ownership across an id change, the old selection cleared at once, an empty draft kept across a hand-off, notes off closing the margin, the right paper flipped, a rename keeping its editor" : "failed"))

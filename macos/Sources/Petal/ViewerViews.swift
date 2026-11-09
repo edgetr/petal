@@ -435,20 +435,20 @@ struct ViewerPDF: NSViewRepresentable {
         }
 
         /// A selection on one page offers a Note: its page, bounds and where it is in the page's text; the page's
-        /// text itself is read off the main thread (ViewerModel.selected), so the passage is cut only after the whole
+        /// text itself, and from it the selected words and whether there are any, is read off the main thread
+        /// (ViewerModel.selected; never the selection's own string here), so the passage is cut only after the whole
         /// page was checked, and, while a note follows the selection, the lens is asked about its paragraph.
         @objc private func selectionChanged() {
             guard let view, let model else { return }
-            guard let selection = view.currentSelection, selection.pages.count == 1, let page = selection.pages.first, let document = view.document,
-                  let words = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines), !words.isEmpty else {
+            guard let selection = view.currentSelection, selection.pages.count == 1, let page = selection.pages.first, let document = view.document else {
                 return model.unselected()
             }
             let range = selection.range(at: 0, on: page)
-            guard range.location != NSNotFound else { return model.unselected() }
+            guard range.location != NSNotFound, range.length > 0 else { return model.unselected() }
             let bounds = selection.bounds(for: page)
             let rect = ViewerGeometry.window(view.convert(bounds, from: page), in: view)
             if let key = model.openKey { model.fold(key) }
-            model.selected(page: document.index(for: page), bounds: bounds, words: words, range: range, anchor: CGPoint(x: rect.maxX, y: rect.minY))
+            model.selected(page: document.index(for: page), bounds: bounds, range: range, anchor: CGPoint(x: rect.maxX, y: rect.minY))
         }
     }
 }
