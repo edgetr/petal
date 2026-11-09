@@ -15,10 +15,20 @@ struct NoteImport: @unchecked Sendable {
     /// The selection it replaces when it's in (its length, and the text it held then).
     var length: Int = 0
     var selected: String = ""
-    /// A picture from a note's fragment (a paste): its spot in the open editor (an anchor that follows edits; the
-    /// end once the editor is gone), and its caption. A paste's picture that can't be read is said in words there.
-    var anchor: Int? = nil
+    /// A picture from a note's fragment (a paste): its spot's marker in the open editor (a token unique everywhere:
+    /// only the editor holding that very marker puts it there; anywhere else it goes at the end), its caption, and
+    /// the link it was copied with (read only through NoteStore.pictureFile). One picture, one import. A paste's
+    /// picture that can't be read is said in words at its spot.
+    var anchor: String? = nil
     var captions: [String]? = nil
+    var pasted: PastedLink? = nil
+}
+
+/// A pasted picture's link as it was copied: the link, the folder of the note it was in, and that note's root.
+struct PastedLink: Equatable, Sendable {
+    var link: String
+    var folder: String
+    var root: String
 }
 
 // MARK: - Places
@@ -703,6 +713,11 @@ enum NoteText {
         }
         guard !inner.isEmpty, !inner.contains(")"), !inner.contains("("), !inner.contains(" ") else { return nil }
         return (inner, caption)
+    }
+
+    /// What a pasted picture that can't be pasted becomes: a short line of words, never a link to something else.
+    static func unpasted(_ caption: String) -> String {
+        caption.isEmpty ? "(A picture couldn't be pasted.)" : "(The picture “\(caption)” couldn't be pasted.)"
     }
 
     static func plain(_ text: String) -> String {

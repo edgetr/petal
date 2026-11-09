@@ -138,7 +138,7 @@ final class NotePictures {
                         // Said once, when it turns broken: a redraw never asks again by itself.
                         let fresh = self.broken[key] == nil
                         self.broken[key] = Date()
-                        if fresh { NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["targets": [key]]) }
+                        if fresh { self.announce([key]) }
                         self.reconsider()
                     }
                 }
@@ -149,7 +149,26 @@ final class NotePictures {
     private func store(_ image: NSImage, _ key: String) {
         images[key] = image
         broken[key] = nil
-        NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["targets": [key]])
+        announce([key])
+    }
+
+    /// Arrivals said together: every one that comes within a short while (imports finishing one by one, reads)
+    /// goes out as one notification, so each editor scans its pictures once for all of them.
+    @ObservationIgnored private var announcing: Set<String> = []
+    @ObservationIgnored private var announceScheduled = false
+
+    private func announce(_ keys: [String]) {
+        announcing.formUnion(keys)
+        guard !announceScheduled else { return }
+        announceScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated {
+                self.announceScheduled = false
+                let keys = self.announcing
+                self.announcing = []
+                NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["targets": Array(keys)])
+            }
+        }
     }
 
     /// Many pictures in at once (a paste, an import), their images made off the main thread: stored together and
@@ -160,7 +179,7 @@ final class NotePictures {
             images[item.file.path] = item.image
             broken[item.file.path] = nil
         }
-        NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["targets": items.map(\.file.path)])
+        announce(items.map(\.file.path))
     }
 
     /// Files that appeared or changed under the notes' folder: every picture they touch is read again.
@@ -355,9 +374,7 @@ enum NoteRich {
     }
 
     /// What a picture that can't be pasted becomes: a short line of words, never a link to something else.
-    static func unpasted(_ caption: String) -> NoteBlock {
-        .text(caption.isEmpty ? "(A picture couldn't be pasted.)" : "(The picture “\(caption)” couldn't be pasted.)")
-    }
+    static func unpasted(_ caption: String) -> NoteBlock { .text(NoteText.unpasted(caption)) }
 
     /// What other apps get for a copied selection: its words, a card as its address, a picture as its caption (or
     /// nothing); never a picture's folder or file name.
@@ -853,10 +870,11 @@ final class NoteTextView: NSTextView {
         let range = selectedRange()
         guard range.length > 0, let storage = textStorage, NSMaxRange(range) <= storage.length else { return false }
         let blocks = NoteRich.blocks(storage.attributedSubstring(from: range))
-        // Each picture's file, by the one rule's words (contained in this notes' root), beside its line.
+        // Each picture's file beside its line, by the one link rule (NoteStore.pictureFile: contained in this notes'
+        // root, no symbolic link on the way); one it refuses is recorded as none (it can't be pasted as a picture).
         let files: [String?] = blocks.compactMap { block -> String?? in
             guard case .image(let path, _) = block else { return nil }
-            return .some(NoteShelf.pictureTarget(path, noteFolder: noteFolder.path))
+            return .some(NoteStore.pictureFile(path, noteFolder: noteFolder)?.path)
         }
         let fragment = NoteRich.Fragment(markdown: NoteBlock.body(blocks), folder: noteFolder.path, note: noteID,
                                          root: noteFolder.deletingLastPathComponent().path, files: files)
@@ -890,8 +908,9 @@ final class NoteTextView: NSTextView {
         let own = noteID.isEmpty ? "" : root + "/" + NoteShelf.pictureFolder(id: noteID)
         // What goes in now, and the pictures still to copy in (each by where it goes among what goes in now).
         var now: [NoteBlock] = []
-        var copies: [(before: Int, file: String, caption: String)] = []
+        var copies: [(before: Int, file: String, caption: String, link: PastedLink)] = []
         var n = 0
+        let sourceRoot = fragment.root ?? URL(fileURLWithPath: fragment.folder).deletingLastPathComponent().path
         for block in blocks {
             guard case .image(let path, let caption) = block else { now.append(block); continue }
             let recorded = fragment.files.map { $0.indices.contains(n) ? $0[n] : nil } ?? NoteShelf.pictureTarget(path, noteFolder: fragment.folder)
@@ -899,7 +918,9 @@ final class NoteTextView: NSTextView {
             switch own.isEmpty ? .missing : NoteShelf.pastePicture(recorded: recorded, root: root, own: own) {
             case .keep(let name): now.append(.image(path: NoteShelf.pictureLink(id: noteID, name: name), caption: caption))
             case .missing: now.append(NoteRich.unpasted(caption))
-            case .copy: if let recorded { copies.append((now.count, recorded, caption)) } else { now.append(NoteRich.unpasted(caption)) }
+            case .copy:
+                if let recorded { copies.append((now.count, recorded, caption, PastedLink(link: path, folder: fragment.folder, root: sourceRoot))) }
+                else { now.append(NoteRich.unpasted(caption)) }
             }
         }
         // Each block's start in the text that goes in, for the spots of the pictures still to come.
@@ -912,33 +933,31 @@ final class NoteTextView: NSTextView {
         let at = selectedRange().location
         let text = NoteRich.attributed(now, folder: folderRef, style: style)
         insertText(text, replacementRange: selectedRange())
-        // Pictures side by side are one import (read together, landing in their order at one spot).
-        var groups: [[(before: Int, file: String, caption: String)]] = []
+        // One picture, one import, one marker: each lands (or is said in words) at its own spot, in order.
         for copy in copies {
-            if let last = groups.last?.last, last.before == copy.before { groups[groups.count - 1].append(copy) } else { groups.append([copy]) }
-        }
-        for group in groups {
-            // Before the block they came before (at its line's start), or after everything that went in.
-            let spot = at + (group[0].before < starts.count ? starts[group[0].before] : text.length)
-            importPictures?(NoteImport(files: group.map { URL(fileURLWithPath: $0.file) }, png: nil, tiff: nil, at: -1,
-                                       anchor: anchor(at: spot), captions: group.map(\.caption)))
+            // Before the block it came before (at its line's start), or after everything that went in.
+            let spot = at + (copy.before < starts.count ? starts[copy.before] : text.length)
+            importPictures?(NoteImport(files: [URL(fileURLWithPath: copy.file)], png: nil, tiff: nil, at: -1,
+                                       anchor: anchor(at: spot), captions: [copy.caption], pasted: copy.link))
         }
         return true
     }
 
     // MARK: Spots for pictures on their way
 
-    /// Spots in this text for pasted pictures still being read (by token): they follow every edit
-    /// (NoteShelf.shiftAnchor); a reload moves them to the end.
-    private(set) var anchors: [Int: Int] = [:]
-    /// Where an import's last picture went (by its token): the next of its pictures, or its words, go right after.
-    private var landed: [Int: Int] = [:]
-    private var nextAnchor = 0
+    /// Spots in this text for pasted pictures still being read, by marker (a token unique everywhere, so a marker
+    /// from another editor, or this one before it reopened, is never taken for one here). They follow every edit
+    /// (NoteShelf.shiftAnchor); a reload moves them to the end. `order`: their order in the paste.
+    private(set) var anchors: [String: Int] = [:]
+    private var order: [String: Int] = [:]
+    private var nextOrder = 0
     private var editing: NSObjectProtocol?
 
-    func anchor(at spot: Int) -> Int {
-        nextAnchor += 1
-        anchors[nextAnchor] = spot
+    func anchor(at spot: Int) -> String {
+        let token = UUID().uuidString
+        nextOrder += 1
+        anchors[token] = spot
+        order[token] = nextOrder
         if editing == nil, let storage = textStorage {
             editing = NotificationCenter.default.addObserver(forName: NSTextStorage.didProcessEditingNotification, object: storage, queue: nil) { [weak self] note in
                 guard let storage = note.object as? NSTextStorage, storage.editedMask.contains(.editedCharacters) else { return }
@@ -948,50 +967,46 @@ final class NoteTextView: NSTextView {
                     for (token, spot) in self.anchors {
                         self.anchors[token] = NoteShelf.shiftAnchor(spot, at: range.location, oldLength: range.length - delta, newLength: range.length)
                     }
-                    for (token, spot) in self.landed {
-                        self.landed[token] = NoteShelf.shiftAnchor(spot, at: range.location, oldLength: range.length - delta, newLength: range.length)
-                    }
                 }
             }
         }
-        return nextAnchor
+        return token
     }
 
-    /// Where a picture on its way goes now: its spot (let go), right after the last of its import's that went in,
-    /// or the end when its spot is gone (a reload).
-    private func take(_ token: Int) -> Int {
+    /// Where a picture on its way goes now: at its marker only when this editor holds that very marker (let go
+    /// then); otherwise at the end.
+    private func take(_ token: String?) -> Int {
         let length = textStorage?.length ?? 0
-        if let spot = anchors.removeValue(forKey: token) { return min(spot, length) }
-        return min(landed[token] ?? length, length)
+        guard let token, let spot = anchors.removeValue(forKey: token) else { return length }
+        order[token] = nil
+        return min(spot, length)
     }
 
-    /// Something goes in at `spot` for `token`, never moving the person's cursor or selection: the others waiting
-    /// at that very spot after it (later in the paste) move past it, so pictures land in their order whichever is
-    /// read first; where it ended is kept for the rest of its import.
-    private func keepOrder(_ token: Int, spot: Int, inserting: () -> Void) {
-        let later = anchors.filter { $0.value == spot && $0.key > token }.map(\.key)
+    /// Something goes in at `spot`, never moving the person's cursor or selection: the markers waiting at that very
+    /// spot later in the paste move past it, so pictures land in their order whichever is read first.
+    private func keepOrder(_ rank: Int?, spot: Int, inserting: () -> Void) {
+        let later = anchors.filter { $0.value == spot && (order[$0.key] ?? 0) > (rank ?? Int.max) }.map(\.key)
         let saved = selectedRange()
         let before = textStorage?.length ?? 0
         setSelectedRange(NSRange(location: spot, length: 0))
         inserting()
         let added = (textStorage?.length ?? 0) - before
         for key in later { anchors[key] = (anchors[key] ?? spot) + added }
-        landed[token] = spot + added
         setSelectedRange(saved.location >= spot ? NSRange(location: saved.location + added, length: saved.length) : saved)
     }
 
-    /// A line of words (a pasted picture that couldn't be read) at a picture's spot, on a line of its own.
+    /// A line of words (a pasted picture that couldn't be read) at its marker's spot, else at the end.
     @discardableResult
-    func insertWords(_ words: String, anchor token: Int?) -> Bool {
+    func insertWords(_ words: String, anchor token: String?) -> Bool {
         guard let storage = textStorage else { return false }
-        // At its spot (or right after its import's pictures); with none, at the end.
-        let spot = token.map(take) ?? storage.length
+        let rank = token.flatMap { order[$0] }
+        let spot = take(token)
         let ns = storage.string as NSString
         let line = NSMutableAttributedString()
         if spot > 0, ns.character(at: spot - 1) != 10 { line.append(NSAttributedString(string: "\n", attributes: NoteRich.attributes("text", style))) }
         line.append(NoteRich.attributed([.text(words)], folder: folderRef, style: style))
         if spot < storage.length { line.append(NSAttributedString(string: "\n", attributes: NoteRich.attributes("text", style))) }
-        keepOrder(token ?? 0, spot: spot) { insertText(line, replacementRange: selectedRange()) }
+        keepOrder(rank, spot: spot) { insertText(line, replacementRange: selectedRange()) }
         changed()
         return true
     }
@@ -1034,14 +1049,16 @@ final class NoteTextView: NSTextView {
     /// A picture saved for the note, on its own line at `at` (the end, past it; -1: at the cursor), replacing the
     /// `length` characters there when they still say `selected` (what was selected when it was pasted; text that
     /// changed meanwhile is never replaced: NoteShelf.pasteRange). False when it can't be.
-    func insertPicture(path: String, file: URL, caption: String, at: Int, length: Int = 0, selected: String = "", anchor token: Int? = nil) -> Bool {
+    func insertPicture(path: String, file: URL, caption: String, at: Int, length: Int = 0, selected: String = "", anchor token: String? = nil) -> Bool {
         guard let storage = textStorage else { return false }
         if let token {
-            // A pasted picture: at its spot (it followed every edit), in its order with the others there.
+            // A pasted picture: at its marker's spot (it followed every edit), in its order with the others there;
+            // a marker this editor doesn't hold (another editor's, or from before it reopened): at the end.
+            let rank = order[token]
             let spot = take(token)
             // At the very end, no empty line after it (nobody is typing there).
             let trailing = spot < storage.length
-            keepOrder(token, spot: spot) { insertLine(PictureCell(path: path, folder: folderRef, caption: caption), kind: "image", trailing: trailing) }
+            keepOrder(rank, spot: spot) { insertLine(PictureCell(path: path, folder: folderRef, caption: caption), kind: "image", trailing: trailing) }
             return true
         }
         if at >= 0 { setSelectedRange(NoteShelf.pasteRange(at: at, length: length, selected: selected, text: storage.string)) }
@@ -1081,9 +1098,9 @@ final class NoteEditorHandle {
     var flush: () -> Void = {}
     /// Typed and not saved yet: the note is fenced against a read of the folder only then (NoteShelf.fenceEditor).
     var busy: () -> Bool = { false }
-    var insert: (String, URL, String, Int, Int, String, Int?) -> Bool = { _, _, _, _, _, _, _ in false }
+    var insert: (String, URL, String, Int, Int, String, String?) -> Bool = { _, _, _, _, _, _, _ in false }
     /// A line of words at a pasted picture's spot (one that couldn't be read).
-    var insertWords: (String, Int?) -> Bool = { _, _ in false }
+    var insertWords: (String, String?) -> Bool = { _, _ in false }
 }
 
 /// The editor in SwiftUI: the note's lines in, the note's lines out (saved a moment after the person stops typing).

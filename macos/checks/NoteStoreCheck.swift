@@ -115,6 +115,7 @@ struct NoteStoreCheck {
         picturesStay(root: root)
         pictureLinks(root: root)
         pastedImports(root: root)
+        pastedReads(root: root)
         caseMove(root: root)
         versionGroups(root: root)
         try? fm.removeItem(at: Config.supportFolder)
@@ -676,7 +677,8 @@ struct NoteStoreCheck {
         guard let first = store.notes.first(where: { $0.noteID == "PI1" }), let second = store.notes.first(where: { $0.noteID == "PI2" }) else {
             return expect(false, "the new notes are read")
         }
-        let pasted = NoteImport(files: [source], png: nil, tiff: nil, at: -1, anchor: 1, captions: ["shot"])
+        let pasted = NoteImport(files: [source], png: nil, tiff: nil, at: -1, anchor: "marker-1", captions: ["shot"],
+                                pasted: PastedLink(link: "../" + NoteShelf.pictureFolder(id: "SRC") + "/p.png", folder: root.appending(path: "Inbox").path, root: root.path))
 
         // A new (empty) note with a pasted picture on its way is never put away as empty.
         guard let begun = store.beginImport(first.key, pasted) else { return expect(false, "the paste is recorded with the note") }
@@ -684,7 +686,8 @@ struct NoteStoreCheck {
                "an empty new note with a pasted picture on its way: never trashed")
         NoteJournal.queue.sync {}
         let journaled = NoteJournal.read(NoteJournal.file("PI1"))
-        expect(journaled?.imports?.first?.path == source.path && journaled?.imports?.first?.caption == "shot", "journaled before it's read, with its caption")
+        expect(journaled?.imports?.first?.path == source.path && journaled?.imports?.first?.caption == "shot" && journaled?.imports?.first?.anchor == "marker-1"
+               && journaled?.imports?.first?.link == "../" + NoteShelf.pictureFolder(id: "SRC") + "/p.png", "journaled before it's read, with its caption, link and marker")
 
         // Its editor folded before the read finished: it lands in the saved note, at the end, through a based write.
         if let accepted = store.acceptPictures(first.key, [("png", png, "shot")]) {
@@ -712,6 +715,53 @@ struct NoteStoreCheck {
                    && (try? Data(contentsOf: root.appending(path: NoteShelf.pictureFolder(id: "PI2") + "/" + name))) == png,
                    "a quit before the read: recovered from the journal into the note, with its caption", text)
         } else { expect(false, "the second paste is in the journal") }
+    }
+
+    /// A pasted picture's source is read only through the one link rule, live and in recovery (NoteJournal.read):
+    /// through a symbolic link, refused; and mixed outcomes recovered in order, a missing one said in words.
+    @MainActor static func pastedReads(root: URL) {
+        let fm = FileManager.default
+        let png = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                   isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?.representation(using: .png, properties: [:]) ?? Data()
+        let inbox = root.appending(path: "ReadsInbox")
+        try? fm.createDirectory(at: inbox, withIntermediateDirectories: true)
+        // Outside the root, reached through a link in a notebook.
+        let outside = root.deletingLastPathComponent().appending(path: "ReadsOutside")
+        try? fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        try? png.write(to: outside.appending(path: "secret.png"))
+        try? fm.createSymbolicLink(at: inbox.appending(path: "linked"), withDestinationURL: outside)
+        let throughLink = NoteJournal.Import(token: 1, path: inbox.appending(path: "linked/secret.png").path, ext: "png", caption: "secret",
+                                             link: "linked/secret.png", folder: inbox.path, root: root.path, anchor: "m-link")
+        expect(NoteJournal.read(throughLink) == .gone, "a pasted picture through a symbolic link: refused at read, never read")
+        expect(NoteStore.pictureFile("linked/secret.png", noteFolder: inbox) == nil, "and the copy records nothing for it (the same rule)")
+        // A recorded path that isn't where its link leads: refused too.
+        let own = root.appending(path: NoteShelf.pictureFolder(id: "RD") + "/a.png")
+        try? fm.createDirectory(at: own.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? png.write(to: own)
+        let mismatched = NoteJournal.Import(token: 2, path: outside.appending(path: "secret.png").path, ext: "png", caption: "",
+                                            link: "../" + NoteShelf.pictureFolder(id: "RD") + "/a.png", folder: inbox.path, root: root.path)
+        expect(NoteJournal.read(mismatched) == .gone, "a recorded path that isn't the link's own file: refused")
+        let fine = NoteJournal.Import(token: 3, path: own.path, ext: "png", caption: "a", link: "../" + NoteShelf.pictureFolder(id: "RD") + "/a.png", folder: inbox.path, root: root.path)
+        expect(NoteJournal.read(fine) == .bytes(png), "inside the root, no link on the way: read")
+
+        // Recovery after a quit with three pasted pictures: landed, missing (said in words), waiting (kept), in order.
+        let waitingFile = root.appending(path: NoteShelf.pictureFolder(id: "RD") + "/c.png")
+        try? Data("not a picture yet".utf8).write(to: waitingFile)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: waitingFile.path)
+        let gone = NoteJournal.Import(token: 4, path: root.appending(path: NoteShelf.pictureFolder(id: "RD") + "/b.png").path, ext: "png", caption: "b",
+                                      link: "../" + NoteShelf.pictureFolder(id: "RD") + "/b.png", folder: inbox.path, root: root.path)
+        let waits = NoteJournal.Import(token: 5, path: waitingFile.path, ext: "png", caption: "c",
+                                       link: "../" + NoteShelf.pictureFolder(id: "RD") + "/c.png", folder: inbox.path, root: root.path)
+        var entry = NoteJournal.Entry(noteID: "RT", path: inbox.appending(path: "RT.md").path, base: nil, text: NoteFile(id: "RT", body: "start").serialized())
+        entry.imports = [fine, gone, waits, throughLink]
+        let (recovered, waiting) = NoteJournal.readImports(entry)
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: waitingFile.path)
+        let body = NoteFile.parse(recovered.text, fallbackID: "", fallbackDate: Date()).body
+        let lines = body.components(separatedBy: "\n")
+        expect(lines.count == 4 && lines[0] == "start" && lines[1].hasPrefix("![a](../Pictures/") && lines[2] == "(The picture “b” couldn't be pasted.)"
+               && lines[3] == "(The picture “secret” couldn't be pasted.)" && waiting == [waits],
+               "recovered in order: the one read, the missing one in words, the refused one in words; the waiting one kept", body)
+        try? fm.removeItem(at: inbox.appending(path: "linked"))
     }
 
     /// The one rule for picture links (NoteStore.pictureFile), journal recovery putting bytes exactly where each saved

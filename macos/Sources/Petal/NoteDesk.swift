@@ -1431,16 +1431,15 @@ final class NoteDesk {
             // a picture at all).
             var read: [(ext: String, data: Data, caption: String)] = []
             var waiting: [NoteJournal.Import] = []
-            // A pasted picture whose file is gone (or isn't a picture): said in words where it went.
-            var unreadable: [String] = []
             for source in sources {
-                if let path = source.path {
-                    let data = try? Data(contentsOf: URL(fileURLWithPath: path))
-                    let picture = data.map { NSImage(data: $0) != nil } ?? false
-                    let end = NoteShelf.sourceEnd(read: picture, exists: data == nil && FileManager.default.fileExists(atPath: path))
-                    if end == .taken, let data { read.append((source.ext, data, source.caption)) }
-                    if end == .waiting { waiting.append(source) }
-                    if end == .gone, items.captions != nil { unreadable.append(source.caption) }
+                if source.path != nil {
+                    // The one read, live and in recovery (NoteJournal.read): a pasted picture only through the one
+                    // link rule, and only the very file recorded.
+                    switch NoteJournal.read(source) {
+                    case .bytes(let data): read.append((source.ext, data, source.caption))
+                    case .waiting: waiting.append(source)
+                    case .gone: break
+                    }
                 } else if let data = source.data {
                     if source.ext == "tiff" {
                         if let rep = NSBitmapImageRep(data: data), let png = rep.representation(using: .png, properties: [:]) { read.append(("png", png, "")) }
@@ -1450,7 +1449,7 @@ final class NoteDesk {
                 }
             }
             // Their images made here, off the main thread, to be shown as one batch.
-            let ready = read, unread = waiting, gone = unreadable, readyImages = read.map { NSImage(data: $0.data) ?? NSImage() }
+            let ready = read, unread = waiting, readyImages = read.map { NSImage(data: $0.data) ?? NSImage() }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // The note's id as it is now (one given its own meanwhile is followed: store.currentID).
@@ -1506,12 +1505,10 @@ final class NoteDesk {
                     NotePictures.shared.previewBatch(accepted.enumerated().map { ($1.file, readyImages[$0]) })
                     self.fresh.remove(nowKey)
                     if self.insertPictures(nowKey, accepted, at: items.at, length: items.length, selected: items.selected, anchor: items.anchor) {
-                        // The pasted ones that couldn't be read, in words right after them.
-                        for caption in gone { self.putWords(NoteRich.unpasted(caption).markdown, into: nowKey, anchor: items.anchor) }
                         // Into the note now (and its snapshot), not a moment later.
                         self.editors[nowKey]?.flush()
                     } else {
-                        let lines = accepted.map { NoteBlock.image(path: $0.path, caption: $0.caption).markdown } + gone.map { NoteRich.unpasted($0).markdown }
+                        let lines = accepted.map { NoteBlock.image(path: $0.path, caption: $0.caption).markdown }
                         self.store.change(nowKey) { file in
                             file.body += (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + lines.joined(separator: "\n")
                         }
@@ -1531,6 +1528,13 @@ final class NoteDesk {
         store.retryPictures(key)
         guard let paper = store.paper(key) else { return }
         for (token, sources) in store.takeWaiting(paper.noteID) {
+            // A pasted picture tried again keeps its link (read only through the one rule), caption and marker.
+            if let source = sources.first, sources.count == 1, let link = source.link, let path = source.path, let folder = source.folder {
+                let item = NoteImport(files: [URL(fileURLWithPath: path)], png: nil, tiff: nil, at: -1, anchor: source.anchor, captions: [source.caption],
+                                      pasted: PastedLink(link: link, folder: folder, root: source.root ?? URL(fileURLWithPath: folder).deletingLastPathComponent().path))
+                if importPictures(item, into: key) { store.endImport(paper.noteID, token, journal: true) } else { store.keepWaiting(paper.noteID, token, sources) }
+                continue
+            }
             let files = sources.compactMap { $0.path.map(URL.init(fileURLWithPath:)) }
             if !files.isEmpty, importPictures(NoteImport(files: files, png: nil, tiff: nil, at: -1), into: key) {
                 store.endImport(paper.noteID, token, journal: true)
@@ -1554,7 +1558,7 @@ final class NoteDesk {
     /// Pictures' references into a note's open editor, as ordinary text, at the cursor's place then; false when no
     /// editor is open on it.
     private func insertPictures(_ key: String, _ pictures: [(path: String, file: URL, caption: String)], at: Int, length: Int = 0,
-                                selected: String = "", anchor: Int? = nil) -> Bool {
+                                selected: String = "", anchor: String? = nil) -> Bool {
         guard let editor = editors[key] else { return false }
         var at = at, length = length
         for picture in pictures {
@@ -1569,7 +1573,7 @@ final class NoteDesk {
 
     /// A line of words into a note: at a pasted picture's spot in its open editor, else at the end through a based
     /// write (as a picture's line would go).
-    private func putWords(_ line: String, into key: String, anchor: Int?) {
+    private func putWords(_ line: String, into key: String, anchor: String?) {
         if let editor = editors[key], editor.insertWords(line, anchor) {
             editor.flush()
             return

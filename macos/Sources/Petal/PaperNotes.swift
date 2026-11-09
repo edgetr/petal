@@ -1656,7 +1656,8 @@ final class NoteStore {
         // A pasted picture keeps its caption from the note it came from; a dropped file is captioned by its name.
         var sources = items.files.enumerated().map { index, file in
             NoteJournal.Import(token: token, path: file.path, ext: file.pathExtension.lowercased(),
-                               caption: items.captions.flatMap { $0.indices.contains(index) ? $0[index] : nil } ?? file.deletingPathExtension().lastPathComponent)
+                               caption: items.captions.flatMap { $0.indices.contains(index) ? $0[index] : nil } ?? file.deletingPathExtension().lastPathComponent,
+                               link: items.pasted?.link, folder: items.pasted?.folder, root: items.pasted?.root, anchor: items.anchor)
         }
         if let png = items.png { sources.append(NoteJournal.Import(token: token, data: png, ext: "png")) }
         if let tiff = items.tiff { sources.append(NoteJournal.Import(token: token, data: tiff, ext: "tiff")) }
