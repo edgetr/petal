@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 // Checks NoteHelp.swift: what an @ line binds and asks, the helper's front matter round trip, times in words, models
@@ -448,6 +449,59 @@ struct NoteHelpCheck {
         withTree.worktree = NoteHelp.Worktree(path: "/t/garden-w", branch: "petal/x-w", checkout: "/u/garden", remote: "upstream")
         expect(NoteFile.parse(withTree.serialized(), fallbackID: "x", fallbackDate: now).worktree == withTree.worktree, "a note's worktree reads back")
         expect(ask("@Petal it's done") == .done, "it's done")
+
+        // MARK: Open all never launches an app or a script (NoteTasks)
+
+        let scratch = FileManager.default.temporaryDirectory.appending(path: "petal-notetasks-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let write = { (name: String, text: String) -> URL in
+            let url = scratch.appending(path: name)
+            try? Data(text.utf8).write(to: url)
+            return url
+        }
+        let pdf = write("Quote.pdf", "%PDF-1.4\n%%EOF\n")
+        let png = write("Shot.png", "png")
+        let plainText = write("Notes.txt", "words")
+        let script = write("run.sh", "#!/bin/sh\necho hi\n")
+        let command = write("Start.command", "#!/bin/sh\necho hi\n")
+        let workflow = write("Do.workflow", "x")
+        let webloc = write("Site.webloc", "<plist/>")
+        let fileloc = write("Elsewhere.fileloc", "<plist/>")
+        let dmg = write("Disk.dmg", "x")
+        let pkg = write("Install.pkg", "x")
+        let app = scratch.appending(path: "Fake.app")
+        try? FileManager.default.createDirectory(at: app.appending(path: "Contents/MacOS"), withIntermediateDirectories: true)
+        let folder = scratch.appending(path: "Folder")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let linkToScript = scratch.appending(path: "Looks fine.pdf")
+        try? FileManager.default.createSymbolicLink(at: linkToScript, withDestinationURL: script)
+        let aliasToScript = scratch.appending(path: "Alias to script")
+        if let mark = try? script.bookmarkData(options: .suitableForBookmarkFile) { try? URL.writeBookmarkData(mark, to: aliasToScript) }
+        let aliasToPDF = scratch.appending(path: "Alias to quote")
+        if let mark = try? pdf.bookmarkData(options: .suitableForBookmarkFile) { try? URL.writeBookmarkData(mark, to: aliasToPDF) }
+        let fileAction = { (url: URL) -> NoteTasks.Action in
+            let found = NoteTasks.resolve(url.path)
+            return NoteTasks.action(NoteHelp.TaskItem(kind: .file, title: "", target: url.path), resolved: found?.url, type: found?.type)
+        }
+        let real = { (url: URL) in url.resolvingSymlinksInPath() }
+        expect(fileAction(pdf) == .open(real(pdf)) && fileAction(png) == .open(real(png)) && fileAction(plainText) == .open(real(plainText)), "a PDF, a picture, text: opened")
+        for blocked in [script, command, workflow, webloc, fileloc, dmg, pkg, app, folder] {
+            expect(fileAction(blocked) == .reveal(real(blocked)), "never opened, only revealed: \(blocked.lastPathComponent)", "\(fileAction(blocked))")
+        }
+        expect(fileAction(linkToScript) == .reveal(real(script)), "a link named like a PDF that leads to a script: resolved first, revealed", "\(fileAction(linkToScript))")
+        expect(fileAction(aliasToScript) == .reveal(real(script)), "a Finder alias to a script: resolved first, revealed", "\(fileAction(aliasToScript))")
+        expect(fileAction(aliasToPDF) == .open(real(pdf)), "an alias to a PDF: the PDF is opened", "\(fileAction(aliasToPDF))")
+        expect(fileAction(scratch.appending(path: "gone.pdf")) == .skip && NoteTasks.resolve("relative/path.pdf") == nil, "a file that isn't there, or a relative path: nothing")
+        let tab = { (target: String) in NoteTasks.action(NoteHelp.TaskItem(kind: .tab, title: "", target: target), resolved: nil, type: nil) }
+        expect(tab("https://a.example/x") == .open(URL(string: "https://a.example/x")!) && tab("http://a.example") != .skip, "tabs: http and https")
+        expect(tab("file:///Applications/Calculator.app") == .skip && tab("javascript:alert(1)") == .skip && tab("vnc://host") == .skip && tab("ssh://host") == .skip,
+               "tabs: nothing else")
+        let mail = { (target: String) in NoteTasks.action(NoteHelp.TaskItem(kind: .mail, title: "", target: target), resolved: nil, type: nil) }
+        expect(mail("message://%3Cabc%40example.com%3E") != .skip && mail("mailto:a@example.com") == .skip && mail("https://a.example") == .skip, "mail: message: only")
+        expect(NoteTasks.action(NoteHelp.TaskItem(kind: .window, title: "", target: "com.example.app"), resolved: nil, type: nil) == .skip, "a window never launches its app")
+        expect(NoteTasks.web("https://github.com/a/b/pull/1") != nil && NoteTasks.web("file:///etc/hosts") == nil && NoteTasks.web("x-man-page://ls") == nil,
+               "a helper's link: http or https only")
 
         print("note helpers: \(passed) passed" + (failures > 0 ? ", \(failures) failed" : ""))
         if failures > 0 { exit(1) }

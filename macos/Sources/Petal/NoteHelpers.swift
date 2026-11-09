@@ -564,16 +564,11 @@ final class NoteHelpers {
         }
     }
 
-    /// Open all: a task's tabs, files and mail, back.
+    /// Open all: a task's tabs, files and mail, back, by NoteTasks' rule (never an app or a script: a task can come
+    /// from sync or a tool).
     func openAll(_ key: String) {
         guard let paper = store?.paper(key) else { return }
-        for item in paper.file.task {
-            switch item.kind {
-            case .tab, .mail: if let url = URL(string: item.target), ["http", "https", "message"].contains(url.scheme ?? "") { NSWorkspace.shared.open(url) }
-            case .file: NSWorkspace.shared.open(URL(fileURLWithPath: item.target))
-            case .window: if let app = NotePlace.running(item.target) { app.activate() }
-            }
-        }
+        NoteTasks.openAll(paper.file.task)
     }
 
     // MARK: Helpers that think: the chat AI, or the person's own coding AI

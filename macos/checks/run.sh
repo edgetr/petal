@@ -34,8 +34,9 @@ swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sour
 # after a hang, and a cancelled tool write leaving nothing (never the Trash).
 # Helpers in notes: what an @ line binds and asks, the helper's front matter (ink, steps, stamps, a watcher, a task, a
 # chain) read back exactly, times and models in words, prices on a page, a notebook's memory, plain arithmetic,
-# chained notes' loops and the person's checkouts (no file, no window, no AI).
-swiftc -parse-as-library -O -o "$out/notehelp" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift checks/NoteHelpCheck.swift
+# chained notes' loops and the person's checkouts (no window, no AI), and Open all never launching an app or a script
+# (NoteTasks: real files, a link and a Finder alias in a throwaway folder in the temporary folder; nothing is opened).
+swiftc -parse-as-library -O -o "$out/notehelp" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteTasks.swift checks/NoteHelpCheck.swift
 "$out/notehelp"
 # The Shielded boundary is the compiler's: what a helper tells an AI can't be made from a raw string. Each of these
 # must fail to compile (a raw string interpolated into a prompt, put into what a helper is told, or made Shielded

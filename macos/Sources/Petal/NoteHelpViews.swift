@@ -58,11 +58,11 @@ struct InkView: View {
                             .frame(width: 52, height: 34)
                             .background(Color(white: 0.949), in: .rect(cornerRadius: 5))
                             .overlay { RoundedRectangle(cornerRadius: 5).stroke(.black.opacity(0.15), lineWidth: 0.5) }
-                            .onTapGesture { if let url = URL(string: ink.link), !ink.link.isEmpty { NSWorkspace.shared.open(url) } }
+                            .onTapGesture { NoteTasks.openWeb(ink.link) }
                     }
                 }
                 .padding(.top, 6)
-                .onDrag { NSItemProvider(object: (URL(string: ink.link) ?? URL(string: "about:blank")!) as NSURL) }
+                .onDrag { NoteTasks.web(ink.link).map { NSItemProvider(object: $0 as NSURL) } ?? NSItemProvider() }
             }
         }
         .foregroundStyle(glass ? Color.primary : HelperLook.ink(tint))
