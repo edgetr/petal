@@ -14,8 +14,10 @@ final class Sites {
     @ObservationIgnored private var images: [String: NSImage] = [:]
     @ObservationIgnored private var fetching: Set<String> = []
     @ObservationIgnored private var failed: [String: Date] = [:]
+    /// Hosts whose cached icon is being read from disk (off the main thread).
+    @ObservationIgnored private var loading: Set<String> = []
 
-    static let folder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "Petal/sites")
+    nonisolated static let folder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "Petal/sites")
 
     // MARK: Addresses
 
@@ -76,21 +78,40 @@ final class Sites {
 
     /// The site's icon only if it's already here (in memory or in Petal's cache): drawing a note's link card never
     /// fetches anything.
+    /// Petal's cache on disk is read off the main thread; the icon shows once it's in.
     func cachedIcon(_ id: String) -> NSImage? {
         guard let host = Self.domain(id) else { return nil }
         _ = arrived
         if let image = images[host] { return image }
-        if let image = NSImage(contentsOf: Self.folder.appending(path: host + ".png")) {
-            images[host] = image
-            return image
-        }
+        loadCached(host)
         return nil
+    }
+
+    /// The cached icon's bytes read off the main thread; `then` says whether there was one.
+    private func loadCached(_ host: String, then: (@MainActor (Bool) -> Void)? = nil) {
+        guard !loading.contains(host) else { then?(images[host] != nil); return }
+        loading.insert(host)
+        let file = Self.folder.appending(path: host + ".png")
+        Task.detached(priority: .utility) {
+            let data = try? Data(contentsOf: file)
+            await MainActor.run {
+                self.loading.remove(host)
+                if let data, let image = NSImage(data: data) {
+                    self.images[host] = image
+                    self.arrived += 1
+                }
+                then?(self.images[host] != nil)
+            }
+        }
     }
 
     /// Fetches the site's icon (bounded, streamed): for a dock shortcut, or a link the person pasted or typed.
     func requestIcon(_ id: String) {
         guard let host = Self.domain(id), images[host] == nil else { return }
-        fetch(id, host: host, to: Self.folder.appending(path: host + ".png"))
+        // Petal's own cache first (read off the main thread), the site only when it has none.
+        loadCached(host) { [weak self] found in
+            if !found { self?.fetch(id, host: host, to: Self.folder.appending(path: host + ".png")) }
+        }
     }
 
     private func fetch(_ id: String, host: String, to file: URL) {
@@ -99,11 +120,14 @@ final class Sites {
         fetching.insert(host)
         Task.detached(priority: .utility) {
             let data = await Self.download(base)
+            // Kept in Petal's cache (written here, off the main thread).
+            if let data, let image = NSImage(data: data), image.isValid, let png = Self.png(image) {
+                try? FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
+                try? png.write(to: file, options: .atomic)
+            }
             await MainActor.run {
                 self.fetching.remove(host)
                 guard let data, let image = NSImage(data: data), image.isValid else { self.failed[host] = Date(); return }
-                try? FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
-                if let png = Self.png(image) { try? png.write(to: file, options: .atomic) }
                 self.images[host] = image
                 self.arrived += 1
             }

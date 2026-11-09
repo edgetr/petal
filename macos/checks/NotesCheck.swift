@@ -635,6 +635,24 @@ struct NotesCheck {
         // A sibling listing that fails refuses the move.
         expect(!NoteShelf.siblingsListed(Optional<[URL]>.none) && NoteShelf.siblingsListed(Optional([URL]())), "can't list: refused; listed (even empty): fine")
 
+        // A folder trashed only when positively verified empty; leftovers swept only when verified elsewhere.
+        expect(!NoteShelf.verifiedEmpty(nil) && NoteShelf.verifiedEmpty([".DS_Store"]) && !NoteShelf.verifiedEmpty(["p.png"]),
+               "can't be listed, or not empty: kept")
+        let pic = Data("p".utf8)
+        expect(NoteShelf.sweepLeftover(here: ["p.png": pic], noteHere: false, elsewhere: ["p.png": pic, "q.png": pic]), "its note elsewhere with the same bytes: swept")
+        expect(!NoteShelf.sweepLeftover(here: ["p.png": pic], noteHere: true, elsewhere: ["p.png": pic])
+               && !NoteShelf.sweepLeftover(here: ["p.png": pic], noteHere: false, elsewhere: ["p.png": Data("other".utf8)])
+               && !NoteShelf.sweepLeftover(here: ["p.png": pic], noteHere: false, elsewhere: nil), "its note beside it, other bytes, or not found once: kept")
+
+        // The notes folder resolved off the main thread, kept until its setting changes.
+        let resolved = URL(fileURLWithPath: "/notes/A")
+        expect(NoteShelf.cachedRoot(setting: "", cached: ("", resolved)) == resolved, "the same setting: the folder already resolved, no probe")
+        expect(NoteShelf.cachedRoot(setting: "~/Notes", cached: ("", resolved)) == nil && NoteShelf.cachedRoot(setting: "", cached: nil) == nil,
+               "the setting changed, or nothing resolved yet: resolved again (off the main thread)")
+
+        // The quick question's capture: only the latest opening's lands.
+        expect(NoteShelf.captureCurrent(3, latest: 3) && !NoteShelf.captureCurrent(2, latest: 3), "an earlier opening's late capture: dropped")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

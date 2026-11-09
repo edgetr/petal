@@ -1485,6 +1485,36 @@ enum NoteShelf {
         return stick
     }
 
+    /// The steps of a move, copy then commit: the pictures copied to where it goes (bytes verified), then the
+    /// Markdown moved, then the originals trashed. Petal stopping after any step leaves at worst a duplicate, never a
+    /// broken link.
+    enum MoveStep: Equatable { case copied, committed, cleaned }
+
+    /// A folder trashed only when it's positively verified empty: listed, and nothing in it but hidden files.
+    static func verifiedEmpty(_ listing: [String]?) -> Bool {
+        guard let listing else { return false }
+        return listing.allSatisfy { $0.hasPrefix(".") }
+    }
+
+    /// Pictures a stopped move left behind: trashed only when their note isn't beside them, and is verifiably
+    /// elsewhere with its own copy of every one of them, byte for byte (`elsewhere`: that copy's pictures, nil when
+    /// not exactly one such note is found or they can't be read).
+    static func sweepLeftover(here: [String: Data], noteHere: Bool, elsewhere: [String: Data]?) -> Bool {
+        guard !noteHere, !here.isEmpty, let elsewhere else { return false }
+        return here.allSatisfy { elsewhere[$0.key] == $0.value }
+    }
+
+    /// The notes folder, resolved off the main thread (it may look at iCloud Drive) and kept until the `notesFolder`
+    /// setting itself changes: the cached one while the setting is the same; nil, resolve it again.
+    static func cachedRoot(setting: String, cached: (setting: String, root: URL)?) -> URL? {
+        guard let cached, cached.setting == setting else { return nil }
+        return cached.root
+    }
+
+    /// A capture of what's in front for the quick question: only the latest opening's lands (an earlier one's
+    /// callback, arriving late, is dropped).
+    static func captureCurrent(_ generation: Int, latest: Int) -> Bool { generation == latest }
+
     /// A Desktop note's mode: the one that Desktop is in (modes.json's workspaces), else the default; never asked of
     /// the dock (which may not be showing).
     static func modeID(desktop: Int?, workspaces: [String: String], defaultMode: String) -> String {

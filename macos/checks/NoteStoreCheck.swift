@@ -22,6 +22,8 @@ struct NoteStoreCheck {
     @MainActor static func main() {
         // File names from titles as they are (nothing here is a secret), except where a check says otherwise.
         NoteStore.nameRedactor = { $0 }
+        // Never the person's Trash: what notes would trash is removed here, in the throwaway folders.
+        NoteStore.toTrash = { (try? FileManager.default.removeItem(at: $0)) != nil }
         let fm = FileManager.default
         let top = fm.temporaryDirectory.appending(path: "petal-notes-check-\(UUID().uuidString)")
         let root = top.appending(path: "Notes")
@@ -110,6 +112,7 @@ struct NoteStoreCheck {
         identityFollowed(root: root)
         idFirst(root: root)
         moveAfterConflict(root: root)
+        copyThenCommit(root: root)
         versionGroups(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -610,6 +613,57 @@ struct NoteStoreCheck {
                "a new file at an id-less note's path gets a handle of its own")
         local.rekeyID("file:Inbox/Plain.md", holder: plainHolder, "U2")
         expect(local.handle("U2") == firstLook && local.handles?[plainHolder] == nil, "an id-less note given its id keeps its handle, and its path's is retired")
+    }
+
+    /// Moves copy then commit: Petal stopping after any step leaves no broken link; a listing or read failure refuses
+    /// the move; leftovers are swept only once verified; a folder is trashed only when verified empty.
+    @MainActor static func copyThenCommit(root: URL) {
+        let fm = FileManager.default
+        func linksHold(_ note: URL) -> Bool {
+            guard let text = text(note) else { return false }
+            return NoteShelf.referencedPictures(text).allSatisfy { fm.fileExists(atPath: note.deletingLastPathComponent().appending(path: $0).path) }
+        }
+        func make(_ name: String, id: String) -> (note: URL, assets: URL) {
+            let folder = root.appending(path: name)
+            let assets = folder.appending(path: NoteShelf.assetsFolder(id: id))
+            try? fm.createDirectory(at: assets, withIntermediateDirectories: true)
+            try? Data("pic-\(id)".utf8).write(to: assets.appending(path: "p.png"))
+            let note = folder.appending(path: "Note.md")
+            _ = NoteStore.create(NoteFile(id: id, body: "# \(id)\n![](\(assets.lastPathComponent)/p.png)").serialized(), at: note, root: root)
+            return (note, assets)
+        }
+        // Stopped right after the copy: the note where it was, its links holding (a duplicate where it was going).
+        let a = make("CTC-A", id: "CA")
+        expect(NoteStore.move(a.note, noteID: "CA", into: root.appending(path: "CTC-Dest-A"), root: root, stop: { $0 == .copied }) == nil
+               && linksHold(a.note), "stopped after the copy: the note where it was, its pictures there")
+        // Stopped right after the Markdown moved: the note where it went, its links holding (the originals left behind).
+        let b = make("CTC-B", id: "CB")
+        let landed = NoteStore.move(b.note, noteID: "CB", into: root.appending(path: "CTC-Dest-B"), root: root, stop: { $0 == .committed })
+        expect(landed.map(linksHold) == true && fm.fileExists(atPath: b.assets.appending(path: "p.png").path),
+               "stopped after the commit: the note where it went, its pictures there, the originals still behind")
+        // The next launch's sweep: the leftovers go once their note is verifiably elsewhere with its own copy.
+        NoteStore.sweepLeftovers(root: root)
+        expect(!fm.fileExists(atPath: b.assets.path) && landed.map(linksHold) == true, "swept: the leftover folder gone, the note's links still holding")
+        // A leftover whose note's copy has other bytes: kept.
+        let c = make("CTC-C", id: "CC")
+        let landedC = NoteStore.move(c.note, noteID: "CC", into: root.appending(path: "CTC-Dest-C"), root: root, stop: { $0 == .committed })
+        try? Data("changed".utf8).write(to: (landedC ?? c.note).deletingLastPathComponent().appending(path: c.assets.lastPathComponent + "/p.png"))
+        NoteStore.sweepLeftovers(root: root)
+        expect(fm.fileExists(atPath: c.assets.appending(path: "p.png").path), "a leftover not verified (other bytes elsewhere): kept")
+        // The whole move: the originals and their folder go only after the commit, the folder only when verified empty.
+        let d = make("CTC-D", id: "CD")
+        let landedD = NoteStore.move(d.note, noteID: "CD", into: root.appending(path: "CTC-Dest-D"), root: root)
+        expect(landedD.map(linksHold) == true && !fm.fileExists(atPath: d.assets.path), "a whole move: the note and its pictures there, nothing left behind")
+        // A pictures' folder that can't be listed, or a picture that can't be read: the move refused.
+        let e = make("CTC-E", id: "CE")
+        try? fm.setAttributes([.posixPermissions: 0o311], ofItemAtPath: e.assets.path)
+        let unlisted = NoteStore.move(e.note, noteID: "CE", into: root.appending(path: "CTC-Dest-E"), root: root) == nil
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: e.assets.path)
+        expect(unlisted && linksHold(e.note) && fm.fileExists(atPath: e.assets.appending(path: "p.png").path), "its pictures can't be listed: refused, nothing moved")
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: e.assets.appending(path: "p.png").path)
+        let unread = NoteStore.move(e.note, noteID: "CE", into: root.appending(path: "CTC-Dest-E"), root: root) == nil
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: e.assets.appending(path: "p.png").path)
+        expect(unread && linksHold(e.note), "a picture that can't be read: refused, nothing moved")
     }
 
     /// A move queued after a flush that was kept beside the file (changed elsewhere meanwhile): stopped and said; and a

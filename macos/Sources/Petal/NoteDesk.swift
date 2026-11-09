@@ -22,7 +22,12 @@ final class NoteDesk {
     /// The tab a pointer is over (by its first note's key).
     var hovered: String?
 
-    @ObservationIgnored var local = NoteLocal.load()
+    /// This Mac's own notes state: read off the main thread at start (`ready` once it and the folder are in).
+    @ObservationIgnored var local = NoteLocal()
+    /// Local state read and the notes folder resolved: notes work from then on.
+    @ObservationIgnored private(set) var ready = false
+    /// The notes folder as last resolved for the `notesFolder` setting (NoteShelf.cachedRoot).
+    @ObservationIgnored private var rootCache: (setting: String, root: URL)?
     @ObservationIgnored private var panels: [String: NotePanel] = [:]
     @ObservationIgnored private var tabPanels: [String: EdgeTabPanel] = [:]
     @ObservationIgnored private(set) var scene: NoteScene?
@@ -65,7 +70,7 @@ final class NoteDesk {
     nonisolated static let roomTurn = Generation()
 
     var app: PetalApp { PetalApp.shared }
-    var on: Bool { app.config.bool("notes") }
+    var on: Bool { ready && app.config.bool("notes") }
     var glass: Bool { app.config.string("notesLook") == "glass" }
     var defaultNotebook: String {
         let name = app.config.string("notesNotebook")
@@ -77,17 +82,9 @@ final class NoteDesk {
     func start() {
         // Writing a Petal before this one accepted and never saw land: put back first (NoteJournal.recover), from the
         // journal's own queue to the notes' queue.
-        let root = NoteStore.rootFolder(setting: app.config.string("notesFolder"))
         // File names are made from titles only after the vault's redaction (never a secret in a name); while the
         // vault can't be read, a plain name. And the names Petal made so, known again.
         NoteStore.nameRedactor = { text in VaultIndex.settled { $0.unreadable ? nil : $0.redacted(text) } ?? nil }
-        NoteJournal.queue.async {
-            // The journal as it was, and any recovery a launch before didn't finish: resumed, entry by entry.
-            let leftovers = NoteJournal.leftovers()
-            guard !leftovers.isEmpty else { return }
-            NoteStore.io.async { for holding in leftovers { NoteJournal.recover(holding, root: root) } }
-        }
-        store.switchRoot(to: root)
         store.onChange = { [weak self] in self?.refresh() }
         store.onRekey = { [weak self] old, paper in self?.rekey(old, to: paper) }
         // An id now in its file: what's kept by it is lasting (written to disk) from now on.
@@ -126,10 +123,34 @@ final class NoteDesk {
         // another Mac's version at once).
         store.keepAlive = { [weak self] key in NoteShelf.fenceEditor(dirty: self?.editors[key]?.busy() == true) }
         Self.queue.async { Self.recoverNarrowed() }
-        // Read and watched only once the first folder is settled: a folder set in Settings is switched to first, and
-        // the switch starts the store itself when it's done (and after every later switch).
-        if !store.switching { store.start() }
-        settingsChanged()
+        // This Mac's notes state and the notes folder, read and resolved off the main thread (the folder may be in
+        // iCloud Drive): only then are notes read, watched and shown.
+        let setting = app.config.string("notesFolder")
+        NoteStore.io.async {
+            let loaded = NoteLocal.load()
+            let root = NoteStore.rootFolder(setting: setting)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.local = loaded
+                    self.rootCache = (setting, root)
+                    NoteJournal.queue.async {
+                        // The journal as it was, and any recovery a launch before didn't finish: resumed, entry by entry.
+                        let leftovers = NoteJournal.leftovers()
+                        guard !leftovers.isEmpty else { return }
+                        NoteStore.io.async { for holding in leftovers { NoteJournal.recover(holding, root: root) } }
+                    }
+                    // Pictures a move left behind when Petal stopped part way: trashed only once their note is
+                    // verifiably elsewhere with its own copy (NoteStore.sweepLeftovers).
+                    NoteStore.io.async { NoteStore.sweepLeftovers(root: root) }
+                    self.store.switchRoot(to: root)
+                    self.ready = true
+                    // Read and watched only once the first folder is settled: the switch starts the store itself
+                    // when it's done (and after every later switch).
+                    if !self.store.switching { self.store.start() }
+                    self.settingsChanged()
+                }
+            }
+        }
     }
 
     /// `notes`, `notesLook` or `notesFolder` changed (or any setting did).
@@ -282,9 +303,28 @@ final class NoteDesk {
     /// switch is under way, it's asked again when that switch is done (NoteShelf.nextRoot), so a change made
     /// meanwhile is never forgotten.
     private func followFolderSetting() {
-        let wanted = NoteStore.rootFolder(setting: app.config.string("notesFolder"))
+        guard ready else { return }
+        let setting = app.config.string("notesFolder")
+        // The folder for this setting, as last resolved; the setting changed, resolved again off the main thread.
+        guard let wanted = NoteShelf.cachedRoot(setting: setting, cached: rootCache) else {
+            guard resolvingRoot != setting else { return }
+            resolvingRoot = setting
+            NoteStore.io.async {
+                let root = NoteStore.rootFolder(setting: setting)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        self.resolvingRoot = nil
+                        self.rootCache = (setting, root)
+                        self.followFolderSetting()
+                    }
+                }
+            }
+            return
+        }
         if let next = NoteShelf.nextRoot(wanted: wanted, current: store.root, switching: store.switching) { switchFolder(to: next) }
     }
+
+    @ObservationIgnored private var resolvingRoot: String?
 
     /// Another notes folder: what's typed is saved into the folder it was typed in (each note's session, drained off
     /// the main thread), every open note and editor of the old folder is put away and every window narrowed for one
@@ -1921,15 +1961,21 @@ final class NoteDesk {
     /// The quick question opened: what's in front then is where Stick here sticks it.
     func capture() {
         captured = nil
+        captures += 1
         guard on, let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return }
         let name = running.localizedName ?? ""
         let privacy = ClaudePanel.privacy.now
+        // This opening's own capture: one from an earlier opening, arriving late, is dropped (NoteShelf.captureCurrent).
+        let generation = captures
         Self.read(running, mac: local.mac) { scene, read in
+            guard NoteShelf.captureCurrent(generation, latest: self.captures) else { return }
             self.captured = (scene, read, read.tab?.url ?? "", name, privacy)
         }
     }
 
     var canStick: Bool { on && captured != nil }
+
+    @ObservationIgnored private var captures = 0
 
     /// Stick here: the quick question's conversation becomes a note on what was in front, open there.
     func stick(_ messages: [Agent.Message], chat: UUID) {
@@ -2122,6 +2168,7 @@ final class NoteDesk {
 
     /// For snapshots: Stick here as if a page were in front.
     func previewCapture() {
+        ready = true   // snapshots: nothing to load
         var tab = NoteTab(url: "https://guide.example/day-one", title: "Day one")
         tab.id = "1"
         captured = (NoteScene(mac: local.mac, app: "com.apple.Safari", pid: 1, window: 1, title: "Day one", tab: tab), ClaudePanel.FrontRead(), tab.url, "Safari",

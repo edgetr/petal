@@ -227,7 +227,18 @@ final class NoteStore {
 
     nonisolated static let io = DispatchQueue(label: "petal.notes.files", qos: .userInitiated)
 
-    init(root: URL? = nil) { self.root = root ?? Self.rootFolder(setting: "") }
+    /// Every move to the Trash notes make (never a deletion): one place, so checks on throwaway folders never touch
+    /// the person's Trash (they replace it with a plain removal there).
+    nonisolated(unsafe) static var toTrash: (URL) -> Bool = { (try? FileManager.default.trashItem(at: $0, resultingItemURL: nil)) != nil }
+
+    /// Until the notes folder is resolved (off the main thread: `rootFolder` may look at iCloud Drive), a path only,
+    /// nothing read or written there.
+    init(root: URL? = nil) { self.root = root ?? Self.unresolvedRoot }
+
+    nonisolated static var unresolvedRoot: URL {
+        if let dir = ProcessInfo.processInfo.environment["PETAL_NOTES"], !dir.isEmpty { return URL(fileURLWithPath: dir) }
+        return Config.supportFolder.appending(path: "Notes")
+    }
 
     /// Where notes live: `PETAL_NOTES`; else the `notesFolder` setting; else iCloud Drive's "Petal Notes" when iCloud
     /// Drive is there; else Application Support's Notes. Never Documents or the Desktop.
@@ -637,7 +648,7 @@ final class NoteStore {
     @discardableResult
     nonisolated static func trash(_ url: URL, root: URL) -> Bool {
         guard safe(url, root: root) else { return false }
-        return (try? FileManager.default.trashItem(at: url, resultingItemURL: nil)) != nil
+        return toTrash(url)
     }
 
     // MARK: Doing a session's work (off the main thread)
@@ -731,7 +742,7 @@ final class NoteStore {
             else if let text = try? String(contentsOf: url, encoding: .utf8) { disk = .text(text) }
             else { disk = .unreadable }
             guard disk != .missing, still(disk) else { return }
-            done = (try? FileManager.default.trashItem(at: url, resultingItemURL: nil)) != nil
+            done = toTrash(url)
         }
         return done
     }
@@ -780,7 +791,9 @@ final class NoteStore {
     /// never over a file. The pictures go first, merged into a folder of the same name already there only where it
     /// holds the same pictures (`NoteShelf.assetPlan`); a picture in the way, or a note that then can't move, puts
     /// everything back: never a note whose pictures stayed behind. Off the main thread.
-    nonisolated static func move(_ from: URL, noteID: String, into folder: URL, root: URL, live: (@Sendable () -> Bool)? = nil) -> URL? {
+    /// `stop`: for checks, Petal stopping right after a step (as if it quit there): nothing more is done.
+    nonisolated static func move(_ from: URL, noteID: String, into folder: URL, root: URL, live: (@Sendable () -> Bool)? = nil,
+                                 stop: ((NoteShelf.MoveStep) -> Bool)? = nil) -> URL? {
         guard safe(from, root: root), safe(folder, root: root) else { return nil }
         let going = { live?() ?? true }   // a tool's asker, checked before each step
         let fm = FileManager.default
@@ -804,24 +817,40 @@ final class NoteStore {
                 .map { try? String(contentsOf: $0, encoding: .utf8) }
             guard !NoteShelf.picturesShared(assets.lastPathComponent, others: others) else { return nil }
         }
-        var movedPictures: [String] = []
+        // Copy then commit: its pictures copied to where it goes (each one's bytes read back and compared), the
+        // Markdown moved, and only then the originals trashed. Petal stopping between any two steps leaves at worst
+        // a duplicate (swept at the next launch once verified), never a note whose links point at nothing. A folder
+        // that can't be listed, or a picture that can't be read, refuses the move.
+        var copiedPictures: [String] = []
+        var sourcePictures: [String: Data] = [:]
         if fm.fileExists(atPath: assets.path) {
             guard safe(assets, root: root), safe(newAssets, root: root) else { return nil }
-            func hashes(_ dir: URL) -> [String: Int] {
-                var out: [String: Int] = [:]
-                for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] { out[name] = (try? Data(contentsOf: dir.appending(path: name)))?.hashValue ?? 0 }
+            func contents(_ dir: URL) -> [String: Data]? {
+                guard fm.fileExists(atPath: dir.path) else { return [:] }
+                guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return nil }
+                var out: [String: Data] = [:]
+                for name in names where !name.hasPrefix(".") {
+                    guard let data = try? Data(contentsOf: dir.appending(path: name)) else { return nil }
+                    out[name] = data
+                }
                 return out
             }
-            guard case .move(let names) = NoteShelf.assetPlan(source: hashes(assets), destination: hashes(newAssets)) else { return nil }
+            guard let source = contents(assets), let destination = contents(newAssets) else { return nil }
+            sourcePictures = source
+            let hash = { (data: [String: Data]) in data.mapValues { $0.hashValue } }
+            guard case .move(let names) = NoteShelf.assetPlan(source: hash(source), destination: hash(destination)) else { return nil }
             try? fm.createDirectory(at: newAssets, withIntermediateDirectories: true)
             for name in names {
-                guard going(), (try? fm.moveItem(at: assets.appending(path: name), to: newAssets.appending(path: name))) != nil else {
-                    for back in movedPictures { try? fm.moveItem(at: newAssets.appending(path: back), to: assets.appending(path: back)) }
+                let into = newAssets.appending(path: name)
+                guard going(), (try? fm.copyItem(at: assets.appending(path: name), to: into)) != nil,
+                      (try? Data(contentsOf: into)) == source[name] else {
+                    for made in copiedPictures + [name] where made != name || fm.fileExists(atPath: into.path) { try? fm.removeItem(at: newAssets.appending(path: made)) }
                     return nil
                 }
-                movedPictures.append(name)
+                copiedPictures.append(name)
             }
         }
+        if stop?(.copied) == true { return nil }
         // Pictures it links outside its own folder (a handwritten `Trip.assets/photo.png`, inside the notebook and
         // through no symbolic link) are copied along, to the same place beside it, so its links hold; another
         // picture already there by that name stops the move (NoteShelf.carry). Copies made are taken back when the
@@ -829,7 +858,7 @@ final class NoteStore {
         var carriedCopies: [URL] = []
         let undo = {
             for copy in carriedCopies { try? fm.removeItem(at: copy) }
-            for back in movedPictures { try? fm.moveItem(at: newAssets.appending(path: back), to: assets.appending(path: back)) }
+            for copy in copiedPictures { try? fm.removeItem(at: newAssets.appending(path: copy)) }
         }
         let source = from.deletingLastPathComponent()
         if let text = try? String(contentsOf: from, encoding: .utf8) {
@@ -866,15 +895,54 @@ final class NoteStore {
             if moved { target = candidate } else if error != nil || cancelled { break }
         }
         guard let target else {
-            // The note couldn't move: its pictures go back where they were, and what was copied along goes.
+            // The note couldn't move: what was copied for it goes; its pictures never left.
             undo()
             return nil
         }
-        // The old pictures' folder, now empty, goes (to the Trash, never deleted outright).
-        if fm.fileExists(atPath: assets.path), ((try? fm.contentsOfDirectory(atPath: assets.path)) ?? []).filter({ !$0.hasPrefix(".") }).isEmpty {
-            try? fm.trashItem(at: assets, resultingItemURL: nil)
+        if stop?(.committed) == true { return target }
+        // Committed: the originals go (to the Trash, never deleted outright), each only while it's still the bytes
+        // that were copied and its copy is there; the folder only once it's verified empty.
+        for name in sourcePictures.keys {
+            let original = assets.appending(path: name)
+            guard (try? Data(contentsOf: newAssets.appending(path: name))) == sourcePictures[name], (try? Data(contentsOf: original)) == sourcePictures[name] else { continue }
+            _ = toTrash(original)
         }
+        if fm.fileExists(atPath: assets.path), NoteShelf.verifiedEmpty(try? fm.contentsOfDirectory(atPath: assets.path)) {
+            _ = toTrash(assets)
+        }
+        _ = stop?(.cleaned)
         return target
+    }
+
+    /// At launch, off the main thread: pictures' folders a stopped move left behind (copy then commit: the note went,
+    /// its originals stayed), each picture trashed only when its note isn't beside it and is verifiably elsewhere in
+    /// the notes' folder with its own copy of every one of them, byte for byte (NoteShelf.sweepLeftover). Anything
+    /// else is left as it is.
+    nonisolated static func sweepLeftovers(root: URL) {
+        let fm = FileManager.default
+        let notes = read(root).notes.filter { $0.version == nil }
+        guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [.skipsHiddenFiles]) else { return }
+        for case let folder as URL in walker where folder.pathExtension == "assets" {
+            walker.skipDescendants()
+            guard safe(folder, root: root) else { continue }
+            let name = folder.lastPathComponent
+            let owners = notes.filter { NoteShelf.assetsFolder(id: $0.noteID) == name }
+            let beside = owners.contains { $0.url.deletingLastPathComponent().standardizedFileURL.path == folder.deletingLastPathComponent().standardizedFileURL.path }
+            func contents(_ dir: URL) -> [String: Data]? {
+                guard let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return nil }
+                var out: [String: Data] = [:]
+                for file in names where !file.hasPrefix(".") {
+                    guard let data = try? Data(contentsOf: dir.appending(path: file)) else { return nil }
+                    out[file] = data
+                }
+                return out
+            }
+            guard let here = contents(folder) else { continue }
+            let elsewhere: [String: Data]? = owners.count == 1 ? contents(owners[0].url.deletingLastPathComponent().appending(path: name)) : nil
+            guard NoteShelf.sweepLeftover(here: here, noteHere: beside, elsewhere: elsewhere) else { continue }
+            for file in here.keys { _ = toTrash(folder.appending(path: file)) }
+            if NoteShelf.verifiedEmpty(try? fm.contentsOfDirectory(atPath: folder.path)) { _ = toTrash(folder) }
+        }
     }
 
     // MARK: Sessions
