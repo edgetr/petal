@@ -41,6 +41,7 @@ struct HelperFront: View {
             }
             // Allow, Don't, Buy, Stop and Pause: pinned outside the scroll, always on the screen.
             HelperBar(paper: paper, tint: tint, glass: glass, desk: desk)
+                .background(GeometryReader { Color.clear.preference(key: HelperControlsHeight.self, value: $0.size.height) })
         }
     }
 }
@@ -63,6 +64,12 @@ struct BoundedScroll<Content: View>: View {
         }
         .onPreferenceChange(BoundedHeight.self) { height = $0 }
     }
+}
+
+/// The helper's controls as drawn (its bar, Allow and Don't, a form with its buttons): the paper keeps their room.
+struct HelperControlsHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 struct BoundedHeight: PreferenceKey {
@@ -208,6 +215,12 @@ struct HelperBar: View {
     let tint: NoteInk.RGB
     let glass: Bool
     var desk: NoteDesk?
+    @State private var actionsHeight: CGFloat = 40
+
+    /// The card's words' room: the screen, less the paper around it and its measured buttons.
+    private var formRoom: CGFloat {
+        NoteHelp.formRoom(screen: NSScreen.main?.visibleFrame.height ?? 800, chrome: 230, actions: actionsHeight)
+    }
 
     var body: some View {
         let noteID = paper.noteID
@@ -240,7 +253,9 @@ struct HelperBar: View {
                 .foregroundStyle(PaperLook.words)
             }
             if let request = desk?.helpers.card(noteID) {
-                AskRequestView(request: request).id(request.id).padding(10)
+                // Its words scroll within what this screen has room for; its buttons, measured, always below them.
+                AskRequestView(request: request, room: formRoom).id(request.id).padding(10)
+                    .onPreferenceChange(FormActionsHeight.self) { actionsHeight = $0 }
                     .background(.white.opacity(0.6), in: .rect(cornerRadius: 10))
                     .overlay { RoundedRectangle(cornerRadius: 10).stroke(.black.opacity(0.1), lineWidth: 0.5) }
                     .environment(\.colorScheme, .light)

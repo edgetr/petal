@@ -45,6 +45,8 @@ struct PaperView: View {
     var editorHeight: CGFloat = 0
     var desk: NoteDesk?
     var conflict = false
+    /// The helper's controls as last drawn (HelperControlsHeight).
+    @State private var controlsHeight: CGFloat = 0
     /// Its last write failed: kept here, tried again, and said on the paper.
     var unsaved = false
     /// Pictures whose bytes couldn't be saved: said on the paper, with Try again and Remove.
@@ -171,7 +173,13 @@ struct PaperView: View {
     /// with room always kept for the helper's controls.
     private var heights: (editor: CGFloat, ink: CGFloat) {
         let screen = NSScreen.main?.visibleFrame.height ?? 800
-        return NoteHelp.paperHeights(screen: screen, chrome: 110, editor: PaperLook.maxOpen - 70, ink: .greatestFiniteMagnitude, controls: 150)
+        return NoteHelp.paperHeights(screen: screen, chrome: 110, editor: PaperLook.maxOpen - 70, ink: .greatestFiniteMagnitude, controls: max(controlsHeight, 40))
+    }
+
+    /// The helper's ink and its controls, the controls measured (a form's buttons too) so the paper keeps their room.
+    private var helperFront: some View {
+        HelperFront(paper: paper, tint: tint, glass: glass, desk: desk, inkRoom: heights.ink).padding(.bottom, 18)
+            .onPreferenceChange(HelperControlsHeight.self) { controlsHeight = $0 }
     }
 
     @ViewBuilder private var openBody: some View {
@@ -202,11 +210,11 @@ struct PaperView: View {
         // One of a conflict's papers is read only, with Keep this one: nothing typed into it could be kept.
         if snapshotting || desk == nil {
             NoteBodyView(paper: paper, tint: tint, accent: color, glass: glass, names: bindable)
-            HelperFront(paper: paper, tint: tint, glass: glass, desk: desk, inkRoom: heights.ink).padding(.bottom, 18)
+            helperFront
         } else if conflict {
             // Read only, in a scroll view as tall as the editor may be: a long one never runs off the screen.
             ConflictBody(paper: paper, tint: tint, accent: color, glass: glass, resized: { desk?.measured(paper.key, $0) })
-            HelperFront(paper: paper, tint: tint, glass: glass, desk: desk, inkRoom: heights.ink).padding(.bottom, 18)
+            helperFront
         } else if let desk {
             NoteEditorView(paper: paper, style: desk.style(color, glass: glass), focus: keyboard,
                            height: { desk.measured(paper.key, $0) },
@@ -222,7 +230,7 @@ struct PaperView: View {
                            names: { desk.helpers.names(for: paper.key) },
                            accent: color, tint: tint)
                 .frame(height: min(heights.editor, max(PaperLook.minOpen - 70, editorHeight)))
-            HelperFront(paper: paper, tint: tint, glass: glass, desk: desk, inkRoom: heights.ink).padding(.bottom, 18)
+            helperFront
         }
     }
 

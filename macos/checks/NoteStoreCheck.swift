@@ -117,6 +117,7 @@ struct NoteStoreCheck {
         removeRefusedReadOnly(root: root)
         helperAnswerDrained(root: root)
         carriedOntoCopy(root: root)
+        heldThroughKeptBoth(root: root)
         coverPrivacy(root: root)
         caseMove(root: root)
         versionGroups(root: root)
@@ -686,6 +687,61 @@ struct NoteStoreCheck {
         let until = Date().addingTimeInterval(10)
         while drained.wait(timeout: .now()) == .timedOut && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         expect(text(file)?.contains("The answer") == true && text(file)?.contains("My words") == true, "drained at quit: the answer is on disk, with the person's words", text(file) ?? "nil")
+    }
+
+    /// A helper's output whose write was kept beside the file (`.keptBoth`) stays in the helpers' journal, held while
+    /// the note is two papers, and is applied to the paper the person keeps; only a `.written` lets it go. A second
+    /// opinion's result is held the same way.
+    @MainActor static func heldThroughKeptBoth(root outer: URL) {
+        let fm = FileManager.default
+        let root = outer.appending(path: "HeldRoot")
+        let folder = root.appending(path: "Held")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Held.md")
+        _ = NoteStore.create(NoteFile(id: "HK1", body: "Mine").serialized(), at: file, root: root)
+        let store = NoteStore(root: root)
+        func reread() { let read = NoteStore.read(root); store.preview(read.notes, notebooks: read.notebooks) }
+        func settle(_ until: () -> Bool) {
+            let end = Date().addingTimeInterval(10)
+            while !until() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        }
+        reread()
+        guard let paper = store.notes.first(where: { $0.noteID == "HK1" }) else { return expect(false, "the note is read") }
+        // The answer and a second opinion's result, journaled as made.
+        var answer = paper.file
+        answer.ink = [NoteHelp.Ink(who: "✦ Petal", text: "The answer"),
+                      NoteHelp.Ink(who: "GPT", text: "A hole", objections: 1)]
+        answer.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", at: Date())
+        let entry = HelperJournal.Entry(noteID: "HK1", answer: answer.serialized(), at: Date())
+        var journal = HelperJournal.adding(entry, to: [])
+        let held = NoteFile.parse(entry.answer, fallbackID: "HK1", fallbackDate: entry.at)
+        // Changed on another Mac before it lands: the write is kept beside the file.
+        try? Data(NoteFile(id: "HK1", body: "Elsewhere").serialized().utf8).write(to: file)
+        var outcome: NoteStore.Outcome?
+        _ = store.change(paper.key, edit: { NoteHelp.applyAnswer(held, to: &$0) }, done: { outcome = $0 })
+        settle { outcome != nil }
+        guard case .keptBoth(let copy)? = outcome else { return expect(false, "the answer's write was kept beside the file", "\(String(describing: outcome))") }
+        // The rule NoteHelpers keeps: an entry goes only when its write landed on the paper meant (`.written`).
+        if outcome == .written { journal.removeAll { $0 == entry } }
+        expect(journal == [entry], "kept beside the file (.keptBoth): still held in the journal")
+        reread()
+        let papers = store.notes.filter { $0.noteID == "HK1" }
+        expect(NoteHelp.answerTarget(papers: papers.count, readOnly: papers.first.map(store.readOnly) ?? true) == .hold,
+               "two papers now: held, not written to either", "\(papers.count)")
+        // The person keeps the file the other Mac wrote: the copy goes, the note is one paper again.
+        try? fm.removeItem(at: copy)
+        reread()
+        guard let kept = store.notes.first(where: { $0.noteID == "HK1" }) else { return expect(false, "the kept paper is read") }
+        expect(NoteHelp.answerTarget(papers: store.notes.filter { $0.noteID == "HK1" }.count, readOnly: store.readOnly(kept)) == .write,
+               "one writable paper again: the held answer is applied")
+        outcome = nil
+        _ = store.change(kept.key, edit: { NoteHelp.applyAnswer(held, to: &$0) }, done: { outcome = $0 })
+        settle { outcome != nil }
+        if outcome == .written { journal.removeAll { $0 == entry } }
+        expect(outcome == .written && journal.isEmpty, "landed on the kept paper (.written): let go", "\(String(describing: outcome))")
+        let landed = text(file) ?? ""
+        expect(landed.contains("Elsewhere") && landed.contains("The answer") && landed.contains("A hole"),
+               "the kept paper has its own words, the answer and the second opinion's result", landed)
     }
 
     /// A session's writes after a conflict copy: the person's typing and a helper's metadata go in one snapshot (one

@@ -69,10 +69,24 @@ struct VaultFormView: View {
     @Environment(PetalApp.self) private var app
     let request: Assist.Request
     let form: VaultForm
+    /// On a note: the room its fields get on this screen (they scroll past it); Submit always stays below them.
+    var room: CGFloat? = nil
     @State private var answer = VaultForm.Answer()
     @State private var showing: Set<VaultField> = []
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let room { BoundedScroll(maxHeight: room) { fields } } else { fields }
+            actions.background(GeometryReader { Color.clear.preference(key: FormActionsHeight.self, value: $0.size.height) })
+        }
+        .onAppear {
+            answer.title = form.title
+            answer.site = form.site
+            if !form.username.isEmpty { answer.values[.username] = form.username }
+        }
+    }
+
+    private var fields: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
                 Text(request.title).font(.system(size: 13, weight: .semibold))
@@ -96,6 +110,11 @@ struct VaultFormView: View {
             if form.fills && form.kind == .login {
                 Toggle("Save to your vault", isOn: $answer.save).toggleStyle(.checkbox).font(.system(size: 13))
             }
+        }
+    }
+
+    /// Submit (or Save): never inside the scroll.
+    private var actions: some View {
             HStack(alignment: .center, spacing: 10) {
                 Text(form.footnote).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
@@ -103,12 +122,6 @@ struct VaultFormView: View {
                     .buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
                     .disabled(!form.complete(answer))
             }
-        }
-        .onAppear {
-            answer.title = form.title
-            answer.site = form.site
-            if !form.username.isEmpty { answer.values[.username] = form.username }
-        }
     }
 
     /// The fields, two to a line where they're short (city and postal code, region and country, expiry and code).

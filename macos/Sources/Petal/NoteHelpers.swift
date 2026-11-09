@@ -58,6 +58,10 @@ final class NoteHelpers {
         var sources: [String] = []
         /// A prompt the gate held (its place or document not showing): delivered once it admits.
         var held: Shielded?
+        /// The private apps' generation what it was told was made under (a change rebuilds it, `admit`).
+        var privacy = 0
+        /// Parked by a tool's admission (its place or document not showing): paused, going on once the gate admits.
+        var parked = false
         /// Waiting for the note's own place to be in front (never looking at whatever else is), and what goes on then.
         var awaitingPlace = false
         @ObservationIgnored var placedResume: (() -> Void)?
@@ -81,8 +85,6 @@ final class NoteHelpers {
     /// grant cancels every run holding it, whichever note it's on.
     @ObservationIgnored private let tokens = TokenTable()
     @ObservationIgnored private let looks = TokenTable()
-    /// The places each running helper's note had when it was last told its place: a change is followed.
-    @ObservationIgnored private var placesSeen: [String: [NoteStick]] = [:]
     /// Notes summoned to the screen (coming back, a watcher's hit, a source chip): shown on their place, or on the
     /// Desktop showing when their place isn't open, until the person puts them away.
     private(set) var summoned: Set<String> = []
@@ -129,21 +131,21 @@ final class NoteHelpers {
     /// helper's answer: the session's work is drained like any other), and written behind any save the person's
     /// editor has waiting (that save is made first, never under it). The editor's next save is made on it
     /// (NoteShelf.rebase: a change of metadata only never makes a conflict with the person's words). Nothing waits
-    /// anywhere else. `done`: whether it landed.
+    /// anywhere else. `done`: whether it landed on that paper (`.written`; a conflict copy beside it isn't).
     func write(_ noteID: String, touch: Bool = false, _ edit: @escaping (inout NoteFile) -> Void, done: ((Bool) -> Void)? = nil) {
         guard let desk, let paper = paper(noteID), !desk.store.readOnly(paper) else { done?(false); return }
         // Typing not saved yet and the helper's metadata: one snapshot, one based write (on the base it was typed on),
         // never the typing's write and then the helper's (two papers when the file changed elsewhere meanwhile).
         if let editor = desk.editors[paper.key], let typed = editor.take() {
             let made = desk.write(paper.key, body: typed.body, base: typed.base, also: edit) { outcome in
-                done?(outcome == .written || { if case .keptBoth = outcome { return true } else { return false } }())
+                done?(outcome == .written)
             }
             editor.landed(made)
             if made == nil { done?(false) }
             return
         }
         let made = desk.store.change(paper.key, touch: touch, edit: edit) { outcome in
-            done?(outcome == .written || { if case .keptBoth = outcome { return true } else { return false } }())
+            done?(outcome == .written)
         }
         if made == nil { done?(false) }
     }
@@ -165,11 +167,13 @@ final class NoteHelpers {
     @ObservationIgnored private var applying: Set<Date> = []
     nonisolated static var journalFile: URL { NoteJournal.folder.appending(path: "helper-answers.json") }
 
-    /// A run's completed answer (or its failure): journaled the moment it's made, whatever the paper's state, then
-    /// written to its note when that's one writable paper, and let go from the journal once it landed; in conflict
-    /// (or not here), held and applied to the note after Keep this one. Never dropped.
+    /// Every helper output (an answer, a second opinion's result, a failure, a stop): journaled the moment it's made,
+    /// whatever the paper's state, then written to its note when that's one writable paper, and let go from the
+    /// journal only once that write landed there (`.written`; a copy kept beside it, `.keptBoth`, isn't: it stays
+    /// held); in conflict (or not here), held and applied to whichever paper the person keeps. Never dropped.
     private func keep(_ noteID: String, _ edit: @escaping (inout NoteFile) -> Void) {
-        var answer = NoteFile(id: noteID, created: Date(timeIntervalSince1970: 0))
+        // Made on the note as it is now (a second opinion's ink after the answer, say), so what's held is whole.
+        var answer = store?.notes.first(where: { $0.noteID == noteID && $0.version == nil })?.file ?? NoteFile(id: noteID, created: Date(timeIntervalSince1970: 0))
         edit(&answer)
         let entry = HelperJournal.Entry(noteID: noteID, answer: answer.serialized(), at: Date())
         heldAnswers = HelperJournal.adding(entry, to: heldAnswers)
@@ -212,7 +216,7 @@ final class NoteHelpers {
         guard runs[run.noteID] === run, run.token.complete(.failed(reason)) else { return }
         runs[run.noteID] = nil
         tokens.finish(run.noteID, run.token)
-        if let sticky = run.sticky, sticky.reviewer { drop(sticky) }
+        retire(run)
         let mac = self.mac
         keep(run.noteID) { file in
             var ink = NoteHelp.Ink(who: run.who + " · couldn't finish", text: reason)
@@ -253,8 +257,8 @@ final class NoteHelpers {
             if sticky.agent.running { sticky.agent.stop() }
             // What it was doing in apps, and what it was allowed there, go with it.
             app.assist.computer.end(sticky.id.uuidString, forget: true)
-            if sticky.reviewer { drop(sticky) }
         }
+        retire(run)
         app.focus.brain.resume()
     }
 
@@ -263,7 +267,7 @@ final class NoteHelpers {
     private func stopped(_ run: Run, saying words: String? = nil) {
         guard runs[run.noteID] === run else { return }
         halt(run)
-        write(run.noteID) { file in
+        keep(run.noteID) { file in
             file.helper = nil
             if let words { file.ink = [NoteHelp.Ink(who: run.who, text: words)] }
         }
@@ -275,7 +279,7 @@ final class NoteHelpers {
         looks.cancel(noteID)
         if let run = runs[noteID] {
             halt(run)
-            write(noteID) { file in
+            keep(noteID) { file in
                 file.helper = nil
                 if run.kind != .quick { file.ink = [NoteHelp.Ink(who: run.who, text: "Stopped.")] }
             }
@@ -305,7 +309,7 @@ final class NoteHelpers {
         // One that can't be begun again (nothing to carry on) isn't paused: Pause stops it, and says so.
         if NoteHelp.goOn(launched: run.launched, waitingTurn: false, restartable: run.restart != nil) == .stopped {
             halt(run)
-            write(noteID) { file in
+            keep(noteID) { file in
                 file.helper = nil
                 file.ink = [NoteHelp.Ink(who: run.who, text: "Stopped: this can't be paused. Ask again to start it over.")]
             }
@@ -541,6 +545,8 @@ final class NoteHelpers {
 
     /// Told for `run`, then `then` while it's still live; the vault unreadable ends it saying so.
     private func told(_ run: Run, _ raw: Raw, _ then: @escaping @MainActor (NoteHelp.Told) -> Void) {
+        // What it's told is made under these private apps: a change before it's used makes it again.
+        run.privacy = ClaudePanel.privacy.now
         Self.tell(raw) { told in
             guard self.live(run) else { return }
             guard let told else { return self.fail(run, NoteShield.unreadable) }
@@ -705,68 +711,48 @@ final class NoteHelpers {
         }
     }
 
-    /// The notes changed (read again, re-stuck, a place taken off or added): a running helper whose note's places
-    /// moved follows them. Its tools look at the new place (none when it isn't on a window in front now), and what
-    /// it read or queued for the old one is dropped (ComputerUse.placeChanged).
-    /// Called once `here` is recomputed (NoteDesk.apply), never before: the new place is judged against what's in
-    /// front now. A place not in front yet makes the helper wait (its default look and act refused, `waitingFor`).
+    /// The notes or what's in front changed: each running helper's requirement and its tools' target are bound again
+    /// in one step (`bind`): re-stuck, both follow; its place or document not showing now, its tools have no target
+    /// and the gate waits (`waitingFor` says why). Called once `here` is recomputed (NoteDesk.apply), never before.
     func placesFollow() {
-        for (noteID, run) in runs where run.launched {
-            guard let paper = paper(noteID), let sticky = run.sticky, let seen = placesSeen[noteID] else { continue }
-            let here = desk?.here[paper.key]
-            let follow = NoteHelp.follow(seen: seen, now: paper.file.places, here: here)
-            // A file helper's document, checked on every placement change, not only when the note's places changed:
-            // the window in front may show another file now (its AXDocument, its bookmark followed).
-            let document = run.kind == .petal ? Self.document(of: paper, here: here) : nil
-            let showing = document.map { NoteHelp.documentShowing(placePath: $0, sceneFile: desk?.scene?.file ?? "") } ?? true
-            if case .unchanged = follow, document == run.document {
-                let waitingForFile = run.document.map { (($0 as NSString).lastPathComponent) } == sticky.waitingFor && sticky.waitingFor != nil
-                if !showing, !waitingForFile, let document {
-                    sticky.waitingFor = (document as NSString).lastPathComponent
-                    sticky.agent.place = nil
-                    app.assist.computer.placeChanged(sticky.id.uuidString)
-                } else if showing, sticky.waitingFor != nil, case .placed = NoteHelp.anchor(paper.file.places, here: here) {
-                    // What it waited for is in front now.
-                    sticky.waitingFor = nil
-                    if run.kind == .petal { sticky.agent.place = place(of: paper) }
-                    app.assist.computer.placeChanged(sticky.id.uuidString)
-                }
-                continue
-            }
-            run.document = document
-            switch follow {
-            case .placed, .unchanged:
-                if showing {
-                    sticky.waitingFor = nil
-                    sticky.agent.place = run.kind == .petal ? place(of: paper) : nil
-                } else {
-                    sticky.waitingFor = document.map { ($0 as NSString).lastPathComponent }
-                    sticky.agent.place = nil
-                }
-            case .waiting(let label):
-                sticky.waitingFor = run.kind == .petal ? label : nil
-                sticky.agent.place = nil
-            case .free:
-                sticky.waitingFor = nil
-                sticky.agent.place = nil
-            }
-            placesSeen[noteID] = paper.file.places
-            app.assist.computer.placeChanged(sticky.id.uuidString)
+        for (noteID, run) in runs where run.launched && run.kind == .petal {
+            guard let paper = paper(noteID), run.sticky != nil else { continue }
+            bind(run, paper)
         }
-        for noteID in placesSeen.keys where runs[noteID] == nil { placesSeen[noteID] = nil }
     }
 
-    /// The file a note's place in front is about (a file, or a sentence in a file), when it's one.
-    private static func document(of paper: PaperNote, here: Int?) -> String? {
-        guard let here, paper.file.places.indices.contains(here) else { return nil }
-        let stick = paper.file.places[here]
-        guard stick.kind == .file || stick.kind == .passage, !stick.path.isEmpty, stick.url.isEmpty else { return nil }
-        return stick.path
+    /// The run's requirement (place, document) and its agent's tool target, set together from the note's places and
+    /// what's in front now (NoteHelp.requirement); what it read or queued for an old target is dropped.
+    private func bind(_ run: Run, _ paper: PaperNote) {
+        guard runs[run.noteID] === run, let sticky = run.sticky else { return }
+        let requirement: (place: NoteStick?, document: String?) = run.kind == .petal ? NoteHelp.requirement(paper.file.places, here: desk?.here[paper.key]) : (nil, nil)
+        let moved = !(run.requiredPlace.map { old in requirement.place.map { old.samePlace($0) } ?? false } ?? (requirement.place == nil))
+            || run.document != requirement.document
+        run.requiredPlace = requirement.place
+        run.document = requirement.document
+        let showing = requirementShowing(run)
+        let target = showing && requirement.place != nil ? place(of: paper) : nil
+        let waiting = showing || requirement.place == nil ? nil : requirement.document.map { ($0 as NSString).lastPathComponent } ?? requirement.place?.label()
+        guard moved || sticky.agent.place != target || sticky.waitingFor != waiting else { return }
+        sticky.agent.place = target
+        sticky.waitingFor = waiting
+        app.assist.computer.placeChanged(sticky.id.uuidString)
+    }
+
+    /// Whether the run's required place (and file) is the one showing now: from the run's own requirement, never `here`.
+    private func requirementShowing(_ run: Run) -> Bool {
+        if let document = run.document { return NoteHelp.documentShowing(placePath: document, sceneFile: desk?.scene?.file ?? "") }
+        guard let required = run.requiredPlace else { return true }
+        return desk?.scene.map { NoteMatch.fits(required, $0) } ?? false
     }
 
     /// Layout placed notes: a run waiting for its note's place goes on once its note is on the window in front.
     func placedNow() {
         // Prompts the gate held, and turns waiting before their process started: once it admits, they go.
+        // Runs parked by a tool's admission go on once it admits.
+        for run in runs.values where run.parked && run.token.paused {
+            if case .go = admit(run) { run.parked = false; goOn(run) }
+        }
         for run in runs.values where run.token.admits {
             if let held = run.held, case .go = admit(run) { deliver(run, held) }
             if run.sticky?.agent.waiting.isEmpty == false, !(run.sticky?.agent.running ?? true), case .go = admit(run) { app.claude.startWaiting() }
@@ -872,13 +858,10 @@ final class NoteHelpers {
         }
     }
 
-    /// The note's own helper agent (one per note while Petal runs): its tools look at the note's place. A note in a
-    /// notebook not known to be open is marked so (and checked again when shown): it never shows in the previews.
+    /// A run's own helper agent: its tools look at the note's place. A note in a notebook not known to be open is
+    /// marked so (and checked again when shown): it never shows in the previews. A fresh agent for every run: never one another run used (no late completion, no leftover state). It goes when
+    /// its run ends (`retire`).
     private func sticky(for paper: PaperNote) -> StickyNote {
-        if let kept = mainSticky(paper.noteID) {
-            kept.secret = privacy(of: paper.notebook) != .open
-            return kept
-        }
         let sticky = StickyNote()
         sticky.paper = paper.noteID
         sticky.secret = privacy(of: paper.notebook) != .open
@@ -887,11 +870,18 @@ final class NoteHelpers {
         return sticky
     }
 
-    private func mainSticky(_ noteID: String) -> StickyNote? { app.claude.notes.first { $0.paper == noteID && !$0.reviewer } }
+    /// A run's agent, when it's that note's run now.
+    private func runSticky(_ noteID: String) -> StickyNote? { runs[noteID]?.sticky }
 
+    /// A run's agent goes with it (stopped first if it's still at work; its late end belongs to no one).
     private func drop(_ sticky: StickyNote) {
-        guard !sticky.agent.running else { return }
+        if sticky.agent.running { sticky.agent.stop() }
         app.claude.notes.removeAll { $0 === sticky }
+    }
+
+    /// A run ended (any way): its agent goes.
+    private func retire(_ run: Run) {
+        if let sticky = run.sticky { drop(sticky) }
     }
 
     /// Whether a helper of this note may show in the AI button's previews: only one in a notebook known to be open.
@@ -914,12 +904,10 @@ final class NoteHelpers {
 
     /// The run's agent starts: its brief and prompt `Shielded`, its turns carried by the run's token.
     private func launch(_ run: Run, _ paper: PaperNote, prompt: Shielded, kind: Run.Kind, provider: Provider, model: String, told: NoteHelp.Told,
-                        brief: Shielded, folder: String?, placed: Bool, sticky given: StickyNote? = nil) {
+                        brief: Shielded, folder: String?, placed: Bool) {
         guard live(run) else { return }
-        let sticky = given ?? run.sticky ?? sticky(for: paper)
+        let sticky = run.sticky ?? sticky(for: paper)
         let agent = sticky.agent
-        // Only the note's own place: when it isn't on a window now, none (the brief says not to look at what's in front).
-        agent.place = placed ? place(of: paper) : nil
         // Its whole system prompt, made only of Shielded parts (no window or tab title, no raw text).
         agent.helperSystem = NoteHelp.system(told, provider: provider == .claude ? "Claude" : "Codex", computerUse: app.config.bool("computerUse"), brief: brief)
         agent.token = run.token
@@ -927,18 +915,23 @@ final class NoteHelpers {
         agent.pinned = (provider, model)
         run.provider = provider.rawValue
         run.model = model
-        run.document = placed ? Self.document(of: paper, here: desk?.here[paper.key]) : nil
-        run.requiredPlace = placed ? desk?.here[paper.key].flatMap { paper.file.places.indices.contains($0) ? paper.file.places[$0] : nil } : nil
+        run.kind = kind
+        run.sticky = sticky
+        // Its requirement and its tools' target, bound together (and again on every re-stick, `placesFollow`).
+        if placed { bind(run, paper) } else { run.requiredPlace = nil; run.document = nil; agent.place = nil }
         // Its process starts only through the gate, too.
         agent.gate = { [weak self, weak run] in
             guard let self, let run else { return .fail("This helper isn't running any more.") }
-            return self.admit(run)
+            let admission = self.admit(run)
+            // Made again (after this turn is let go): the turn waits, and the rebuild withdraws it.
+            if case .rebuild = admission {
+                DispatchQueue.main.async { MainActor.assumeIsolated { self.rebuild(run) } }
+                return .wait("Starting over")
+            }
+            return admission
         }
-        run.sticky = sticky
-        run.kind = kind
         run.from = agent.messages.count
         run.launched = true
-        placesSeen[run.noteID] = paper.file.places
         working(run.noteID, step: "Starting", asked: run.asked, who: run.who)
         deliver(run, prompt)
     }
@@ -961,15 +954,27 @@ final class NoteHelpers {
         facts.model = run.model
         facts.available = app.providers.filter { app.paths[$0] != nil && app.aiReady($0) }.map(\.rawValue)
         if run.provider == Provider.codex.rawValue, !app.codexModels.isEmpty { facts.models = app.codexModels.map(\.id) }
+        facts.builtPrivacy = run.privacy
+        facts.nowPrivacy = ClaudePanel.privacy.now
+        facts.placePrivate = run.requiredPlace.map { app.assist.neverLook($0.app) } ?? false
         if run.kind == .petal {
             facts.document = run.document
             facts.sceneFile = desk?.scene?.file ?? ""
             if let required = run.requiredPlace, run.document == nil {
                 facts.place = required.label()
-                facts.placeShowing = desk?.scene.map { NoteMatch.fits(required, $0) } ?? false
+                facts.placeShowing = requirementShowing(run)
             }
         }
         return NoteHelp.admit(facts)
+    }
+
+    /// The apps kept private changed since what it was told was made: made again from its line, as a new run
+    /// (through Shielded once more); one that can't be begun again fails.
+    private func rebuild(_ run: Run) {
+        guard runs[run.noteID] === run else { return }
+        guard let restart = run.restart else { return fail(run, "The apps you keep private changed while it worked. Ask again.") }
+        halt(run)
+        restart()
     }
 
     /// The one way a helper's prompt reaches its agent: through the gate, from what's true now. Waiting, it's held
@@ -985,6 +990,8 @@ final class NoteHelpers {
             write(run.noteID) { file in file.helper?.state = .waiting; file.helper?.step = reason }
         case .fail(let reason):
             fail(run, reason, settings: reason.contains("isn't set up"))
+        case .rebuild:
+            rebuild(run)
         }
     }
 
@@ -993,11 +1000,27 @@ final class NoteHelpers {
     func admitTool(_ caller: String?) -> String? {
         guard let caller, let sticky = app.claude.note(withID: caller), let noteID = sticky.paper else { return nil }
         guard let run = runs[noteID], run.sticky === sticky else { return "This helper isn't running any more." }
-        switch admit(run) {
-        case .go: return nil
-        case .wait(let reason): return reason + " Say so in one line, and go on once it's there."
-        case .fail(let reason): return reason
+        switch NoteHelp.toolOutcome(admit(run)) {
+        case .answer: return nil
+        case .fail(let reason):
+            // Failed at once: the run completes as failed, its process ended.
+            fail(run, reason, settings: reason.contains("isn't set up"))
+            return reason
+        case .park(let reason):
+            // Parked: paused (resumable), going on once the gate admits again (placedNow).
+            park(run, reason)
+            return reason
+        case .rebuild:
+            rebuild(run)
+            return "The apps kept private changed: this helper is starting over."
         }
+    }
+
+    /// A run parked by a tool's admission: paused where it is, its note saying what it waits for.
+    private func park(_ run: Run, _ reason: String) {
+        guard !run.parked, run.token.pause() else { return }
+        run.parked = true
+        write(run.noteID) { file in file.helper?.state = .waiting; file.helper?.step = reason }
     }
 
     /// The note says a helper is at work (`helper: working`).
@@ -1035,7 +1058,8 @@ final class NoteHelpers {
             write(noteID) { $0.helper?.state = .waiting; $0.helper?.step = "Waiting for you: Allow or Don't" }
             return
         case .paused:
-            write(noteID) { $0.helper?.state = .waiting; $0.helper?.step = "Paused" }
+            // Parked by a tool, its note already says what it waits for.
+            if !run.parked { write(noteID) { $0.helper?.state = .waiting; $0.helper?.step = "Paused" } }
             return
         case .stopped:
             return stopped(run, saying: "Stopped.")
@@ -1048,7 +1072,7 @@ final class NoteHelpers {
         let steps = messages.filter { $0.kind == .step }.map(\.text)
         // Something said meanwhile, to this run: its answer so far is ink, and the run goes on with it.
         if let next = followUps.next(note: noteID, current: run.token) {
-            write(noteID) { $0.ink = [NoteHelp.Ink(who: run.who, text: NoteHelp.inkText(answer))]; $0.steps = steps }
+            keep(noteID) { $0.ink = [NoteHelp.Ink(who: run.who, text: NoteHelp.inkText(answer))]; $0.steps = steps }
             run.from = agent.messages.count
             deliver(run, next)
             return
@@ -1056,11 +1080,11 @@ final class NoteHelpers {
         guard run.token.complete(.succeeded) else { return }
         runs[noteID] = nil
         tokens.finish(noteID, run.token)
+        retire(run)
         if case .holes = run.kind {
             let ink = NoteHelp.Ink(who: run.who, text: NoteHelp.inkText(answer), objections: NoteHelp.objections(in: answer))
             let mac = self.mac
-            drop(sticky)
-            write(noteID) { file in
+            keep(noteID) { file in
                 file.ink = file.ink.filter { $0.objections == nil } + [ink]
                 file.steps = file.steps + steps.map { "\(run.who): \($0)" }
                 file.helper = NoteHelp.Helper(state: .done, who: run.who, step: "", asked: run.asked, mac: mac, at: Date())
@@ -1100,24 +1124,20 @@ final class NoteHelpers {
         guard case .use(let id) = provider(for: model), let provider = Provider(rawValue: id) else {
             // Asked for, but that AI isn't set up: said under the answer (the answer stands), never another instead.
             let name = model.provider == .claude ? "Claude Code" : "Codex"
-            return write(paper.noteID) { $0.ink.append(NoteHelp.Ink(who: Self.petalWho, text: "No second opinion: \(name) isn't set up in Petal.", link: NoteHelp.settingsLink)) }
+            return keep(paper.noteID) { $0.ink.append(NoteHelp.Ink(who: Self.petalWho, text: "No second opinion: \(name) isn't set up in Petal.", link: NoteHelp.settingsLink)) }
         }
         let who = model.name.isEmpty ? provider.name : model.name
         let run = begin(paper, asked: first.asked, step: "Looking for holes", who: who)
         let tree = first.tree
-        let reviewer = StickyNote()
-        reviewer.paper = paper.noteID
+        let reviewer = sticky(for: paper)
         reviewer.reviewer = true
-        reviewer.secret = privacy(of: paper.notebook) != .open
-        reviewer.agent.keeps = false
-        app.claude.notes.append(reviewer)
         run.sticky = reviewer
         var raw = raw(paper)
         raw.answer = answer
         raw.paths = tree.map { [$0] } ?? []
         told(run, raw) { told in
             self.launch(run, paper, prompt: NoteHelp.reviewRequest(told, tree: told.paths.first), kind: .holes(folder: tree), provider: provider, model: model.id,
-                        told: told, brief: NoteHelp.reviewBrief(told), folder: tree, placed: false, sticky: reviewer)
+                        told: told, brief: NoteHelp.reviewBrief(told), folder: tree, placed: false)
         }
     }
 
@@ -1194,17 +1214,17 @@ final class NoteHelpers {
         case .always(let kind):
             app.config.set("aiAllowed", app.config.strings("aiAllowed").filter { $0 != kind })
         case .rules(let rules):
-            mainSticky(noteID)?.agent.revoke(rules)
+            runSticky(noteID)?.agent.revoke(rules)
         case .project(let id):
             AgentGrants.shared.remove(id)
         case .once:
-            if let sticky = mainSticky(noteID) { app.assist.computer.end(sticky.id.uuidString) }
+            if let sticky = runSticky(noteID) { app.assist.computer.end(sticky.id.uuidString) }
         }
         // Every run holding it is cancelled, whichever note it's on (an Always for a checkout is shared).
         for held in tokens.revoke(stamp.grant) {
             guard let run = runs[held] else { continue }
             halt(run)
-            write(held) { file in
+            keep(held) { file in
                 file.helper = nil
                 file.ink = [NoteHelp.Ink(who: run.who, text: "Stopped: you took back what it was allowed.")]
             }
@@ -1423,8 +1443,8 @@ final class NoteHelpers {
                     guard gone.status == 0 || !FileManager.default.fileExists(atPath: tree.path) else {
                         return self.say(paper.noteID, "The worktree of \(short) has changes not committed, so Petal left it at \(tree.path).", asked: asked)
                     }
-                    self.write(paper.noteID) { file in
-                        file.worktree = nil
+                    self.write(paper.noteID) { $0.worktree = nil }
+                    self.keep(paper.noteID) { file in
                         file.ink = file.ink.filter { $0.who != Self.petalWho } + [NoteHelp.Ink(who: Self.petalWho, text: "Removed the worktree of \(short): \(why). The branch \(tree.branch) stays.")]
                     }
                 }

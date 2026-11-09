@@ -410,7 +410,7 @@ final class Agent {
         if let gate {
             switch gate() {
             case .go: break
-            case .wait: if waiting.isEmpty { waitingToken = token }; waiting.append(prompt); return
+            case .wait, .rebuild: if waiting.isEmpty { waitingToken = token }; waiting.append(prompt); return
             case .fail(let reason): return refuse(reason, opensSettings: reason.contains("isn't set up"))
             }
         }

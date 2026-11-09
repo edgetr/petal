@@ -655,6 +655,32 @@ struct NoteHelpCheck {
         expect(NoteHelp.completionMatches(turn: newRun, run: newRun) && !NoteHelp.completionMatches(turn: oldTurn, run: newRun) && !NoteHelp.completionMatches(turn: nil, run: newRun),
                "a completion belongs to the run whose token started that turn")
 
+        // MARK: Round eight: privacy at the gate, tool outcomes, re-sticks, forms
+
+        var madePrivate = facts
+        madePrivate.placePrivate = true
+        if case .fail = NoteHelp.admit(madePrivate) { expect(true, "") } else { expect(false, "its place's app made private while queued: the run fails") }
+        var privacyChanged = facts
+        privacyChanged.builtPrivacy = 3; privacyChanged.nowPrivacy = 4
+        expect(NoteHelp.admit(privacyChanged) == .rebuild, "another app made private since it was told: what it's told is made again", "\(NoteHelp.admit(privacyChanged))")
+        privacyChanged.builtPrivacy = 4
+        expect(NoteHelp.admit(privacyChanged) == .go, "told under the current private apps: go")
+        expect(NoteHelp.toolOutcome(.go) == .answer && NoteHelp.toolOutcome(.wait("its window")) == .park("its window")
+               && NoteHelp.toolOutcome(.fail("gone")) == .fail("gone") && NoteHelp.toolOutcome(.rebuild) == .rebuild,
+               "a tool's admission changes the run: waiting parks it, failing fails it, never only words back")
+        var windowA = NoteStick(kind: .window); windowA.title = "Window A"
+        var talk = NoteStick(kind: .file); talk.path = "/Users/someone/Talk.key"
+        let onWindow = NoteHelp.requirement([windowA], here: 0)
+        expect(onWindow.place == windowA && onWindow.document == nil, "placed on its window: that window is required")
+        let restuck = NoteHelp.requirement([talk], here: nil)
+        expect(restuck.place == talk && restuck.document == talk.path, "re-stuck to a file while running: the file is required, both together", "\(restuck)")
+        let deskOnly = NoteHelp.requirement([NoteStick(kind: .desktop)], here: 0)
+        expect(deskOnly.place == nil && deskOnly.document == nil, "re-stuck to the Desktop only: nothing in an app is required")
+        for screen in [300.0, 500.0, 900.0] as [CGFloat] {
+            let room = NoteHelp.formRoom(screen: screen, chrome: 230, actions: 44)
+            expect(room >= 60 && (screen < 334 || room + 230 + 44 <= screen), "a form's fields scroll; its buttons stay on the screen (\(screen))", "\(room)")
+        }
+
         // MARK: Open all never launches an app or a script (NoteTasks)
 
         let scratch = FileManager.default.temporaryDirectory.appending(path: "petal-notetasks-\(UUID().uuidString)")

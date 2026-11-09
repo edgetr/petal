@@ -132,6 +132,35 @@ perl -0777 -ne '
     unless (/let grant = NoteHelp\.autoGrant\(.*?\) \{\s*return done\(app\.paper\.helpers\.authorized\(owner, grant\)\)/s) { print "Assist.ask: an automatic approval must register on the run first\n"; exit 1 }
     print "helpers: automatic approvals register on the run\n";
 ' Sources/Petal/Assist.swift
+# Every helper output (answers, second opinions, failures, stops) goes through the held-answer journal (keep), and
+# an entry is let go only when its write landed on the paper meant (.written, never .keptBoth).
+perl -ne '
+    if (/\b(keep|write)\(/) { $last = $1 }
+    if (/\.ink(\.append\(| = )/ && !/^\s*\/\//) { $ink++; if ($last ne "keep") { print "NoteHelpers:$.: ink written outside keep (the held-answer journal): $_"; $bad++ } }
+    $written++ if /done\?\(outcome == \.written\)/;
+    END { exit 1 if $bad || !$ink || $written < 2; print "helpers: every output goes through the journal; only .written lets it go\n" }
+' Sources/Petal/NoteHelpers.swift
+# One agent per run: a run's agent is made fresh (sticky(for:)) and goes when the run ends; none is reused.
+perl -0777 -ne '
+    my $made = () = /StickyNote\(\)/g;
+    unless ($made == 1 && /func sticky\(for paper: PaperNote\) -> StickyNote \{\s*let sticky = StickyNote\(\)/ && /let sticky = run\.sticky \?\? sticky\(for: paper\)/
+            && /let reviewer = sticky\(for: paper\)/ && /func retire\(_ run: Run\) \{\s*if let sticky = run\.sticky \{ drop\(sticky\) \}/) {
+        print "NoteHelpers: every run must get a fresh agent of its own, dropped when it ends\n"; exit 1 }
+    print "helpers: a fresh agent for every run\n";
+' Sources/Petal/NoteHelpers.swift
+# A tool's admission changes the run: failing fails it, waiting parks it (resumable), a privacy change rebuilds it.
+perl -0777 -ne '
+    unless (/func admitTool.*?case \.fail\(let reason\):.*?\bfail\(run, reason.*?case \.park\(let reason\):.*?\bpark\(run, reason\).*?case \.rebuild:\s*rebuild\(run\)/s
+            && /facts\.builtPrivacy = run\.privacy/ && /facts\.placePrivate = /) { print "NoteHelpers: tool admission outcomes and privacy must change the run\n"; exit 1 }
+    print "helpers: tool admissions fail, park or rebuild the run; privacy is checked at the gate\n";
+' Sources/Petal/NoteHelpers.swift
+# A form fits the screen: its fields scroll, its buttons (Submit, Allow, Don't, Buy) stay outside the scroll, and
+# the paper keeps the controls' measured room.
+grep -q 'if let room { BoundedScroll(maxHeight: room) { fields } } else { fields }' Sources/Petal/VaultViews.swift \
+    && grep -q 'if let room { BoundedScroll(maxHeight: room) { words } } else { words }' Sources/Petal/Popups.swift \
+    && grep -q 'controls: max(controlsHeight, 40)' Sources/Petal/NoteViews.swift \
+    || { echo "forms: buttons must stay outside the scroll, and the paper keep their room"; exit 1; }
+echo "forms: fields scroll, buttons stay on the screen"
 swiftc -parse-as-library -O -o "$out/notestore" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/PaperNotes.swift Sources/Petal/NoteJournal.swift checks/NoteStoreCheck.swift
 "$out/notestore"
 # A passage for Petal AI follows petal_look's rule for selected text (UIMap.selectionHidden), and what the note tools

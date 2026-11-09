@@ -1809,7 +1809,9 @@ extension NoteHelp {
 extension NoteHelp {
     /// What the gate decides: go, wait (its place or document isn't showing), or fail with a reason (the note gone,
     /// moved, a source's access lost, its AI gone). Never a fallback, never a substitution.
-    enum Admission: Equatable { case go, wait(String), fail(String) }
+    /// `rebuild`: the apps kept private changed since what it was told was made: it's made again (through Shielded),
+    /// from the line, as a new run.
+    enum Admission: Equatable { case go, wait(String), fail(String), rebuild }
 
     /// Everything the gate re-derives from current state, right before a helper's prompt is admitted to its agent,
     /// before its process starts and before any tool answers it.
@@ -1833,11 +1835,18 @@ extension NoteHelp {
         var model = ""
         var available: [String] = []
         var models: [String]? = nil
+        /// The private apps' generation what it was told was made under, and now; whether its place's app is private now.
+        var builtPrivacy = 0
+        var nowPrivacy = 0
+        var placePrivate = false
     }
 
     static func admit(_ f: GateFacts) -> Admission {
         guard f.paperFound else { return .fail("This note isn't here as one paper now (gone, or changed in two places): nothing was sent.") }
         guard f.notebook == f.startNotebook else { return .fail("This note moved to another notebook while it waited, so what it was told is out of date. Ask again.") }
+        // An app made private: a run on that app's place stops; any other change is made again from the line.
+        guard !f.placePrivate else { return .fail("This note's place is in an app you keep private now, so its helper stopped.") }
+        guard f.builtPrivacy == f.nowPrivacy else { return .rebuild }
         for source in f.sources {
             guard let book = source.notebook else { return .fail("A note it was checking against is gone. Ask again.") }
             guard mayRead(f.privacy(book), notebook: book, asking: f.notebook) else { return .fail("A note it was checking against is private now (or its notebook's cover isn't here). Ask again.") }
@@ -1852,6 +1861,36 @@ extension NoteHelp {
         if let place = f.place, !f.placeShowing { return .wait("Waiting for \(place) to be in front.") }
         return .go
     }
+
+    /// What a tool's admission does to the run asking: going on, parked (paused, resumable: it goes on once the gate
+    /// admits again), failed at once, or made again.
+    enum ToolOutcome: Equatable { case answer, park(String), fail(String), rebuild }
+    static func toolOutcome(_ admission: Admission) -> ToolOutcome {
+        switch admission {
+        case .go: return .answer
+        case .wait(let reason): return .park(reason)
+        case .fail(let reason): return .fail(reason)
+        case .rebuild: return .rebuild
+        }
+    }
+
+    /// A run's requirement, held on the run and set in one step with its tools' target: the place it must be on
+    /// (the one in front now, or the one it waits for) and, for a file, that file. Re-stuck, both change together.
+    static func requirement(_ places: [NoteStick], here: Int?) -> (place: NoteStick?, document: String?) {
+        let stick: NoteStick?
+        switch anchor(places, here: here) {
+        case .placed(let index): stick = places[index]
+        case .away: stick = places.first { $0.kind != .desktop }
+        case .free: stick = nil
+        }
+        guard let stick else { return (nil, nil) }
+        let isFile = (stick.kind == .file || stick.kind == .passage) && !stick.path.isEmpty && stick.url.isEmpty
+        return (stick, isFile ? stick.path : nil)
+    }
+
+    /// A form's room on this screen: its fields scroll within it, its buttons (Submit, Allow, Don't, Buy) measured and
+    /// kept below it, always on the screen.
+    static func formRoom(screen: CGFloat, chrome: CGFloat, actions: CGFloat) -> CGFloat { max(60, screen - chrome - actions) }
 
     /// A completion belongs to the run whose token started that turn, and to no other (a retiring agent's late
     /// completion never ends a replacement run).
