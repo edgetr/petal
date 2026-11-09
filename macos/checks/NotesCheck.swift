@@ -474,6 +474,36 @@ struct NotesCheck {
         expect(!NoteShelf.mayShow(.window(0), missionControl: false, awaitingRead: true) && NoteShelf.mayShow(.desktop, missionControl: false, awaitingRead: true)
                && !NoteShelf.mayShow(.none, missionControl: false, awaitingRead: false), "a read awaited: the window's wait, Desktop notes stay; no placement: hidden")
 
+        // Each rescue its own folder: by its note's id (hashed) and the moment.
+        let at = Date(timeIntervalSince1970: 1_800_000_000)
+        expect(NoteShelf.rescueFolder(noteID: "W1", at: at) != NoteShelf.rescueFolder(noteID: "H1", at: at)
+               && NoteShelf.rescueFolder(noteID: "W1", at: at) != NoteShelf.rescueFolder(noteID: "W1", at: at.addingTimeInterval(0.01))
+               && !NoteShelf.rescueFolder(noteID: "file:Inbox/Card 4111.md", at: at).contains("4111"), "two notes, or two moments: two folders; nothing of the id")
+
+        // A keyboard request for a paper on a window being brought forward survives that window's activation only.
+        var tagged = NoteShelf.KeyboardRequests()
+        _ = tagged.request("drop", shown: false, expecting: .init(pid: 30, window: 7))
+        _ = tagged.request("plain", shown: false)
+        tagged.focusMoved(pid: 30, window: nil)
+        expect(tagged.pending == ["drop"], "the app brought forward activates: its request stays, an untagged one goes")
+        tagged.focusMoved(pid: 30, window: 7)
+        expect(tagged.shown("drop"), "its window focused: still waiting, then honored")
+        _ = tagged.request("drop2", shown: false, expecting: .init(pid: 30, window: 7))
+        tagged.focusMoved(pid: 30, window: 9)
+        expect(tagged.pending.isEmpty, "another window of that app: dropped")
+        _ = tagged.request("drop3", shown: false, expecting: .init(pid: 30, window: 7))
+        tagged.focusMoved(pid: 44, window: nil)
+        expect(tagged.pending.isEmpty, "another app: dropped")
+
+        // The Mission Control watcher runs while anyone needs it: the notes alone keep it on.
+        var users = NoteShelf.TrackerUsers()
+        users.need("dock", true)
+        users.need("notes", true)
+        users.need("dock", false)
+        expect(users.listening, "macOS's Dock chosen (Petal's dock off), notes on: still watching")
+        users.need("notes", false)
+        expect(!users.listening, "nobody needs it: stopped")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

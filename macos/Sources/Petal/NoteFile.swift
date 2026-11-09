@@ -1213,6 +1213,20 @@ enum NoteShelf {
 
     static func carry(destinationExists: Bool, same: Bool) -> Carry { !destinationExists ? .copy : same ? .already : .stop }
 
+    /// Each rescue's own folder in "Unsaved notes": a hash of its note's id and the moment (never a character of the
+    /// id), so two notes' pictures with the same name (`Trip.assets/photo.png` in two notebooks) never meet.
+    static func rescueFolder(noteID: String, at date: Date) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in noteID.utf8 { hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
+        return "note-" + String(format: "%016llx", hash) + "-" + String(Int64(date.timeIntervalSince1970 * 1000))
+    }
+
+    /// A picture already where one is wanted counts only when it's the very same bytes; else it's someone else's.
+    static func acceptExisting(existing: Data?, wanted: Data?) -> Bool {
+        guard let existing, let wanted else { return false }
+        return existing == wanted
+    }
+
     /// A rescue (into "Unsaved notes") is complete only once every picture its text references is there too.
     static func rescueComplete(referenced: [String], present: Set<String>) -> Bool { referenced.allSatisfy(present.contains) }
 
@@ -1232,23 +1246,57 @@ enum NoteShelf {
     /// A paper asked for the keyboard before layout showed it (its place not validated yet, as the first Desktop note
     /// is): kept pending, honored once layout shows it, dropped if the person goes elsewhere first.
     struct KeyboardRequests: Equatable {
-        private(set) var pending: Set<String> = []
+        /// The app and window Petal is bringing forward for a paper (a drop on another app's window behind): focus
+        /// going there keeps its request.
+        struct Target: Equatable {
+            var pid: Int32
+            var window: UInt32?
+        }
 
-        /// True: take the keyboard now (it's shown); else it waits.
-        mutating func request(_ key: String, shown: Bool) -> Bool {
-            if shown { pending.remove(key); return true }
+        private(set) var pending: Set<String> = []
+        private(set) var targets: [String: Target] = [:]
+
+        /// True: take the keyboard now (it's shown); else it waits (for focus going to `expecting`, when given).
+        mutating func request(_ key: String, shown: Bool, expecting: Target? = nil) -> Bool {
+            if shown { cancel(key); return true }
             pending.insert(key)
+            targets[key] = expecting
             return false
         }
 
         /// Layout showed `key`: true when it was waiting for the keyboard.
-        mutating func shown(_ key: String) -> Bool { pending.remove(key) != nil }
+        mutating func shown(_ key: String) -> Bool {
+            targets[key] = nil
+            return pending.remove(key) != nil
+        }
 
-        mutating func cancel(_ key: String) { pending.remove(key) }
+        mutating func cancel(_ key: String) {
+            pending.remove(key)
+            targets[key] = nil
+        }
+
+        /// Focus went to `pid` (and `window`): a request waiting for that app and window stays; every other goes
+        /// (the person went somewhere else first).
+        mutating func focusMoved(pid: Int32, window: UInt32?) {
+            for key in pending {
+                guard let target = targets[key], target.pid == pid, window == nil || target.window == nil || target.window == window else {
+                    cancel(key)
+                    continue
+                }
+            }
+        }
 
         /// A paper's key changed (its file moved or was renamed): its request follows.
-        mutating func rekey(_ old: String, _ new: String) { if pending.remove(old) != nil { pending.insert(new) } }
-        mutating func cancelAll() { pending.removeAll() }
+        mutating func rekey(_ old: String, _ new: String) {
+            guard pending.remove(old) != nil else { return }
+            pending.insert(new)
+            targets[new] = targets.removeValue(forKey: old)
+        }
+
+        mutating func cancelAll() {
+            pending.removeAll()
+            targets.removeAll()
+        }
     }
 
     /// Making a note from what's in front: only when its read became the active scene, and, after the selection was
@@ -1329,6 +1377,13 @@ enum NoteShelf {
     static func stillNote(found: String?, expected: String, missing: Bool) -> Bool {
         guard let found else { return missing }
         return found == expected
+    }
+
+    /// Who needs a shared watcher (Mission Control's): it runs while anyone does, whichever of them.
+    struct TrackerUsers: Equatable {
+        private(set) var users: Set<String> = []
+        var listening: Bool { !users.isEmpty }
+        mutating func need(_ who: String, _ on: Bool) { if on { users.insert(who) } else { users.remove(who) } }
     }
 
     /// A per-paper record moved to a paper's new key (its file moved or renamed): every one of the desk's.

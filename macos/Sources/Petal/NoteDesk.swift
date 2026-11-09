@@ -112,6 +112,9 @@ final class NoteDesk {
     /// `notes`, `notesLook` or `notesFolder` changed (or any setting did).
     func settingsChanged() {
         followFolderSetting()
+        // Mission Control from the shared watcher, needed while notes are on (whichever dock is chosen).
+        MissionControlWatch.shared.subscribe("notes") { [weak self] open in self?.missionControl(open) }
+        MissionControlWatch.shared.need("notes", on && !Headless.on)
         if on && !listening {
             listening = true
             WindowEvents.shared.listen("papernotes") { [weak self] event in self?.event(event) }
@@ -144,7 +147,11 @@ final class NoteDesk {
             concealWindowNotes()
         }
         // The person went to another app before a paper waiting for the keyboard showed: it doesn't take it.
-        if event.kind == .activated, event.pid != getpid() { keyboardWanted.cancelAll() }
+        // Focus going elsewhere before a paper waiting for the keyboard showed: its request goes, unless that's the
+        // app and window Petal is bringing forward for it.
+        if event.kind == .activated || event.kind == .focused, event.pid != getpid() {
+            keyboardWanted.focusMoved(pid: event.pid, window: event.window)
+        }
         switch event.kind {
         case .moved, .resized: lookAgain(after: 0.03)
         case .activated, .focused, .closed, .titleChanged, .tabSwitched, .created, .minimized, .unminimized, .shown, .hidden, .quit: lookAgain(after: 0.12)
@@ -929,24 +936,26 @@ final class NoteDesk {
         if !showing, let first = ids.first { open(first) } else { layout() }
     }
 
-    func open(_ key: String) {
+    /// `expecting`: the app and window Petal is bringing forward for it (a drop on a window behind): focus going
+    /// there doesn't drop its keyboard request.
+    func open(_ key: String, expecting: NoteShelf.KeyboardRequests.Target? = nil) {
         guard let paper = store.paper(key) else { return }
         faces[key] = .open
         keyboard = key
         local.shown = Array(Set(local.shown + [paper.noteID]))
         local.save(pending: store.pendingIDs)
         faceChanged(key)
-        wantKeyboard(key)
+        wantKeyboard(key, expecting: expecting)
     }
 
     /// Papers waiting for the keyboard until layout shows them (NoteShelf.KeyboardRequests).
     @ObservationIgnored private var keyboardWanted = NoteShelf.KeyboardRequests()
 
     /// The keyboard for `key`: now when it's shown, else once layout shows it.
-    private func wantKeyboard(_ key: String) {
+    private func wantKeyboard(_ key: String, expecting: NoteShelf.KeyboardRequests.Target? = nil) {
         let panel = panel(for: key)
         panel.refit()
-        if keyboardWanted.request(key, shown: panel.unveiled) { panel.takeKeyboard() }
+        if keyboardWanted.request(key, shown: panel.unveiled, expecting: expecting) { panel.takeKeyboard() }
     }
 
     /// Layout just showed `key`: the keyboard it was waiting for.
@@ -1473,7 +1482,8 @@ final class NoteDesk {
     @discardableResult
     /// `window`: the frame (Accessibility's coordinates) of the window it's made on, when that isn't the one in
     /// front (a drop on a window behind): its spot is recorded against that window.
-    func make(on stick: NoteStick, body: String = "", chat: String = "", at point: CGPoint? = nil, window: CGRect? = nil) -> PaperNote? {
+    func make(on stick: NoteStick, body: String = "", chat: String = "", at point: CGPoint? = nil, window: CGRect? = nil,
+              expecting: NoteShelf.KeyboardRequests.Target? = nil) -> PaperNote? {
         var file = NoteFile(body: body)
         file.places = [stick]
         file.chat = chat
@@ -1489,7 +1499,7 @@ final class NoteDesk {
             }
         }
         if let scene, stick.kind != .desktop, let index = NoteMatch.best([stick], scene) { here[paper.key] = index }
-        open(paper.key)
+        open(paper.key, expecting: expecting)
         if stick.kind == .desktop { refreshSpaces() }
         return paper
     }
@@ -1645,7 +1655,12 @@ final class NoteDesk {
                         if scene.window != number { scene.tab = nil; scene.file = ""; scene.window = number; scene.title = title }
                         if read.window == number { self.activate(scene, read: read, ticket: ticket) }
                         let offers = self.places(for: scene, read: read, appName: name)
-                        if let first = offers.first(where: { $0.kind != .passage }) { self.make(on: first, at: point, window: read.window == number ? read.frame ?? bounds : bounds) }
+                        // Brought forward for it (not in front now): its keyboard request waits for that app and window.
+                        let bringing = read.window != number || !running.isActive
+                        let target = bringing ? NoteShelf.KeyboardRequests.Target(pid: pid, window: number) : nil
+                        if let first = offers.first(where: { $0.kind != .passage }) {
+                            self.make(on: first, at: point, window: read.window == number ? read.frame ?? bounds : bounds, expecting: target)
+                        }
                         // Another window than the one in front: it comes forward (the pointer stays), and the note with it.
                         if read.window != number || !running.isActive { self.bringForward(pid: pid, window: number) }
                     }

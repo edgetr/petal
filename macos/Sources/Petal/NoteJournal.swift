@@ -272,7 +272,12 @@ enum NoteJournal {
         try? fm.createDirectory(at: assets, withIntermediateDirectories: true)
         for picture in pictures {
             let into = assets.appending(path: picture.name)
-            if !fm.fileExists(atPath: into.path), (try? picture.data.write(to: into, options: .withoutOverwriting)) == nil { return nil }
+            if fm.fileExists(atPath: into.path) {
+                // Another picture by that name there: never taken for this one; the rest goes to a rescue of its own.
+                if !NoteShelf.acceptExisting(existing: try? Data(contentsOf: into), wanted: picture.data) {
+                    return NoteStore.rescued(entry.text, noteID: entry.noteID, pictures: pictures, from: file.deletingLastPathComponent())
+                }
+            } else if (try? picture.data.write(to: into, options: .withoutOverwriting)) == nil { return nil }
         }
         // Nothing there, or what landed there: written; a file that can't be read, or changed since: kept, and the
         // rest goes to a file of its own (NoteShelf.continueWrite).

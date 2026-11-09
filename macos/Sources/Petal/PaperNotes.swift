@@ -707,6 +707,9 @@ final class NoteStore {
             guard safe(file, root: root) else { return written }
             if !FileManager.default.fileExists(atPath: file.path) {
                 guard (try? picture.data.write(to: file, options: .withoutOverwriting)) != nil else { return written }
+            } else if !NoteShelf.acceptExisting(existing: try? Data(contentsOf: file), wanted: picture.data) {
+                // Another picture by that name: never taken for this one (and never written over).
+                return written
             }
             written.append((folder.lastPathComponent + "/" + picture.name, file, picture.caption))
         }
@@ -1234,29 +1237,35 @@ final class NoteStore {
     /// written and the journal keeps it.
     nonisolated static func rescued(_ text: String, noteID: String, pictures: [NotePictureBytes], from noteFolder: URL? = nil) -> URL? {
         let fm = FileManager.default
-        let folder = Config.supportFolder.appending(path: "Unsaved notes")
+        // A folder of its own (NoteShelf.rescueFolder): another note's pictures are never met there.
+        let folder = Config.supportFolder.appending(path: "Unsaved notes").appending(path: NoteShelf.rescueFolder(noteID: noteID, at: Date()))
         try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
-        if !pictures.isEmpty {
-            let assets = folder.appending(path: NoteShelf.assetsFolder(id: noteID))
-            try? fm.createDirectory(at: assets, withIntermediateDirectories: true)
-            for picture in pictures {
-                let file = assets.appending(path: picture.name)
-                if !fm.fileExists(atPath: file.path), (try? picture.data.write(to: file, options: .withoutOverwriting)) == nil { return nil }
-            }
-        }
-        // Every picture the text references, there too: the older ones copied from beside the note.
+        // Every picture the text references, there too: bytes still in memory, else the older ones copied from
+        // beside the note; one already there counts only when it's the same bytes.
         let referenced = NoteShelf.referencedPictures(text)
         var present = Set<String>()
         for path in referenced {
             let into = folder.appending(path: path)
             guard NoteShelf.within(into.path, folder.path) != nil else { continue }
-            if fm.fileExists(atPath: into.path) { present.insert(path); continue }
+            let wanted: Data?
+            if let bytes = pictures.first(where: { $0.name == (path as NSString).lastPathComponent }) { wanted = bytes.data }
+            else if let noteFolder, case let source = noteFolder.appending(path: path), NoteShelf.within(source.path, noteFolder.path) != nil {
+                wanted = picture(at: source)
+            } else { wanted = nil }
+            guard let wanted else { continue }
+            if fm.fileExists(atPath: into.path) {
+                if NoteShelf.acceptExisting(existing: try? Data(contentsOf: into), wanted: wanted) { present.insert(path) }
+                continue
+            }
             try? fm.createDirectory(at: into.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if let bytes = pictures.first(where: { $0.name == (path as NSString).lastPathComponent }) {
-                if (try? bytes.data.write(to: into, options: .withoutOverwriting)) != nil { present.insert(path) }
-            } else if let noteFolder, case let source = noteFolder.appending(path: path), NoteShelf.within(source.path, noteFolder.path) != nil,
-                      let data = picture(at: source), (try? data.write(to: into, options: .withoutOverwriting)) != nil {
-                present.insert(path)
+            if (try? wanted.write(to: into, options: .withoutOverwriting)) != nil { present.insert(path) }
+        }
+        // Bytes it carries that its text doesn't (yet) reference: kept beside it too.
+        if !pictures.isEmpty {
+            let assets = folder.appending(path: NoteShelf.assetsFolder(id: noteID))
+            try? fm.createDirectory(at: assets, withIntermediateDirectories: true)
+            for picture in pictures where !fm.fileExists(atPath: assets.appending(path: picture.name).path) {
+                if (try? picture.data.write(to: assets.appending(path: picture.name), options: .withoutOverwriting)) == nil { return nil }
             }
         }
         guard NoteShelf.rescueComplete(referenced: referenced, present: present) else { return nil }

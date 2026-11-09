@@ -216,11 +216,13 @@ struct NoteStoreCheck {
         NoteStore.drain([(session: 3, items: [item(21, .pictureBytes([NotePictureBytes(name: "picture-u.png", data: Data("u".utf8), caption: "")], noteID: "S3")),
                                               item(20, .write(text: kept.serialized(), base: s0))])], root: root)
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: work.path)
+        // Each rescue in a folder of its own in Unsaved notes.
         let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
-        let rescued = (try? fm.contentsOfDirectory(atPath: unsaved.path)) ?? []
-        expect(rescued.contains("Rescued words.md") && text(unsaved.appending(path: "Rescued words.md"))?.contains("keep me") == true,
-               "writing that can't land by quit is kept in Unsaved notes", "\(rescued)")
-        expect(fm.fileExists(atPath: unsaved.appending(path: reference).path), "with the pictures it references, where its references point")
+        let rescuedFile = ((try? fm.contentsOfDirectory(atPath: unsaved.path)) ?? []).map { unsaved.appending(path: $0 + "/Rescued words.md") }
+            .first { fm.fileExists(atPath: $0.path) }
+        expect(rescuedFile.flatMap(text)?.contains("keep me") == true, "writing that can't land by quit is kept in Unsaved notes, in a folder of its own")
+        expect(rescuedFile.map { fm.fileExists(atPath: $0.deletingLastPathComponent().appending(path: reference).path) } == true,
+               "with the pictures it references, where its references point")
         expect(text(stuck) == s0, "and the file is as it was")
 
         // Keep this one: checked again inside each coordinated step; a file edited since stops it.
@@ -368,7 +370,7 @@ struct NoteStoreCheck {
         NoteJournal.recover(holding, root: root)
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: lockedNotes.path)
         let rest = NoteJournal.read(NoteJournal.file("JU", in: holding))
-        let unsavedFolder = Config.supportFolder.appending(path: "Unsaved notes")
+        let unsavedFolder = rest?.landedAt.map { URL(fileURLWithPath: $0).deletingLastPathComponent() } ?? Config.supportFolder
         expect(rest?.landedAt?.contains("Unsaved notes") == true && rest?.pictures.count == 1 && rest?.imports?.count == 1 && text(lockedNote) == tripText,
                "landed in Unsaved notes: the rest continues there, the first picture's bytes kept", "\(String(describing: rest?.landedAt))")
         try? png?.write(to: later)
@@ -388,9 +390,31 @@ struct NoteStoreCheck {
         let rescuedText = NoteFile(id: "RS", body: "# Illustrated\n![](\(NoteShelf.assetsFolder(id: "RS"))/old.png)\n![](\(NoteShelf.assetsFolder(id: "RS"))/new.png)").serialized()
         let newBytes = NotePictureBytes(name: "new.png", data: png ?? Data(), caption: "")
         let rescuedTo = NoteStore.rescued(rescuedText, noteID: "RS", pictures: [newBytes], from: illustratedFolder)
-        let rescueAssets = Config.supportFolder.appending(path: "Unsaved notes/" + NoteShelf.assetsFolder(id: "RS"))
+        let rescueAssets = (rescuedTo?.deletingLastPathComponent() ?? Config.supportFolder).appending(path: NoteShelf.assetsFolder(id: "RS"))
         expect(rescuedTo != nil && fm.fileExists(atPath: rescueAssets.appending(path: "old.png").path) && fm.fileExists(atPath: rescueAssets.appending(path: "new.png").path),
                "the older picture copied with the new one")
+        // Two notes with the same relative picture (`Trip.assets/photo.png`, different pictures): each rescue in its own
+        // folder, each with its own picture.
+        let workTrip = root.appending(path: "WorkTrip"), homeTrip = root.appending(path: "HomeTrip")
+        for (folder, bytes) in [(workTrip, "work photo"), (homeTrip, "home photo")] {
+            try? fm.createDirectory(at: folder.appending(path: "Trip.assets"), withIntermediateDirectories: true)
+            try? Data(bytes.utf8).write(to: folder.appending(path: "Trip.assets/photo.png"))
+        }
+        let workRescue = NoteStore.rescued(NoteFile(id: "W1", body: "# Work\n![](Trip.assets/photo.png)").serialized(), noteID: "W1", pictures: [], from: workTrip)
+        let homeRescue = NoteStore.rescued(NoteFile(id: "H1", body: "# Home\n![](Trip.assets/photo.png)").serialized(), noteID: "H1", pictures: [], from: homeTrip)
+        expect(workRescue?.deletingLastPathComponent() != homeRescue?.deletingLastPathComponent()
+               && workRescue.flatMap { text($0.deletingLastPathComponent().appending(path: "Trip.assets/photo.png")) } == "work photo"
+               && homeRescue.flatMap { text($0.deletingLastPathComponent().appending(path: "Trip.assets/photo.png")) } == "home photo",
+               "two notes' pictures of one name: each rescue its own folder and its own picture")
+        expect(NoteShelf.acceptExisting(existing: Data("a".utf8), wanted: Data("a".utf8)) && !NoteShelf.acceptExisting(existing: Data("a".utf8), wanted: Data("b".utf8))
+               && !NoteShelf.acceptExisting(existing: nil, wanted: Data("a".utf8)), "an existing picture counts only when it's the same bytes")
+        // A picture already where a recovery puts its own, with other bytes: never taken for it.
+        let taken = root.appending(path: "Taken/" + NoteShelf.assetsFolder(id: "TK"))
+        try? fm.createDirectory(at: taken, withIntermediateDirectories: true)
+        try? Data("someone else's".utf8).write(to: taken.appending(path: "p.png"))
+        expect(NoteStore.writePictures([NotePictureBytes(name: "p.png", data: Data("mine".utf8), caption: "")], into: taken, root: root).isEmpty
+               && text(taken.appending(path: "p.png")) == "someone else's", "another picture by that name: not counted as written, and not written over")
+
         let gapText = NoteFile(id: "RG", body: "# Gap\n![](\(NoteShelf.assetsFolder(id: "RG"))/nowhere.png)").serialized()
         expect(NoteStore.rescued(gapText, noteID: "RG", pictures: [], from: illustratedFolder) == nil, "a picture it references that isn't anywhere: not complete (the journal keeps it)")
 
