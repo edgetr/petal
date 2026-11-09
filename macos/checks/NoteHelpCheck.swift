@@ -231,8 +231,11 @@ struct NoteHelpCheck {
         watched?.id = watchID
         expect(NoteFile.parse({ var f = NoteFile(id: "W1", created: now); f.watch = watched; return f.serialized() }(), fallbackID: "x", fallbackDate: now).watch?.id == watchID,
                "a watcher's id reads back")
-        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$99", hint: "from", past: true, confirmed: true, at: now) == true && watched?.last == "$99" && watched?.hit == true,
-               "a look under its own id: written, newly crossed (the only thing that says it)")
+        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$99", hint: "from", past: true, confirmed: true, at: now) == true && watched?.last == "$99" && watched?.hit == false,
+               "a look under its own id: written, newly crossed (the only thing that says it), not a hit until the person is told")
+        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$99", hint: nil, past: true, confirmed: true, at: now) == true,
+               "not shown yet: the next look tells them again")
+        expect(NoteHelp.told(&watched, id: watchID) && watched?.hit == true, "shown to the person: the hit is kept")
         expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$98", hint: nil, past: true, confirmed: false, at: now) == false && watched?.hit == true, "still past the line: the hit stays, not said again")
         expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$120", hint: nil, past: false, confirmed: false, at: now) == false && watched?.hit == false, "back over the line")
         expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$90", hint: nil, past: true, confirmed: true, at: now) == true, "crossed again after coming back: said again")
@@ -566,7 +569,7 @@ struct NoteHelpCheck {
         expect(!NoteHelp.documentShowing(placePath: "/Users/someone/Talk.key", sceneFile: ""), "no document read: not its place")
         var held: NoteHelp.Watch? = NoteHelp.Watch(every: "1d", line: "under $100", mac: "m", at: "09:00")
         held?.id = "W"
-        expect(NoteHelp.applyLook(&held, id: "W", shown: "$95", hint: nil, past: true, confirmed: true, at: now) == true && held?.hit == true, "confirmed: a hit")
+        expect(NoteHelp.applyLook(&held, id: "W", shown: "$95", hint: nil, past: true, confirmed: true, at: now) == true && NoteHelp.told(&held, id: "W") && held?.hit == true, "confirmed and told: a hit")
         expect(NoteHelp.applyLook(&held, id: "W", shown: "$94", hint: nil, past: true, confirmed: false, at: now) == false && held?.hit == true,
                "still past the line, nothing confirmed this time: the hit stays (never re-armed)")
         expect(NoteHelp.applyLook(&held, id: "W", shown: "$93", hint: nil, past: true, confirmed: true, at: now) == false, "still past and confirmed again: not said again")
@@ -848,6 +851,68 @@ struct NoteHelpCheck {
         expect(NoteHelp.followUpTarget(runCheckout: "/u/checkout-a", runProvider: "claude", runModel: "", words: "@Petal and look at ~/checkout-a/README", home: "/u") == .newRun
                || NoteHelp.followUpTarget(runCheckout: "/u/checkout-a", runProvider: "claude", runModel: "", words: "@Petal check it in ~/checkout-a", home: "/u") == .same,
                "its own checkout named: it goes to the run")
+
+        // MARK: Round fourteen: the quick queue, a watcher's own output, nameless reasons, titles after redaction
+
+        var quick = QuickQueue<String, String>()
+        let watcherLook = RunToken(), running = RunToken()
+        quick.add(.init(job: "watcher look", token: watcherLook, provider: nil, gate: nil))
+        quick.add(.init(job: "recalculate", token: running, provider: nil, gate: nil))
+        watcherLook.pause()
+        watcherLook.cancel()
+        var passes = 0
+        var answered: [String] = []
+        func drain() {
+            passes += 1
+            guard passes < 10 else { return }
+            let step = quick.pass { _ in .wait }
+            // What a dropped call's answer does (end → halt → resume → a pass) comes after the pass, never inside it.
+            for entry in step.dropped { answered.append(entry.job); drain() }
+        }
+        drain()
+        expect(passes == 2 && answered == ["watcher look"] && quick.entries.map(\.job) == ["recalculate"],
+               "a watcher cancelled while another call waits: taken out before it's answered, answered once, no recursion", "\(passes) \(answered)")
+        var unready = QuickQueue<String, String>()
+        unready.add(.init(job: "named", token: RunToken(), provider: "codex", gate: nil))
+        unready.add(.init(job: "chat", token: RunToken(), provider: nil, gate: nil))
+        let firstStep = unready.pass { named in named == "codex" ? .none : .go("claude") }
+        expect(firstStep.dropped.map(\.job) == ["named"] && firstStep.start?.entry.job == "chat" && unready.isEmpty,
+               "a call whose own AI isn't ready is answered nothing (out first); the next one starts")
+        var answerHeld = NoteFile(id: "J1", created: now)
+        answerHeld.ink = [NoteHelp.Ink(who: "✦ Petal", text: "The answer")]
+        var watchHeld = NoteFile(id: "J1", created: now)
+        var lookWatch = NoteHelp.Watch(every: "1d", line: "under $100", mac: "m")
+        lookWatch.id = "W1"; lookWatch.last = "$95"
+        watchHeld.watch = lookWatch
+        let answerEntry = HelperJournal.Entry(noteID: "J1", answer: answerHeld.serialized(), at: now)
+        let watchEntry = HelperJournal.Entry(noteID: "J1", answer: watchHeld.serialized(), at: now.addingTimeInterval(1), kind: .watch)
+        expect(HelperJournal.adding(watchEntry, to: [answerEntry]).count == 2, "a watcher's look is its own kind in the journal: it never replaces a helper's answer")
+        var paperWithHelper = NoteFile(id: "J1", created: now)
+        paperWithHelper.ink = [NoteHelp.Ink(who: "✦ Petal", text: "The primary answer")]
+        paperWithHelper.helper = NoteHelp.Helper(state: .working, who: "✦ Petal", step: "x", at: now)
+        var olderWatch = lookWatch; olderWatch.last = "$120"
+        paperWithHelper.watch = olderWatch
+        NoteHelp.applyAnswer(watchHeld, to: &paperWithHelper, kind: .watch)
+        expect(paperWithHelper.watch?.last == "$95" && paperWithHelper.ink.first?.text == "The primary answer" && paperWithHelper.helper?.state == .working,
+               "a watcher's look lands only in its watch fields: never the ink or the helper line (so never a chain)")
+        var newerWatcher = olderWatch; newerWatcher.id = "W2"
+        paperWithHelper.watch = newerWatcher
+        NoteHelp.applyAnswer(watchHeld, to: &paperWithHelper, kind: .watch)
+        expect(paperWithHelper.watch?.id == "W2" && paperWithHelper.watch?.last == "$120", "a look for an older watcher lands on nothing")
+        var backOver: NoteHelp.Watch? = lookWatch
+        backOver?.last = "$130"
+        expect(!NoteHelp.told(&backOver, id: "W1") && backOver?.hit == false, "told after the value came back over the line: no hit kept")
+        var waitsNamed = NoteHelp.GateFacts()
+        waitsNamed.notebook = "Work"; waitsNamed.startNotebook = "Work"; waitsNamed.provider = "claude"; waitsNamed.available = ["claude"]
+        waitsNamed.place = "Bank of Q7m!a2Z:91"; waitsNamed.placeShowing = false
+        if case .wait(let why) = NoteHelp.admit(waitsNamed) { expect(!why.contains("Q7m") && !why.contains("Bank"), "a wait's reason never names the place (it goes on the note and to the AI)", why) }
+        else { expect(false, "a place not in front waits") }
+        waitsNamed.place = nil; waitsNamed.document = "/Users/someone/Q7m!a2Z:91.key"; waitsNamed.sceneFile = "/Users/someone/Other.key"
+        if case .wait(let why) = NoteHelp.admit(waitsNamed) { expect(!why.contains("Q7m"), "nor its file", why) } else { expect(false, "a file not showing waits") }
+        guard let afterShown = NoteShield.shield(["# Research \(saved) and more\nIts words"], index: savedIndex) else { return expect(false, "after") }
+        let chainBrief = NoteHelp.brief(NoteHelp.Told(after: afterShown[0]))
+        expect(chainBrief.text.contains("This runs because") && !chainBrief.text.contains("Q7m"), "a chain's done note is named by a title derived after redaction", chainBrief.text)
+        expect(NoteHelp.bareHint.text == "Ask Petal something after @Petal", "replies are Shielded words")
 
         // MARK: Open all never launches an app or a script (NoteTasks)
 

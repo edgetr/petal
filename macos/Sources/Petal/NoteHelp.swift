@@ -732,7 +732,7 @@ enum NoteHelp {
         if case .ask(let text) = request(line, now: Date()) { return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         return false
     }
-    static let bareHint = "Ask Petal something after @Petal"
+    static let bareHint: Shielded = "Ask Petal something after @Petal"
 
     /// A note's name as an @ writes it: one word as it is, more in brackets.
     static func mention(_ name: String) -> String {
@@ -1685,8 +1685,10 @@ extension NoteHelp {
     /// A watcher's look, written back only into its own fields (value, history, checked, hint, hit) and only while
     /// the watcher is still the one it began under (`id`, a UUID made anew on every change of it) and not paused.
     /// Returns whether this write newly crossed the line (nil: nothing written): the only thing that says it.
-    /// `past`: the value is past the line now; `confirmed`: a crossing confirmed with an explicit yes. A hit stays
-    /// while the value stays past the line (never re-armed, never said again) and clears only once it comes back.
+    /// `past`: the value is past the line now; `confirmed`: a crossing confirmed with an explicit yes. Its value
+    /// goes in the corner (the newest, the ones before struck); `hit` is kept only once the person has been told
+    /// (`told`), so a crossing they never saw is told again by the next look. A hit stays while the value stays past
+    /// the line (never said again) and clears only once it comes back.
     static func applyLook(_ watch: inout Watch?, id: String, shown: String?, hint: String?, past: Bool, confirmed: Bool, at time: Date) -> Bool? {
         guard var current = watch, current.id == id, !current.paused else { return nil }
         guard let shown else {
@@ -1697,9 +1699,19 @@ extension NoteHelp {
         current.record(shown, at: time)
         if let hint, !hint.isEmpty { current.hint = hint }
         let newly = past && confirmed && !current.hit
-        current.hit = past && (current.hit || confirmed)
+        current.hit = past && current.hit
         watch = current
         return newly
+    }
+
+    /// The person was shown a crossing (its note on the screen, the number in its corner): `hit` is kept, while the
+    /// watcher is still that one and its newest value still past the line.
+    static func told(_ watch: inout Watch?, id: String) -> Bool {
+        guard var current = watch, current.id == id, !current.paused,
+              let value = amounts(current.last, needCurrency: false).first?.value, crossed(value, line: current.line) else { return false }
+        current.hit = true
+        watch = current
+        return true
     }
 
     /// Where a helper may look, by the note's saved places: the one placed on the window in front now; away when it
@@ -1982,9 +1994,10 @@ extension NoteHelp {
         }
         if let models = f.models, !f.model.isEmpty, !models.contains(f.model) { return .fail("\(f.model) isn't available in Petal now.") }
         if let document = f.document, !documentShowing(placePath: document, sceneFile: f.sceneFile) {
-            return .wait("Waiting for \((document as NSString).lastPathComponent) to be in front.")
+            return .wait("Waiting for this note's file to be in front.")
         }
-        if let place = f.place, !f.placeShowing { return .wait("Waiting for \(place) to be in front.") }
+        // (Said without its name: a reason goes on the note and to the AI, and only what's shielded is ever named.)
+        if f.place != nil, !f.placeShowing { return .wait("Waiting for this note's place to be in front.") }
         return .go
     }
 
@@ -2072,8 +2085,12 @@ extension NoteHelp {
     /// The keys a helper's answer sets, carried from a held answer onto the note it's applied to.
     static let answerKeys = ["helper", "ink", "steps"]
 
-    static func applyAnswer(_ held: NoteFile, to file: inout NoteFile) {
-        for key in answerKeys { file.set(key, held.value(key)) }
+    static func applyAnswer(_ held: NoteFile, to file: inout NoteFile, kind: HelperJournal.Kind = .answer) {
+        switch kind {
+        case .answer: for key in answerKeys { file.set(key, held.value(key)) }
+        // A watcher's look lands only on the watcher it was made for (a newer one, or none, is left as it is).
+        case .watch: if let watch = held.watch, file.watch?.id == watch.id { file.watch = watch }
+        }
     }
 
     /// A paper's open parts within the screen: the editor, then the helper's ink (scrolling past what fits), with the
@@ -2088,10 +2105,17 @@ extension NoteHelp {
 /// The helpers' journal: answers held while their note was in conflict (or not here), by note id, as the answer's
 /// front matter, in the notes journal's folder; applied (and let go) once the note is one writable paper again.
 enum HelperJournal {
+    /// What an entry holds: a helper's answer (its ink, steps and helper line), or a watcher's look (only its `watch`
+    /// fields: its own kind of output, never ink or the helper line, so it can never release a chain).
+    enum Kind: String, Codable { case answer, watch }
+
     struct Entry: Codable, Equatable {
         var noteID: String
         var answer: String
         var at: Date
+        var kind: Kind? = nil
+
+        var of: Kind { kind ?? .answer }
     }
 
     static func load(_ file: URL) -> [Entry] {
@@ -2105,8 +2129,49 @@ enum HelperJournal {
         return (try? data.write(to: file, options: .atomic)) != nil
     }
 
-    /// The newest answer per note: a later one replaces the one before.
-    static func adding(_ entry: Entry, to entries: [Entry]) -> [Entry] { entries.filter { $0.noteID != entry.noteID } + [entry] }
+    /// The newest of each kind per note: a later one replaces the one before (an answer never replaces a watcher's
+    /// look, nor the other way).
+    static func adding(_ entry: Entry, to entries: [Entry]) -> [Entry] {
+        entries.filter { !($0.noteID == entry.noteID && $0.of == entry.of) } + [entry]
+    }
+}
+
+/// The quick AI's queue of calls (Brain): one pass takes out the calls of runs that ended, and the first one that
+/// may go now, or that can't (its AI not ready: answered nothing). Every call is out of the queue before anything is
+/// called back, and nothing is called back inside a pass: the caller answers what's dropped later (async), so an
+/// answer that ends a run and asks the queue again can never come back into the same pass.
+struct QuickQueue<Job, AI> {
+    struct Entry {
+        let job: Job
+        let token: RunToken?
+        let provider: AI?
+        let gate: (() -> Bool)?
+    }
+    enum Resolution { case go(AI), wait, none }
+
+    private(set) var entries: [Entry] = []
+
+    mutating func add(_ entry: Entry) { entries.append(entry) }
+
+    /// A call paused while it ran: kept, first in line, for Go on.
+    mutating func putBack(_ entry: Entry) { entries.insert(entry, at: 0) }
+
+    var isEmpty: Bool { entries.isEmpty }
+
+    /// One pass. `resolve`: the AI a call uses (its own, else the chat's), ready, not found yet (wait), or none.
+    mutating func pass(_ resolve: (AI?) -> Resolution) -> (dropped: [Entry], start: (entry: Entry, ai: AI)?) {
+        let over = { (entry: Entry) in entry.token.map { $0.state == .cancelled || $0.state == .finished } == true }
+        var dropped = entries.filter(over)
+        entries.removeAll(where: over)
+        while let index = entries.firstIndex(where: { ($0.token?.admits ?? true) && ($0.gate?() ?? true) }) {
+            switch resolve(entries[index].provider) {
+            case .go(let ai): return (dropped, (entries.remove(at: index), ai))
+            case .wait: return (dropped, nil)
+            case .none: dropped.append(entries.remove(at: index))
+            }
+        }
+        return (dropped, nil)
+    }
 }
 
 /// A value belonging to one run (the command rules Claude was allowed): kept for continuations of that run, empty
@@ -2181,6 +2246,8 @@ extension NoteHelp {
         /// A notebook to check against: its name and each note's whole text, shielded one by one.
         var sourceBook: Shielded = ""
         var sources: [Shielded] = []
+        /// A chain's note that is done: its whole body (its title derived from it).
+        var after: Shielded = ""
     }
 
     /// A helper's whole system prompt, made only of `Shielded` parts (no window or tab title, no raw text): what it
@@ -2216,6 +2283,7 @@ extension NoteHelp {
             words = words + "\n\nThe note isn't on a window now: don't look at what's in front unless the user's line asks for it."
         }
         if !t.extra.isEmpty { words = words + "\n\n\(t.extra)" }
+        if !t.after.isEmpty { words = words + "\n\nThis runs because “\(t.after.title)” is done: read it with petal_note_read, its helper's answer included." }
         if !t.sources.isEmpty { words = words + "\n\n\(comparison(t))" }
         return words
     }

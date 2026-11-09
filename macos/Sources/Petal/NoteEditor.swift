@@ -1449,7 +1449,7 @@ final class NoteEditorHandle {
 /// Return hands a helper. It runs once; a run that fails or is stopped, a refusal, or a follow-up never sent makes it
 /// runnable again while its editor is open and the line is as it was. A restart (or a closed editor) leaves nothing
 /// runnable: edit the line to run it again.
-final class NoteLine {
+final class NoteLine: @unchecked Sendable {
     static let key = NSAttributedString.Key("petal.helperLine")
     let mark: String
     weak var view: NoteTextView?

@@ -42,8 +42,8 @@ final class StickyNote {
     @ObservationIgnored var secret = false
     /// A second opinion's helper (its own agent beside the note's).
     @ObservationIgnored var reviewer = false
-    /// A helper whose note moved to a place that isn't in front: what it waits for (its default look and act refused).
-    @ObservationIgnored var waitingFor: String?
+    /// A helper whose note moved to a place that isn't in front: it waits for it (its default look and act refused).
+    @ObservationIgnored var waitingForPlace = false
 
     var place: NotePlace? {
         get { agent.place }
@@ -71,8 +71,9 @@ extension ClaudePanel {
 
     /// Why a note's helper can't look or act on its default target now (its note's place isn't in front), or nil.
     func helperWaiting(_ id: String?) -> String? {
-        guard let id, let note = note(withID: id), note.paper != nil, let label = note.waitingFor else { return nil }
-        return "This note's place (\(label)) isn't in front: Petal is waiting for it. Say so in one line, and go on once it's there."
+        // Never named: what an AI is told of a place is only what NoteShield made of it.
+        guard let id, let note = note(withID: id), note.paper != nil, note.waitingForPlace else { return nil }
+        return "This note's place isn't in front: Petal is waiting for it. Say so in one line, and go on once it's there."
     }
 
     /// The place a chat's tools look at: its note's (a helper's always; an AI sticky note's while those are on).

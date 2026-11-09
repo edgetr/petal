@@ -122,6 +122,9 @@ struct Shielded: Equatable, Sendable, CustomStringConvertible, ExpressibleByStri
     /// The finish line ("done means …") in the redacted words.
     var finishLine: Shielded? { NoteHelp.finishLine(text).map { Shielded(verified: $0) } }
 
+    /// Its first sentence (derived after redaction).
+    var firstSentence: Shielded { Shielded(verified: text.components(separatedBy: CharacterSet(charactersIn: ".\n")).first ?? text) }
+
     /// The line without its @Petal.
     var spoken: Shielded { Shielded(verified: NoteHelp.spoken(text)) }
 

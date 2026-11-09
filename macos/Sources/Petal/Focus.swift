@@ -4,8 +4,9 @@ import AppKit
 /// Haiku; Codex at low effort): one at a time, answers cached.
 @MainActor
 final class Brain {
-    private typealias Job = (prompt: String, key: String, token: RunToken?, provider: Provider?, gate: (() -> Bool)?, done: ([String: Any]?) -> Void)
-    private var queue: [Job] = []
+    private typealias Job = (prompt: String, key: String, done: ([String: Any]?) -> Void)
+    /// Calls waiting (NoteHelp's QuickQueue: each out of the queue before anything is called back).
+    private var queue = QuickQueue<Job, Provider>()
     private var busy = false
     private var cache: [String: [String: Any]] = [:]
 
@@ -77,7 +78,7 @@ final class Brain {
     /// One quick JSON call (answers cached by `key`).
     func ask(_ prompt: String, key: String, done: @escaping ([String: Any]?) -> Void) {
         if let cached = cache[key] { return done(cached) }
-        queue.append((prompt, key, nil, nil, nil, done))
+        queue.add(.init(job: (prompt, key, done), token: nil, provider: nil, gate: nil))
         next()
     }
 
@@ -87,41 +88,31 @@ final class Brain {
     /// asked right when the call would start (false: it waits, or its run already failed).
     func ask(_ prompt: Shielded, key: String, token: RunToken, provider: Provider? = nil, gate: (() -> Bool)? = nil,
              done: @escaping ([String: Any]?) -> Void) {
-        queue.append((prompt.text, key, token, provider, gate, done))
+        queue.add(.init(job: (prompt.text, key, done), token: token, provider: provider, gate: gate))
         next()
     }
 
-    /// A run went on (Go on): its calls waiting are admitted again.
-    func resume() { next() }
+    /// A run went on (Go on) or ended: its calls waiting are admitted again, or dropped. Asked later, never inside a
+    /// pass (an answer that ends a run asks again from outside it).
+    func resume() { DispatchQueue.main.async { MainActor.assumeIsolated { self.next() } } }
 
     private func next() {
         guard !busy, !queue.isEmpty else { return }
-        // Calls of stopped runs go; calls of paused runs wait where they are; the first admitted goes now, a helper's
-        // only once its gate admits it right then (a run that fails there is dropped on the next pass).
-        let over = { (job: Job) in job.token.map { $0.state == .cancelled || $0.state == .finished } == true }
-        for job in queue where over(job) { job.done(nil) }
-        queue.removeAll(where: over)
-        guard let index = queue.firstIndex(where: { ($0.token?.admits ?? true) && ($0.gate?() ?? true) }) else {
-            // A gate that failed its run: that call goes now.
-            if queue.contains(where: over) { next() }
-            return
+        // One pass: calls of stopped runs taken out; calls of paused runs wait where they are; the first admitted goes
+        // now, a helper's only once its gate admits it right then. Its own AI first (the one the person named, else
+        // the chat's), and only then whether that one is ready: none chosen, a named one not found, or one on an API
+        // key with none saved hears nothing (never another instead, never a quiet fall back to the subscription). The
+        // chat's not found yet (at launch) is waited for.
+        let app = PetalApp.shared
+        let step = queue.pass { named in
+            guard let provider = named ?? app.chatProvider else { return .none }
+            guard app.paths[provider] != nil else { return named == nil ? .wait : .none }
+            return app.aiReady(provider) ? .go(provider) : .none
         }
-        let job = queue[index]
-        // Its own AI first (the one the person named, else the chat's), and only then whether that one is ready:
-        // none chosen, a named one not found, or one on an API key with none saved hears nothing (never another
-        // instead, never a quiet fall back to the subscription). The chat's not found yet (at launch) is waited for.
-        let unanswered = { () -> Void in
-            self.queue.remove(at: index)
-            job.done(nil)
-            self.next()
-        }
-        guard let provider = job.provider ?? PetalApp.shared.chatProvider else { return unanswered() }
-        guard let path = PetalApp.shared.paths[provider] else {
-            if job.provider == nil { return }
-            return unanswered()
-        }
-        guard PetalApp.shared.aiReady(provider) else { return unanswered() }
-        queue.remove(at: index)
+        // What's dropped is answered later, outside this pass (its answer may end a run, which asks the queue again).
+        for entry in step.dropped { DispatchQueue.main.async { entry.job.done(nil) } }
+        guard let (entry, provider) = step.start, let path = app.paths[provider] else { return }
+        let job = (prompt: entry.job.prompt, key: entry.job.key, token: entry.token, done: entry.job.done)
         busy = true
         let environment = PetalApp.shared.aiEnvironment(provider)
         let api = PetalApp.shared.usesAPIKey(provider)
@@ -164,7 +155,7 @@ final class Brain {
                     if let spent { PetalApp.shared.usage.addSpend(spent, for: provider) }
                     // Paused while it ran: kept, first in line, for Go on (its answer, if any, isn't used).
                     if job.token?.paused == true {
-                        self.queue.insert(job, at: 0)
+                        self.queue.putBack(entry)
                         self.busy = false
                         return self.next()
                     }

@@ -178,7 +178,7 @@ perl -0777 -ne '
 # before the line is taken or any run registered; control requests come before follow-up routing; a follow-up's line
 # goes with it through delivery; an empty prompt never reaches an agent.
 perl -0777 -ne '
-    unless (/func returned\(_ key: String, line: String, at ticket: NoteLine\) \{.*?if NoteHelp\.bare\(trimmed\) \{ return reply\(noteID, NoteHelp\.bareHint.*?guard NoteShelf\.lasting\(noteID, pending: desk\.store\.pendingIDs\) else \{\s*return desk\.store\.ensureID\(.*?ticket\.take\(\).*?if NoteHelp\.isControl\(request\) \{ return control\(.*?NoteHelp\.followUpTarget\(/s
+    unless (/func returned\(_ key: String, line: String, at ticket: NoteLine\) \{.*?if NoteHelp\.bare\(trimmed\) \{ return reply\(noteID, giveBack: nil\) \{ _ in NoteHelp\.bareHint.*?guard NoteShelf\.lasting\(noteID, pending: desk\.store\.pendingIDs\) else \{\s*return desk\.store\.ensureID\(.*?ticket\.take\(\).*?if NoteHelp\.isControl\(request\) \{ return control\(.*?NoteHelp\.followUpTarget\(/s
             && /func deliver\(.*?guard !prompt\.text\.trimmingCharacters/s && /func letGo\(.*?run\.line\?\.again\(\)/s
             && /followUps\.add\(told\.ask, note: noteID, token: run\.token, line: ticket\)/ && /followUp\(run, next\.text, line: next\.line\)/
             && /private func followUp\(_ run: Run, _ words: Shielded, line: NoteLine\?\) \{\s*if let line \{ run\.line = line \}/) {
@@ -213,7 +213,7 @@ perl -0777 -ne '
 ' Sources/Petal/NoteHelpers.swift
 # A quick call uses its own AI: chosen first (the one named, else the chat'"'"'s), then checked ready.
 perl -0777 -ne '
-    unless (/guard let provider = job\.provider \?\? PetalApp\.shared\.chatProvider else \{ return unanswered\(\) \}.*?guard PetalApp\.shared\.aiReady\(provider\) else/s && !/aiReady\(chat\)/) {
+    unless (/guard let provider = named \?\? app\.chatProvider else \{ return \.none \}.*?return app\.aiReady\(provider\) \? \.go\(provider\) : \.none/s && !/aiReady\(chat\)/) {
         print "Brain: each call picks its own AI before checking it is ready\n"; exit 1 }
     print "brain: each call picks its own AI first\n";
 ' Sources/Petal/Focus.swift
@@ -222,7 +222,7 @@ perl -0777 -ne '
 perl -0777 -ne '
     my $done = () = /state: \.done/g;
     unless ($done == 1 && /case \.succeeded\(let ink, let who, let steps\):\s*guard run\.token\.complete\(\.succeeded\) else \{ return \}.*?state: \.done/s
-            && /private func reply\(_ noteID: String, _ text: String, giveBack line: NoteLine\?\) \{\s*line\?\.again\(\)\s*hint\(noteID, text\)\s*\}/s) {
+            && /private func reply\(_ noteID: String, giveBack line: NoteLine\?.*?\{\s*line\?\.again\(\)\s*guard !parts\.isEmpty else \{ return hint\(noteID, words\(\[\]\)\) \}/s) {
         print "NoteHelpers: only a succeeded run writes done; replies stay faint\n"; exit 1 }
     print "helpers: only a succeeded run writes done; replies are faint\n";
 ' Sources/Petal/NoteHelpers.swift
@@ -246,8 +246,8 @@ perl -0777 -ne '
             && /private func release\(_ run: Run\) \{\s*if runs\[run\.noteID\] === run \{\s*runs\[run\.noteID\] = nil/
             && !/func say\(|func refuse\(|func succeeded\(|func answer\(|desk\.tell\(/ && $hints == 2
             && /end\(run, \.succeeded\(ink: \[\]\)\)/ && /self\.end\(run, \.succeeded\(ink: \[NoteHelp\.Ink\(who: who, text: line\)\], who: who\)\)/
-            && /self\.end\(run, \.succeeded\(ink: \[NoteHelp\.Ink\(who: run\.who, text: words\)\], who: Self\.petalWho\)\)/
-            && /run\.kind == \.quick \{\s*return reply\(paper\.noteID, "A quick helper/) {
+            && /self\.end\(run, \.succeeded\(ink: nil\)\)/
+            && /run\.kind == \.quick \{\s*return reply\(paper\.noteID, giveBack: taking\) \{ _ in "A quick helper/) {
         print "NoteHelpers: every run kind must end through end, every reply through reply ($direct completes, $nil removals, $hints hints)\n"; exit 1 }
     print "helpers: one end for every run kind, one reply\n";
 ' Sources/Petal/NoteHelpers.swift
@@ -258,9 +258,49 @@ perl -ne '
     END { exit 1 if $bad || !$raw; print "helpers: only whole sources are shielded; what is needed is derived after\n" }
 ' Sources/Petal/NoteHelpers.swift
 grep -q 'Told(ask: shown\[0\].spoken' Sources/Petal/NoteHelpers.swift && grep -q 't.body.rows.map' Sources/Petal/NoteHelp.swift \
-    && grep -q 'guard let words = told.ask.watch else' Sources/Petal/NoteHelpers.swift && grep -q 'guard let ask = told.ask.chainAsk?.text else' Sources/Petal/NoteHelpers.swift \
+    && grep -q 'guard let words = told.ask.watch else' Sources/Petal/NoteHelpers.swift && grep -q 'guard let ask = told.ask.chainAsk else' Sources/Petal/NoteHelpers.swift \
     && grep -q 'run.checkout = checkout' Sources/Petal/NoteHelpers.swift \
     || { echo "NoteHelpers: derivations after redaction, and a reviewer keeping its checkout"; exit 1; }
+# The quick queue never calls back inside a pass: each call is out of the queue first, what's dropped is answered
+# later (async), and asking it again is async too; `end` runs once per token; a gate never ends a run in a pass.
+perl -0777 -ne '
+    unless (/let step = queue\.pass \{/ && /for entry in step\.dropped \{ DispatchQueue\.main\.async \{ entry\.job\.done\(nil\) \} \}/
+            && /func resume\(\) \{ DispatchQueue\.main\.async/ && !/queue\.removeAll|for job in queue/) { print "Brain: the quick queue must take calls out first and never call back inside a pass\n"; exit 1 }
+    print "brain: calls out of the queue first, answered outside the pass\n";
+' Sources/Petal/Focus.swift
+perl -0777 -ne '
+    unless (/private func end\(_ run: Run, _ ending: Ending\) \{.*?guard run\.token\.completion == nil, /s
+            && /case \.fail\(let reason\):\s*DispatchQueue\.main\.async \{ MainActor\.assumeIsolated \{ self\.fail\(run/s) {
+        print "NoteHelpers: end once per token; a quick gate never ends a run inside a pass\n"; exit 1 }
+    print "helpers: end runs once per token\n";
+' Sources/Petal/NoteHelpers.swift
+# A watcher's results never touch the ink or the helper line: its own kind of journal output (only `watch`), `hit`
+# kept only once the person was shown it; no ink, no faint word from a look.
+perl -0777 -ne '
+    unless (/self\.keepWatch\(noteID\) \{ current in\s*newly\.value = NoteHelp\.applyLook\(/s && /if let ink, !look \{/
+            && /private func tellHit\(.*?self\.desk\?\.isShowing\(key\) == true.*?NoteHelp\.told\(&watch, id: watchID\)/s
+            && !/not confirmed\./ && !/reply\?\["say"\]/) { print "NoteHelpers: a watcher writes only its watch, its hit kept once told\n"; exit 1 }
+    print "helpers: a watcher writes only its own watch fields\n";
+' Sources/Petal/NoteHelpers.swift
+# Anything said of a note (a prompt, ink, a reply, a step, a chip) comes from Shielded whole sources: replies take
+# only Shielded words; no title, file name or label is cut from raw text into what's said (only two raw title uses
+# remain: finding a note by its name, and the @ menu'"'"'s names, both local).
+perl -0777 -ne '
+    my $titles = () = /file\.title/g;
+    unless ($titles == 2 && /private func reply\(_ noteID: String, giveBack line: NoteLine\?, _ parts: \[String\] = \[\], _ words: \@escaping \@MainActor \(\[Shielded\]\) -> Shielded\)/
+            && /private func hint\(_ noteID: String, _ words: Shielded\)/ && !/\.label\(\)/ && !/label\.prefix|prefix\(48\)|prefix\(30\)/) {
+        print "NoteHelpers: what is said of a note comes only from Shielded whole sources ($titles raw titles)\n"; exit 1 }
+    print "helpers: replies, steps and chips only from Shielded whole sources\n";
+' Sources/Petal/NoteHelpers.swift
+! grep -n 'paper\.file\.title' Sources/Petal/NoteTools.swift || { echo "NoteTools: chips take titles derived after redaction"; exit 1; }
+grep -q 'This note.s place isn.t in front: Petal is waiting for it' Sources/Petal/StickyNotes.swift && ! grep -n 'waitingFor:' Sources/Petal/StickyNotes.swift \
+    || { echo "StickyNotes: a helper waiting is never told its place by name"; exit 1; }
+# A reviewer is registered before its AI is checked: every way it can't go ends through end (its line given back).
+perl -0777 -ne '
+    unless (/private func secondOpinion\(.*?let run = begin\(paper, asked: asked.*?guard case \.use\(let id\) = provider\(for: model\).*?return fail\(run,/s) {
+        print "NoteHelpers: a reviewer is registered before its AI is checked\n"; exit 1 }
+    print "helpers: a reviewer ends through end, its AI checked after it holds its line\n";
+' Sources/Petal/NoteHelpers.swift
 # Every reviewer output, its turns on the way included, goes through opinion (output).
 perl -0777 -ne '
     if (/Something said meanwhile.*?\n\s*return\n/s && $& !~ /output\(run,/) { print "NoteHelpers: a reviewer turn must go through output\n"; exit 1 }

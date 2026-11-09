@@ -20,10 +20,15 @@ extension NoteDesk {
         let asking = caller.flatMap { app.claude.note(withID: $0)?.paper }.flatMap { helpers.paper($0) }
         let readable = { (paper: PaperNote) in self.helpers.mayRead(paper.notebook, from: asking) }
         // The notes a quick question (or a helper) used: chips under its answer, each opening its note.
+        // Their titles derived from their whole bodies once shielded (never cut from the raw text first).
         let used = { (papers: [PaperNote]) in
             guard let agent = caller.flatMap({ self.app.claude.note(withID: $0)?.agent }) else { return }
-            for paper in papers where !agent.sources.contains(where: { $0.noteID == paper.noteID }) {
-                agent.sources.append(NoteSource(noteID: paper.noteID, title: paper.file.title.isEmpty ? "A note" : paper.file.title))
+            let fresh = papers.filter { paper in !agent.sources.contains { $0.noteID == paper.noteID } }
+            guard !fresh.isEmpty else { return }
+            NoteHelpers.shield(fresh.map(\.file.body)) { shown in
+                for (paper, words) in zip(fresh, shown ?? []) where !agent.sources.contains(where: { $0.noteID == paper.noteID }) {
+                    agent.sources.append(NoteSource(noteID: paper.noteID, title: words.title.isEmpty ? "A note" : words.title.text))
+                }
             }
         }
         // Everything told goes through the vault's redaction first (NoteShield, the rule petal_ui and petal_look
