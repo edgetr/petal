@@ -143,10 +143,16 @@ final class NoteDesk {
                     self.local = loaded
                     self.rootCache = (setting, root)
                     NoteJournal.queue.async {
+                        // Canvas edits a launch before kept: moved aside first (the notes' recovery removes its own
+                        // folder once its notes are back), then put back by their notebook's cover id after the notes.
+                        let canvases = NoteJournal.canvasLeftovers()
                         // The journal as it was, and any recovery a launch before didn't finish: resumed, entry by entry.
                         let leftovers = NoteJournal.leftovers()
-                        guard !leftovers.isEmpty else { return }
-                        NoteStore.io.async { for holding in leftovers { NoteJournal.recover(holding, root: root) } }
+                        guard !leftovers.isEmpty || !canvases.isEmpty else { return }
+                        NoteStore.io.async {
+                            for holding in leftovers { NoteJournal.recover(holding, root: root) }
+                            for holding in canvases { NoteJournal.recoverCanvas(holding, root: root) }
+                        }
                     }
                     self.store.switchRoot(to: root)
                     self.ready = true
@@ -1168,6 +1174,14 @@ final class NoteDesk {
         let mouse = NSEvent.mouseLocation
         let screen = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame ?? .zero
         let corner = point ?? CGPoint(x: screen.midX - PaperLook.openWidth / 2, y: screen.midY + 220)
+        // A note in a conflict opens with every other paper of it beside it (all read only, each with Keep this one),
+        // through layout like any paper.
+        let group = NoteShelf.standaloneGroup(key, group: store.paper(key).flatMap { store.conflict(of: $0) }?.map(\.key) ?? [])
+        for (index, other) in group.enumerated() where other != key {
+            standalone[other] = CGPoint(x: corner.x + CGFloat(index) * (PaperLook.openWidth + 16), y: corner.y)
+            faces[other] = .open
+            if fromLibrary { standaloneFromLibrary.insert(other) } else { standaloneFromLibrary.remove(other) }
+        }
         standalone[key] = corner
         faces[key] = .open
         keyboard = key

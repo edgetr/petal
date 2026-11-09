@@ -112,6 +112,44 @@ extension NoteDesk {
     }
 }
 
+// MARK: - A task's parts
+
+extension NoteTasks {
+    /// Open all: each part of a task through the normal open paths (a tab in the person's browser, a file in its own
+    /// app, a mail in Mail by its message address), asynchronously (Launch Services never asked on the main thread to
+    /// wait), never moving the pointer; nothing is sent or changed. Returns how many parts it opened; a window has
+    /// nothing to reopen and is skipped.
+    @MainActor @discardableResult
+    static func openAll(_ items: [NoteContract.TaskItem], said: @escaping @MainActor (String) -> Void = { _ in }) -> Int {
+        let urls = openable(items)
+        let failed = Counter()
+        let group = DispatchGroup()
+        for url in urls {
+            group.enter()
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            NSWorkspace.shared.open(url, configuration: configuration) { _, error in
+                if error != nil { failed.add() }
+                group.leave()
+            }
+        }
+        group.notify(queue: .main) {
+            MainActor.assumeIsolated {
+                let missed = failed.value + (items.count - urls.count)
+                if missed > 0 { said(missed == 1 ? "One part of the task couldn't be opened." : "\(missed) parts of the task couldn't be opened.") }
+            }
+        }
+        return urls.count
+    }
+
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func add() { lock.withLock { count += 1 } }
+        var value: Int { lock.withLock { count } }
+    }
+}
+
 // MARK: - A notebook's stack
 
 /// A notebook in the dock: a little pile of paper in its color.

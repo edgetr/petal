@@ -92,13 +92,36 @@ enum NoteContract {
     static func fromPetal(_ file: NoteFile) -> Bool { file.scalarValue("from") == "petal" }
 
     /// How many things the note holds as a task (`task:` items).
-    static func tasks(_ file: NoteFile) -> Int {
-        guard let lines = file.frontMatter("task") else { return 0 }
-        if let first = lines.first, let colon = first.firstIndex(of: ":") {
-            let raw = String(first[first.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
-            if raw.hasPrefix("[") { return raw.components(separatedBy: "kind").count - 1 }
+    static func tasks(_ file: NoteFile) -> Int { taskItems(file).count }
+
+    /// One thing a note holds as a task: a tab, a file, a window or a mail, its title, and its address or path.
+    struct TaskItem: Equatable, Sendable {
+        var kind: String
+        var title: String
+        var target: String
+    }
+
+    /// The note's `task:` items, written on one line (`task: [ { kind: tab, title: …, url_or_path: … } ]`) or as a
+    /// list with each item's fields on lines of their own.
+    static func taskItems(_ file: NoteFile) -> [TaskItem] {
+        guard let lines = file.frontMatter("task"), let first = lines.first, let colon = first.firstIndex(of: ":") else { return [] }
+        let raw = String(first[first.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+        var maps: [[String: String]] = []
+        if raw.hasPrefix("[") {
+            maps = flowList(raw).map { item in flowMap(item).compactMapValues(\.first) }
+        } else {
+            for line in lines.dropFirst() {
+                var text = line.trimmingCharacters(in: .whitespaces)
+                if text.hasPrefix("- ") { maps.append([:]); text = String(text.dropFirst(2)) }
+                guard !maps.isEmpty, let at = text.firstIndex(of: ":") else { continue }
+                let key = String(text[..<at]).trimmingCharacters(in: .whitespaces)
+                maps[maps.count - 1][key] = NoteFile.scalar(String(text[text.index(after: at)...]).trimmingCharacters(in: .whitespaces))
+            }
         }
-        return lines.dropFirst().filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("- ") }.count
+        return maps.compactMap { map in
+            guard let kind = map["kind"], !kind.isEmpty else { return nil }
+            return TaskItem(kind: kind, title: map["title"] ?? "", target: map["url_or_path"] ?? map["url"] ?? map["path"] ?? "")
+        }
     }
 
     /// A Private notebook's cover (`private: true`).
@@ -325,7 +348,21 @@ extension NotePrivacy {
     }
 }
 
+extension NotePrivacy {
+    /// The notebooks the notes an answer returns are in now, by each note's identity (its id): a note moved into a
+    /// Private notebook while the answer was made is checked where it is, not where it was.
+    static func currentNotebooks(of ids: Set<String>, notes: [(id: String, notebook: String)]) -> Set<String> {
+        Set(notes.filter { ids.contains($0.id) }.map(\.notebook))
+    }
+}
+
 extension NoteShelf {
+    /// A note opened on its own, with every paper of its conflict (iCloud's versions, a conflicted copy) beside it:
+    /// the note first, then the others in the group's order.
+    static func standaloneGroup(_ key: String, group: [String]) -> [String] {
+        [key] + group.filter { $0 != key }
+    }
+
     /// A note opened on its own and put away: the keyboard goes back to the Petal Notes window only on Escape, when
     /// it was opened from there and the window is still open; folded by a click elsewhere, the keyboard stays where
     /// the person clicked.
@@ -341,6 +378,48 @@ extension NoteRoom {
             return note.open && !note.moved
         }
     }
+}
+
+/// A task a note holds (`task:`): its parts as chips, and Open all, which brings them back through the normal open
+/// paths (a tab by its address, a file by its path, a mail by its message address), never moving the pointer. The
+/// one place that opens a task's parts, for the Petal Notes window and the note itself alike.
+enum NoteTasks {
+    /// A part in a few words: a tab's site (or title), a file's name, "Mail · title", a window's title.
+    static func chip(_ item: NoteContract.TaskItem) -> String {
+        switch item.kind {
+        case "tab":
+            let host = NoteText.host(item.target)
+            return host.isEmpty ? (item.title.isEmpty ? "A tab" : item.title) : host
+        case "file": return item.target.isEmpty ? (item.title.isEmpty ? "A file" : item.title) : (item.target as NSString).lastPathComponent
+        case "mail": return "Mail" + (item.title.isEmpty ? "" : " · " + item.title)
+        default: return item.title.isEmpty ? "A window" : item.title
+        }
+    }
+
+    /// Where a part opens: a tab only at a web address (http or https), a file only at an absolute path, a mail only
+    /// by its message address (`message:`, or a Message-ID in angle brackets); a window has nothing to open (nil).
+    static func url(_ item: NoteContract.TaskItem) -> URL? {
+        let target = item.target.trimmingCharacters(in: .whitespaces)
+        switch item.kind {
+        case "tab":
+            guard let url = URL(string: target), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
+            return url
+        case "file":
+            if target.hasPrefix("file://") { return URL(string: target).flatMap { $0.isFileURL ? $0 : nil } }
+            let path = (target as NSString).expandingTildeInPath
+            return path.hasPrefix("/") && !path.contains("\0") ? URL(fileURLWithPath: path) : nil
+        case "mail":
+            if target.lowercased().hasPrefix("message:") { return URL(string: target) }
+            guard target.hasPrefix("<"), target.hasSuffix(">"),
+                  let id = target.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: ".@-_"))) else { return nil }
+            return URL(string: "message://" + id)
+        default:
+            return nil
+        }
+    }
+
+    /// The parts Open all opens, in order.
+    static func openable(_ items: [NoteContract.TaskItem]) -> [URL] { items.compactMap(url) }
 }
 
 // MARK: - Notes on people
@@ -515,7 +594,7 @@ struct NoteCanvas: Codable, Equatable, Sendable {
     /// away whichever version it comes from; something changed after it comes back.
     var removed: [String: Double] = [:]
 
-    enum Edit: Equatable, Sendable {
+    enum Edit: Codable, Equatable, Sendable {
         case move(String, Spot)
         case area(Area)
         case removeArea(String)
@@ -527,7 +606,7 @@ struct NoteCanvas: Codable, Equatable, Sendable {
     }
 
     /// An edit with the time it was made (kept with it while it waits to be saved, so a retry is as old as the edit).
-    struct Stamped: Equatable, Sendable {
+    struct Stamped: Codable, Equatable, Sendable {
         var edit: Edit
         var at: Double
 
@@ -572,6 +651,19 @@ struct NoteCanvas: Codable, Equatable, Sendable {
     }
 
     func applying(_ edits: [Stamped]) -> NoteCanvas { edits.reduce(self) { $0.applying($1.edit, at: $1.at) } }
+
+    /// Edits made on this canvas through the same merge as versions, never over it: each edit is a canvas of its own
+    /// (its element stamped with its time, or its tombstone) merged in, so an edit older than what's there now (a
+    /// retry, a recovery, another Mac's newer change) never wins.
+    func applyingMerged(_ edits: [Stamped]) -> NoteCanvas {
+        edits.reduce(self) { canvas, stamped in
+            let alone = NoteCanvas().applying(stamped.edit, at: stamped.at)
+            var merged = Self.merge(canvas, alone)
+            // A zoom of its own only when the edit is one (an empty canvas's zoom says nothing).
+            if case .zoom = stamped.edit {} else { merged.zoom = canvas.zoom; merged.zoomAt = canvas.zoomAt }
+            return merged
+        }
+    }
 
     /// Two versions of one canvas as one: every element of both by its id, the newer winning on the same id (a tie
     /// keeps `a`'s), every tombstone of both, and an element only while it's newer than its tombstone.
@@ -646,7 +738,7 @@ struct NoteCanvas: Codable, Equatable, Sendable {
     /// isn't a canvas Petal can read (kept as it is).
     static func write(_ edits: [Stamped], disk: String?, versions: [String] = []) -> String? {
         guard let current = decode(disk), let base = merged(disk: disk, versions: versions) else { return nil }
-        let next = base.applying(edits)
+        let next = base.applyingMerged(edits)
         if next == current, disk != nil { return disk }
         var raw: [String: Any] = [:]
         if let disk, !disk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -719,9 +811,26 @@ struct NoteCanvas: Codable, Equatable, Sendable {
     }
 }
 
-/// A notebook's canvas edits not saved yet: kept in memory in order, written together on the next try, and kept
-/// (never dropped) until a write takes them.
+/// A notebook's canvas edits not saved yet, as the notes journal keeps them on this Mac's own disk: by the notebook's
+/// cover id (never its name, so a renamed notebook keeps them), with its name when they were made (for a rescue's
+/// file name), in order with their own times.
+struct CanvasEntry: Codable, Equatable, Sendable {
+    var coverID: String
+    var notebook: String
+    var edits: [NoteCanvas.Stamped]
+}
+
+/// A notebook's canvas edits not saved yet: kept in memory in order, journaled, written together on the next try,
+/// and kept (never dropped) until a write takes them or, their notebook gone, a rescue does.
 enum CanvasQueue {
+    /// Where a canvas entry goes now: the one notebook whose cover has its id (a cover's conflict copies are in one
+    /// notebook), else nil: the notebook is gone and its edits are rescued.
+    static func notebook(coverID: String, covers: [(id: String, notebook: String)]) -> String? {
+        let found = Set(covers.filter { $0.id == coverID }.map { $0.notebook.lowercased() })
+        guard found.count == 1 else { return nil }
+        return covers.first { $0.id == coverID }?.notebook
+    }
+
     /// After a write of the first `count` waiting edits: what's still waiting (the ones added meanwhile, and all of
     /// them when it failed).
     static func after(_ waiting: [NoteCanvas.Stamped], wrote count: Int, ok: Bool) -> [NoteCanvas.Stamped] {

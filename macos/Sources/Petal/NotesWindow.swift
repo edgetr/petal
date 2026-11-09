@@ -657,6 +657,8 @@ struct GridPaper: View {
             .padding(.top, watch == nil ? 0 : watch?.history.isEmpty == false ? 46 : 34)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .clipped()
+            let tasks = NoteContract.taskItems(paper.file)
+            if !tasks.isEmpty { TaskChips(items: tasks, tint: tint).padding(.bottom, 6) }
             HStack(spacing: 6) {
                 if footer.dot { Circle().fill(Color(nsColor: color)).frame(width: 7, height: 7).opacity(footer.working ? 0.6 : 1) }
                 Text(footer.text).font(.system(size: 11)).foregroundStyle(PaperLook.footer).lineLimit(1)
@@ -689,6 +691,35 @@ struct GridPaper: View {
         case .person: return first.title + " · any chat app"
         default: return NoteText.site(first.label())
         }
+    }
+}
+
+/// A task's parts as the sketch's chips, and Open all.
+struct TaskChips: View {
+    @Environment(PetalApp.self) private var app
+    let items: [NoteContract.TaskItem]
+    let tint: NoteInk.RGB
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                // The first part, and how many more: a 150-point paper has room for no more.
+                if let first = items.first { chip(NoteTasks.chip(first)) }
+                if items.count > 1 { chip("+\(items.count - 1)").fixedSize() }
+            }
+            Button { NoteTasks.openAll(items) { app.paper.tell($0) } } label: {
+                Text("Open all \(items.count)").underline().font(.system(size: 10.5, weight: .medium)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
+            }
+            .buttonStyle(.plain)
+            .help("Brings back its tabs, files and mail")
+        }
+    }
+
+    private func chip(_ words: String) -> some View {
+        Text(words).font(.system(size: 10.5)).foregroundStyle(Color(white: 0.2)).lineLimit(1)
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(PaperLook.color(NoteInk.mix(tint, 0.12, NoteInk.paper)), in: .rect(cornerRadius: 5))
+            .overlay { RoundedRectangle(cornerRadius: 5).stroke(.black.opacity(0.12), lineWidth: 0.5) }
     }
 }
 

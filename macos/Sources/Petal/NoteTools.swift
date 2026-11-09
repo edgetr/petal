@@ -35,7 +35,9 @@ extension NoteDesk {
                 guard let out else { return refuse(NoteShield.unreadable) }
                 guard let self else { return }
                 let insideNow = asker.flatMap { self.store.current($0)?.notebook }
-                guard NotePrivacy.deliverable(notebooks: told.books, privateBooks: self.store.privateBooks, asker: insideNow) else {
+                // Each note returned, by its identity, where it is now (moved into a Private notebook meanwhile counts).
+                let now = told.books.union(NotePrivacy.currentNotebooks(of: told.notes, notes: self.store.notes.map { ($0.noteID, $0.notebook) }))
+                guard NotePrivacy.deliverable(notebooks: now, privateBooks: self.store.privateBooks, asker: insideNow) else {
                     return refuse(Self.turnedPrivate)
                 }
                 answer(out)
@@ -65,6 +67,7 @@ extension NoteDesk {
                 guard let hits = hits ?? nil else { return refuse(NoteShield.unreadable) }
                 let found = hits.map { papers[$0] }
                 told.books.formUnion(found.prefix(limit).map(\.notebook))
+                told.notes.formUnion(found.prefix(limit).map(\.noteID))
                 told.books.formUnion(self.store.notebooks.filter { readable($0.name) }.map(\.name))
                 send(["notes": found.prefix(limit).map { self.summary($0) }, "count": found.count,
                       "notebooks": self.store.notebooks.filter { readable($0.name) }.map { ["name": $0.name, "color": $0.color.isEmpty ? "accent" : $0.color, "notes": $0.count] }])
@@ -102,6 +105,7 @@ extension NoteDesk {
                     self.store.make(file, in: notebook, live: live) { made in
                         guard let made else { return fail(Self.notMade) }
                         told.books.insert(made.notebook)
+                        told.notes.insert(made.noteID)
                         var result = self.written(made)
                         result["notebook"] = made.notebook
                         if sticking { result["stuck"] = place.map { self.told($0) as Any } ?? "nowhere (nothing in front Petal could stick it to)" }
@@ -120,7 +124,7 @@ extension NoteDesk {
                 guard readable(notebook) else { return fail("Petal can't move notes there. Pick another notebook.") }
                 // The same move as the letterhead's: what's typed in it goes with it, and its panel and editor follow.
                 self.move(paper.key, to: notebook, live: live) { moved in
-                    if let moved { told.books.insert(moved.notebook) }
+                    if let moved { told.books.insert(moved.notebook); told.notes.insert(moved.noteID) }
                     if let moved { send(["moved": self.handle(moved), "notebook": moved.notebook]) }
                     else { fail(live() ? "Couldn't move it (or its pictures); it's where it was." : Self.hungUp) }
                 }
@@ -175,6 +179,7 @@ extension NoteDesk {
                     return fail("That note changed while Petal looked (renamed, or another note has its name now); petal_notes lists them.")
                 }
                 told.books.insert(paper.notebook)
+                told.notes.insert(paper.noteID)
                 then(paper)
             case .none?: fail("No note with that id; petal_notes lists them.")
             case .ambiguous(let all)?:
@@ -188,6 +193,8 @@ extension NoteDesk {
     /// The notebooks one request's answer tells of (filled as it goes, read right before it's handed over).
     final class Told {
         var books: Set<String> = []
+        /// The notes it returns, by id: rechecked where each is right before delivery.
+        var notes: Set<String> = []
     }
 
     /// The paper a request is about, carried by its note's id through every wait (a lookup, a read of what's in
@@ -251,6 +258,7 @@ extension NoteDesk {
             case .written:
                 let now = self.store.paper(key) ?? NoteShelf.pick(key: key, id: paper.noteID, now: self.store.notes.map { ($0.key, $0.noteID) }).map { self.store.notes[$0] } ?? paper
                 told.books.insert(now.notebook)
+                told.notes.insert(now.noteID)
                 send(result(now))
             case .keptBoth(let copy):
                 // The copy's name comes from the note's title (cut to fit), so it isn't told.

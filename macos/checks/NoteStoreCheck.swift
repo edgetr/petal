@@ -119,6 +119,7 @@ struct NoteStoreCheck {
         versionGroups(root: root)
         canvasFile(root: root)
         canvasRetry(root: root)
+        privateCovers(root: root)
         notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -1103,37 +1104,97 @@ struct NoteStoreCheck {
                "no notebook folder: nothing made")
     }
 
-    /// A canvas edit whose write fails is kept, said ("Not saved yet") and tried again until it lands; on a drain that
-    /// still fails, it's kept in Unsaved notes.
+    /// Canvas edits are journaled first, by their notebook's cover id; one whose write fails is kept, said ("Not
+    /// saved yet") and tried again, merged (never over anything newer); and an entry left at quit is put back where its
+    /// notebook is after a rename, or rescued into Unsaved notes when it's gone.
     @MainActor static func canvasRetry(root: URL) {
         let fm = FileManager.default
         let folder = root.appending(path: "Board")
         try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var coverFile = NoteFile(id: "COVER-BOARD", body: "# About this notebook")
+        coverFile.cover = true
+        let coverURL = folder.appending(path: NoteShelf.coverName)
+        _ = NoteStore.create(coverFile.serialized(), at: coverURL, root: root)
         let store = NoteStore(root: root)
-        store.preview([], notebooks: [Notebook(name: "Board", folder: folder, color: "", cover: nil, count: 0)])
-        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder.path)
+        store.preview([PaperNote(file: coverFile, url: coverURL, notebook: "Board", revision: coverFile.serialized())],
+                      notebooks: [Notebook(name: "Board", folder: folder, color: "", cover: coverURL.path, count: 0)])
+        // Something in the canvas file's place that can't be read (a folder): every write fails until it's gone.
+        let canvasFile = folder.appending(path: NoteStore.canvasName)
+        try? fm.createDirectory(at: canvasFile, withIntermediateDirectories: true)
         var saved: NoteCanvas?
         store.editCanvas("Board", .move("n1", .init(x: 3, y: 4))) { saved = $0 }
+        store.editCanvas("Board", .move("n2", .init(x: 5, y: 6))) { _ in }
         var until = Date().addingTimeInterval(3)
         while !store.canvasUnsaved.contains("Board") && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-        expect(store.canvasUnsaved.contains("Board") && store.canvasPending("Board").count == 1 && saved == nil,
-               "a failed canvas save is kept and said, not dropped")
-        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+        NoteJournal.queue.sync {}
+        let journaled = NoteJournal.readCanvas(NoteJournal.canvasFile("COVER-BOARD"))
+        expect(store.canvasUnsaved.contains("Board") && store.canvasPending("Board").count == 2 && saved == nil
+               && journaled?.edits.count == 2 && journaled?.coverID == "COVER-BOARD",
+               "a failed canvas save is kept, said, and journaled on this Mac by its notebook's cover id")
+        // Meanwhile another Mac moved n1, later than the edit waiting here.
+        try? fm.removeItem(at: canvasFile)
+        let later = NoteCanvas().applying(.move("n1", .init(x: 900, y: 900)), at: Date().timeIntervalSince1970 + 3600)
+        try? Data(later.encoded().utf8).write(to: canvasFile)
         until = Date().addingTimeInterval(8)
         while saved == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-        expect(saved?.notes["n1"]?.x == 3 && !store.canvasUnsaved.contains("Board") && store.canvasPending("Board").isEmpty
-               && NoteCanvas.decode(text(folder.appending(path: NoteStore.canvasName)))?.notes["n1"]?.y == 4, "tried again, it lands")
-        // Quitting while it still can't be written: kept in Unsaved notes.
-        let locked = root.appending(path: "Locked board")
-        try? fm.createDirectory(at: locked, withIntermediateDirectories: true)
-        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: locked.path)
-        NoteStore.drainCanvas([(notebook: "Locked board", file: locked.appending(path: NoteStore.canvasName),
-                                edits: [NoteCanvas.Stamped(.move("n7", .init(x: 1, y: 2)))])], root: root)
+        NoteJournal.queue.sync {}
+        let landed = NoteCanvas.decode(text(folder.appending(path: NoteStore.canvasName)))
+        expect(landed?.notes["n1"]?.x == 900 && landed?.notes["n2"]?.x == 5, "tried again, merged: the newer move elsewhere stays, its own edit lands",
+               "\(String(describing: landed?.notes))")
+        expect(!store.canvasUnsaved.contains("Board") && store.canvasPending("Board").isEmpty
+               && !fm.fileExists(atPath: NoteJournal.canvasFile("COVER-BOARD").path), "and its journal entry goes")
+
+        // At the next launch: an entry left by a quit, its notebook renamed meanwhile, goes to where it is now.
+        NoteJournal.keepCanvas(CanvasEntry(coverID: "COVER-BOARD", notebook: "Board", edits: [NoteCanvas.Stamped(.words(.init(id: "w", text: "hi", x: 1, y: 1)))]))
+        let renamed = root.appending(path: "Board renamed")
+        expect(NoteStore.moveFolder(folder, to: renamed, root: root), "the notebook is renamed")
+        // An entry whose notebook is gone.
+        NoteJournal.keepCanvas(CanvasEntry(coverID: "COVER-GONE", notebook: "Gone board", edits: [NoteCanvas.Stamped(.move("n9", .init(x: 1, y: 2)))]))
+        // The notes' journal moved aside too (with its own entry), as a launch does: the canvas entries aren't lost with it.
+        NoteJournal.snapshot(NoteJournal.Entry(noteID: "N-JOURNAL", path: "", base: nil, text: "x"))
+        let canvases = NoteJournal.canvasLeftovers()
+        let notesLeft = NoteJournal.leftovers()
+        expect(canvases.count == 1 && !fm.fileExists(atPath: NoteJournal.canvasFolder().path), "at launch the canvas entries move aside first")
+        for holding in canvases { NoteJournal.recoverCanvas(holding, root: root) }
+        for holding in notesLeft { try? fm.removeItem(at: holding) }
+        expect(NoteCanvas.decode(text(renamed.appending(path: NoteStore.canvasName)))?.texts.first?.text == "hi",
+               "an entry follows its notebook's rename, by cover id")
         let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
-        let kept = (fm.enumerator(atPath: unsaved.path)?.allObjects as? [String] ?? []).filter { $0.hasSuffix("Locked board canvas.json") }
-        expect(kept.count == 1 && NoteCanvas.decode(kept.first.flatMap { text(unsaved.appending(path: $0)) })?.notes["n7"]?.y == 2,
-               "on quit, an edit that still can't be written is kept in Unsaved notes", "\(kept)")
-        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+        let rescued = (fm.enumerator(atPath: unsaved.path)?.allObjects as? [String] ?? []).filter { $0.hasSuffix("Gone board canvas.json") }
+        expect(rescued.count == 1 && NoteCanvas.decode(rescued.first.flatMap { text(unsaved.appending(path: $0)) })?.notes["n9"]?.y == 2
+               && canvases.allSatisfy { !fm.fileExists(atPath: $0.path) }, "its notebook gone: rescued into Unsaved notes, nothing dropped", "\(rescued)")
+    }
+
+    /// Making a notebook Private: shown at once, and written through its cover's session, also when it has no cover
+    /// (one is made, never over a file) or a cover with no front matter (it gets its id and front matter).
+    @MainActor static func privateCovers(root: URL) {
+        let fm = FileManager.default
+        let bare = root.appending(path: "Bare")
+        let plain = root.appending(path: "Plain")
+        try? fm.createDirectory(at: bare, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: plain, withIntermediateDirectories: true)
+        _ = NoteStore.create("hello", at: bare.appending(path: "One.md"), root: root)
+        try? Data("# About this notebook\nWritten by hand, no front matter.".utf8).write(to: plain.appending(path: NoteShelf.coverName))
+        let store = NoteStore(root: root)
+        store.reload()
+        var until = Date().addingTimeInterval(5)
+        while store.notebook("Plain") == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        expect(store.notebook("Plain")?.cover != nil && store.notebook("Bare")?.cover == nil, "a cover with no front matter is its notebook's cover")
+        store.setCover("Bare", { $0.setScalar("private", "true") }) { $0.isPrivate = true }
+        store.setCover("Plain", { $0.setScalar("private", "true") }) { $0.isPrivate = true }
+        expect(store.notebook("Bare")?.isPrivate == true && store.notebook("Plain")?.isPrivate == true, "Private at once, in memory")
+        until = Date().addingTimeInterval(8)
+        func onDisk(_ folder: URL) -> NoteFile? { text(folder.appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) } }
+        while (onDisk(bare).map(NoteContract.isPrivate) != true || onDisk(plain).map(NoteContract.isPrivate) != true) && Date() < until {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            store.reload()
+        }
+        expect(onDisk(bare).map(NoteContract.isPrivate) == true && onDisk(bare)?.cover == true, "no cover: one made, and it says private", text(bare.appending(path: NoteShelf.coverName)) ?? "nil")
+        let written = onDisk(plain)
+        expect(written.map(NoteContract.isPrivate) == true && written?.cover == true && !NoteShelf.needsID(written?.id ?? "file:")
+               && written?.body.contains("Written by hand") == true, "a cover with no front matter gets its id and front matter, its words kept",
+               text(plain.appending(path: NoteShelf.coverName)) ?? "nil")
+        expect(store.notebook("Bare")?.isPrivate == true && store.notebook("Plain")?.isPrivate == true, "and stays Private through reads of the folder")
     }
 
     /// A notebook's folder renamed: its notes and canvas go with it, never over another notebook, only inside the

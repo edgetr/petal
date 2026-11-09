@@ -48,6 +48,20 @@ struct NoteLibraryCheck {
         let helper = NoteContract.helper(file)
         expect(helper?.state == .working && helper?.who == "Petal" && helper?.step == "Reading the page", "helper: fields on lines of their own")
         expect(NoteContract.tasks(file) == 2, "task: its items counted", "\(NoteContract.tasks(file))")
+        // A task's parts and Open all.
+        var task = NoteFile(id: "T1", body: "")
+        task.extra = [(key: "task", lines: [#"task: [ { kind: tab, title: "Quote A", url_or_path: "https://insure.example/a" }, { kind: file, title: Quote, url_or_path: "/Users/someone/Quote B.pdf" }, { kind: mail, title: Agent, url_or_path: "<abc@mail.example>" }, { kind: window, title: Notes } ]"#])]
+        let taskParts = NoteContract.taskItems(task)
+        expect(taskParts.map(\.kind) == ["tab", "file", "mail", "window"] && taskParts[1].target == "/Users/someone/Quote B.pdf", "task items on one line", "\(taskParts)")
+        expect(taskParts.map(NoteTasks.chip) == ["insure.example", "Quote B.pdf", "Mail · Agent", "Notes"], "its chips", "\(taskParts.map(NoteTasks.chip))")
+        let opens = NoteTasks.openable(taskParts)
+        expect(opens.map(\.absoluteString) == ["https://insure.example/a", "file:///Users/someone/Quote%20B.pdf", "message://%3Cabc@mail.example%3E"],
+               "Open all: the tab, the file and the mail by its message address; a window has nothing to open", "\(opens)")
+        let blockTask = NoteContract.taskItems(file)
+        expect(blockTask.map(\.title) == ["One", "Two"], "task items as a list on lines of their own")
+        let unsafe = [NoteContract.TaskItem(kind: "tab", title: "", target: "file:///etc/passwd"), NoteContract.TaskItem(kind: "tab", title: "", target: "javascript:alert(1)"),
+                      NoteContract.TaskItem(kind: "file", title: "", target: "relative/path"), NoteContract.TaskItem(kind: "mail", title: "", target: "https://evil.example")]
+        expect(NoteTasks.openable(unsafe).isEmpty, "a tab only at a web address, a file only at a full path, a mail only by its message address")
         expect(NoteContract.fromPetal(file), "from: petal")
         expect(file.serialized() == text.replacingOccurrences(of: "\r\n", with: "\n"), "every one written back exactly as it was")
         var blockWatch = NoteFile(id: "W2", body: "")
@@ -249,6 +263,15 @@ struct NoteLibraryCheck {
         expect(CanvasQueue.after(waiting, wrote: 2, ok: true) == [waiting[2]], "a write that landed leaves the ones added meanwhile")
         expect(CanvasQueue.retry(after: 1) == 2 && CanvasQueue.retry(after: 3) == 8 && CanvasQueue.retry(after: 20) == 60, "tried again sooner, then less often")
         expect(NoteCanvas().applying(waiting).zoom == 1.5 && NoteCanvas().applying(waiting).zoomAt == 3, "edits kept with their own times")
+        let newerThere = NoteCanvas().applying(.move("n1", .init(x: 9, y: 9)), at: 100).applying(.removeArea("gone"), at: 100)
+        let retried = newerThere.applyingMerged([NoteCanvas.Stamped(.move("n1", .init(x: 1, y: 1)), at: 50),
+                                                 NoteCanvas.Stamped(.area(.init(id: "gone", label: "Old", x: 0, y: 0, w: 1, h: 1)), at: 60),
+                                                 NoteCanvas.Stamped(.move("n2", .init(x: 2, y: 2)), at: 70)])
+        expect(at(retried.notes["n1"], 9, 9) && retried.areas.isEmpty && at(retried.notes["n2"], 2, 2) && retried.zoom == newerThere.zoom,
+               "a waiting edit goes through the merge: older than what's there, it doesn't win (nor bring back what was removed later)")
+        expect(CanvasQueue.notebook(coverID: "c", covers: [("c", "Trip"), ("c", "Trip"), ("d", "Work")]) == "Trip"
+               && CanvasQueue.notebook(coverID: "c", covers: [("c", "Trip"), ("c", "Work")]) == nil && CanvasQueue.notebook(coverID: "x", covers: []) == nil,
+               "an entry's notebook by its cover id; gone or in two notebooks: none (rescued)")
 
         expect(NoteCanvas.zoomIn(1) == 1.25 && NoteCanvas.zoomOut(1) == 0.8 && NoteCanvas.zoomIn(2) == 2 && NoteCanvas.zoomOut(0.5) == 0.5, "zoom steps")
 
@@ -264,6 +287,12 @@ struct NoteLibraryCheck {
         expect(!NotePrivacy.deliverable(notebooks: ["Garden", "health"], privateBooks: ["Health"], asker: nil),
                "one turned Private before it's handed over: not given")
         expect(NotePrivacy.deliverable(notebooks: ["Health"], privateBooks: ["Health"], asker: "Health"), "still from inside it: given")
+        // A note read in Garden and moved into Health before the answer is handed over: checked where it is now.
+        let movedNow = NotePrivacy.currentNotebooks(of: ["N1"], notes: [("N1", "Health"), ("N2", "Garden")])
+        expect(movedNow == ["Health"] && !NotePrivacy.deliverable(notebooks: Set(["Garden"]).union(movedNow), privateBooks: ["Health"], asker: nil),
+               "a note moved into a Private notebook mid-read: not given")
+        expect(NoteShelf.standaloneGroup("b", group: ["a", "b", "c"]) == ["b", "a", "c"] && NoteShelf.standaloneGroup("x", group: []) == ["x"],
+               "a note in a conflict opens with every other paper of it beside it")
 
         // MARK: The dock
 

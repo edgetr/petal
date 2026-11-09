@@ -45,7 +45,8 @@ extension Snapshot {
         let backFriday = Calendar.current.nextDate(after: now, matching: DateComponents(hour: 9, minute: 0, weekday: 6), matchingPolicy: .nextTime) ?? now
         _ = note("Garden", "# Tulip bulbs\nPlant them before the first frost, 15 cm deep.", age: 3600, places: [tab("https://bulbs.example/autumn")],
                  extra: [("back", ["back: \(NoteFile.stamp(backFriday))"])])
-        _ = note("Garden", "# Seed order\nBeans, peas, two kinds of lettuce", age: 2 * day, places: [tab("https://seeds.example/cart")])
+        _ = note("Garden", "# Seed order\nBeans, peas, two kinds of lettuce", age: 2 * day, places: [tab("https://seeds.example/cart")],
+                 extra: [("task", [#"task: [ { kind: tab, title: Cart, url_or_path: "https://seeds.example/cart" }, { kind: file, title: List, url_or_path: "/Users/someone/Seeds.pdf" }, { kind: mail, title: Shop, url_or_path: "<order@seeds.example>" } ]"#])])
         _ = note("Garden", "Water the balcony pots every other morning, more in July.", age: 3 * day, places: [tab("https://garden-guide.example/pots")])
         _ = note("Garden", "@Petal tell me when the hose is under 30", age: 4 * day, places: [tab("https://tools.example/hose")],
                  extra: [("watch", ["watch: { every: 1d, line: \"under 30\", last: \"34\", history: [\"36\"] }"])])
