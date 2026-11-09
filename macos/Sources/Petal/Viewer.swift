@@ -25,6 +25,11 @@ final class Viewers {
 
     var app: PetalApp { PetalApp.shared }
 
+    init() {
+        // Quick Look exports a Petal before this one left behind (it quit or crashed mid-load): swept away.
+        Self.queue.async { ViewerExport.sweep() }
+    }
+
     /// Opens `path` (a note's file, a drop, an agent's path): checked off the main thread (ViewerPath: a regular file
     /// the person owns, never through a link out of the home folder, of a kind the viewer shows), then shown in its
     /// own window, or the one already showing it brought forward. `page`: counted from 1.
@@ -75,6 +80,11 @@ final class Viewers {
         windows[model.id] = nil
     }
 
+    /// A note's file got another name (NoteStore's rekey): every viewer's records of that paper follow it.
+    func rekeyed(_ old: String, _ new: String) {
+        for model in open { model.rekeyed(old, new) }
+    }
+
     /// Files dropped on the Petal Notes area (or on a viewer): each opens in the viewer. True when any could be.
     @discardableResult
     func dropped(_ urls: [URL]) -> Bool {
@@ -87,15 +97,24 @@ final class Viewers {
     func preview(_ model: ViewerModel) { open = [model] }
 }
 
-/// What a selection in a PDF offers a note: its page, bounds on it, words and the words around them.
+/// What a selection in a PDF offers a note: its page and bounds on it, its words as shown, and the page's whole text
+/// with where the selection is in it (UTF-16), so the passage is cut from the page's text only after all of it was
+/// checked against the vault.
 struct ViewerSelection: Equatable {
     var page: Int
     var bounds: CGRect
     var quote: String
-    var before: String
-    var after: String
+    var pageText: String
+    var range: NSRange
     /// Where its end is in the window (top-left origin), for the Note button.
     var anchor: CGPoint
+}
+
+/// Where a margin note's passage is in the document now: found again by its words (its page and bounds there), or
+/// moved (it shows on the file, with no highlight).
+enum ViewerFound: Equatable {
+    case found(page: Int, bounds: CGRect)
+    case moved
 }
 
 /// One version made on a copy: its label ("Shorter"), the copy, and its picture of the page shown.
@@ -144,8 +163,9 @@ final class ViewerVersionSet {
     }
 }
 
-/// What the reading lens asks: the paragraph the person's selection is in (its words already through the vault's
-/// redaction), for a note in the margin that follows the selection. Phase 2 answers it with `answerLens`.
+/// What the reading lens asks: the paragraph the person's selection is in (its words through the vault's redaction,
+/// the whole page checked first), for a note in the margin that follows the selection. Phase 2 answers it with
+/// `answerLens`.
 struct ViewerLensRequest: Equatable, Sendable {
     var id = UUID()
     var noteID: String
@@ -173,14 +193,16 @@ final class ViewerModel: Identifiable {
     var unit: ViewerUnit { kind.unit }
     var name: String { url.lastPathComponent }
 
-    /// Its pages: the PDF, or what Quick Look exported. Only ever used on the main thread; the data is kept to make
-    /// thumbnails from its own copy off it.
+    /// Its pages: the PDF, or what Quick Look exported. Only ever used on the main thread; its bytes are kept to
+    /// make thumbnails and find passages from a copy of their own off it.
     private(set) var document: PDFDocument?
     @ObservationIgnored private(set) var data: Data?
     /// Quick Look's own view, when no pages could be exported: notes are on the file (or the page they say).
     private(set) var live = false
     private(set) var pageCount = 0
-    var current = 0
+    var current = 0 {
+        didSet { if current != oldValue, let set = versions { drawVersions(set) } }
+    }
     /// The page to show once loaded (0-based).
     @ObservationIgnored var wanted: Int?
     private(set) var thumbs: [Int: NSImage] = [:]
@@ -194,23 +216,35 @@ final class ViewerModel: Identifiable {
 
     /// A PDF selection that may become a note's passage.
     var selection: ViewerSelection?
-    /// The margin note open for writing (by note id), and turned over or not.
-    var openNote: String?
+    /// The margin paper open for writing (by paper key: one of a conflict's papers is its own), turned over or not.
+    var openKey: String?
     var face: PaperFace = .open
-    /// Where each margin note's passage is (by note id), and each page shown's top, in the window (top-left origin).
+    /// Each margin note's passage, found again by its words in the pages shown (by paper key).
+    private(set) var passages: [String: ViewerFound] = [:]
+    /// Where each passage's highlight and each page shown's top are, in the window (top-left origin), by paper key and
+    /// page.
     var highlights: [String: CGRect] = [:]
     var pageTops: [Int: CGFloat] = [:]
     /// The document's area in the window.
     var documentFrame: CGRect = .zero
-    /// Each margin paper's height, as drawn.
+    /// How far the pages have scrolled from their top, and how tall they are (the window's points): the margin
+    /// scrolls in step with them (pages scrolling; one slide at a time doesn't scroll).
+    var docScroll: CGFloat = 0
+    var docHeight: CGFloat = 0
+    /// How far the margin is scrolled, as it says.
+    var marginOffset: CGFloat = 0
+    /// Each margin paper's height, as drawn (by paper key).
     var heights: [String: CGFloat] = [:]
     /// Versions on copies under the document.
     var versions: ViewerVersionSet?
 
+    /// The pages scroll (a document), so the margin moves with them.
+    var scrolls: Bool { unit == .page && !live }
+
     // MARK: The reading lens
 
-    /// The margin note that follows the selection (by note id), and the answer beside the current paragraph.
-    var lensNote: String?
+    /// The margin note that follows the selection (by paper key), and the answer beside the current paragraph.
+    var lensKey: String?
     var lensAnswer: ViewerLensAnswer?
     /// Where the paragraph a lens request is about is, in the window.
     var lensSpot: CGRect?
@@ -220,8 +254,12 @@ final class ViewerModel: Identifiable {
     @ObservationIgnored private(set) var lensRequest: ViewerLensRequest?
 
     @ObservationIgnored weak var pdfView: PDFView?
+    /// Scrolls the pages to a margin offset (PDFKit's view, set by its coordinator).
+    @ObservationIgnored var scrollDocument: ((CGFloat) -> Void)?
     @ObservationIgnored private var watcher: ViewerWatch?
     @ObservationIgnored private var stamp: ViewerUpdated.Stamp?
+    /// A bookmark to the file, made with each read (the file replaced: made again), so a move or rename is followed.
+    @ObservationIgnored private var bookmark: Data?
     @ObservationIgnored private var loads = 0
     @ObservationIgnored private var closedNow = false
     @ObservationIgnored private var lensSoon: DispatchWorkItem?
@@ -236,19 +274,21 @@ final class ViewerModel: Identifiable {
     var desk: NoteDesk { app.paper }
 
     /// For Petal --snapshot: made-up pages (drawn, never read from a file).
-    func preview(pages: [NSImage], current: Int, app: String = "Preview") {
+    func preview(pages: [NSImage], current: Int, app: String = "Preview", passages: [String: ViewerFound] = [:]) {
         thumbs = Dictionary(uniqueKeysWithValues: pages.enumerated().map { ($0, $1) })
         pageCount = pages.count
         self.current = current
         appName = app
         loading = false
+        self.passages = passages
     }
 
     // MARK: Loading
 
     /// Reads the file off the main thread (coordinated, so a file iCloud hasn't downloaded comes down first): a PDF
     /// as it is, anything else through Quick Look's preview, exported as pages where Quick Look gives them. Never
-    /// writes it. A newer load (the file changed again) makes an older one stand down.
+    /// writes it. A newer load (the file changed again) makes an older one stand down; what it exported is cleaned
+    /// up all the same (ViewerExport).
     func load() {
         loads += 1
         let ticket = loads
@@ -269,6 +309,7 @@ final class ViewerModel: Identifiable {
         if appName.isEmpty { appName = read.appName; appURL = read.appURL }
         let first = stamp == nil
         stamp = read.stamp
+        if let made = read.bookmark { bookmark = made }
         if !first { updated = Date() }
         switch read.pages {
         case .pdf(let data): show(data, ticket: ticket)
@@ -313,6 +354,8 @@ final class ViewerModel: Identifiable {
         problem = nil
         thumbs = [:]
         renderThumbs(data)
+        resolvedFor = nil
+        resolvePassages()
         if let page = document.page(at: current) { pdfView?.go(to: page) }
         versions.map { refreshVersions($0) }
     }
@@ -324,6 +367,7 @@ final class ViewerModel: Identifiable {
         pageCount = 0
         loading = false
         problem = nil
+        passages = [:]
     }
 
     /// The pages' thumbnails from a copy of the document of their own, off the main thread, a few at a time.
@@ -349,36 +393,88 @@ final class ViewerModel: Identifiable {
         }
     }
 
+    // MARK: Passages, found again by their words
+
+    /// What the passages were last found for: the load and the notes' passages (their keys and words).
+    @ObservationIgnored private var resolvedFor: (load: Int, passages: [String])?
+
+    /// Every margin note's passage found again in the pages shown by its whole quote and the words around it
+    /// (ViewerPassages, off the main thread, from a copy of the document of its own), never by the coordinates it
+    /// was saved with; not found: moved. Again whenever the pages or the notes' passages change.
+    func resolvePassages() {
+        guard let data, !live else { return }
+        let wanted = notes.filter { !$0.place.quote.isEmpty }.map { ($0.paper.key, $0.place) }
+        let signature = wanted.map { "\($0.0)\u{1}\($0.1.quote)\u{1}\($0.1.before)\u{1}\($0.1.after)" }
+        if let resolvedFor, resolvedFor.load == loads, resolvedFor.passages == signature { return }
+        resolvedFor = (loads, signature)
+        let ticket = loads
+        let sticks = wanted
+        Viewers.queue.async {
+            let found = ViewerModel.find(sticks, in: data)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard ticket == self.loads, self.resolvedFor?.passages == signature else { return }
+                    if self.passages != found { self.passages = found }
+                }
+            }
+        }
+    }
+
+    /// Off the main thread: each passage's page and bounds in `data`'s pages, or moved.
+    nonisolated static func find(_ sticks: [(String, NoteStick)], in data: Data) -> [String: ViewerFound] {
+        guard !sticks.isEmpty, let document = PDFDocument(data: data) else { return [:] }
+        let texts = (0..<document.pageCount).map { document.page(at: $0)?.string ?? "" }
+        var out: [String: ViewerFound] = [:]
+        for (key, stick) in sticks {
+            guard let spot = ViewerPassages.find(stick, in: texts), let page = document.page(at: spot.page),
+                  let bounds = page.selection(for: spot.range)?.bounds(for: page), bounds.width > 0 else {
+                out[key] = .moved
+                continue
+            }
+            out[key] = .found(page: spot.page, bounds: bounds)
+        }
+        return out
+    }
+
+    /// Where a margin note is in the document: its passage's page and bounds as found now, else its page or slide; a
+    /// passage that moved is on the file (no page, no highlight).
+    func spot(_ paper: PaperNote, _ place: NoteStick) -> (page: Int?, bounds: CGRect?, moved: Bool) {
+        guard !place.quote.isEmpty else { return (ViewerMatch.pageIndex(place, count: pageCount), nil, false) }
+        switch passages[paper.key] {
+        case .found(let page, let bounds)?: return (page, bounds, false)
+        case .moved?: return (nil, nil, true)
+        case nil: return (nil, nil, false)
+        }
+    }
+
     // MARK: Keeping up with the file
 
-    /// The file and its folder watched: a change (saved in place, or replaced as PowerPoint and Keynote save) is
-    /// read again once it settles; a file moved or renamed is followed by its bookmark.
+    /// The file and its folder watched (the descriptors opened off the main thread): a change (saved in place, or
+    /// replaced as PowerPoint and Keynote save) is read again once it settles; a file moved or renamed is followed
+    /// by its bookmark.
     private func watch() {
         guard !Headless.on else { return }
         watcher = ViewerWatch(url: url) { [weak self] in self?.changed() }
     }
-
-    @ObservationIgnored private var bookmark: Data?
 
     private func changed() {
         let url = url
         let before = stamp
         let kept = bookmark
         Viewers.queue.async {
-            let bookmark = kept ?? ViewerLoader.bookmark(url)
             var now = ViewerLoader.stamp(url)
             var moved: URL?
-            if now == nil, let bookmark, let found = ViewerLoader.follow(bookmark), found.path != url.path {
+            if now == nil, let kept, let found = ViewerLoader.follow(kept), found.path != url.path {
                 moved = found
                 now = ViewerLoader.stamp(found)
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard !self.closedNow else { return }
-                    if self.bookmark == nil { self.bookmark = bookmark }
                     if let moved { self.url = moved }
                     guard let now, now != before else { return }
-                    // Replaced (a new file swapped in, as most apps save): the new one is watched from now on.
+                    // Replaced (a new file swapped in, as most apps save): the new one is watched from now on, and
+                    // the load makes its bookmark again.
                     if moved != nil || now.inode != before?.inode { self.watcher = nil; self.watch() }
                     self.load()
                 }
@@ -389,6 +485,7 @@ final class ViewerModel: Identifiable {
     func close() {
         closedNow = true
         watcher = nil
+        versionWatch = nil
         lensSoon?.cancel()
         if let key = openKey { fold(key) }
         if let set = versions {
@@ -414,51 +511,66 @@ final class ViewerModel: Identifiable {
         else { NSWorkspace.shared.open(url) }
     }
 
+    /// The margin scrolled by the person: the pages follow (as far as they go), so its notes stay lined up.
+    func marginScrolled(_ offset: CGFloat) {
+        marginOffset = offset
+        if scrolls, abs(offset - docScroll) > 0.5 { scrollDocument?(offset) }
+    }
+
     // MARK: Notes in the margin
 
-    /// The notes on this file and where each is (its place's index), most specific place first.
+    /// The notes on this file, every paper of each (one of a conflict's papers too), and where each is (its place),
+    /// most specific place first.
     var notes: [(paper: PaperNote, place: NoteStick)] {
         desk.store.notes.compactMap { paper in
-            guard paper.version == nil, let index = ViewerMatch.place(paper.file.places, path: url.path, also: [opened]) else { return nil }
+            guard let index = ViewerMatch.place(paper.file.places, path: url.path, also: [opened]) else { return nil }
             return (paper, paper.file.places[index])
         }
     }
 
-    /// The paper key of the note open here.
-    var openKey: String? { openNote.flatMap { id in desk.store.notes.first { $0.noteID == id }?.key } }
+    /// A paper's file got another name: what's kept about it here follows.
+    func rekeyed(_ old: String, _ new: String) {
+        if openKey == old { openKey = new }
+        if lensKey == old { lensKey = new }
+        heights = NoteShelf.rekeyed(heights, old, new)
+        highlights = NoteShelf.rekeyed(highlights, old, new)
+        passages = NoteShelf.rekeyed(passages, old, new)
+        resolvedFor = nil
+    }
 
-    /// Opens a margin note for writing here: closed wherever else it was open (one editor per note), and this one
-    /// let go if the desk opens it (`heldByViewer`).
+    /// Opens a margin paper here: closed wherever else it was open (one editor per note), and this one let go if the
+    /// desk opens it (`heldByViewer`).
     func openPaper(_ paper: PaperNote) {
         if let key = openKey, key != paper.key { fold(key) }
         // Open in another viewer (a note on two files): closed there first.
         desk.heldByViewer.removeValue(forKey: paper.noteID)?()
         if desk.faces[paper.key] == .open || desk.faces[paper.key] == .back { desk.fold(paper.key) }
-        openNote = paper.noteID
+        openKey = paper.key
         face = .open
         desk.heldByViewer[paper.noteID] = { [weak self] in
             guard let self, let key = self.openKey else { return }
             self.fold(key)
         }
-        if let index = notes.first(where: { $0.paper.noteID == paper.noteID }).flatMap({ ViewerMatch.pageIndex($0.place, count: pageCount) }), index != current {
+        if let item = notes.first(where: { $0.paper.key == paper.key }), let index = spot(item.paper, item.place).page, index != current {
             go(to: index)
         }
     }
 
-    /// Folds the note open here: what's typed saved first, and a note made here and left empty let go of.
+    /// Folds the paper open here: what's typed saved first, and a note made here and left empty let go of.
     func fold(_ key: String) {
-        guard let paper = desk.store.paper(key), paper.noteID == openNote else { return }
+        guard key == openKey else { return }
         desk.editors[key]?.flush()
-        desk.heldByViewer[paper.noteID] = nil
-        openNote = nil
+        if let paper = desk.store.paper(key) { desk.heldByViewer[paper.noteID] = nil }
+        openKey = nil
         desk.letGoIfEmpty(key)
     }
 
     func flip() { face = face == .back ? .open : .back }
 
-    /// A new note here: on the selection's passage (exact: its page and bounds), else on the page or slide shown,
-    /// else on the file. A file anchor all the same, so Preview and Acrobat show it on the file (AXDocument). Its
-    /// words are checked against the vault first (off the main thread): a selection holding a secret makes no note.
+    /// A new note here: on the selection's passage (its page and words; found again by them wherever it moves),
+    /// else on the page or slide shown, else on the file. A file anchor all the same, so Preview and Acrobat show it
+    /// on the file (AXDocument). The page's whole text is checked against the vault before the passage is cut from
+    /// it (off the main thread): a selection touching a secret, or a vault that can't be read, makes no note.
     func newNote() {
         var stick = NoteStick(kind: .file)
         stick.path = url.path
@@ -467,25 +579,31 @@ final class ViewerModel: Identifiable {
         if !live, pageCount > 0 {
             if unit == .slide { stick.slide = current + 1 } else { stick.page = current + 1 }
         }
-        if let chosen {
-            stick.page = chosen.page + 1
-            stick.slide = nil
-            stick.bounds = [chosen.bounds.minX, chosen.bounds.minY, chosen.bounds.width, chosen.bounds.height]
-            stick.quote = String(chosen.quote.prefix(500))
-            stick.before = String(chosen.before.suffix(80))
-            stick.after = String(chosen.after.prefix(80))
-        }
-        let words = [stick.quote, stick.before, stick.after].filter { !$0.isEmpty }
         let url = url
         Viewers.queue.async {
             // A bookmark, so the note follows the file when it's moved or renamed (made off the main thread).
             stick.bookmark = ViewerLoader.bookmark(url)?.base64EncodedString() ?? ""
-            // A passage's words checked against the vault; unreadable, nothing counts as checked, so no note on it.
-            let secret = words.isEmpty ? false : VaultIndex.settled { index in index.unreadable ? true : words.contains { index.redacted($0) != $0 } } ?? true
+            var refused = false
+            if let chosen {
+                let cut = VaultIndex.settled { index -> (quote: String, before: String, after: String)? in
+                    guard !index.unreadable else { return nil }
+                    return ViewerSecrets.passage(chosen.pageText, range: chosen.range, secrets: index.spans(chosen.pageText))
+                } ?? nil
+                if let cut {
+                    stick.page = chosen.page + 1
+                    stick.slide = nil
+                    stick.bounds = [chosen.bounds.minX, chosen.bounds.minY, chosen.bounds.width, chosen.bounds.height]
+                    stick.quote = cut.quote
+                    stick.before = cut.before
+                    stick.after = cut.after
+                } else {
+                    refused = true
+                }
+            }
             let made = stick
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if secret { return self.desk.tell("That selection holds something from your vault: Petal makes no note on it.") }
+                    if refused { return self.desk.tell("That selection holds something from your vault, or the vault can't be read: Petal makes no note on it.") }
                     if chosen != nil { self.selection = nil }
                     self.make(made)
                 }
@@ -497,29 +615,37 @@ final class ViewerModel: Identifiable {
         guard desk.on else { return desk.tell("Petal Notes is off.") }
         guard let paper = desk.make(on: stick, open: false) else { return }
         openPaper(paper)
+        resolvePassages()
     }
 
     // MARK: The reading lens (Phase 2 connects the AI)
 
-    /// Marks a margin note to follow the selection (nil: none does).
-    func follow(_ noteID: String?) {
-        lensNote = noteID
+    /// Marks a margin paper to follow the selection (nil: none does).
+    func follow(_ key: String?) {
+        lensKey = key
         lensAnswer = nil
         lensSpot = nil
         lensRequest = nil
     }
 
-    /// The selection settled: while a note follows it, the paragraph it's in is asked about (redacted with the
-    /// vault's index off the main thread; the vault unreadable, nothing is asked).
-    func selectionSettled(page: Int, paragraph: String, selected: String, bounds: CGRect) {
-        guard let noteID = lensNote else { return }
+    /// The selection settled in a paragraph: while a note follows it, that paragraph is asked about, cut from the
+    /// page's text only after all of it was checked against the vault (off the main thread; the vault unreadable,
+    /// nothing is asked). `paragraph` and `selected`: UTF-16 ranges in `text`.
+    func selectionSettled(page: Int, text: String, paragraph: NSRange, selected: NSRange, bounds: CGRect) {
+        guard let key = lensKey, let noteID = desk.store.paper(key)?.noteID else { return }
         lensSoon?.cancel()
         let work = DispatchWorkItem { [weak self] in
             Viewers.queue.async {
-                let told = VaultIndex.settled { index in index.unreadable ? nil : (index.redacted(paragraph), index.redacted(selected)) } ?? nil
+                let told = VaultIndex.settled { index -> (String, String)? in
+                    guard !index.unreadable else { return nil }
+                    let secrets = index.spans(text)
+                    guard let words = ViewerSecrets.cut(text, range: paragraph, secrets: secrets, hidden: UIMap.hidden),
+                          let chosen = ViewerSecrets.cut(text, range: selected, secrets: secrets, hidden: UIMap.hidden) else { return nil }
+                    return (words, chosen)
+                } ?? nil
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
-                        guard let self, let told, self.lensNote == noteID else { return }
+                        guard let self, let told, self.lensKey == key else { return }
                         let request = ViewerLensRequest(noteID: noteID, page: page + 1, paragraph: told.0, selected: told.1, bounds: bounds)
                         self.lensRequest = request
                         self.onLens?(request)
@@ -533,7 +659,7 @@ final class ViewerModel: Identifiable {
 
     /// A short answer beside the paragraph `request` is about (only while it's still the one asked about).
     func answerLens(_ text: String, for request: ViewerLensRequest) {
-        guard request.id == lensRequest?.id, lensNote == request.noteID else { return }
+        guard request.id == lensRequest?.id, lensKey.flatMap({ desk.store.paper($0)?.noteID }) == request.noteID else { return }
         lensAnswer = ViewerLensAnswer(request: request, text: ViewerLens.short(text))
         lensPlaced()
     }
@@ -548,7 +674,7 @@ final class ViewerModel: Identifiable {
 
     /// Makes a copy of the file for each label in a temporary folder of its own ("Roadmap (Shorter).pptx"), off
     /// the main thread, and shows them under the document with "Use this". Whoever asked edits the copies; their
-    /// pictures follow the copies as they change. The original is never touched.
+    /// pictures follow the copies as they change, and the page shown. The original is never touched.
     func makeVersions(_ labels: [String], asker: String, then done: @escaping @MainActor (Result<ViewerVersionSet, ViewerCopyError>) -> Void) {
         let labels = ViewerCopies.labels(labels)
         guard !labels.isEmpty else { return done(.failure(.noLabels)) }
@@ -586,8 +712,9 @@ final class ViewerModel: Identifiable {
                     }
                     let set = ViewerVersionSet(id: String(id), asker: asker, folder: folder, versions: versions)
                     self.versions = set
+                    self.versionPages = [:]
                     self.app.viewers.versionSets[set.id] = set
-                    // The copies (edited in place, or replaced) and their folder: each change draws their pictures again.
+                    // The copies (edited in place, or replaced) and their folder: each change reads them again.
                     self.versionWatch = ViewerWatch(paths: [folder.path] + versions.map(\.url.path)) { [weak model = self, weak set] in
                         guard let model, let set else { return }
                         model.refreshVersions(set)
@@ -600,36 +727,60 @@ final class ViewerModel: Identifiable {
     }
 
     @ObservationIgnored private var versionWatch: ViewerWatch?
+    /// Each copy's pages as last read (by label), and the turn they and the pictures drawn from them belong to: a
+    /// newer read, or another page shown, makes an older answer stand down.
+    @ObservationIgnored private var versionPages: [String: Data] = [:]
+    @ObservationIgnored private var versionReads = 0
+    @ObservationIgnored private var versionDraws = 0
 
-    /// Each copy's picture of the page shown, off the main thread (through the same loader: Quick Look for decks).
+    /// Each copy read again (through the same loader: Quick Look for decks), off the main thread, then its picture
+    /// of the page shown drawn.
     func refreshVersions(_ set: ViewerVersionSet) {
-        let page = current
+        versionReads += 1
+        let turn = versionReads
         let kind = kind
         for version in set.versions {
             Viewers.queue.async {
                 let read = ViewerLoader.read(version.url, kind: kind)
-                let finish: @MainActor (Data?) -> Void = { data in
-                    let carried = ViewerCarry(data)
-                    Viewers.queue.async {
-                        let image = (carried.value as? Data).flatMap { PDFDocument(data: $0) }.flatMap { $0.page(at: min(page, $0.pageCount - 1)) }?
-                            .thumbnail(of: CGSize(width: 400, height: 224), for: .cropBox)
-                        let picture = ViewerCarry(image)
-                        DispatchQueue.main.async {
-                            MainActor.assumeIsolated {
-                                guard let index = set.versions.firstIndex(where: { $0.label == version.label }) else { return }
-                                set.versions[index].thumb = picture.value as? NSImage
-                            }
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        let keep: @MainActor (Data?) -> Void = { data in
+                            guard turn == self.versionReads, set === self.versions else { return }
+                            self.versionPages[version.label] = data
+                            self.drawVersion(set, version.label)
+                        }
+                        switch read.pages {
+                        case .pdf(let data): keep(data)
+                        case .web(let preview): ViewerWeb.pages(preview) { keep($0) }
+                        default: keep(nil)
                         }
                     }
                 }
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        switch read.pages {
-                        case .pdf(let data): finish(data)
-                        case .web(let preview): ViewerWeb.pages(preview) { finish($0) }
-                        default: finish(nil)
-                        }
-                    }
+            }
+        }
+    }
+
+    /// Every copy's picture of the page shown now (another page shown: drawn again from what was read).
+    private func drawVersions(_ set: ViewerVersionSet) {
+        versionDraws += 1
+        for version in set.versions { drawVersion(set, version.label) }
+    }
+
+    /// One copy's picture of the page shown, drawn off the main thread; kept only while that page and these copies
+    /// are still the ones shown.
+    private func drawVersion(_ set: ViewerVersionSet, _ label: String) {
+        let page = current
+        let turn = versionDraws
+        let carried = ViewerCarry(versionPages[label])
+        Viewers.queue.async {
+            let image = (carried.value as? Data).flatMap { PDFDocument(data: $0) }.flatMap { $0.page(at: min(page, $0.pageCount - 1)) }?
+                .thumbnail(of: CGSize(width: 400, height: 224), for: .cropBox)
+            let picture = ViewerCarry(image)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard turn == self.versionDraws, page == self.current, set === self.versions,
+                          let index = set.versions.firstIndex(where: { $0.label == label }) else { return }
+                    set.versions[index].thumb = picture.value as? NSImage
                 }
             }
         }
@@ -660,8 +811,8 @@ final class ViewerCarry: @unchecked Sendable {
 
 // MARK: - Reading
 
-/// What the viewer reads, off the main thread: the file's stamp, its pages (a PDF's bytes, or Quick Look's
-/// preview), and the app that opens it.
+/// What the viewer reads, off the main thread: the file's stamp and bookmark, its pages (a PDF's bytes, or Quick
+/// Look's preview), and the app that opens it.
 enum ViewerLoader {
     enum Pages {
         case pdf(Data)
@@ -673,6 +824,7 @@ enum ViewerLoader {
     struct Read {
         var pages: Pages
         var stamp: ViewerUpdated.Stamp?
+        var bookmark: Data?
         var appName: String
         var appURL: URL?
     }
@@ -691,12 +843,14 @@ enum ViewerLoader {
         return try? URL(resolvingBookmarkData: bookmark, options: [.withoutUI, .withoutMounting], relativeTo: nil, bookmarkDataIsStale: &stale)
     }
 
-    /// Off the main thread only.
+    /// Off the main thread only. The bookmark is made with every read that finds the file, so the first move or
+    /// rename is followed, and a replaced file's bookmark is its own.
     static func read(_ url: URL, kind: ViewerKind) -> Read {
         let app = NSWorkspace.shared.urlForApplication(toOpen: url)
         let appName = app.map { FileManager.default.displayName(atPath: $0.path).replacingOccurrences(of: ".app", with: "") } ?? ""
         let stamp = stamp(url)
         guard stamp != nil else { return Read(pages: .failed("The file isn't there any more."), stamp: nil, appName: appName, appURL: app) }
+        let mark = bookmark(url)
         switch kind {
         case .pdf:
             var data: Data?
@@ -704,10 +858,41 @@ enum ViewerLoader {
             NSFileCoordinator().coordinate(readingItemAt: url, options: [.withoutChanges], error: &error) { readable in
                 data = try? Data(contentsOf: readable)
             }
-            guard let data, PDFDocument(data: data) != nil else { return Read(pages: .failed("Petal can't read this PDF."), stamp: stamp, appName: appName, appURL: app) }
-            return Read(pages: .pdf(data), stamp: stamp, appName: appName, appURL: app)
+            guard let data, PDFDocument(data: data) != nil else {
+                return Read(pages: .failed("Petal can't read this PDF."), stamp: stamp, bookmark: mark, appName: appName, appURL: app)
+            }
+            return Read(pages: .pdf(data), stamp: stamp, bookmark: mark, appName: appName, appURL: app)
         case .quickLook(let unit):
-            return Read(pages: ViewerQuickLook.export(url, unit: unit), stamp: stamp, appName: appName, appURL: app)
+            return Read(pages: ViewerQuickLook.export(url, unit: unit), stamp: stamp, bookmark: mark, appName: appName, appURL: app)
+        }
+    }
+}
+
+/// A folder Quick Look exported a preview into: it owns that folder, which goes (off the main thread) once nothing
+/// holds the export any more, whether its pages were used or a newer load made it stand down.
+final class ViewerExport: @unchecked Sendable {
+    /// Where every export goes, each in a folder of its own.
+    static var root: URL { FileManager.default.temporaryDirectory.appending(path: "Petal Viewer") }
+
+    let folder: URL
+
+    init() {
+        folder = Self.root.appending(path: UUID().uuidString)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    }
+
+    deinit {
+        let folder = folder
+        Viewers.queue.async { try? FileManager.default.removeItem(at: folder) }
+    }
+
+    /// At launch: exports a Petal before this one left behind (quit or crashed mid-load), older than ten minutes
+    /// (another Petal process's export under way is left alone).
+    static func sweep(now: Date = Date()) {
+        let fm = FileManager.default
+        for folder in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
+            let made = (try? folder.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            if now.timeIntervalSince(made) > 600 { try? fm.removeItem(at: folder) }
         }
     }
 }
@@ -717,18 +902,15 @@ enum ViewerLoader {
 /// cut into slides or pages; nothing exported, Quick Look's own view shows it instead.
 enum ViewerQuickLook {
     static func export(_ url: URL, unit: ViewerUnit) -> ViewerLoader.Pages {
-        let out = FileManager.default.temporaryDirectory.appending(path: "Petal Viewer").appending(path: UUID().uuidString)
-        try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        let export = ViewerExport()
         // Quick Look reads the file where it is. A file iCloud hasn't downloaded comes down first (a coordinated
         // read); Quick Look runs after it, so an app saving the file never waits on Petal.
         var error: NSError?
         var readable = url
         NSFileCoordinator().coordinate(readingItemAt: url, options: [.withoutChanges], error: &error) { readable = $0 }
-        let ran = error == nil && run(["/usr/bin/qlmanage", "-p", "-o", out.path, readable.path], timeout: 40)
-        guard ran, let folder = (try? FileManager.default.contentsOfDirectory(at: out, includingPropertiesForKeys: nil))?.first(where: { $0.pathExtension == "qlpreview" }) else {
-            try? FileManager.default.removeItem(at: out)
-            return .live
-        }
+        let ran = error == nil && run(["/usr/bin/qlmanage", "-p", "-o", export.folder.path, readable.path], timeout: 40)
+        guard ran, let folder = (try? FileManager.default.contentsOfDirectory(at: export.folder, includingPropertiesForKeys: nil))?
+            .first(where: { $0.pathExtension == "qlpreview" }) else { return .live }
         let properties = (try? Data(contentsOf: folder.appending(path: "PreviewProperties.plist")))
             .flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any] } ?? [:]
         let mime = properties["MimeType"] as? String ?? ""
@@ -736,17 +918,17 @@ enum ViewerQuickLook {
         switch ViewerPages.shape(mime: mime, html: html) {
         case .pdf(let name):
             let file = name.isEmpty ? folder.appending(path: "Preview.pdf") : folder.appending(path: name)
-            let data = try? Data(contentsOf: file)
-            try? FileManager.default.removeItem(at: out)
-            guard let data, PDFDocument(data: data) != nil else { return .live }
+            guard let data = try? Data(contentsOf: file), PDFDocument(data: data) != nil else { return .live }
             return .pdf(data)
         case .slides, .flowing:
-            let width = (properties["Width"] as? NSNumber)?.doubleValue ?? 800
-            let height = (properties["Height"] as? NSNumber)?.doubleValue ?? 1000
-            return .web(ViewerWeb.Preview(folder: folder, cleanup: out, slides: html.contains("class=\"slide\"") || unit == .slide,
-                                          width: width, height: height))
+            // Sizes from Quick Look's file, kept to what a page can be.
+            let size = { (key: String, fallback: Double) -> Double in
+                let value = (properties[key] as? NSNumber)?.doubleValue ?? fallback
+                return value.isFinite ? min(max(value, 100), 20_000) : fallback
+            }
+            return .web(ViewerWeb.Preview(folder: folder, export: export, slides: html.contains("class=\"slide\"") || unit == .slide,
+                                          width: size("Width", 800), height: size("Height", 1000)))
         case .none:
-            try? FileManager.default.removeItem(at: out)
             return .live
         }
     }
@@ -771,43 +953,73 @@ enum ViewerQuickLook {
 
 /// Quick Look's HTML preview made into pages: laid out by WebKit (in its own process), measured (each slide's box,
 /// or where each block ends), drawn once as one long PDF, and cut into a page per slide or per page height off the
-/// main thread. Its words stay text, so a passage there can be exact too.
+/// main thread. Its words stay text, so a passage there can be exact too. It loads nothing but local files: a
+/// content rule list blocks every other load (an image or style from the network, a socket) before the preview
+/// is loaded, and the page's own scripts are off.
 @MainActor
 final class ViewerWeb: NSObject, WKNavigationDelegate {
     struct Preview: @unchecked Sendable {
         var folder: URL
-        var cleanup: URL
+        /// The export the preview is in: kept while WebKit uses it, removed once nothing holds it.
+        var export: ViewerExport?
         var slides: Bool
         var width: Double
         var height: Double
     }
 
     private let preview: Preview
-    private let web: WKWebView
+    private var web: WKWebView?
     private let done: @MainActor (Data?) -> Void
     private var finished = false
     private static var running: Set<ViewerWeb> = []
 
-    static func pages(_ preview: Preview, done: @escaping @MainActor (Data?) -> Void) {
+    /// `localOnly` false only for the check that proves the rule list matters (Petal --viewer-check).
+    static func pages(_ preview: Preview, localOnly: Bool = true, done: @escaping @MainActor (Data?) -> Void) {
         let job = ViewerWeb(preview, done: done)
         running.insert(job)
-        job.start()
+        guard localOnly else { return job.start(rules: nil) }
+        rules { list in
+            // No rule list, no load: nothing is loaded without it.
+            guard let list else { return job.finish(nil) }
+            job.start(rules: list)
+        }
+    }
+
+    /// Every load blocked but local files (and data the page carries in itself).
+    static let ruleSource = """
+        [{"trigger":{"url-filter":".*"},"action":{"type":"block"}},
+         {"trigger":{"url-filter":"^file:"},"action":{"type":"ignore-previous-rules"}},
+         {"trigger":{"url-filter":"^data:"},"action":{"type":"ignore-previous-rules"}}]
+        """
+    private static var compiled: WKContentRuleList?
+
+    private static func rules(_ done: @escaping @MainActor (WKContentRuleList?) -> Void) {
+        if let compiled { return done(compiled) }
+        WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "petal.viewer.local-only", encodedContentRuleList: ruleSource) { list, _ in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if let list { compiled = list }
+                    done(list)
+                }
+            }
+        }
     }
 
     private init(_ preview: Preview, done: @escaping @MainActor (Data?) -> Void) {
         self.preview = preview
         self.done = done
-        let configuration = WKWebViewConfiguration()
-        // Quick Look's preview is the file's own content: nothing it says reaches the network or runs scripts of
-        // its own beyond the measuring Petal does.
-        configuration.websiteDataStore = .nonPersistent()
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
-        web = WKWebView(frame: NSRect(x: 0, y: 0, width: max(320, preview.width), height: max(320, preview.height)), configuration: configuration)
         super.init()
-        web.navigationDelegate = self
     }
 
-    private func start() {
+    private func start(rules: WKContentRuleList?) {
+        guard !finished else { return }
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        if let rules { configuration.userContentController.add(rules) }
+        let web = WKWebView(frame: NSRect(x: 0, y: 0, width: max(320, preview.width), height: max(320, preview.height)), configuration: configuration)
+        web.navigationDelegate = self
+        self.web = web
         web.loadFileURL(preview.folder.appending(path: "Preview.html"), allowingReadAccessTo: preview.folder)
         DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in self?.finish(nil) }
     }
@@ -833,20 +1045,31 @@ final class ViewerWeb: NSObject, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { finish(nil) }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { finish(nil) }
 
+    /// The tallest a preview is drawn (as many pages as the viewer shows, at most).
+    static let tallest: CGFloat = 400_000
+
     private func measured(_ value: Any) {
+        guard let web else { return finish(nil) }
         var boxes: [CGRect] = []
         var size = CGSize(width: preview.width, height: preview.height)
         var bottoms: [CGFloat] = []
+        let sane = { (number: NSNumber) -> CGFloat? in
+            let value = number.doubleValue
+            return value.isFinite && abs(value) <= Double(Self.tallest) ? CGFloat(value) : nil
+        }
         if preview.slides {
             for item in value as? [[NSNumber]] ?? [] where item.count == 4 {
-                boxes.append(CGRect(x: item[0].doubleValue, y: item[1].doubleValue, width: item[2].doubleValue, height: item[3].doubleValue))
+                let numbers = item.compactMap(sane)
+                guard numbers.count == 4, numbers[2] > 1, numbers[3] > 1 else { continue }
+                boxes.append(CGRect(x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3]))
             }
+            boxes = Array(boxes.prefix(500))
             guard !boxes.isEmpty else { return finish(nil) }
             size = CGSize(width: max(size.width, boxes.map(\.maxX).max() ?? 0), height: boxes.map(\.maxY).max() ?? size.height)
         } else {
-            let numbers = (value as? [NSNumber] ?? []).map { CGFloat($0.doubleValue) }
+            let numbers = (value as? [NSNumber] ?? []).compactMap(sane)
             guard numbers.count >= 2 else { return finish(nil) }
-            size = CGSize(width: max(numbers[0], 320), height: max(numbers[1], 320))
+            size = CGSize(width: max(numbers[0], 320), height: min(max(numbers[1], 320), Self.tallest))
             bottoms = Array(numbers.dropFirst(2))
         }
         // The whole preview, laid out at its full height so every part is in the drawing.
@@ -892,9 +1115,9 @@ final class ViewerWeb: NSObject, WKNavigationDelegate {
     private func finish(_ data: Data?) {
         guard !finished else { return }
         finished = true
-        web.stopLoading()
-        let cleanup = preview.cleanup
-        Viewers.queue.async { try? FileManager.default.removeItem(at: cleanup) }
+        web?.stopLoading()
+        web = nil
+        // The export goes once this job lets go of it (ViewerExport).
         Self.running.remove(self)
         done(data)
     }
@@ -902,10 +1125,12 @@ final class ViewerWeb: NSObject, WKNavigationDelegate {
 
 /// A file (and its folder) watched for changes, on the viewer's queue: saved in place, replaced (PowerPoint,
 /// Keynote and most apps save a new file and swap it in), renamed or moved. Each burst is one call, once settled.
+/// The paths are opened off the main thread.
 final class ViewerWatch: @unchecked Sendable {
     private var sources: [DispatchSourceFileSystemObject] = []
     private let changed: @MainActor () -> Void
     private var soon: DispatchWorkItem?
+    private var stopped = false
     private let lock = NSLock()
 
     convenience init(url: URL, changed: @escaping @MainActor () -> Void) {
@@ -914,6 +1139,11 @@ final class ViewerWatch: @unchecked Sendable {
 
     init(paths: [String], changed: @escaping @MainActor () -> Void) {
         self.changed = changed
+        Viewers.queue.async { [weak self] in self?.start(paths) }
+    }
+
+    private func start(_ paths: [String]) {
+        var made: [DispatchSourceFileSystemObject] = []
         for path in paths {
             let fd = open(path, O_EVTONLY)
             guard fd >= 0 else { continue }
@@ -921,8 +1151,17 @@ final class ViewerWatch: @unchecked Sendable {
                                                                    queue: Viewers.queue)
             source.setEventHandler { [weak self] in self?.fire() }
             source.setCancelHandler { close(fd) }
-            source.resume()
-            sources.append(source)
+            made.append(source)
+        }
+        lock.withLock {
+            // Let go of before it was set up: nothing is watched (a source is resumed before it's cancelled, so its
+            // descriptor is closed).
+            if stopped {
+                for source in made { source.setEventHandler {}; source.resume(); source.cancel() }
+                return
+            }
+            sources = made
+            for source in made { source.resume() }
         }
     }
 
@@ -939,8 +1178,11 @@ final class ViewerWatch: @unchecked Sendable {
     }
 
     deinit {
-        soon?.cancel()
-        for source in sources { source.cancel() }
+        lock.withLock {
+            stopped = true
+            soon?.cancel()
+            for source in sources { source.cancel() }
+        }
     }
 }
 
@@ -957,38 +1199,60 @@ enum ViewerGeometry {
 
 // MARK: - Notes as comments
 
-/// "Write these notes into the PDF as comments": each note on the PDF as a comment where it's stuck (a passage's
-/// highlight, else a sticky note at its page's top-left corner, the first page for one on the whole file). Into a
-/// copy beside the original by default ("Report (with notes).pdf"); into the original only when asked, and then
-/// the original is kept beside it first ("Report (before notes).pdf"). Every note's words go through the vault's
-/// redaction (nothing from it is written while the vault can't be read). Off the main thread.
+/// "Write these notes into the PDF as comments": each note on the PDF as a comment where it's stuck (a passage found
+/// again by its words, highlighted; else a sticky note at its page's top-left corner, the first page for one on the
+/// whole file or whose passage moved). Into a copy beside the original by default ("Report (with notes).pdf"); into
+/// the original only when asked, the original kept beside it first ("Report (before notes).pdf"). Every note's
+/// words are redacted whole with the vault's index before they're made plain or cut (nothing is written while the
+/// vault can't be read). The write lands only on the PDF it was made from, its asker still there: both checked
+/// inside the coordinated write, right before each change (ViewerWrites). Off the main thread.
 enum ViewerPDFComments {
     struct Comment: Sendable {
         var stick: NoteStick
-        var text: String
+        var body: String
         var color: NoteInk.RGB
     }
 
-    enum Outcome { case wrote(URL, Int), failed(String) }
+    enum Outcome: Equatable { case wrote(URL, Int), failed(String) }
 
-    static func write(_ pdf: URL, comments: [Comment], intoOriginal: Bool, author: String, _ done: @escaping @MainActor (Outcome) -> Void) {
+    static let changed = "The PDF changed while Petal was writing its notes into it: nothing was written. Try again."
+    static let hungUp = "The request ended before this was done: nothing was written."
+
+    /// `meanwhile`: for Petal --viewer-check only, between reading the PDF and writing (a change made then).
+    static func write(_ pdf: URL, comments: [Comment], intoOriginal: Bool, author: String, live: @escaping @Sendable () -> Bool = { true },
+                      meanwhile: (@Sendable () -> Void)? = nil, _ done: @escaping @MainActor (Outcome) -> Void) {
         Viewers.queue.async {
-            let outcome = make(pdf, comments: comments, intoOriginal: intoOriginal, author: author)
+            let outcome = make(pdf, comments: comments, intoOriginal: intoOriginal, author: author, live: live, meanwhile: meanwhile)
             DispatchQueue.main.async { MainActor.assumeIsolated { done(outcome) } }
         }
     }
 
-    private static func make(_ pdf: URL, comments: [Comment], intoOriginal: Bool, author: String) -> Outcome {
+    private static func make(_ pdf: URL, comments: [Comment], intoOriginal: Bool, author: String, live: @Sendable () -> Bool,
+                             meanwhile: (@Sendable () -> Void)?) -> Outcome {
         guard !comments.isEmpty else { return .failed("No notes are on this PDF yet.") }
-        let told = VaultIndex.settled { index in index.unreadable ? nil : comments.map { index.redacted($0.text) } } ?? nil
+        guard live() else { return .failed(hungUp) }
+        // Each note's words redacted whole, before anything is cut from them.
+        let told = VaultIndex.settled { index in index.unreadable ? nil : comments.map { ViewerComments.text($0.body, redact: index.redacted) } } ?? nil
         guard let told else { return .failed("Your vault can't be read right now, so Petal wrote nothing (a note's words are checked first).") }
-        var data: Data?
+        // The base: the PDF as read now (its bytes and identity); the write lands only on it.
+        var base: Data?
+        var baseStamp: ViewerUpdated.Stamp?
         var error: NSError?
-        NSFileCoordinator().coordinate(readingItemAt: pdf, options: [.withoutChanges], error: &error) { readable in data = try? Data(contentsOf: readable) }
-        guard let data, let document = PDFDocument(data: data), document.pageCount > 0 else { return .failed("Petal can't read this PDF.") }
+        NSFileCoordinator().coordinate(readingItemAt: pdf, options: [.withoutChanges], error: &error) { readable in
+            baseStamp = ViewerLoader.stamp(readable)
+            base = try? Data(contentsOf: readable)
+        }
+        guard let base, let baseStamp, let document = PDFDocument(data: base), document.pageCount > 0 else { return .failed("Petal can't read this PDF.") }
+        let texts = (0..<document.pageCount).map { document.page(at: $0)?.string ?? "" }
         var written = 0
         for (comment, text) in zip(comments, told) where !text.isEmpty {
-            guard let spot = ViewerComments.spot(comment.stick, pages: document.pageCount, pageSize: { document.page(at: $0)?.bounds(for: .cropBox).size ?? .zero }),
+            // A passage where its words are now, never where it was saved.
+            let found = ViewerPassages.find(comment.stick, in: texts).flatMap { spot -> (page: Int, bounds: CGRect)? in
+                guard let page = document.page(at: spot.page), let bounds = page.selection(for: spot.range)?.bounds(for: page), bounds.width > 0 else { return nil }
+                return (spot.page, bounds)
+            }
+            guard let spot = ViewerComments.spot(comment.stick, passage: found, pages: document.pageCount,
+                                                 pageSize: { document.page(at: $0)?.bounds(for: .cropBox).size ?? .zero }),
                   let page = document.page(at: spot.page) else { continue }
             let color = NSColor(srgbRed: comment.color.r, green: comment.color.g, blue: comment.color.b, alpha: 1)
             if let bounds = spot.bounds {
@@ -1006,32 +1270,48 @@ enum ViewerPDFComments {
             written += 1
         }
         guard written > 0 else { return .failed("No notes are on this PDF yet.") }
+        // Written first in a folder of Petal's own on the PDF's volume (never beside it), then moved in.
+        guard let scratch = try? FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: pdf, create: true) else {
+            return .failed("Petal couldn't write beside the PDF (its folder may not be writable).")
+        }
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let temp = scratch.appending(path: pdf.lastPathComponent)
+        guard document.write(to: temp) else { return .failed("Petal couldn't write the PDF with its notes.") }
+        meanwhile?()
         let folder = pdf.deletingLastPathComponent()
-        let taken = Set(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).map { $0.lowercased() })
-        let temp = folder.appending(path: ".petal-\(UUID().uuidString).pdf")
-        guard document.write(to: temp) else { return .failed("Petal couldn't write beside the PDF (its folder may not be writable).") }
+        var outcome: Outcome = .failed("Petal couldn't write beside the PDF; nothing changed.")
         if !intoOriginal {
-            let copy = folder.appending(path: ViewerCopies.withNotes(original: pdf.lastPathComponent, taken: taken))
-            do { try FileManager.default.moveItem(at: temp, to: copy) } catch {
-                try? FileManager.default.removeItem(at: temp)
-                return .failed("Petal couldn't write the copy beside the PDF.")
+            // A new copy beside it: the PDF read (it's still the one the notes were written on), the copy written.
+            let names = Set(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).map { $0.lowercased() })
+            let copy = folder.appending(path: ViewerCopies.withNotes(original: pdf.lastPathComponent, taken: names))
+            NSFileCoordinator().coordinate(readingItemAt: pdf, options: [.withoutChanges], writingItemAt: copy, options: [], error: &error) { readable, writable in
+                switch ViewerWrites.land(live: live(), base: (baseStamp, base), now: (ViewerLoader.stamp(readable), try? Data(contentsOf: readable))) {
+                case .hungUp: outcome = .failed(hungUp)
+                case .changed: outcome = .failed(changed)
+                case .land:
+                    guard !FileManager.default.fileExists(atPath: writable.path), (try? FileManager.default.moveItem(at: temp, to: writable)) != nil else { return }
+                    outcome = .wrote(writable, written)
+                }
             }
-            return .wrote(copy, written)
+            return outcome
         }
-        // Into the original: the original kept beside it first, then the new one put in its place, coordinated.
-        let backup = folder.appending(path: ViewerCopies.beforeNotes(original: pdf.lastPathComponent, taken: taken))
-        var failure: String?
+        // Into the original: the original kept beside it first, then the new one put in its place.
         NSFileCoordinator().coordinate(writingItemAt: pdf, options: [.forReplacing], error: &error) { writable in
-            do {
-                try FileManager.default.copyItem(at: writable, to: backup)
-                _ = try FileManager.default.replaceItemAt(writable, withItemAt: temp)
-            } catch { failure = "Petal couldn't write into the PDF; it's as it was." }
+            switch ViewerWrites.land(live: live(), base: (baseStamp, base), now: (ViewerLoader.stamp(writable), try? Data(contentsOf: writable))) {
+            case .hungUp: outcome = .failed(hungUp)
+            case .changed: outcome = .failed(changed)
+            case .land:
+                let names = Set(((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).map { $0.lowercased() })
+                let backup = folder.appending(path: ViewerCopies.beforeNotes(original: pdf.lastPathComponent, taken: names))
+                do {
+                    try FileManager.default.copyItem(at: writable, to: backup)
+                    _ = try FileManager.default.replaceItemAt(writable, withItemAt: temp)
+                    outcome = .wrote(pdf, written)
+                } catch {
+                    outcome = .failed("Petal couldn't write into the PDF; it's as it was.")
+                }
+            }
         }
-        if error != nil, failure == nil { failure = "Petal couldn't write into the PDF; it's as it was." }
-        if let failure {
-            try? FileManager.default.removeItem(at: temp)
-            return .failed(failure)
-        }
-        return .wrote(pdf, written)
+        return outcome
     }
 }

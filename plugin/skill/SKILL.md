@@ -104,8 +104,9 @@ Use, in this order:
   notebook's `About this notebook.md` is its cover and holds its `color` ("accent" is the Mac's accent color).
   Petal keeps a note's pictures at the notes folder's root, in `Pictures/<hash>/` (one folder per note), and links them as `../Pictures/<hash>/<name>`; moving a note moves only its Markdown. Prefer the note tools; if you edit a file by hand, keep its front
   matter and its `id`. A note on a file in Petal's viewer keeps where in it on its `file` place: `page` or `slide`
-  (from 1), and for a PDF passage `quote`, `before`, `after` and `bounds` ("x y width height" in the page's points);
-  other apps show it on the file. A note changed in two places at once shows as two read-only papers (one may be a
+  (from 1), and for a PDF passage `quote`, `before`, `after` and `bounds` ("x y width height" in the page's points;
+  where it was: the viewer finds a passage again by its words, and one no longer there shows on the file as "passage
+  moved"); other apps show it on the file. A note changed in two places at once shows as two read-only papers (one may be a
   "(conflicted copy)" file) until the user keeps one. Which notes are open on this Mac is in `~/Library/Application Support/Petal/notes-state.json`.
 - `routines.json` (macOS): the routines; change them with the routine tools rather than by hand. What they did is in
   `~/Library/Application Support/Petal/routines-log.json`.

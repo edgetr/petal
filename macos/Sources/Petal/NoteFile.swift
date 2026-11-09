@@ -179,10 +179,13 @@ struct NoteStick: Equatable, Sendable {
 }
 
 /// A spot in a file as a file anchor writes it (Petal's viewer): a PDF passage's bounds on its page, "x y width
-/// height" in the page's points. Only finite numbers with a positive size; anything else is no bounds.
+/// height" in the page's points. Only numbers a page can have (within a million points either way: PDF pages are at
+/// most 14,400) with a positive size; anything else is no bounds, kept in the file as it was written.
 enum ViewerSpots {
+    static let reach = 1_000_000.0
+
     static func boundsText(_ bounds: [Double]) -> String? {
-        guard bounds.count == 4, bounds.allSatisfy(\.isFinite), bounds[2] > 0, bounds[3] > 0 else { return nil }
+        guard bounds.count == 4, bounds.allSatisfy({ $0.isFinite && abs($0) <= reach }), bounds[2] > 0, bounds[3] > 0 else { return nil }
         return bounds.map { value in
             let rounded = (value * 100).rounded() / 100
             return rounded == rounded.rounded() ? String(Int(rounded)) : String(rounded)

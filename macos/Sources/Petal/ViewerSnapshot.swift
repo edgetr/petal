@@ -37,8 +37,12 @@ extension Snapshot {
                         PaperNote(file: second, url: root.appending(path: "Reading/Intro.md"), notebook: "Reading"),
                         PaperNote(file: whole, url: root.appending(path: "Inbox/Thursday.md"), notebook: "Inbox")]
         app.paper.store.preview(notesPDF, notebooks: books)
-        pdf.openNote = "V1"
-        pdf.heights = ["V1": 214, "V2": PaperLook.folded, "V3": PaperLook.folded]
+        // The passages as the viewer finds them again by their words on the page drawn above.
+        pdf.preview(pages: (0..<6).map { samplePage($0) }, current: 0,
+                    passages: [notesPDF[0].key: .found(page: 0, bounds: CGRect(x: 72, y: 558, width: 300, height: 16)),
+                               notesPDF[1].key: .found(page: 0, bounds: CGRect(x: 72, y: 378, width: 260, height: 16))])
+        pdf.openKey = notesPDF[0].key
+        pdf.heights = [notesPDF[0].key: 214, notesPDF[1].key: PaperLook.folded, notesPDF[2].key: PaperLook.folded]
         lay(pdf, size: size, strip: false)
         write(render(AnyView(ViewerView(model: pdf)), app: app, size: size), name: "viewer-pdf", folder: folder)
 
@@ -55,8 +59,8 @@ extension Snapshot {
                          PaperNote(file: five, url: root.appending(path: "Team/Chart.md"), notebook: "Team"),
                          PaperNote(file: seven, url: root.appending(path: "Team/Screenshot.md"), notebook: "Team")]
         app.paper.store.preview(notesDeck, notebooks: books)
-        deck.openNote = "D1"
-        deck.heights = ["D1": 190, "D2": PaperLook.folded, "D3": PaperLook.folded]
+        deck.openKey = notesDeck[0].key
+        deck.heights = [notesDeck[0].key: 190, notesDeck[1].key: PaperLook.folded, notesDeck[2].key: PaperLook.folded]
         lay(deck, size: size, strip: false)
         write(render(AnyView(ViewerView(model: deck)), app: app, size: size), name: "viewer-slides", folder: folder)
 
@@ -80,9 +84,10 @@ extension Snapshot {
         model.pageTops = frames.mapValues(\.minY)
         var highlights: [String: CGRect] = [:]
         for (paper, place) in model.notes {
-            guard let index = ViewerMatch.pageIndex(place, count: model.pageCount), let frame = frames[index], let b = place.bounds else { continue }
+            let spot = model.spot(paper, place)
+            guard let index = spot.page, let frame = frames[index], let b = spot.bounds else { continue }
             let scale = frame.width / 612
-            highlights[paper.noteID] = CGRect(x: frame.minX + b[0] * scale, y: frame.minY + (792 - b[1] - b[3]) * scale, width: b[2] * scale, height: b[3] * scale)
+            highlights[paper.key] = CGRect(x: frame.minX + b.minX * scale, y: frame.minY + (792 - b.maxY) * scale, width: b.width * scale, height: b.height * scale)
         }
         model.highlights = highlights
     }
@@ -136,8 +141,13 @@ extension Snapshot {
 
 /// `Petal --viewer-check <file>… [--out <folder>]`: the viewer's loading as the window does it, without showing
 /// anything: each file checked (ViewerPath), read off the main thread, its pages exported through Quick Look where
-/// it isn't a PDF, and for a PDF its notes written as comments into a copy beside it (a made-up note). Prints what
-/// each became. Run it on throwaway files only: it writes beside a PDF it's given.
+/// it isn't a PDF, and for a PDF its notes written as comments into a copy beside it (made-up notes). Then, on
+/// throwaway copies in a folder of its own: a comment write refused when the PDF changed under it (into a copy and
+/// into the original) and when its asker hung up; a Quick Look export cleaned up when its result is dropped; a
+/// preview with a remote picture loading nothing from the network (and, without the rule list, a request seen, so
+/// the check means something); and an off-screen viewer window (a selection, a passage found again by its words
+/// whatever coordinates it was saved with, its highlight on them, its paper lined up, the margin and pages in step).
+/// Run it on throwaway files only: it writes beside a PDF it's given.
 @MainActor
 enum ViewerCheck {
     static func run(_ arguments: [String]) {
@@ -156,21 +166,224 @@ enum ViewerCheck {
                 failed = failed || !ok
                 done = true
             }
-            let until = Date().addingTimeInterval(90)
-            while !done && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+            wait(90) { done }
             if !done { print("\(file): timed out"); failed = true }
         }
-        // The window itself, never shown: PDFKit's view, a selection offering a Note, and a note's highlight where
-        // the selection of the same words is.
         if let pdf = files.first(where: { ViewerKind.of($0) == .pdf }), case .success(let url) = ViewerPath.check(pdf) {
+            failed = !writes(url) || failed
             failed = !window(url) || failed
         }
+        if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
+            failed = !cleanup(url) || failed
+        }
+        failed = !remote() || failed
         exit(failed ? 1 : 0)
     }
 
     private static func wait(_ seconds: Double, until done: () -> Bool) {
         let until = Date().addingTimeInterval(seconds)
         while !done() && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+    }
+
+    private static func check(_ file: String, out: String?, _ done: @escaping @MainActor (Bool) -> Void) {
+        let checked = ViewerPath.check(file)
+        guard case .success(let url) = checked else {
+            if case .failure(let refusal) = checked { print("\(file): refused: \(refusal.description)") }
+            return done(false)
+        }
+        let kind = ViewerKind.of(url.path) ?? .quickLook(.page)
+        Viewers.queue.async {
+            let read = ViewerLoader.read(url, kind: kind)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let report = { (data: Data?, how: String) in
+                        guard read.bookmark != nil else { print("\(url.lastPathComponent): FAIL no bookmark made with the read"); return done(false) }
+                        guard let data, let document = PDFDocument(data: data) else {
+                            print("\(url.lastPathComponent): \(how), no pages (shown through Quick Look's own view); opens in \(read.appName)")
+                            return done(how == "live")
+                        }
+                        let text = (document.page(at: 0)?.string ?? "").replacingOccurrences(of: "\n", with: " ").prefix(60)
+                        print("\(url.lastPathComponent): \(how), \(document.pageCount) \(kind.unit.word)s, first: “\(text)”; opens in \(read.appName.isEmpty ? "—" : read.appName)")
+                        if let out {
+                            try? FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
+                            try? data.write(to: URL(fileURLWithPath: out).appending(path: url.lastPathComponent + ".pages.pdf"))
+                        }
+                        guard kind == .pdf else { return done(true) }
+                        // Comments into a copy beside it: a made-up note on page 1's first words (found by them), one on
+                        // the file.
+                        ViewerPDFComments.write(url, comments: comments(url, document), intoOriginal: false, author: "Petal check") { outcome in
+                            switch outcome {
+                            case .wrote(let copy, let count):
+                                let annotations = PDFDocument(url: copy).map { doc in (0..<doc.pageCount).reduce(0) { $0 + (doc.page(at: $1)?.annotations.count ?? 0) } } ?? 0
+                                let highlights = PDFDocument(url: copy)?.page(at: 0)?.annotations.filter { $0.type == "Highlight" }.count ?? 0
+                                print("  comments: \(count) notes into \(copy.lastPathComponent) (\(annotations) annotations, \(highlights) highlight on its words)")
+                                try? FileManager.default.removeItem(at: copy)
+                                done(count == 2 && annotations == 3 && highlights == 1)
+                            case .failed(let text):
+                                print("  comments failed: \(text)")
+                                done(false)
+                            }
+                        }
+                    }
+                    switch read.pages {
+                    case .pdf(let data): report(data, kind == .pdf ? "PDF" : "Quick Look's PDF")
+                    case .web(let preview): ViewerWeb.pages(preview) { report($0, preview.slides ? "Quick Look's slides" : "Quick Look's pages") }
+                    case .live: report(nil, "live")
+                    case .failed(let text): print("\(url.lastPathComponent): \(text)"); done(false)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Made-up notes on a PDF: one on page 1's first words (with coordinates that are wrong on purpose: the passage
+    /// is found by its words), one on the file.
+    private static func comments(_ url: URL, _ document: PDFDocument) -> [ViewerPDFComments.Comment] {
+        let text = document.page(at: 0)?.string ?? ""
+        var passage = NoteStick(kind: .file)
+        passage.path = url.path
+        passage.page = 1
+        passage.bounds = [1, 1, 5, 5]
+        passage.quote = String(text.prefix(15))
+        passage.after = String(text.dropFirst(15).prefix(20))
+        var whole = NoteStick(kind: .file)
+        whole.path = url.path
+        return [ViewerPDFComments.Comment(stick: passage, body: "A made-up note on a passage", color: PaperLook.rgb(.systemBlue)),
+                ViewerPDFComments.Comment(stick: whole, body: "A made-up note on the file", color: PaperLook.rgb(.systemGreen))]
+    }
+
+    /// A folder of the check's own, removed when it's done.
+    private static func scratch() -> URL {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "petal-viewer-check-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder
+    }
+
+    /// Comment writes land only on the PDF they were made from, and only while their asker is there.
+    private static func writes(_ source: URL) -> Bool {
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let pdf = folder.appending(path: "Report.pdf")
+        try? FileManager.default.copyItem(at: source, to: pdf)
+        guard let document = PDFDocument(url: pdf) else { return false }
+        let notes = comments(pdf, document)
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("writes: FAIL \(what)"); ok = false } }
+        func run(original: Bool, live: @escaping @Sendable () -> Bool = { true }, meanwhile: (@Sendable () -> Void)? = nil) -> ViewerPDFComments.Outcome? {
+            var outcome: ViewerPDFComments.Outcome?
+            ViewerPDFComments.write(pdf, comments: notes, intoOriginal: original, author: "Petal check", live: live, meanwhile: meanwhile) { outcome = $0 }
+            wait(20) { outcome != nil }
+            return outcome
+        }
+        let names = { Set((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []) }
+        // The PDF changed after it was read: refused, and the change kept.
+        let edit: @Sendable () -> Void = {
+            guard let handle = try? FileHandle(forWritingTo: pdf) else { return }
+            handle.seekToEndOfFile()
+            handle.write(Data("\n% an edit made meanwhile\n".utf8))
+            try? handle.close()
+        }
+        expect(run(original: false, meanwhile: edit) == .failed(ViewerPDFComments.changed) && names() == ["Report.pdf"], "a copy refused on a changed base")
+        let edited = try? Data(contentsOf: pdf)
+        expect(run(original: true, meanwhile: edit) == .failed(ViewerPDFComments.changed), "the original refused on a changed base")
+        expect((try? Data(contentsOf: pdf)) != edited && (try? Data(contentsOf: pdf))?.count ?? 0 > edited?.count ?? 0 && names() == ["Report.pdf"],
+               "the newer edits kept, nothing written over them")
+        // Its asker gone (before or while it worked): nothing written.
+        expect(run(original: true, live: { false }) == .failed(ViewerPDFComments.hungUp) && names() == ["Report.pdf"], "a hung-up request writes nothing")
+        let flag = HangUp()
+        expect(run(original: true, live: { !flag.gone }, meanwhile: { flag.gone = true }) == .failed(ViewerPDFComments.hungUp) && names() == ["Report.pdf"],
+               "hung up mid-way: nothing written")
+        // Unchanged: into the original, the original kept beside it.
+        let before = try? Data(contentsOf: pdf)
+        if case .wrote(_, let count)? = run(original: true) {
+            expect(count == 2 && names() == ["Report.pdf", "Report (before notes).pdf"], "written into the original")
+            expect((try? Data(contentsOf: folder.appending(path: "Report (before notes).pdf"))) == before, "the original kept as it was")
+        } else { expect(false, "written into the original") }
+        print("writes: " + (ok ? "refused on a changed PDF or a hung-up asker, the original kept when written into" : "failed"))
+        return ok
+    }
+
+    final class HangUp: @unchecked Sendable { var gone = false }
+
+    /// A Quick Look export whose result is dropped unused (a newer load) is cleaned up all the same.
+    private static func cleanup(_ deck: URL) -> Bool {
+        var folder: URL?
+        var exported = false
+        Viewers.queue.async {
+            let pages = ViewerQuickLook.export(deck, unit: .slide)
+            if case .web(let preview) = pages { folder = preview.export?.folder; exported = true }
+            // Dropped here, unused.
+        }
+        wait(60) { exported }
+        guard let folder else { print("cleanup: FAIL the deck didn't export"); return false }
+        wait(5) { !FileManager.default.fileExists(atPath: folder.path) }
+        let ok = !FileManager.default.fileExists(atPath: folder.path)
+        print("cleanup: " + (ok ? "an export dropped unused is removed" : "FAIL an export dropped unused was left behind"))
+        return ok
+    }
+
+    /// A preview with a picture from the network loads nothing from it (a local server counts what reaches it);
+    /// without the rule list the same preview does reach it, so the check means something.
+    private static func remote() -> Bool {
+        let server = LocalServer()
+        guard let port = server.start() else { print("remote: FAIL no local server"); return false }
+        func preview() -> ViewerWeb.Preview {
+            let export = ViewerExport()
+            let folder = export.folder.appending(path: "Sample.qlpreview")
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let html = "<html><body><p>Words of a sample document.</p><img src=\"http://127.0.0.1:\(port)/picture.png\" width=\"40\" height=\"40\"><p>More words.</p></body></html>"
+            try? Data(html.utf8).write(to: folder.appending(path: "Preview.html"))
+            return ViewerWeb.Preview(folder: folder, export: export, slides: false, width: 600, height: 800)
+        }
+        func pages(localOnly: Bool) -> Data?? {
+            var result: Data??
+            ViewerWeb.pages(preview(), localOnly: localOnly) { result = .some($0) }
+            wait(40) { result != nil }
+            return result
+        }
+        let blocked = pages(localOnly: true)
+        wait(1) { false }
+        let reachedBlocked = server.hits
+        _ = pages(localOnly: false)
+        wait(2) { server.hits > reachedBlocked }
+        let reachedOpen = server.hits - reachedBlocked
+        server.stop()
+        let ok = (blocked ?? nil) != nil && reachedBlocked == 0 && reachedOpen > 0
+        print("remote: " + (ok ? "nothing loaded from the network (without the rule list: \(reachedOpen) reached it)" : "FAIL \(reachedBlocked) requests reached the network with the rule list, \(reachedOpen) without; pages \(blocked.map { $0 != nil } ?? false)"))
+        return ok
+    }
+
+    /// A TCP listener on 127.0.0.1 that counts connections (the check's stand-in for the network).
+    final class LocalServer: @unchecked Sendable {
+        private var socketFD: Int32 = -1
+        private let lock = NSLock()
+        private var count = 0
+        var hits: Int { lock.withLock { count } }
+
+        func start() -> UInt16? {
+            socketFD = socket(AF_INET, SOCK_STREAM, 0)
+            guard socketFD >= 0 else { return nil }
+            var address = sockaddr_in()
+            address.sin_family = sa_family_t(AF_INET)
+            address.sin_addr.s_addr = inet_addr("127.0.0.1")
+            address.sin_port = 0
+            let bound = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(socketFD, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+            guard bound == 0, listen(socketFD, 8) == 0 else { return nil }
+            var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+            _ = withUnsafeMutablePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(socketFD, $0, &length) } }
+            let fd = socketFD
+            Thread.detachNewThread { [self] in
+                while true {
+                    let client = accept(fd, nil, nil)
+                    if client < 0 { return }
+                    lock.withLock { count += 1 }
+                    close(client)
+                }
+            }
+            return UInt16(bigEndian: address.sin_port)
+        }
+
+        func stop() { if socketFD >= 0 { close(socketFD); socketFD = -1 } }
     }
 
     /// An off-screen viewer window on a throwaway PDF whose first page has "Growth held steady" (never ordered in).
@@ -191,91 +404,61 @@ enum ViewerCheck {
         var ok = true
         func expect(_ condition: Bool, _ what: String) { if !condition { print("window: FAIL \(what)"); ok = false } }
         expect(model.pageCount == 2 && model.current == 0, "two pages, the first shown")
-        // A selection offers a Note with its page, bounds, words and the words around them.
+        // A selection offers a Note with its page, bounds, and the page's whole text.
         let selection = page.selection(for: NSRange(found, in: text))
         view.setCurrentSelection(selection, animate: false)
         wait(1) { model.selection != nil }
-        expect(model.selection?.page == 0 && model.selection?.quote == "Growth held steady" && model.selection?.after.hasPrefix(" through") == true,
-               "the selection's page and words")
-        // A note on those bounds: its highlight in the window is where the selection is.
+        expect(model.selection?.page == 0 && model.selection?.quote == "Growth held steady" && model.selection?.pageText == text, "the selection's page and words")
+        // The passage as the vault check cuts it from the whole page.
+        if let chosen = model.selection, let cut = ViewerSecrets.passage(chosen.pageText, range: chosen.range, secrets: []) {
+            expect(cut.quote == "Growth held steady" && cut.after.hasPrefix(" through"), "the passage cut from the page's text")
+        } else { expect(false, "the passage cut from the page's text") }
+        // A note on those words, saved with coordinates that are wrong now: its highlight is where the words are.
         guard let bounds = model.selection?.bounds else { return false }
         var stick = NoteStick(kind: .file)
         stick.path = url.path
         stick.page = 1
-        stick.bounds = [bounds.minX, bounds.minY, bounds.width, bounds.height]
+        stick.bounds = [5, 5, 40, 10]
         stick.quote = "Growth held steady"
+        stick.after = " through the second half."
         var file = NoteFile(id: "W1", body: "A made-up note")
         file.places = [stick]
-        app.paper.store.preview([PaperNote(file: file, url: FileManager.default.temporaryDirectory.appending(path: "W1.md"), notebook: "Inbox")], notebooks: [])
+        var gone = NoteStick(kind: .file)
+        gone.path = url.path
+        gone.page = 1
+        gone.bounds = [72, 600, 100, 14]
+        gone.quote = "Words this page doesn't have"
+        var lost = NoteFile(id: "W2", body: "A note whose passage moved")
+        lost.places = [gone]
+        let notes = [PaperNote(file: file, url: FileManager.default.temporaryDirectory.appending(path: "W1.md"), notebook: "Inbox"),
+                     PaperNote(file: lost, url: FileManager.default.temporaryDirectory.appending(path: "W2.md"), notebook: "Inbox")]
+        app.paper.store.preview(notes, notebooks: [])
         model.selection = nil
+        model.resolvePassages()
         window.contentView?.layoutSubtreeIfNeeded()
-        wait(2) { model.highlights["W1"] != nil }
+        wait(3) { model.highlights[notes[0].key] != nil && model.passages[notes[1].key] != nil }
         let words = ViewerGeometry.window(view.convert(bounds, from: page), in: view)
-        let mark = model.highlights["W1"] ?? .zero
-        expect(abs(mark.minX - words.minX) < 0.5 && abs(mark.minY - words.minY) < 0.5 && mark.width > 10, "the highlight is on the passage's words")
+        let mark = model.highlights[notes[0].key] ?? .zero
+        expect(abs(mark.minX - words.minX) < 1 && abs(mark.minY - words.minY) < 1 && mark.width > 10, "the highlight is on the passage's words, not its old coordinates")
+        expect(model.passages[notes[1].key] == .moved && model.highlights[notes[1].key] == nil && model.spot(notes[1], gone).page == nil,
+               "a passage that isn't there any more: moved, on the file, no highlight")
         expect(model.documentFrame.contains(mark), "inside the document")
-        expect(model.notes.count == 1 && ViewerMatch.place(model.notes[0].paper.file.places, path: url.path) == 0, "the note is in the margin")
-        let spots = ViewerMarginView.placed(model, model.notes)
-        expect(spots["W1"].map { abs($0.y + ViewerLook.bar - (mark.midY - 28)) < 1 || $0.y == ViewerLook.marginTop } == true, "lined up with its passage")
-        print("window: " + (ok ? "PDF view, selection, highlight and margin line up" : "failed"))
+        let layout = ViewerMarginView.placed(model, model.notes, visible: ViewerLook.size.height - ViewerLook.bar)
+        expect(layout.spots[notes[0].key].map { abs($0.y + ViewerLook.bar - model.docScroll - (mark.midY - 28)) < 1 || $0.y == ViewerLook.marginTop } == true,
+               "lined up with its passage")
+        expect(layout.spots[notes[1].key] != nil, "the moved one still in the margin")
+        // The margin scrolled moves the pages with it (as far as they had scrolled already: PDFKit shows the first
+        // page's top, past the break above it), and back.
+        let start = model.docScroll
+        model.marginScrolled(120)
+        wait(1) { abs(model.docScroll - 120) < 1 }
+        expect(abs(model.docScroll - 120) < 1, "the pages follow the margin (\(model.docScroll))")
+        let moved = model.highlights[notes[0].key] ?? .zero
+        expect(abs((mark.minY - moved.minY) - (120 - start)) < 1.5, "the passage moved up with them (\(mark.minY) → \(moved.minY), from \(start))")
+        model.marginScrolled(0)
+        wait(1) { model.docScroll < 1 }
+        print("window: " + (ok ? "PDF view, selection, passages found by their words, highlight, margin and pages in step" : "failed"))
         window.close()
         return ok
-    }
-
-    private static func check(_ file: String, out: String?, _ done: @escaping @MainActor (Bool) -> Void) {
-        let checked = ViewerPath.check(file)
-        guard case .success(let url) = checked else {
-            if case .failure(let refusal) = checked { print("\(file): refused: \(refusal.description)") }
-            return done(false)
-        }
-        let kind = ViewerKind.of(url.path) ?? .quickLook(.page)
-        Viewers.queue.async {
-            let read = ViewerLoader.read(url, kind: kind)
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    let report = { (data: Data?, how: String) in
-                        guard let data, let document = PDFDocument(data: data) else {
-                            print("\(url.lastPathComponent): \(how), no pages (shown through Quick Look's own view); opens in \(read.appName)")
-                            return done(how == "live")
-                        }
-                        let text = (document.page(at: 0)?.string ?? "").replacingOccurrences(of: "\n", with: " ").prefix(60)
-                        print("\(url.lastPathComponent): \(how), \(document.pageCount) \(kind.unit.word)s, first: “\(text)”; opens in \(read.appName.isEmpty ? "—" : read.appName)")
-                        if let out {
-                            try? FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
-                            try? data.write(to: URL(fileURLWithPath: out).appending(path: url.lastPathComponent + ".pages.pdf"))
-                        }
-                        guard kind == .pdf else { return done(true) }
-                        // Comments into a copy beside it: a made-up note on page 1's first words, one on the file.
-                        var passage = NoteStick(kind: .file)
-                        passage.path = url.path
-                        passage.page = 1
-                        let first = document.page(at: 0)
-                        let box = first?.bounds(for: .cropBox) ?? .zero
-                        passage.bounds = [Double(box.minX + 72), Double(box.maxY - 120), 200, 14]
-                        var whole = NoteStick(kind: .file)
-                        whole.path = url.path
-                        let comments = [ViewerPDFComments.Comment(stick: passage, text: "A made-up note on a passage", color: PaperLook.rgb(.systemBlue)),
-                                        ViewerPDFComments.Comment(stick: whole, text: "A made-up note on the file", color: PaperLook.rgb(.systemGreen))]
-                        ViewerPDFComments.write(url, comments: comments, intoOriginal: false, author: "Petal check") { outcome in
-                            switch outcome {
-                            case .wrote(let copy, let count):
-                                let annotations = PDFDocument(url: copy).map { doc in (0..<doc.pageCount).reduce(0) { $0 + (doc.page(at: $1)?.annotations.count ?? 0) } } ?? 0
-                                print("  comments: \(count) notes into \(copy.lastPathComponent) (\(annotations) annotations)")
-                                done(count == 2 && annotations >= 3)
-                            case .failed(let text):
-                                print("  comments failed: \(text)")
-                                done(false)
-                            }
-                        }
-                    }
-                    switch read.pages {
-                    case .pdf(let data): report(data, kind == .pdf ? "PDF" : "Quick Look's PDF")
-                    case .web(let preview): ViewerWeb.pages(preview) { report($0, preview.slides ? "Quick Look's slides" : "Quick Look's pages") }
-                    case .live: report(nil, "live")
-                    case .failed(let text): print("\(url.lastPathComponent): \(text)"); done(false)
-                    }
-                }
-            }
-        }
     }
 }

@@ -43,6 +43,13 @@ struct ViewerFileCheck {
         expect(odd.places[0].page == nil && odd.places[0].bounds == nil && odd.places[0].extra.map(\.key) == ["page", "bounds"], "unreadable spots kept as written")
         expect(odd.serialized().contains("page: zero") && odd.serialized().contains("bounds: 1 2 three 4"), "and written back as they were")
         expect(ViewerSpots.bounds("1 2 0 4") == nil && ViewerSpots.bounds("1 2 3") == nil && ViewerSpots.bounds("nan 2 3 4") == nil, "bounds need four numbers and a size")
+        // Numbers no page has: no bounds, never a trap (Int of 1e20 would stop Petal on every load).
+        expect(ViewerSpots.bounds("1e20 2 3 4") == nil && ViewerSpots.bounds("1 2 3 1e300") == nil && ViewerSpots.bounds("-2000000 2 3 4") == nil
+               && ViewerSpots.bounds("inf 2 3 4") == nil, "out-of-range bounds are no bounds")
+        expect(ViewerSpots.boundsText([1e20, 2, 3, 4]) == nil && ViewerSpots.boundsText([1, 2, 3, .infinity]) == nil
+               && ViewerSpots.boundsText([14400, -14400, 999_999.5, 0.5]) == "14400 -14400 999999.5 0.5", "only what a page can have is written")
+        let huge = NoteFile.parse("---\nid: V3\nplaces:\n  - kind: file\n    path: /a.pdf\n    bounds: 1e20 2 3 4\n---\n", fallbackID: "x", fallbackDate: when)
+        expect(huge.places[0].bounds == nil && huge.serialized().contains("bounds: 1e20 2 3 4"), "kept as written, as unknown")
         // In other apps it's the file: Phase 1's AXDocument match is unchanged.
         expect(NoteMatch.fits(passage, NoteScene(file: "/Users/someone/Report.pdf")), "fits the file in Preview or Acrobat")
         expect(!NoteMatch.fits(passage, NoteScene(file: "/Users/someone/Other.pdf")), "never another file")
@@ -149,12 +156,76 @@ struct ViewerFileCheck {
         expect(ViewerComments.text("# Title\n- [ ] one\n- [x] two\n![shot](a.png)\nsee [the page](https://example.com)") == "Title\n☐ one\n☑ two\n(picture)\nsee the page",
                "a note's words as plain text")
         let size = { (_: Int) in CGSize(width: 612, height: 792) }
-        let spot = ViewerComments.spot(passage, pages: 5, pageSize: size)
-        expect(spot?.page == 2 && spot?.bounds == CGRect(x: 72, y: 540.5, width: 200, height: 14), "a passage's comment on its highlight")
-        expect(ViewerComments.spot(plain, pages: 5, pageSize: size)?.page == 0 && ViewerComments.spot(plain, pages: 5, pageSize: size)?.bounds == nil,
-               "a note on the file: a sticky note on the first page")
-        expect(ViewerComments.spot(passage, pages: 1, pageSize: size)?.page == 0 && ViewerComments.spot(passage, pages: 1, pageSize: size)?.bounds == nil,
-               "a page the PDF hasn't any more: a sticky note on the first, never a highlight in the wrong place")
+        let now = CGRect(x: 90, y: 300, width: 180, height: 14)
+        let spot = ViewerComments.spot(passage, passage: (1, now), pages: 5, pageSize: size)
+        expect(spot?.page == 1 && spot?.bounds == now, "a passage's comment where its words are now, not where they were saved")
+        expect(ViewerComments.spot(passage, passage: nil, pages: 5, pageSize: size).map { $0.page == 0 && $0.bounds == nil } == true,
+               "a passage that moved: a sticky note on the first page, no highlight from old coordinates")
+        expect(ViewerComments.spot(plain, passage: nil, pages: 5, pageSize: size)?.page == 0 && ViewerComments.spot(paged, passage: nil, pages: 5, pageSize: size)?.page == 1,
+               "a note on the file: the first page; on a page: that page")
+        expect(ViewerComments.spot(paged, passage: nil, pages: 1, pageSize: size)?.page == 0, "a page the PDF hasn't any more: the first")
+
+        // Whole-text redaction: the note's words redacted whole before they're made plain or cut.
+        let secret = "sk-live-0123456789abcdef"
+        let redact = { (text: String) in text.replacingOccurrences(of: secret, with: "(hidden)") }
+        let long = String(repeating: "a", count: 1990) + " " + secret
+        expect(!ViewerComments.text(long, redact: redact).contains("sk-live") && ViewerComments.text(long, redact: redact).hasSuffix("(hidden)"),
+               "a secret across the cut is hidden whole, never cut in two first")
+        expect(ViewerComments.text("see [\(secret)](https://example.com)", redact: redact) == "see (hidden)", "a secret inside a link's words")
+
+        // MARK: Passages found again by their words
+
+        var moved = NoteStick(kind: .file)
+        moved.quote = "the second half"
+        moved.before = "steady through "
+        moved.after = "."
+        let pagesNow = ["Intro words.", "Growth held steady through the second half. Then more."]
+        let again = ViewerPassages.find(moved, in: pagesNow)
+        expect(again?.page == 1 && again.map { (pagesNow[1] as NSString).substring(with: $0.range) } == "the second half", "found on the page it moved to")
+        expect(ViewerPassages.find(moved, in: ["Growth held steady through the first half."]) == nil, "its words gone: moved")
+        expect(ViewerPassages.find(moved, in: ["x the second half y", "z the second half w"]) == nil, "two places as likely: no guess")
+        moved.before = "through "
+        expect(ViewerPassages.find(moved, in: ["x the second half y", "through the second half."])?.page == 1, "told apart by the words around it")
+        var noWords = NoteStick(kind: .file)
+        noWords.bounds = [1, 2, 3, 4]
+        noWords.page = 1
+        expect(ViewerPassages.find(noWords, in: pagesNow) == nil, "coordinates alone are never a passage")
+        let emoji = ["👋🏽 hi there, the quote"]
+        var wide = NoteStick(kind: .file)
+        wide.quote = "the quote"
+        expect(ViewerPassages.find(wide, in: emoji).map { (emoji[0] as NSString).substring(with: $0.range) } == "the quote", "a range PDFKit can use (UTF-16)")
+
+        // MARK: Secrets looked for in the whole text
+
+        let pageText = "Before words. The passage here. Key: SECRET123 after."
+        let selected = NSRange(pageText.range(of: "The passage here.")!, in: pageText)
+        let secretSpan = { (text: String) -> [Range<Int>] in
+            guard let r = text.range(of: "SECRET123") else { return [] }
+            let start = text.distance(from: text.startIndex, to: r.lowerBound)
+            return [start..<(start + 9)]
+        }
+        expect(ViewerSecrets.passage(pageText, range: selected, secrets: secretSpan(pageText), context: 80) == nil,
+               "a secret in the words kept around a passage: no note")
+        let cutNear = ViewerSecrets.passage(pageText, range: selected, secrets: secretSpan(pageText), context: 4)
+        expect(cutNear?.quote == "The passage here." && cutNear?.before == "ds. " && cutNear?.after == " Key", "kept clear of it: the passage and its words")
+        expect(ViewerSecrets.passage(pageText, range: NSRange(location: 0, length: (pageText as NSString).length), secrets: secretSpan(pageText), limit: 5) == nil,
+               "the whole selection is checked, even past what's kept of it")
+        expect(ViewerSecrets.cut(pageText, range: NSRange(location: 32, length: 21), secrets: secretSpan(pageText), hidden: "(hidden)") == "Key: (hidden) after.",
+               "the lens's words: secrets hidden, found in the whole page first")
+        expect(ViewerSecrets.cut(pageText, range: NSRange(location: 37, length: 4), secrets: secretSpan(pageText), hidden: "(hidden)") == "(hidden)",
+               "part of a secret is still hidden")
+
+        // MARK: Writes land only on their base
+
+        let stamp = ViewerUpdated.Stamp(size: 10, modified: 1, inode: 7)
+        let bytes = Data("%PDF-1.4 a".utf8)
+        expect(ViewerWrites.land(live: true, base: (stamp, bytes), now: (stamp, bytes)) == .land, "unchanged: it lands")
+        expect(ViewerWrites.land(live: false, base: (stamp, bytes), now: (stamp, bytes)) == .hungUp, "its asker gone: nothing")
+        var replaced = stamp
+        replaced.inode = 8
+        expect(ViewerWrites.land(live: true, base: (stamp, bytes), now: (replaced, bytes)) == .changed, "the file replaced: refused")
+        expect(ViewerWrites.land(live: true, base: (stamp, bytes), now: (stamp, Data("%PDF-1.4 b".utf8))) == .changed, "same stamp, other bytes: refused")
+        expect(ViewerWrites.land(live: true, base: (stamp, bytes), now: (nil, nil)) == .changed, "gone: refused")
 
         // MARK: Keeping up, the lens
 

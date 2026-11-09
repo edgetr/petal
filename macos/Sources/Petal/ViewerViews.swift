@@ -243,9 +243,10 @@ struct ViewerDocument: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// What the margin's highlights depend on: the notes on this file and their places.
+    /// What the margin's highlights depend on: the notes on this file, their places and where their passages are.
     private var signature: String {
-        model.notes.map { "\($0.paper.noteID):\($0.place.page ?? 0):\($0.place.slide ?? 0):\($0.place.bounds ?? [])" }.joined(separator: ",")
+        model.notes.map { "\($0.paper.key):\($0.place.page ?? 0):\($0.place.slide ?? 0):\($0.place.quote.count)" }.joined(separator: ",")
+            + "|\(model.passages.count)|\(model.passages.values.map { "\($0)" }.sorted().joined())"
     }
 }
 
@@ -273,7 +274,8 @@ struct ViewerQuickLookView: NSViewRepresentable {
 }
 
 /// PDFKit's view: one slide at a time for a deck, the pages scrolling for anything else. It tells the model the page
-/// shown, the selection (a Note), and where each note's passage and each page are as it scrolls and zooms.
+/// shown, the selection (a Note), where each passage (found again by its words) and each page is as it scrolls and
+/// zooms, and how far the pages have scrolled, so the margin moves in step; the margin scrolled moves the pages.
 struct ViewerPDF: NSViewRepresentable {
     let model: ViewerModel
     let signature: String
@@ -302,6 +304,8 @@ struct ViewerPDF: NSViewRepresentable {
             view.document = model.document
             if let page = model.document?.page(at: model.current) { view.go(to: page) }
         }
+        // A note added, moved or re-stuck: its passage found again (only when the notes' passages changed).
+        model.resolvePassages()
         context.coordinator.relayoutSoon()
     }
 
@@ -321,11 +325,14 @@ struct ViewerPDF: NSViewRepresentable {
             center.addObserver(self, selector: #selector(selectionChanged), name: .PDFViewSelectionChanged, object: view)
             center.addObserver(self, selector: #selector(moved), name: .PDFViewScaleChanged, object: view)
             center.addObserver(self, selector: #selector(moved), name: NSView.frameDidChangeNotification, object: view)
+            model.scrollDocument = { [weak self] offset in self?.scroll(to: offset) }
             DispatchQueue.main.async { [weak self] in self?.watchScrolling() }
         }
 
+        private var scroller: NSScrollView? { view?.documentView?.enclosingScrollView }
+
         private func watchScrolling() {
-            guard let clip = view?.documentView?.enclosingScrollView?.contentView else { return }
+            guard let clip = scroller?.contentView else { return }
             clip.postsBoundsChangedNotifications = true
             NotificationCenter.default.addObserver(self, selector: #selector(moved), name: NSView.boundsDidChangeNotification, object: clip)
             relayout()
@@ -349,20 +356,41 @@ struct ViewerPDF: NSViewRepresentable {
             }
         }
 
-        /// Where each passage's highlight and each page's top are now, in the window: the margin lines its notes
-        /// up with them.
+        /// How far the pages have scrolled from their top and how tall they are, in the window's points.
+        private func scrolled() -> (offset: CGFloat, height: CGFloat)? {
+            guard let scroller, let doc = scroller.documentView else { return nil }
+            let visible = scroller.documentVisibleRect
+            let fromTop = doc.isFlipped ? visible.minY : doc.bounds.height - visible.maxY
+            let scale = scroller.magnification
+            return (max(0, fromTop * scale), doc.bounds.height * scale)
+        }
+
+        /// The pages scrolled so that `offset` (the margin's) is how far they are from their top, as far as they go.
+        func scroll(to offset: CGFloat) {
+            guard let scroller, let doc = scroller.documentView else { return }
+            let clip = scroller.contentView
+            let visible = scroller.documentVisibleRect
+            let scale = max(scroller.magnification, 0.01)
+            let target = min(max(0, offset / scale), max(0, doc.bounds.height - visible.height))
+            let y = doc.isFlipped ? target : doc.bounds.height - target - visible.height
+            clip.scroll(to: NSPoint(x: visible.minX, y: y))
+            scroller.reflectScrolledClipView(clip)
+        }
+
+        /// Where each passage's highlight and each page's top are now, in the window, and how far the pages have
+        /// scrolled: the margin lines its notes up with them.
         func relayout() {
             guard let view, let model, let document = view.document, view.window != nil else { return }
             var highlights: [String: CGRect] = [:]
             var tops: [Int: CGFloat] = [:]
             let single = view.displayMode == .singlePage
             for (paper, place) in model.notes {
-                guard let index = ViewerMatch.pageIndex(place, count: document.pageCount), let page = document.page(at: index) else { continue }
+                let spot = model.spot(paper, place)
+                guard let index = spot.page, let page = document.page(at: index) else { continue }
                 if single, index != model.current { continue }
                 tops[index] = ViewerGeometry.window(view.convert(page.bounds(for: .cropBox), from: page), in: view).minY
-                if let b = place.bounds, place.page != nil {
-                    highlights[paper.noteID] = ViewerGeometry.window(view.convert(CGRect(x: b[0], y: b[1], width: b[2], height: b[3]), from: page), in: view)
-                }
+                // Only a passage found again by its words now is highlighted.
+                if let bounds = spot.bounds { highlights[paper.key] = ViewerGeometry.window(view.convert(bounds, from: page), in: view) }
             }
             if let page = document.page(at: model.current) {
                 tops[model.current] = ViewerGeometry.window(view.convert(page.bounds(for: .cropBox), from: page), in: view).minY
@@ -371,6 +399,10 @@ struct ViewerPDF: NSViewRepresentable {
             if model.highlights != highlights { model.highlights = highlights }
             if model.pageTops != tops { model.pageTops = tops }
             if model.documentFrame != frame { model.documentFrame = frame }
+            if model.scrolls, let scrolled = scrolled() {
+                if abs(model.docScroll - scrolled.offset) > 0.5 { model.docScroll = scrolled.offset }
+                if abs(model.docHeight - scrolled.height) > 0.5 { model.docHeight = scrolled.height }
+            }
             if let selection = view.currentSelection, let page = selection.pages.first, model.selection != nil {
                 let rect = ViewerGeometry.window(view.convert(selection.bounds(for: page), from: page), in: view)
                 model.selection?.anchor = CGPoint(x: rect.maxX, y: rect.minY)
@@ -378,8 +410,9 @@ struct ViewerPDF: NSViewRepresentable {
             if model.lensAnswer != nil { model.lensPlaced() }
         }
 
-        /// A selection on one page offers a Note (its page, bounds, words and the words around them), and, while a
-        /// note follows the selection, asks the lens about its paragraph.
+        /// A selection on one page offers a Note (its page and bounds, and the page's whole text with where it is,
+        /// so the passage is cut only after the whole page was checked), and, while a note follows the selection,
+        /// asks the lens about its paragraph.
         @objc private func selectionChanged() {
             guard let view, let model else { return }
             guard let selection = view.currentSelection, selection.pages.count == 1, let page = selection.pages.first, let document = view.document,
@@ -389,25 +422,20 @@ struct ViewerPDF: NSViewRepresentable {
             }
             let index = document.index(for: page)
             let bounds = selection.bounds(for: page)
-            let text = (page.string ?? "") as NSString
+            let text = page.string ?? ""
             let range = selection.range(at: 0, on: page)
-            var before = "", after = ""
-            if range.location != NSNotFound, NSMaxRange(range) <= text.length {
-                let head = max(0, range.location - 80)
-                before = text.substring(with: NSRange(location: head, length: range.location - head))
-                let tailLength = min(80, text.length - NSMaxRange(range))
-                after = text.substring(with: NSRange(location: NSMaxRange(range), length: tailLength))
+            guard range.location != NSNotFound, NSMaxRange(range) <= (text as NSString).length else {
+                if model.selection != nil { model.selection = nil }
+                return
             }
             let rect = ViewerGeometry.window(view.convert(bounds, from: page), in: view)
-            model.selection = ViewerSelection(page: index, bounds: bounds, quote: words, before: before, after: after, anchor: CGPoint(x: rect.maxX, y: rect.minY))
+            model.selection = ViewerSelection(page: index, bounds: bounds, quote: words, pageText: text, range: range, anchor: CGPoint(x: rect.maxX, y: rect.minY))
             if let key = model.openKey { model.fold(key) }
             // The reading lens: the paragraph the selection is in, for the note that follows it.
-            if model.lensNote != nil, range.location != NSNotFound, let swift = Range(range, in: text as String) {
-                let full = text as String
-                let paragraph = ViewerLens.paragraph(full, around: swift)
-                let nsParagraph = NSRange(paragraph, in: full)
-                let box = page.selection(for: nsParagraph)?.bounds(for: page) ?? bounds
-                model.selectionSettled(page: index, paragraph: String(full[paragraph]), selected: words, bounds: box)
+            if model.lensKey != nil, let swift = Range(range, in: text) {
+                let paragraph = NSRange(ViewerLens.paragraph(text, around: swift), in: text)
+                let box = page.selection(for: paragraph)?.bounds(for: page) ?? bounds
+                model.selectionSettled(page: index, text: text, paragraph: paragraph, selected: range, bounds: box)
             }
         }
     }
@@ -448,8 +476,8 @@ struct ViewerPagesPicture: View {
     }
 }
 
-/// Where PDFKit's view would put each page in an area (snapshots): a slide fitted with 40 points around it, pages at
-/// 82% of the width, 20 points apart.
+/// Where PDFKit's view would put each page in an area (snapshots): a slide fitted and centered, pages at most 600
+/// points wide, 20 points apart.
 @MainActor
 enum ViewerSnapshotPages {
     static func frames(_ model: ViewerModel, area: CGSize) -> [Int: CGRect] {
@@ -474,37 +502,60 @@ enum ViewerSnapshotPages {
 
 // MARK: - The margin
 
-/// The notes on this file, in the margin: those on the page shown lined up with their passage (or their page's
-/// top), the one open with the keyboard, those on other pages folded below it in page order, those on the whole
-/// file at the top. Clicking a folded one opens it (and goes to its page); right-click: follow the selection (the
-/// reading lens).
+/// The notes on this file, in the margin: those on a page shown lined up with their passage (found again by its
+/// words) or their page's top, the one open with the keyboard, those on other pages folded below in page order,
+/// and those on the whole file (or whose passage moved) stacked below them. The margin scrolls in step with the
+/// pages (scrolling either scrolls both), so nothing is out of reach and everything lined up stays lined up; with
+/// one slide at a time it scrolls on its own. Every paper of a note shows, one of a conflict's read only with Keep
+/// this one, as on the desk. Clicking a folded one opens it (and goes to its page); right-click: follow the
+/// selection (the reading lens).
 struct ViewerMarginView: View {
     let model: ViewerModel
     let size: CGSize
     @Environment(\.snapshotting) private var snapshotting
+    @State private var position = ScrollPosition(edge: .top)
 
     var body: some View {
-        let desk = model.desk
         let notes = model.notes
-        let spots = Self.placed(model, notes)
+        let layout = Self.placed(model, notes, visible: size.height - ViewerLook.bar)
         ZStack(alignment: .topLeading) {
             Color.white.opacity(0.5)
             ViewerLook.line.frame(width: 1).frame(maxHeight: .infinity)
-            ForEach(notes, id: \.paper.noteID) { item in
-                if let spot = spots[item.paper.noteID] {
-                    paper(item.paper, item.place, desk: desk)
+            if snapshotting {
+                content(notes, layout)
+            } else {
+                ScrollView(.vertical) { content(notes, layout) }
+                    .scrollIndicators(.automatic)
+                    .scrollPosition($position)
+                    .onScrollGeometryChange(for: CGFloat.self, of: { $0.contentOffset.y }) { _, offset in model.marginScrolled(offset) }
+                    // The pages scrolled: the margin follows them.
+                    .onChange(of: model.docScroll) { _, offset in
+                        if model.scrolls, abs(offset - model.marginOffset) > 0.5 { position.scrollTo(y: offset) }
+                    }
+            }
+        }
+        // Its content from the top, however tall (never centered up over the bar).
+        .frame(width: ViewerLook.margin, height: max(0, size.height - ViewerLook.bar), alignment: .topLeading)
+        .clipped()
+    }
+
+    private func content(_ notes: [(paper: PaperNote, place: NoteStick)], _ layout: (spots: [String: Spot], height: CGFloat)) -> some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear.frame(width: ViewerLook.margin, height: layout.height)
+            ForEach(notes, id: \.paper.key) { item in
+                if let spot = layout.spots[item.paper.key] {
+                    paper(item.paper, item.place)
                         .rotationEffect(.degrees(spot.tilt))
                         .offset(x: spot.x, y: spot.y)
-                        .zIndex(model.openNote == item.paper.noteID ? 2 : 1)
+                        .zIndex(model.openKey == item.paper.key ? 2 : 1)
                 }
             }
             if let answer = model.lensAnswer, let spot = model.lensSpot {
                 ViewerLensSlot(answer: answer, color: color(answer.request.noteID))
-                    .offset(x: 18, y: max(8, spot.minY - ViewerLook.bar))
+                    .offset(x: 18, y: max(8, spot.minY - ViewerLook.bar + (model.scrolls ? model.docScroll : 0)))
                     .zIndex(3)
             }
         }
-        .clipped()
     }
 
     struct Spot { var x: CGFloat; var y: CGFloat; var tilt: Double }
@@ -513,67 +564,72 @@ struct ViewerMarginView: View {
         model.desk.store.notes.first { $0.noteID == noteID }.map { model.desk.store.color(of: $0.notebook) } ?? .controlAccentColor
     }
 
-    /// Each paper's spot in the margin (its top-left corner, in the margin's own coordinates): the one layout the
-    /// papers and the lines to their passages both use.
-    static func placed(_ model: ViewerModel, _ notes: [(paper: PaperNote, place: NoteStick)]) -> [String: Spot] {
+    /// Each paper's spot in the margin's content (its top-left corner) and the content's height: the one layout the
+    /// papers and the lines to their passages both use. The content is the pages' own length when they scroll (a
+    /// spot there is its place in the window plus how far the pages have scrolled), so the two move in step.
+    static func placed(_ model: ViewerModel, _ notes: [(paper: PaperNote, place: NoteStick)], visible: CGFloat) -> (spots: [String: Spot], height: CGFloat) {
         let top = ViewerLook.marginTop
-        let count = model.pageCount
-        let single = model.unit == .slide || model.live
+        let single = !model.scrolls
+        let shift = model.scrolls ? model.docScroll : 0
         var aligned: [(id: String, y: CGFloat, height: CGFloat)] = []
         var others: [(id: String, page: Int?, top: Double)] = []
         for (paper, place) in notes {
-            let id = paper.noteID
-            let height = model.heights[id] ?? PaperLook.folded
-            let index = ViewerMatch.pageIndex(place, count: count)
-            if let highlight = model.highlights[id] {
-                aligned.append((id, highlight.midY - 28 - ViewerLook.bar, height))
-            } else if let index, let pageTop = model.pageTops[index], !(single && index != model.current) {
-                aligned.append((id, pageTop - ViewerLook.bar, height))
-            } else if index == nil, model.openNote == id || !single {
-                // On the whole file: at the top.
-                aligned.append((id, top - 1, height))
+            let key = paper.key
+            let height = model.heights[key] ?? PaperLook.folded
+            let spot = model.spot(paper, place)
+            if let highlight = model.highlights[key] {
+                aligned.append((key, highlight.midY - 28 - ViewerLook.bar + shift, height))
+            } else if let index = spot.page, let pageTop = model.pageTops[index], !(single && index != model.current) {
+                aligned.append((key, pageTop - ViewerLook.bar + shift, height))
             } else {
-                others.append((id, index, Double(place.bounds?[1] ?? 0)))
+                others.append((key, spot.page, Double(spot.bounds?.minY ?? 0)))
             }
         }
-        // Lined up where they can be; scrolled away above the margin, out of sight.
         var spots: [String: Spot] = [:]
-        let visible = aligned.filter { $0.y + $0.height > 0 || $0.y == top - 1 }
-        for (id, y) in ViewerMargin.layout(visible.map { ($0.id, max($0.y, top), $0.height) }, top: top) { spots[id] = Spot(x: 18, y: y, tilt: 0) }
-        // The rest folded below, as paper on a desk: a cascade of two columns.
-        var floor = (visible.compactMap { item in spots[item.id].map { $0.y + item.height } }.max() ?? top) + 40
+        for (id, y) in ViewerMargin.layout(aligned.map { ($0.id, max($0.y, top), $0.height) }, top: top) { spots[id] = Spot(x: 18, y: y, tilt: 0) }
+        // The rest below, as paper on a desk: a cascade of two columns, notes on other pages first, then those on
+        // the whole file.
+        var floor = (aligned.compactMap { item in spots[item.id].map { $0.y + item.height } }.max() ?? top) + (aligned.isEmpty ? 0 : 40)
+        var bottom = floor
         for (offset, id) in ViewerMatch.order(others, current: single ? model.current : nil).enumerated() {
             let right = offset % 2 == 1
-            spots[id] = Spot(x: right ? 165 : 30, y: floor, tilt: right ? 2 : 0)
-            floor += right ? PaperLook.folded + 12 : 70
+            let height = model.heights[id] ?? PaperLook.folded
+            spots[id] = Spot(x: right ? 165 : (model.openKey == id ? 18 : 30), y: floor, tilt: right ? 2 : 0)
+            bottom = max(bottom, floor + height)
+            floor += right ? height + 12 : 70
         }
-        return spots
+        let notesEnd = max(bottom, spots.compactMap { id, spot in model.heights[id].map { spot.y + $0 } }.max() ?? 0) + 40
+        return (spots, max(notesEnd, model.scrolls ? model.docHeight : 0, visible))
     }
 
     @ViewBuilder
-    private func paper(_ paper: PaperNote, _ place: NoteStick, desk: NoteDesk) -> some View {
-        let open = model.openNote == paper.noteID
+    private func paper(_ paper: PaperNote, _ place: NoteStick) -> some View {
+        let desk = model.desk
+        let open = model.openKey == paper.key
         let face: PaperFace = open ? model.face : .folded
         let color = desk.store.color(of: paper.notebook)
+        let spot = model.spot(paper, place)
         let others = paper.file.places.count - 1
-        let where_ = open ? place.label() : (place.spot.isEmpty ? (place.quote.isEmpty ? "this file" : "this passage") : place.spot)
-        PaperView(paper: paper, color: color, glass: desk.glass, face: face, place: where_, notebook: paper.notebook,
+        let shortWhere = spot.moved ? "passage moved" : !place.quote.isEmpty ? (spot.page.map { "\(model.unit.word) \($0 + 1)" } ?? "this file")
+            : place.spot.isEmpty ? "this file" : place.spot
+        let longWhere = spot.moved ? place.label() + " · passage moved" : place.label()
+        PaperView(paper: paper, color: color, glass: desk.glass, face: face, place: open ? longWhere : shortWhere, notebook: paper.notebook,
                   others: others == 1 ? paper.file.places.first { !$0.samePlace(place) }?.label() ?? "" : others > 1 ? "\(others) places" : "",
-                  footer: model.lensNote == paper.noteID ? "Follows your selection" : desk.footer(paper),
+                  footer: model.lensKey == paper.key ? "Follows your selection" : desk.footer(paper),
                   keyboard: open, editorHeight: desk.heights[paper.key] ?? 0, desk: snapshotting ? nil : desk,
                   conflict: desk.store.readOnly(paper), unsaved: desk.store.failed.contains(paper.key), pictureTrouble: desk.troubleCount(paper),
                   width: ViewerLook.openWidth, flipped: { model.flip() }, folded: { model.fold(paper.key) })
             .background(GeometryReader { box in
-                Color.clear.onAppear { model.heights[paper.noteID] = box.size.height }
-                    .onChange(of: box.size.height) { _, height in model.heights[paper.noteID] = height }
+                Color.clear.onAppear { model.heights[paper.key] = box.size.height }
+                    .onChange(of: box.size.height) { _, height in model.heights[paper.key] = height }
             })
             .modifier(ViewerFolded(folded: !open, open: { model.openPaper(paper) }) {
-                if model.lensNote == paper.noteID {
+                if model.lensKey == paper.key {
                     Button("Stop following my selection") { model.follow(nil) }
                 } else {
-                    Button("Follow my selection") { model.follow(paper.noteID) }
+                    Button("Follow my selection") { model.follow(paper.key) }
                 }
-                if let index = ViewerMatch.pageIndex(place, count: model.pageCount) {
+                if let index = spot.page {
                     Button("Go to its \(model.unit.word)") { model.go(to: index) }
                 }
             })
@@ -617,24 +673,28 @@ struct ViewerLensSlot: View {
     }
 }
 
-/// Each passage's highlight in its notebook's color, and the sketch's dashed line from it to its note.
+/// Each passage's highlight in its notebook's color (only a passage found again by its words), and the sketch's
+/// dashed line from it to its note, wherever the margin has scrolled.
 struct ViewerInk: View {
     let model: ViewerModel
     let size: CGSize
 
     var body: some View {
         let notes = model.notes
-        let spots = ViewerMarginView.placed(model, notes)
+        let layout = ViewerMarginView.placed(model, notes, visible: size.height - ViewerLook.bar)
         Canvas { context, _ in
             let marginX = size.width - ViewerLook.margin
             let document = model.documentFrame == .zero ? CGRect(x: 0, y: ViewerLook.bar, width: marginX, height: size.height) : model.documentFrame
+            let margin = CGRect(x: marginX, y: ViewerLook.bar, width: ViewerLook.margin, height: size.height - ViewerLook.bar)
             for (paper, _) in notes {
-                guard let words = model.highlights[paper.noteID], words.intersects(document) else { continue }
+                guard let words = model.highlights[paper.key], words.intersects(document) else { continue }
                 let color = Color(nsColor: model.desk.store.color(of: paper.notebook))
                 let mark = words.insetBy(dx: -2, dy: -2)
                 context.fill(Path(roundedRect: mark, cornerRadius: 3), with: .color(color.opacity(0.24)))
-                guard let spot = spots[paper.noteID] else { continue }
-                let target = CGRect(x: marginX + spot.x, y: spot.y + ViewerLook.bar, width: ViewerLook.openWidth, height: model.heights[paper.noteID] ?? PaperLook.folded)
+                guard let spot = layout.spots[paper.key] else { continue }
+                let target = CGRect(x: marginX + spot.x, y: spot.y + ViewerLook.bar - model.marginOffset, width: ViewerLook.openWidth,
+                                    height: model.heights[paper.key] ?? PaperLook.folded)
+                guard target.intersects(margin) else { continue }
                 let points = ViewerMargin.pin(from: mark, to: target)
                 var line = Path()
                 line.move(to: points[0])
@@ -648,13 +708,23 @@ struct ViewerInk: View {
 
 // MARK: - Versions
 
-/// Versions made on copies, under the document: each copy's picture of the page shown, its name, and Use this.
-/// Picking one only tells whoever asked; the file itself is never changed here.
+/// Versions made on copies, under the document: each copy's picture of the page shown, its name, and Use this,
+/// scrolling sideways when there are more than fit. Picking one only tells whoever asked; the file itself is never
+/// changed here.
 struct ViewerVersionsStrip: View {
     let model: ViewerModel
     let set: ViewerVersionSet
+    @Environment(\.snapshotting) private var snapshotting
 
     var body: some View {
+        if snapshotting {
+            row
+        } else {
+            ScrollView(.horizontal) { row }.scrollIndicators(.automatic)
+        }
+    }
+
+    private var row: some View {
         HStack(alignment: .top, spacing: 16) {
             ForEach(set.versions) { version in
                 VStack(alignment: .leading, spacing: 6) {
@@ -685,6 +755,6 @@ struct ViewerVersionsStrip: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.leading, 20).padding(.top, 14).padding(.bottom, 22)
+        .padding(.leading, 20).padding(.trailing, 20).padding(.top, 14).padding(.bottom, 22)
     }
 }

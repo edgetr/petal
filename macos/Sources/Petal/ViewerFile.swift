@@ -272,17 +272,97 @@ enum ViewerComments {
         return text.count > 2000 ? String(text.prefix(1999)) + "…" : text
     }
 
-    /// Where a note's comment goes: its passage's bounds on its page, or a sticky note at its page's top-left corner
-    /// (the first page for a note on the whole file).
-    static func spot(_ stick: NoteStick, pages: Int, pageSize: (Int) -> CGSize) -> (page: Int, bounds: CGRect?, corner: CGPoint)? {
+    /// Where a note's comment goes: a passage where it is in the PDF now (`passage`, found again by its words:
+    /// ViewerPassages), highlighted; else a sticky note at its page's top-left corner, or the first page's for a note
+    /// on the whole file, a passage that moved, or a page the PDF hasn't any more. Never a highlight from coordinates
+    /// alone.
+    static func spot(_ stick: NoteStick, passage: (page: Int, bounds: CGRect)?, pages: Int, pageSize: (Int) -> CGSize) -> (page: Int, bounds: CGRect?, corner: CGPoint)? {
         guard pages > 0 else { return nil }
-        let found = ViewerMatch.pageIndex(stick, count: pages)
-        let page = found ?? 0
+        if let passage, passage.page >= 0, passage.page < pages {
+            let b = passage.bounds
+            return (passage.page, b, CGPoint(x: max(0, b.minX - 22), y: b.maxY))
+        }
+        let page = stick.quote.isEmpty ? ViewerMatch.pageIndex(stick, count: pages) ?? 0 : 0
         let size = pageSize(page)
-        let corner = CGPoint(x: 18, y: max(0, size.height - 40))
-        // A highlight only on the page it was made on: a page the PDF hasn't any more gets a sticky note instead.
-        guard let b = stick.bounds, b.count == 4, stick.page != nil, found != nil else { return (page, nil, corner) }
-        return (page, CGRect(x: b[0], y: b[1], width: b[2], height: b[3]), CGPoint(x: max(0, b[0] - 22), y: b[1] + b[3]))
+        return (page, nil, CGPoint(x: 18, y: max(0, size.height - 40)))
+    }
+
+    /// A note's words as a comment says them: redacted whole first (`redact`: the vault's redaction), then made
+    /// plain and cut, so a secret is never cut in two before it's looked for.
+    static func text(_ body: String, redact: (String) -> String) -> String { text(redact(body)) }
+}
+
+// MARK: - Passages, found again by their words
+
+/// A passage in a document, found again by its words, never by the coordinates it was saved with: the one place in
+/// the document's pages its whole quote is, told apart by the words before and after it (Phase 1's rule,
+/// NoteMatch.pick). Not there, or two places as likely: it moved (no highlight, on the file).
+enum ViewerPassages {
+    /// The page (0-based) and the quote's range in that page's text (UTF-16, as PDFKit counts), or nil.
+    static func find(_ stick: NoteStick, in pages: [String]) -> (page: Int, range: NSRange)? {
+        guard !stick.quote.isEmpty, let found = NoteMatch.pick(quote: stick.quote, before: stick.before, after: stick.after, in: pages) else { return nil }
+        return (found.text, NSRange(found.range, in: pages[found.text]))
+    }
+}
+
+// MARK: - Secrets, looked for in the whole text
+
+/// What's taken from a page's text (a passage and the words around it, the lens's paragraph) is cut only after the
+/// whole page was checked against the vault: `secrets` are the character ranges the vault's index finds in the
+/// whole text (UIMap.SecretIndex.spans), so a secret is never cut in two before it's looked for.
+enum ViewerSecrets {
+    /// A passage (at most `limit` characters) and the words around it (`context` each side), from a page's text:
+    /// nil when any secret touches the passage or the words kept with it. `range`: the selection, UTF-16.
+    static func passage(_ text: String, range: NSRange, secrets: [Range<Int>], context: Int = 80, limit: Int = 500) -> (quote: String, before: String, after: String)? {
+        guard let span = characters(text, range), !span.isEmpty else { return nil }
+        let all = Array(text)
+        let end = min(span.upperBound, span.lowerBound + limit)
+        let kept = max(0, span.lowerBound - context)..<min(all.count, end + context)
+        // The whole selection is checked, even past what's kept of it.
+        let checked = kept.lowerBound..<max(kept.upperBound, span.upperBound)
+        guard !secrets.contains(where: { $0.overlaps(checked) }) else { return nil }
+        return (String(all[span.lowerBound..<end]), String(all[kept.lowerBound..<span.lowerBound]), String(all[end..<kept.upperBound]))
+    }
+
+    /// The part of a page's text at `range` (UTF-16) with every secret in it shown as `hidden`, the secrets found in
+    /// the whole text first.
+    static func cut(_ text: String, range: NSRange, secrets: [Range<Int>], hidden: String) -> String? {
+        guard let span = characters(text, range) else { return nil }
+        let all = Array(text)
+        var out = ""
+        var at = span.lowerBound
+        while at < span.upperBound {
+            if let secret = secrets.first(where: { $0.contains(at) }) {
+                out += hidden
+                at = secret.upperBound
+            } else {
+                out.append(all[at])
+                at += 1
+            }
+        }
+        return out
+    }
+
+    /// A UTF-16 range as characters.
+    static func characters(_ text: String, _ range: NSRange) -> Range<Int>? {
+        guard let found = Range(range, in: text) else { return nil }
+        let start = text.distance(from: text.startIndex, to: found.lowerBound)
+        return start..<(start + text.distance(from: found.lowerBound, to: found.upperBound))
+    }
+}
+
+// MARK: - Writing into the person's files
+
+/// A write into the person's folder (a PDF's comments) lands only on the file it was made from: its asker still
+/// there, and the file the same (its identity, size, date and every byte) as when it was read. Decided inside the
+/// coordinated write, right before the change.
+enum ViewerWrites {
+    enum Land: Equatable { case land, hungUp, changed }
+
+    static func land(live: Bool, base: (stamp: ViewerUpdated.Stamp, bytes: Data), now: (stamp: ViewerUpdated.Stamp?, bytes: Data?)) -> Land {
+        guard live else { return .hungUp }
+        guard now.stamp == base.stamp, now.bytes == base.bytes else { return .changed }
+        return .land
     }
 }
 

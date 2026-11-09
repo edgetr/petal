@@ -108,13 +108,15 @@ extension Viewers {
         let paths = [pdf.path, opened]
         let comments = app.paper.store.notes.compactMap { paper -> ViewerPDFComments.Comment? in
             guard paper.version == nil, let index = ViewerMatch.place(paper.file.places, path: pdf.path, also: paths) else { return nil }
-            return ViewerPDFComments.Comment(stick: paper.file.places[index], text: ViewerComments.text(paper.file.body),
+            // The words as written: the writer redacts them whole before anything is cut.
+            return ViewerPDFComments.Comment(stick: paper.file.places[index], body: paper.file.body,
                                             color: PaperLook.rgb(app.paper.store.color(of: paper.notebook)))
         }
         guard !comments.isEmpty else { return fail("No notes are on this PDF yet.") }
         let write = {
             guard live() else { return fail(NoteDesk.hungUp) }
-            ViewerPDFComments.write(pdf, comments: comments, intoOriginal: intoOriginal, author: NSFullUserName()) { outcome in
+            // Its asker hanging up stops it right up to the change (checked inside the coordinated write).
+            ViewerPDFComments.write(pdf, comments: comments, intoOriginal: intoOriginal, author: NSFullUserName(), live: live) { outcome in
                 switch outcome {
                 case .failed(let text): fail(text)
                 case .wrote(let file, let count):

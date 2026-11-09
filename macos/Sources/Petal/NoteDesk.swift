@@ -1316,7 +1316,8 @@ final class NoteDesk {
             return CGRect(x: v[0], y: v[1], width: v[2], height: v[3])
         }
         for row in rows {
-            guard let number = (row["window"] as? Double).map({ CGWindowID($0) }), let pid = (row["pid"] as? Double).map({ pid_t($0) }),
+            // Numbers from a file: only those a window number and a process id can be (a broken file never traps).
+            guard let number = (row["window"] as? Double).flatMap({ CGWindowID(exactly: $0) }), let pid = (row["pid"] as? Double).flatMap({ pid_t(exactly: $0) }),
                   let before = rect(row["before"]), let given = rect(row["given"]) else { continue }
             ledger[number] = (pid, before, given)
             // What couldn't be given back yet (its app not answering) stays, tried again with every change.
@@ -1638,6 +1639,7 @@ final class NoteDesk {
         pinPanels = NoteShelf.rekeyed(pinPanels, old, new)
         if let tab = tabPanels.removeValue(forKey: old) { tab.conceal() }
         if let panel = panels.removeValue(forKey: old) { panel.rekey(new); panels[new] = panel }
+        app.viewers.rekeyed(old, new)
     }
 
     /// An editor came or went: gone (folded, closed), the folder is read again, so a version that arrived while it
