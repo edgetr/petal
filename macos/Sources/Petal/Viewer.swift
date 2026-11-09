@@ -1640,6 +1640,17 @@ final class ViewerModel: Identifiable {
         return nil
     }
 
+    /// Closed (its window gone): nothing of it is told any more.
+    var isClosed: Bool { closedNow }
+
+    /// What a tool's answer about this viewer describes, in a word: the document loaded (its incarnation and stamp),
+    /// whether it's loading, what went wrong, and its pages and the page shown. Another mark by the time the answer
+    /// is delivered, and it's told again as it is then.
+    var shownMark: String {
+        let base = loadedBase.map { "\($0.id.volume)|\($0.id.inode)|\($0.id.created)|\($0.stamp.size)|\($0.stamp.modified)" } ?? "none"
+        return [base, loading ? "loading" : "loaded", problem ?? "", "\(live)", "\(pageCount)", "\(current)", "\(notes.count)"].joined(separator: "\u{1}")
+    }
+
     /// Snapshots only: the made-up document `preview` loads.
     @ObservationIgnored private var previewing = false
     /// The loaded document's incarnation and stamp (what a set of versions records as its base).

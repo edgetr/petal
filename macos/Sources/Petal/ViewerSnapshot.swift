@@ -219,6 +219,7 @@ enum ViewerCheck {
             failed = !twentyfirst(url, app: app, versionsRoot: versionsRoot) || failed
             failed = !twentysecond(url, app: app) || failed
             failed = !twentythird(url, app: app) || failed
+            failed = !twentyfourth(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -1584,6 +1585,79 @@ enum ViewerCheck {
         expect(setsAfter == setsBefore, "and nothing copied")
         app.viewers.closed(viewer)
         print("twentythird: " + (ok ? "picks held back with why once the original is deleted or replaced, the copies kept; a source swapped for a link outside refused, nothing copied" : "failed"))
+        return ok
+    }
+
+    /// Round 24: a viewer tool's answer is read again after its redaction, right before it's delivered. A pick whose
+    /// original changes, or whose viewer closes, during a slow redaction is answered with why, never as a pick;
+    /// petal_view answered as a viewer closes says it was closed.
+    private static func twentyfourth(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("twentyfourth: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let root = URL(fileURLWithPath: ViewerPath.canonical(home.path) ?? home.path)
+        /// A viewer on a copy of the sample with versions made and the first one picked.
+        func picked(_ name: String) -> (model: ViewerModel, set: ViewerVersionSet, file: URL)? {
+            let file = root.appending(path: name)
+            try? FileManager.default.copyItem(at: source, to: file)
+            let model = app.viewers.show(file, front: false)
+            wait(20) { !model.loading }
+            var made: ViewerVersionSet?
+            model.makeVersions(["One", "Two"], asker: "late-check") { if case .success(let set) = $0 { made = set } }
+            wait(20) { made != nil }
+            guard let set = made else { return nil }
+            model.use(set.versions[0])
+            guard set.picked == set.versions[0].id else { return nil }
+            return (model, set, file)
+        }
+        func toolCall(_ tool: String, _ args: [String: Any]) -> () -> (answer: [String: Any]?, refusal: String?) {
+            var answer: [String: Any]?
+            var refusal: String?
+            app.viewers.handle(tool, args, caller: "late-check", live: { true }, { answer = $0 as? [String: Any] }, { refusal = $0 })
+            return {
+                wait(10) { answer != nil || refusal != nil }
+                return (answer, refusal)
+            }
+        }
+        // The redaction made slow (a vault read that waits): a second per answer.
+        Viewers.shielding = { Thread.sleep(forTimeInterval: 1.0) }
+        defer { Viewers.shielding = nil }
+
+        // The original deleted while the pick's answer is redacted: answered with why, never the pick.
+        guard let first = picked("First.pdf") else { expect(false, "a pick (set up)"); return false }
+        let changed = toolCall("petal_view_pick", ["set": first.set.id])
+        try? FileManager.default.removeItem(at: first.file)
+        first.model.fileChanged()
+        let late = changed()
+        expect(late.answer?["picked"] is NSNull && late.answer?["note"] as? String == ViewerModel.originalChangedText,
+               "the original changed during the redaction: answered with why, not the pick (\(String(describing: late.answer ?? [:])) \(late.refusal ?? ""))")
+        app.viewers.closed(first.model)
+
+        // The viewer closed while the pick's answer is redacted: answered closed, never the pick.
+        guard let second = picked("Second.pdf") else { expect(false, "a second pick (set up)"); return false }
+        let closing = toolCall("petal_view_pick", ["set": second.set.id])
+        app.viewers.closed(second.model)
+        let closed = closing()
+        expect(closed.answer?["picked"] is NSNull && (closed.answer?["note"] as? String)?.contains("closed") == true,
+               "the viewer closed during the redaction: answered closed, not the pick (\(String(describing: closed.answer ?? [:])) \(closed.refusal ?? ""))")
+
+        // Unchanged all the while: the pick is told.
+        guard let third = picked("Third.pdf") else { expect(false, "a third pick (set up)"); return false }
+        let steady = toolCall("petal_view_pick", ["set": third.set.id])()
+        expect((steady.answer?["picked"] as? [String: Any])?["id"] as? String == third.set.versions[0].id, "nothing changed: the pick is told")
+        // petal_view answered as its viewer closes: said closed, never its pages.
+        let viewing = toolCall("petal_view", ["path": third.file.path])
+        wait(0.2) { false }
+        app.viewers.closed(third.model)
+        let viewed = viewing()
+        expect(viewed.answer == nil && viewed.refusal == Viewers.closedText, "petal_view as the viewer closes: said closed (\(viewed.refusal ?? String(describing: viewed.answer)))")
+        print("twentyfourth: " + (ok ? "answers read again after their redaction: a pick whose original changed or whose viewer closed meanwhile is never told as a pick" : "failed"))
         return ok
     }
 

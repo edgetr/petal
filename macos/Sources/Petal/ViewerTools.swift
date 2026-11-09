@@ -12,8 +12,23 @@ extension Viewers {
                 _ answer: @escaping (Any) -> Void, _ refuse: @escaping (String) -> Void) {
         // Everything told goes through the vault's redaction first (NoteShield, as the note tools' answers): file
         // names, labels, copies' names and paths. While the vault can't be read, nothing is told.
-        let send: (Any) -> Void = { value in Self.shielded(value) { out in if let out { answer(out) } else { refuse(NoteShield.unreadable) } } }
-        let fail: (String) -> Void = { text in Self.shielded(text) { out in refuse(out as? String ?? NoteShield.unreadable) } }
+        let fail: (String) -> Void = { text in Self.shielded(text) { out in if live() { refuse(out as? String ?? NoteShield.unreadable) } } }
+        // The one way an answer goes out (`told`): made from the state it describes, redacted off the main thread
+        // (which may wait on the vault), then that state read again right before it's delivered. Still the same,
+        // it goes; changed meanwhile (the original replaced, the viewer closed, a pick held back), the answer is
+        // made again from what's true now, never the earlier one. Nothing goes to an asker that hung up.
+        func told(_ make: @escaping @MainActor () -> Told, attempt: Int = 0) {
+            let first = make()
+            guard let value = first.value else { return fail(first.refusal ?? NoteShield.unreadable) }
+            Self.shielded(value) { out in
+                guard live() else { return }
+                guard make().mark == first.mark else {
+                    // Three tries at most: a viewer that never settles is said so, not told stale.
+                    return attempt < 2 ? told(make, attempt: attempt + 1) : fail("The viewer kept changing while Petal answered: ask again.")
+                }
+                if let out { answer(out) } else { refuse(NoteShield.unreadable) }
+            }
+        }
         guard app.paper.on else { return fail("Petal Notes is off in Petal's settings (notes); the viewer is part of it.") }
         let path = args["path"] as? String ?? ""
         switch name {
@@ -26,14 +41,18 @@ extension Viewers {
                 switch result {
                 case .failure(let refusal): fail(refusal.description)
                 case .success(let model):
-                    model.whenLoaded(within: Self.loadLimit) { answer in
-                        // Closed while it was read: said so, never a page count or "still loading".
-                        if answer == .closed { return fail(Self.closedText) }
-                        var told = self.told(model)
-                        if let page, !model.live, model.pageCount > 0, ViewerPages.index(page, count: model.pageCount) == nil {
-                            told["note"] = "It has \(model.pageCount) \(model.unit.word)s; \(model.unit.word) \(page) isn't one, so it shows \(model.unit.word) \(model.current + 1)."
+                    model.whenLoaded(within: Self.loadLimit) { _ in
+                        // What it shows as the answer goes out: closed meanwhile (while it was read, or while the
+                        // answer was redacted), said so, never a page count or "still loading"; reloaded or replaced
+                        // meanwhile, told again as it is then.
+                        told {
+                            guard !model.isClosed else { return Told(refusal: Self.closedText) }
+                            var told = self.told(model)
+                            if let page, !model.live, model.pageCount > 0, ViewerPages.index(page, count: model.pageCount) == nil {
+                                told["note"] = "It has \(model.pageCount) \(model.unit.word)s; \(model.unit.word) \(page) isn't one, so it shows \(model.unit.word) \(model.current + 1)."
+                            }
+                            return Told(told, mark: model.shownMark)
                         }
-                        send(told)
                     }
                 }
             }
@@ -48,9 +67,19 @@ extension Viewers {
                         switch made {
                         case .failure(let error): fail(error.description)
                         case .success(let set):
-                            send(["set": set.id, "file": model.name,
-                                  "versions": set.versions.map { ["id": $0.id, "name": $0.label, "path": $0.url.path] },
-                                  "note": "Copies in a folder of Petal's own, shown under the document with Use this. Change the copies (never the file itself); their pictures follow. petal_view_pick tells you which one the person picks. Newer versions replace these (their copies go, but a picked one; one you changed goes to the Trash), and every copy goes when the viewer closes: read the picked one while it's open."])
+                            // Told only while these are still the versions shown in an open viewer (closed or
+                            // replaced while the answer was redacted, their copies are gone: said so); the original
+                            // changed meanwhile, the copies stay and that's said with them.
+                            told {
+                                guard !model.isClosed, !set.closed else { return Told(refusal: ViewerCopyError.cancelled.description) }
+                                guard model.versions === set else { return Told(refusal: ViewerCopyError.superseded.description) }
+                                let held = model.pickSuspended(set)
+                                let note = "Copies in a folder of Petal's own, shown under the document with Use this. Change the copies (never the file itself); their pictures follow. petal_view_pick tells you which one the person picks. Newer versions replace these (their copies go, but a picked one; one you changed goes to the Trash), and every copy goes when the viewer closes: read the picked one while it's open."
+                                return Told(["set": set.id, "file": model.name,
+                                             "versions": set.versions.map { ["id": $0.id, "name": $0.label, "path": $0.url.path] },
+                                             "note": held.map { $0 + " " + note } ?? note],
+                                            mark: set.id + "|" + (held ?? ""))
+                            }
                         }
                     }
                 }
@@ -60,15 +89,22 @@ extension Viewers {
                 return fail("No versions by that id were made for you (petal_view_versions makes them).")
             }
             // A pick is told only while the viewer's loaded document is the very original the versions were made from,
-            // unchanged (ViewerVersionSet.pickState); else why it's held back (the copies stay).
+            // unchanged (ViewerVersionSet.pickState); else why it's held back (the copies stay). Read again after
+            // the redaction, right before it goes: the original changed or the viewer closed meanwhile, the answer
+            // is that, never the pick.
             let answer = {
-                switch set.pickState {
-                case .picked(let picked):
-                    send(["picked": ["id": picked.id, "name": picked.label, "path": picked.url.path],
-                          "note": "The original is as it was when these were made. Change it only after the person allows it, and ask petal_view_pick again right before you do: once the original changes, the pick isn't told."])
-                case .suspended(let reason): send(["picked": NSNull(), "note": reason])
-                case .closed: send(["picked": NSNull(), "note": "The viewer was closed without a pick."])
-                case .waiting: send(["picked": NSNull(), "note": "Not picked yet."])
+                told {
+                    switch set.pickState {
+                    case .picked(let picked):
+                        Told(["picked": ["id": picked.id, "name": picked.label, "path": picked.url.path],
+                              "note": "The original is as it was when these were made. Change it only after the person allows it, and ask petal_view_pick again right before you do: once the original changes, the pick isn't told."],
+                             mark: "picked|" + picked.id)
+                    case .suspended(let reason): Told(["picked": NSNull(), "note": reason], mark: "suspended|" + reason)
+                    case .closed:
+                        Told(["picked": NSNull(), "note": set.picked == nil ? "The viewer was closed without a pick." : "The viewer was closed, and its copies went with it."],
+                             mark: "closed")
+                    case .waiting: Told(["picked": NSNull(), "note": "Not picked yet."], mark: "waiting")
+                    }
                 }
             }
             let wait = min(120, max(0, (args["wait"] as? NSNumber)?.doubleValue ?? 0))
@@ -92,7 +128,9 @@ extension Viewers {
                         case .failure(let refusal): fail(refusal.description)
                         case .success(let url):
                             guard ViewerKind.of(url.path) == .pdf else { return fail("Comments go into a PDF; that file isn't one.") }
-                            self.comments(url, opened: path, intoOriginal: original, caller: caller, live: live, send, fail)
+                            // What was written is a fact of its own (no viewer's state): told while its asker is there.
+                            self.comments(url, opened: path, intoOriginal: original, caller: caller, live: live,
+                                          { value in told { Told(value, mark: "written") } }, fail)
                         }
                     }
                 }
@@ -102,10 +140,32 @@ extension Viewers {
         }
     }
 
+    /// An answer as it's made from the state it describes: what's told (or why it's refused), and `mark`, that
+    /// state in a word; the same mark after the redaction means the answer still holds.
+    struct Told {
+        var value: Any?
+        var refusal: String?
+        var mark: String
+
+        init(_ value: Any, mark: String) {
+            self.value = value
+            self.mark = mark
+        }
+
+        init(refusal: String) {
+            self.refusal = refusal
+            mark = "refused|" + refusal
+        }
+    }
+
+    /// Petal --viewer-check only: run off the main thread just before an answer is redacted (a slow vault read).
+    nonisolated(unsafe) static var shielding: (() -> Void)?
+
     /// `value` with the vault's secrets taken out (off the main thread); nil while the vault can't be read.
     static func shielded(_ value: Any, _ done: @escaping @MainActor (Any?) -> Void) {
         let carried = ViewerCarry(value)
         queue.async {
+            shielding?()
             let out = ViewerCarry(VaultIndex.settled { $0.unreadable ? nil : NoteShield.shield(carried.value as Any, index: $0) } ?? nil)
             DispatchQueue.main.async { MainActor.assumeIsolated { done(out.value) } }
         }
