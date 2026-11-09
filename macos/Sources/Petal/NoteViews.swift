@@ -177,7 +177,6 @@ struct PaperView: View {
                            save: { desk.write(paper.key, body: $0, base: $1) },
                            register: { desk.editorRegistered(paper.key, $0) },
                            importPictures: { desk.importPictures($0, into: paper.key) },
-                           escape: { desk.fold(paper.key, escape: true) },
                            idle: { desk.store.takeDeferred(paper.key) },
                            sameNote: { desk.store.sameNote($0, instance: $1, $2) },
                            say: { desk.tell($0) },

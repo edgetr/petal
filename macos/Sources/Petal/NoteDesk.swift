@@ -64,11 +64,16 @@ final class NoteDesk {
     @ObservationIgnored private var ghost: NSPanel?
     /// Made just now and still empty: let go of if it's put away empty.
     @ObservationIgnored private var fresh: Set<String> = []
-    /// Notes opened on their own (from the Petal Notes window or a notebook's stack), by paper key: where the paper's
-    /// top-left corner is (AppKit's coordinates). Never kept past this run.
-    @ObservationIgnored private(set) var standalone: [String: CGPoint] = [:]
-    /// Notes opened on their own from the Petal Notes window: Escape gives that window the keyboard back.
-    @ObservationIgnored private var standaloneFromLibrary: Set<String> = []
+    /// Notes opened on their own (from the Petal Notes window or a notebook's stack), by paper key: one record each,
+    /// everything about it together, so it moves with its paper as one (`rekey`). Never kept past this run.
+    @ObservationIgnored private(set) var standalone: [String: Standalone] = [:]
+
+    struct Standalone {
+        /// Where the paper's top-left corner is (AppKit's coordinates).
+        var corner: CGPoint
+        /// Opened from the Petal Notes window: Escape gives that window the keyboard back.
+        var fromLibrary: Bool
+    }
 
     nonisolated static let queue = DispatchQueue(label: "petal.notes.look", qos: .userInitiated)
     /// Narrowing a window for an open note: a newer turn (the note folded, notes off, quitting) makes one still
@@ -1189,7 +1194,6 @@ final class NoteDesk {
     /// through layout like every paper, and folding it or clicking away puts it away.
     func openStandalone(_ key: String, at point: CGPoint? = nil, fromLibrary: Bool = false) {
         guard on, store.paper(key) != nil else { return }
-        if fromLibrary { standaloneFromLibrary.insert(key) } else { standaloneFromLibrary.remove(key) }
         let mouse = NSEvent.mouseLocation
         let screen = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame ?? .zero
         let corner = point ?? CGPoint(x: screen.midX - PaperLook.openWidth / 2, y: screen.midY + 220)
@@ -1199,9 +1203,8 @@ final class NoteDesk {
         let group = NoteShelf.standaloneGroup(key, group: store.paper(key).flatMap { store.conflict(of: $0) }?.map(\.key) ?? [])
         let spots = NoteShelf.groupLayout(count: group.count, corner: corner, paper: CGSize(width: PaperLook.openWidth, height: 380), visible: screen)
         for (index, other) in group.enumerated() {
-            standalone[other] = spots[index]
+            standalone[other] = Standalone(corner: spots[index], fromLibrary: fromLibrary)
             faces[other] = .open
-            if fromLibrary { standaloneFromLibrary.insert(other) } else { standaloneFromLibrary.remove(other) }
         }
         faces[key] = .open
         keyboard = key
@@ -1212,7 +1215,8 @@ final class NoteDesk {
     /// Shows each note opened on its own where it was opened.
     private func placeStandalone() {
         guard on else { return }
-        for (key, corner) in standalone {
+        for (key, record) in standalone {
+            let corner = record.corner
             guard store.paper(key) != nil, faces[key] != nil else { standalone[key] = nil; continue }
             let panel = panel(for: key)
             panel.desktop = false
@@ -1228,8 +1232,7 @@ final class NoteDesk {
     private func closeStandalone(_ key: String, escape: Bool) {
         keyboardWanted.cancel(key)
         editors[key]?.flush()
-        standalone[key] = nil
-        let fromLibrary = standaloneFromLibrary.remove(key) != nil
+        let fromLibrary = standalone.removeValue(forKey: key)?.fromLibrary == true
         faces[key] = nil
         if keyboard == key { keyboard = nil }
         panels[key]?.conceal()
@@ -1848,7 +1851,7 @@ final class NoteDesk {
     func moved(_ key: String, to rect: CGRect) {
         guard let paper = store.paper(key) else { return }
         if standalone[key] != nil {
-            standalone[key] = CGPoint(x: rect.minX, y: rect.maxY)
+            standalone[key]?.corner = CGPoint(x: rect.minX, y: rect.maxY)
             return
         } else if isDesktop(key) {
             local.desk[paper.noteID] = [rect.minX, rect.maxY]
@@ -2641,6 +2644,15 @@ final class NotePanel: NSPanel {
         refit()
         guard NoteShelf.mayTakeKeyboard(shown: unveiled) else { return }
         makeKeyAndOrderFront(nil)
+    }
+
+    /// Escape, on any face of the note (open, turned over, folded, a conflict's read-only paper; from its editor too,
+    /// which passes it here): folded with the keyboard handed back (NoteDesk.fold's Escape), the one way.
+    override func cancelOperation(_ sender: Any?) { desk?.fold(key, escape: true) }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { return cancelOperation(nil) }
+        super.keyDown(with: event)
     }
 
     /// The Edit menu's keys (⌘C, ⌘V, ⌘Z…) here too, after the paper's own (EditMenu.keyEquivalent).

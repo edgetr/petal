@@ -844,7 +844,6 @@ final class PictureCell: NSTextAttachmentCell {
 final class NoteTextView: NSTextView {
     var style = NoteRich.Style(ink: .black, dim: .gray, petal: .black, accent: .systemBlue)
     var changed: () -> Void = {}
-    var escape: () -> Void = {}
     /// The note's folder, which its picture links are read from.
     /// Shared with every picture in this editor's text (NoteFolder).
     let folderRef = NoteFolder(URL(fileURLWithPath: "/"))
@@ -1296,7 +1295,8 @@ final class NoteTextView: NSTextView {
         changed()
     }
 
-    override func cancelOperation(_ sender: Any?) { escape() }
+    /// Escape goes to the paper's window, which handles it once for every face of the note (NotePanel).
+    override func cancelOperation(_ sender: Any?) { window?.cancelOperation(sender) }
 }
 
 /// An open editor, as the desk reaches it: save what's typed now; put a picture in.
@@ -1323,7 +1323,6 @@ struct NoteEditorView: NSViewRepresentable {
     let register: (NoteEditorHandle?) -> Void
     /// Pictures pasted or dropped: the desk reads them and puts them in, here or (once this editor is gone) in the note.
     let importPictures: (NoteImport) -> Void
-    let escape: () -> Void
     /// Its typing saved and nothing waits: a newer version deferred while it was dirty is taken now.
     var idle: () -> Void = {}
 
@@ -1436,7 +1435,6 @@ struct NoteEditorView: NSViewRepresentable {
     private func load(_ text: NoteTextView, _ coordinator: Coordinator) {
         coordinator.parent = self
         text.style = style
-        text.escape = escape
         text.changed = { [weak coordinator, weak text] in
             guard let coordinator, let text else { return }
             MainActor.assumeIsolated { coordinator.schedule(text) }
@@ -1490,7 +1488,6 @@ struct NoteEditorView: NSViewRepresentable {
         text.acceptPictures = acceptPictures
         text.noteID = paper.noteID
         text.noteFolder = paper.url.deletingLastPathComponent()
-        text.escape = escape
         let coordinator = context.coordinator
         // Another note in this paper, or the file changed elsewhere while the person isn't typing here: read again.
         // A newer version (another Mac, another editor) taken at once by an idle editor, typing here or not; one with

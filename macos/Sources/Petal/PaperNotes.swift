@@ -2036,26 +2036,30 @@ final class NoteStore {
         for session in Array(sessions.values) where !session.busy {
             guard let pending = session.idPending else { continue }
             let onDisk = read.first { $0.key == session.key && $0.version == nil }
-            switch NoteShelf.reconcileID(pending: pending, diskID: onDisk?.noteID) {
-            case .wait: continue
+            let verdict = NoteShelf.reconcileID(pending: pending, diskID: onDisk?.noteID)
+            guard verdict != .wait, let onDisk else { continue }
+            // Either way, first: the session, the files queue and the paper know the note as its file holds it now
+            // (its id, path and text), so the next write expects what's there; only then is anything waiting told.
+            session.idPending = nil
+            session.noteID = onDisk.noteID
+            let sessionID = session.id, url = onDisk.url, revision = onDisk.revision, id = onDisk.noteID
+            Self.io.async {
+                NoteDisk.states[sessionID]?.noteID = id
+                NoteDisk.states[sessionID]?.url = url
+                NoteDisk.states[sessionID]?.revision = revision
+            }
+            if let index = notes.firstIndex(where: { $0.key == session.key && $0.version == nil }) { notes[index] = onDisk }
+            switch verdict {
             case .landed:
-                session.idPending = nil
                 idWritten(pending, landed: true)
-            case .dropped(let id):
-                session.idPending = nil
+            case .dropped:
                 pendingIDs.remove(pending)
                 idWritten(pending, landed: false)
                 for (name, renewed) in renewing where renewed == pending { renewing[name] = nil }
                 // An id-less note's old path no longer points at an id that never landed.
                 aliases = aliases.filter { $0.value != pending }
-                session.noteID = id
-                let sessionID = session.id, url = URL(fileURLWithPath: session.key), revision = onDisk?.revision
-                Self.io.async {
-                    NoteDisk.states[sessionID]?.noteID = id
-                    NoteDisk.states[sessionID]?.url = url
-                    NoteDisk.states[sessionID]?.revision = revision
-                }
-                if let onDisk, let index = notes.firstIndex(where: { $0.key == session.key && $0.version == nil }) { notes[index] = onDisk }
+            case .wait:
+                break
             }
         }
     }

@@ -71,8 +71,10 @@ extension NoteDesk {
                 // The vault unreadable, or changing all the while: nothing searched, and said why.
                 guard let hits = hits ?? nil else { return refuse(NoteShield.unreadable) }
                 let found = hits.map { papers[$0] }
-                told.books.formUnion(found.prefix(limit).map(\.notebook))
-                told.notes.formUnion(found.prefix(limit).map(\.noteID))
+                // Every match counted (not only those listed) goes through the delivery fence: a notebook made Private
+                // while the search ran can't show up in the count either.
+                told.books.formUnion(found.map(\.notebook))
+                told.notes.formUnion(found.map(\.noteID))
                 told.books.formUnion(self.store.notebooks.filter { readable($0.name) }.map(\.name))
                 send(["notes": found.prefix(limit).map { self.summary($0) }, "count": found.count,
                       "notebooks": self.store.notebooks.filter { readable($0.name) }.map { ["name": $0.name, "color": $0.color.isEmpty ? "accent" : $0.color, "notes": $0.count] }])
