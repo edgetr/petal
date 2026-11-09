@@ -328,7 +328,9 @@ final class NoteDesk {
             // The drain clears journal entries as their writes land (on the journal's queue): waited for too, once the
             // drain is done or its time is up, so what it cleared is cleared.
             if group.wait(timeout: .now() + 10) == .success { NoteJournal.queue.sync {} }
-            DispatchQueue.main.async {
+            // On the run loop, not the main dispatch queue: AppKit is waiting for this answer inside `terminate`, and
+            // if that was called from a main-queue block, the queue runs nothing until it returns (PetalApp.quit).
+            RunLoop.main.perform(inModes: [.common]) {
                 MainActor.assumeIsolated {
                     let waiting = self.quitWaiters
                     self.quitWaiters = []
