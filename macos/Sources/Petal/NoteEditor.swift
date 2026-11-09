@@ -658,6 +658,8 @@ final class NoteTextView: NSTextView {
 @MainActor
 final class NoteEditorHandle {
     var flush: () -> Void = {}
+    /// Typed and not saved yet: the note is fenced against a read of the folder only then (NoteShelf.fenceEditor).
+    var busy: () -> Bool = { false }
     var insert: (String, URL, String, Int) -> Bool = { _, _, _, _ in false }
 }
 
@@ -784,6 +786,7 @@ struct NoteEditorView: NSViewRepresentable {
             guard let coordinator, let text else { return }
             MainActor.assumeIsolated { coordinator.flush(text) }
         }
+        handle.busy = { [weak coordinator] in MainActor.assumeIsolated { coordinator?.saveLater != nil } }
         handle.insert = { [weak text] path, file, caption, at in
             guard let text else { return false }
             return MainActor.assumeIsolated { text.insertPicture(path: path, file: file, caption: caption, at: at) }
@@ -803,7 +806,9 @@ struct NoteEditorView: NSViewRepresentable {
         text.escape = escape
         let coordinator = context.coordinator
         // Another note in this paper, or the file changed elsewhere while the person isn't typing here: read again.
-        let elsewhere = paper.file.body != coordinator.body && text.window?.firstResponder !== text
+        // A newer version (another Mac, another editor) taken at once by an idle editor, typing here or not; one with
+        // typing not saved yet keeps it (it's saved on the file it was made on, NoteShelf.editorTakesNewer).
+        let elsewhere = NoteShelf.editorTakesNewer(bodyChanged: paper.file.body != coordinator.body, dirty: coordinator.saveLater != nil)
         // The same note, whatever happened to its identity since (moved, renamed, given its own id): what's typed
         // stays, and is saved through the note as it is now (this view's save), never through a key that's gone.
         let same = sameNote(coordinator.noteID, coordinator.instance, paper.noteID)
@@ -813,8 +818,14 @@ struct NoteEditorView: NSViewRepresentable {
             coordinator.noteID = paper.noteID
             if !paper.instance.isEmpty { coordinator.instance = paper.instance }
             if elsewhere {
-                coordinator.flush(text)
+                // The keyboard here: the cursor stays where it was (within the new text).
+                let focused = text.window?.firstResponder === text
+                let cursor = text.selectedRange()
                 load(text, coordinator)
+                if focused {
+                    let kept = NoteShelf.keptSelection(location: cursor.location, length: cursor.length, newLength: (text.string as NSString).length)
+                    text.setSelectedRange(NSRange(location: kept.location, length: kept.length))
+                }
             }
         } else {
             // Another note: what's typed and not saved yet is saved first, into the note it was typed in and on the

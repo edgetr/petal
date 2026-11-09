@@ -548,6 +548,32 @@ struct NotesCheck {
                "a minute without a fresh opening: taken as closed")
         expect(!NoteShelf.missionControlOpen(dockWindows: [], barHiddenByPetal: true, lastOpened: opened, now: opened.addingTimeInterval(3)), "no Dock window: closed")
 
+        // An open editor fences its note only while it has typing not saved yet; an idle one takes another Mac's version.
+        expect(NoteShelf.fenceEditor(dirty: true) && !NoteShelf.fenceEditor(dirty: false), "fenced only while dirty")
+        expect(NoteShelf.editorTakesNewer(bodyChanged: true, dirty: false), "idle (focused or not): the newer version at once")
+        expect(!NoteShelf.editorTakesNewer(bodyChanged: true, dirty: true) && !NoteShelf.editorTakesNewer(bodyChanged: false, dirty: false),
+               "typing waiting to be saved: kept (saved on the file it was made on); nothing new: nothing")
+        expect(NoteShelf.keptSelection(location: 40, length: 5, newLength: 30) == (30, 0) && NoteShelf.keptSelection(location: 10, length: 5, newLength: 30) == (10, 5),
+               "the cursor stays where it was, within the new text")
+
+        // A title change anywhere is followed by the event's own process and window identity.
+        var behind = NoteStick(kind: .window); behind.mac = "m"; behind.pid = 12; behind.window = 70; behind.title = "Untitled"
+        expect(NoteShelf.followedTitle(behind, mac: "m", pid: 12, window: 70, title: "Budget.numbers") == "Budget.numbers", "a window behind, renamed: followed")
+        expect(NoteShelf.followedTitle(behind, mac: "m", pid: 12, window: 71, title: "Budget.numbers") == nil
+               && NoteShelf.followedTitle(behind, mac: "m", pid: 13, window: 70, title: "Budget.numbers") == nil
+               && NoteShelf.followedTitle(behind, mac: "other", pid: 12, window: 70, title: "Budget.numbers") == nil
+               && NoteShelf.followedTitle(behind, mac: "m", pid: 12, window: nil, title: "Budget.numbers") == nil,
+               "another window, process, Mac, or no window: never")
+
+        // A paper dragged out of the AI button: the real pointer is hit; only the paper's landing is offset.
+        let drop = NoteShelf.dropPoints(pointer: CGPoint(x: 500, y: 300))
+        expect(drop.hit == CGPoint(x: 500, y: 300) && drop.paper == CGPoint(x: 480, y: 320), "hit at the pointer, the paper at the ghost's corner")
+
+        // Hiding notes for a tab switch starts a new look: an older read can't undo it.
+        let lookBefore = 7, lookAfter = NoteShelf.hidingLook(7)
+        expect(!NoteShelf.mayBecomeActive(.look, ticket: lookBefore, current: lookAfter, readPID: 5, frontPID: 5),
+               "the read of the tab before the switch: refused")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

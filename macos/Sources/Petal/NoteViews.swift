@@ -175,7 +175,7 @@ struct PaperView: View {
             NoteEditorView(paper: paper, style: desk.style(color, glass: glass), focus: keyboard,
                            height: { desk.measured(paper.key, $0) },
                            save: { desk.write(paper.key, body: $0, base: $1) },
-                           register: { desk.editors[paper.key] = $0 },
+                           register: { desk.editorRegistered(paper.key, $0) },
                            importPictures: { desk.importPictures($0, into: paper.key) },
                            escape: { desk.fold(paper.key) },
                            sameNote: { desk.store.sameNote($0, instance: $1, $2) })

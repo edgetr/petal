@@ -101,7 +101,9 @@ final class NoteDesk {
             self.local.save(pending: store.pendingIDs)
         }
         store.onProblem = { [weak self] text in self?.say(text) }
-        store.keepAlive = { [weak self] key in self?.editors[key] != nil }
+        // Only an editor with typing not saved yet fences its note against a read of the folder (an idle one takes
+        // another Mac's version at once).
+        store.keepAlive = { [weak self] key in NoteShelf.fenceEditor(dirty: self?.editors[key]?.busy() == true) }
         Self.queue.async { Self.recoverNarrowed() }
         // Read and watched only once the first folder is settled: a folder set in Settings is switched to first, and
         // the switch starts the store itself when it's done (and after every later switch).
@@ -152,10 +154,16 @@ final class NoteDesk {
         if event.kind == .activated || event.kind == .focused, event.pid != getpid() {
             keyboardWanted.focusMoved(pid: event.pid, window: event.window)
         }
+        // A window's title changed (in front or behind): anchors with that very window take it.
+        if event.kind == .titleChanged, windowsStuck, let window = event.window, let element = event.element {
+            followTitle(pid: event.pid, window: window, element: element)
+        }
         // Another tab in the browser window shown: its tab and passage notes hide at once, until its tab is read again.
         if NoteShelf.tabReread(switched: event.kind == .tabSwitched || event.kind == .titleChanged, eventPID: event.pid, eventWindow: event.window,
                                shownPID: scene?.pid, shownWindow: scene?.window, browser: scene?.tab != nil) {
             awaitingTab = true
+            // A read already under way (of the tab before) is stale from now on: it can't undo the hiding.
+            looks = NoteShelf.hidingLook(looks)
             layout()
         }
         switch event.kind {
@@ -172,7 +180,7 @@ final class NoteDesk {
     private func concealWindowNotes() {
         awaitingRead = true
         // A read already under way (of the window left behind) is stale from now on.
-        looks += 1
+        looks = NoteShelf.hidingLook(looks)
         Self.roomTurn.cancel()
         for (key, panel) in panels where !isDesktop(key) { panel.conceal() }
         for panel in tabPanels.values { panel.conceal() }
@@ -429,6 +437,42 @@ final class NoteDesk {
         guard awaitingTab, let index = here[key], let paper = store.paper(key), paper.file.places.indices.contains(index) else { return false }
         return NoteShelf.hiddenDuringTabRead(paper.file.places[index].kind)
     }
+
+    /// A title change heard for `window` of `pid` (any window, not only the one in front): its title read off the main
+    /// thread, then every window anchor with that very identity on this Mac takes it (NoteShelf.followedTitle), fenced
+    /// by each note's revision and without touching when it was edited; never for an app kept private.
+    private func followTitle(pid: pid_t, window: CGWindowID, element: AXUIElement) {
+        let bundle = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier ?? ""
+        guard !bundle.isEmpty, !app.assist.neverLook(bundle) else { return }
+        let mac = local.mac
+        guard store.notes.contains(where: { $0.file.places.contains { $0.kind == .window && $0.pid == pid && $0.window == window && $0.mac == mac } }) else { return }
+        let carried = Self.Carried(element)
+        Self.titleQueue.async {
+            let title: String = Windows.value(carried.element, kAXTitleAttribute) ?? ""
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard !self.app.assist.neverLook(bundle) else { return }
+                    for paper in self.store.notes where !self.store.readOnly(paper) {
+                        let follows = paper.file.places.indices.filter {
+                            NoteShelf.followedTitle(paper.file.places[$0], mac: mac, pid: pid, window: window, title: title) != nil
+                        }
+                        guard !follows.isEmpty else { continue }
+                        // One write per note, fenced by the revision it was read at.
+                        self.store.change(paper.key, expect: paper.revision, touch: false) { file in
+                            for index in follows where file.places.indices.contains(index) && file.places[index].kind == .window { file.places[index].title = title }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private final class Carried: @unchecked Sendable {
+        let element: AXUIElement
+        init(_ element: AXUIElement) { self.element = element }
+    }
+
+    nonisolated private static let titleQueue = DispatchQueue(label: "petal.notes.titles", qos: .utility)
 
     /// Window anchors confirmed by live identity take the window's current title (NoteShelf.followedTitle), written
     /// through the note's session fenced by its revision, without touching when it was last edited.
@@ -1386,6 +1430,13 @@ final class NoteDesk {
         if let panel = panels.removeValue(forKey: old) { panel.rekey(new); panels[new] = panel }
     }
 
+    /// An editor came or went: gone (folded, closed), the folder is read again, so a version that arrived while it
+    /// was open shows.
+    func editorRegistered(_ key: String, _ handle: NoteEditorHandle?) {
+        editors[key] = handle
+        if handle == nil { store.reload() }
+    }
+
     func keep(_ key: String) {
         guard let paper = store.paper(key) else { return }
         store.keep(paper)
@@ -1613,8 +1664,10 @@ final class NoteDesk {
 
     /// Dragged from ✦ and let go at `point` (AppKit's coordinates): a blank note there, on the window under it,
     /// else on the Desktop.
-    func note(at point: CGPoint) {
+    /// `point`: the real pointer (what's under it is hit); `paperAt`: where the paper lands, when that's offset from it.
+    func note(at point: CGPoint, paperAt: CGPoint? = nil) {
         guard on else { return }
+        let landing = paperAt ?? point
         let ax = CGPoint(x: point.x, y: primaryHeight - point.y)
         let me = getpid()
         drops += 1
@@ -1647,10 +1700,10 @@ final class NoteDesk {
                         var desk = NoteStick(kind: .desktop)
                         desk.desktop = desktop
                         desk.mode = self.app.docks.focusedDock?.mode?.id ?? ""
-                        self.make(on: desk, at: point)
+                        self.make(on: desk, at: landing)
                         return
                     }
-                    self.noteOnDropped(running, window: number, frame: bounds, title: title, at: point, drop: drop)
+                    self.noteOnDropped(running, window: number, frame: bounds, title: title, at: landing, drop: drop)
                 }
             }
         }
@@ -1714,7 +1767,9 @@ final class NoteDesk {
             ghost?.orderOut(nil)
             ghost = nil
             let overDock = app.docks.focusedDock?.panel.map { $0.frame.contains(mouse) } ?? false
-            if !overDock { note(at: CGPoint(x: mouse.x - 20, y: mouse.y + 20)) }
+            // The real pointer is hit-tested; only the paper's landing is offset (NoteShelf.dropPoints).
+            let drop = NoteShelf.dropPoints(pointer: mouse)
+            if !overDock { note(at: drop.hit, paperAt: drop.paper) }
             return
         }
         if ghost == nil {

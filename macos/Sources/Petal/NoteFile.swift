@@ -1388,13 +1388,41 @@ enum NoteShelf {
     /// A new handle kept only when the vault's redaction leaves it as it is (`redact`); else another is made.
     static func handleSurvives(_ handle: String, redact: (String) -> String) -> Bool { redact(handle) == handle }
 
+    /// An open editor fences its note against a read of the folder only while it has work not saved yet (typed and
+    /// waiting to be saved); an idle one takes a newer version at once, its text and its base.
+    static func fenceEditor(dirty: Bool) -> Bool { dirty }
+
+    static func editorTakesNewer(bodyChanged: Bool, dirty: Bool) -> Bool { bodyChanged && !dirty }
+
+    /// The cursor kept when an idle editor that has the keyboard takes a newer version: where it was, within the new text.
+    static func keptSelection(location: Int, length: Int, newLength: Int) -> (location: Int, length: Int) {
+        let at = min(max(0, location), newLength)
+        return (at, min(max(0, length), newLength - at))
+    }
+
+    /// Hiding notes (a focus change, a tab switching) starts a new look: a read already under way belongs to the old
+    /// one, and can't show what was just hidden (NoteShelf.mayBecomeActive compares looks).
+    static func hidingLook(_ look: Int) -> Int { look + 1 }
+
+    /// A paper dragged out of the AI button: the window under the real pointer is the one it goes on (and the
+    /// Desktop of the screen under it); only where the paper lands is offset from it (the ghost's corner).
+    static func dropPoints(pointer: CGPoint) -> (hit: CGPoint, paper: CGPoint) {
+        (pointer, CGPoint(x: pointer.x - 20, y: pointer.y + 20))
+    }
+
     /// A window anchor confirmed by live identity (this Mac, its process and window number) takes the window's title
     /// as it is now (an "Untitled" document saved since), so finding it again after its app restarts works; never an
     /// empty title (a private app's isn't read).
     static func followedTitle(_ place: NoteStick, scene: NoteScene) -> String? {
-        guard place.kind == .window, place.mac == scene.mac, place.pid == scene.pid, place.window != nil, place.window == scene.window,
-              !scene.title.isEmpty, place.title != scene.title else { return nil }
-        return scene.title
+        followedTitle(place, mac: scene.mac, pid: scene.pid, window: scene.window, title: scene.title)
+    }
+
+    /// The same for a window whose title changed anywhere (in front or behind), by that event's own process and
+    /// window: only an anchor with exactly that identity on this Mac takes it.
+    static func followedTitle(_ place: NoteStick, mac: String, pid: Int32, window: UInt32?, title: String) -> String? {
+        guard place.kind == .window, place.mac == mac, place.pid == pid, let window, place.window == window,
+              !title.isEmpty, place.title != title else { return nil }
+        return title
     }
 
     /// A browser window in front showing another tab (its tab switched, or its title changed): its tab and passage
