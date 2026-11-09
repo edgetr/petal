@@ -105,6 +105,7 @@ final class NotesModel {
     /// One change to the canvas, made on its file as it is then (NoteStore.editCanvas); shown at once.
     /// `at`: when the person made it (kept through any wait for a note's id).
     func edit(_ notebook: String, _ edit: NoteCanvas.Edit, at: Double = Date().timeIntervalSince1970) {
+        guard desk.takesChanges() else { return }
         // A notebook not here yet (its folder not read): nothing changes on screen that couldn't be kept.
         guard store.canvasEditable(notebook) else { return desk.tell("Waiting for \(notebook) to download: its canvas can be changed once it's here.") }
         if let current = canvas, NoteLibrary.same(current.notebook, notebook), let layout = current.layout {
@@ -199,6 +200,7 @@ final class NotesModel {
     /// same folder in use, and the binding still finding that notebook, by its name now); else nothing is done, and
     /// the person is told. A notebook not read yet asks nothing.
     func dialog<Answer>(about notebook: String?, _ show: () -> Answer?, then apply: (Answer, Asked) -> Void) {
+        guard desk.takesChanges() else { return }
         let session = store.session
         let binding = notebook.flatMap { store.binding($0) }
         if let notebook, binding == nil { return desk.tell("\(notebook) isn't read yet. Try again in a moment.") }
@@ -268,11 +270,13 @@ final class NotesModel {
     func makeDefault(_ book: Notebook) { PetalApp.shared.config.set("notesNotebook", book.name) }
 
     func setPrivate(_ book: Notebook, _ on: Bool) {
+        guard desk.takesChanges() else { return }
         store.setCover(book.name, fields: ["private": on ? "true" : ""])
         desk.refreshPanels()
     }
 
     func setView(_ book: Notebook, _ view: NoteLibrary.View) {
+        guard desk.takesChanges() else { return }
         store.setCover(book.name, fields: ["view": view == .canvas ? "canvas" : ""])
         if view == .canvas { loadCanvas(book.name) }
     }

@@ -82,6 +82,14 @@ final class NoteDesk {
 
     var app: PetalApp { PetalApp.shared }
     var on: Bool { ready && app.config.bool("notes") }
+
+    /// Notes take a change from the person or a tool (a new note, an editor, a paste, a move, a tool's call) only once
+    /// they're ready: this Mac's state and the folder in, and the store's `notesReady` (no switch under way, the
+    /// folder's recovery done, its first read in), as at launch. Else nothing is done, and it's said plainly.
+    func takesChanges() -> Bool {
+        guard ready, store.notesReady else { say(NoteStore.gettingReady); return false }
+        return true
+    }
     var glass: Bool { app.config.string("notesLook") == "glass" }
     var defaultNotebook: String {
         let name = app.config.string("notesNotebook")
@@ -1195,7 +1203,7 @@ final class NoteDesk {
     /// near the middle of the screen under the pointer): from the Petal Notes window or a notebook's stack. It shows
     /// through layout like every paper, and folding it or clicking away puts it away.
     func openStandalone(_ key: String, at point: CGPoint? = nil, fromLibrary: Bool = false) {
-        guard on, store.paper(key) != nil else { return }
+        guard on, takesChanges(), store.paper(key) != nil else { return }
         let mouse = NSEvent.mouseLocation
         let screen = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame ?? .zero
         let corner = point ?? CGPoint(x: screen.midX - PaperLook.openWidth / 2, y: screen.midY + 220)
@@ -1330,8 +1338,9 @@ final class NoteDesk {
 
     /// `expecting`: the app and window Petal is bringing forward for it (a drop on a window behind): focus going
     /// there doesn't drop its keyboard request.
+    /// A paper opened for writing (its editor): only once notes take changes.
     func open(_ key: String, expecting: NoteShelf.KeyboardRequests.Target? = nil) {
-        guard let paper = store.paper(key) else { return }
+        guard takesChanges(), let paper = store.paper(key) else { return }
         faces[key] = .open
         keyboard = key
         local.shown = Array(Set(local.shown + [paper.noteID]))
@@ -1632,6 +1641,7 @@ final class NoteDesk {
     /// and a quit meanwhile keeps it for the next launch.
     @discardableResult
     func importPictures(_ items: NoteImport, into key: String) -> Bool {
+        guard takesChanges() else { return false }
         guard let paper = store.paper(key), !store.readOnly(paper) else { say("This note has two versions: keep one before adding pictures."); return false }
         // A paste is journaled by the note's own id: an id-less note gets it in its file first (its session), and
         // the paste waits for that; it can't be written, the paste is refused (the paper says the note isn't saved).
@@ -1806,6 +1816,7 @@ final class NoteDesk {
     /// Pictures pasted as bytes (a copy from a note), taken as a pasted screenshot's are: accepted in memory and
     /// journaled at once (their files written through the note's session), and shown at once.
     func acceptCopiedPictures(_ key: String, _ items: [(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? {
+        guard takesChanges() else { return nil }
         guard let accepted = store.acceptPictures(key, items) else { return nil }
         NotePictures.shared.accepted(accepted.enumerated().map { ($1.file, items[$0].data) })
         return accepted
@@ -2022,6 +2033,7 @@ final class NoteDesk {
     /// tab changed while it was read) makes no note at all: never a note without the check.
     private func noteOnSelection() {
         guard on, let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return }
+        guard takesChanges() else { return }
         let name = running.localizedName ?? ""
         let privacy = ClaudePanel.privacy.now
         let ticket = looks
@@ -2084,7 +2096,7 @@ final class NoteDesk {
     /// else on the Desktop.
     /// `point`: the real pointer (what's under it is hit); `paperAt`: where the paper lands, when that's offset from it.
     func note(at point: CGPoint, paperAt: CGPoint? = nil) {
-        guard on else { return }
+        guard on, takesChanges() else { return }
         let landing = paperAt ?? point
         let ax = CGPoint(x: point.x, y: primaryHeight - point.y)
         let me = getpid()
@@ -2316,7 +2328,7 @@ final class NoteDesk {
 
     /// Stick here: the quick question's conversation becomes a note on what was in front, open there.
     func stick(_ messages: [Agent.Message], chat: UUID) {
-        guard let captured else { return }
+        guard takesChanges(), let captured else { return }
         var lines: [String] = []
         if let first = messages.first(where: { $0.kind == .user }) {
             let title = first.text.split(separator: "\n").first.map(String.init) ?? ""
@@ -2446,6 +2458,7 @@ final class NoteDesk {
     /// through the note's session, and its panel, editor and everything showing it follow it (`rekey`, from the
     /// store, for every change of a note's file). `done`: the note where it is now, or nil.
     func move(_ key: String, to notebook: String, live: (@Sendable () -> Bool)? = nil, then done: @escaping @MainActor (PaperNote?) -> Void = { _ in }) {
+        guard takesChanges() else { return done(nil) }
         editors[key]?.flush()
         store.move(key, to: notebook, live: live) { moved in
             if let moved {

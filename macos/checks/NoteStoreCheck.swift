@@ -149,6 +149,7 @@ struct NoteStoreCheck {
         trashAfterSwitch(root: root)
         renewalAcrossSwitch(root: root)
         picturesSurviveSwitch(root: root)
+        notReadyDuringRecovery(root: root)
         notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -2400,6 +2401,56 @@ struct NoteStoreCheck {
         while !(rescuedWithNote() || (try? Data(contentsOf: landed)) == bytes) && Date() < until { settle(0.1) }
         expect(rescuedWithNote() || (try? Data(contentsOf: landed)) == bytes,
                "the picture's bytes land once writable, or the note is in Unsaved notes with its picture")
+        try? fm.removeItem(at: folder)
+        try? fm.removeItem(at: rootB)
+    }
+
+    /// A switch back to a folder whose journal recovery can't finish yet: notes aren't ready, so nothing is made,
+    /// written, pasted or changed (⌃⌥N and every other way in make nothing, and it's said); once recovery is done
+    /// and the folder's first read is in, they work.
+    @MainActor static func notReadyDuringRecovery(root: URL) {
+        let fm = FileManager.default
+        let rootB = root.deletingLastPathComponent().appending(path: "petal-root-B-\(UUID().uuidString)")
+        try? fm.createDirectory(at: rootB, withIntermediateDirectories: true)
+        let folder = root.appending(path: "Ready")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        _ = NoteStore.create(NoteFile(id: "READY-1", body: "there").serialized(), at: folder.appending(path: "There.md"), root: root)
+        let store = NoteStore(root: root)
+        var said: [String] = []
+        store.onProblem = { said.append($0) }
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        store.reload()
+        settle(1)
+        expect(store.notesReady, "ready once the folder's first read is in")
+        var away = false
+        store.switchRoot(to: rootB) { away = true }
+        var until = Date().addingTimeInterval(8)
+        while (!away || !store.loaded) && Date() < until { settle(0.05) }
+        // The journal's queue held: the switch back's recovery can't start.
+        let hold = DispatchSemaphore(value: 0)
+        NoteJournal.queue.async { hold.wait() }
+        var back = false
+        store.switchRoot(to: root) { back = true }
+        until = Date().addingTimeInterval(5)
+        while (store.switching || store.root != root) && Date() < until { settle(0.05) }
+        settle(0.3)
+        let beforeFiles = (try? fm.contentsOfDirectory(atPath: folder.path)) ?? []
+        let made = store.make(NoteFile(body: "made while recovering"), in: "Ready")
+        store.setCover("Ready", fields: ["private": "true"])
+        var edited = false
+        store.editCanvas("Ready", .move("r", .init(x: 1, y: 1))) { edited = $0 != nil }
+        expect(!store.switching && !back && !store.notesReady && made == nil && !edited
+               && said.contains(NoteStore.gettingReady) && ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []) == beforeFiles,
+               "recovery not done: notes aren't ready; nothing is made or changed, and it's said", "\(said)")
+        hold.signal()
+        until = Date().addingTimeInterval(8)
+        while !(back && store.notesReady) && Date() < until { settle(0.05) }
+        expect(store.notesReady, "recovery done and the first read in: ready")
+        var landed: PaperNote?
+        _ = store.make(NoteFile(body: "made once ready"), in: "Ready") { landed = $0 }
+        until = Date().addingTimeInterval(5)
+        while landed == nil && Date() < until { settle(0.05) }
+        expect(landed.map { (text($0.url) ?? "").contains("made once ready") } == true, "once ready, a new note is made")
         try? fm.removeItem(at: folder)
         try? fm.removeItem(at: rootB)
     }

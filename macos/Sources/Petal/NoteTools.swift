@@ -59,6 +59,8 @@ extension NoteDesk {
         let send: (Any) -> Void = { deliver($0, false) }
         let fail: (String) -> Void = { deliver($0, true) }
         guard on else { return fail("Petal Notes is off in Petal's settings (notes).") }
+        // Not ready (a switch of the notes folder, its recovery, its first read): no tool, as at launch.
+        guard ready, store.notesReady else { return fail(NoteStore.gettingReady) }
         switch name {
         case "petal_notes":
             let query = args["query"] as? String ?? ""

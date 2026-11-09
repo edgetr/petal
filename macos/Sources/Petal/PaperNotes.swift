@@ -236,9 +236,9 @@ final class RootSession {
     var importTrouble: [String: [Int: [NoteJournal.Import]]] = [:]
     @ObservationIgnored var renewing: [String: String] = [:]
 
-    /// Its folder's journal entries being put back (a switch back to it): nothing is read yet, and snapshots wait.
+    /// Its folder's journal entries being put back (a switch back to it): nothing is read yet, and notes aren't ready
+    /// (NoteStore.notesReady).
     @ObservationIgnored var recovering = false
-    @ObservationIgnored var heldSnapshots: [String: NoteJournal.Entry] = [:]
 
     init(root: URL) { self.root = root }
 
@@ -348,6 +348,13 @@ final class NoteStore {
     /// nothing read or written there.
     init(root: URL? = nil) { session = RootSession(root: root ?? Self.unresolvedRoot) }
 
+    /// Notes take changes (Phase 1's `ready`): no switch under way, this folder's journal recovery done and its first
+    /// read in. Before it, nothing is made, written, moved, stuck, pasted or changed by the person or a tool, as at
+    /// launch, and the desk says so (NoteDesk.takesChanges). So no snapshot is ever taken before the folder's
+    /// recovery is done.
+    var notesReady: Bool { !switching && !session.recovering && loaded }
+    nonisolated static let gettingReady = "Petal Notes are getting ready. Try again in a moment."
+
     /// Whether `captured` is still the session in use: every completion and deferred action checks it before acting.
     func current(_ captured: RootSession) -> Bool { captured === session && !captured.ended }
 
@@ -404,8 +411,8 @@ final class NoteStore {
     /// "Unsaved notes"), then its notes go and the new folder's come. Nothing new starts in the old folder meanwhile.
     /// `recover`: the new folder's session first puts back this Mac's journal entries for that folder's notes, as a
     /// launch does (NoteJournal.leftovers(forRoot:), then `recover`: journalRecovery, restorePictures, pastes read
-    /// in), before it reads the folder or takes a fresh snapshot. The launch's own switch passes false: the launch
-    /// recovers the whole journal itself.
+    /// in), before it reads the folder; notes aren't ready (`notesReady`) until then and its first read is in. The
+    /// launch's own switch passes false: the launch recovers the whole journal itself.
     func switchRoot(to newRoot: URL, recover: Bool = true, then done: @escaping @MainActor () -> Void = {}) {
         guard newRoot != root, !switching else { return }
         switching = true
@@ -434,8 +441,8 @@ final class NoteStore {
                         return done()
                     }
                     // Phase 1's recovery for this folder's notes first: the entries move aside on the journal's queue
-                    // (after everything the drain told it), so no fresh snapshot can replace one, and are put back on
-                    // the notes' queue; only then is the folder read and a snapshot taken.
+                    // (after everything the drain told it) and are put back on the notes' queue; only then is the
+                    // folder read, and notes are ready once that read is in (no snapshot before).
                     fresh.recovering = true
                     NoteJournal.queue.async {
                         let holding = NoteJournal.leftovers(forRoot: newRoot)
@@ -443,9 +450,6 @@ final class NoteStore {
                             if let holding { NoteJournal.recover(holding, root: newRoot) }
                             self.onMain(fresh) {
                                 fresh.recovering = false
-                                let held = Array(fresh.heldSnapshots.values)
-                                fresh.heldSnapshots = [:]
-                                NoteJournal.queue.async { for entry in held { NoteJournal.snapshot(entry) } }
                                 self.start()
                                 self.adoptJournal()
                                 done()
@@ -1468,8 +1472,6 @@ final class NoteStore {
             // Nothing waiting to be written: this text is the file's already.
             if firstBase == nil, text == paper.revision { entry.landed = true }
         }
-        // While the session's recovery runs, held (the newest per note) and journaled once it's done.
-        if self.session.recovering { self.session.heldSnapshots[NoteJournal.file(entry.noteID, aside: entry.aside).lastPathComponent] = entry; return }
         NoteJournal.queue.async { NoteJournal.snapshot(entry) }
     }
 
@@ -1737,7 +1739,7 @@ final class NoteStore {
     @discardableResult
     func change(_ key: String, base: String? = nil, expect: String?? = nil, touch stamp: Bool = true, live: (@Sendable () -> Bool)? = nil,
                 edit: (inout NoteFile) -> Void, done: (@MainActor (Outcome) -> Void)? = nil) -> String? {
-        guard !switching, let before = paper(key), !readOnly(before) else { return nil }
+        guard notesReady, let before = paper(key), !readOnly(before) else { return nil }
         if let expect, before.revision != expect { return nil }
         // An id-less note gets its id first (written through its session); an edit made on the file as it was is
         // made on it as it is once the id is in.
@@ -1853,7 +1855,7 @@ final class NoteStore {
     /// again) or its asker went.
     @discardableResult
     func make(_ file: NoteFile, in notebook: String, live: (@Sendable () -> Bool)? = nil, then done: (@MainActor (PaperNote?) -> Void)? = nil) -> PaperNote? {
-        guard !switching else { done?(nil); return nil }
+        guard notesReady else { done?(nil); return nil }
         let name = ensureNotebook(notebook, color: "")
         let folder = root.appending(path: name)
         // Names shown here or still being made (another note of the same title on its way, a tool's not shown yet)
@@ -1904,7 +1906,7 @@ final class NoteStore {
     func ensureNotebook(_ name: String, color: String) -> String {
         // A notebook already there by another case ("inbox" for Inbox) is that notebook, by its own name.
         let folderName = NoteShelf.canonicalNotebook(NoteShelf.folderName(name), existing: notebooks.map(\.name))
-        guard notebook(folderName) == nil, !switching else { return folderName }
+        guard notebook(folderName) == nil, notesReady else { return folderName }
         let folder = root.appending(path: folderName)
         var cover = NoteFile(body: "# About this notebook\n\nWhat \(folderName) is for.")
         cover.cover = true
@@ -1927,7 +1929,7 @@ final class NoteStore {
         // The notebook as it exists, whatever its case ("inbox" is Inbox): the same one, nothing to do.
         let name = NoteShelf.canonicalNotebook(NoteShelf.folderName(notebook), existing: notebooks.map(\.name))
         guard name.compare(paper.notebook, options: .caseInsensitive) != .orderedSame else { return done(paper) }
-        guard !switching, !readOnly(paper), let session = session(for: key) else { return done(nil) }
+        guard notesReady, !readOnly(paper), let session = session(for: key) else { return done(nil) }
         ensureNotebook(name, color: "")
         // Its id in its file first (an id-less note's is its path, which the move changes).
         ensureID(key)
@@ -1941,7 +1943,7 @@ final class NoteStore {
     /// a move too). Returns each one's reference (as the note writes it), for the editor to put in as ordinary text;
     /// nil when the note can't take them.
     func acceptPictures(_ key: String, _ items: [(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? {
-        guard !switching, let before = paper(key), !readOnly(before), !items.isEmpty else { return nil }
+        guard notesReady, let before = paper(key), !readOnly(before), !items.isEmpty else { return nil }
         // The pictures' folder is named for the note's id: an id-less note gets its own first.
         ensureID(key)
         guard let paper = paper(key), let session = session(for: key) else { return nil }
@@ -1960,7 +1962,7 @@ final class NoteStore {
     /// the note can't take pictures now.
     func beginImport(_ key: String, _ items: NoteImport) -> (token: Int, sources: [NoteJournal.Import])? {
         // Only a note whose own id is in its file: a paste is journaled by it (never by a path's id).
-        guard !switching, !draining, let paper = paper(key), !readOnly(paper), NoteShelf.lasting(paper.noteID, pending: pendingIDs),
+        guard notesReady, !draining, let paper = paper(key), !readOnly(paper), NoteShelf.lasting(paper.noteID, pending: pendingIDs),
               let session = session(for: key) else { return nil }
         nextID += 1
         let token = nextID
@@ -2104,6 +2106,7 @@ final class NoteStore {
     /// with no cover yet (a folder made elsewhere), a cover made with it, never over one. `book`: the same change on
     /// the notebook in memory, shown at once.
     func setCover(_ notebook: String, fields: [String: String]) {
+        guard notesReady else { return onProblem(NoteStore.gettingReady) }
         let name = self.notebook(notebook)?.name ?? ensureNotebook(notebook, color: "")
         // Bound to this root and to the notebook (NotebookBinding: its cover id, path and folder), never its name;
         // changes already waiting for this notebook are added to.
@@ -2482,7 +2485,7 @@ extension NoteStore {
     /// unless it still finds the same notebook in this session's folder, and checked again inside the move.
     func renameNotebook(_ old: String, to wanted: String, binding wanted_: NotebookBinding? = nil, then done: @escaping @MainActor (String?) -> Void) {
         let name = NoteShelf.folderName(wanted)
-        guard !switching, let bound = wanted_ ?? binding(old), case .found(let now) = resolve(bound), let book = notebook(now), !name.isEmpty else {
+        guard notesReady, let bound = wanted_ ?? binding(old), case .found(let now) = resolve(bound), let book = notebook(now), !name.isEmpty else {
             onProblem("\(old) isn't where it was, so it wasn't renamed.")
             return done(nil)
         }
@@ -2522,7 +2525,7 @@ extension NoteStore {
     /// has work under way. Petal's pictures stay where they are (a note trashed leaves its pictures alone).
     /// `binding`: as for a rename: refused unless it still finds the same notebook, here and inside the trash.
     func trashNotebook(_ name: String, binding wanted: NotebookBinding? = nil, then done: @escaping @MainActor (Bool) -> Void) {
-        guard !switching, let bound = wanted ?? binding(name), case .found(let now) = resolve(bound), let book = notebook(now) else {
+        guard notesReady, let bound = wanted ?? binding(name), case .found(let now) = resolve(bound), let book = notebook(now) else {
             onProblem("\(name) isn't where it was, so nothing was moved to the Trash.")
             return done(false)
         }
@@ -2644,7 +2647,7 @@ extension NoteStore {
     /// gesture always wins).
     func editCanvas(_ notebook: String, _ edit: NoteCanvas.Edit, at: Double = Date().timeIntervalSince1970,
                     then done: @escaping @MainActor (NoteCanvas?) -> Void = { _ in }) {
-        guard !switching, !draining, let book = self.notebook(notebook) else { return done(nil) }
+        guard notesReady, !draining, let book = self.notebook(notebook) else { return done(nil) }
         // Journaled at once, by the notebook's own folder (`canvasKey`). Only a notebook whose folder isn't read yet
         // can't take edits: the canvas waits for it (`canvasEditable`), and nothing shown is left unjournaled.
         guard let key = canvasKey(book.name) else {
