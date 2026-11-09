@@ -61,6 +61,17 @@ extension NoteDesk {
             // Its whole text, its pictures as `![picture N]`: never a pictures' folder or file name.
             var result = self.summary(paper, text: true)
             if paper.file.cover { result["cover"] = true }
+            // What the note's helper answered (a chained helper reads its predecessor's), marked as the helper's and
+            // shielded with the rest of the answer.
+            if !paper.file.ink.isEmpty {
+                result["helper"] = ["note": "Written on the note by its helper (Petal), not by the user.",
+                                    "ink": paper.file.ink.map { ink -> [String: Any] in
+                                        var out: [String: Any] = ["who": ink.heading, "text": ink.text]
+                                        if !ink.link.isEmpty { out["link"] = ink.link }
+                                        if !ink.proof.isEmpty { out["proof"] = ink.proof }
+                                        return out
+                                    }]
+            }
             if self.store.readOnly(paper) { result["note"] = "This note changed in two places at once: the person sees both papers until they keep one, and it can't be changed until then." }
             send(result)
             }

@@ -57,7 +57,7 @@ struct NoteHelpCheck {
         let handFile = NoteFile.parse(hand, fallbackID: "x", fallbackDate: now)
         expect(handFile.watch?.every == "6h" && handFile.watch?.history == ["40", "30"], "a hand-written watcher", "\(String(describing: handFile.watch))")
         expect(handFile.serialized().contains("later: kept"), "an unknown key kept")
-        expect(NoteFile.parse("---\nid: P\ncover: true\nprivate: true\n---\n", fallbackID: "x", fallbackDate: now).isPrivate, "a private cover")
+        expect(NoteFile.parse("---\nid: P\ncover: true\nprivate: true\n---\n", fallbackID: "x", fallbackDate: now).coverPrivate, "a private cover, by its key")
 
         // MARK: Mentions
 
@@ -173,18 +173,133 @@ struct NoteHelpCheck {
         expect(NoteHelp.repository(url: "https://github.com/edgetr/petal/pull/16") == NoteHelp.Repository(slug: "edgetr/petal", kind: .pull, number: 16), "a pull request")
         expect(NoteHelp.repository(url: "https://github.com/edgetr/petal/issues/3")?.kind == .issue && NoteHelp.repository(url: "https://example.com/a/b") == nil, "an issue; not GitHub")
         let config = "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:Edgetr/petal.git\n\tfetch = +refs/heads/*\n[branch \"main\"]\n\tremote = origin"
-        expect(NoteHelp.remotes(config: config) == ["git@github.com:Edgetr/petal.git"], "a git config's remotes")
+        expect(NoteHelp.remotes(config: config).map { "\($0.name) \($0.url)" } == ["origin git@github.com:Edgetr/petal.git"], "a git config's remotes, by name")
         expect(NoteHelp.slug(remote: "git@github.com:Edgetr/petal.git") == "edgetr/petal" && NoteHelp.slug(remote: "https://github.com/edgetr/petal") == "edgetr/petal", "remotes' slugs")
         expect(NoteHelp.slug(remote: "git@gitlab.com:a/b.git") == nil, "another host")
-        let candidates = [(path: "/u/petal", remotes: ["git@github.com:edgetr/petal.git"]), (path: "/u/petal-old", remotes: ["https://github.com/edgetr/petal"]), (path: "/u/site", remotes: ["git@github.com:edgetr/edgetr.git"])]
+        let candidates: [(path: String, remotes: [(name: String, url: String)])] = [(path: "/u/petal", remotes: [(name: "origin", url: "git@github.com:edgetr/petal.git")]),
+                                                                                    (path: "/u/petal-old", remotes: [(name: "origin", url: "https://github.com/edgetr/petal")]),
+                                                                                    (path: "/u/site", remotes: [(name: "origin", url: "git@github.com:edgetr/edgetr.git")])]
         expect(NoteHelp.checkouts(for: "edgetr/petal", among: candidates) == ["/u/petal", "/u/petal-old"], "two checkouts: asked")
         expect(NoteHelp.checkout(holding: "/u/petal/macos/a.swift", among: ["/u/petal", "/u/petal/macos/vendor", "/u/pet"]) == "/u/petal", "the checkout a file is in")
-        expect(NoteHelp.branch("Fix the failing check and open a PR", number: 16) == "petal/16-fix-the-failing-check-and-open", "a branch name", NoteHelp.branch("Fix the failing check and open a PR", number: 16))
         let answer = "Opened https://github.com/example/garden/pull/43 into #42.\nProof: run.sh ✓ · diff +4 −2 · PR #43"
         expect(NoteHelp.pullRequest(in: answer) == "https://github.com/example/garden/pull/43" && NoteHelp.proof(in: answer) == ["run.sh ✓", "diff +4 −2", "PR #43"], "the result and its proof")
         expect(NoteHelp.inkText(answer) == "Opened https://github.com/example/garden/pull/43 into #42.", "ink without the proof line")
         expect(NoteHelp.objections(in: "1. The list in Settings still doesn't sort.\n2. No check covers it.") == 2 && NoteHelp.objections(in: "No objections.") == 0, "objections counted")
         expect(NoteHelp.taskChips([.init(kind: .tab, title: "", target: ""), .init(kind: .tab, title: "", target: ""), .init(kind: .file, title: "", target: "/a/Quote-A.pdf")]) == ["2 tabs", "Quote-A.pdf"], "a task's chips")
+
+
+        // MARK: Rule A: one cancellable operation per run
+
+        var gate = NoteHelp.Gate(id: 7)
+        expect(gate.continues(7) && !gate.continues(6), "a continuation goes on only for its own run")
+        expect(gate.pause() && !gate.continues(7) && gate.paused, "paused: no continuation goes on")
+        expect(gate.ending(answered: true, asking: false) == .paused, "a turn ending while paused is a pause, not an answer")
+        var pausedEnd = gate
+        expect(!pausedEnd.end(.paused) && pausedEnd.paused, "a pause advances nothing and stays paused (Go on)")
+        expect(gate.goOn() && gate.continues(7), "Go on: running again")
+        gate.hold("always:code:/u/garden")
+        var revoked = gate
+        expect(revoked.revoke("always:code:/u/garden") && !revoked.continues(7), "taking back the grant it works under stops it")
+        var other = gate
+        expect(!other.revoke("reply") && other.continues(7), "another grant leaves it running")
+        var stopped = gate
+        stopped.stop()
+        expect(stopped.ending(answered: true, asking: false) == .stopped && !stopped.goOn(), "stopped: its answer counts for nothing, and stays stopped")
+        expect(!stopped.end(.stopped), "a stopped run advances nothing")
+        expect(gate.ending(answered: true, asking: true) == .waitingOnPerson, "asking the person: not done yet")
+        expect(gate.ending(answered: false, asking: false) == .failed, "no answer: failed, nothing advances")
+        var done = gate
+        expect(done.ending(answered: true, asking: false) == .succeeded && done.end(.succeeded), "only a running run with an answer advances")
+        expect(!done.end(.succeeded) && !done.continues(7), "once")
+        // A watcher's look writes back only its own fields, and only under its own generation.
+        var watched: NoteHelp.Watch? = NoteHelp.Watch(every: "1d", line: "under $100", mac: "m", at: "09:00")
+        watched?.gen = 3
+        expect(NoteHelp.applyLook(&watched, gen: 3, shown: "$99", hint: "from", crossed: true, at: now) == true && watched?.last == "$99" && watched?.hit == true,
+               "a look under its own generation: written, newly crossed")
+        var pausedWatch = watched
+        pausedWatch?.paused = true
+        pausedWatch?.gen = 4
+        let before = pausedWatch
+        expect(NoteHelp.applyLook(&pausedWatch, gen: 3, shown: "$80", hint: nil, crossed: true, at: now) == nil && pausedWatch == before,
+               "paused meanwhile: the look writes nothing (Pause stays)")
+        var stoppedWatch: NoteHelp.Watch? = nil
+        expect(NoteHelp.applyLook(&stoppedWatch, gen: 3, shown: "$80", hint: nil, crossed: true, at: now) == nil && stoppedWatch == nil, "stopped meanwhile: nothing comes back")
+        expect(NoteHelp.applyLook(&watched, gen: 3, shown: "$98", hint: nil, crossed: true, at: now) == false, "still under the line: not said again")
+        // Its place: the one in front, else wait for it (never what happens to be in front).
+        var tabPlace = NoteStick(kind: .tab)
+        tabPlace.url = "https://shop.example/x"
+        var deskPlace = NoteStick(kind: .desktop)
+        deskPlace.desktop = 2
+        expect(NoteHelp.anchor([deskPlace, tabPlace], here: 1) == .placed(1), "placed on its window: that place")
+        expect(NoteHelp.anchor([deskPlace, tabPlace], here: nil) == .away("shop.example/x"), "brought back on the Desktop: it waits for its page")
+        expect(NoteHelp.anchor([deskPlace, tabPlace], here: 0) == .away("shop.example/x"), "shown on a Desktop: still waits for its page")
+        expect(NoteHelp.anchor([deskPlace], here: nil) == .free && NoteHelp.anchor([], here: nil) == .free, "only on a Desktop, or nowhere: free")
+
+        // MARK: Rule B: everything told to an AI is shielded first
+
+        let secret = "4111 1111 1111 1111"
+        let redact = { (text: String) in text.replacingOccurrences(of: secret, with: "(hidden)") }
+        var raw = NoteHelp.Context()
+        raw.ask = "pay with \(secret) please"
+        raw.body = "# Card \(secret) and more words after it, enough that the title would be cut right through the middle of a secret if cut first\nBody \(secret)"
+        raw.notebook = "Book \(secret)"
+        raw.cover = "Remembers \(secret)"
+        raw.place = "The page \(secret)"
+        raw.quote = String(repeating: "x", count: 390) + secret + " tail"
+        raw.extra = "Chained answer \(secret)"
+        raw.answer = "It said \(secret)"
+        raw.labels = ["Label \(secret)"]
+        let shown = NoteHelp.shield(raw, redact: redact)
+        let told = [NoteHelp.brief(shown), NoteHelp.codeBrief(shown), NoteHelp.codeRequest(shown, checkout: "~/g", tree: "/t", branch: "b", from: "", finish: NoteHelp.finishLine(shown.context.ask)),
+                    NoteHelp.reviewRequest(shown, tree: nil), NoteHelp.reviewBrief(shown), NoteHelp.formulaRequest(shown), NoteHelp.awayRequest(shown),
+                    NoteHelp.watchConfirm(shown, line: "under $1", found: "$1", hint: ""), NoteHelp.watchFind(shown, line: "under $1", last: "")]
+        let digits = String(secret.prefix(9))
+        expect(told.allSatisfy { !$0.contains(digits) }, "no prompt carries the secret, whole or cut", told.first { $0.contains(digits) } ?? "")
+        expect(NoteHelp.brief(shown).contains("(hidden)") && NoteHelp.brief(shown).contains("Book (hidden)"), "redacted, then said")
+        expect(shown.title.hasPrefix("Card (hidden)"), "the title derived after redaction", shown.title)
+        var nowhere = NoteHelp.Context()
+        nowhere.body = "words"
+        expect(NoteHelp.brief(NoteHelp.shield(nowhere, redact: redact)).contains("isn't on a window now"), "a note on no window is told not to look in front")
+
+        // MARK: Paths, remotes, watcher words, local times, branches
+
+        let home = "/Users/someone"
+        let garden = ["/Users/someone/garden", "/Users/someone/garden-old"]
+        expect(NoteHelp.named(garden, in: "@Petal fix it in ~/garden", home: home) == "/Users/someone/garden", "~/garden is ~/garden")
+        expect(NoteHelp.named(garden, in: "@Petal fix it in ~/garden-old.", home: home) == "/Users/someone/garden-old", "~/garden-old is ~/garden-old, never ~/garden")
+        expect(NoteHelp.named(garden, in: "in ~/garden/ please", home: home) == "/Users/someone/garden", "a trailing slash is the same path")
+        expect(NoteHelp.named(garden, in: "in ~/gard", home: home) == nil && NoteHelp.named(garden, in: "fix it", home: home) == nil, "a part of a name, or none: nothing")
+        expect(NoteHelp.named(garden, in: "~/garden or ~/garden-old", home: home) == nil, "two named: neither")
+        let remotes = [(name: "fork", url: "git@github.com:someone/garden.git"), (name: "upstream", url: "https://github.com/example/garden")]
+        expect(NoteHelp.remote(for: "example/garden", in: remotes) == "upstream", "the remote that is the PR's repository, not origin by default")
+        expect(NoteHelp.remote(for: "example/garden", in: [(name: "origin", url: "git@github.com:example/garden.git")] + remotes) == "origin", "origin first when it's that repository")
+        expect(NoteHelp.remote(for: "other/repo", in: remotes) == nil, "no remote for another repository")
+        expect(NoteHelp.watchWords("check whether it's under $300") == nil, "a plain check is asked once")
+        expect(ask("@Petal check if this is under $300") == .ask("check if this is under $300"), "a one-time check is a helper run")
+        expect(NoteHelp.watchWords("tell me when it's under $300")?.line == "under $300" && NoteHelp.watchWords("keep checking, under $300") != nil, "tell me when, keep checking: a watcher")
+        expect(NoteHelp.watchWords("check each morning, tell me under $300")?.every == "1d", "each morning: a watcher")
+        expect(NoteHelp.watchWords("every morning at 7:30 tell me under $300")?.at == "07:30", "its clock as said", "\(String(describing: NoteHelp.watchWords("every morning at 7:30 tell me under $300")))")
+        expect(NoteHelp.watchWords("every evening at 6pm tell me over 50")?.at == "18:00", "6pm is 18:00, whatever the time zone")
+        expect(NoteHelp.clockParts("12am")! == (0, 0) && NoteHelp.clockParts("noon")! == (12, 0) && NoteHelp.clockParts("25:00") == nil, "clock words")
+        // 07:30 said in Tokyo is 07:30 in Tokyo: due after it there, not before.
+        var tokyo = NoteHelp.Watch(every: "1d", line: "under $1", mac: "m", at: "07:30")
+        tokyo.tz = "Asia/Tokyo"
+        tokyo.checked = now.addingTimeInterval(-3 * 86400)
+        let tokyoMorning = calendar.date(from: DateComponents(year: 2026, month: 11, day: 9, hour: 22, minute: 45))!   // 07:45 in Tokyo, 10 Nov
+        let tokyoNight = calendar.date(from: DateComponents(year: 2026, month: 11, day: 9, hour: 21, minute: 0))!      // 06:00 in Tokyo
+        expect(NoteHelp.due(tokyo, now: tokyoMorning, calendar: calendar) && !NoteHelp.due(tokyo, now: tokyoNight, calendar: calendar), "a watcher's time is its own clock, in its own time zone")
+        let id = "3F2A9C1D-0000-4000-8000-000000000001"
+        let branch = NoteHelp.branch(noteID: id, words: "use Opus 5.5 to fix the date picker")
+        expect(branch == "petal/opus-5-5-3f2a9c1d", "a branch from the note's id and a few words", branch)
+        expect(NoteHelp.branch(noteID: id, words: "fix the date picker") != NoteHelp.branch(noteID: "8C1D0000-0000-4000-8000-000000000002", words: "fix the date picker"),
+               "two notes asking alike: two branches")
+        expect(NoteHelp.branch(noteID: id, words: "").hasSuffix("-3f2a9c1d") && NoteHelp.branch(noteID: id, words: "日本語").hasPrefix("petal/note-"), "always the note's key")
+        expect(NoteHelp.worktreeName(checkout: "/Users/someone/garden", noteID: id) == "garden-3f2a9c1d", "one worktree per note")
+        expect(NoteHelp.noteKey("file:Inbox/a.md").count == 8 && NoteHelp.noteKey("file:Inbox/a.md") != NoteHelp.noteKey("file:Inbox/b.md"), "an id-less note's key is a hash")
+        var withTree = NoteFile(id: "W", created: now)
+        withTree.worktree = NoteHelp.Worktree(path: "/t/garden-w", branch: "petal/x-w", checkout: "/u/garden", remote: "upstream")
+        expect(NoteFile.parse(withTree.serialized(), fallbackID: "x", fallbackDate: now).worktree == withTree.worktree, "a note's worktree reads back")
+        expect(ask("@Petal it's done") == .done, "it's done")
 
         print("note helpers: \(passed) passed" + (failures > 0 ? ", \(failures) failed" : ""))
         if failures > 0 { exit(1) }

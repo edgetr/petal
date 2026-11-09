@@ -74,7 +74,7 @@ extension NoteTextView {
 
     /// The chips, each in the room kept after its word: a little raised, in the notebook's ink.
     func drawMentionChips() {
-        guard !mentions.chips.isEmpty, let layoutManager, let textContainer, let storage = textStorage else { return }
+        guard !mentions.chips.isEmpty, let layoutManager, let storage = textStorage else { return }
         let ink = color(0.70, NoteInk.RGB(r: 0, g: 0, b: 0)).withAlphaComponent(0.65)
         for chip in mentions.chips where chip.at < storage.length {
             let glyph = layoutManager.glyphIndexForCharacter(at: chip.at)

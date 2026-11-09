@@ -38,6 +38,10 @@ final class StickyNote {
     @ObservationIgnored var windowGone = false
     /// A helper in one of Petal Notes (NoteHelpers): that note's id. Its cards, steps and answer go on the note.
     @ObservationIgnored var paper: String?
+    /// A helper of a note in a Private notebook: never in the AI button's previews (checked again when shown).
+    @ObservationIgnored var secret = false
+    /// A second opinion's helper (its own agent beside the note's).
+    @ObservationIgnored var reviewer = false
 
     var place: NotePlace? {
         get { agent.place }

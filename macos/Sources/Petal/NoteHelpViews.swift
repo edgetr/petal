@@ -167,7 +167,7 @@ struct HelperBar: View {
         let run = desk?.helpers.runs[noteID]
         let helper = paper.file.helper
         let working = run != nil || helper.map { $0.state != .done } == true
-        let denials = run?.sticky.agent.pendingAsk ?? []
+        let denials = run?.sticky?.agent.pendingAsk ?? []
         VStack(alignment: .leading, spacing: 8) {
             if working {
                 HStack(spacing: 7) {
@@ -205,7 +205,7 @@ struct HelperBar: View {
     private func line(run: NoteHelpers.Run?, helper: NoteHelp.Helper?) -> String {
         if let run {
             if run.paused { return "\(run.who) · paused" }
-            let step = run.sticky.agent.activity
+            let step = run.sticky?.agent.activity ?? ""
             return run.who + " · " + (step.isEmpty ? "working" : step)
         }
         guard let helper else { return "" }

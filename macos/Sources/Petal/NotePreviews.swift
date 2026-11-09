@@ -45,7 +45,9 @@ extension ClaudePanel {
 
     /// The notes the preview shows, waiting for the person first.
     var previewItems: [NotePreviewItem] {
-        let all = notes.map { ($0, facts($0)) }
+        // A helper of a note in a Private notebook never shows here.
+        let helpers = PetalApp.shared.paper.helpers
+        let all = notes.filter { $0.paper == nil || helpers.previewable($0) }.map { ($0, facts($0)) }
         let assist = PetalApp.shared.assist
         return NoteStatus.order(all.map(\.1)).map { index in
             let (note, facts) = all[index]

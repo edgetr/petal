@@ -912,6 +912,7 @@ final class NoteDesk {
 
     /// The tabs on the window in front, and its notes that are showing beside it.
     func layout() {
+        defer { helpers.placedNow() }
         // Mission Control open, or the front window changed and its read isn't in yet: nothing shows meanwhile.
         if missionControlOpen || awaitingRead { return concealUnplaced() }
         defer { reconcileRoom() }
@@ -1693,7 +1694,7 @@ final class NoteDesk {
     func footer(_ paper: PaperNote) -> String {
         let file = paper.file
         if let run = helpers.runs[paper.noteID] {
-            let step = run.sticky.agent.activity
+            let step = run.sticky?.agent.activity ?? ""
             return run.paused ? "Paused" : step.isEmpty ? "Working" : step
         }
         if let helper = file.helper, helper.state != .done { return helper.step.isEmpty ? "Working" : helper.step }
@@ -2465,7 +2466,7 @@ struct NotePanelContent: View {
     /// What changes a paper's height from a helper: its file as written, a run, a question waiting on it.
     private func helperShape(_ paper: PaperNote) -> String {
         let run = desk.helpers.runs[paper.noteID]
-        return "\(paper.revision?.count ?? 0)|\(paper.file.ink.count)|\(run != nil)|\(run?.sticky.agent.pendingAsk.count ?? 0)|\(desk.helpers.card(paper.noteID)?.id.uuidString ?? "")"
+        return "\(paper.revision?.count ?? 0)|\(paper.file.ink.count)|\(run != nil)|\(run?.sticky?.agent.pendingAsk.count ?? 0)|\(run?.paused == true)|\(desk.helpers.card(paper.noteID)?.id.uuidString ?? "")"
     }
 
     var body: some View {
