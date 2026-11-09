@@ -91,7 +91,7 @@ extension NoteTextView {
     }
 
     /// The line the cursor ends, when Return there asks a helper: the cursor at its very end, nothing selected.
-    func helperLine() -> String? {
+    func helperLine() -> (words: String, line: NoteLine)? {
         let text = string as NSString
         let selection = selectedRange()
         guard selection.length == 0 else { return nil }
@@ -101,7 +101,9 @@ extension NoteTextView {
         guard selection.location == end else { return nil }
         let words = text.substring(with: NSRange(location: line.location, length: end - line.location))
             .replacingOccurrences(of: "\u{FFFC}", with: "").trimmingCharacters(in: .whitespaces)
-        return NoteHelp.calls(words) ? words : nil
+        // Only the line as the person wrote or edited it (its mark still runnable): an untouched line makes a new line.
+        guard NoteHelp.calls(words), let runnable = runnableLine(NSRange(location: line.location, length: end - line.location)) else { return nil }
+        return (words, runnable)
     }
 
     // MARK: The @ menu

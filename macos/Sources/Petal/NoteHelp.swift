@@ -655,17 +655,18 @@ enum NoteHelp {
         }
     }
 
-    // MARK: Dirty lines: Return runs only what the person wrote or edited
+    // MARK: Runnable lines: Return runs only what the person wrote or edited
 
-    /// A line as the dirty set knows it: its words, picture and card marks out, spaces collapsed.
+    /// A line's words as a helper is told them: picture and card marks out, spaces collapsed.
     static func normalizedLine(_ line: String) -> String {
         line.replacingOccurrences(of: "\u{FFFC}", with: "").split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
-    /// The lines one change in an editor touched, read from the text after it (`location` and the inserted text's
-    /// length in UTF-16, as NSString counts): every line the inserted text (or a deletion's spot) is on. A Return at
-    /// the very end of a line touches nothing (it only makes a new line).
-    static func editedLines(after text: String, location: Int, inserted: String) -> [String] {
+    /// The lines one change in an editor touched, as ranges of the text after it (`location` and the inserted text's
+    /// length in UTF-16, as NSString counts), each without its line break: every line the inserted text (or a
+    /// deletion's spot) is on, and a line split by it on both sides. A Return at the very end of a line touches nothing
+    /// (it only makes a new line).
+    static func editedLines(after text: String, location: Int, inserted: String) -> [NSRange] {
         let ns = text as NSString
         let length = (inserted as NSString).length
         guard location >= 0, location + length <= ns.length else { return [] }
@@ -673,40 +674,31 @@ enum NoteHelp {
             let next = location + 1
             if next >= ns.length || ns.character(at: next) == 10 { return [] }
         }
-        // One character past what's inserted: a line split by it counts on both sides.
         let range = ns.lineRange(for: NSRange(location: location, length: min(length + 1, ns.length - location)))
-        return ns.substring(with: range).components(separatedBy: "\n").filter { !$0.isEmpty }
+        var lines: [NSRange] = []
+        var at = range.location
+        while at < NSMaxRange(range) {
+            let line = ns.lineRange(for: NSRange(location: at, length: 0))
+            var content = line
+            if content.length > 0, ns.character(at: NSMaxRange(content) - 1) == 10 { content.length -= 1 }
+            lines.append(content)
+            at = NSMaxRange(line)
+            if line.length == 0 { break }
+        }
+        return lines
     }
 
-    /// Which @ lines may run on Return, in memory only (nothing is stored, so a restart makes every line clean):
-    /// those the person typed or edited since Petal opened, or since that line last ran. Return on one runs it and
-    /// marks it clean; one whose run failed, was stopped, was refused or whose follow-up never ran is dirty again.
-    struct DirtyLines {
-        private(set) var lines: [String: Set<String>] = [:]
+    /// What an output does to the note's helper line, said explicitly: keep it (a turn on the way), clear it (stopped:
+    /// no helper at work, nothing left saying so, even after a restart), or set it (done, failed).
+    enum HelperChange: Equatable {
+        case keep, clear, set(Helper)
 
-        /// The person typed or edited `line` in the note `note` (only lines that call a helper count).
-        mutating func edited(_ note: String, _ line: String) {
-            guard calls(line) else { return }
-            lines[note, default: []].insert(normalizedLine(line))
-        }
-
-        func runs(_ note: String, _ line: String) -> Bool { lines[note]?.contains(normalizedLine(line)) == true }
-
-        /// Return on it: it runs (true) and is clean now; an untouched line doesn't (false).
-        mutating func take(_ note: String, _ line: String) -> Bool {
-            lines[note]?.remove(normalizedLine(line)) != nil
-        }
-
-        /// Its run failed, was stopped or refused, or its follow-up never ran: Return runs it again.
-        mutating func again(_ note: String, _ line: String) {
-            guard !line.isEmpty else { return }
-            lines[note, default: []].insert(normalizedLine(line))
-        }
-
-        /// A note given its own id: its dirty lines go with it.
-        mutating func rekey(_ old: String, _ new: String) {
-            guard old != new, let moved = lines.removeValue(forKey: old) else { return }
-            lines[new, default: []].formUnion(moved)
+        func apply(to file: inout NoteFile) {
+            switch self {
+            case .keep: break
+            case .clear: file.helper = nil
+            case .set(let helper): file.helper = helper
+            }
         }
     }
 
@@ -1755,31 +1747,34 @@ extension NoteHelp {
 /// Follow-ups said while a run works, each with the token of the run it was said to: one is admitted only while
 /// that token is still the note's run's and running; Stop clears its run's, so nothing said to a stopped run is ever
 /// sent in a later one.
-struct FollowUpQueue {
-    private(set) var entries: [(note: String, token: RunToken, text: Shielded, line: String)] = []
-    /// Lines whose follow-up was dropped without being sent (their run ended): dirty again (DirtyLines.again).
-    private(set) var dropped: [(note: String, line: String)] = []
+struct FollowUpQueue<Line> {
+    typealias Entry = (note: String, token: RunToken, text: Shielded, line: Line?)
+    private(set) var entries: [Entry] = []
+    /// The lines of follow-ups dropped without being sent (their run ended): runnable again.
+    private(set) var dropped: [Line] = []
 
-    mutating func add(_ text: Shielded, note: String, token: RunToken, line: String = "") { entries.append((note, token, text, line)) }
+    mutating func add(_ text: Shielded, note: String, token: RunToken, line: Line? = nil) { entries.append((note, token, text, line)) }
 
-    /// The next follow-up for `note` its current run may send; entries of any other token are dropped.
-    mutating func next(note: String, current: RunToken?) -> Shielded? {
+    /// The next follow-up for `note` its current run may send, with its line (held by the run until that turn
+    /// succeeds); entries of any other token are dropped.
+    mutating func next(note: String, current: RunToken?) -> (text: Shielded, line: Line?)? {
         drop { $0.note == note && ($0.token !== current || !$0.token.admits) }
         guard let index = entries.firstIndex(where: { $0.note == note }) else { return nil }
-        return entries.remove(at: index).text
+        let entry = entries.remove(at: index)
+        return (entry.text, entry.line)
     }
 
     /// A run ended: everything said to it goes, never sent.
     mutating func clear(_ token: RunToken) { drop { $0.token === token } }
 
     /// The lines dropped since last asked, taken.
-    mutating func takeDropped() -> [(note: String, line: String)] {
+    mutating func takeDropped() -> [Line] {
         defer { dropped = [] }
         return dropped
     }
 
-    private mutating func drop(_ which: ((note: String, token: RunToken, text: Shielded, line: String)) -> Bool) {
-        dropped += entries.filter(which).filter { !$0.line.isEmpty }.map { ($0.note, $0.line) }
+    private mutating func drop(_ which: (Entry) -> Bool) {
+        dropped += entries.filter(which).compactMap(\.line)
         entries.removeAll(where: which)
     }
 

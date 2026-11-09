@@ -96,22 +96,6 @@ final class Brain {
 
     private func next() {
         guard !busy, !queue.isEmpty else { return }
-        // No AI chosen (all of them turned off): everyone waiting hears nothing, so a routine waiting on an answer
-        // moves on. One chosen but not found yet (at launch) is waited for.
-        guard let chat = PetalApp.shared.chatProvider else {
-            let waiting = queue
-            queue = []
-            for job in waiting { job.done(nil) }
-            return
-        }
-        guard PetalApp.shared.paths[chat] != nil else { return }
-        // On an API key with none saved, nothing is asked (and nothing falls back to the subscription).
-        guard PetalApp.shared.aiReady(chat) else {
-            let waiting = queue
-            queue = []
-            for job in waiting { job.done(nil) }
-            return
-        }
         // Calls of stopped runs go; calls of paused runs wait where they are; the first admitted goes now, a helper's
         // only once its gate admits it right then (a run that fails there is dropped on the next pass).
         let over = { (job: Job) in job.token.map { $0.state == .cancelled || $0.state == .finished } == true }
@@ -122,13 +106,22 @@ final class Brain {
             if queue.contains(where: over) { next() }
             return
         }
-        let job = queue.remove(at: index)
-        // The AI the person named for it (the helper checked it's set up), else the chat's.
-        let provider = job.provider ?? chat
-        guard let path = PetalApp.shared.paths[provider], PetalApp.shared.aiReady(provider) else {
+        let job = queue[index]
+        // Its own AI first (the one the person named, else the chat's), and only then whether that one is ready:
+        // none chosen, a named one not found, or one on an API key with none saved hears nothing (never another
+        // instead, never a quiet fall back to the subscription). The chat's not found yet (at launch) is waited for.
+        let unanswered = { () -> Void in
+            self.queue.remove(at: index)
             job.done(nil)
-            return next()
+            self.next()
         }
+        guard let provider = job.provider ?? PetalApp.shared.chatProvider else { return unanswered() }
+        guard let path = PetalApp.shared.paths[provider] else {
+            if job.provider == nil { return }
+            return unanswered()
+        }
+        guard PetalApp.shared.aiReady(provider) else { return unanswered() }
+        queue.remove(at: index)
         busy = true
         let environment = PetalApp.shared.aiEnvironment(provider)
         let api = PetalApp.shared.usesAPIKey(provider)

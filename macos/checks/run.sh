@@ -172,23 +172,29 @@ perl -0777 -ne '
     for my $f (qw(fail stopped)) { unless (/func $f\(.*?\n    \}/s && $& =~ /output\(run,/) { print "NoteHelpers: $f must report through output\n"; exit 1 } }
     print "helpers: second opinions add to their primary, failures included; reviewers bound to their place\n";
 ' Sources/Petal/NoteHelpers.swift
-# Return runs a line only if the person wrote or edited it (DirtyLines, in memory, nothing stored): checked first;
-# a bare @Petal and a note whose id isn't lasting are refused or waited on before the line is taken or any run
-# registered; control requests are handled on the note before any follow-up routing; an empty prompt never reaches
-# an agent. The editor reports only its own changes, never text from outside.
+# Return runs a line only as the person wrote or edited it: the editor hands only a runnable line (its identity, a
+# mark set by the person's own typing or pasting; undo, redo, autocorrect and text from outside clear it, never set
+# it), and nothing about its words is kept. A bare @Petal and a note whose id isn't lasting are refused or waited on
+# before the line is taken or any run registered; control requests come before follow-up routing; a follow-up's line
+# goes with it through delivery; an empty prompt never reaches an agent.
 perl -0777 -ne '
-    unless (/func returned\(_ key: String, line: String\) \{.*?guard dirty\.runs\(noteID, trimmed\) else \{ return \}.*?if NoteHelp\.bare\(trimmed\) \{ return hint\(.*?guard NoteShelf\.lasting\(noteID, pending: desk\.store\.pendingIDs\) else \{\s*return desk\.store\.ensureID\(.*?_ = dirty\.take\(noteID, trimmed\).*?if NoteHelp\.isControl\(request\) \{ return control\(.*?NoteHelp\.followUpTarget\(/s
-            && /func deliver\(.*?guard !prompt\.text\.trimmingCharacters/s && /func letGo\(.*?dirty\.again\(/s && /followUps\.add\(told\.ask, note: noteID, token: run\.token, line: trimmed\)/) {
-        print "NoteHelpers: Return must run only dirty lines, after the bare and id checks, with control requests before follow-ups\n"; exit 1 }
-    if (/func returned\(.*?_ = dirty\.take/s && $& =~ /begin\(|ask\(paper|followUps\.add/) { print "NoteHelpers: something runs before the line is taken\n"; exit 1 }
-    if (/\.answered\b|receipt/) { print "NoteHelpers: receipts are gone; nothing about lines is stored\n"; exit 1 }
-    print "helpers: Return runs only lines written or edited (in memory); control requests never become follow-ups\n";
+    unless (/func returned\(_ key: String, line: String, at ticket: NoteLine\) \{.*?if NoteHelp\.bare\(trimmed\) \{ return hint\(.*?guard NoteShelf\.lasting\(noteID, pending: desk\.store\.pendingIDs\) else \{\s*return desk\.store\.ensureID\(.*?ticket\.take\(\).*?if NoteHelp\.isControl\(request\) \{ return control\(.*?NoteHelp\.followUpTarget\(/s
+            && /func deliver\(.*?guard !prompt\.text\.trimmingCharacters/s && /func letGo\(.*?run\.line\?\.again\(\)/s
+            && /followUps\.add\(told\.ask, note: noteID, token: run\.token, line: ticket\)/ && /followUp\(run, next\.text, line: next\.line\)/
+            && /private func followUp\(_ run: Run, _ words: Shielded, line: NoteLine\?\) \{\s*if let line \{ run\.line = line \}/) {
+        print "NoteHelpers: Return must take only the editor'"'"'s runnable line, after the bare and id checks, with control requests before follow-ups and follow-up lines carried\n"; exit 1 }
+    if (/func returned\(.*?ticket\.take\(\)/s && $& =~ /begin\(|ask\(paper|followUps\.add/) { print "NoteHelpers: something runs before the line is taken\n"; exit 1 }
+    if (/DirtyLines|\.answered\b|receipt|Helper\?\?/) { print "NoteHelpers: no text history, no receipts, no double optional for the helper line\n"; exit 1 }
+    print "helpers: Return takes only the runnable line; control requests never become follow-ups; follow-up lines carried\n";
 ' Sources/Petal/NoteHelpers.swift
 perl -0777 -ne '
-    unless (/override func shouldChangeText\(inRanges.*?record\(/s && /override func didChangeText\(\) \{.*?NoteHelp\.editedLines\(.*?linesEdited\(lines\)/s
-            && /func replaceFromOutside\(_ text: NSAttributedString\) \{\s*textStorage\?\.setAttributedString\(text\)/) { print "NoteEditor: only the person'"'"'s own edits make a line dirty\n"; exit 1 }
-    print "helpers: the editor marks only the person'"'"'s own edits\n";
+    unless (/let person = !history\.isUndoing && !history\.isRedoing && !correcting/ && /override func handleTextCheckingResults\(.*?correcting = true/s
+            && /private func remark\(.*?storage\.removeAttribute\(NoteLine\.key, range: line\)\s*guard edit\.person/s
+            && /func replaceFromOutside\(_ text: NSAttributedString\) \{\s*textStorage\?\.setAttributedString\(text\)\s*\/\/[^\n]*\n\s*runnable\.removeAll\(\)/) {
+        print "NoteEditor: only the person'"'"'s own typing or pasting may make a line runnable\n"; exit 1 }
+    print "helpers: lines are runnable by identity, only from the person'"'"'s own edits\n";
 ' Sources/Petal/NoteEditor.swift
+grep -q 'runnableLine(NSRange' Sources/Petal/NoteMentions.swift || { echo "NoteMentions: Return hands only a runnable line"; exit 1; }
 if grep -n '"answered"' Sources/Petal/NoteHelp.swift; then echo "NoteHelp: the answered key is gone"; exit 1; fi
 # Quick calls check a named AI and go through the gate when they start; a second opinion in a worktree is checked first.
 perl -0777 -ne '
@@ -198,6 +204,19 @@ perl -0777 -ne '
             && /NoteHelp\.reviewTreeOK\(/) { print "NoteHelpers: quick calls must check their AI and gate; reviewers their worktree\n"; exit 1 }
     print "helpers: quick calls check their AI and pass the gate; reviewers check their worktree\n";
 ' Sources/Petal/NoteHelpers.swift
+# Every worktree removal goes through the one ownership check (where it belongs, that checkout's, on the saved branch).
+perl -0777 -ne '
+    my $removes = () = /"worktree", "remove"/g;
+    unless ($removes == 1 && /let check = Self\.ownedTree\(tree, noteID: noteID, token: RunToken\(\)\)\s*let gone: \(status: Int32, output: String\)\? = if case \.owned\(let path, let checkout\) = check \{ Self\.git\(checkout, \["worktree", "remove", path\]\)/
+            && /func verifyTree\(.*?ownedTree\(stored/s) { print "NoteHelpers: every worktree removal goes through ownedTree\n"; exit 1 }
+    print "helpers: worktrees removed only once checked to be the note'"'"'s own\n";
+' Sources/Petal/NoteHelpers.swift
+# A quick call uses its own AI: chosen first (the one named, else the chat'"'"'s), then checked ready.
+perl -0777 -ne '
+    unless (/guard let provider = job\.provider \?\? PetalApp\.shared\.chatProvider else \{ return unanswered\(\) \}.*?guard PetalApp\.shared\.aiReady\(provider\) else/s && !/aiReady\(chat\)/) {
+        print "Brain: each call picks its own AI before checking it is ready\n"; exit 1 }
+    print "brain: each call picks its own AI first\n";
+' Sources/Petal/Focus.swift
 # Every reviewer output, its turns on the way included, goes through opinion (output).
 perl -0777 -ne '
     if (/Something said meanwhile.*?\n\s*return\n/s && $& !~ /output\(run,/) { print "NoteHelpers: a reviewer turn must go through output\n"; exit 1 }

@@ -460,12 +460,12 @@ struct NoteHelpCheck {
 
         // MARK: Round four: follow-ups, auth, automatic approvals, checkout choice, quick calls, place follow
 
-        var queue = FollowUpQueue()
+        var queue = FollowUpQueue<String>()
         let first = RunToken(), later = RunToken()
         guard let said = NoteShield.shield(["and also this"], index: index) else { return expect(false, "said") }
         queue.add(said[0], note: "N", token: first)
         queue.add(said[0], note: "N", token: first)
-        expect(queue.next(note: "N", current: first) == said[0] && queue.count(note: "N") == 1, "a follow-up goes in its own run")
+        expect(queue.next(note: "N", current: first)?.text == said[0] && queue.count(note: "N") == 1, "a follow-up goes in its own run")
         first.complete(.stopped)
         queue.clear(first)
         expect(queue.count(note: "N") == 0, "Stop clears what was said to its run")
@@ -681,7 +681,7 @@ struct NoteHelpCheck {
             expect(room >= 60 && (screen < 334 || room + 230 + 44 <= screen), "a form's fields scroll; its buttons stay on the screen (\(screen))", "\(room)")
         }
 
-        // MARK: Round nine and ten: second opinions add to the complete ink, dirty lines, the helper cover rule, a bare @Petal
+        // MARK: Rounds nine to eleven: second opinions add to the complete ink, runnable lines, the helper cover rule, a bare @Petal
 
         let primaryInk = NoteHelp.Ink(who: "✦ Petal · Codex", text: "Fixed it.", proof: ["tests pass"], link: "https://github.com/o/r/pull/7", code: true)
         let objectionsInk = NoteHelp.Ink(who: "GPT 6.1 Sol", text: "1. Is the week view covered?", objections: 1)
@@ -709,42 +709,34 @@ struct NoteHelpCheck {
         let opinionBack = NoteFile.parse(opinionFile.serialized(), fallbackID: "OP1", fallbackDate: now).ink
         expect(opinionBack == failed, "a failed opinion stays an opinion through the front matter", "\(opinionBack)")
 
-        // Dirty lines: Return runs only what the person wrote or edited (in memory; nothing stored).
-        let lineA = "@Petal summarize this page"
-        var lines = NoteHelp.DirtyLines()
-        expect(!lines.runs("N1", lineA), "a line loaded from disk or a sync, never touched: Return doesn't run it")
-        lines.edited("N1", lineA)
-        expect(lines.runs("N1", "@Petal   summarize this page "), "typed in this session: it runs (spaces don't matter)")
-        expect(lines.take("N1", lineA) && !lines.runs("N1", lineA), "Return runs it and marks it clean")
-        lines.edited("N1", "@Petal remember the side door")
-        _ = lines.take("N1", "@Petal remember the side door")
-        expect(!lines.take("N1", lineA), "after another request ran, the first line still doesn't run again")
-        lines.edited("N1", lineA + " ")
-        expect(lines.runs("N1", lineA) == true, "an edit (even a space) makes it run again")
-        _ = lines.take("N1", lineA)
-        lines.again("N1", lineA)
-        expect(lines.runs("N1", lineA), "its run failed, was stopped or refused: dirty again, Return runs it")
-        lines.edited("N1", "just words")
-        expect(!lines.runs("N1", "just words"), "only lines that call a helper are kept")
-        lines.rekey("N1", "N2")
-        expect(lines.runs("N2", lineA) && !lines.runs("N1", lineA), "a note given its own id keeps its dirty lines")
-        expect(NoteHelp.DirtyLines().runs("N2", lineA) == false, "after a restart nothing is dirty")
+        // Which lines an edit touches (the editor's runnable marks follow them; checked on a real editor in NoteRichCheck).
         let typedText = "intro\n@Petal summarize this page\nmore"
         let at = ("intro\n@Petal summarize this pag" as NSString).length
-        expect(NoteHelp.editedLines(after: typedText, location: at, inserted: "e") == ["@Petal summarize this page"], "typing a character touches its line")
-        let returned = "intro\n@Petal summarize this page\n\nmore"
+        let lineRange = NSRange(location: 6, length: ("@Petal summarize this page" as NSString).length)
+        expect(NoteHelp.editedLines(after: typedText, location: at, inserted: "e") == [lineRange], "typing a character touches its line")
+        let returnedText = "intro\n@Petal summarize this page\n\nmore"
         let end = ("intro\n@Petal summarize this page" as NSString).length
-        expect(NoteHelp.editedLines(after: returned, location: end, inserted: "\n").isEmpty, "Return at the end of a line touches nothing (no rerun by pressing it)")
+        expect(NoteHelp.editedLines(after: returnedText, location: end, inserted: "\n").isEmpty, "Return at the end of a line touches nothing (pressing it never makes its line run)")
         let split = "intro\n@Petal summarize\n this page"
         expect(NoteHelp.editedLines(after: split, location: ("intro\n@Petal summarize" as NSString).length, inserted: "\n").count == 2, "Return inside a line edits both halves")
-        let deleted = "intro\n@Petal summarize this pag\nmore"
-        expect(NoteHelp.editedLines(after: deleted, location: at, inserted: "") == ["@Petal summarize this pag"], "a deletion touches its line")
-        var followQueue = FollowUpQueue()
+        var followQueue = FollowUpQueue<String>()
         let followToken = RunToken()
-        followQueue.add("go on", note: "N1", token: followToken, line: "@Petal and the side door")
+        followQueue.add("go on", note: "N1", token: followToken, line: "second line")
+        let sent = followQueue.next(note: "N1", current: followToken)
+        expect(sent?.line == "second line", "a follow-up's line goes with it when it's sent (the run holds it until that turn succeeds)")
+        followQueue.add("and this", note: "N1", token: followToken, line: "third line")
         followQueue.clear(followToken)
         let dropped = followQueue.takeDropped()
-        expect(dropped.count == 1 && dropped[0].line == "@Petal and the side door", "a follow-up that never ran gives its line back (dirty again)")
+        expect(dropped == ["third line"], "a follow-up that never ran gives its own line back (runnable again)")
+        var helperFile = NoteFile(id: "HC1", created: now)
+        helperFile.helper = NoteHelp.Helper(state: .working, who: "✦ Petal", step: "Reading", at: now)
+        NoteHelp.HelperChange.keep.apply(to: &helperFile)
+        expect(helperFile.helper?.state == .working, "a turn on the way keeps the helper line")
+        NoteHelp.HelperChange.clear.apply(to: &helperFile)
+        let clearedBack = NoteFile.parse(helperFile.serialized(), fallbackID: "HC1", fallbackDate: now)
+        expect(helperFile.helper == nil && clearedBack.helper == nil, "Stop clears the working line, also on disk (nothing says it's at work after a restart)")
+        NoteHelp.HelperChange.set(NoteHelp.Helper(state: .failed, who: "✦ Petal", step: "x", at: now)).apply(to: &helperFile)
+        expect(helperFile.helper?.state == .failed, "a failure sets it")
 
         // Control requests are done on the note, also while a helper works: never a follow-up.
         for (words, control) in [("@Petal stop watching", true), ("@Petal pause", true), ("@Petal remember the side door", true),

@@ -846,11 +846,16 @@ final class NoteTextView: NSTextView {
     var changed: () -> Void = {}
     /// Helpers (NoteHelpers): Return at the end of a line that calls one runs it; the names the @ menu offers and
     /// chips bind to; the notebook's color the mentions are drawn in. The @ menu and the chips' state.
-    var helperReturn: (String) -> Void = { _ in }
-    /// The lines the person typed or edited (only they run on Return: NoteHelp.DirtyLines), never text from outside.
-    var linesEdited: ([String]) -> Void = { _ in }
-    /// The changes about to be made (where, in the text after them, and what's inserted), read in `didChangeText`.
-    private var pendingEdits: [(location: Int, inserted: String)] = []
+    var helperReturn: (String, NoteLine) -> Void = { _, _ in }
+    /// Which lines may run on Return, by their identity here (`NoteLine.mark`, an attribute on the line's characters),
+    /// never by their words: a line the person typed or pasted into gets a new mark that can run; undo, redo,
+    /// autocorrect and text from outside take the mark off the lines they touch and never give one. In memory only.
+    private(set) var runnable: Set<String> = []
+    /// The changes about to be made (where, in the text after them, what's inserted, and whether the person made it),
+    /// read in `didChangeText`.
+    private var pendingEdits: [(location: Int, inserted: String, person: Bool)] = []
+    /// Inside an automatic correction (spelling, quotes, dashes): not the person's typing.
+    private var correcting = false
     var mentionNames: () -> (notes: [String], notebooks: [String], place: String) = { ([], [], "") }
     var tint = NoteInk.RGB(r: 0, g: 0.48, b: 1)
     let mentions = MentionState()
@@ -880,6 +885,8 @@ final class NoteTextView: NSTextView {
     /// ⌘Z never applies an old range to new text.
     func replaceFromOutside(_ text: NSAttributedString) {
         textStorage?.setAttributedString(text)
+        // Every line came from outside: none can run.
+        runnable.removeAll()
         history.removeAllActions()
         MainActor.assumeIsolated { NotePictures.shared.editorChanged() }
     }
@@ -900,19 +907,68 @@ final class NoteTextView: NSTextView {
     }
 
     private func record(_ ranges: [NSRange], _ strings: [String]) {
+        // The person's own change: not an undo or redo, not an automatic correction.
+        let person = !history.isUndoing && !history.isRedoing && !correcting
         var delta = 0
         for (range, text) in zip(ranges, strings).sorted(by: { $0.0.location < $1.0.location }) {
-            pendingEdits.append((range.location + delta, text))
+            pendingEdits.append((range.location + delta, text, person))
             delta += (text as NSString).length - range.length
         }
     }
 
+    override func handleTextCheckingResults(_ results: [NSTextCheckingResult], forRange range: NSRange, types checkingTypes: NSTextCheckingTypes,
+                                            options: [NSSpellChecker.OptionKey: Any] = [:], orthography: NSOrthography, wordCount: Int) {
+        correcting = true
+        defer { correcting = false }
+        super.handleTextCheckingResults(results, forRange: range, types: checkingTypes, options: options, orthography: orthography, wordCount: wordCount)
+    }
+
+    /// The lines a change touched lose their mark (it can't run any more); the person's own change gives each a new
+    /// one that can.
+    private func remark(_ edits: [(location: Int, inserted: String, person: Bool)]) {
+        guard let storage = textStorage else { return }
+        let text = string
+        for edit in edits {
+            for line in NoteHelp.editedLines(after: text, location: edit.location, inserted: edit.inserted) where NSMaxRange(line) <= storage.length {
+                storage.enumerateAttribute(NoteLine.key, in: line) { value, _, _ in if let old = value as? String { runnable.remove(old) } }
+                storage.removeAttribute(NoteLine.key, range: line)
+                guard edit.person, line.length > 0 else { continue }
+                let mark = UUID().uuidString
+                storage.addAttribute(NoteLine.key, value: mark, range: line)
+                runnable.insert(mark)
+            }
+        }
+        typingAttributes[NoteLine.key] = nil
+    }
+
+    /// The line `range` (without its break) as one that may run now: its one mark, over all of it, still runnable.
+    func runnableLine(_ range: NSRange) -> NoteLine? {
+        guard let storage = textStorage, range.length > 0, NSMaxRange(range) <= storage.length else { return nil }
+        var whole = NSRange()
+        guard let mark = storage.attribute(NoteLine.key, at: range.location, longestEffectiveRange: &whole, in: range) as? String,
+              whole == range, runnable.contains(mark) else { return nil }
+        return NoteLine(mark: mark, view: self)
+    }
+
+    /// A line's run failed, was stopped or refused, or its follow-up never ran: it may run again, if it's still here
+    /// as it was (its mark on it).
+    func runnableAgain(_ mark: String) {
+        guard let storage = textStorage else { return }
+        var found = false
+        storage.enumerateAttribute(NoteLine.key, in: NSRange(location: 0, length: storage.length)) { value, _, stop in
+            if value as? String == mark { found = true; stop.pointee = true }
+        }
+        if found { runnable.insert(mark) }
+    }
+
+    /// Ran: the line as it is now won't run again until the person edits it.
+    func ran(_ mark: String) { runnable.remove(mark) }
+
     /// Typed, pasted, undone: the pictures it contains may have changed (the holding rule weighs them again).
     override func didChangeText() {
-        let text = string
-        let lines = pendingEdits.flatMap { NoteHelp.editedLines(after: text, location: $0.location, inserted: $0.inserted) }
+        let edits = pendingEdits
         pendingEdits = []
-        if !lines.isEmpty { linesEdited(lines) }
+        remark(edits)
         super.didChangeText()
         MainActor.assumeIsolated {
             NotePictures.shared.editorChanged()
@@ -1109,7 +1165,7 @@ final class NoteTextView: NSTextView {
             if let calling {
                 flushNow()
                 let ask = helperReturn
-                DispatchQueue.main.async { ask(calling) }
+                DispatchQueue.main.async { ask(calling.words, calling.line) }
             }
         }
         let kind = lineKind
@@ -1388,6 +1444,26 @@ final class NoteEditorHandle {
     var landed: (String?) -> Void = { _ in }
 }
 
+/// One @ line in an open editor, known by its identity there (a mark on its characters), never by its words: what
+/// Return hands a helper. It runs once; a run that fails or is stopped, a refusal, or a follow-up never sent makes it
+/// runnable again while its editor is open and the line is as it was. A restart (or a closed editor) leaves nothing
+/// runnable: edit the line to run it again.
+final class NoteLine {
+    static let key = NSAttributedString.Key("petal.helperLine")
+    let mark: String
+    weak var view: NoteTextView?
+
+    init(mark: String, view: NoteTextView?) {
+        self.mark = mark
+        self.view = view
+    }
+
+    /// Ran: it won't run again until the person edits it.
+    @MainActor func take() { view?.ran(mark) }
+    /// May run again (if it's still there as it was).
+    @MainActor func again() { view?.runnableAgain(mark) }
+}
+
 /// The editor in SwiftUI: the note's lines in, the note's lines out (saved a moment after the person stops typing).
 struct NoteEditorView: NSViewRepresentable {
     let paper: PaperNote
@@ -1411,9 +1487,7 @@ struct NoteEditorView: NSViewRepresentable {
     /// Pictures pasted as bytes (a copy from a note): taken by the screenshot paste's path.
     var acceptPictures: ([(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? = { _ in nil }
     /// Return at the end of a line that calls a helper (@Petal): the line.
-    var helperReturn: (String) -> Void = { _ in }
-    /// The lines the person typed or edited (NoteTextView.linesEdited).
-    var linesEdited: ([String]) -> Void = { _ in }
+    var helperReturn: (String, NoteLine) -> Void = { _, _ in }
     /// What the @ menu offers and the chips bind to.
     var names: () -> (notes: [String], notebooks: [String], place: String) = { ([], [], "") }
     var accent: NSColor = .controlAccentColor
@@ -1569,7 +1643,6 @@ struct NoteEditorView: NSViewRepresentable {
         }
         text.say = say
         text.helperReturn = helperReturn
-        text.linesEdited = linesEdited
         text.mentionNames = names
         text.tint = tint
         text.flushNow = { [weak coordinator, weak text] in
@@ -1601,7 +1674,6 @@ struct NoteEditorView: NSViewRepresentable {
         text.noteFolder = paper.url.deletingLastPathComponent()
         text.escape = escape
         text.helperReturn = helperReturn
-        text.linesEdited = linesEdited
         text.mentionNames = names
         text.tint = tint
         let coordinator = context.coordinator

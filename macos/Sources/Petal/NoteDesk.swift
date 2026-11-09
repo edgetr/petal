@@ -103,8 +103,6 @@ final class NoteDesk {
             guard let self else { return }
             self.local.rekeyID(old, holder: holder, new)
             self.local.save(pending: store.pendingIDs)
-            // The lines typed in it that may run on Return go with it.
-            self.helpers.rekey(old, new)
         }
         store.onProblem = { [weak self] text in self?.say(text) }
         // Which Desktop each screen shows, followed on Space and screen changes whether or not Accessibility is
