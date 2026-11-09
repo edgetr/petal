@@ -162,7 +162,8 @@ final class ViewerText: @unchecked Sendable {
 /// Where a margin note's passage is in the document now: found again by its words (its page and bounds there), or
 /// moved (it shows on the file, with no highlight).
 enum ViewerFound: Equatable {
-    case found(page: Int, bounds: CGRect)
+    /// Found: its page, its lines' union (where its note lines up) and each line's own rectangle (what's highlighted).
+    case found(page: Int, bounds: CGRect, lines: [CGRect])
     case moved
 }
 
@@ -173,7 +174,7 @@ struct ViewerVersion: Identifiable, Equatable {
     var label: String
     var url: URL
     var thumb: NSImage?
-    /// Its copy isn't one the viewer may read (ViewerVersionGate): shown as "can't be shown", nothing of it read.
+    /// Its copy can't be read through its set's pinned folder (ViewerVersionStore): shown as "can't be shown".
     var refused = false
 
     static func == (a: ViewerVersion, b: ViewerVersion) -> Bool {
@@ -195,6 +196,8 @@ final class ViewerVersionSet {
     /// viewer closes.
     @ObservationIgnored var waiting: [(ViewerVersion?) -> Void] = []
     var closed = false
+    /// Its folder, pinned when it was made (ViewerVersionStore): every copy is read through it, never by its path.
+    var pin: ViewerVersionStore.Pin?
 
     init(id: String, asker: String, folder: URL, versions: [ViewerVersion]) {
         self.id = id
@@ -311,6 +314,8 @@ final class ViewerModel: Identifiable {
     /// Where each passage's highlight and each page shown's top are, in the window (top-left origin), by paper key and
     /// page.
     var highlights: [String: CGRect] = [:]
+    /// Each passage's lines in the window (what's drawn: one rectangle per line), by paper key.
+    var highlightLines: [String: [CGRect]] = [:]
     var pageTops: [Int: CGFloat] = [:]
     /// The document's area in the window.
     var documentFrame: CGRect = .zero
@@ -576,13 +581,26 @@ final class ViewerModel: Identifiable {
         var out: [String: ViewerFound] = [:]
         for (key, stick) in sticks {
             guard let spot = ViewerPassages.find(stick, in: texts), let page = document.page(at: spot.page),
-                  let bounds = page.selection(for: spot.range)?.bounds(for: page), bounds.width > 0 else {
+                  let lines = ViewerModel.lines(page, spot.range), let bounds = ViewerComments.union(lines) else {
                 out[key] = .moved
                 continue
             }
-            out[key] = .found(page: spot.page, bounds: bounds)
+            out[key] = .found(page: spot.page, bounds: bounds, lines: lines)
         }
         return out
+    }
+
+    /// A passage's lines on its page: one rectangle per line of the selection (PDFKit's `selectionsByLine`).
+    nonisolated static func lines(_ page: PDFPage, _ range: NSRange) -> [CGRect]? {
+        guard let selection = page.selection(for: range) else { return nil }
+        let lines = selection.selectionsByLine().map { $0.bounds(for: page) }.filter { $0.width > 0 && $0.height > 0 }
+        return lines.isEmpty ? nil : lines
+    }
+
+    /// Each line of a found passage on its page (what's highlighted); empty for any other note.
+    func passageLines(_ paper: PaperNote) -> [CGRect] {
+        if case .found(_, _, let lines)? = passages[paper.key] { return lines }
+        return []
     }
 
     /// Where a margin note is in the document: its passage's page and bounds as found now, else its page or slide; a
@@ -590,7 +608,7 @@ final class ViewerModel: Identifiable {
     func spot(_ paper: PaperNote, _ place: NoteStick) -> (page: Int?, bounds: CGRect?, moved: Bool) {
         guard !place.quote.isEmpty else { return (ViewerMatch.pageIndex(place, count: pageCount), nil, false) }
         switch passages[paper.key] {
-        case .found(let page, let bounds)?: return (page, bounds, false)
+        case .found(let page, let bounds, _)?: return (page, bounds, false)
         case .moved?: return (nil, nil, true)
         case nil: return (nil, nil, false)
         }
@@ -953,28 +971,31 @@ final class ViewerModel: Identifiable {
                 return DispatchQueue.main.async { MainActor.assumeIsolated { done(.failure(.vault)) } }
             }
             let ext = url.pathExtension
-            let folder = FileManager.default.temporaryDirectory.appending(path: "Petal Versions").appending(path: String(id))
+            // The set's folder made and pinned in Petal's own versions root (ViewerVersionStore): the copies are
+            // written and read through its descriptor, never through a path that could be swapped.
+            guard let store = ViewerVersionStore.shared, let pin = store.makeSet(String(id)) else {
+                return DispatchQueue.main.async { MainActor.assumeIsolated { done(.failure(.copy)) } }
+            }
+            let folder = store.path(pin)
             var made: [ViewerVersion] = []
             var failure: ViewerCopyError?
-            do {
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            // Read coordinated once (a file iCloud hasn't downloaded comes down first); the copies are the viewer's own.
+            var original: Data?
+            var error: NSError?
+            NSFileCoordinator().coordinate(readingItemAt: url, options: [.withoutChanges], error: &error) { readable in
+                original = try? Data(contentsOf: readable)
+            }
+            if let original {
                 var taken: Set<String> = []
                 for (index, label) in labels.enumerated() {
                     // Its asker gone or the viewer closed: no more copies.
                     if going() { failure = .cancelled; break }
                     let name = ViewerCopies.version(original: names.stem + (ext.isEmpty ? "" : "." + ext), label: names.labels[index], taken: taken)
                     taken.insert(name.lowercased())
-                    let copy = folder.appending(path: name)
-                    var error: NSError?
-                    var copied = false
-                    // Read coordinated (a file iCloud hasn't downloaded comes down first); the copy is the viewer's own.
-                    NSFileCoordinator().coordinate(readingItemAt: url, options: [.withoutChanges], error: &error) { readable in
-                        copied = (try? FileManager.default.copyItem(at: readable, to: copy)) != nil
-                    }
-                    guard copied else { failure = .copy; break }
-                    made.append(ViewerVersion(id: ViewerCopies.versionID(index), label: label, url: copy))
+                    guard store.write(pin, file: name, data: original) else { failure = .copy; break }
+                    made.append(ViewerVersion(id: ViewerCopies.versionID(index), label: label, url: folder.appending(path: name)))
                 }
-            } catch { failure = .copy }
+            } else { failure = .copy }
             let versions = made
             let failed = failure ?? (going() ? .cancelled : nil)
             // Nothing made shown: whatever was copied goes.
@@ -992,14 +1013,11 @@ final class ViewerModel: Identifiable {
                         older.settle(nil)
                     }
                     let set = ViewerVersionSet(id: String(id), asker: asker, folder: folder, versions: versions)
+                    set.pin = pin
                     self.versions = set
                     self.versionPages = [:]
                     self.app.viewers.versionSets[set.id] = set
-                    // The copies (edited in place, or replaced) and their folder: each change reads them again.
-                    self.versionWatch = ViewerWatch(paths: [folder.path] + versions.map(\.url.path)) { [weak model = self, weak set] in
-                        guard let model, let set else { return }
-                        model.refreshVersions(set)
-                    }
+                    self.watchVersions(set)
                     self.refreshVersions(set)
                     done(.success(set))
                 }
@@ -1008,6 +1026,20 @@ final class ViewerModel: Identifiable {
     }
 
     @ObservationIgnored private var versionWatch: ViewerWatch?
+
+    /// The set's folder and every copy in it watched; after any change the watches are opened again, so a copy
+    /// replaced by an atomic save (a new file) is watched as it is now, and every later write to it is seen.
+    private func watchVersions(_ set: ViewerVersionSet) {
+        guard !closedNow, set === versions else { return }
+        versionWatch = ViewerWatch(paths: [set.folder.path] + set.versions.map(\.url.path)) { [weak model = self, weak set] in
+            guard let model, let set else { return }
+            model.watchVersions(set)
+            model.refreshVersions(set)
+        }
+    }
+
+    /// How many pages a version's copy had when it was last read (Petal --viewer-check: its preview follows edits).
+    func versionPageCount(_ id: String) -> Int? { versionPages[id].flatMap { PDFDocument(data: $0)?.pageCount } }
     /// Each copy's pages as last read (by version id), and the read they came from: a newer read makes an older one
     /// stand down; each picture drawn is fenced by its version's latest drawing (`turns`), which always uses the
     /// newest pages, and by the page shown.
@@ -1020,11 +1052,12 @@ final class ViewerModel: Identifiable {
         versionReads += 1
         let turn = versionReads
         let kind = kind
-        let folder = set.folder.path
+        let pin = set.pin
         for version in set.versions {
             Viewers.queue.async {
-                // Every read gated: the path rule, or Petal's own copy (a regular file in this set's folder).
-                guard ViewerVersionGate.allowed(version.url.path, folder: folder) else {
+                // Every read through the set's pinned folder (ViewerVersionStore): the folder still the one made, the
+                // copy a regular file there, never a link; else nothing of it is read.
+                guard let pin, let store = ViewerVersionStore.shared, let bytes = store.read(pin, file: version.url.lastPathComponent) else {
                     return DispatchQueue.main.async {
                         MainActor.assumeIsolated {
                             guard turn == self.versionReads, set === self.versions,
@@ -1035,7 +1068,18 @@ final class ViewerModel: Identifiable {
                         }
                     }
                 }
-                let read = ViewerLoader.read(version.url, kind: kind)
+                // Its pages from those bytes: a PDF's as they are; anything else through Quick Look, from a copy of those
+                // bytes in an export folder of Petal's own (never the path in the set).
+                let pages: ViewerLoader.Pages
+                if kind == .pdf {
+                    pages = PDFDocument(data: bytes) != nil ? .pdf(bytes) : .failed("Petal can't read this PDF.")
+                } else {
+                    let holder = ViewerExport()
+                    let own = holder.folder.appending(path: version.url.lastPathComponent)
+                    pages = (try? bytes.write(to: own)) != nil ? ViewerQuickLook.export(own, unit: kind.unit) : .failed("")
+                    withExtendedLifetime(holder) {}
+                }
+                let read = ViewerLoader.Read(pages: pages, stamp: nil, appName: "", appURL: nil)
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         if let index = set.versions.firstIndex(where: { $0.id == version.id }), set === self.versions { set.versions[index].refused = false }
@@ -1574,16 +1618,19 @@ enum ViewerPDFComments {
         var written = 0
         for (comment, text) in zip(comments, told.texts) where !text.isEmpty {
             // A passage where its words are now, never where it was saved.
-            let found = ViewerPassages.find(comment.stick, in: texts).flatMap { spot -> (page: Int, bounds: CGRect)? in
-                guard let page = document.page(at: spot.page), let bounds = page.selection(for: spot.range)?.bounds(for: page), bounds.width > 0 else { return nil }
-                return (spot.page, bounds)
+            let lines = ViewerPassages.find(comment.stick, in: texts).flatMap { spot -> (page: Int, lines: [CGRect])? in
+                guard let page = document.page(at: spot.page), let lines = ViewerModel.lines(page, spot.range) else { return nil }
+                return (spot.page, lines)
             }
+            let found = lines.flatMap { found in ViewerComments.union(found.lines).map { (page: found.page, bounds: $0) } }
             guard let spot = ViewerComments.spot(comment.stick, passage: found, pages: document.pageCount,
                                                  pageSize: { document.page(at: $0)?.bounds(for: .cropBox).size ?? .zero }),
                   let page = document.page(at: spot.page) else { continue }
             let color = NSColor(srgbRed: comment.color.r, green: comment.color.g, blue: comment.color.b, alpha: 1)
             if let bounds = spot.bounds {
                 let mark = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
+                // One quadrilateral per line, so only the passage's own words are marked.
+                mark.quadrilateralPoints = ViewerComments.quads(lines?.lines ?? [bounds], within: bounds).map { NSValue(point: $0) }
                 mark.color = color.withAlphaComponent(0.35)
                 mark.contents = text
                 mark.userName = author

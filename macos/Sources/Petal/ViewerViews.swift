@@ -401,6 +401,7 @@ struct ViewerPDF: NSViewRepresentable {
         func relayout() {
             guard let view, let model, let document = view.document, view.window != nil else { return }
             var highlights: [String: CGRect] = [:]
+            var lines: [String: [CGRect]] = [:]
             var tops: [Int: CGFloat] = [:]
             let single = view.displayMode == .singlePage
             for (paper, place) in model.notes {
@@ -409,13 +410,17 @@ struct ViewerPDF: NSViewRepresentable {
                 if single, index != model.current { continue }
                 tops[index] = ViewerGeometry.window(view.convert(page.bounds(for: .cropBox), from: page), in: view).minY
                 // Only a passage found again by its words now is highlighted.
-                if let bounds = spot.bounds { highlights[paper.key] = ViewerGeometry.window(view.convert(bounds, from: page), in: view) }
+                if let bounds = spot.bounds {
+                    highlights[paper.key] = ViewerGeometry.window(view.convert(bounds, from: page), in: view)
+                    lines[paper.key] = model.passageLines(paper).map { ViewerGeometry.window(view.convert($0, from: page), in: view) }
+                }
             }
             if let page = document.page(at: model.current) {
                 tops[model.current] = ViewerGeometry.window(view.convert(page.bounds(for: .cropBox), from: page), in: view).minY
             }
             let frame = ViewerGeometry.window(view.bounds, in: view)
             if model.highlights != highlights { model.highlights = highlights }
+            if model.highlightLines != lines { model.highlightLines = lines }
             if model.pageTops != tops { model.pageTops = tops }
             if model.documentFrame != frame { model.documentFrame = frame }
             if model.scrolls, let scrolled = scrolled() {
@@ -695,7 +700,10 @@ struct ViewerInk: View {
                 guard let words = model.highlights[paper.key], words.intersects(document) else { continue }
                 let color = Color(nsColor: model.desk.store.color(of: paper.notebook))
                 let mark = words.insetBy(dx: -2, dy: -2)
-                context.fill(Path(roundedRect: mark, cornerRadius: 3), with: .color(color.opacity(0.24)))
+                // Each line on its own, never one box over words that weren't selected.
+                for line in model.highlightLines[paper.key] ?? [words] {
+                    context.fill(Path(roundedRect: line.insetBy(dx: -2, dy: -2), cornerRadius: 3), with: .color(color.opacity(0.24)))
+                }
                 guard let spot = layout.spots[paper.key] else { continue }
                 let target = CGRect(x: marginX + spot.x, y: spot.y + ViewerLook.bar - model.marginOffset, width: ViewerLook.openWidth,
                                     height: model.heights[paper.key] ?? PaperLook.folded)

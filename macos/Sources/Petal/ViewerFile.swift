@@ -133,17 +133,85 @@ enum ViewerPath {
     }
 }
 
-/// What a version's copy may be read as: a file the path rule allows, or Petal's own copy, a regular file (never a
-/// link, by lstat) inside that set's own temporary folder, by canonical path. Anything else (a copy swapped for a
-/// link, or moved out) is never read: that version can't be shown.
-enum ViewerVersionGate {
-    static func allowed(_ copy: String, folder: String) -> Bool {
-        if case .success = ViewerPath.check(copy) { return true }
-        var info = stat()
-        guard lstat(copy, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
-              let file = ViewerPath.canonical(copy), let own = ViewerPath.canonical(folder) else { return false }
-        return ViewerPath.inside(file, own) && file != own
+/// Versions' copies, read through descriptors, never paths: Petal's own versions root opened once (`O_DIRECTORY |
+/// O_NOFOLLOW`), each set's folder pinned when it's made (its device and inode), and every read opening that folder
+/// again from the root's descriptor, checking with fstat that it's still the pinned one, then the copy with
+/// `openat(…, O_NOFOLLOW)`, checked to be a regular file, and read from that descriptor. A folder or root swapped for
+/// a link, or for another folder, is never read through; a copy replaced by an atomic save inside the folder is.
+final class ViewerVersionStore: @unchecked Sendable {
+    struct Pin: Equatable, Sendable {
+        var name: String
+        var device: UInt64
+        var inode: UInt64
     }
+
+    let root: URL
+    private let rootFD: Int32
+
+    /// Opens `root` once (made first when missing); nil when it can't be opened as a folder (a link there, say).
+    init?(root: URL) {
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let fd = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard fd >= 0 else { return nil }
+        self.root = root
+        rootFD = fd
+    }
+
+    deinit { close(rootFD) }
+
+    /// Petal's own versions root in the temporary folder, opened once.
+    static let shared = ViewerVersionStore(root: FileManager.default.temporaryDirectory.appending(path: "Petal Versions"))
+
+    /// A set's folder made and pinned: its device and inode, as opened from the root without following a link.
+    func makeSet(_ name: String) -> Pin? {
+        guard !name.isEmpty, !name.contains("/"), mkdirat(rootFD, name, 0o700) == 0 || errno == EEXIST else { return nil }
+        let fd = openat(rootFD, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0 else { return nil }
+        return Pin(name: name, device: UInt64(bitPattern: Int64(info.st_dev)), inode: UInt64(info.st_ino))
+    }
+
+    /// The pinned folder opened again (nil when it isn't the pinned one any more); the caller closes it.
+    private func openSet(_ pin: Pin) -> Int32? {
+        let fd = openat(rootFD, pin.name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard fd >= 0 else { return nil }
+        var info = stat()
+        guard fstat(fd, &info) == 0, UInt64(bitPattern: Int64(info.st_dev)) == pin.device, UInt64(info.st_ino) == pin.inode else {
+            close(fd)
+            return nil
+        }
+        return fd
+    }
+
+    /// A copy's bytes, read through the pinned folder; nil when the folder isn't the pinned one, or the copy isn't a
+    /// regular file there (a link, a folder, nothing).
+    func read(_ pin: Pin, file name: String, limit: Int = 512 * 1024 * 1024) -> Data? {
+        guard !name.contains("/"), let dir = openSet(pin) else { return nil }
+        defer { close(dir) }
+        let fd = openat(dir, name, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_size <= limit else { return nil }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+        return (try? handle.readToEnd()) ?? Data()
+    }
+
+    /// A copy written into the pinned folder from bytes (made when the set is made), through descriptors too.
+    func write(_ pin: Pin, file name: String, data: Data) -> Bool {
+        guard !name.contains("/"), let dir = openSet(pin) else { return false }
+        defer { close(dir) }
+        let fd = openat(dir, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { return false }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        do { try handle.write(contentsOf: data); try handle.close() } catch { return false }
+        return true
+    }
+
+    /// The pinned folder's path, for whoever edits the copies (the agent) and for watching it.
+    func path(_ pin: Pin) -> URL { root.appending(path: pin.name) }
 }
 
 // MARK: - Notes in the margin
@@ -572,6 +640,19 @@ enum ViewerComments {
         let size = pageSize(page)
         return (page, nil, CGPoint(x: 18, y: max(0, size.height - 40)))
     }
+
+    /// A highlight's quadrilaterals, one per line of the passage (never one box over words that weren't selected), as
+    /// PDF annotations take them: each line's top-left, top-right, bottom-left and bottom-right corners, relative to
+    /// the annotation's bounds (`within`, the lines' union).
+    static func quads(_ lines: [CGRect], within bounds: CGRect) -> [CGPoint] {
+        lines.flatMap { line in
+            [CGPoint(x: line.minX - bounds.minX, y: line.maxY - bounds.minY), CGPoint(x: line.maxX - bounds.minX, y: line.maxY - bounds.minY),
+             CGPoint(x: line.minX - bounds.minX, y: line.minY - bounds.minY), CGPoint(x: line.maxX - bounds.minX, y: line.minY - bounds.minY)]
+        }
+    }
+
+    /// Lines as one bounding box (for where a note lines up), never what's drawn or exported.
+    static func union(_ lines: [CGRect]) -> CGRect? { lines.dropFirst().reduce(lines.first) { $0?.union($1) } }
 
     /// A note's words as a comment says them: redacted whole first (`redact`: the vault's redaction), then made
     /// plain and cut, so a secret is never cut in two before it's looked for.

@@ -42,8 +42,8 @@ extension Snapshot {
         app.paper.store.preview(notesPDF, notebooks: books)
         // The passages as the viewer finds them again by their words on the page drawn above.
         pdf.preview(pages: (0..<6).map { samplePage($0) }, current: 0,
-                    passages: [notesPDF[0].key: .found(page: 0, bounds: CGRect(x: 72, y: 558, width: 300, height: 16)),
-                               notesPDF[1].key: .found(page: 0, bounds: CGRect(x: 72, y: 378, width: 260, height: 16))])
+                    passages: [notesPDF[0].key: .found(page: 0, bounds: CGRect(x: 72, y: 558, width: 300, height: 16), lines: [CGRect(x: 72, y: 558, width: 300, height: 16)]),
+                               notesPDF[1].key: .found(page: 0, bounds: CGRect(x: 72, y: 378, width: 260, height: 16), lines: [CGRect(x: 72, y: 378, width: 260, height: 16)])])
         pdf.openKey = notesPDF[0].key
         pdf.heights = [notesPDF[0].key: 214, notesPDF[1].key: PaperLook.folded, notesPDF[2].key: PaperLook.folded]
         lay(pdf, size: size, strip: false)
@@ -95,6 +95,7 @@ extension Snapshot {
             highlights[paper.key] = CGRect(x: frame.minX + b.minX * scale, y: frame.minY + (792 - b.maxY) * scale, width: b.width * scale, height: b.height * scale)
         }
         model.highlights = highlights
+        model.highlightLines = highlights.mapValues { [$0] }
     }
 
     /// A made-up page of a report: a heading and lines of grey "text", with the passages the notes are on in dark.
@@ -188,6 +189,7 @@ enum ViewerCheck {
             failed = !seventh(url, app: app) || failed
             failed = !eighth(url, app: app) || failed
             failed = !ninth(url, app: app) || failed
+            failed = !tenth(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -393,6 +395,132 @@ enum ViewerCheck {
         let after = NoteJournal.read(NoteJournal.file("P1", in: journal))
         expect(after?.imports == loading && after?.text == "---\nid: P1\n---\nBefore", "undone: the typing goes, the pastes' recovery stays")
         print("ninth: " + (ok ? "a version's copy swapped for a link isn't read; refused saves and undo keep pending pastes" : "failed"))
+        return ok
+    }
+
+    /// A PDF of `count` pages copied from `source`'s first page (a version's copy edited by an agent, say).
+    private static func pages(_ count: Int, from source: URL) -> Data? {
+        guard let document = PDFDocument(url: source), let page = document.page(at: 0) else { return nil }
+        let out = PDFDocument()
+        for index in 0..<count { if let copy = page.copy() as? PDFPage { out.insert(copy, at: index) } }
+        return withExtendedLifetime(document) { out.dataRepresentation() }
+    }
+
+    /// A one-page PDF with two lines of text drawn as text (CoreText), so PDFKit finds its words and lines.
+    private static func twoLines(_ first: String, _ second: String, to url: URL) -> Bool {
+        var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+        guard let context = CGContext(url as CFURL, mediaBox: &box, nil) else { return false }
+        context.beginPDFPage(nil)
+        let font = CTFontCreateWithName("Helvetica" as CFString, 14, nil)
+        for (line, y) in [(first, 700.0), (second, 680.0)] {
+            let text = NSAttributedString(string: line, attributes: [.font: font])
+            context.textPosition = CGPoint(x: 72, y: y)
+            CTLineDraw(CTLineCreateWithAttributedString(text), context)
+        }
+        context.endPDFPage()
+        context.closePDF()
+        return true
+    }
+
+    /// The tenth review: versions read through their set's pinned folder (swapped for a link: refused); a version's
+    /// preview keeps following edits after an atomic replace; a passage over two lines is highlighted line by line,
+    /// in the viewer and in the comments written, never one box over the words either side.
+    private static func tenth(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("tenth: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let deck = home.appending(path: "Deck.pdf")
+        try? FileManager.default.copyItem(at: source, to: deck)
+        let start = PDFDocument(url: source)?.pageCount ?? 1
+
+        // Edits after an atomic replace still refresh the preview.
+        let model = ViewerModel(url: URL(fileURLWithPath: ViewerPath.canonical(deck.path) ?? deck.path), kind: .pdf)
+        model.load()
+        wait(20) { !model.loading }
+        var made: ViewerVersionSet?
+        model.makeVersions(["One", "Two"], asker: "check") { if case .success(let set) = $0 { made = set } }
+        wait(20) { made != nil }
+        guard let set = made else { expect(false, "versions made (set up)"); return false }
+        let one = set.versions[0]
+        wait(20) { model.versionPageCount(one.id) == start }
+        expect(model.versionPageCount(one.id) == start, "a copy's preview read (set up)")
+        let temp = set.folder.appending(path: ".saving")
+        try? pages(start + 1, from: source)?.write(to: temp)
+        _ = rename(temp.path, one.url.path)
+        wait(10) { model.versionPageCount(one.id) == start + 1 }
+        expect(model.versionPageCount(one.id) == start + 1, "an atomic replace refreshes the preview")
+        if let handle = try? FileHandle(forWritingTo: one.url), let data = pages(start + 2, from: source) {
+            try? handle.truncate(atOffset: 0)
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        }
+        wait(10) { model.versionPageCount(one.id) == start + 2 }
+        expect(model.versionPageCount(one.id) == start + 2, "an edit in place after the atomic replace refreshes it too")
+        try? pages(start + 3, from: source)?.write(to: temp)
+        _ = rename(temp.path, one.url.path)
+        wait(10) { model.versionPageCount(one.id) == start + 3 }
+        expect(model.versionPageCount(one.id) == start + 3, "and a second atomic replace")
+
+        // The set's folder swapped for a link to a folder holding files of the same names: refused through the pin.
+        let decoy = folder.appending(path: "Decoy")
+        try? FileManager.default.createDirectory(at: decoy, withIntermediateDirectories: true)
+        for version in set.versions { try? FileManager.default.copyItem(at: source, to: decoy.appending(path: version.url.lastPathComponent)) }
+        let moved = folder.appending(path: "Moved set")
+        try? FileManager.default.moveItem(at: set.folder, to: moved)
+        try? FileManager.default.createSymbolicLink(atPath: set.folder.path, withDestinationPath: decoy.path)
+        model.refreshVersions(set)
+        wait(10) { set.versions.allSatisfy(\.refused) }
+        expect(set.versions.allSatisfy { $0.refused && $0.thumb == nil }, "the set's folder swapped for a link: every copy refused through the pinned descriptor")
+        try? FileManager.default.removeItem(at: set.folder)
+        try? FileManager.default.removeItem(at: moved)
+        model.close()
+
+        // A passage over two lines: one rectangle per line, in the viewer and as the comment's quadrilaterals.
+        let lines = home.appending(path: "Lines.pdf")
+        guard twoLines("Alpha beta gamma delta", "epsilon zeta eta theta", to: lines), let document = PDFDocument(url: lines),
+              let page = document.page(at: 0), let text = page.string else { expect(false, "a two-line PDF (set up)"); return false }
+        let ns = text as NSString
+        let quoteRange = NSRange(location: ns.range(of: "gamma").location, length: NSMaxRange(ns.range(of: "zeta")) - ns.range(of: "gamma").location)
+        let quote = ns.substring(with: quoteRange)
+        let unselected = ["Alpha beta", "eta theta"].compactMap { word -> CGRect? in
+            let range = ns.range(of: word, options: .backwards)
+            return range.location == NSNotFound ? nil : page.selection(for: range)?.bounds(for: page)
+        }
+        expect(unselected.count == 2, "the words either side found (set up)")
+        let viewerLines = ViewerModel.lines(page, quoteRange) ?? []
+        let union = ViewerComments.union(viewerLines) ?? .zero
+        expect(viewerLines.count == 2, "the viewer's highlight: two lines, one rectangle each")
+        expect(!viewerLines.contains { line in unselected.contains { $0.insetBy(dx: 1, dy: 1).intersects(line) } } && unselected.contains { union.intersects($0) },
+               "the viewer's lines miss the unselected words their union would cover")
+        var stick = NoteStick(kind: .file)
+        stick.path = lines.path
+        stick.page = 1
+        stick.quote = quote
+        stick.before = ns.substring(to: quoteRange.location)
+        stick.after = ns.substring(from: NSMaxRange(quoteRange))
+        var outcome: ViewerPDFComments.Outcome?
+        ViewerPDFComments.write(lines, comments: [.init(stick: stick, body: "Two lines", color: NoteInk.RGB(r: 0.9, g: 0.7, b: 0.2))], intoOriginal: false,
+                                author: "Petal check", expected: nil, live: { true }) { outcome = $0 }
+        wait(20) { outcome != nil }
+        guard case .wrote(let written, _)? = outcome, let back = PDFDocument(url: written)?.page(at: 0),
+              let mark = back.annotations.first(where: { $0.type == "Highlight" }) else { expect(false, "the comment written as a highlight"); return false }
+        let points = (mark.quadrilateralPoints ?? []).map(\.pointValue)
+        // PDFKit gives them relative to the annotation's bounds.
+        let quads = stride(from: 0, to: points.count - points.count % 4, by: 4).map { i -> CGRect in
+            let xs = points[i..<i + 4].map { $0.x + mark.bounds.minX }, ys = points[i..<i + 4].map { $0.y + mark.bounds.minY }
+            return CGRect(x: xs.min()!, y: ys.min()!, width: xs.max()! - xs.min()!, height: ys.max()! - ys.min()!)
+        }
+        expect(quads.count == 2, "exported: two quadrilaterals (\(quads.count))")
+        expect(!quads.contains { quad in unselected.contains { $0.insetBy(dx: 1, dy: 1).intersects(quad) } },
+               "exported quadrilaterals don't cover the unselected words")
+        expect(zip(quads, viewerLines).allSatisfy { abs($0.midY - $1.midY) < 2 && abs($0.minX - $1.minX) < 2 }, "each quadrilateral is its line")
+        print("tenth: " + (ok ? "versions read through their pinned folder and followed after a replace; two-line passages marked line by line" : "failed"))
         return ok
     }
 

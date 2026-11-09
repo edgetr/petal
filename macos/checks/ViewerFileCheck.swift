@@ -499,21 +499,66 @@ struct ViewerFileCheck {
 
         // MARK: Ninth review: versions' copies gated, volumes with no UUID
 
+        // Tenth review: copies read through descriptors pinned when their set was made (ViewerVersionStore).
         let gateBase = FileManager.default.temporaryDirectory.appending(path: "petal-viewer-gate-\(UUID().uuidString)")
-        let setFolder = gateBase.appending(path: "Petal Versions/abc")
         let elsewhere = gateBase.appending(path: "elsewhere")
-        try? FileManager.default.createDirectory(at: setFolder, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
-        let copy = setFolder.appending(path: "Deck (Short).pdf")
-        try? Data("%PDF-1.4".utf8).write(to: copy)
         try? Data("%PDF-1.4 other".utf8).write(to: elsewhere.appending(path: "Private.pdf"))
-        expect(ViewerVersionGate.allowed(copy.path, folder: setFolder.path), "Petal's own copy in its set's folder is read")
-        try? FileManager.default.removeItem(at: copy)
-        try? FileManager.default.createSymbolicLink(atPath: copy.path, withDestinationPath: elsewhere.appending(path: "Private.pdf").path)
-        expect(!ViewerVersionGate.allowed(copy.path, folder: setFolder.path), "a copy swapped for a link (to a file outside the allowed roots): refused")
-        expect(!ViewerVersionGate.allowed(elsewhere.appending(path: "Private.pdf").path, folder: setFolder.path), "a file outside its set's folder: refused")
-        expect(!ViewerVersionGate.allowed(setFolder.path, folder: setFolder.path), "the folder itself isn't a copy")
+        if let store = ViewerVersionStore(root: gateBase.appending(path: "Petal Versions")), let pin = store.makeSet("abc") {
+            let setFolder = store.path(pin)
+            let name = "Deck (Short).pdf"
+            expect(store.write(pin, file: name, data: Data("%PDF-1.4".utf8)), "a copy is written through the pinned folder")
+            expect(!store.write(pin, file: name, data: Data("again".utf8)), "never over a file already there")
+            expect(store.read(pin, file: name) == Data("%PDF-1.4".utf8), "Petal's own copy in its set's folder is read")
+            // An atomic save inside the folder (a new file renamed over the copy) is still read.
+            let temp = setFolder.appending(path: ".tmp-save")
+            try? Data("%PDF-1.4 saved".utf8).write(to: temp)
+            _ = rename(temp.path, setFolder.appending(path: name).path)
+            expect(store.read(pin, file: name) == Data("%PDF-1.4 saved".utf8), "a copy replaced by an atomic save inside the folder is read")
+            // The copy swapped for a link: refused.
+            try? FileManager.default.removeItem(at: setFolder.appending(path: name))
+            try? FileManager.default.createSymbolicLink(atPath: setFolder.appending(path: name).path, withDestinationPath: elsewhere.appending(path: "Private.pdf").path)
+            expect(store.read(pin, file: name) == nil, "a copy swapped for a link: refused")
+            expect(store.read(pin, file: "../elsewhere/Private.pdf") == nil, "a name that leaves the folder: refused")
+            expect(store.read(pin, file: "missing.pdf") == nil, "nothing there: nothing read")
+            // The set's folder swapped for a link to a folder holding a file of that name: refused through the pin.
+            try? Data("%PDF-1.4 other".utf8).write(to: elsewhere.appending(path: name))
+            try? FileManager.default.removeItem(at: setFolder)
+            try? FileManager.default.createSymbolicLink(atPath: setFolder.path, withDestinationPath: elsewhere.path)
+            expect(store.read(pin, file: name) == nil, "the set's folder swapped for a link: refused through the pinned descriptor")
+            expect(!store.write(pin, file: "New.pdf", data: Data("x".utf8)), "and nothing written through it")
+            // Swapped for another real folder with the same name: refused too (its inode isn't the pinned one).
+            try? FileManager.default.removeItem(at: setFolder)
+            try? FileManager.default.createDirectory(at: setFolder, withIntermediateDirectories: true)
+            try? Data("%PDF-1.4 other".utf8).write(to: setFolder.appending(path: name))
+            expect(store.read(pin, file: name) == nil, "the set's folder swapped for another folder: refused")
+        } else {
+            expect(false, "a versions store opens on a throwaway folder")
+        }
+        // The versions root itself a link: never opened.
+        let linkedRoot = gateBase.appending(path: "Linked Versions")
+        try? FileManager.default.createSymbolicLink(atPath: linkedRoot.path, withDestinationPath: elsewhere.path)
+        expect(ViewerVersionStore(root: linkedRoot) == nil, "a versions root that is a link: refused")
         try? FileManager.default.removeItem(at: gateBase)
+
+        // A two-line passage highlighted line by line: one quadrilateral per line, never one box over the words
+        // either side that weren't selected.
+        let lineOne = CGRect(x: 300, y: 700, width: 200, height: 14)
+        let lineTwo = CGRect(x: 72, y: 684, width: 120, height: 14)
+        let lineUnion = ViewerComments.union([lineOne, lineTwo])!
+        let quads = ViewerComments.quads([lineOne, lineTwo], within: lineUnion)
+        expect(quads.count == 8, "two lines: two quadrilaterals")
+        let quadRects = stride(from: 0, to: quads.count, by: 4).map { i -> CGRect in
+            let xs = quads[i..<i + 4].map { $0.x }, ys = quads[i..<i + 4].map { $0.y }
+            return CGRect(x: xs.min()! + lineUnion.minX, y: ys.min()! + lineUnion.minY, width: xs.max()! - xs.min()!, height: ys.max()! - ys.min()!)
+        }
+        expect(quadRects == [lineOne, lineTwo], "each quadrilateral is its own line, relative to the annotation's bounds")
+        expect(quads[0] == CGPoint(x: lineOne.minX - lineUnion.minX, y: lineOne.maxY - lineUnion.minY) && quads[3] == CGPoint(x: lineOne.maxX - lineUnion.minX, y: lineOne.minY - lineUnion.minY),
+               "in PDF order: top-left, top-right, bottom-left, bottom-right")
+        let unselectedBefore = CGRect(x: 72, y: 700, width: 200, height: 14)
+        let unselectedAfter = CGRect(x: 220, y: 684, width: 250, height: 14)
+        expect(!quadRects.contains { $0.intersects(unselectedBefore) || $0.intersects(unselectedAfter) } && lineUnion.intersects(unselectedBefore),
+               "the quadrilaterals miss the unselected words the lines' union would cover")
 
         let fallbackBase = FileManager.default.temporaryDirectory.appending(path: "petal-viewer-local-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: fallbackBase, withIntermediateDirectories: true)
