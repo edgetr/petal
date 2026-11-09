@@ -340,8 +340,7 @@ final class NoteStore {
                     self.notes = []
                     self.notebooks = []
                     self.conflicts = [:]
-                    self.canvasUnsaved = []
-                    self.canvasFailures = [:]
+                    self.endRootSession()
                     self.changedAt = [:]
                     self.removedAt = [:]
                     self.root = newRoot
@@ -351,6 +350,22 @@ final class NoteStore {
                 }
             }
         }
+    }
+
+    /// What's in flight belongs to the notes' folder it started in: a switch drains that work (its completions never
+    /// come back here), so its flags go with it. What's still pending (cover fields, canvas edits, each bound to its
+    /// own folder) stays, and is reconciled against the disk by the reads of whichever folder comes next: landed if
+    /// it's theirs, else left alone.
+    private func endRootSession() {
+        coverLanding = []
+        coverMaking = []
+        canvasWriting = []
+        canvasUnsaved = []
+        canvasFailures = [:]
+        canvasAmbiguityTimers = []
+        coverAmbiguityTimers = []
+        canvasAmbiguousSince = [:]
+        coverAmbiguousSince = [:]
     }
 
     // MARK: Reading
@@ -2181,15 +2196,17 @@ final class NoteStore {
 
     /// Everything pending bound to a notebook's folder (canvas edits, cover fields) takes its cover's new id, in
     /// memory and in the journal.
+    /// Only what was made in this notes' folder: another root's entries are skipped before any matching.
     private func rebind(_ notebook: String, to new: String) {
-        let places = notebookPlaces
-        for (key, entry) in canvasWaiting {
-            let next = NoteShelf.renewing(entry.bound, folder: notebook, to: new, places: places)
+        let places = notebookPlaces, current = root.path
+        func here(_ binding: NotebookBinding) -> Bool { binding.root.isEmpty || NotebookBinding.sameRoot(binding.root, current) }
+        for (key, entry) in canvasWaiting where here(entry.bound) {
+            let next = NoteShelf.renewing(entry.bound, folder: notebook, to: new, places: places, root: current)
             guard next != entry.bound else { continue }
             canvasWaiting[key]?.binding = next
             journalCanvas(key)
         }
-        for (key, pending) in coverPending where pending.target(root: root.path, places: places) == notebook {
+        for (key, pending) in coverPending where here(pending.binding) && pending.target(root: current, places: places) == notebook {
             coverPending[key]?.coverID = new
             let now = coverPending[key]!
             NoteJournal.queue.async { NoteJournal.keepCover(now) }

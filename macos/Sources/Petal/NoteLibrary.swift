@@ -1329,10 +1329,11 @@ extension NoteShelf {
         }.map(\.name)
     }
 
-    /// The one rule applied to a cover id renewed on a folder: every pending binding that resolves to that folder now
-    /// takes the new id, so a duplicate that kept the old id never inherits it.
-    static func renewing(_ binding: NotebookBinding, folder: String, to newID: String, places: [NotebookPlace]) -> NotebookBinding {
-        guard notebookFor(binding, places: places, complete: false) == .found(folder) else { return binding }
+    /// The one rule applied to a cover id renewed on a folder of `root`: every pending binding of that root that
+    /// resolves to that folder now takes the new id, so a duplicate that kept the old id never inherits it; one made
+    /// in another notes' folder is never matched.
+    static func renewing(_ binding: NotebookBinding, folder: String, to newID: String, places: [NotebookPlace], root: String) -> NotebookBinding {
+        guard notebookFor(binding, places: places, complete: false, root: root) == .found(folder) else { return binding }
         var next = binding
         next.coverID = newID
         return next

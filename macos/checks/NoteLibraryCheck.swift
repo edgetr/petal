@@ -521,9 +521,13 @@ struct NoteLibraryCheck {
         let dupPlaces = [place("Alpha", "1:20", "X"), place("Zed", "1:30", "X")]
         let zedBinding = NotebookBinding(coverID: "X", path: "Zed", instance: "1:30"), alphaBinding = NotebookBinding(coverID: "X", path: "Alpha", instance: "1:20")
         let zedRenewed = NoteLibrary.renewedID("X", folder: "Zed")
-        expect(NoteShelf.renewing(zedBinding, folder: "Zed", to: zedRenewed, places: dupPlaces).coverID == zedRenewed
-               && NoteShelf.renewing(alphaBinding, folder: "Zed", to: zedRenewed, places: dupPlaces) == alphaBinding,
+        expect(NoteShelf.renewing(zedBinding, folder: "Zed", to: zedRenewed, places: dupPlaces, root: "/A").coverID == zedRenewed
+               && NoteShelf.renewing(alphaBinding, folder: "Zed", to: zedRenewed, places: dupPlaces, root: "/A") == alphaBinding,
                "a renewal rewrites the bindings of its own folder only")
+        let zedInA = NotebookBinding(coverID: "X", path: "Zed", instance: "1:30", root: "/A")
+        expect(NoteShelf.renewing(zedInA, folder: "Zed", to: zedRenewed, places: dupPlaces, root: "/B") == zedInA
+               && NoteShelf.renewing(zedInA, folder: "Zed", to: zedRenewed, places: dupPlaces, root: "/A").coverID == zedRenewed,
+               "a root A binding is never renewed by a notebook in root B, even one just like it")
         // Cover changes use the same binding, in their own root, preferring the original folder.
         var zedPrivate = CoverFields(notebook: "Zed", root: "/A", coverID: "X", folderID: "1:30", path: "Zed")
         zedPrivate.set("private", "true")

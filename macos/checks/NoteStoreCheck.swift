@@ -144,6 +144,8 @@ struct NoteStoreCheck {
         ambiguousCovers(root: root)
         writeRechecksBinding(root: root)
         canvasOtherRoot(root: root)
+        switchBackSavesCover(root: root)
+        renewalSkipsOtherRoot(root: root)
         notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -2111,6 +2113,92 @@ struct NoteStoreCheck {
         while !back && Date() < until { settle(0.1) }
         try? fm.removeItem(at: rootB)
         try? fm.removeItem(at: root.appending(path: "Shared"))
+    }
+
+    /// A switch of notes' folder with a cover write in flight: its completion never comes back, and the flags in
+    /// flight go with the old folder; back in it, a Private change saves.
+    @MainActor static func switchBackSavesCover(root: URL) {
+        let fm = FileManager.default
+        let rootB = root.deletingLastPathComponent().appending(path: "petal-root-B-\(UUID().uuidString)")
+        try? fm.createDirectory(at: rootB, withIntermediateDirectories: true)
+        let folder = root.appending(path: "Roundtrip")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var cover = NoteFile(id: "COVER-ROUND", body: "# About this notebook")
+        cover.cover = true
+        _ = NoteStore.create(cover.serialized(), at: folder.appending(path: NoteShelf.coverName), root: root)
+        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        func switchTo(_ next: URL) {
+            var done = false
+            store.switchRoot(to: next) { done = true }
+            let until = Date().addingTimeInterval(8)
+            while (!done || !store.loaded) && Date() < until { settle(0.05) }
+            settle(1)
+        }
+        store.reload()
+        settle(1)
+        // A color change in flight when the folder switches.
+        store.setCover("Roundtrip", fields: ["color": "#336699"])
+        expect(!store.coverLanding.isEmpty, "a cover write in flight")
+        switchTo(rootB)
+        expect(store.coverLanding.isEmpty, "the switch ends what was in flight with the old folder")
+        switchTo(root)
+        store.setCover("Roundtrip", fields: ["private": "true"])
+        func onDisk() -> NoteFile? { text(folder.appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) } }
+        let until = Date().addingTimeInterval(8)
+        while onDisk().map(NoteContract.isPrivate) != true && Date() < until { settle(0.2); store.reload() }
+        expect(onDisk().map(NoteContract.isPrivate) == true && onDisk()?.color == "#336699" && store.coverPending.isEmpty,
+               "back in its folder: the Private change saves, and the change from before lands too", text(folder.appending(path: NoteShelf.coverName)) ?? "nil")
+        try? fm.removeItem(at: folder)
+        try? fm.removeItem(at: rootB)
+    }
+
+    /// A cover renewed in another notes' folder never renews a waiting canvas edit made in this one, even for a
+    /// notebook just like its own (same name, same cover id).
+    @MainActor static func renewalSkipsOtherRoot(root: URL) {
+        let fm = FileManager.default
+        let rootB = root.deletingLastPathComponent().appending(path: "petal-root-B-\(UUID().uuidString)")
+        func notebook(_ base: URL, _ name: String) {
+            let folder = base.appending(path: name)
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            var cover = NoteFile(id: "COVER-TWIN", body: "# About this notebook")
+            cover.cover = true
+            _ = NoteStore.create(cover.serialized(), at: folder.appending(path: NoteShelf.coverName), root: base)
+        }
+        notebook(root, "Twin")
+        // In B: "Twin" and a duplicate that sorts first, so B's "Twin" is the one renewed.
+        notebook(rootB, "Twin")
+        notebook(rootB, "Aaa twin")
+        let canvasA = root.appending(path: "Twin").appending(path: NoteStore.canvasName)
+        try? fm.createDirectory(at: canvasA, withIntermediateDirectories: true)   // A's writes fail for now
+        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        store.reload()
+        settle(1)
+        store.editCanvas("Twin", .move("t1", .init(x: 3, y: 3))) { _ in }
+        settle(0.3)
+        let key = store.canvasWaiting.keys.first ?? ""
+        var done = false
+        store.switchRoot(to: rootB) { done = true }
+        var until = Date().addingTimeInterval(8)
+        while (!done || !store.loaded) && Date() < until { settle(0.05) }
+        let renewed = NoteLibrary.renewedID("COVER-TWIN", folder: "Twin")
+        func idOnDisk(_ folder: URL) -> String? { text(folder.appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()).id } }
+        until = Date().addingTimeInterval(8)
+        while idOnDisk(rootB.appending(path: "Twin")) != renewed && Date() < until { settle(0.1); store.reload() }
+        settle(0.5)
+        NoteJournal.queue.sync {}
+        expect(idOnDisk(rootB.appending(path: "Twin")) == renewed && store.canvasWaiting[key]?.bound.coverID == "COVER-TWIN"
+               && NoteJournal.readCanvas(NoteJournal.canvasFile(key))?.binding?.coverID == "COVER-TWIN",
+               "a root A entry is never renewed by a notebook in root B, in memory or in the journal")
+        var back = false
+        store.switchRoot(to: root) { back = true }
+        until = Date().addingTimeInterval(8)
+        while !back && Date() < until { settle(0.05) }
+        store.drainCanvas()
+        NoteJournal.ackCanvas(key, wrote: Set(NoteJournal.readCanvas(NoteJournal.canvasFile(key))?.edits.map(\.id) ?? []))
+        try? fm.removeItem(at: root.appending(path: "Twin"))
+        try? fm.removeItem(at: rootB)
     }
 
     /// Making a notebook Private: shown at once, and written through its cover's session, also when it has no cover
