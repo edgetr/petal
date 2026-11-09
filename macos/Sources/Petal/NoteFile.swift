@@ -110,15 +110,28 @@ struct NoteStick: Equatable, Sendable {
     /// The tab as NoteRules knows tabs.
     var noteTab: NoteTab { NoteTab(id: tabID, element: tabElement, shared: shared, url: url, title: title) }
 
-    /// The same place, whatever was learned about it since (a new window number, a title).
+    /// The same file, as the one file resolver knows files: by the incarnation recorded with each place (`fileID`:
+    /// both have it and it's the same), else, with neither recorded, by the very same bookmark at the same path. A
+    /// path alone never proves it (another file may have taken it), and what can't be proven the same file is
+    /// another one: kept, never merged or replaced. A place is always on its own file.
+    func sameFile(_ other: NoteStick) -> Bool {
+        // A place is always on its own file, recorded or not.
+        if self == other { return true }
+        if !fileID.isEmpty || !other.fileID.isEmpty { return fileID == other.fileID }
+        return !bookmark.isEmpty && bookmark == other.bookmark && path == other.path
+    }
+
+    /// The same place, whatever was learned about it since (a new window number, a title). A file's place, or a
+    /// sentence in a file, is the same only as the same file (`sameFile`) at the same position; the one equality
+    /// every place is deduplicated or replaced by.
     func samePlace(_ other: NoteStick) -> Bool {
         guard kind == other.kind else { return false }
         switch kind {
-        case .passage: return quote == other.quote && (url.isEmpty ? path == other.path : NoteRules.sameURL(url, other.url))
+        case .passage: return quote == other.quote && (url.isEmpty ? sameFile(other) : NoteRules.sameURL(url, other.url))
         case .tab:
             if mac == other.mac, let a = pid, let b = other.pid { return NoteRules.sameTab(noteTab, pid: a, other.noteTab, pid: b) }
             return NoteRules.byAddress(noteTab, other.noteTab)
-        case .file: return path == other.path && page == other.page && slide == other.slide && quote == other.quote
+        case .file: return sameFile(other) && page == other.page && slide == other.slide && quote == other.quote
         case .window: return NoteShelf.sameWindow(self, other)
         case .app: return app == other.app
         case .desktop: return desktop == other.desktop

@@ -2311,7 +2311,8 @@ final class NoteDesk {
         guard let paper = store.paper(key) else { return [] }
         let offers: [NoteStick]
         if let viewer = app.viewers.front {
-            offers = [viewer.fileAnchor()]
+            // Only once its file's identity is in: nothing to offer until then.
+            offers = viewer.fileAnchor().map { [$0] } ?? []
         } else if let cached = scene, let cachedRead = front, cached.window != nil {
             // Cached from the last look: filtered again, an app made private since gives nothing of itself.
             let (scene, front) = Self.filtered(cached, cachedRead, since: scenePrivacy)

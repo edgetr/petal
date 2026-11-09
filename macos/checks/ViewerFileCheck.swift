@@ -53,11 +53,31 @@ struct ViewerFileCheck {
         // In other apps it's the file: Phase 1's AXDocument match is unchanged.
         expect(NoteMatch.fits(passage, NoteScene(file: "/Users/someone/Report.pdf")), "fits the file in Preview or Acrobat")
         expect(!NoteMatch.fits(passage, NoteScene(file: "/Users/someone/Other.pdf")), "never another file")
-        var samePage = passage
+        var recorded = passage
+        recorded.fileID = "MAC-A|vol|7|1000"
+        var samePage = recorded
         samePage.bookmark = "b3RoZXI="
-        var otherPage = passage
+        samePage.path = "/Users/someone/Report renamed.pdf"
+        var otherPage = recorded
         otherPage.page = 4
-        expect(passage.samePlace(samePage) && !passage.samePlace(otherPage), "the same spot only on the same page and words")
+        expect(recorded.samePlace(samePage) && !recorded.samePlace(otherPage), "the same spot only as the same file (its incarnation, renamed or not) on the same page and words")
+        // Fourteenth review: a path alone never proves the same file; what can't be proven the same is kept.
+        var tookPath = recorded
+        tookPath.fileID = "MAC-A|vol|8|2000"
+        var unrecorded = recorded
+        unrecorded.fileID = ""
+        expect(!recorded.samePlace(tookPath), "another file that took the path, same page: not the same place")
+        expect(!recorded.samePlace(unrecorded) && !unrecorded.samePlace(recorded), "one with the file's identity, one without: not proven, kept apart")
+        expect(passage.samePlace(passage) && unrecorded.samePlace(unrecorded), "a place is always itself")
+        var bookmarked = passage
+        bookmarked.bookmark = "Ym9vaw=="
+        var otherBookmark = bookmarked
+        otherBookmark.bookmark = "b3RoZXI="
+        expect(!passage.samePlace(otherBookmark) && !bookmarked.samePlace(otherBookmark), "no identity on either: only the very same bookmark")
+        let alsoStuck = [recorded].filter { !$0.samePlace(tookPath) } + [tookPath]
+        expect(alsoStuck == [recorded, tookPath], "also: the other file's anchor added, the first kept")
+        let instead = [recorded, otherPage].filter { !$0.samePlace(samePage) } + [samePage]
+        expect(instead == [otherPage, samePage], "the same file and page again: replaced, never doubled")
         expect(slide.label() == "Deck.pptx · slide 5" && passage.spot == "page 3", "the letterhead says where in the file", slide.label())
         expect(passage.words.hasPrefix("“Growth held steady” on Report.pdf, page 3"), "in words", passage.words)
         expect(passage.scrubbed.page == nil && passage.scrubbed.quote.isEmpty, "a private app's spot isn't told")

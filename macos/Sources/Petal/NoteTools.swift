@@ -290,7 +290,7 @@ extension NoteDesk {
                     guard live() else { return }
                     if case .place(let stick, _) = plain { done(stick) } else { done(nil) }
                 }
-                case .refused, .changed: done(nil)
+                case .refused, .changed, .unidentified: done(nil)
                 }
             }
         }

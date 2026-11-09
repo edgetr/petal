@@ -193,6 +193,7 @@ enum ViewerCheck {
             failed = !eleventh(url, app: app) || failed
             failed = !twelfth(url, app: app) || failed
             failed = !thirteenth(url, app: app) || failed
+            failed = !fourteenth(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -757,6 +758,93 @@ enum ViewerCheck {
         return ok
     }
 
+    /// The fourteenth review: a file place is offered only with the document's checked identity (waited for while
+    /// it loads, refused when it can't be shown); "also" never merges another file's anchor that took a path; a
+    /// slow membership read finishing last never replaces the newest.
+    private static func fourteenth(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("fourteenth: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        let outside = folder.appending(path: "Outside")
+        for made in [home, outside] { try? FileManager.default.createDirectory(at: made, withIntermediateDirectories: true) }
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let canonical = { (url: URL) in URL(fileURLWithPath: ViewerPath.canonical(url.path) ?? url.path) }
+
+        // Asked while it loads: waited for, and the place carries the file's identity.
+        let report = home.appending(path: "Report.pdf")
+        try? FileManager.default.copyItem(at: source, to: report)
+        let model = app.viewers.show(canonical(report), front: false)
+        app.viewers.keyID = model.id
+        defer { app.viewers.keyID = nil }
+        expect(model.fileAnchor() == nil, "no file place before the document's identity is in")
+        var early: ViewerModel.HereOutcome?
+        model.herePlace(passage: false) { early = $0 }
+        wait(20) { early != nil }
+        if case .place(let stick, _)? = early {
+            expect(!stick.fileID.isEmpty && !stick.bookmark.isEmpty, "asked while loading: waited for, the place has the file's identity and bookmark")
+        } else { expect(false, "asked while loading: a place once it's in") }
+        // A file the viewer refuses: no identity, no place.
+        let away = outside.appending(path: "Away.pdf")
+        try? FileManager.default.copyItem(at: source, to: away)
+        let refused = app.viewers.show(canonical(away), front: false)
+        var none: ViewerModel.HereOutcome?
+        refused.herePlace(passage: false) { none = $0 }
+        wait(20) { none != nil }
+        if case .unidentified? = none {} else { expect(false, "a file that can't be shown: no place (\(String(describing: none)))") }
+        expect(refused.fileAnchor() == nil, "and no file anchor to offer")
+        app.viewers.closed(refused)
+
+        // A note on A's page 1; A renamed, B takes its path, shown in the viewer: "also" keeps A and adds B.
+        let a = home.appending(path: "Shared.pdf")
+        try? FileManager.default.copyItem(at: source, to: a)
+        let onA = app.viewers.show(canonical(a), front: false)
+        wait(20) { !onA.loading }
+        app.viewers.keyID = onA.id
+        var anchorA: NoteStick?
+        onA.herePlace(passage: false) { if case .place(let stick, _) = $0 { anchorA = stick } }
+        wait(10) { anchorA != nil }
+        app.viewers.closed(onA)
+        guard let anchorA, let paper = app.paper.make(on: anchorA, body: "On A fourteen", open: false) else { expect(false, "a note on A (set up)"); return false }
+        try? FileManager.default.moveItem(at: a, to: home.appending(path: "Shared renamed.pdf"))
+        try? FileManager.default.copyItem(at: source, to: a)
+        let onB = app.viewers.show(canonical(a), front: false)
+        wait(20) { !onB.loading }
+        app.viewers.keyID = onB.id
+        var listed: [String: Any]?
+        app.paper.handle("petal_notes", ["query": "On A fourteen"], live: { true }, { listed = $0 as? [String: Any] }, { _ in listed = [:] })
+        wait(10) { listed != nil }
+        let handle = (listed?["notes"] as? [[String: Any]])?.first?["id"] as? String ?? ""
+        var stuck: Any?
+        app.paper.handle("petal_note_stick", ["id": handle, "to": "file", "also": true], live: { true }, { stuck = $0 }, { stuck = $0 })
+        wait(20) { stuck != nil }
+        wait(5) { (app.paper.store.paper(paper.key)?.file.places.count ?? 0) == 2 }
+        let places = app.paper.store.paper(paper.key)?.file.places ?? []
+        expect(places.count == 2 && places[0].fileID == anchorA.fileID && places[1].fileID != anchorA.fileID && places[1].path == anchorA.path,
+               "also: A's anchor kept, B's added at the same path and page (\(places.map(\.fileID)))")
+
+        // Membership reads: the newest wins even when an older one finishes last.
+        app.paper.store.preview(app.paper.store.notes.filter { $0.key != paper.key }, notebooks: app.paper.store.notebooks)
+        let withB = app.paper.store.notes
+        var onBNote = NoteStick(kind: .file)
+        if let anchorB = places.last { onBNote = anchorB }
+        let noteB = PaperNote(file: { var f = NoteFile(id: "F14", body: "On B fourteen"); f.places = [onBNote]; return f }(),
+                              url: folder.appending(path: "F14.md"), notebook: "Inbox")
+        app.paper.store.preview(withB + [noteB], notebooks: app.paper.store.notebooks)
+        onB.refreshPlaces(late: 1.0)
+        app.paper.store.preview(withB, notebooks: app.paper.store.notebooks)
+        onB.refreshPlaces()
+        wait(2.5) { false }
+        expect(!onB.onFile.contains(onBNote.fileKey), "an older read finishing last never replaces the newest")
+        app.viewers.closed(onB)
+        app.viewers.closed(model)
+        print("fourteenth: " + (ok ? "file places only with the file's identity; also keeps another file's anchor; the newest membership read wins" : "failed"))
+        return ok
+    }
+
     /// The eighth review: one path rule at every load and follow (a reload swapped to a link out of the home folder
     /// shows nothing); a refused save's snapshot is the whole note and comes back with its front matter; undoing the
     /// refused typing retires its snapshot.
@@ -1138,9 +1226,13 @@ enum ViewerCheck {
             return PaperNote(file: file, url: folder.appending(path: id + ".md"), notebook: "Inbox")
         }
         func margin(_ url: URL) -> [String] {
-            let model = ViewerModel(url: url, kind: .pdf)
+            // Loaded as the viewer loads it: membership is worked out for the file's checked identity.
+            let model = ViewerModel(url: URL(fileURLWithPath: ViewerPath.canonical(url.path) ?? url.path), kind: .pdf)
+            model.load()
+            wait(20) { !model.loading }
             model.refreshPlaces()
             wait(3) { !model.notes.isEmpty }
+            defer { model.close() }
             wait(0.3) { false }
             return model.notes.map(\.paper.noteID).sorted()
         }

@@ -308,6 +308,8 @@ final class ViewerModel: Identifiable {
             let told = loadWaiters
             loadWaiters = []
             for wait in told { wait(true) }
+            // The load is over: whoever waited for the file's identity goes on, with it or without.
+            identified()
         }
     }
     @ObservationIgnored private var loadWaiters: [@MainActor (Bool) -> Void] = []
@@ -480,6 +482,9 @@ final class ViewerModel: Identifiable {
         thumbs = [:]
         passages = [:]
         selection = nil
+        // Not a file the viewer may show: no identity to offer as a place.
+        fileID = nil
+        bookmark = nil
         problem = Self.cantShowText
         loading = false
     }
@@ -489,7 +494,14 @@ final class ViewerModel: Identifiable {
         let first = stamp == nil
         stamp = read.stamp
         if let made = read.bookmark { bookmark = made }
-        if let read = read.fileID { fileID = read }
+        if let read = read.fileID {
+            let changed = fileID != read
+            fileID = read
+            identified()
+            // Which notes are on this file, worked out again for the file as it is now (refreshPlaces is fenced
+            // by this load).
+            if changed { refreshPlaces() }
+        }
         if !first { updated = Date() }
         switch read.pages {
         case .pdf(let data): show(data, ticket: ticket)
@@ -702,8 +714,9 @@ final class ViewerModel: Identifiable {
         defer { NotePictures.shared.visibilityChanged() }
         closedNow = true
         closing.on = true
-        // Whoever waits for a selection goes on, and finds the viewer closed.
+        // Whoever waits for a selection or the file's identity goes on, and finds the viewer closed.
         settleSelection()
+        identified()
         watcher = nil
         versionWatch = nil
         lensSoon?.cancel()
@@ -758,16 +771,23 @@ final class ViewerModel: Identifiable {
     /// Which of the notes' places name this file, each resolved on its own off the main thread (ViewerFiles): a
     /// note made through a link, on a file since renamed, or a sentence noted in Preview shows; a note on a file
     /// whose path this one took doesn't.
-    func refreshPlaces() {
-        let file = url
+    /// Each read is a turn ("places") of one document load, for the file's checked identity (its load's `fileID`);
+    /// only the newest turn's answer, for the load still shown, is taken: an older read finishing last never
+    /// replaces it, and one from a load since replaced runs again for the file as it is now.
+    /// `late`: Petal --viewer-check only, its answer held back that long (a slow read finishing last).
+    func refreshPlaces(late: Double = 0) {
+        guard !closedNow, let id = fileID else { return }
         let mac = desk.local.mac
         let places = desk.store.notes.flatMap { $0.file.places.filter(ViewerFiles.namesFile) }
+        let turn = turns.begin("places")
+        let load = loads
         Viewers.queue.async {
-            guard let id = ViewerFileID.of(file.path) else { return }
             let found = ViewerFiles.on(id, places, mac: mac, follow: ViewerLoader.follow)
-            DispatchQueue.main.async {
+            DispatchQueue.main.asyncAfter(deadline: .now() + late) {
                 MainActor.assumeIsolated {
-                    guard file == self.url, found != self.onFile else { return }
+                    guard self.turns.isLatest("places", turn), !self.closedNow else { return }
+                    guard load == self.loads, id == self.fileID else { return self.refreshPlaces() }
+                    guard found != self.onFile else { return }
                     self.onFile = found
                     self.resolvePassages()
                 }
@@ -822,6 +842,21 @@ final class ViewerModel: Identifiable {
         for wait in waiting { wait() }
     }
 
+    @ObservationIgnored private var identityWaiters: [@MainActor () -> Void] = []
+
+    /// `then` once the file's checked identity is in (its load's `fileID`), or its load is over without one, or the
+    /// viewer closed: a file place is offered only with it (`fileAnchor`).
+    func whenIdentified(_ then: @escaping @MainActor () -> Void) {
+        guard fileID == nil, loading, !closedNow else { return then() }
+        identityWaiters.append(then)
+    }
+
+    private func identified() {
+        let waiting = identityWaiters
+        identityWaiters = []
+        for wait in waiting { wait() }
+    }
+
     /// `then` once no selection is being read: at once, or when the newest selection's read is in.
     func whenSelectionSettled(_ then: @escaping @MainActor () -> Void) {
         guard selectionPending, !closedNow else { return then() }
@@ -841,6 +876,8 @@ final class ViewerModel: Identifiable {
         case refused
         /// The viewer closed, its document reloaded or its selection changed meanwhile: nothing used.
         case changed
+        /// The file's checked identity isn't in (its load failed or was refused): no file place without it.
+        case unidentified
     }
 
     /// A paper's file got another name: what's kept about it here follows.
@@ -915,6 +952,7 @@ final class ViewerModel: Identifiable {
             switch outcome {
             case .refused: self.desk.tell("That selection holds something from your vault, or the vault can't be read: Petal makes no note on it.")
             case .changed: if !self.closedNow { self.desk.tell("What's in the viewer changed while Petal looked, so no note was made.") }
+            case .unidentified: self.desk.tell("Petal can't tell which file this is yet, so no note was made.")
             case .place(let stick, let used):
                 if used { self.selection = nil }
                 self.make(stick)
@@ -923,8 +961,11 @@ final class ViewerModel: Identifiable {
     }
 
     /// This viewer's file as a note's place: a file anchor with the incarnation and bookmark its latest read made,
-    /// at the page or slide shown. The one place the viewer offers as "here" (herePlace, the letterhead's menu).
-    func fileAnchor() -> NoteStick {
+    /// at the page or slide shown. The one place the viewer offers as "here" (herePlace, the letterhead's menu), and
+    /// only with the file's checked identity: nil until its load has read it (a path alone could later be another
+    /// file's), so no file place without one is ever saved from the viewer.
+    func fileAnchor() -> NoteStick? {
+        guard let fileID else { return nil }
         var stick = NoteStick(kind: .file)
         stick.path = url.path
         stick.title = name
@@ -932,7 +973,7 @@ final class ViewerModel: Identifiable {
             if unit == .slide { stick.slide = current + 1 } else { stick.page = current + 1 }
         }
         stick.bookmark = bookmark?.base64EncodedString() ?? ""
-        stick.fileID = fileID?.record(mac: desk.local.mac) ?? ""
+        stick.fileID = fileID.record(mac: desk.local.mac)
         return stick
     }
 
@@ -947,14 +988,18 @@ final class ViewerModel: Identifiable {
     /// place is used only while the viewer is open with the same document and selection it was made for
     /// (`hereContext`); else `changed`.
     func herePlace(passage: Bool = true, _ done: @escaping @MainActor (HereOutcome) -> Void) {
+        // The selection's read and the file's identity both in first: never a page note for a pending selection,
+        // never a place without the file's identity.
         whenSelectionSettled {
-            guard !self.closedNow else { return done(.changed) }
-            self.placeNow(passage: passage, done)
+            self.whenIdentified {
+                guard !self.closedNow else { return done(.changed) }
+                self.placeNow(passage: passage, done)
+            }
         }
     }
 
     private func placeNow(passage: Bool, _ done: @escaping @MainActor (HereOutcome) -> Void) {
-        var stick = fileAnchor()
+        guard var stick = fileAnchor() else { return done(.unidentified) }
         let context = hereContext
         guard let chosen = passage ? selection : nil else { return done(.place(stick, selection: false)) }
         Viewers.queue.async {
