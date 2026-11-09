@@ -721,6 +721,12 @@ struct NotesCheck {
         expect(NoteShelf.pictureRetry(broken: ["/n/P/a": t0], onScreen: ["/n/P/a"], now: t0.addingTimeInterval(4)) == ([], true), "on screen, too soon: waits")
         expect(NoteShelf.pictureRetry(broken: ["/n/P/a": t0], onScreen: ["/n/P/b"], now: t0.addingTimeInterval(60)) == ([], false), "not on screen: no timer")
         expect(NoteShelf.pictureRetry(broken: [:], onScreen: ["/n/P/a"], now: t0) == ([], false), "nothing missing: no timer")
+        // What's on screen: pictures of papers revealed and open only; a hidden (clear) or folded paper shows none.
+        let pictured = "# A\n![](../Pictures/h/p.png)"
+        expect(NoteShelf.picturesOnScreen([(true, true, "/n/Inbox", pictured)]) == ["/n/Pictures/h/p.png"], "revealed and open: its pictures")
+        expect(NoteShelf.picturesOnScreen([(false, true, "/n/Inbox", pictured)]).isEmpty, "a hidden paper (gone clear): none")
+        expect(NoteShelf.picturesOnScreen([(true, false, "/n/Inbox", pictured)]).isEmpty, "a folded paper: none")
+        expect(NoteShelf.picturesOnScreen([(true, true, "/n/Inbox", "![](../../out.png)")]).isEmpty, "a link leading out: nothing to retry")
         // The folder watcher's paths touch the pictures they hold, however they're spelled.
         expect(NoteShelf.picturesTouched(events: ["/private/var/n/Pictures/h/p.png"], keys: ["/var/n/Pictures/h/p.png", "/var/n/Pictures/h/q.png"]) == ["/var/n/Pictures/h/p.png"],
                "the file itself, in /private spelling")

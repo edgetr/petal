@@ -100,6 +100,19 @@ struct NoteRichCheck {
         expect(NotePictures.shared.retryTick(now: Date().addingTimeInterval(11), onScreen: []).isEmpty,
                "not on screen: not asked again, and the timer stops")
         expect(NotePictures.shared.retryTick(now: Date(), onScreen: [missing]).isEmpty, "on screen but just tried: not yet")
+        // The retry follows the one visibility signal: hidden, it stops; revealed again, it restarts.
+        NotePictures.shared.visible = { [] }
+        NotePictures.shared.visibilityChanged()
+        spin { !NotePictures.shared.retrying }
+        expect(!NotePictures.shared.retrying, "its paper hidden: no retrying")
+        NotePictures.shared.visible = { [missing] }
+        NotePictures.shared.visibilityChanged()
+        spin { NotePictures.shared.retrying }
+        expect(NotePictures.shared.retrying, "its paper revealed again: retrying restarts")
+        NotePictures.shared.visible = { [] }
+        NotePictures.shared.visibilityChanged()
+        spin { !NotePictures.shared.retrying }
+        expect(!NotePictures.shared.retrying, "folded or hidden again: stops")
         let png = FileManager.default.temporaryDirectory.appending(path: "petal-rich-\(UUID().uuidString).png")
         try? NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                               colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)?.representation(using: .png, properties: [:])?.write(to: png)
@@ -108,6 +121,17 @@ struct NoteRichCheck {
         spin { NotePictures.shared.image("../Pictures/late/p.png", in: folder) != nil }
         expect(NotePictures.shared.image("../Pictures/late/p.png", in: folder) != nil && !NotePictures.shared.isBroken("../Pictures/late/p.png", in: folder)
                && said.last == missing, "the file appeared (watcher, another spelling): read again, shown, and said to the editors")
+        // A pasted picture (shown from memory before any read): its source is recorded as it's drawn, so a change
+        // on disk reads it again.
+        let pasted = URL(fileURLWithPath: "/tmp/petal-rich/Pictures/paste/p.png")
+        NotePictures.shared.preview(pasted, NSImage(size: NSSize(width: 2, height: 2)))
+        expect(NotePictures.shared.image("../Pictures/paste/p.png", in: folder) != nil, "a paste shows from memory")
+        NoteStore.files[pasted.path] = png
+        let readsBefore = NoteStore.reads
+        NotePictures.shared.filesChanged([pasted.path])
+        spin { NoteStore.reads > readsBefore }
+        expect(NoteStore.reads > readsBefore, "its file changed on disk: read again from the recorded source")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         NotificationCenter.default.removeObserver(listen)
         try? FileManager.default.removeItem(at: png)
         print("note editor: \(roundTrips) of \(bodies.count + 1) round trips, \(checks) picture checks" + (failures > bodies.count + 1 - roundTrips ? " (some failed)" : ""))

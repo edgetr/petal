@@ -10,8 +10,9 @@ import SwiftUI
 @MainActor @Observable
 final class NoteDesk {
     let store = NoteStore()
-    /// Notes showing, each folded, open or turned over (by paper key).
-    var faces: [String: PaperFace] = [:]
+    /// Notes showing, each folded, open or turned over (by paper key). Opening or folding one changes which
+    /// pictures are on screen (NotePictures' retry).
+    var faces: [String: PaperFace] = [:] { didSet { NotePictures.shared.visibilityChanged() } }
     /// The open note with the keyboard.
     var keyboard: String?
     /// Each open note's writing's height.
@@ -86,6 +87,8 @@ final class NoteDesk {
         // vault can't be read, a plain name. And the names Petal made so, known again.
         NoteStore.nameRedactor = { text in VaultIndex.settled { $0.unreadable ? nil : $0.redacted(text) } ?? nil }
         store.onChange = { [weak self] in self?.refresh() }
+        // The one visibility signal for missing pictures: papers revealed and open now.
+        NotePictures.shared.visible = { [weak self] in self?.picturesOnScreen() ?? [] }
         store.onRekey = { [weak self] old, paper in self?.rekey(old, to: paper) }
         // An id now in its file: what's kept by it is lasting (written to disk) from now on.
         store.onIDLanded = { [weak self] _ in
@@ -966,6 +969,14 @@ final class NoteDesk {
         passageRects = NoteShelf.passageGeometry(passageRects, passages: passages)
         let kept = NoteShelf.passageGeometry(found, passages: passages)
         if kept != found { found = kept }
+    }
+
+    /// The pictures on screen: those of papers whose panel is revealed (not hidden by going clear) and open
+    /// (NoteShelf.picturesOnScreen), editors and read-only papers alike.
+    func picturesOnScreen() -> Set<String> {
+        NoteShelf.picturesOnScreen(panels.compactMap { key, panel in
+            store.paper(key).map { (panel.unveiled, faces[key] == .open, $0.url.deletingLastPathComponent().path, $0.file.body) }
+        })
     }
 
     /// The sketch's dashed line in the notebook's color from each showing note to its sentence, wherever the
@@ -2478,15 +2489,21 @@ extension NSPanel {
     func conceal() {
         guard alphaValue != 0 || !ignoresMouseEvents else { return }
         if isKeyWindow { resignKey() }
+        let was = alphaValue
         alphaValue = 0
         ignoresMouseEvents = true
+        // A paper hidden: what's on screen changed (NotePictures' retry weighs it again).
+        if was != 0, self is NotePanel { MainActor.assumeIsolated { NotePictures.shared.visibilityChanged() } }
     }
 
     /// Showing again: on screen once, then only made opaque. `mouse`: whether it takes clicks (a pin never does).
     func unveil(mouse: Bool = true) {
+        let was = unveiled
         if !isVisible { orderFrontRegardless() }
         if alphaValue != 1 { alphaValue = 1 }
         if ignoresMouseEvents == mouse { ignoresMouseEvents = !mouse }
+        // A paper revealed: missing pictures on it are retried again (NotePictures' retry).
+        if !was, self is NotePanel { MainActor.assumeIsolated { NotePictures.shared.visibilityChanged() } }
     }
 
     /// On the screen and seen (not concealed).

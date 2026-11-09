@@ -89,10 +89,12 @@ final class NotePictures {
     @ObservationIgnored private var asked: Set<String> = []
     /// What each picture was asked for with (its link and the note's folder), to ask again.
     @ObservationIgnored private var sources: [String: (link: String, folder: URL)] = [:]
-    /// Editors that may show pictures (weak), and pictures the read-only papers show now (counted).
-    @ObservationIgnored private let editors = NSHashTable<NSView>.weakObjects()
-    @ObservationIgnored private var shownElsewhere: [String: Int] = [:]
+    /// The one visibility signal: the pictures of papers revealed and open now (the desk's, NoteShelf.picturesOnScreen).
+    @ObservationIgnored var visible: () -> Set<String> = { [] }
     @ObservationIgnored private var retryTimer: Timer?
+    /// Whether missing pictures are being retried (the timer runs, except headless).
+    @ObservationIgnored private(set) var retrying = false
+    @ObservationIgnored private var reconsidering = false
     @ObservationIgnored private var watching: NSObjectProtocol?
 
     init() {
@@ -107,8 +109,9 @@ final class NotePictures {
 
     func image(_ link: String, in folder: URL) -> NSImage? {
         guard let key = Self.target(link, in: folder) else { return nil }
-        if let image = images[key] { return image }
+        // Recorded first, even for a picture already in memory (a paste's preview): the watcher reads it again from it.
         sources[key] = (link, folder)
+        if let image = images[key] { return image }
         // Broken: asked again only by the watcher or the retry timer, never by drawing (which would loop).
         guard broken[key] == nil else { return nil }
         read(key)
@@ -136,7 +139,7 @@ final class NotePictures {
                         let fresh = self.broken[key] == nil
                         self.broken[key] = Date()
                         if fresh { NotificationCenter.default.post(name: Self.arrived, object: nil, userInfo: ["target": key]) }
-                        self.scheduleRetry()
+                        self.reconsider()
                     }
                 }
             }
@@ -154,33 +157,24 @@ final class NotePictures {
         for key in NoteShelf.picturesTouched(events: paths, keys: Array(Set(images.keys).union(broken.keys))) where sources[key] != nil { read(key) }
     }
 
-    /// An editor that may show pictures, and pictures a read-only paper shows while it's on screen.
-    func register(_ editor: NSView) { editors.add(editor) }
-    func showing(_ link: String, in folder: URL, _ on: Bool) {
-        guard let key = Self.target(link, in: folder) else { return }
-        shownElsewhere[key, default: 0] += on ? 1 : -1
-        if shownElsewhere[key] ?? 0 <= 0 { shownElsewhere[key] = nil }
-        if on { scheduleRetry() }
+    /// A paper was revealed, hidden, opened or folded: the retry timer weighed again on the next turn (once for
+    /// however many changes came together).
+    func visibilityChanged() {
+        guard !reconsidering else { return }
+        reconsidering = true
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.reconsidering = false; self.reconsider() } }
     }
 
-    /// The pictures on screen now: in an editor whose window shows, or on a read-only paper.
-    private var onScreen: Set<String> {
-        var keys = Set(shownElsewhere.keys)
-        for case let editor as NoteTextView in editors.allObjects {
-            guard let window = editor.window, window.isVisible, window.alphaValue > 0, window.occlusionState.contains(.visible),
-                  let storage = editor.textStorage else { continue }
-            storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, _, _ in
-                if let key = ((value as? NSTextAttachment)?.attachmentCell as? PictureCell)?.leadsTo { keys.insert(key) }
+    /// The retry timer runs while some missing picture is on screen (NoteShelf.pictureRetry), and only then.
+    private func reconsider() {
+        retrying = NoteShelf.pictureRetry(broken: broken, onScreen: visible(), now: Date()).keepTimer
+        if !retrying {
+            retryTimer?.invalidate()
+            retryTimer = nil
+        } else if retryTimer == nil, !Headless.on {
+            retryTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { _ = self?.retryTick(now: Date()) }
             }
-        }
-        return keys
-    }
-
-    /// The retry timer: every 10 s, only while a missing picture is on screen.
-    private func scheduleRetry() {
-        guard retryTimer == nil, !broken.isEmpty, !Headless.on else { return }
-        retryTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { _ = self?.retryTick(now: Date()) }
         }
     }
 
@@ -188,8 +182,9 @@ final class NotePictures {
     /// asked for again.
     @discardableResult
     func retryTick(now: Date, onScreen given: Set<String>? = nil) -> [String] {
-        let rule = NoteShelf.pictureRetry(broken: broken, onScreen: given ?? onScreen, now: now)
+        let rule = NoteShelf.pictureRetry(broken: broken, onScreen: given ?? visible(), now: now)
         if !rule.keepTimer {
+            retrying = false
             retryTimer?.invalidate()
             retryTimer = nil
         }
@@ -616,7 +611,6 @@ final class NoteTextView: NSTextView {
         if let pictureObserver { NotificationCenter.default.removeObserver(pictureObserver) }
         pictureObserver = nil
         guard window != nil else { return }
-        NotePictures.shared.register(self)
         pictureObserver = NotificationCenter.default.addObserver(forName: NotePictures.arrived, object: nil, queue: .main) { [weak self] note in
             guard let target = note.userInfo?["target"] as? String else { return }
             MainActor.assumeIsolated { _ = self?.pictureArrived(target) }

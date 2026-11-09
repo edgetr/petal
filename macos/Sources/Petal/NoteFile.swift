@@ -1679,6 +1679,18 @@ enum NoteShelf {
         return path
     }
 
+    /// The pictures on screen now, the one visibility signal the retry timer asks: those of papers that are revealed
+    /// (not hidden by going clear) and open; a folded or hidden paper shows none.
+    static func picturesOnScreen(_ papers: [(revealed: Bool, open: Bool, folder: String, body: String)]) -> Set<String> {
+        var keys: Set<String> = []
+        for paper in papers where paper.revealed && paper.open {
+            for case .image(let path, _) in NoteBlock.blocks(paper.body) {
+                if let key = pictureTarget(path, noteFolder: paper.folder) { keys.insert(key) }
+            }
+        }
+        return keys
+    }
+
     /// Which missing pictures to ask for again now: those still on screen whose last try was at least `every` ago.
     /// The retry timer runs only while some missing picture is on screen (`keepTimer`).
     static func pictureRetry(broken: [String: Date], onScreen: Set<String>, now: Date, every: TimeInterval = 10) -> (retry: [String], keepTimer: Bool) {
