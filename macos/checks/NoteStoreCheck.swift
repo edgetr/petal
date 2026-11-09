@@ -130,6 +130,7 @@ struct NoteStoreCheck {
         coverConflictNames(root: root)
         keepPromotes(root: root)
         coverGroupsByFolder(root: root)
+        renewalKeepsCanvas(root: root)
         duplicatedNotebook(root: root)
         renamedPrivateFolder(root: root)
         identicalRenewal(root: root)
@@ -1134,7 +1135,8 @@ struct NoteStoreCheck {
         _ = NoteStore.create(coverFile.serialized(), at: coverURL, root: root)
         let store = NoteStore(root: root)
         store.preview([PaperNote(file: coverFile, url: coverURL, notebook: "Board", revision: coverFile.serialized())],
-                      notebooks: [Notebook(name: "Board", folder: folder, color: "", cover: coverURL.path, count: 0)])
+                      notebooks: [Notebook(name: "Board", folder: folder, color: "", cover: coverURL.path, count: 0, instance: NoteStore.instance(of: folder))])
+        let boardKey = CanvasQueue.folderKey(NoteStore.instance(of: folder))
         // Something in the canvas file's place that can't be read (a folder): every write fails until it's gone.
         let canvasFile = folder.appending(path: NoteStore.canvasName)
         try? fm.createDirectory(at: canvasFile, withIntermediateDirectories: true)
@@ -1144,10 +1146,10 @@ struct NoteStoreCheck {
         var until = Date().addingTimeInterval(3)
         while !store.canvasUnsaved.contains("Board") && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         NoteJournal.queue.sync {}
-        let journaled = NoteJournal.readCanvas(NoteJournal.canvasFile("COVER-BOARD"))
+        let journaled = NoteJournal.readCanvas(NoteJournal.canvasFile(boardKey))
         expect(store.canvasUnsaved.contains("Board") && store.canvasPending("Board").count == 2 && saved == nil
-               && journaled?.edits.count == 2 && journaled?.coverID == "COVER-BOARD",
-               "a failed canvas save is kept, said, and journaled on this Mac by its notebook's cover id")
+               && journaled?.edits.count == 2 && journaled?.coverID == boardKey,
+               "a failed canvas save is kept, said, and journaled on this Mac by its notebook's own folder")
         // Meanwhile another Mac moved n1, later than the edit waiting here.
         try? fm.removeItem(at: canvasFile)
         let later = NoteCanvas().applying(.move("n1", .init(x: 900, y: 900)), at: Date().timeIntervalSince1970 + 3600)
@@ -1159,7 +1161,7 @@ struct NoteStoreCheck {
         expect(landed?.notes["n1"]?.x == 900 && landed?.notes["n2"]?.x == 5, "tried again, merged: the newer move elsewhere stays, its own edit lands",
                "\(String(describing: landed?.notes))")
         expect(!store.canvasUnsaved.contains("Board") && store.canvasPending("Board").isEmpty
-               && !fm.fileExists(atPath: NoteJournal.canvasFile("COVER-BOARD").path), "and its journal entry goes")
+               && !fm.fileExists(atPath: NoteJournal.canvasFile(boardKey).path), "and its journal entry goes")
 
         // At the next launch: an entry left by a quit, its notebook renamed meanwhile, goes to where it is now.
         NoteJournal.keepCanvas(CanvasEntry(coverID: "COVER-BOARD", notebook: "Board", edits: [NoteCanvas.Stamped(.words(.init(id: "w", text: "hi", x: 1, y: 1)))]))
@@ -1194,7 +1196,8 @@ struct NoteStoreCheck {
         _ = NoteStore.create(coverFile.serialized(), at: coverURL, root: root)
         let store = NoteStore(root: root)
         store.preview([PaperNote(file: coverFile, url: coverURL, notebook: "Drain board", revision: coverFile.serialized())],
-                      notebooks: [Notebook(name: "Drain board", folder: folder, color: "", cover: coverURL.path, count: 0)])
+                      notebooks: [Notebook(name: "Drain board", folder: folder, color: "", cover: coverURL.path, count: 0, instance: NoteStore.instance(of: folder))])
+        let drainKey = CanvasQueue.folderKey(NoteStore.instance(of: folder))
         // Hold the files' queue so the first write is under way when the drain comes.
         let hold = DispatchSemaphore(value: 0)
         NoteStore.io.async { hold.wait() }
@@ -1208,11 +1211,11 @@ struct NoteStoreCheck {
         while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         NoteJournal.queue.sync {}
         var left: [String] = []
-        for stamped in NoteJournal.readCanvas(NoteJournal.canvasFile("COVER-DRAIN"))?.edits ?? [] {
+        for stamped in NoteJournal.readCanvas(NoteJournal.canvasFile(drainKey))?.edits ?? [] {
             if case .move(let id, _) = stamped.edit { left.append(id) }
         }
         expect(left.contains("second"), "an edit queued behind a write under way at quit stays journaled", "\(left)")
-        try? fm.removeItem(at: NoteJournal.canvasFile("COVER-DRAIN"))
+        try? fm.removeItem(at: NoteJournal.canvasFile(drainKey))
     }
 
     /// A coverless notebook made Private, then a quit before its cover is made: at the next launch it's Private at
@@ -1532,6 +1535,43 @@ struct NoteStoreCheck {
         for folder in [a, b, c] { try? fm.removeItem(at: folder) }
     }
 
+    /// A notebook with canvas edits waiting (its canvas can't be written yet) whose cover's id is renewed when a
+    /// duplicate appears: its edits stay its own, keyed by its folder, and land in it, never in the other notebook.
+    @MainActor static func renewalKeepsCanvas(root: URL) {
+        let fm = FileManager.default
+        let a = root.appending(path: "Alpha"), z = root.appending(path: "Zeta")
+        try? fm.createDirectory(at: z, withIntermediateDirectories: true)
+        var cover = NoteFile(id: "SHARED-COVER", body: "# About this notebook\nZeta")
+        cover.cover = true
+        _ = NoteStore.create(cover.serialized(), at: z.appending(path: NoteShelf.coverName), root: root)
+        let zCanvas = z.appending(path: NoteStore.canvasName)
+        try? fm.createDirectory(at: zCanvas, withIntermediateDirectories: true)   // Z's canvas can't be written for now
+        let store = NoteStore(root: root)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        store.reload()
+        var until = Date().addingTimeInterval(8)
+        while store.notebook("Zeta") == nil && Date() < until { settle(0.05) }
+        store.editCanvas("Zeta", .move("z1", .init(x: 9, y: 9))) { _ in }
+        settle(0.5)
+        // A duplicate named so it sorts first: Zeta's cover is the one renewed.
+        try? fm.createDirectory(at: a, withIntermediateDirectories: true)
+        _ = NoteStore.create(cover.serialized(), at: a.appending(path: NoteShelf.coverName), root: root)
+        store.reload()
+        until = Date().addingTimeInterval(8)
+        let renewed = NoteLibrary.renewedID("SHARED-COVER", folder: "Zeta")
+        func idOnDisk(_ folder: URL) -> String? { text(folder.appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()).id } }
+        while idOnDisk(z) != renewed && Date() < until { settle(0.1) }
+        store.reload()
+        settle(1)
+        try? fm.removeItem(at: zCanvas)
+        until = Date().addingTimeInterval(10)
+        while NoteCanvas.decode(text(zCanvas))?.notes["z1"] == nil && Date() < until { settle(0.2) }
+        expect(idOnDisk(z) == renewed && idOnDisk(a) == "SHARED-COVER", "the later folder's cover was renewed")
+        expect(NoteCanvas.decode(text(zCanvas))?.notes["z1"]?.x == 9 && !fm.fileExists(atPath: a.appending(path: NoteStore.canvasName).path),
+               "its waiting canvas edit lands in its own notebook, never in the one that now has its old cover id")
+        for folder in [a, z] { try? fm.removeItem(at: folder) }
+    }
+
     /// A notebook duplicated in Finder (its cover's id in two folders): the later folder's cover gets a new,
     /// deterministic id through its session, Private until it lands; then its cover fields and canvas stay its own.
     @MainActor static func duplicatedNotebook(root: URL) {
@@ -1729,13 +1769,13 @@ struct NoteStoreCheck {
         store.reload()
         settle(1.5)
         NoteJournal.queue.sync {}
-        expect(store.coverID("Downloading") == "COVER-DL" && NoteJournal.readCanvas(NoteJournal.canvasFile("COVER-DL"))?.edits.count == 1
-               && !fm.fileExists(atPath: NoteJournal.canvasFile(CanvasQueue.folderKey(instance)).path), "re-keyed by its cover id once known, out of the folder's entry")
+        expect(store.coverID("Downloading") == "COVER-DL" && NoteJournal.readCanvas(NoteJournal.canvasFile(CanvasQueue.folderKey(instance)))?.edits.count == 1
+               && !fm.fileExists(atPath: NoteJournal.canvasFile("COVER-DL").path), "its cover id known, the edit stays keyed by its own folder")
         try? fm.removeItem(at: canvasFile)
         let until = Date().addingTimeInterval(10)
         while NoteCanvas.decode(text(canvasFile))?.notes["n1"] == nil && Date() < until { settle(0.2) }
         NoteJournal.queue.sync {}
-        expect(NoteCanvas.decode(text(canvasFile))?.notes["n1"]?.x == 7 && !fm.fileExists(atPath: NoteJournal.canvasFile("COVER-DL").path), "and lands")
+        expect(NoteCanvas.decode(text(canvasFile))?.notes["n1"]?.x == 7 && !fm.fileExists(atPath: NoteJournal.canvasFile(CanvasQueue.folderKey(instance)).path), "and lands")
         try? fm.removeItem(at: folder)
     }
 

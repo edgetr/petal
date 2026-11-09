@@ -488,6 +488,26 @@ struct NoteLibraryCheck {
                && CanvasQueue.notebook(key: CanvasQueue.folderKey("1:44"), covers: [], folders: [("1:42", "Trip")]) == nil
                && CanvasQueue.notebook(key: "cov", covers: [("cov", "Work")], folders: []) == "Work",
                "a canvas entry's notebook by its cover id, or its folder while the cover id isn't known")
+        // A picture leaves Petal only from the notes' Pictures folder, as an image that decodes: never another note, a
+        // cover or a file beside a note that a picture link reaches.
+        let exportRoot = FileManager.default.temporaryDirectory.appending(path: "petal-export-\(UUID().uuidString)")
+        let pictureDir = exportRoot.appending(path: "Pictures/abc")
+        try? FileManager.default.createDirectory(at: pictureDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: exportRoot.appending(path: "Health"), withIntermediateDirectories: true)
+        let png = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")!
+        try? png.write(to: pictureDir.appending(path: "shot.png"))
+        try? Data("---\nprivate: true\n---\nsecret".utf8).write(to: exportRoot.appending(path: "Health/About this notebook.md"))
+        try? Data("not an image".utf8).write(to: pictureDir.appending(path: "fake.png"))
+        try? png.write(to: exportRoot.appending(path: "Health/beside.png"))
+        expect(NoteDrop.exportPicture(pictureDir.appending(path: "shot.png"), root: exportRoot) != nil, "a real picture in Pictures goes")
+        expect(NoteDrop.exportPicture(exportRoot.appending(path: "Health/About this notebook.md"), root: exportRoot) == nil,
+               "another notebook's cover reached by a picture link never goes")
+        expect(NoteDrop.exportPicture(pictureDir.appending(path: "fake.png"), root: exportRoot) == nil, "a file named like a picture that isn't one never goes")
+        expect(NoteDrop.exportPicture(exportRoot.appending(path: "Health/beside.png"), root: exportRoot) == nil, "a picture outside Pictures never goes")
+        try? FileManager.default.createSymbolicLink(at: pictureDir.appending(path: "link.png"), withDestinationURL: exportRoot.appending(path: "Health/About this notebook.md"))
+        expect(NoteDrop.exportPicture(pictureDir.appending(path: "link.png"), root: exportRoot) == nil, "a link in Pictures to anything else never goes")
+        expect(NoteDrop.decodesAsImage(png) && !NoteDrop.decodesAsImage(Data("plain".utf8)), "held bytes go only as an image")
+        try? FileManager.default.removeItem(at: exportRoot)
         // Mail: a picture's file, else its held bytes staged, else missing and said.
         expect(NoteDrop.attachment(onDisk: true, held: true) == .file && NoteDrop.attachment(onDisk: false, held: true) == .stage
                && NoteDrop.attachment(onDisk: false, held: false) == .missing, "a picture for Mail: its file, its held bytes, or missing")

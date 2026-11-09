@@ -82,10 +82,12 @@ extension NoteDesk {
                 let onDisk = NoteStore.pictureFile(link, noteFolder: folder, root: root).flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
                 switch NoteDrop.attachment(onDisk: onDisk != nil, held: held[name] != nil) {
                 case .file:
-                    // Only pictures that are documents, as they really are (NoteTasks' rule).
-                    if let onDisk, case (let url, .open) = NoteTasks.decide(onDisk) { files.append(url) } else { missing += 1 }
+                    // Only a real picture in the notes' Pictures folder (NoteDrop.exportPicture): never another note,
+                    // a cover or anything else a picture link reaches.
+                    if let onDisk, let url = NoteDrop.exportPicture(onDisk, root: root) { files.append(url) } else { missing += 1 }
                 case .stage:
-                    if let staged = NoteDrop.stage(held[name]!, name: name, in: stage), case (let url, .open) = NoteTasks.decide(staged) { files.append(url) }
+                    // Held bytes go only when they decode as an image.
+                    if let bytes = held[name], NoteDrop.decodesAsImage(bytes), let staged = NoteDrop.stage(bytes, name: name, in: stage) { files.append(staged) }
                     else { missing += 1 }
                 case .missing:
                     missing += 1

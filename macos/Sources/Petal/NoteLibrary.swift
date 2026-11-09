@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import UniformTypeIdentifiers
 
 // Petal Notes' library, its pure side (checked by macos/checks/run.sh, no file or window): what the Petal Notes
@@ -1345,6 +1346,29 @@ enum NoteDrop {
         let url = folder.appending(path: safe)
         return (try? data.write(to: url, options: .withoutOverwriting)) != nil ? url : nil
     }
+
+    /// The one rule for a picture leaving Petal (a Mail draft, or anything else a note's picture links become files
+    /// for): only a file inside the notes' Pictures folder (its links resolved first), of an image type, that decodes as
+    /// an image. Anything else a picture link reaches (another note, a notebook's cover, a file beside a note) is
+    /// missing, never sent. Phase 1's `pictureFile` stays as it is for showing pictures; this is the export's own check.
+    static func exportPicture(_ url: URL, root: URL) -> URL? {
+        let real = url.resolvingSymlinksInPath().standardizedFileURL
+        let pictures = root.appending(path: NoteShelf.picturesRoot).resolvingSymlinksInPath().standardizedFileURL
+        guard inside(real.path, pictures.path),
+              let type = try? real.resourceValues(forKeys: [.contentTypeKey]).contentType, type.conforms(to: .image),
+              let source = CGImageSourceCreateWithURL(real as CFURL, nil), CGImageSourceGetCount(source) > 0,
+              CGImageSourceCreateImageAtIndex(source, 0, nil) != nil else { return nil }
+        return real
+    }
+
+    /// Held bytes leave Petal only when they decode as an image.
+    static func decodesAsImage(_ data: Data) -> Bool {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0 else { return false }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil) != nil
+    }
+
+    /// `path` strictly inside `folder`.
+    static func inside(_ path: String, _ folder: String) -> Bool { path.hasPrefix(folder.hasSuffix("/") ? folder : folder + "/") }
 
     /// What the person is told when pictures couldn't go along.
     static func missingWords(_ count: Int) -> String? {

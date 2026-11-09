@@ -2301,7 +2301,8 @@ extension NoteStore {
     /// The key a notebook's canvas edits are kept by: its cover's id once it has one, else its folder itself
     /// (`folder:` and its volume and inode); nil when neither is known yet (its folder not read).
     func canvasKey(_ notebook: String) -> String? {
-        if let id = coverID(notebook) { return id }
+        // Always the notebook's own folder (its volume and inode: the same through a rename, never another notebook's,
+        // whatever happens to cover ids), never its cover's id, which a duplicated notebook's renewal can move.
         guard let book = self.notebook(notebook), !book.instance.isEmpty else { return nil }
         return CanvasQueue.folderKey(book.instance)
     }
@@ -2347,8 +2348,7 @@ extension NoteStore {
     func editCanvas(_ notebook: String, _ edit: NoteCanvas.Edit, at: Double = Date().timeIntervalSince1970,
                     then done: @escaping @MainActor (NoteCanvas?) -> Void = { _ in }) {
         guard !switching, !draining, let book = self.notebook(notebook) else { return done(nil) }
-        // Journaled at once, by its cover's id or, while that isn't known (a cover still downloading, or none yet), by
-        // its folder; re-keyed by cover id once it is (`rekeyCanvas`). Only a notebook whose folder isn't read yet
+        // Journaled at once, by the notebook's own folder (`canvasKey`). Only a notebook whose folder isn't read yet
         // can't take edits: the canvas waits for it (`canvasEditable`), and nothing shown is left unjournaled.
         guard let key = canvasKey(book.name) else {
             onProblem("Waiting for \(book.name) to download: its canvas can be changed once it's here.")
@@ -2375,29 +2375,13 @@ extension NoteStore {
 
     /// The edits of a notebook's canvas not saved yet.
     func canvasPending(_ notebook: String) -> [NoteCanvas.Stamped] {
-        guard let book = self.notebook(notebook) else { return [] }
-        let keys = [coverID(book.name), book.instance.isEmpty ? nil : CanvasQueue.folderKey(book.instance)].compactMap { $0 }
-        return keys.flatMap { canvasWaiting[$0]?.edits ?? [] }
+        guard let key = canvasKey(notebook) else { return [] }
+        return canvasWaiting[key]?.edits ?? []
     }
 
     /// Whether a notebook's canvas can take an edit now (its cover id or folder known), else it says it's waiting.
     func canvasEditable(_ notebook: String) -> Bool { canvasKey(notebook) != nil }
 
-    /// Edits kept by a notebook's folder whose cover now has an id: moved to the cover id's entry, journaled there
-    /// first, then out of the folder's (never while a write of them is under way).
-    private func rekeyCanvas() {
-        for (key, entry) in canvasWaiting where CanvasQueue.isFolderKey(key) && !canvasWriting.contains(key) {
-            guard let book = notebook(canvasKey: key), let id = coverID(book.name) else { continue }
-            var target = canvasWaiting[id] ?? CanvasEntry(coverID: id, notebook: book.name, edits: [])
-            target.edits += entry.edits.filter { edit in !target.edits.contains { $0.id == edit.id } }
-            canvasWaiting[id] = target
-            canvasWaiting[key] = nil
-            canvasDone[id, default: []] += canvasDone.removeValue(forKey: key) ?? []
-            let moved = Set(entry.edits.map(\.id))
-            // The old entry loses them only once the new one holds them (NoteJournal.moveCanvas).
-            NoteJournal.queue.async { NoteJournal.moveCanvas(target, from: key, ids: moved) }
-        }
-    }
 
     private func pumpCanvas(_ id: String) {
         guard !canvasWriting.contains(id), !switching, !draining, let entry = canvasWaiting[id], !entry.edits.isEmpty, loaded else { return }
@@ -2467,7 +2451,6 @@ extension NoteStore {
 
     /// Edits waiting, after a read of the folder: each tried again where its notebook is now (renamed, gone).
     func pumpAllCanvas() {
-        rekeyCanvas()
         for id in canvasWaiting.keys { pumpCanvas(id) }
     }
 
