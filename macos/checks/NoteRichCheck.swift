@@ -210,6 +210,63 @@ struct NoteRichCheck {
         let keptBody = NoteBlock.body(NoteRich.blocks(changedMeanwhile.textStorage!))
         expect(keptBody.contains("OTHERED") && keptBody.contains("../Pictures/x/p.png"), "text changed meanwhile: nothing replaced, the picture still put in", keptBody)
 
+        // Cut and paste keep cards and pictures: a note's own fragment beside plain text, on a private pasteboard here
+        // (never the person's clipboard).
+        let board = NSPasteboard(name: NSPasteboard.Name("petal-check-\(UUID().uuidString)"))
+        defer { board.releaseGlobally() }
+        let inbox = URL(fileURLWithPath: "/tmp/petal-rich/Inbox"), work = URL(fileURLWithPath: "/tmp/petal-rich/Work")
+        func editor(_ body: String, note: String, folder: URL) -> NoteTextView {
+            let view = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+            view.noteID = note
+            view.noteFolder = folder
+            view.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks(body), folder: view.folderRef, style: style))
+            return view
+        }
+        func body(_ view: NoteTextView) -> String { NoteBlock.body(NoteRich.blocks(view.textStorage!)) }
+        let carded = editor("hello\nhttps://example.com/page\nafter", note: "N1", folder: inbox)
+        carded.setSelectedRange(NSRange(location: 0, length: 7))   // "hello\n" and the card
+        expect(carded.copySelection(to: board), "words and a card copied")
+        carded.delete(nil)
+        expect(!body(carded).contains("hello") && !body(carded).contains("example.com"), "cut: gone from the note", body(carded))
+        expect(board.string(forType: .string) == "hello\nhttps://example.com/page", "another app gets plain text: the words and the address",
+               board.string(forType: .string) ?? "nil")
+        carded.setSelectedRange(NSRange(location: (carded.string as NSString).length, length: 0))
+        expect(carded.pasteNote(from: board), "pasted back as the note's own")
+        let cardBlocks = NoteBlock.blocks(body(carded))
+        expect(cardBlocks.contains(.link("https://example.com/page")) && body(carded) == "\nafterhello\nhttps://example.com/page",
+               "the card comes back as a card, after the words", body(carded))
+
+        // Words and a picture, within the note: the picture line as it was, nothing copied.
+        var acceptedBytes: [Data] = []
+        let pictureLine = "![shot](../Pictures/abc/p.png)"
+        let illustrated = editor("caption line\n" + pictureLine, note: "N1", folder: inbox)
+        illustrated.acceptPictures = { items in acceptedBytes += items.map(\.data); return nil }
+        illustrated.selectAll(nil)
+        illustrated.copySelection(to: board)
+        expect(board.string(forType: .string) == "caption line\nshot" && !(board.string(forType: .string) ?? "").contains("Pictures"),
+               "another app gets the words and the caption, never a picture's path", board.string(forType: .string) ?? "nil")
+        illustrated.setSelectedRange(NSRange(location: (illustrated.string as NSString).length, length: 0))
+        illustrated.pasteNote(from: board)
+        expect(body(illustrated).components(separatedBy: pictureLine).count == 3 && acceptedBytes.isEmpty, "within the note: the same picture line again", body(illustrated))
+
+        // Into another note: the picture's bytes (as last read) stored in that note's own folder, its new link used.
+        NotePictures.shared.preview(URL(fileURLWithPath: "/tmp/petal-rich/Pictures/abc/p.png"), NSImage(size: NSSize(width: 2, height: 2)), data: Data("pic bytes".utf8))
+        let other = editor("", note: "N2", folder: work)
+        other.acceptPictures = { items in
+            acceptedBytes += items.map(\.data)
+            return items.map { ("../Pictures/n2hash/picture-new.\($0.ext)", URL(fileURLWithPath: "/tmp/petal-rich/Pictures/n2hash/picture-new.png"), $0.caption) }
+        }
+        other.pasteNote(from: board)
+        expect(acceptedBytes == [Data("pic bytes".utf8)] && NoteBlock.blocks(body(other)).contains(.image(path: "../Pictures/n2hash/picture-new.png", caption: "shot"))
+               && NoteBlock.blocks(body(other)).contains(.text("caption line")), "into another note: its bytes copied into that note's folder", body(other))
+        // Bytes not in memory: the same file linked from there (never a broken link).
+        let unread = editor("![](Trip.assets/q.png)", note: "N1", folder: inbox)
+        unread.selectAll(nil)
+        unread.copySelection(to: board)
+        let elsewhere = editor("", note: "N3", folder: work)
+        elsewhere.pasteNote(from: board)
+        expect(body(elsewhere) == "![](../Inbox/Trip.assets/q.png)", "a picture not in memory: linked to the same file from the other notebook", body(elsewhere))
+
         // A note moved to another notebook: its open editor's pictures read their links from the new folder, the
         // text and selection untouched.
         let moving = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 400))

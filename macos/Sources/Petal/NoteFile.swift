@@ -1694,6 +1694,17 @@ enum NoteShelf {
         return keys
     }
 
+    /// A link to `target` (an absolute path) from a note's folder, by the words alone: "../Pictures/h/p.png" from
+    /// another notebook, "Trip.assets/p.png" beside it. Nil unless the link stays inside the notes' root (pictureTarget).
+    static func relink(_ target: String, from folder: String) -> String? {
+        let to = target.split(separator: "/").map(String.init), from = folder.split(separator: "/").map(String.init)
+        var common = 0
+        while common < min(to.count, from.count), to[common] == from[common] { common += 1 }
+        guard common < to.count else { return nil }
+        let link = (Array(repeating: "..", count: from.count - common) + to[common...]).joined(separator: "/")
+        return pictureTarget(link, noteFolder: folder) == target ? link : nil
+    }
+
     /// Where pasted pictures go when they're in: the selection they were pasted over when the text there still says
     /// what it did then; else, never replacing anything, at that place (within the text).
     static func pasteRange(at: Int, length: Int, selected: String, text: String) -> NSRange {

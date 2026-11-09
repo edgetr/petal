@@ -714,6 +714,11 @@ struct NotesCheck {
                && NoteShelf.resolvedLink("./a/./b.png", from: "/n/Inbox") == "/n/Inbox/a/b.png", "a handwritten link: beside the note")
         expect(NoteShelf.resolvedLink("../../../../x.png", from: "/n/Inbox") == nil && NoteShelf.resolvedLink("/abs.png", from: "/n/Inbox") == nil,
                "above /, or absolute: none")
+        // A link to the same picture from another note's folder, inside the notes only.
+        expect(NoteShelf.relink("/n/Pictures/h/p.png", from: "/n/Work") == "../Pictures/h/p.png"
+               && NoteShelf.relink("/n/Inbox/Trip.assets/p.png", from: "/n/Work") == "../Inbox/Trip.assets/p.png"
+               && NoteShelf.relink("/n/Work/a.png", from: "/n/Work") == "a.png", "relinked from the other notebook")
+        expect(NoteShelf.relink("/elsewhere/p.png", from: "/n/Work") == nil, "a file outside the notes: no link")
         // A paste's range: the selection when it still holds what was selected; else no replacing, at that place.
         expect(NoteShelf.pasteRange(at: 5, length: 7, selected: "REPLACE", text: "keep REPLACE end") == NSRange(location: 5, length: 7), "still there: replaced")
         expect(NoteShelf.pasteRange(at: 5, length: 7, selected: "REPLACE", text: "keep OTHERED end") == NSRange(location: 5, length: 0)

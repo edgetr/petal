@@ -1493,7 +1493,7 @@ final class NoteDesk {
                     case .accepted: break
                     }
                     guard let (nowKey, accepted) = taken else { return }
-                    for (index, picture) in accepted.enumerated() { NotePictures.shared.preview(picture.file, NSImage(data: ready[index].data) ?? NSImage()) }
+                    for (index, picture) in accepted.enumerated() { NotePictures.shared.preview(picture.file, NSImage(data: ready[index].data) ?? NSImage(), data: ready[index].data) }
                     self.fresh.remove(nowKey)
                     if self.insertPictures(nowKey, accepted, at: items.at, length: items.length, selected: items.selected) {
                         // Into the note now (and its snapshot), not a moment later.
@@ -1537,6 +1537,16 @@ final class NoteDesk {
     /// How many pictures the paper says couldn't be saved (or read yet).
     func troubleCount(_ paper: PaperNote) -> Int {
         (store.pictureTrouble[paper.key]?.count ?? 0) + (store.importTrouble[paper.noteID]?.values.reduce(0) { $0 + $1.count } ?? 0)
+    }
+
+    /// Pictures pasted from another note (their bytes as last read): stored in this note's own folder through its
+    /// session, as a paste's are, and shown at once. Their references, or nil when the note can't take them.
+    func acceptCopiedPictures(_ key: String, _ items: [(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? {
+        guard let accepted = store.acceptPictures(key, items) else { return nil }
+        for (index, picture) in accepted.enumerated() {
+            NotePictures.shared.preview(picture.file, NSImage(data: items[index].data) ?? NSImage(), data: items[index].data)
+        }
+        return accepted
     }
 
     /// Pictures' references into a note's open editor, as ordinary text, at the cursor's place then; false when no
