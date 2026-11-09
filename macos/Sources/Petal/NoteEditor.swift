@@ -254,6 +254,11 @@ enum NoteRich {
 
     /// The editor's text for a note's body. `base`: the note's folder, for its pictures.
     @MainActor static func attributed(_ blocks: [NoteBlock], base: URL, style: Style) -> NSAttributedString {
+        attributed(blocks, folder: NoteFolder(base), style: style)
+    }
+
+    /// The same, its pictures reading their links through `folder` (the editor's own: a move rebinds them all).
+    @MainActor static func attributed(_ blocks: [NoteBlock], folder: NoteFolder, style: Style) -> NSAttributedString {
         let result = NSMutableAttributedString()
         for (index, block) in blocks.enumerated() {
             if index > 0 { result.append(NSAttributedString(string: "\n", attributes: attributes(kind(of: blocks[index - 1]), style))) }
@@ -268,7 +273,7 @@ enum NoteRich {
             case .link(let url):
                 result.append(attachment(LinkCell(url: url), attributes("link", style)))
             case .image(let path, let caption):
-                result.append(attachment(PictureCell(path: path, folder: base, caption: caption), attributes("image", style)))
+                result.append(attachment(PictureCell(path: path, folder: folder, caption: caption), attributes("image", style)))
             case .ink(let text):
                 result.append(inline(text, attributes("ink", style)))
             case .bullet(let text):
@@ -528,18 +533,25 @@ final class LinkCell: NSTextAttachmentCell {
 }
 
 /// A picture beside the note (pasted or dropped), with its caption.
+/// The folder a note's file is in, shared by its editor and every picture in it: when the note moves, the editor
+/// changes it once and every picture reads its link from the new folder (nothing is stored per picture).
+final class NoteFolder {
+    var url: URL
+    init(_ url: URL) { self.url = url }
+}
+
 final class PictureCell: NSTextAttachmentCell {
     let path: String
-    /// The note's folder its link is read from.
-    let folder: URL
+    /// The note's folder its link is read from, as it is now (shared with its editor).
+    let note: NoteFolder
     let caption: String
-    /// Where its link leads (nil: out of the notes' root, absolute, or a web address; never read).
-    let leadsTo: String?
-    init(path: String, folder: URL, caption: String) {
+    var folder: URL { note.url }
+    /// Where its link leads now (nil: out of the notes' root, absolute, or a web address; never read).
+    var leadsTo: String? { NotePictures.target(path, in: note.url) }
+    init(path: String, folder: NoteFolder, caption: String) {
         self.path = path
-        self.folder = folder
+        self.note = folder
         self.caption = caption
-        self.leadsTo = NotePictures.target(path, in: folder)
         super.init(textCell: "")
     }
     required init(coder: NSCoder) { fatalError() }
@@ -601,7 +613,51 @@ final class NoteTextView: NSTextView {
     var changed: () -> Void = {}
     var escape: () -> Void = {}
     /// The note's folder, which its picture links are read from.
-    var noteFolder = URL(fileURLWithPath: "/")
+    /// Shared with every picture in this editor's text (NoteFolder).
+    let folderRef = NoteFolder(URL(fileURLWithPath: "/"))
+    var noteFolder: URL {
+        get { folderRef.url }
+        set {
+            guard newValue != folderRef.url else { return }
+            folderRef.url = newValue
+            // The note moved: its pictures read their links from here now; laid out and drawn again, the text and
+            // the selection untouched.
+            repictured()
+        }
+    }
+    /// This editor's own undo history (never the window's, shared with other papers), cleared whenever its text
+    /// comes from outside.
+    let history = UndoManager()
+    override var undoManager: UndoManager? { history }
+
+    /// ⌘Z and ⇧⌘Z undo and redo this editor's own history while it has the keyboard (Petal has no Edit menu).
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        guard window?.firstResponder === self, event.charactersIgnoringModifiers?.lowercased() == "z",
+              mods == .command || mods == [.command, .shift] else { return super.performKeyEquivalent(with: event) }
+        if mods.contains(.shift) { if history.canRedo { history.redo() } } else if history.canUndo { history.undo() }
+        return true
+    }
+
+    /// Text that came from outside (a sync, a tool, a reload): it replaces what's here and the undo history goes, so
+    /// ⌘Z never applies an old range to new text.
+    func replaceFromOutside(_ text: NSAttributedString) {
+        textStorage?.setAttributedString(text)
+        history.removeAllActions()
+    }
+
+    /// Every picture laid out and drawn again (its folder changed); the paper measured again.
+    func repictured() {
+        guard let storage = textStorage, let layoutManager else { return }
+        var any = false
+        storage.enumerateAttribute(.attachment, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            guard (value as? NSTextAttachment)?.attachmentCell is PictureCell else { return }
+            any = true
+            layoutManager.invalidateLayout(forCharacterRange: range, actualCharacterRange: nil)
+            layoutManager.invalidateDisplay(forCharacterRange: range)
+        }
+        if any { needsDisplay = true; remeasure() }
+    }
     /// Measures the paper again (a picture that arrived changes its height).
     var remeasure: () -> Void = {}
     private var pictureObserver: NSObjectProtocol?
@@ -773,7 +829,7 @@ final class NoteTextView: NSTextView {
     func insertPicture(path: String, file: URL, caption: String, at: Int) -> Bool {
         guard let storage = textStorage else { return false }
         if at >= 0 { setSelectedRange(NSRange(location: min(at, storage.length), length: 0)) }
-        insertLine(PictureCell(path: path, folder: noteFolder, caption: caption), kind: "image")
+        insertLine(PictureCell(path: path, folder: folderRef, caption: caption), kind: "image")
         return true
     }
 
@@ -958,7 +1014,8 @@ struct NoteEditorView: NSViewRepresentable {
             guard let coordinator, let text else { return }
             MainActor.assumeIsolated { coordinator.measure(text) }
         }
-        text.textStorage?.setAttributedString(NoteRich.attributed(NoteBlock.blocks(paper.file.body), base: base, style: style))
+        // From outside (a sync, a tool, a reload, another note): its undo history goes with the old text.
+        text.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks(paper.file.body), folder: text.folderRef, style: style))
         text.typingAttributes = NoteRich.attributes("text", style)
         text.insertionPointColor = style.ink
         DispatchQueue.main.async { coordinator.measure(text) }

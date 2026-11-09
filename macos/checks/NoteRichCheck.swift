@@ -55,7 +55,7 @@ struct NoteRichCheck {
         let roundTrips = bodies.count + 1 - failures
         // A picture arriving: the editors showing it lay out, draw and measure it again; other pictures untouched.
         var checks = 0
-        func expect(_ ok: Bool, _ what: String) { checks += 1; if !ok { failures += 1; print("FAIL \(what)") } }
+        func expect(_ ok: Bool, _ what: String, _ detail: String = "") { checks += 1; if !ok { failures += 1; print("FAIL \(what) \(detail)") } }
         let folder = URL(fileURLWithPath: "/tmp/petal-rich/Inbox")
         let storage = NSTextStorage(), layout = NSLayoutManager()
         storage.addLayoutManager(layout)
@@ -134,6 +134,34 @@ struct NoteRichCheck {
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
         NotificationCenter.default.removeObserver(listen)
         try? FileManager.default.removeItem(at: png)
+        // Text from outside (a sync, a tool, a reload): the undo history goes with the old text; ⌘Z then changes nothing.
+        let typing = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 400))
+        typing.allowsUndo = true
+        typing.isRichText = true
+        typing.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("first words"), folder: typing.folderRef, style: style))
+        typing.setSelectedRange(NSRange(location: 11, length: 0))
+        typing.insertText(" and more typed here", replacementRange: typing.selectedRange())
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        expect(typing.history.canUndo, "the person's typing can be undone")
+        typing.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("short"), folder: typing.folderRef, style: style))
+        typing.undoManager?.undo()
+        expect(!typing.history.canUndo && typing.string == "short", "after an outside load, nothing to undo and ⌘Z leaves the text as it is", typing.string)
+
+        // A note moved to another notebook: its open editor's pictures read their links from the new folder, the
+        // text and selection untouched.
+        let moving = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 400))
+        moving.noteFolder = URL(fileURLWithPath: "/tmp/petal-rich/Inbox")
+        var remeasured = 0
+        moving.remeasure = { remeasured += 1 }
+        moving.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("words\n![](Trip.assets/q.png)\nafter"), folder: moving.folderRef, style: style))
+        moving.setSelectedRange(NSRange(location: 2, length: 3))
+        let textBefore = moving.string
+        moving.noteFolder = URL(fileURLWithPath: "/tmp/petal-rich/Work")
+        let cells = NoteRich.pictureRanges(in: moving.textStorage!, target: "/tmp/petal-rich/Work/Trip.assets/q.png")
+        expect(cells.count == 1 && NoteRich.pictureRanges(in: moving.textStorage!, target: "/tmp/petal-rich/Inbox/Trip.assets/q.png").isEmpty,
+               "its picture now leads from the new notebook, not the old")
+        expect(moving.string == textBefore && moving.selectedRange() == NSRange(location: 2, length: 3) && remeasured == 1,
+               "the text and selection kept, the pictures laid out again")
         print("note editor: \(roundTrips) of \(bodies.count + 1) round trips, \(checks) picture checks" + (failures > bodies.count + 1 - roundTrips ? " (some failed)" : ""))
         if failures > 0 { exit(1) }
     }
