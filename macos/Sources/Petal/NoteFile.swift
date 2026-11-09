@@ -37,8 +37,9 @@ struct NoteStick: Equatable, Sendable {
         case app
         /// A Desktop (and its mode): the note sits on that Desktop.
         case desktop
-        /// A person (`title`, and `contact`: a vault contact's id when one is linked): the note shows beside their
-        /// conversation in any chat app Petal reads a person from (PersonRead).
+        /// A person: `title` their name, and what tells them apart from anyone else of that name, `contact` (a vault
+        /// contact's id) or `handle` (the chat's own address for them: an email or phone number). The note shows
+        /// beside their conversation in any chat app Petal reads a person from (PersonRead); a name alone never.
         case person
 
         /// The ranked fallback: a passage, then its page, its file, its window, its app. Lower is more specific.
@@ -81,6 +82,8 @@ struct NoteStick: Equatable, Sendable {
     var mode = ""
     /// A person's vault contact, by the contact's id (never its details).
     var contact = ""
+    /// A person's address in their chat (an email or phone number), when the app shows one.
+    var handle = ""
     /// Keys this Petal doesn't know (a later one's, or the person's own), each with its lines exactly as written
     /// (nested ones too), written back as they were.
     var extra: [(key: String, lines: [String])] = []
@@ -89,7 +92,7 @@ struct NoteStick: Equatable, Sendable {
         a.kind == b.kind && a.app == b.app && a.appName == b.appName && a.url == b.url && a.title == b.title && a.path == b.path
             && a.bookmark == b.bookmark && a.quote == b.quote && a.before == b.before && a.after == b.after && a.mac == b.mac
             && a.pid == b.pid && a.window == b.window && a.tabID == b.tabID && a.shared == b.shared && a.tabElement == b.tabElement
-            && a.desktop == b.desktop && a.mode == b.mode && a.contact == b.contact
+            && a.desktop == b.desktop && a.mode == b.mode && a.contact == b.contact && a.handle == b.handle
             && a.extra.map(\.key) == b.extra.map(\.key) && a.extra.map(\.lines) == b.extra.map(\.lines)
     }
 
@@ -118,7 +121,7 @@ struct NoteStick: Equatable, Sendable {
         case .window: return NoteShelf.sameWindow(self, other)
         case .app: return app == other.app
         case .desktop: return desktop == other.desktop
-        case .person: return PersonRead.same(title, other.title)
+        case .person: return PersonRead.samePerson(self, other)
         }
     }
 
@@ -180,8 +183,11 @@ struct NoteScene: Equatable, Sendable {
     /// A bookmark to `file` (base64), made with the read off the main thread, for a note stuck to it.
     var fileBookmark = ""
     var desktop: Int? = nil
-    /// The person in the conversation in front (PersonRead), never read from an app kept private.
+    /// The person in the conversation in front (PersonRead), never read from an app kept private: their name, their
+    /// vault contact when exactly one contact has it, and their address when the chat shows one.
     var person = ""
+    var personContact = ""
+    var personHandle = ""
 }
 
 extension NoteScene {
@@ -195,6 +201,8 @@ extension NoteScene {
         s.file = ""
         s.fileBookmark = ""
         s.person = ""
+        s.personContact = ""
+        s.personHandle = ""
         return s
     }
 }
@@ -326,8 +334,8 @@ enum NoteMatch {
         case .desktop:
             return false   // Desktop notes sit on their Desktop, never on a window
         case .person:
-            // Their conversation in any chat app, by name; nothing when Petal couldn't tell one person.
-            return scene.window != nil && !scene.person.isEmpty && PersonRead.same(stick.title, scene.person)
+            // Their conversation in any chat app, by what tells them apart (their contact or address), never a name alone.
+            return scene.window != nil && PersonRead.matches(stick, scene)
         }
     }
 
@@ -499,6 +507,7 @@ struct NoteFile: Equatable, Sendable {
                 if let shared = place.shared { fields.append(("shared", "\(shared)")) }
                 if let desktop = place.desktop { fields.append(("desktop", "\(desktop)")) }
                 if !place.contact.isEmpty { fields.append(("contact", Self.quoted(place.contact))) }
+                if !place.handle.isEmpty { fields.append(("handle", Self.quoted(place.handle))) }
                 for (offset, field) in fields.enumerated() {
                     head.append((offset == 0 ? "  - " : "    ") + "\(field.0): \(field.1)")
                 }
@@ -583,6 +592,7 @@ struct NoteFile: Equatable, Sendable {
                 case "shared": stick.shared = Int(value)
                 case "desktop": stick.desktop = Int(value)
                 case "contact": stick.contact = value
+                case "handle": stick.handle = value
                 default: stick.extra.append((key: field.key, lines: field.lines))
                 }
             }

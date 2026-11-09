@@ -677,7 +677,7 @@ struct GridPaper: View {
     /// Opens it on its own, its corner by the pointer.
     static func open(_ paper: PaperNote, app: PetalApp) {
         let mouse = NSEvent.mouseLocation
-        app.paper.openStandalone(paper.key, at: CGPoint(x: mouse.x - 60, y: mouse.y + 60))
+        app.paper.openStandalone(paper.key, at: CGPoint(x: mouse.x - 60, y: mouse.y + 60), fromLibrary: app.notesWindow.window?.isKeyWindow == true)
     }
 
     /// Where it's stuck, as the grid says it (its first place: a site, a file, a person, a Desktop).
@@ -788,6 +788,11 @@ struct NotesCanvasView: View {
                     Button { model.sidebar.toggle() } label: { Image(systemName: "sidebar.left").font(.system(size: 13)) }
                         .buttonStyle(.plain).foregroundStyle(look.dim).padding(.leading, model.sidebar ? 16 : 84)
                     Text(book.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(look.text)
+                    // Edits kept and tried again (NoteStore.editCanvas): never lost quietly.
+                    if app.paper.store.canvasUnsaved.contains(book.name) {
+                        Text("Not saved yet: Petal keeps your changes and tries again").font(.system(size: 11))
+                            .foregroundStyle(Color(red: 0.7, green: 0.15, blue: 0.12))
+                    }
                     Spacer()
                 }
                 NotesViewToggle(view: .canvas, look: look) { model.setView(book, $0) }

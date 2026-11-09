@@ -198,6 +198,12 @@ final class NoteStore {
     private(set) var loaded = false
     /// Counts reads of the folder: anything else kept in it (a notebook's canvas) is read again after each.
     private(set) var reads = 0
+    /// Notebooks whose canvas edits aren't saved yet (tried again): the canvas says so.
+    var canvasUnsaved: Set<String> = []
+    @ObservationIgnored var canvasWaiting: [String: [NoteCanvas.Stamped]] = [:]
+    @ObservationIgnored var canvasDone: [String: [@MainActor (NoteCanvas?) -> Void]] = [:]
+    @ObservationIgnored var canvasWriting: Set<String> = []
+    @ObservationIgnored var canvasFailures: [String: Int] = [:]
     /// Papers whose work keeps failing: the paper says it isn't saved yet.
     private(set) var failed: Set<String> = []
     @ObservationIgnored private(set) var root: URL
@@ -289,9 +295,11 @@ final class NoteStore {
         stopWatching()
         let jobs = drainJobs()
         let unsaved = drainUnsaved()
+        let canvases = drainCanvas()
         let oldRoot = root
         Self.io.async {
             Self.drain(jobs, unsaved: unsaved, root: oldRoot)
+            Self.drainCanvas(canvases, root: oldRoot)
             NoteDisk.states = [:]
             NoteDisk.results = [:]
             NoteDisk.claimed = []
@@ -303,6 +311,8 @@ final class NoteStore {
                     self.notes = []
                     self.notebooks = []
                     self.conflicts = [:]
+                    self.canvasUnsaved = []
+                    self.canvasFailures = [:]
                     self.changedAt = [:]
                     self.removedAt = [:]
                     self.root = newRoot
@@ -1295,9 +1305,11 @@ final class NoteStore {
         draining = true
         let jobs = drainJobs()
         let unsaved = drainUnsaved()
+        let canvases = drainCanvas()
         let root = self.root
         Self.io.async {
             Self.drain(jobs, unsaved: unsaved, root: root)
+            Self.drainCanvas(canvases, root: root)
             done()
         }
     }
@@ -1921,6 +1933,7 @@ extension NoteStore {
     func notebookBusy(_ name: String) -> Bool {
         let keysHere = Set(notes.filter { NoteLibrary.same($0.notebook, name) }.map(\.key))
         return sessions.values.contains { keysHere.contains($0.key) && $0.busy }
+            || notebooks.contains { NoteLibrary.same($0.name, name) && (canvasWaiting[$0.name]?.isEmpty == false || canvasWriting.contains($0.name)) }
             || notes.contains { NoteLibrary.same($0.notebook, name) && (importsLoading[$0.noteID]?.isEmpty == false) }
     }
 
@@ -2020,46 +2033,136 @@ extension NoteStore {
     /// A notebook's canvas file.
     nonisolated static let canvasName = ".canvas.json"
 
-    /// A notebook's canvas as it is on disk, read off the main thread (nil: a file Petal can't read as a canvas).
+    /// A notebook's canvas as it is (the file merged with the versions iCloud kept of it, and the edits still waiting
+    /// to be saved), read off the main thread (nil: a file Petal can't read as a canvas). Versions waiting are merged
+    /// into the file (a based write) and marked resolved.
     func canvas(_ notebook: String, _ done: @escaping @MainActor (NoteCanvas?) -> Void) {
         guard let book = self.notebook(notebook) else { return done(NoteCanvas()) }
         let file = book.folder.appending(path: Self.canvasName), root = self.root
         Self.io.async {
-            let text = Self.safe(file, root: root) && FileManager.default.fileExists(atPath: file.path) ? Self.coordinatedRead(file) : nil
-            let canvas = NoteCanvas.decode(text)
-            DispatchQueue.main.async { MainActor.assumeIsolated { done(canvas) } }
+            let read = Self.readCanvas(file, root: root)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { done(read.map { $0.applying(self.canvasWaiting[book.name] ?? []) }) }
+            }
         }
     }
 
-    /// One change to a notebook's canvas, made on the file as it is right then, inside one coordinated write
-    /// (`NoteCanvas.write`: a based write, so what another Mac moved meanwhile stays) and written atomically; a file
-    /// that isn't a canvas Petal can read is never written over. `done`: the canvas now, or nil.
+    /// One change to a notebook's canvas: kept in memory at once (in order, with the time it was made), then written
+    /// with every other edit waiting, on the file as it is right then merged with iCloud's versions of it, in one
+    /// coordinated, atomic write (`writeCanvas`). A write that fails keeps the edits and is tried again (2 s,
+    /// doubling, at most a minute); the canvas says "Not saved yet" meanwhile (`canvasUnsaved`); on quit or a switch
+    /// of folder they're tried once more, and kept in Unsaved notes if that fails too. `done`: the canvas once saved.
     func editCanvas(_ notebook: String, _ edit: NoteCanvas.Edit, then done: @escaping @MainActor (NoteCanvas?) -> Void = { _ in }) {
-        guard !switching, let book = self.notebook(notebook) else { return done(nil) }
+        guard !switching, !draining, let book = self.notebook(notebook) else { return done(nil) }
+        canvasWaiting[book.name, default: []].append(NoteCanvas.Stamped(edit))
+        canvasDone[book.name, default: []].append(done)
+        pumpCanvas(book.name)
+    }
+
+    /// The edits of a notebook's canvas not saved yet.
+    func canvasPending(_ notebook: String) -> [NoteCanvas.Stamped] { canvasWaiting[self.notebook(notebook)?.name ?? notebook] ?? [] }
+
+    private func pumpCanvas(_ name: String) {
+        guard !canvasWriting.contains(name), !switching, !draining, let batch = canvasWaiting[name], !batch.isEmpty,
+              let book = notebook(name) else { return }
+        canvasWriting.insert(name)
+        let callbacks = canvasDone[name] ?? []
+        canvasDone[name] = []
         let file = book.folder.appending(path: Self.canvasName), root = self.root
         Self.io.async {
-            let canvas = Self.writeCanvas(edit, to: file, root: root)
-            DispatchQueue.main.async { MainActor.assumeIsolated { done(canvas) } }
+            let saved = Self.writeCanvas(batch, to: file, root: root)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.canvasWriting.remove(name)
+                    self.canvasWaiting[name] = CanvasQueue.after(self.canvasWaiting[name] ?? [], wrote: batch.count, ok: saved != nil)
+                    if self.canvasWaiting[name]?.isEmpty == true { self.canvasWaiting[name] = nil }
+                    if let saved {
+                        self.canvasFailures[name] = nil
+                        if self.canvasUnsaved.contains(name) { self.canvasUnsaved.remove(name) }
+                        let shown = saved.applying(self.canvasWaiting[name] ?? [])
+                        for callback in callbacks { callback(shown) }
+                        self.pumpCanvas(name)
+                    } else {
+                        // Kept, said, and tried again (with the callbacks, for when it lands).
+                        self.canvasDone[name] = callbacks + (self.canvasDone[name] ?? [])
+                        let failures = (self.canvasFailures[name] ?? 0) + 1
+                        self.canvasFailures[name] = failures
+                        self.canvasUnsaved.insert(name)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + CanvasQueue.retry(after: failures)) {
+                            MainActor.assumeIsolated { self.pumpCanvas(name) }
+                        }
+                    }
+                }
+            }
         }
     }
 
-    /// The canvas edit on the file at `file`, coordinated and atomic. Off the main thread.
-    nonisolated static func writeCanvas(_ edit: NoteCanvas.Edit, to file: URL, root: URL) -> NoteCanvas? {
+    /// Edits waiting for every notebook's canvas, for a drain (quit, or a switch of folder): nothing more is written
+    /// here after it.
+    func drainCanvas() -> [(notebook: String, file: URL, edits: [NoteCanvas.Stamped])] {
+        let out = canvasWaiting.compactMap { name, edits in
+            notebook(name).map { (notebook: name, file: $0.folder.appending(path: Self.canvasName), edits: edits) }
+        }
+        canvasWaiting = [:]
+        canvasDone = [:]
+        return out
+    }
+
+    /// The last try of canvas edits waiting, on the files' queue: written, else kept in Application Support's
+    /// "Unsaved notes" (the canvas as it would have been, the file Petal last read with the edits made on it).
+    nonisolated static func drainCanvas(_ items: [(notebook: String, file: URL, edits: [NoteCanvas.Stamped])], root: URL) {
+        for item in items where !item.edits.isEmpty {
+            if writeCanvas(item.edits, to: item.file, root: root) != nil { continue }
+            let base = readCanvas(item.file, root: root, resolve: false) ?? NoteCanvas()
+            let folder = Config.supportFolder.appending(path: "Unsaved notes")
+                .appending(path: NoteShelf.rescueFolder(noteID: "canvas:" + item.notebook, at: Date()))
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try? Data(base.applying(item.edits).encoded().utf8)
+                .write(to: folder.appending(path: NoteShelf.folderName(item.notebook) + " canvas.json"), options: .withoutOverwriting)
+        }
+    }
+
+    /// The canvas file merged with iCloud's versions of it; with `resolve`, versions there are merged into the file
+    /// (a based write) and marked resolved. Off the main thread.
+    nonisolated static func readCanvas(_ file: URL, root: URL, resolve: Bool = true) -> NoteCanvas? {
+        guard safe(file, root: root) else { return nil }
+        guard FileManager.default.fileExists(atPath: file.path) else { return NoteCanvas() }
+        if resolve, !(NSFileVersion.unresolvedConflictVersionsOfItem(at: file) ?? []).isEmpty { return writeCanvas([], to: file, root: root) }
+        guard let text = coordinatedRead(file) else { return nil }
+        let versions = (NSFileVersion.unresolvedConflictVersionsOfItem(at: file) ?? []).compactMap { try? String(contentsOf: $0.url, encoding: .utf8) }
+        return NoteCanvas.merged(disk: text, versions: versions)
+    }
+
+    /// Canvas edits on the file at `file`, coordinated and atomic: made on the file as it is merged with every
+    /// version iCloud kept of it (one Petal can't read is left out and left unresolved), and the versions merged are
+    /// marked resolved once the merge is written. Nil (nothing written) when the file isn't a canvas Petal can read,
+    /// its folder is gone or the write failed. Off the main thread.
+    nonisolated static func writeCanvas(_ edits: [NoteCanvas.Stamped], to file: URL, root: URL) -> NoteCanvas? {
         guard safe(file, root: root), safe(file.deletingLastPathComponent(), root: root),
               FileManager.default.fileExists(atPath: file.deletingLastPathComponent().path) else { return nil }
         var result: NoteCanvas?
         var error: NSError?
         NSFileCoordinator(filePresenter: nil).coordinate(writingItemAt: file, options: .forMerging, error: &error) { url in
-            let disk = FileManager.default.fileExists(atPath: url.path) ? (try? String(contentsOf: url, encoding: .utf8)) : nil
+            let there = FileManager.default.fileExists(atPath: url.path)
+            let disk = there ? (try? String(contentsOf: url, encoding: .utf8)) : nil
             // A file there that can't be read is never taken for no file.
-            if FileManager.default.fileExists(atPath: url.path), disk == nil { return }
-            guard let text = NoteCanvas.write(edit, disk: disk) else { return }
+            if there, disk == nil { return }
+            let versions = there ? (NSFileVersion.unresolvedConflictVersionsOfItem(at: url) ?? []) : []
+            let readable = versions.compactMap { version in
+                (try? String(contentsOf: version.url, encoding: .utf8)).flatMap { NoteCanvas.decode($0) == nil ? nil : (version, $0) }
+            }
+            guard let text = NoteCanvas.write(edits, disk: disk, versions: readable.map(\.1)) else { return }
             if text != disk {
                 guard (try? Data(text.utf8).write(to: url, options: .atomic)) != nil else { return }
             }
+            for (version, _) in readable { version.isResolved = true }
             result = NoteCanvas.decode(text)
         }
         return result
+    }
+
+    nonisolated static func writeCanvas(_ edit: NoteCanvas.Edit, to file: URL, root: URL) -> NoteCanvas? {
+        writeCanvas([NoteCanvas.Stamped(edit)], to: file, root: root)
     }
 }
 

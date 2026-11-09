@@ -67,6 +67,8 @@ final class NoteDesk {
     /// Notes opened on their own (from the Petal Notes window or a notebook's stack), by paper key: where the paper's
     /// top-left corner is (AppKit's coordinates). Never kept past this run.
     @ObservationIgnored private(set) var standalone: [String: CGPoint] = [:]
+    /// Notes opened on their own from the Petal Notes window: Escape gives that window the keyboard back.
+    @ObservationIgnored private var standaloneFromLibrary: Set<String> = []
 
     nonisolated static let queue = DispatchQueue(label: "petal.notes.look", qos: .userInitiated)
     /// Narrowing a window for an open note: a newer turn (the note folded, notes off, quitting) makes one still
@@ -459,6 +461,7 @@ final class NoteDesk {
                 var bookmark = ""
                 var twins: Int?
                 var person = ""
+                var handle = ""
                 if let number = read.window, Windows.trusted {
                     let element = AXUIElementCreateApplication(pid)
                     AXUIElementSetMessagingTimeout(element, 0.3)
@@ -471,16 +474,22 @@ final class NoteDesk {
                     if !read.title.isEmpty { twins = all.filter { (Windows.value($0, kAXTitleAttribute) as String?) == read.title }.count }
                     // The person in a chat app's conversation (never an app kept private): one person or none.
                     if !quiet, PersonRead.isChat(app), ClaudePanel.privacy.current(privacy), let window = all.first(where: { Windows.id(of: $0) == number }) {
-                        person = PersonRead.person(app: app, appName: appName, title: read.title, headings: Self.headings(window)) ?? ""
+                        let header = Self.headings(window)
+                        person = PersonRead.person(app: app, appName: appName, title: read.title, headings: header) ?? ""
+                        if !person.isEmpty { handle = PersonRead.handle(title: read.title, headings: header) ?? "" }
                     }
                 }
                 var made = NoteScene(mac: mac, app: app, pid: pid, window: read.window, title: read.title, titleTwins: twins, tab: read.tab, file: file)
                 made.fileBookmark = bookmark
                 made.person = person
+                made.personHandle = handle
                 let scene = made
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         var (scene, read) = Self.filtered(scene, read, since: privacy)
+                        // Their vault contact, when exactly one contact has their name (the contacts read off the main
+                        // thread, PetalApp.paper.contacts); after the privacy filter, so a private app has none.
+                        if !scene.person.isEmpty { scene.personContact = PersonRead.contact(scene.person, contacts: PetalApp.shared.paper.contacts) ?? "" }
                         scene.desktop = desktop ?? Self.desktopShowing(on: NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)
                         done(scene, read)
                     }
@@ -1114,13 +1123,31 @@ final class NoteDesk {
     /// someone else's conversation.
     @ObservationIgnored private var peopleTimer: Timer?
 
+    /// The vault's contacts (id and name only, never their details), for telling people apart: read off the main
+    /// thread when notes start and again at most once a minute while a chat app is in front.
+    @ObservationIgnored private(set) var contacts: [(id: String, name: String)] = []
+    @ObservationIgnored private var contactsRead: Date?
+
+    func refreshContacts() {
+        guard on, !Headless.on, contactsRead.map({ Date().timeIntervalSince($0) > 60 }) ?? true else { return }
+        contactsRead = Date()
+        VaultStore.load { [weak self] result in
+            // While the vault can't be read: no contacts, so no person is told apart by one.
+            guard let self else { return }
+            if case .success(let items) = result { self.contacts = items.filter { $0.kind == .contact }.map { (id: $0.id, name: $0.title) } }
+            else { self.contacts = [] }
+        }
+    }
+
     func watchPeople() {
+        if let front = NSWorkspace.shared.frontmostApplication, PersonRead.isChat(front.bundleIdentifier ?? "") { refreshContacts() }
         let wanted = on && store.notes.contains { $0.file.places.contains { $0.kind == .person } }
         if wanted, peopleTimer == nil {
             peopleTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self, self.on, let front = NSWorkspace.shared.frontmostApplication,
                           PersonRead.isChat(front.bundleIdentifier ?? "") else { return }
+                    self.refreshContacts()
                     self.look()
                 }
             }
@@ -1135,8 +1162,9 @@ final class NoteDesk {
     /// Opens a note on its own, open with the keyboard, its top-left corner at `point` (AppKit's coordinates; else
     /// near the middle of the screen under the pointer): from the Petal Notes window or a notebook's stack. It shows
     /// through layout like every paper, and folding it or clicking away puts it away.
-    func openStandalone(_ key: String, at point: CGPoint? = nil) {
+    func openStandalone(_ key: String, at point: CGPoint? = nil, fromLibrary: Bool = false) {
         guard on, store.paper(key) != nil else { return }
+        if fromLibrary { standaloneFromLibrary.insert(key) } else { standaloneFromLibrary.remove(key) }
         let mouse = NSEvent.mouseLocation
         let screen = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame ?? .zero
         let corner = point ?? CGPoint(x: screen.midX - PaperLook.openWidth / 2, y: screen.midY + 220)
@@ -1160,17 +1188,22 @@ final class NoteDesk {
         }
     }
 
-    /// A note opened on its own, put away: what's typed is saved, and the Petal Notes window (when it's open) has
-    /// the keyboard again.
-    private func closeStandalone(_ key: String) {
+    /// A note opened on its own, put away: what's typed is saved; on Escape the Petal Notes window it was opened from
+    /// has the keyboard again, and on a click elsewhere the keyboard stays where the person clicked
+    /// (NoteShelf.standaloneKeyboard).
+    private func closeStandalone(_ key: String, escape: Bool) {
         keyboardWanted.cancel(key)
         editors[key]?.flush()
         standalone[key] = nil
+        let fromLibrary = standaloneFromLibrary.remove(key) != nil
         faces[key] = nil
         if keyboard == key { keyboard = nil }
         panels[key]?.conceal()
         layout()
-        if let window = app.notesWindow.window, window.isVisible { window.makeKeyAndOrderFront(nil) }
+        let library = app.notesWindow.window
+        if NoteShelf.standaloneKeyboard(escape: escape, fromLibrary: fromLibrary, libraryOpen: library?.isVisible == true) {
+            library?.makeKeyAndOrderFront(nil)
+        }
     }
 
     // MARK: The Desktop
@@ -1275,9 +1308,10 @@ final class NoteDesk {
         if keyboardWanted.shown(key), faces[key] == .open { panel.takeKeyboard() }
     }
 
-    func fold(_ key: String) {
+    /// `escape`: the person pressed Escape on it (else a click elsewhere, or Petal folding it).
+    func fold(_ key: String, escape: Bool = false) {
         // A note opened on its own has nowhere to rest: folding it puts it away.
-        if standalone[key] != nil { return closeStandalone(key) }
+        if standalone[key] != nil { return closeStandalone(key, escape: escape) }
         keyboardWanted.cancel(key)
         guard faces[key] == .open || faces[key] == .back else { return }
         Self.roomTurn.cancel()
@@ -1322,7 +1356,12 @@ final class NoteDesk {
         appWatch = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication, app.processIdentifier != getpid() else { return }
             let pid = app.processIdentifier
-            MainActor.assumeIsolated { self?.lastOtherApp = pid }
+            let chat = PersonRead.isChat(app.bundleIdentifier ?? "")
+            MainActor.assumeIsolated {
+                self?.lastOtherApp = pid
+                // A chat app in front: the vault's contacts read (at most once a minute), to tell its people apart.
+                if chat { self?.refreshContacts() }
+            }
         }
     }
 
@@ -1434,8 +1473,9 @@ final class NoteDesk {
     /// nobody moved it) has no room, and every other narrowed window gets its width back.
     private func reconcileRoom() {
         var wanted: (number: CGWindowID, pid: pid_t, frame: CGRect, target: CGRect?)?
+        // Only notes open there by their window placement (never one opened on its own) want room beside it.
         if on, !quitting, let frame, let scene, let number = scene.window,
-           here.keys.contains(where: { faces[$0] == .open && local.spots[store.paper($0)?.noteID ?? ""] == nil }) {
+           NoteRoom.wanted(here.keys.map { (placementNow($0), faces[$0] == .open, local.spots[store.paper($0)?.noteID ?? ""] != nil) }) {
             let target = visible(for: frame).flatMap { NoteRoom.narrowed(window: frame, visible: $0, note: PaperLook.openWidth) }
             wanted = (number, scene.pid, frame, target)
         }
@@ -1862,9 +1902,13 @@ final class NoteDesk {
             offers.append(s)
         }
         // The person in a chat's conversation: their note shows beside their conversation in any chat app.
-        if !scene.person.isEmpty {
+        // Only with what tells them apart (their contact, or the chat's address for them): a name alone could be two
+        // people, so then the note goes on the conversation's window.
+        if let identity = PersonRead.identity(name: scene.person, handle: scene.personHandle, contacts: contacts) {
             var s = NoteStick(kind: .person)
             s.title = scene.person
+            s.contact = identity.contact
+            s.handle = identity.handle
             offers.append(s)
         }
         offers.append(stick(.window))
@@ -1909,7 +1953,6 @@ final class NoteDesk {
             }
         }
         if let scene, stick.kind != .desktop, let index = NoteMatch.best([stick], scene) { here[paper.key] = index }
-        if stick.kind == .person { linkContact(paper.key) }
         open(paper.key, expecting: expecting)
         if stick.kind == .desktop { refreshSpaces() }
         return paper
@@ -2303,7 +2346,6 @@ final class NoteDesk {
         guard let paper = store.paper(key) else { return }
         guard !store.readOnly(paper) else { return say("This note has two versions: keep one first.") }
         guard store.change(key, touch: false, edit: { $0.places = places }) != nil else { return }
-        if places.contains(where: { $0.kind == .person && $0.contact.isEmpty }) { linkContact(key) }
         if let scene, let index = NoteMatch.best(places, scene) { here[key] = index } else { here[key] = nil }
         if places.contains(where: { $0.kind == .desktop }) { faces[key] = .folded; refreshSpaces() }
         layout()
@@ -2376,6 +2418,7 @@ final class NoteDesk {
     func refreshPanels() {
         for panel in panels.values { panel.refresh() }
         for panel in tabPanels.values { panel.refreshSharing() }
+        app.popups.notebookPrivacyChanged()
     }
 
     /// Whether a paper's notebook is Private.
@@ -2428,6 +2471,7 @@ final class NoteDesk {
         // Every paper and tab redrawn, and kept out of pictures again if its notebook turned Private (here or elsewhere).
         for panel in panels.values { panel.refresh() }
         for panel in tabPanels.values { panel.refreshSharing() }
+        app.popups.notebookPrivacyChanged()
         watchPeople()
     }
 

@@ -28,26 +28,6 @@ extension NoteDesk {
         }
     }
 
-    // MARK: Notes on people
-
-    /// A note on a person linked to their vault contact, when exactly one contact has their name (never a guess
-    /// between two): only the contact's id is kept, never its details. The vault read off the main thread; while it
-    /// can't be read, nothing is linked.
-    func linkContact(_ key: String) {
-        VaultStore.load { [weak self] result in
-            guard let self, case .success(let items) = result, let paper = self.store.paper(key) else { return }
-            let contacts = items.filter { $0.kind == .contact }.map { (id: $0.id, name: $0.title) }
-            // Only when some person on it has one contact of their name.
-            guard paper.file.places.contains(where: { $0.kind == .person && $0.contact.isEmpty && PersonRead.contact($0.title, contacts: contacts) != nil })
-            else { return }
-            self.store.change(key, expect: paper.revision, touch: false) { file in
-                for index in file.places.indices where file.places[index].kind == .person && file.places[index].contact.isEmpty {
-                    if let id = PersonRead.contact(file.places[index].title, contacts: contacts) { file.places[index].contact = id }
-                }
-            }
-        }
-    }
-
     // MARK: A note dropped on an app
 
     /// A note dropped on an app in the dock, used there; never sent.

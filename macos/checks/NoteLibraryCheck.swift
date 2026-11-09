@@ -148,6 +148,7 @@ struct NoteLibraryCheck {
         expect(personBack.places == [personPlace], "a person's place round-trips, with its contact's id")
         var chat = NoteScene(app: "net.whatsapp.WhatsApp", pid: 3, window: 9)
         chat.person = "alex kim"
+        chat.personContact = "c1"
         var windowPlace = NoteStick(kind: .window)
         windowPlace.app = "net.whatsapp.WhatsApp"
         windowPlace.pid = 3
@@ -155,7 +156,35 @@ struct NoteLibraryCheck {
         expect(NoteMatch.best([windowPlace, personPlace], chat) == 1, "beside their conversation: the person before the window")
         expect(NoteMatch.best([personPlace], chat.privately) == nil, "an app kept private: no person")
         chat.person = ""
+        chat.personContact = ""
         expect(NoteMatch.best([personPlace], chat) == nil, "no one person in front: no note")
+
+        // The person-identifier rule: a name alone never sticks a note to a person, nor finds one.
+        let twoAlexes: [(id: String, name: String)] = [("c1", "Alex"), ("c2", "alex")]
+        expect(PersonRead.identity(name: "Alex", handle: "", contacts: twoAlexes) == nil, "two contacts of one name and no address: no person place")
+        expect(PersonRead.identity(name: "Alex", handle: "", contacts: []) == nil, "a name alone: no person place (the window instead)")
+        let byHandle = PersonRead.identity(name: "Alex", handle: "alex@example.com", contacts: twoAlexes)
+        expect(byHandle?.contact == "" && byHandle?.handle == "alex@example.com", "two contacts of one name: the chat's address tells them apart")
+        let byContact = PersonRead.identity(name: "Sam", handle: "", contacts: [("c3", "Sam")])
+        expect(byContact?.contact == "c3", "exactly one contact of that name: their contact")
+        var nameOnly = NoteStick(kind: .person)
+        nameOnly.title = "Alex"
+        var anotherAlex = NoteScene(app: "com.apple.MobileSMS", pid: 4, window: 2)
+        anotherAlex.person = "Alex"
+        expect(!PersonRead.matches(nameOnly, anotherAlex), "a place with only a name matches no one")
+        var alexByMail = nameOnly
+        alexByMail.handle = "alex@example.com"
+        anotherAlex.personHandle = "other.alex@example.com"
+        expect(!PersonRead.matches(alexByMail, anotherAlex), "the same name with another address is another person")
+        anotherAlex.personHandle = "alex@example.com"
+        expect(PersonRead.matches(alexByMail, anotherAlex), "the same address is the same person, in any chat app")
+        expect(!PersonRead.samePerson(nameOnly, nameOnly) && PersonRead.samePerson(alexByMail, alexByMail), "one person by contact or address, never by name")
+        expect(PersonRead.handle(title: "Alex Kim", headings: ["Alex Kim <ALEX@example.com>"]) == "alex@example.com", "an address in the header")
+        expect(PersonRead.handle(title: "", headings: ["+90 555 123 45 67"]) == "+905551234567", "a phone number in the header")
+        expect(PersonRead.handle(title: "a@example.com", headings: ["b@example.com"]) == nil, "two addresses: none")
+        var withHandle = NoteFile(id: "P2", body: "x")
+        withHandle.places = [alexByMail]
+        expect(NoteFile.parse(withHandle.serialized(), fallbackID: "", fallbackDate: now).places == [alexByMail], "a person's address round-trips")
 
         // MARK: Canvas
 
@@ -166,7 +195,8 @@ struct NoteLibraryCheck {
         canvas = canvas.applying(.arrow(.init(id: "self", from: "n1", to: "n1")))
         canvas = canvas.applying(.words(.init(id: "w", text: "first →", x: 5, y: 5)))
         canvas = canvas.applying(.zoom(9))
-        expect(canvas.notes["n1"] == .init(x: 10, y: 20) && canvas.areas.count == 1 && canvas.arrows.map(\.id) == ["r"] && canvas.texts.count == 1 && canvas.zoom == 2,
+        func at(_ spot: NoteCanvas.Spot?, _ x: Double, _ y: Double) -> Bool { spot?.x == x && spot?.y == y }
+        expect(at(canvas.notes["n1"], 10, 20) && canvas.areas.count == 1 && canvas.arrows.map(\.id) == ["r"] && canvas.texts.count == 1 && canvas.zoom == 2,
                "edits: a move, an area, an arrow (never to itself), words, a zoom kept in range")
         expect(NoteCanvas.decode(canvas.encoded()) == canvas, "the file round-trips")
         expect(NoteCanvas.decode(nil) == NoteCanvas() && NoteCanvas.decode("not json") == nil, "no file is an empty canvas; one Petal can't read is nil")
@@ -174,9 +204,9 @@ struct NoteLibraryCheck {
         // Based: the edit is made on the file as it is, so another Mac's move meanwhile stays.
         let elsewhere = NoteCanvas().applying(.move("n9", .init(x: 300, y: 300))).encoded()
         let merged = NoteCanvas.decode(NoteCanvas.write(.move("n1", .init(x: 50, y: 50)), disk: elsewhere))
-        expect(merged?.notes["n9"] == .init(x: 300, y: 300) && merged?.notes["n1"] == .init(x: 50, y: 50), "a based write keeps what changed elsewhere")
-        expect(NoteCanvas.write(.move("n9", .init(x: 300, y: 300)), disk: elsewhere) == elsewhere, "an edit that changes nothing writes the same")
-        expect(NoteCanvas.decode(#"{"notes":{"x":{"x":1,"y":2}},"later":true}"#)?.notes["x"] == .init(x: 1, y: 2), "a later Petal's keys don't stop a read")
+        expect(at(merged?.notes["n9"], 300, 300) && at(merged?.notes["n1"], 50, 50), "a based write keeps what changed elsewhere")
+        expect(NoteCanvas.write([], disk: elsewhere) == elsewhere, "nothing to change writes the same")
+        expect(at(NoteCanvas.decode(#"{"notes":{"x":{"x":1,"y":2}},"later":true}"#)?.notes["x"], 1, 2), "a later Petal's keys don't stop a read")
         let later = #"{"areas":[{"id":"a","label":"Beds","x":0,"y":0,"w":10,"h":10,"tint":"green"}],"later":{"k":1},"notes":{"x":{"x":1,"y":2,"pinned":true}}}"#
         let kept = NoteCanvas.write(.move("y", .init(x: 5, y: 5)), disk: later).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
         expect((kept?["later"] as? [String: Int])?["k"] == 1 && ((kept?["areas"] as? [[String: Any]])?.first?["tint"] as? String) == "green"
@@ -185,11 +215,55 @@ struct NoteLibraryCheck {
         expect(NoteCanvas.decode(#"{"areas":[{"id":"a"}]}"#) == nil && NoteCanvas.write(.move("y", .init(x: 1, y: 1)), disk: #"{"areas":[{"id":"a"}]}"#) == nil,
                "an area Petal can't read: the file isn't taken for empty, and isn't written")
         let placed = canvas.spots(for: ["n1", "n3", "n4"], columns: 2)
-        expect(placed["n1"] == .init(x: 10, y: 20), "a note keeps its spot")
+        expect(at(placed["n1"], 10, 20), "a note keeps its spot")
         expect((placed["n3"]?.y ?? 0) >= 300 + NoteCanvas.gap && placed["n3"]?.y == placed["n4"]?.y && placed["n3"] != placed["n4"],
                "new ones go below everything, side by side", "\(placed)")
         expect(canvas.inside(canvas.areas[0], spots: ["n1": .init(x: 10, y: 20), "far": .init(x: 900, y: 900)]) == ["n1"], "the notes in an area")
+        // Merging iCloud's versions: two versions with independent edits, one element edited on both, a removal.
+        let base = NoteCanvas()
+            .applying(.area(.init(id: "beds", label: "Beds", x: 0, y: 0, w: 100, h: 100)), at: 10)
+            .applying(.words(.init(id: "w1", text: "hello", x: 1, y: 1)), at: 10)
+            .applying(.arrow(.init(id: "r1", from: "n1", to: "n2")), at: 10)
+        let macA = base.applying(.move("n1", .init(x: 5, y: 5)), at: 20)
+            .applying(.area(.init(id: "beds", label: "Beds A", x: 0, y: 0, w: 100, h: 100)), at: 30)
+            .applying(.removeWords("w1"), at: 25)
+        let macB = base.applying(.move("n2", .init(x: 9, y: 9)), at: 21)
+            .applying(.area(.init(id: "beds", label: "Beds B", x: 0, y: 0, w: 100, h: 100)), at: 40)
+            .applying(.removeArrow("r1"), at: 22)
+        let both = NoteCanvas.merge(macA, macB)
+        expect(at(both.notes["n1"], 5, 5) && at(both.notes["n2"], 9, 9), "independent edits on two versions: both kept")
+        expect(both.areas.count == 1 && both.areas[0].label == "Beds B", "the same area edited on both: the newer wins")
+        expect(both.texts.isEmpty && both.arrows.isEmpty && both.removed["words:w1"] == 25 && both.removed["arrow:r1"] == 22,
+               "a removal on either side stays removed, its tombstone kept")
+        expect(NoteCanvas.merge(macB, macA) == NoteCanvas.merge(macA, macB) || NoteCanvas.merge(macB, macA).areas == both.areas,
+               "the merge comes out the same whichever version is first")
+        let revived = NoteCanvas.merge(macA, base.applying(.words(.init(id: "w1", text: "hello again", x: 1, y: 1)), at: 50))
+        expect(revived.texts.first?.text == "hello again", "an element changed after its removal comes back")
+        let fromFile = NoteCanvas.decode(NoteCanvas.write([NoteCanvas.Stamped(.zoom(1.5), at: 60)], disk: macA.encoded(), versions: [macB.encoded(), "not json"]))
+        expect(fromFile?.areas.first?.label == "Beds B" && at(fromFile?.notes["n2"], 9, 9) && fromFile?.zoom == 1.5 && fromFile?.texts.isEmpty == true,
+               "a write merges the file with iCloud's versions (one it can't read left out), then makes its edit")
+
+        // A save that failed keeps its edits, in order, until a write takes them.
+        let waiting = [NoteCanvas.Stamped(.zoom(1), at: 1), NoteCanvas.Stamped(.zoom(2), at: 2), NoteCanvas.Stamped(.zoom(1.5), at: 3)]
+        expect(CanvasQueue.after(waiting, wrote: 2, ok: false) == waiting, "a failed write keeps every edit")
+        expect(CanvasQueue.after(waiting, wrote: 2, ok: true) == [waiting[2]], "a write that landed leaves the ones added meanwhile")
+        expect(CanvasQueue.retry(after: 1) == 2 && CanvasQueue.retry(after: 3) == 8 && CanvasQueue.retry(after: 20) == 60, "tried again sooner, then less often")
+        expect(NoteCanvas().applying(waiting).zoom == 1.5 && NoteCanvas().applying(waiting).zoomAt == 3, "edits kept with their own times")
+
         expect(NoteCanvas.zoomIn(1) == 1.25 && NoteCanvas.zoomOut(1) == 0.8 && NoteCanvas.zoomIn(2) == 2 && NoteCanvas.zoomOut(0.5) == 0.5, "zoom steps")
+
+        // MARK: Room, the keyboard and delivery
+
+        expect(NoteRoom.wanted([(.window(0), true, false)]), "a note open on the window by its placement wants room")
+        expect(!NoteRoom.wanted([(.standalone, true, false), (.desktop, true, false), (.window(0), false, false), (.window(1), true, true)]),
+               "never one opened on its own, on a Desktop, folded or moved off by the person")
+        expect(NoteShelf.standaloneKeyboard(escape: true, fromLibrary: true, libraryOpen: true), "Escape: back to the Petal Notes window it came from")
+        expect(!NoteShelf.standaloneKeyboard(escape: false, fromLibrary: true, libraryOpen: true), "a click elsewhere: the keyboard stays there")
+        expect(!NoteShelf.standaloneKeyboard(escape: true, fromLibrary: false, libraryOpen: true), "opened from the dock: not to the window")
+        expect(NotePrivacy.deliverable(notebooks: ["Garden"], privateBooks: ["Health"], asker: nil), "an answer about public notebooks is given")
+        expect(!NotePrivacy.deliverable(notebooks: ["Garden", "health"], privateBooks: ["Health"], asker: nil),
+               "one turned Private before it's handed over: not given")
+        expect(NotePrivacy.deliverable(notebooks: ["Health"], privateBooks: ["Health"], asker: "Health"), "still from inside it: given")
 
         // MARK: The dock
 

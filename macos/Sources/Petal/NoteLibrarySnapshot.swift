@@ -30,6 +30,7 @@ extension Snapshot {
         desk.desktop = 2
         var person = NoteStick(kind: .person)
         person.title = "Alex"
+        person.handle = "alex@example.com"
 
         // Garden: the notebook the window shows, its cover first.
         let gardenCover = note("Garden", """

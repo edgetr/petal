@@ -317,6 +317,32 @@ enum NotePrivacy {
     }
 }
 
+extension NotePrivacy {
+    /// Whether a tool's answer may still be given, right before it's handed over (after the vault's redaction, a
+    /// wait): every notebook it tells of is still readable by its asker as things are now.
+    static func deliverable(notebooks: Set<String>, privateBooks: Set<String>, asker: String?) -> Bool {
+        notebooks.allSatisfy { readable(notebook: $0, privateBooks: privateBooks, asker: asker) }
+    }
+}
+
+extension NoteShelf {
+    /// A note opened on its own and put away: the keyboard goes back to the Petal Notes window only on Escape, when
+    /// it was opened from there and the window is still open; folded by a click elsewhere, the keyboard stays where
+    /// the person clicked.
+    static func standaloneKeyboard(escape: Bool, fromLibrary: Bool, libraryOpen: Bool) -> Bool { escape && fromLibrary && libraryOpen }
+}
+
+extension NoteRoom {
+    /// Whether the window in front needs room beside it: only for a note open there by its window placement (one
+    /// opened on its own, on a Desktop, or moved off by the person never narrows it).
+    static func wanted(_ notes: [(placement: NoteShelf.Placement, open: Bool, moved: Bool)]) -> Bool {
+        notes.contains { note in
+            guard case .window = note.placement else { return false }
+            return note.open && !note.moved
+        }
+    }
+}
+
 // MARK: - Notes on people
 
 /// A person, worked out from the conversation in front: the chat's header or recipient in Messages, WhatsApp,
@@ -391,18 +417,64 @@ enum PersonRead {
         let hits = contacts.filter { same($0.name, person) }
         return hits.count == 1 ? hits[0].id : nil
     }
+
+    /// The chat's own address for the person in front (an email or a phone number) when its header shows exactly
+    /// one; nil when it shows none or several.
+    static func handle(title: String, headings: [String]) -> String? {
+        var found: [String] = []
+        for text in [title] + headings {
+            let range = NSRange(text.startIndex..., in: text)
+            if let email = try? NSRegularExpression(pattern: #"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"#) {
+                for match in email.matches(in: text, range: range) { found.append((text as NSString).substring(with: match.range).lowercased()) }
+            }
+            if let phone = try? NSRegularExpression(pattern: #"\+?\d[\d \-().]{6,}\d"#) {
+                for match in phone.matches(in: text, range: range) {
+                    let digits = (text as NSString).substring(with: match.range).filter { $0.isNumber || $0 == "+" }
+                    if digits.filter(\.isNumber).count >= 7 { found.append(digits) }
+                }
+            }
+        }
+        let distinct = Set(found)
+        return distinct.count == 1 ? distinct.first : nil
+    }
+
+    /// What a note on the person in front is stuck to: their name with what tells them apart, their vault contact
+    /// (exactly one contact of that name) or else the chat's address for them. Nil, and no note on a person, when
+    /// there's only a name: two people of one name would share it, so the note goes on the conversation's window.
+    static func identity(name: String, handle: String, contacts: [(id: String, name: String)]) -> (contact: String, handle: String)? {
+        guard !name.isEmpty else { return nil }
+        let contact = self.contact(name, contacts: contacts) ?? ""
+        guard !contact.isEmpty || !handle.isEmpty else { return nil }
+        return (contact, handle)
+    }
+
+    /// Whether a person's note is on the person in front: the same vault contact, or the same address; a name alone
+    /// never matches.
+    static func matches(_ stick: NoteStick, _ scene: NoteScene) -> Bool {
+        guard stick.kind == .person else { return false }
+        if !stick.contact.isEmpty, stick.contact == scene.personContact { return true }
+        return !stick.handle.isEmpty && stick.handle == scene.personHandle
+    }
+
+    /// Two person places are one person by their contact or their address, never by a name alone.
+    static func samePerson(_ a: NoteStick, _ b: NoteStick) -> Bool {
+        (!a.contact.isEmpty && a.contact == b.contact) || (!a.handle.isEmpty && a.handle == b.handle)
+    }
 }
 
 // MARK: - Canvas
 
 /// A notebook's canvas (`view: canvas` on its cover): the same notes laid out freely, labeled areas around them,
-/// arrows between them and words written on it. Kept in the notebook's `.canvas.json`, synced like its notes, and
-/// changed only as an edit applied to the file as it is right then (a based write: NoteCanvasFile), so two Macs
-/// moving different notes both keep their moves.
+/// arrows between them and words written on it. Kept in the notebook's `.canvas.json`, synced like its notes. Every
+/// element (a note's spot, an area, an arrow, words) has a stable id and the time it was last changed (`at`), and a
+/// removal leaves a tombstone (`removed`), so two Macs' files, or iCloud's versions of one, merge element by element
+/// (`merge`: the union, the newer winning on one id, a removal winning over anything older). A change is made only
+/// as an edit on the file as it is right then, merged with every version iCloud kept (`write`).
 struct NoteCanvas: Codable, Equatable, Sendable {
     struct Spot: Codable, Equatable, Sendable {
         var x: Double
         var y: Double
+        var at: Double? = nil
     }
 
     struct Area: Codable, Equatable, Identifiable, Sendable {
@@ -412,6 +484,7 @@ struct NoteCanvas: Codable, Equatable, Sendable {
         var y: Double
         var w: Double
         var h: Double
+        var at: Double? = nil
     }
 
     struct Arrow: Codable, Equatable, Identifiable, Sendable {
@@ -419,6 +492,7 @@ struct NoteCanvas: Codable, Equatable, Sendable {
         var from: String
         var to: String
         var dashed = false
+        var at: Double? = nil
     }
 
     struct Words: Codable, Equatable, Identifiable, Sendable {
@@ -426,15 +500,20 @@ struct NoteCanvas: Codable, Equatable, Sendable {
         var text: String
         var x: Double
         var y: Double
+        var at: Double? = nil
     }
 
-    var version = 1
+    var version = 2
     /// Each note's spot, by its id (only a note with an id of its own in its file: NoteShelf.lasting).
     var notes: [String: Spot] = [:]
     var areas: [Area] = []
     var arrows: [Arrow] = []
     var texts: [Words] = []
     var zoom: Double = 1
+    var zoomAt: Double? = nil
+    /// What was taken away and when ("area:<id>", "arrow:<id>", "words:<id>"): anything older under that id stays
+    /// away whichever version it comes from; something changed after it comes back.
+    var removed: [String: Double] = [:]
 
     enum Edit: Equatable, Sendable {
         case move(String, Spot)
@@ -447,24 +526,81 @@ struct NoteCanvas: Codable, Equatable, Sendable {
         case zoom(Double)
     }
 
-    /// The canvas with one edit made on it: an area, arrow or words by their id (added or replaced).
-    func applying(_ edit: Edit) -> NoteCanvas {
+    /// An edit with the time it was made (kept with it while it waits to be saved, so a retry is as old as the edit).
+    struct Stamped: Equatable, Sendable {
+        var edit: Edit
+        var at: Double
+
+        init(_ edit: Edit, at: Double = Date().timeIntervalSince1970) {
+            self.edit = edit
+            self.at = at
+        }
+    }
+
+    /// The canvas with one edit made on it at `at`: an area, arrow or words by their id (added or replaced, stamped),
+    /// a removal leaving its tombstone.
+    func applying(_ edit: Edit, at: Double = Date().timeIntervalSince1970) -> NoteCanvas {
         var next = self
         switch edit {
-        case .move(let id, let spot): next.notes[id] = spot
-        case .area(let area):
-            if let at = next.areas.firstIndex(where: { $0.id == area.id }) { next.areas[at] = area } else { next.areas.append(area) }
-        case .removeArea(let id): next.areas.removeAll { $0.id == id }
-        case .arrow(let arrow):
+        case .move(let id, var spot):
+            spot.at = at
+            next.notes[id] = spot
+        case .area(var area):
+            area.at = at
+            if let index = next.areas.firstIndex(where: { $0.id == area.id }) { next.areas[index] = area } else { next.areas.append(area) }
+        case .removeArea(let id):
+            next.areas.removeAll { $0.id == id }
+            next.removed["area:" + id] = at
+        case .arrow(var arrow):
             guard arrow.from != arrow.to else { return next }
-            if let at = next.arrows.firstIndex(where: { $0.id == arrow.id }) { next.arrows[at] = arrow } else { next.arrows.append(arrow) }
-        case .removeArrow(let id): next.arrows.removeAll { $0.id == id }
-        case .words(let words):
-            if let at = next.texts.firstIndex(where: { $0.id == words.id }) { next.texts[at] = words } else { next.texts.append(words) }
-        case .removeWords(let id): next.texts.removeAll { $0.id == id }
-        case .zoom(let zoom): next.zoom = Self.clampZoom(zoom)
+            arrow.at = at
+            if let index = next.arrows.firstIndex(where: { $0.id == arrow.id }) { next.arrows[index] = arrow } else { next.arrows.append(arrow) }
+        case .removeArrow(let id):
+            next.arrows.removeAll { $0.id == id }
+            next.removed["arrow:" + id] = at
+        case .words(var words):
+            words.at = at
+            if let index = next.texts.firstIndex(where: { $0.id == words.id }) { next.texts[index] = words } else { next.texts.append(words) }
+        case .removeWords(let id):
+            next.texts.removeAll { $0.id == id }
+            next.removed["words:" + id] = at
+        case .zoom(let zoom):
+            next.zoom = Self.clampZoom(zoom)
+            next.zoomAt = at
         }
         return next
+    }
+
+    func applying(_ edits: [Stamped]) -> NoteCanvas { edits.reduce(self) { $0.applying($1.edit, at: $1.at) } }
+
+    /// Two versions of one canvas as one: every element of both by its id, the newer winning on the same id (a tie
+    /// keeps `a`'s), every tombstone of both, and an element only while it's newer than its tombstone.
+    static func merge(_ a: NoteCanvas, _ b: NoteCanvas) -> NoteCanvas {
+        var out = NoteCanvas()
+        out.version = max(a.version, b.version)
+        out.removed = a.removed.merging(b.removed) { max($0, $1) }
+        func newer<T>(_ x: T?, _ y: T?, _ at: (T) -> Double?) -> T? {
+            guard let x else { return y }
+            guard let y else { return x }
+            return (at(y) ?? 0) > (at(x) ?? 0) ? y : x
+        }
+        for id in Set(a.notes.keys).union(b.notes.keys) { out.notes[id] = newer(a.notes[id], b.notes[id], \.at) }
+        func union<T: Identifiable>(_ x: [T], _ y: [T], kind: String, _ at: (T) -> Double?) -> [T] where T.ID == String {
+            var order = x.map(\.id)
+            for item in y where !order.contains(item.id) { order.append(item.id) }
+            return order.compactMap { id in
+                guard let item = newer(x.first { $0.id == id }, y.first { $0.id == id }, at) else { return nil }
+                if let gone = out.removed[kind + ":" + id], (at(item) ?? 0) <= gone { return nil }
+                return item
+            }
+        }
+        out.areas = union(a.areas, b.areas, kind: "area", \.at)
+        out.arrows = union(a.arrows, b.arrows, kind: "arrow", \.at)
+        out.texts = union(a.texts, b.texts, kind: "words", \.at)
+        let zoomFromB = (b.zoomAt ?? 0) > (a.zoomAt ?? 0)
+        out.zoom = zoomFromB ? b.zoom : a.zoom
+        out.zoomAt = zoomFromB ? b.zoomAt : a.zoomAt
+        return out
     }
 
     /// The file's text: nil (no file yet) is an empty canvas; a file Petal can't read as a canvas is nil, and is
@@ -493,16 +629,25 @@ struct NoteCanvas: Codable, Equatable, Sendable {
         arrows = try c.decodeIfPresent([Arrow].self, forKey: .arrows) ?? []
         texts = try c.decodeIfPresent([Words].self, forKey: .texts) ?? []
         zoom = Self.clampZoom(try c.decodeIfPresent(Double.self, forKey: .zoom) ?? 1)
+        zoomAt = try c.decodeIfPresent(Double.self, forKey: .zoomAt)
+        removed = try c.decodeIfPresent([String: Double].self, forKey: .removed) ?? [:]
     }
 
-    /// What a based write puts in the file now on disk (`disk`, nil when there's none): the edit made on it as it
-    /// is, so moves made elsewhere meanwhile stay, and everything this Petal doesn't know (a later Petal's keys, on
-    /// the file or on an area, arrow, words or spot) is kept as it was. Nil when the file isn't a canvas Petal can
-    /// read (kept as it is).
-    static func write(_ edit: Edit, disk: String?) -> String? {
-        guard let canvas = decode(disk) else { return nil }
-        let next = canvas.applying(edit)
-        if next == canvas, disk != nil { return disk }
+    /// The canvas as it is: the file merged with every version iCloud kept of it (`versions`; one Petal can't read is
+    /// left out, and left unresolved by the caller).
+    static func merged(disk: String?, versions: [String]) -> NoteCanvas? {
+        guard let current = decode(disk) else { return nil }
+        return versions.compactMap { decode($0) }.reduce(current, merge)
+    }
+
+    /// What a based write puts in the file now on disk (`disk`, nil when there's none): the file merged with iCloud's
+    /// versions of it, then the edits (each at its own time), so what changed elsewhere meanwhile stays; everything
+    /// this Petal doesn't know (a later Petal's keys, on the file or on an item) is kept as it was. Nil when the file
+    /// isn't a canvas Petal can read (kept as it is).
+    static func write(_ edits: [Stamped], disk: String?, versions: [String] = []) -> String? {
+        guard let current = decode(disk), let base = merged(disk: disk, versions: versions) else { return nil }
+        let next = base.applying(edits)
+        if next == current, disk != nil { return disk }
         var raw: [String: Any] = [:]
         if let disk, !disk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             guard let object = try? JSONSerialization.jsonObject(with: Data(disk.utf8)) as? [String: Any] else { return nil }
@@ -526,6 +671,10 @@ struct NoteCanvas: Codable, Equatable, Sendable {
         }
         guard let data = try? JSONSerialization.data(withJSONObject: raw, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) else { return nil }
         return String(decoding: data, as: UTF8.self) + "\n"
+    }
+
+    static func write(_ edit: Edit, disk: String?, versions: [String] = [], at: Double = Date().timeIntervalSince1970) -> String? {
+        write([Stamped(edit, at: at)], disk: disk, versions: versions)
     }
 
     /// An item as this Petal writes it, over what the file had for it (the keys it doesn't know kept).
@@ -568,6 +717,19 @@ struct NoteCanvas: Codable, Equatable, Sendable {
             return mx >= area.x && mx <= area.x + area.w && my >= area.y && my <= area.y + area.h
         }.map(\.key).sorted()
     }
+}
+
+/// A notebook's canvas edits not saved yet: kept in memory in order, written together on the next try, and kept
+/// (never dropped) until a write takes them.
+enum CanvasQueue {
+    /// After a write of the first `count` waiting edits: what's still waiting (the ones added meanwhile, and all of
+    /// them when it failed).
+    static func after(_ waiting: [NoteCanvas.Stamped], wrote count: Int, ok: Bool) -> [NoteCanvas.Stamped] {
+        ok ? Array(waiting.dropFirst(min(count, waiting.count))) : waiting
+    }
+
+    /// How long to wait before trying again after `failures` failed tries in a row (2 s, doubling, at most a minute).
+    static func retry(after failures: Int) -> TimeInterval { min(60, 2 * pow(2, Double(max(0, failures - 1)))) }
 }
 
 // MARK: - A notebook in the dock

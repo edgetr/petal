@@ -11,6 +11,7 @@ extension NoteDesk {
     static let readOnlyWords = "This note has two versions right now (it changed in two places at once): nothing was changed. The person keeps one with Keep this one on the paper; then try again."
     static let notMade = "Petal couldn't make the note's file. It keeps the note and tries again; nothing to do now."
     static let hungUp = "The request ended before this was done: nothing was changed."
+    static let turnedPrivate = "A notebook this answer is about turned Private meanwhile, so nothing of it is told."
     static let notThisNote = "That note's file is another note's now (it was renamed or moved meanwhile): nothing was changed. petal_notes lists them."
 
     /// `asker`: the note the request comes from (PETAL_NOTE: a helper's @ inside a note, by the note's id), or nil.
@@ -26,7 +27,20 @@ extension NoteDesk {
         }
         // Everything told goes through the vault's redaction first (NoteShield, the rule petal_ui and petal_look
         // follow), off the main thread; while the vault can't be read, nothing of the notes is told.
-        let send: (Any) -> Void = { value in Self.shielded(value) { out in if let out { answer(out) } else { refuse(NoteShield.unreadable) } } }
+        // Every notebook the answer tells of; checked again right before it's handed over (after the redaction's wait
+        // and any other): one turned Private meanwhile, or the asker's note moved out of it, and nothing is told.
+        let told = Told()
+        let send: (Any) -> Void = { [weak self] value in
+            Self.shielded(value) { out in
+                guard let out else { return refuse(NoteShield.unreadable) }
+                guard let self else { return }
+                let insideNow = asker.flatMap { self.store.current($0)?.notebook }
+                guard NotePrivacy.deliverable(notebooks: told.books, privateBooks: self.store.privateBooks, asker: insideNow) else {
+                    return refuse(Self.turnedPrivate)
+                }
+                answer(out)
+            }
+        }
         let fail: (String) -> Void = { text in Self.shielded(text) { out in refuse(out as? String ?? NoteShield.unreadable) } }
         guard on else { return fail("Petal Notes is off in Petal's settings (notes).") }
         switch name {
@@ -50,11 +64,13 @@ extension NoteDesk {
                 // The vault unreadable, or changing all the while: nothing searched, and said why.
                 guard let hits = hits ?? nil else { return refuse(NoteShield.unreadable) }
                 let found = hits.map { papers[$0] }
+                told.books.formUnion(found.prefix(limit).map(\.notebook))
+                told.books.formUnion(self.store.notebooks.filter { readable($0.name) }.map(\.name))
                 send(["notes": found.prefix(limit).map { self.summary($0) }, "count": found.count,
                       "notebooks": self.store.notebooks.filter { readable($0.name) }.map { ["name": $0.name, "color": $0.color.isEmpty ? "accent" : $0.color, "notes": $0.count] }])
             }
         case "petal_note_read":
-            resolve(args["id"] as? String ?? "", readable: readable, refuse, fail) { paper in
+            resolve(args["id"] as? String ?? "", readable: readable, told: told, refuse, fail) { paper in
             // Its whole text, its pictures as `![picture N]`: never a pictures' folder or file name.
             var result = self.summary(paper, text: true)
             if paper.file.cover { result["cover"] = true }
@@ -65,8 +81,8 @@ extension NoteDesk {
             let text = args["text"] as? String ?? ""
             if let id = args["id"] as? String, !id.isEmpty {
                 let append = args["append"] as? Bool ?? false
-                resolve(id, readable: readable, refuse, fail) { paper in
-                    self.persist(paper.key, live: live, send, fail, touch: true, edit: { file in
+                resolve(id, readable: readable, told: told, refuse, fail) { paper in
+                    self.persist(paper.key, told: told, live: live, send, fail, touch: true, edit: { file in
                         // `![picture N]` lines are the note's own pictures again.
                         let words = NoteTold.restorePictures(text, from: file.body)
                         file.body = append ? file.body + (file.body.isEmpty || file.body.hasSuffix("\n") ? "" : "\n") + words : words
@@ -85,6 +101,7 @@ extension NoteDesk {
                     if let place { file.places = [place] }
                     self.store.make(file, in: notebook, live: live) { made in
                         guard let made else { return fail(Self.notMade) }
+                        told.books.insert(made.notebook)
                         var result = self.written(made)
                         result["notebook"] = made.notebook
                         if sticking { result["stuck"] = place.map { self.told($0) as Any } ?? "nowhere (nothing in front Petal could stick it to)" }
@@ -97,30 +114,31 @@ extension NoteDesk {
             let notebook = (args["notebook"] as? String ?? "").trimmingCharacters(in: .whitespaces)
             guard !notebook.isEmpty else { return fail("Which notebook? (a new name makes one)") }
             guard readable(notebook) else { return fail("Petal can't move notes there. Pick another notebook.") }
-            resolve(args["id"] as? String ?? "", readable: readable, refuse, fail) { paper in
+            resolve(args["id"] as? String ?? "", readable: readable, told: told, refuse, fail) { paper in
                 guard !self.store.readOnly(paper) else { return fail(Self.readOnlyWords) }
                 guard live() else { return fail(Self.hungUp) }
                 guard readable(notebook) else { return fail("Petal can't move notes there. Pick another notebook.") }
                 // The same move as the letterhead's: what's typed in it goes with it, and its panel and editor follow.
                 self.move(paper.key, to: notebook, live: live) { moved in
+                    if let moved { told.books.insert(moved.notebook) }
                     if let moved { send(["moved": self.handle(moved), "notebook": moved.notebook]) }
                     else { fail(live() ? "Couldn't move it (or its pictures); it's where it was." : Self.hungUp) }
                 }
             }
         case "petal_note_stick":
-            resolve(args["id"] as? String ?? "", readable: readable, refuse, fail) { paper in self.stickTool(paper, args, readable: readable, live: live, send, fail) }
+            resolve(args["id"] as? String ?? "", readable: readable, told: told, refuse, fail) { paper in self.stickTool(paper, args, readable: readable, told: told, live: live, send, fail) }
         default:
             fail("Unknown tool \(name)")
         }
     }
 
     /// petal_note_stick, once the note is found.
-    private func stickTool(_ paper: PaperNote, _ args: [String: Any], readable: @escaping (String) -> Bool, live: @escaping @Sendable () -> Bool,
+    private func stickTool(_ paper: PaperNote, _ args: [String: Any], readable: @escaping (String) -> Bool, told: Told, live: @escaping @Sendable () -> Bool,
                            _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
             guard !store.readOnly(paper) else { return fail(Self.readOnlyWords) }
             if let remove = (args["remove"] as? NSNumber)?.intValue {
                 guard paper.file.places.indices.contains(remove), paper.file.places.count > 1 else { return fail("A note keeps at least one place; remove is an index from places.") }
-                return persist(paper.key, live: live, send, fail, touch: false, edit: { file in
+                return persist(paper.key, told: told, live: live, send, fail, touch: false, edit: { file in
                     if file.places.indices.contains(remove), file.places.count > 1 { file.places.remove(at: remove) }
                 }) { ["places": $0.file.places.map(self.told)] }
             }
@@ -130,7 +148,7 @@ extension NoteDesk {
                 guard let place else { return fail("Petal couldn't tell what's in front (or it changed while Petal looked): nothing was stuck.") }
                 // The same note after the wait, by its id (its path may be another note's by now).
                 guard let paper = self.repick(ticket), readable(paper.notebook) else { return fail(Self.notThisNote) }
-                self.persist(paper.key, live: live, send, fail, touch: false, edit: { file in
+                self.persist(paper.key, told: told, live: live, send, fail, touch: false, edit: { file in
                     file.places = also ? file.places.filter { !$0.samePlace(place) } + [place] : [place]
                 }) { saved in
                     self.refresh()
@@ -141,7 +159,7 @@ extension NoteDesk {
 
     /// The note an agent names, found on what it may see of ids, files and titles (NoteShield.find, redacted with a
     /// settled index); while the vault can't be read, nothing is looked up and it's told why.
-    private func resolve(_ name: String, readable: @escaping (String) -> Bool, _ refuse: @escaping (String) -> Void, _ fail: @escaping (String) -> Void,
+    private func resolve(_ name: String, readable: @escaping (String) -> Bool, told: Told, _ refuse: @escaping (String) -> Void, _ fail: @escaping (String) -> Void,
                          _ then: @escaping @MainActor (PaperNote) -> Void) {
         // A Private notebook's notes aren't there for an asker outside it: never found, by handle, file or title.
         let papers = store.notes.filter { readable($0.notebook) }
@@ -156,6 +174,7 @@ extension NoteDesk {
                 guard let paper = self.repick(chosen), readable(paper.notebook) else {
                     return fail("That note changed while Petal looked (renamed, or another note has its name now); petal_notes lists them.")
                 }
+                told.books.insert(paper.notebook)
                 then(paper)
             case .none?: fail("No note with that id; petal_notes lists them.")
             case .ambiguous(let all)?:
@@ -164,6 +183,11 @@ extension NoteDesk {
             case .unreadable?, nil: refuse(NoteShield.unreadable)
             }
         }
+    }
+
+    /// The notebooks one request's answer tells of (filled as it goes, read right before it's handed over).
+    final class Told {
+        var books: Set<String> = []
     }
 
     /// The paper a request is about, carried by its note's id through every wait (a lookup, a read of what's in
@@ -215,7 +239,7 @@ extension NoteDesk {
     /// Changes a note for the AI through its session (the one way any note changes) and answers with what reached
     /// the disk: written; kept beside the note as a copy (it changed elsewhere meanwhile); or not saved yet (kept
     /// in Petal and tried again). A read-only paper, or a request whose asker hung up, changes nothing.
-    private func persist(_ key: String, live: @escaping @Sendable () -> Bool, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void,
+    private func persist(_ key: String, told: Told, live: @escaping @Sendable () -> Bool, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void,
                          touch: Bool, edit: (inout NoteFile) -> Void, _ result: @escaping @MainActor (PaperNote) -> [String: Any]) {
         guard live() else { return fail(Self.hungUp) }
         guard let paper = store.paper(key), !store.readOnly(paper) else { return fail(Self.readOnlyWords) }
@@ -224,7 +248,10 @@ extension NoteDesk {
             case .cancelled: fail(Self.hungUp)
             case .notThisNote: fail(Self.notThisNote)
             // The paper written (by its file; moved meanwhile, by its id when that names one paper).
-            case .written: send(result(self.store.paper(key) ?? NoteShelf.pick(key: key, id: paper.noteID, now: self.store.notes.map { ($0.key, $0.noteID) }).map { self.store.notes[$0] } ?? paper))
+            case .written:
+                let now = self.store.paper(key) ?? NoteShelf.pick(key: key, id: paper.noteID, now: self.store.notes.map { ($0.key, $0.noteID) }).map { self.store.notes[$0] } ?? paper
+                told.books.insert(now.notebook)
+                send(result(now))
             case .keptBoth(let copy):
                 // The copy's name comes from the note's title (cut to fit), so it isn't told.
                 _ = copy

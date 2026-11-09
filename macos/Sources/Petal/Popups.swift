@@ -288,6 +288,7 @@ final class Popups {
         let wasPreview = kind == "preview"
         panel.hide()
         panel.sharingType = .readOnly
+        fanNotebook = nil
         kind = nil
         stack = nil
         anchor = nil
@@ -298,6 +299,18 @@ final class Popups {
     }
 
     /// The stack opens once its files are read, off the main thread (a few milliseconds), at the size they need.
+    /// The notebook whose papers are fanned up now, if any.
+    private var fanNotebook: String?
+
+    /// A notebook's privacy changed (here, or on another Mac): an open fan of a notebook that's Private now is kept out
+    /// of pictures of the screen at once.
+    func notebookPrivacyChanged() {
+        guard let name = fanNotebook else { return }
+        let book = PetalApp.shared.paper.store.notebook(name)
+        // Gone or renamed meanwhile: kept out too, until it closes.
+        panel.sharingType = book?.isPrivate == false ? .readOnly : .none
+    }
+
     func toggleStack(_ folder: String, in dock: ScreenDock) {
         let key = "stack:\(folder)"
         if dock.openPopup == key { closeAll(); return }
@@ -312,7 +325,9 @@ final class Popups {
         if let book = PetalApp.shared.paper.notebook(forStack: folder) {
             PetalApp.shared.signals.opened(folder)
             guard let slot = dock.panel?.screenFrame(of: key) else { return }
-            // A Private notebook's papers never show in pictures of the screen or screen sharing.
+            // A Private notebook's papers never show in pictures of the screen or screen sharing (and the fan follows
+            // its notebook turning Private while it's open: notebookPrivacyChanged).
+            fanNotebook = book.name
             panel.sharingType = book.isPrivate ? .none : .readOnly
             panel.show(NotebookFanView(book: book, papers: PetalApp.shared.paper.fanned(book)) { [weak self] in self?.closeAll() }, over: slot, dock: dock.panel)
             return

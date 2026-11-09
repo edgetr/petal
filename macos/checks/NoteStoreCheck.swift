@@ -118,6 +118,7 @@ struct NoteStoreCheck {
         caseMove(root: root)
         versionGroups(root: root)
         canvasFile(root: root)
+        canvasRetry(root: root)
         notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -1081,12 +1082,12 @@ struct NoteStoreCheck {
         try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
         let file = folder.appending(path: NoteStore.canvasName)
         let first = NoteStore.writeCanvas(.move("n1", .init(x: 10, y: 10)), to: file, root: root)
-        expect(first?.notes["n1"] == .init(x: 10, y: 10) && NoteCanvas.decode(text(file)) == first, "the first edit makes the file")
+        expect(first?.notes["n1"]?.x == 10 && NoteCanvas.decode(text(file)) == first, "the first edit makes the file")
         // Another Mac moved another note meanwhile.
-        let elsewhere = NoteCanvas.decode(text(file))!.applying(.move("n2", .init(x: 70, y: 70)))
+        let elsewhere = NoteCanvas.decode(text(file))!.applying(.move("n2", .init(x: 70, y: 70)), at: Date().timeIntervalSince1970 + 1)
         try? Data(elsewhere.encoded().utf8).write(to: file)
         let second = NoteStore.writeCanvas(.move("n1", .init(x: 20, y: 20)), to: file, root: root)
-        expect(second?.notes["n1"] == .init(x: 20, y: 20) && second?.notes["n2"] == .init(x: 70, y: 70), "what moved elsewhere stays")
+        expect(second?.notes["n1"]?.x == 20 && second?.notes["n2"]?.x == 70, "what moved elsewhere stays")
         try? Data("the person's own words".utf8).write(to: file)
         expect(NoteStore.writeCanvas(.move("n1", .init(x: 1, y: 1)), to: file, root: root) == nil && text(file) == "the person's own words",
                "a file that isn't a canvas is left as it is")
@@ -1100,6 +1101,39 @@ struct NoteStoreCheck {
         try? fm.removeItem(at: outside)
         expect(NoteStore.writeCanvas(.move("n1", .init(x: 1, y: 1)), to: root.appending(path: "Never made \(UUID().uuidString)/\(NoteStore.canvasName)"), root: root) == nil,
                "no notebook folder: nothing made")
+    }
+
+    /// A canvas edit whose write fails is kept, said ("Not saved yet") and tried again until it lands; on a drain that
+    /// still fails, it's kept in Unsaved notes.
+    @MainActor static func canvasRetry(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Board")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let store = NoteStore(root: root)
+        store.preview([], notebooks: [Notebook(name: "Board", folder: folder, color: "", cover: nil, count: 0)])
+        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder.path)
+        var saved: NoteCanvas?
+        store.editCanvas("Board", .move("n1", .init(x: 3, y: 4))) { saved = $0 }
+        var until = Date().addingTimeInterval(3)
+        while !store.canvasUnsaved.contains("Board") && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        expect(store.canvasUnsaved.contains("Board") && store.canvasPending("Board").count == 1 && saved == nil,
+               "a failed canvas save is kept and said, not dropped")
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+        until = Date().addingTimeInterval(8)
+        while saved == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        expect(saved?.notes["n1"]?.x == 3 && !store.canvasUnsaved.contains("Board") && store.canvasPending("Board").isEmpty
+               && NoteCanvas.decode(text(folder.appending(path: NoteStore.canvasName)))?.notes["n1"]?.y == 4, "tried again, it lands")
+        // Quitting while it still can't be written: kept in Unsaved notes.
+        let locked = root.appending(path: "Locked board")
+        try? fm.createDirectory(at: locked, withIntermediateDirectories: true)
+        try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: locked.path)
+        NoteStore.drainCanvas([(notebook: "Locked board", file: locked.appending(path: NoteStore.canvasName),
+                                edits: [NoteCanvas.Stamped(.move("n7", .init(x: 1, y: 2)))])], root: root)
+        let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
+        let kept = (fm.enumerator(atPath: unsaved.path)?.allObjects as? [String] ?? []).filter { $0.hasSuffix("Locked board canvas.json") }
+        expect(kept.count == 1 && NoteCanvas.decode(kept.first.flatMap { text(unsaved.appending(path: $0)) })?.notes["n7"]?.y == 2,
+               "on quit, an edit that still can't be written is kept in Unsaved notes", "\(kept)")
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
     }
 
     /// A notebook's folder renamed: its notes and canvas go with it, never over another notebook, only inside the
