@@ -2447,6 +2447,16 @@ final class NoteDesk {
         app.popups.notebookPrivacyChanged()
     }
 
+    /// Petal's own windows showing a Private notebook's note now (papers, edge tabs, a notebook's fan, the Petal Notes
+    /// window): every picture Petal takes leaves them out (NotePrivacy.excludedWindows).
+    func privateWindowNumbers() -> Set<Int> {
+        var surfaces = panels.map { key, panel in NotePrivacy.Surface(window: panel.windowNumber, showsPrivate: isPrivate(key)) }
+        surfaces += tabPanels.map { key, panel in NotePrivacy.Surface(window: panel.windowNumber, showsPrivate: panel.showsPrivate) }
+        if let fan = app.popups.privateFanWindow { surfaces.append(NotePrivacy.Surface(window: fan, showsPrivate: true)) }
+        if let window = app.notesWindow.window { surfaces.append(NotePrivacy.Surface(window: window.windowNumber, showsPrivate: app.notesWindow.showsPrivate)) }
+        return NotePrivacy.excludedWindows(surfaces)
+    }
+
     /// Whether a paper's notebook is Private.
     func isPrivate(_ key: String) -> Bool {
         guard let paper = store.paper(key) else { return false }
@@ -2494,7 +2504,7 @@ final class NoteDesk {
         } else { look() }
         // From the Spaces last read; read (off the main thread) when none were yet and a note is on a Desktop.
         if Self.spaces.isEmpty { refreshSpaces() } else { placeDesktop() }
-        // Every paper and tab redrawn, and kept out of pictures again if its notebook turned Private (here or elsewhere).
+        // Every paper and tab redrawn, and left out of Petal's pictures again if its notebook turned Private (here or elsewhere).
         for panel in panels.values { panel.refresh() }
         for panel in tabPanels.values { panel.refreshSharing() }
         app.popups.notebookPrivacyChanged()
@@ -2569,7 +2579,8 @@ final class NotePanel: NSPanel {
 
     func refresh() {
         guard let desk else { return }
-        // A Private notebook's paper never shows in pictures of the screen or screen sharing.
+        // A Private notebook's paper: left out of Petal's own pictures (privateWindowNumbers); macOS is asked not to
+        // share it too, a best effort only.
         sharingType = desk.isPrivate(key) ? .none : .readOnly
         hosting.rootView = AnyView(NotePanelContent(desk: desk, key: key, panel: self).environment(PetalApp.shared))
     }
@@ -2732,8 +2743,12 @@ final class EdgeTabPanel: NSPanel {
     /// A tab whose notes include a Private notebook's never shows in pictures of the screen (its hover says its title).
     func refreshSharing() {
         guard let tab = edgeTab, let desk else { return }
-        sharingType = tab.ids.contains(where: desk.isPrivate) ? .none : .readOnly
+        showsPrivate = tab.ids.contains(where: desk.isPrivate)
+        sharingType = showsPrivate ? .none : .readOnly
     }
+
+    /// Its tab is for a Private notebook's note (its hover says its title): Petal's own pictures leave it out.
+    private(set) var showsPrivate = false
 
     private func draw() {
         guard let tab = edgeTab, let desk else { return }

@@ -333,12 +333,16 @@ extension NoteLibrary {
     /// A notebook's cover: "About this notebook.md" (any version of it), front matter or not, or a note that says it.
     static func isCover(fileName: String, file: NoteFile) -> Bool { file.cover || fileName == NoteShelf.coverName }
 
+    /// Whether a notebook's cover is unknown: its file is there and wasn't read (not downloaded, unreadable), or a
+    /// version of it wasn't. Unknown counts as Private.
+    static func coverUnknown(fileThere: Bool, fileRead: Bool, versionsUnread: Bool) -> Bool { (fileThere && !fileRead) || versionsUnread }
+
     /// Whether a notebook is Private, counted across every version of its cover: Private when any says so, or while
     /// its cover is there and not read yet (unknown).
     static func privateNotebook(covers: [NoteFile], unread: Bool) -> Bool { unread || covers.contains(where: NoteContract.isPrivate) }
 }
 
-/// A Private notebook (`private: true` on its cover) stays out of pictures, the AI button's previews and every other
+/// A Private notebook (`private: true` on its cover) stays out of Petal's own pictures, the AI button's previews and every other
 /// notebook's memory; tools read its notes only when asked from inside it (an @ in one of its notes).
 enum NotePrivacy {
     /// Whether a tool or a helper asking from `asker` (the notebook of the note it's in; nil: from no note) may read
@@ -351,6 +355,20 @@ enum NotePrivacy {
 }
 
 extension NotePrivacy {
+    /// One of Petal's own windows, as Petal's pictures weigh it: its window number, and whether it shows a Private
+    /// notebook's note (a paper, an edge tab, a notebook's fan, the Petal Notes window on a Private notebook).
+    struct Surface: Equatable {
+        var window: Int
+        var showsPrivate: Bool
+    }
+
+    /// The windows every picture Petal takes leaves out (petal_look's, the AI button's previews, any SCContentFilter
+    /// Petal builds): all those showing a Private notebook's note.
+    static func excludedWindows(_ surfaces: [Surface]) -> Set<Int> { Set(surfaces.filter(\.showsPrivate).map(\.window)) }
+
+    /// Whether a picture of one window may be taken: never of one left out (then there's no picture at all).
+    static func mayCapture(window: Int, excluded: Set<Int>) -> Bool { !excluded.contains(window) }
+
     /// Whether a tool's answer may still be given, right before it's handed over (after the vault's redaction, a
     /// wait): every notebook it tells of is still readable by its asker as things are now.
     static func deliverable(notebooks: Set<String>, privateBooks: Set<String>, asker: String?) -> Bool {
@@ -491,11 +509,41 @@ enum NoteTasks {
 /// at once like canvas edits, and made on whatever the cover is on disk when they land: a field never carries an old
 /// value of another. Shown in memory at once (Private first), and an unknown cover counts as Private.
 struct CoverFields: Codable, Equatable, Sendable {
+    /// Its notebook's name when the change was made: only for saying so, never how it's found.
     var notebook: String
+    /// What it's bound to: the notes' folder it was made in, and its notebook's cover id (when it had one) and folder
+    /// itself (volume and inode). Applied only in that root, to the notebook that is that cover or that folder.
+    var root = ""
+    var coverID = ""
+    var folderID = ""
     /// Each field's value ("" takes `private` or `view` off).
     var fields: [String: String] = [:]
 
     var isEmpty: Bool { fields.isEmpty }
+
+    /// Its key, the same through renames: its root, then its cover id, else its folder.
+    var key: String { root + "|" + (coverID.isEmpty ? "folder:" + folderID : coverID) }
+
+    init(notebook: String, root: String = "", coverID: String = "", folderID: String = "", fields: [String: String] = [:]) {
+        self.notebook = notebook
+        self.root = root
+        self.coverID = coverID
+        self.folderID = folderID
+        self.fields = fields
+    }
+
+    /// The notebook it's for in `root` now: the one whose cover has its id, else the one that is its folder; nil when
+    /// it's another root's, or neither is found (or found twice: never a guess).
+    func target(root now: String, notebooks: [(name: String, coverID: String, folderID: String)]) -> String? {
+        guard root == now else { return nil }
+        if !coverID.isEmpty {
+            let byCover = notebooks.filter { $0.coverID == coverID }
+            if byCover.count == 1 { return byCover[0].name }
+        }
+        guard !folderID.isEmpty else { return nil }
+        let byFolder = notebooks.filter { $0.folderID == folderID }
+        return byFolder.count == 1 ? byFolder[0].name : nil
+    }
 
     static let names: Set<String> = ["private", "color", "view"]
 
@@ -974,6 +1022,10 @@ struct CanvasEntry: Codable, Equatable, Sendable {
 /// A notebook's canvas edits not saved yet: kept in memory in order, journaled, written together on the next try,
 /// and kept (never dropped) until a write takes them or, their notebook gone, a rescue does.
 enum CanvasQueue {
+    /// Whether a canvas entry's notebook is gone, to be rescued: only when no notebook's cover has its id and the
+    /// notes' folder was read completely (no cover still downloading or unreadable, which could be it).
+    static func gone(found: Bool, complete: Bool) -> Bool { !found && complete }
+
     /// Where a canvas entry goes now: the one notebook whose cover has its id (a cover's conflict copies are in one
     /// notebook), else nil: the notebook is gone and its edits are rescued.
     static func notebook(coverID: String, covers: [(id: String, notebook: String)]) -> String? {

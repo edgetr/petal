@@ -43,10 +43,15 @@ final class NotesWindow {
         PetalWindow.bringForward(window)
     }
 
-    /// Shown in pictures of the screen and screen sharing only while no Private notebook is showing.
+    /// Whether a Private notebook's note shows in it (Petal's own pictures leave it out then).
+    /// The window shows a Private notebook's note now (its page, a search hit, a view): Petal's own pictures leave it
+    /// out (NotePrivacy.excludedWindows), and, as a best effort only, macOS is asked not to share it.
     func showingPrivate(_ hidden: Bool) {
+        showsPrivate = hidden
         window?.sharingType = hidden ? .none : .readOnly
     }
+
+    private(set) var showsPrivate = false
 
     private func make() -> NSWindow {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1220, height: 748),
@@ -282,7 +287,7 @@ struct NotesWindowView: View {
     private var canvasShowing: Bool { model.query.isEmpty && book?.view == .canvas }
 
     /// Whether a Private notebook's note is showing (its page, a search hit, a view across notebooks): the window is
-    /// kept out of pictures of the screen and screen sharing while it is.
+    /// left out of Petal's own pictures while it is (and macOS asked not to share it, a best effort only).
     private var showingPrivate: Bool {
         let books = store.privateBooks
         guard !books.isEmpty else { return false }
@@ -472,7 +477,7 @@ struct NotesWindowView: View {
         var parts = [book.count == 1 ? "1 note" : "\(book.count) notes",
                      NoteLibrary.whereWords(root: rootPath ?? store.root.path, notebook: book.name, home: NSHomeDirectory())]
         if model.inDock(book) { parts.append("in the dock as a stack") }
-        if book.isPrivate { parts.append("private: kept out of pictures, previews and other notebooks") }
+        if book.isPrivate { parts.append("private: kept from Petal AI, previews, other notebooks and Petal's pictures") }
         return parts.joined(separator: " · ")
     }
 

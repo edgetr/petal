@@ -423,16 +423,19 @@ extension NoteJournal {
         for name in names {
             let url = holding.appending(path: name)
             guard let entry = readCanvas(url) else { continue }
-            if landCanvas(entry, covers: covers, notebooks: read.notebooks, root: root) { try? fm.removeItem(at: url) }
+            if landCanvas(entry, covers: covers, notebooks: read.notebooks, complete: read.complete, root: root) { try? fm.removeItem(at: url) }
         }
         if (((try? fm.contentsOfDirectory(atPath: holding.path)) ?? []).filter { $0.hasSuffix(".json") }).isEmpty { try? fm.removeItem(at: holding) }
     }
 
-    /// One entry put somewhere safe: its notebook's canvas, or (gone) "Unsaved notes". True once written.
-    nonisolated static func landCanvas(_ entry: CanvasEntry, covers: [(id: String, notebook: String)], notebooks: [Notebook], root: URL) -> Bool {
-        if let name = CanvasQueue.notebook(coverID: entry.coverID, covers: covers), let book = notebooks.first(where: { $0.name == name }) {
+    /// One entry put somewhere safe: its notebook's canvas, or (gone) "Unsaved notes". True once written. While the
+    /// folder wasn't read completely (a cover still downloading, which could be its notebook's), it waits.
+    nonisolated static func landCanvas(_ entry: CanvasEntry, covers: [(id: String, notebook: String)], notebooks: [Notebook], complete: Bool, root: URL) -> Bool {
+        let name = CanvasQueue.notebook(coverID: entry.coverID, covers: covers)
+        if let name, let book = notebooks.first(where: { $0.name == name }) {
             return NoteStore.writeCanvas(entry.edits, to: book.folder.appending(path: NoteStore.canvasName), root: root) != nil
         }
+        guard CanvasQueue.gone(found: name != nil, complete: complete) else { return false }
         return rescueCanvas(entry) != nil
     }
 
@@ -440,14 +443,14 @@ extension NoteJournal {
 
     nonisolated static func coverFolder(in folder: URL = folder) -> URL { folder.appending(path: "Covers") }
 
-    nonisolated static func coverFile(_ notebook: String, in folder: URL = folder) -> URL {
-        coverFolder(in: folder).appending(path: file("cover:" + notebook.lowercased(), in: folder).lastPathComponent)
+    nonisolated static func coverFile(_ key: String, in folder: URL = folder) -> URL {
+        coverFolder(in: folder).appending(path: file("cover:" + key, in: folder).lastPathComponent)
     }
 
     /// A notebook's cover fields waiting, written over its entry (the latest value of each field). On the journal's
     /// queue.
     nonisolated static func keepCover(_ entry: CoverFields, in folder: URL = folder) {
-        let url = coverFile(entry.notebook, in: folder)
+        let url = coverFile(entry.key, in: folder)
         guard !entry.isEmpty else { try? FileManager.default.removeItem(at: url); return }
         try? FileManager.default.createDirectory(at: coverFolder(in: folder), withIntermediateDirectories: true)
         guard let data = try? JSONEncoder().encode(entry) else { return }
@@ -455,8 +458,8 @@ extension NoteJournal {
     }
 
     /// A write took these fields: each leaves the entry only while it still holds that value.
-    nonisolated static func ackCover(_ notebook: String, wrote: [String: String], in folder: URL = folder) {
-        let url = coverFile(notebook, in: folder)
+    nonisolated static func ackCover(_ entry: CoverFields, wrote: [String: String], in folder: URL = folder) {
+        let url = coverFile(entry.key, in: folder)
         guard let data = try? Data(contentsOf: url), let entry = try? JSONDecoder().decode(CoverFields.self, from: data) else { return }
         keepCover(entry.after(wrote: wrote), in: folder)
     }

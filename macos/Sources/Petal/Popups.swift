@@ -302,6 +302,12 @@ final class Popups {
     /// The notebook whose papers are fanned up now, if any.
     private var fanNotebook: String?
 
+    /// The fan's window while it shows a Private notebook's papers (Petal's own pictures leave it out).
+    var privateFanWindow: Int? {
+        guard let name = fanNotebook else { return nil }
+        return PetalApp.shared.paper.store.notebook(name)?.isPrivate == false ? nil : panel.windowNumber
+    }
+
     /// A notebook's privacy changed (here, or on another Mac): an open fan of a notebook that's Private now is kept out
     /// of pictures of the screen at once.
     func notebookPrivacyChanged() {
@@ -325,7 +331,8 @@ final class Popups {
         if let book = PetalApp.shared.paper.notebook(forStack: folder) {
             PetalApp.shared.signals.opened(folder)
             guard let slot = dock.panel?.screenFrame(of: key) else { return }
-            // A Private notebook's papers never show in pictures of the screen or screen sharing (and the fan follows
+            // A Private notebook's papers: left out of Petal's own pictures (privateFanWindow), macOS asked not to share
+            // them as a best effort (and the fan follows
             // its notebook turning Private while it's open: notebookPrivacyChanged).
             fanNotebook = book.name
             panel.sharingType = book.isPrivate ? .none : .readOnly
@@ -692,7 +699,8 @@ final class Previews {
         let taken = Dictionary(items.map { ($0.id, $0.seen) }, uniquingKeysWith: { first, _ in first })
         capturingNotes = true
         Task {
-            let pictures = await Capture.notes(items.map { (id: $0.id, seen: $0.seen) })
+            let excluded = PetalApp.shared.paper.privateWindowNumbers()
+            let pictures = await Capture.notes(items.map { (id: $0.id, seen: $0.seen) }, excluding: excluded)
             capturingNotes = false
             guard showing == Self.notes else { return }
             // Kept only if it shows the window asked for (any of its app's only for a note on all of an app), its

@@ -352,6 +352,8 @@ final class Assist {
                     if !shownSelection.isEmpty { result["selectedText"] = shownSelection }
                     if let shownClipboard { result["clipboard"] = shownClipboard }
                     let hidden = self.privatePIDs
+                    // Petal's own windows showing a Private notebook's note: never in a picture.
+                    let shielded = self.app.paper.privateWindowNumbers()
                     // What was read goes to the AI only if it's still what it was read from: the app not made private
                     // meanwhile, and a tab note's tab still the one showing in the same window. Else none of it goes
                     // (the picture is deleted): another tab's text, address or picture is never told as the note's.
@@ -404,7 +406,7 @@ final class Assist {
                     let finish = {
                         guard !shot.isEmpty else { return deliver(nil) }
                         Task {
-                            let picture = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", hiding: hidden)
+                            let picture = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", hiding: hidden, excluding: shielded)
                             if let path = picture.path {
                                 result["screenshot"] = path
                                 result["screenshotNote"] = "A PNG of the \(shot == "screen" ? "screen" : "window"); read it to see it. Black boxes are fields that may hold a password, card number, security code or key: Petal hides them."
@@ -489,10 +491,10 @@ final class Assist {
     /// that moved or changed size between the list and the picture would have its blackouts in the wrong place, as
     /// would a field that scrolled far, appeared or went while it was taken: then it's taken again once, and after
     /// that there's no picture.
-    nonisolated private static func screenshot(_ window: CGWindowID?, screen: Bool = false, hiding: Set<pid_t> = []) async -> (path: String?, note: String?) {
+    nonisolated private static func screenshot(_ window: CGWindowID?, screen: Bool = false, hiding: Set<pid_t> = [], excluding: Set<Int> = []) async -> (path: String?, note: String?) {
         var why: String?
         for _ in 0..<2 {
-            let taken = await capture(window, screen: screen, hiding: hiding)
+            let taken = await capture(window, screen: screen, hiding: hiding, excluding: excluding)
             if !taken.moved { return (taken.path, taken.note) }
             why = taken.note
         }
@@ -517,8 +519,13 @@ final class Assist {
         return abs(now.minX - then.minX) <= 1 && abs(now.minY - then.minY) <= 1 && abs(now.width - then.width) <= 1 && abs(now.height - then.height) <= 1
     }
 
-    nonisolated private static func capture(_ window: CGWindowID?, screen: Bool, hiding: Set<pid_t>) async -> (path: String?, note: String?, moved: Bool) {
+    /// `excluding`: Petal's own windows showing a Private notebook's note (NotePrivacy.excludedWindows): left out of
+    /// a picture of the screen, and a picture of one of them alone is never taken.
+    nonisolated private static func capture(_ window: CGWindowID?, screen: Bool, hiding: Set<pid_t>, excluding: Set<Int> = []) async -> (path: String?, note: String?, moved: Bool) {
         guard screen || window != nil else { return (nil, nil, false) }
+        if !screen, let window, !NotePrivacy.mayCapture(window: Int(window), excluded: excluding) {
+            return (nil, "That window shows a note from a Private notebook: Petal takes no picture of it.", false)
+        }
         // Nothing can be checked for the vault's secrets while it can't be read: no picture at all.
         if VaultIndex.current().unreadable {
             return (nil, VaultStore.unreadableText + " Petal can't hide its secrets in a picture, so it takes none: try again in a moment.", false)
@@ -557,7 +564,8 @@ final class Assist {
             var included: [SCWindow] = []
             var left: [String] = []
             var overlays = 0
-            for candidate in content.windows where candidate.isOnScreen && candidate.frame.intersects(area) {
+            for candidate in content.windows where candidate.isOnScreen && candidate.frame.intersects(area)
+                && NotePrivacy.mayCapture(window: Int(candidate.windowID), excluded: excluding) {
                 guard let owner = candidate.owningApplication, !hiding.contains(owner.processID), owner.processID != me,
                       owner.bundleIdentifier != "com.apple.notificationcenterui" else { continue }
                 if let element = Sensitive.window(pid: owner.processID, id: candidate.windowID) {

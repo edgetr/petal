@@ -351,6 +351,32 @@ struct NoteLibraryCheck {
         expect(NoteLibrary.privateNotebook(covers: [], unread: true) && !NoteLibrary.privateNotebook(covers: [publicCover], unread: false),
                "unknown counts as Private; one public cover is public")
         expect(NoteLibrary.isCover(fileName: NoteShelf.coverName, file: NoteFile(id: "file:x", body: "hand written")), "a cover version without front matter is the cover")
+        expect(NoteLibrary.coverUnknown(fileThere: true, fileRead: true, versionsUnread: true)
+               && NoteLibrary.privateNotebook(covers: [publicCover], unread: NoteLibrary.coverUnknown(fileThere: true, fileRead: true, versionsUnread: true)),
+               "a cover version not read: unknown, so Private, even when the file read says public")
+        expect(!NoteLibrary.coverUnknown(fileThere: true, fileRead: true, versionsUnread: false) && NoteLibrary.coverUnknown(fileThere: true, fileRead: false, versionsUnread: false)
+               && !NoteLibrary.coverUnknown(fileThere: false, fileRead: false, versionsUnread: false), "known only once the file and every version are read")
+
+        // Petal's own pictures leave out every window showing a Private notebook's note.
+        let surfaces = [NotePrivacy.Surface(window: 11, showsPrivate: true), NotePrivacy.Surface(window: 12, showsPrivate: false),
+                        NotePrivacy.Surface(window: 13, showsPrivate: true)]
+        let excluded = NotePrivacy.excludedWindows(surfaces)
+        expect(excluded == [11, 13], "the exclusion list: the papers, tabs, fan and window showing a Private note")
+        expect(!NotePrivacy.mayCapture(window: 11, excluded: excluded) && NotePrivacy.mayCapture(window: 12, excluded: excluded) && NotePrivacy.mayCapture(window: 99, excluded: excluded),
+               "no picture of one of them; any other window may be pictured")
+
+        // Cover changes bound to their root and their cover id or folder, never the name.
+        let bound = CoverFields(notebook: "Same", root: "/A", coverID: "cov-1", folderID: "1:100", fields: ["private": "true"])
+        let inA: [(name: String, coverID: String, folderID: String)] = [("Same renamed", "cov-1", "1:100"), ("Other", "cov-2", "1:200")]
+        let inB: [(name: String, coverID: String, folderID: String)] = [("Same", "cov-9", "2:100")]
+        expect(bound.target(root: "/A", notebooks: inA) == "Same renamed", "in its own root: its notebook by cover id, whatever its name now")
+        expect(bound.target(root: "/B", notebooks: inB) == nil, "another root's notebook of the same name: never")
+        let coverless = CoverFields(notebook: "Bare", root: "/A", folderID: "1:300", fields: ["private": "true"])
+        expect(coverless.target(root: "/A", notebooks: [("Bare now", "cov-new", "1:300")]) == "Bare now", "no cover id: its folder")
+        expect(coverless.target(root: "/A", notebooks: [("Bare", "", "1:301")]) == nil, "a folder of the same name that isn't it: never")
+        expect(bound.key != CoverFields(notebook: "Same", root: "/B", coverID: "cov-1").key, "kept per root")
+        expect(!CanvasQueue.gone(found: false, complete: false) && CanvasQueue.gone(found: false, complete: true) && !CanvasQueue.gone(found: true, complete: true),
+               "a canvas entry is rescued only when its notebook isn't found in a folder read completely")
 
         // Cover fields, one by one: a field never carries an old value of another.
         var synced = NoteFile(id: "C2", body: "")

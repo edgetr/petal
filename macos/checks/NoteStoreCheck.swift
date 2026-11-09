@@ -122,6 +122,9 @@ struct NoteStoreCheck {
         canvasDrain(root: root)
         privateCovers(root: root)
         coverQuit(root: root)
+        coverConflict(root: root)
+        canvasWaitsForCovers(root: root)
+        coverRoots(top: root.deletingLastPathComponent())
         notebookFolders(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -1208,7 +1211,7 @@ struct NoteStoreCheck {
         try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
         _ = NoteStore.create("a note", at: folder.appending(path: "One.md"), root: root)
         // What a quit leaves: the field journaled, no cover yet.
-        var pending = CoverFields(notebook: "Quit")
+        var pending = CoverFields(notebook: "Quit", root: root.path, folderID: NoteStore.instance(of: folder))
         pending.fields["private"] = "true"
         NoteJournal.keepCover(pending)
         let left = NoteJournal.coverLeftovers()
@@ -1217,7 +1220,7 @@ struct NoteStoreCheck {
         store.recoverCovers(left.entries)
         NoteJournal.queue.sync {}
         NoteJournal.dropCoverLeftovers(left.holding)
-        expect(fm.fileExists(atPath: NoteJournal.coverFile("Quit").path) && left.holding.allSatisfy { !fm.fileExists(atPath: $0.path) },
+        expect(fm.fileExists(atPath: NoteJournal.coverFile(pending.key).path) && left.holding.allSatisfy { !fm.fileExists(atPath: $0.path) },
                "journaled again before the moved-aside copy goes")
         store.reload()
         var until = Date().addingTimeInterval(5)
@@ -1231,8 +1234,98 @@ struct NoteStoreCheck {
         }
         expect(onDisk().map(NoteContract.isPrivate) == true, "and it lands on the cover made for it")
         until = Date().addingTimeInterval(3)
-        while fm.fileExists(atPath: NoteJournal.coverFile("Quit").path) && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)); NoteJournal.queue.sync {} }
-        expect(!fm.fileExists(atPath: NoteJournal.coverFile("Quit").path), "its journal entry goes once it landed")
+        while fm.fileExists(atPath: NoteJournal.coverFile(pending.key).path) && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)); NoteJournal.queue.sync {} }
+        expect(!fm.fileExists(atPath: NoteJournal.coverFile(pending.key).path), "its journal entry goes once it landed")
+    }
+
+    /// A cover in conflict (its file and a conflicted copy of it): cover changes waiting from before a launch are
+    /// replayed only after the read's conflicts are rebuilt, so neither paper is written.
+    @MainActor static func coverConflict(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Torn")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var cover = NoteFile(id: "COVER-TORN", body: "# About this notebook\nOne side")
+        cover.cover = true
+        _ = NoteStore.create(cover.serialized(), at: folder.appending(path: NoteShelf.coverName), root: root)
+        var other = cover
+        other.body = "# About this notebook\nThe other side"
+        _ = NoteStore.create(other.serialized(), at: folder.appending(path: "About this notebook (conflicted copy).md"), root: root)
+        let before = [text(folder.appending(path: NoteShelf.coverName)), text(folder.appending(path: "About this notebook (conflicted copy).md"))]
+        let store = NoteStore(root: root)
+        store.recoverCovers([CoverFields(notebook: "Torn", root: root.path, coverID: "COVER-TORN", fields: ["private": "true"])])
+        store.reload()
+        let until = Date().addingTimeInterval(3)
+        while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
+        NoteStore.io.sync {}
+        let after = [text(folder.appending(path: NoteShelf.coverName)), text(folder.appending(path: "About this notebook (conflicted copy).md"))]
+        expect(after == before && store.notebook("Torn")?.isPrivate == true, "a cover in conflict isn't written; the change shows and waits")
+        try? fm.removeItem(at: folder)
+    }
+
+    /// Canvas recovery while a cover can't be read yet (as one still downloading from iCloud): kept, not rescued;
+    /// once the cover reads, it lands in its notebook.
+    @MainActor static func canvasWaitsForCovers(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Cloudy")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        var cover = NoteFile(id: "COVER-CLOUDY", body: "# About this notebook")
+        cover.cover = true
+        let coverURL = folder.appending(path: NoteShelf.coverName)
+        _ = NoteStore.create(cover.serialized(), at: coverURL, root: root)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: coverURL.path)
+        NoteJournal.keepCanvas(CanvasEntry(coverID: "COVER-CLOUDY", notebook: "Cloudy", edits: [NoteCanvas.Stamped(.move("n1", .init(x: 4, y: 4)))]))
+        let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
+        let rescuedBefore = (fm.enumerator(atPath: unsaved.path)?.allObjects as? [String] ?? []).filter { $0.hasSuffix("Cloudy canvas.json") }.count
+        var holding = NoteJournal.canvasLeftovers()
+        for folder in holding { NoteJournal.recoverCanvas(folder, root: root) }
+        let rescued = (fm.enumerator(atPath: unsaved.path)?.allObjects as? [String] ?? []).filter { $0.hasSuffix("Cloudy canvas.json") }.count
+        expect(rescued == rescuedBefore && holding.contains { fm.fileExists(atPath: $0.path) }, "a cover not read yet: the entry waits, never rescued")
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: coverURL.path)
+        holding = NoteJournal.canvasLeftovers()
+        for folder in holding { NoteJournal.recoverCanvas(folder, root: root) }
+        expect(NoteCanvas.decode(text(folder.appending(path: NoteStore.canvasName)))?.notes["n1"]?.x == 4, "once it reads, the entry lands in its notebook")
+        try? fm.removeItem(at: folder)
+    }
+
+    /// Cover changes waiting in one notes folder never touch a notebook of the same name in another: kept per folder
+    /// across a switch, and landed only back in their own.
+    @MainActor static func coverRoots(top: URL) {
+        let fm = FileManager.default
+        let rootA = top.appending(path: "Root A"), rootB = top.appending(path: "Root B")
+        for r in [rootA, rootB] { try? fm.createDirectory(at: r.appending(path: "Same"), withIntermediateDirectories: true) }
+        // In A, the cover is there but can't be read yet: the change waits.
+        var coverA = NoteFile(id: "COVER-A", body: "# About this notebook")
+        coverA.cover = true
+        let coverAURL = rootA.appending(path: "Same/\(NoteShelf.coverName)")
+        _ = NoteStore.create(coverA.serialized(), at: coverAURL, root: rootA)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: coverAURL.path)
+        var coverB = NoteFile(id: "COVER-B", body: "# About this notebook")
+        coverB.cover = true
+        let coverBURL = rootB.appending(path: "Same/\(NoteShelf.coverName)")
+        _ = NoteStore.create(coverB.serialized(), at: coverBURL, root: rootB)
+        let store = NoteStore(root: rootA)
+        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
+        store.reload()
+        settle(1)
+        store.setCover("Same", fields: ["private": "true"])
+        expect(store.notebook("Same")?.isPrivate == true, "Private at once in its own folder")
+        var switched = false
+        store.switchRoot(to: rootB) { switched = true }
+        settle(2)
+        store.reload()
+        settle(1.5)
+        let b = text(coverBURL).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) }
+        expect(switched && b.map(NoteContract.isPrivate) == false && store.notebook("Same")?.isPrivate == false,
+               "another folder's notebook of the same name: untouched, and not shown Private", text(coverBURL) ?? "nil")
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: coverAURL.path)
+        store.switchRoot(to: rootA) {}
+        let until = Date().addingTimeInterval(8)
+        while text(coverAURL).map({ NoteContract.isPrivate(NoteFile.parse($0, fallbackID: "", fallbackDate: Date())) }) != true && Date() < until {
+            settle(0.2)
+            store.reload()
+        }
+        expect(text(coverAURL).map { NoteContract.isPrivate(NoteFile.parse($0, fallbackID: "", fallbackDate: Date())) } == true, "back in its own folder, it lands there")
+        for r in [rootA, rootB] { try? fm.removeItem(at: r) }
     }
 
     /// Making a notebook Private: shown at once, and written through its cover's session, also when it has no cover
