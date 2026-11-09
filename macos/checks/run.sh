@@ -112,3 +112,11 @@ perl -0777 -ne '
     }
     END { if ($bad) { print "$bad card(s) without an owner\n"; exit 1 } print "asks: all $calls name their owner\n" }
 ' Sources/Petal/*.swift
+# Quitting answers later (notes are saved first), and AppKit waits for the answer inside `terminate`. Called from a
+# block of the main dispatch queue (a signal's handler, an asyncAfter), that wait stops the queue, the answer never
+# arrives and Petal never quits. So the one call to terminate is PetalApp.quit's, from the run loop, and the answer
+# comes back on the run loop too.
+n=$(grep -n 'NSApp\.terminate\|NSApplication\.shared\.terminate' Sources/Petal/*.swift | grep -vc 'RunLoop\.main\.perform(inModes: \[\.common\]) { MainActor\.assumeIsolated { NSApp\.terminate(nil) } }' || true)
+r=$(awk '/func prepareToQuit\(/,/^    }$/' Sources/Petal/NoteDesk.swift | grep -c 'DispatchQueue\.main\.async' || true)
+if [ "$n" != 0 ] || [ "$r" != 0 ]; then echo "quit: terminate is called outside PetalApp.quit, or its answer comes back on the main queue"; exit 1; fi
+echo "quit: only from the run loop"

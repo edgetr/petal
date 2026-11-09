@@ -146,7 +146,7 @@ final class MenuBar: NSObject, NSMenuDelegate {
         } else {
             menu.addItem(ClosureMenuItem(title: "Use Petal’s Dock") { [weak self] in self?.app.useDock("petal") })
         }
-        menu.addItem(ClosureMenuItem(title: "Quit Petal") { NSApp.terminate(nil) })
+        menu.addItem(ClosureMenuItem(title: "Quit Petal") { PetalApp.quit() })
     }
 
     // MARK: The mark
