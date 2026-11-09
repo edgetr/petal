@@ -81,16 +81,10 @@ final class NoteDesk {
 
     // MARK: Starting
 
-    func start() {
-        // Writing a Petal before this one accepted and never saw land: put back first (NoteJournal.recover), from the
-        // journal's own queue to the notes' queue.
-        // File names are made from titles only after the vault's redaction (never a secret in a name); while the
-        // vault can't be read, a plain name. And the names Petal made so, known again.
-        NoteStore.nameRedactor = { text in VaultIndex.settled { $0.unreadable ? nil : $0.redacted(text) } ?? nil }
-        store.onChange = { [weak self] in self?.refresh() }
-        watchApps()
-        // The one visibility signal for missing pictures: papers revealed and open now.
-        NotePictures.shared.visible = { [weak self] in self?.picturesOnScreen() ?? [] }
+    /// How a note's file and identity changing reach everything that shows or holds it (the desk's panels and
+    /// records, Petal's viewer's margins: `rekey`, `identityChanged`), and what's kept by an id becomes lasting.
+    /// Part of `start`; `Petal --viewer-check` installs these alone (it starts nothing else).
+    func hookStore() {
         store.onRekey = { [weak self] old, paper in self?.rekey(old, to: paper) }
         // An id now in its file: what's kept by it is lasting (written to disk) from now on.
         store.onIDLanded = { [weak self] _ in
@@ -101,8 +95,21 @@ final class NoteDesk {
             guard let self else { return }
             self.identityChanged(holder: holder, new)
             self.local.rekeyID(old, holder: holder, new)
-            self.local.save(pending: store.pendingIDs)
+            self.local.save(pending: self.store.pendingIDs)
         }
+    }
+
+    func start() {
+        // Writing a Petal before this one accepted and never saw land: put back first (NoteJournal.recover), from the
+        // journal's own queue to the notes' queue.
+        // File names are made from titles only after the vault's redaction (never a secret in a name); while the
+        // vault can't be read, a plain name. And the names Petal made so, known again.
+        NoteStore.nameRedactor = { text in VaultIndex.settled { $0.unreadable ? nil : $0.redacted(text) } ?? nil }
+        store.onChange = { [weak self] in self?.refresh() }
+        watchApps()
+        // The one visibility signal for missing pictures: papers revealed and open now.
+        NotePictures.shared.visible = { [weak self] in self?.picturesOnScreen() ?? [] }
+        hookStore()
         store.onProblem = { [weak self] text in self?.say(text) }
         // Which Desktop each screen shows, followed on Space and screen changes whether or not Accessibility is
         // allowed (those notifications don't need it; WindowEvents' stop with the permission): NoteShelf.spaceSignals.

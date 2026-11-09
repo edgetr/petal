@@ -251,7 +251,8 @@ struct ViewerDocument: View {
         Group {
             if snapshotting {
                 ViewerPagesPicture(model: model)
-            } else if model.loading {
+            } else if model.loading && model.document == nil && !model.live {
+                // The first load only: a reload keeps the pages shown until its own are in.
                 ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let problem = model.problem {
                 Text(problem).font(.system(size: 13)).foregroundStyle(ViewerLook.caption).frame(maxWidth: .infinity, maxHeight: .infinity)

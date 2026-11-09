@@ -444,9 +444,17 @@ final class ViewerModel: Identifiable {
     /// as it is, anything else through Quick Look's preview, exported as pages where Quick Look gives them. Never
     /// writes it. A newer load (the file changed again) makes an older one stand down; what it exported is cleaned
     /// up all the same (ViewerExport).
+    /// A reload (the file changed on disk, followed to where it went) is a load like the first: the viewer is
+    /// loading again (whoever waits for it, `whenLoaded`, `whenIdentified`, waits for this one), and nothing about the
+    /// file is kept from the load before as anchor state: no identity, bookmark or selection until this load's own
+    /// checked read is in. The pages already shown stay on screen meanwhile.
     func load() {
         loads += 1
         let ticket = loads
+        if !loading { loading = true }
+        fileID = nil
+        bookmark = nil
+        unselected()
         let url = url
         let kind = kind
         Viewers.queue.async {
@@ -509,7 +517,6 @@ final class ViewerModel: Identifiable {
         let changed = fileID != read.fileID
         bookmark = read.bookmark
         fileID = read.fileID
-        identified()
         // Which notes are on this file, worked out again for the file as it is now (refreshPlaces is fenced by
         // this load).
         if changed { refreshPlaces() }
@@ -807,7 +814,9 @@ final class ViewerModel: Identifiable {
         // The selection before is gone at once (its Note with it); the new one is offered only once its read is in.
         let turn = turns.begin("selection")
         if selection != nil { selection = nil }
-        guard let source = text else { return settleSelection() }
+        // Text selected on the pages of the load before, while the file is read again, is never offered: a passage
+        // only ever from the pages of the current load.
+        guard !loading, let source = text else { return settleSelection() }
         // Being read: never taken for no selection (herePlace waits for it).
         selectionPending = true
         let lens = lensKey != nil
@@ -850,10 +859,11 @@ final class ViewerModel: Identifiable {
 
     @ObservationIgnored private var identityWaiters: [@MainActor () -> Void] = []
 
-    /// `then` once the file's checked identity is in (its load's `fileID`), or its load is over without one, or the
-    /// viewer closed: a file place is offered only with it (`fileAnchor`).
+    /// `then` once the current load is over (a first load or a reload: its pages, page count and checked identity
+    /// all from it), or the viewer closed: a file place is offered only from a finished load (`fileAnchor`), never
+    /// with a load's identity and the pages or selection of the load before it.
     func whenIdentified(_ then: @escaping @MainActor () -> Void) {
-        guard fileID == nil, loading, !closedNow else { return then() }
+        guard loading, !closedNow else { return then() }
         identityWaiters.append(then)
     }
 
@@ -971,7 +981,8 @@ final class ViewerModel: Identifiable {
     /// only with the file's checked identity: nil until its load has read it (a path alone could later be another
     /// file's), so no file place without one is ever saved from the viewer.
     func fileAnchor() -> NoteStick? {
-        guard let fileID else { return nil }
+        // Only from a finished load: while one is under way its identity, pages and page shown aren't all its own yet.
+        guard !loading, let fileID else { return nil }
         var stick = NoteStick(kind: .file)
         stick.path = url.path
         stick.title = name

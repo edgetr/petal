@@ -187,6 +187,9 @@ enum ViewerCheck {
         }
         if let pdf = files.first(where: { ViewerKind.of($0) == .pdf }), case .success(let url) = ViewerPath.check(pdf) {
             let app = PetalApp()
+            // A note's file renamed or given an id reaches the viewer's margins as in the app (the rest of the desk
+            // isn't started here).
+            app.paper.hookStore()
             failed = !writes(url) || failed
             failed = !places(url, app: app) || failed
             failed = !opening(url, app: app) || failed
@@ -202,6 +205,7 @@ enum ViewerCheck {
             failed = !thirteenth(url, app: app) || failed
             failed = !fourteenth(url, app: app) || failed
             failed = !fifteenth(url, app: app) || failed
+            failed = !sixteenth(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -950,6 +954,64 @@ enum ViewerCheck {
         expect(app.assist.history.count > historyBefore && line.hasPrefix("Wrote 1 note into a PDF") && !line.contains(secret) && !line.contains("petalcheck"),
                "the history line never holds the vault's secret (\(line))")
         print("fifteenth: " + (ok ? "an older versions request never retires the newer; edited copies to the Trash; a failed reload keeps no identity; history redacted" : "failed"))
+        return ok
+    }
+
+    /// A reload is a load like the first: a note asked for while a replaced file is read again gets the new file's
+    /// identity (and its pages), or nothing; never the old file's identity, pages or selection.
+    private static func sixteenth(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("sixteenth: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let report = home.appending(path: "Report.pdf")
+        try? FileManager.default.copyItem(at: source, to: report)
+        let model = app.viewers.show(URL(fileURLWithPath: ViewerPath.canonical(report.path) ?? report.path), front: false)
+        wait(20) { !model.loading }
+        app.viewers.keyID = model.id
+        defer { app.viewers.keyID = nil }
+        let start = model.pageCount
+        guard let oldID = model.fileID, start > 0 else { expect(false, "loaded (set up)"); return false }
+        let mac = app.paper.local.mac
+        // Replaced on disk by another file (an atomic save: a new incarnation with more pages), then read again.
+        let replacement = home.appending(path: ".saving")
+        try? pages(start + 2, from: source)?.write(to: replacement)
+        _ = rename(replacement.path, report.path)
+        guard let newID = ViewerFileID.of(report.path), newID != oldID else { expect(false, "a new incarnation (set up)"); return false }
+        model.go(to: start - 1)
+        model.load()
+        expect(model.loading && model.fileAnchor() == nil && model.fileID == nil, "reloading: loading again, no identity or place from the load before")
+        // A selection made on the old pages while it reloads is never offered.
+        model.selected(page: 0, bounds: CGRect(x: 72, y: 700, width: 60, height: 14), range: NSRange(location: 0, length: 6), anchor: .zero)
+        expect(model.selection == nil && !model.selectionPending, "text selected on the old pages during the reload: not offered")
+        // Asked for during the reload, three ways: waited for, and only ever the new file's identity.
+        var placed: ViewerModel.HereOutcome?
+        model.herePlace(passage: true) { placed = $0 }
+        var told: [String: Any]?
+        app.viewers.open(path: report.path) { result in
+            if case .success(let opened) = result { opened.whenLoaded(within: 20) { _ in told = app.viewers.told(opened) } }
+        }
+        app.paper.newHere()
+        wait(20) { placed != nil && model.openKey != nil && told != nil }
+        if case .place(let stick, let used)? = placed {
+            expect(stick.fileID == newID.record(mac: mac) && !used && (stick.page ?? 0) >= 1 && (stick.page ?? 0) <= start + 2,
+                   "a place asked for during the reload: the new file's identity and pages (\(stick.fileID))")
+        } else if case .unidentified? = placed {
+            // Nothing is allowed too: never the old identity.
+        } else { expect(false, "a place asked for during the reload: the new identity or nothing (\(String(describing: placed)))") }
+        let made = model.openKey.flatMap { app.paper.store.paper($0) }?.file.places.first
+        expect(made == nil || (made?.fileID == newID.record(mac: mac) && made?.fileID != oldID.record(mac: mac)),
+               "⌃⌥N during the reload: a note on the new file's identity, never the old one's (\(made?.fileID ?? "none"))")
+        expect(made != nil, "⌃⌥N during the reload: made once the reload is in")
+        expect((told?["pages"] as? Int) == start + 2, "petal_view during the reload answers with the reload's pages (\(String(describing: told?["pages"])))")
+        if let key = model.openKey { app.paper.fresh.remove(key) }
+        app.viewers.closed(model)
+        print("sixteenth: " + (ok ? "a reload is a load: a note asked for while a replaced file is read again gets its new identity, never the old one" : "failed"))
         return ok
     }
 
