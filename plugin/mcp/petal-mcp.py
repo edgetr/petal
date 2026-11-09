@@ -953,7 +953,7 @@ ASSIST_TOOLS = {
                          "With id (a handle from petal_notes, or its title when only one note has it): replaces its text, or append: true adds text at its end; a ![picture N] line keeps that picture (leave them as read). A note is the user's own writing: never change their words unless they asked; add to it instead. Nothing is ever deleted.",
                          {"id": {"type": "string"}, "text": {"type": "string"}, "append": {"type": "boolean"}, "notebook": {"type": "string"},
                           "stick": {"type": "string", "enum": ["here", "none"]}, "to": {"type": "string", "enum": ["passage", "tab", "window", "app", "file", "desktop"]}}),
-    "petal_note_move": (assist("petal_note_move"), "Put a note in another notebook (a new name makes the notebook). Its pictures go with it.",
+    "petal_note_move": (assist("petal_note_move"), "Put a note in another notebook (a new name makes the notebook). Only the note moves: its pictures stay where Petal keeps them, and its links keep working.",
                         {"id": {"type": "string"}, "notebook": {"type": "string"}}),
     "petal_note_stick": (assist("petal_note_stick"), "Stick a note to what's in front now: to tab, window, app, file or desktop (else the most specific there is: the selected sentence, its tab, its file, its window). also: true keeps its other places; remove: an index from its places takes it off that one (a note keeps at least one).",
                          {"id": {"type": "string"}, "to": {"type": "string", "enum": ["passage", "tab", "window", "app", "file", "desktop"]},

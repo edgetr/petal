@@ -112,8 +112,8 @@ struct NoteStoreCheck {
         identityFollowed(root: root)
         idFirst(root: root)
         moveAfterConflict(root: root)
-        copyThenCommit(root: root)
-        caseAndSweep(root: root)
+        picturesStay(root: root)
+        caseMove(root: root)
         versionGroups(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -153,8 +153,8 @@ struct NoteStoreCheck {
         expect(first.outcome == .written && again.outcome == .written && first.pictures.first?.path == again.pictures.first?.path && text(pictureNote) == p0,
                "picture bytes written once, idempotent, the note untouched")
 
-        // A handwritten note linking a picture outside its own folder: the move carries it, its link holds; another
-        // picture by that name where it lands stops the move, and nothing is left behind.
+        // A handwritten note linking a picture beside it: the move copies it to the same place where it lands (its
+        // link holds) and never deletes the original; a different picture already there refuses the move.
         let handwritten = work.appending(path: "Handwritten.md")
         let tripAssets = work.appending(path: "Trip.assets")
         try? fm.createDirectory(at: tripAssets, withIntermediateDirectories: true)
@@ -165,26 +165,55 @@ struct NoteStoreCheck {
         try? fm.createDirectory(at: clash, withIntermediateDirectories: true)
         try? Data("someone else's".utf8).write(to: clash.appending(path: "photo.png"))
         expect(NoteStore.move(handwritten, noteID: "HW", into: root.appending(path: "Clash"), root: root) == nil && text(handwritten) == handText
-               && text(clash.appending(path: "photo.png")) == "someone else's", "another picture by that name where it lands: the move stops")
+               && text(clash.appending(path: "photo.png")) == "someone else's" && text(tripAssets.appending(path: "photo.png")) == "photo",
+               "a different picture where it lands: the move refused, both pictures as they were")
+        // The same bytes there already: nothing to copy, the move goes.
+        let sameThere = root.appending(path: "Same/Trip.assets")
+        try? fm.createDirectory(at: sameThere, withIntermediateDirectories: true)
+        try? Data("photo".utf8).write(to: sameThere.appending(path: "photo.png"))
+        let sameMove = NoteStore.move(handwritten, noteID: "HW", into: root.appending(path: "Same"), root: root)
+        expect(sameMove != nil && text(sameThere.appending(path: "photo.png")) == "photo" && text(tripAssets.appending(path: "photo.png")) == "photo",
+               "the same picture there already: the move goes, nothing deleted")
+        _ = sameMove.flatMap { NoteStore.move($0, noteID: "HW", into: work, root: root) }
+        // Two links to one picture spelled in different cases (one file on this volume): one copy, the move goes,
+        // and no picture anywhere is deleted.
+        let caseText = NoteFile(id: "HC", body: "# Case\n![](Trip.assets/photo.png)\n![](trip.assets/Photo.png)").serialized()
+        let caseNote = work.appending(path: "Case.md")
+        _ = NoteStore.create(caseText, at: caseNote, root: root)
+        let caseMove = NoteStore.move(caseNote, noteID: "HC", into: root.appending(path: "CaseLand"), root: root)
+        expect(caseMove != nil && text(root.appending(path: "CaseLand/Trip.assets/photo.png")) == "photo" && text(tripAssets.appending(path: "photo.png")) == "photo",
+               "case-variant links: copied once, the original kept")
         let landedHW = NoteStore.move(handwritten, noteID: "HW", into: root.appending(path: "Carried"), root: root)
         expect(landedHW != nil && text(root.appending(path: "Carried/Trip.assets/photo.png")) == "photo" && text(landedHW!) == handText
                && text(tripAssets.appending(path: "photo.png")) == "photo", "moved with its picture copied along, its text unchanged, the original left for others")
 
-        // Moving a note with pictures: the pictures go first and come along; one in the way stops it all.
-        let assetsName = NoteShelf.assetsFolder(id: "P5")
+        // Petal's own pictures live in the notes' Pictures, one folder per note: a move takes only the Markdown, the
+        // pictures stay exactly where they were, and the note's links resolve the same from its new notebook.
+        let ownPicture = root.appending(path: NoteShelf.pictureFolder(id: "P5") + "/picture-1.png")
+        expect(first.pictures.first?.path == NoteShelf.pictureLink(id: "P5", name: "picture-1.png") && first.pictures.first?.path.hasPrefix("../Pictures/") == true
+               && text(ownPicture) == "png" && !fm.fileExists(atPath: work.appending(path: "Pictures").path),
+               "a picture's bytes go to the notes' Pictures, never beside the note", first.pictures.first?.path ?? "nil")
+        let illustrated = NoteFile(id: "P5", body: "p0\n![](\(NoteShelf.pictureLink(id: "P5", name: "picture-1.png")))").serialized()
+        try? Data(illustrated.utf8).write(to: pictureNote)
+        let picturesBefore = (try? fm.contentsOfDirectory(atPath: root.appending(path: NoteShelf.pictureFolder(id: "P5")).path)) ?? []
         let moved = NoteStore.move(pictureNote, noteID: "P5", into: root.appending(path: "Away"), root: root)
-        expect(moved != nil && fm.fileExists(atPath: root.appending(path: "Away/\(assetsName)/picture-1.png").path)
-               && !fm.fileExists(atPath: work.appending(path: assetsName).path), "a moved note's pictures go with it")
-        let blocked = work.appending(path: "Blocked.md")
-        let b0 = NoteFile(id: "B6", body: "b0").serialized()
-        _ = NoteStore.create(b0, at: blocked, root: root)
-        let blockedAssets = NoteShelf.assetsFolder(id: "B6")
-        try? fm.createDirectory(at: work.appending(path: blockedAssets), withIntermediateDirectories: true)
-        try? Data("mine".utf8).write(to: work.appending(path: "\(blockedAssets)/picture-2.png"))
-        try? fm.createDirectory(at: root.appending(path: "Away/\(blockedAssets)"), withIntermediateDirectories: true)
-        try? Data("other".utf8).write(to: root.appending(path: "Away/\(blockedAssets)/picture-2.png"))
-        expect(NoteStore.move(blocked, noteID: "B6", into: root.appending(path: "Away"), root: root) == nil && text(blocked) == b0
-               && text(work.appending(path: "\(blockedAssets)/picture-2.png")) == "mine", "another picture in the way: nothing moves, nothing breaks")
+        let resolvesFrom = { (note: URL) in
+            NoteShelf.referencedPictures(text(note) ?? "").allSatisfy { link in
+                NoteShelf.resolvedLink(link, from: note.deletingLastPathComponent().path).map { fm.fileExists(atPath: $0) } == true
+            }
+        }
+        expect(moved != nil && text(moved!) == illustrated && text(ownPicture) == "png"
+               && ((try? fm.contentsOfDirectory(atPath: root.appending(path: NoteShelf.pictureFolder(id: "P5")).path)) ?? []) == picturesBefore
+               && !fm.fileExists(atPath: root.appending(path: "Away/Pictures").path) && moved.map(resolvesFrom) == true,
+               "a move leaves its pictures untouched, and its links still resolve from the new notebook")
+        expect(!NoteStore.read(root).notebooks.contains { $0.name.compare("Pictures", options: .caseInsensitive) == .orderedSame },
+               "the notes' Pictures is never a notebook")
+        // Trashing a note leaves its pictures alone.
+        if let moved {
+            NoteDisk.states[55] = NoteDisk.State(url: moved, noteID: "P5", revision: illustrated)
+            _ = NoteStore.perform(.trash(revision: illustrated), session: 55, root: root)
+            expect(!fm.fileExists(atPath: moved.path) && text(ownPicture) == "png", "a trashed note's pictures stay")
+        }
 
         // A move, then writes made meanwhile, as quitting drains them: the writing lands where the note landed.
         let moving = work.appending(path: "Moving.md")
@@ -216,18 +245,18 @@ struct NoteStoreCheck {
         _ = NoteStore.create(s0, at: stuck, root: root)
         NoteDisk.states[3] = NoteDisk.State(url: stuck, noteID: "S3", revision: s0)
         try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: work.path)
-        let reference = NoteShelf.assetsFolder(id: "S3") + "/picture-u.png"
+        let reference = NoteShelf.pictureLink(id: "S3", name: "picture-u.png")
         let kept = NoteFile(id: "S3", body: "# Rescued words\nkeep me\n![](\(reference))")
         NoteStore.drain([(session: 3, items: [item(21, .pictureBytes([NotePictureBytes(name: "picture-u.png", data: Data("u".utf8), caption: "")], noteID: "S3")),
                                               item(20, .write(text: kept.serialized(), base: s0))])], root: root)
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: work.path)
         // Each rescue in a folder of its own in Unsaved notes.
         let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
-        let rescuedFile = ((try? fm.contentsOfDirectory(atPath: unsaved.path)) ?? []).map { unsaved.appending(path: $0 + "/Rescued words.md") }
+        let rescuedFile = ((try? fm.contentsOfDirectory(atPath: unsaved.path)) ?? []).map { unsaved.appending(path: $0 + "/Note/Rescued words.md") }
             .first { fm.fileExists(atPath: $0.path) }
         expect(rescuedFile.flatMap(text)?.contains("keep me") == true, "writing that can't land by quit is kept in Unsaved notes, in a folder of its own")
-        expect(rescuedFile.map { fm.fileExists(atPath: $0.deletingLastPathComponent().appending(path: reference).path) } == true,
-               "with the pictures it references, where its references point")
+        expect(rescuedFile.flatMap { NoteShelf.resolvedLink(reference, from: $0.deletingLastPathComponent().path) }.map { text(URL(fileURLWithPath: $0)) == "u" } == true,
+               "with the pictures it references, where its references point (its own Pictures beside it)")
         expect(text(stuck) == s0, "and the file is as it was")
 
         // Keep this one: checked again inside each coordinated step; a file edited since stops it.
@@ -284,11 +313,11 @@ struct NoteStoreCheck {
         expect(NoteJournal.read(NoteJournal.file("JI", in: journal))?.imports?.count == 1, "its text landing keeps a paste still being read")
         let (withPicture, waiting) = NoteJournal.readImports(loading)
         expect(waiting.isEmpty && withPicture.pictures.count == 1 && withPicture.base == pastedText
-               && withPicture.text.contains(NoteShelf.assetsFolder(id: "JI") + "/" + (withPicture.pictures.first?.name ?? "?")),
+               && withPicture.text.contains(NoteShelf.pictureLink(id: "JI", name: withPicture.pictures.first?.name ?? "?")),
                "read at the next launch: a picture and its line, on the text that was there")
         expect(NoteJournal.recoverEntry(withPicture, notes: NoteStore.read(root).notes, root: root) != nil
                && text(pasted) == withPicture.text
-               && fm.fileExists(atPath: notes.appending(path: NoteShelf.assetsFolder(id: "JI") + "/" + (withPicture.pictures.first?.name ?? "?")).path),
+               && fm.fileExists(atPath: root.appending(path: NoteShelf.pictureFolder(id: "JI") + "/" + (withPicture.pictures.first?.name ?? "?")).path),
                "put back: the note has the picture", text(pasted) ?? "nil")
         var gone = loading
         gone.imports = [NoteJournal.Import(token: 3, path: root.appending(path: "nowhere.png").path, ext: "png")]
@@ -311,7 +340,7 @@ struct NoteStoreCheck {
         notYet.imports = [NoteJournal.Import(token: 8, path: unreadable.path, ext: "png")]
         expect(!NoteJournal.putIn(notYet, token: 8, root: root).stored && text(rejected) == rejectedText,
                "a paste whose file can't be read yet: nothing written, kept")
-        expect(NoteJournal.putIn(held, token: 7, root: root).stored && text(rejected)?.contains(NoteShelf.assetsFolder(id: "JR")) == true,
+        expect(NoteJournal.putIn(held, token: 7, root: root).stored && text(rejected)?.contains(NoteShelf.pictureLink(id: "JR", name: "")) == true,
                "put in from the journal: the note has the picture", text(rejected) ?? "nil")
         expect(NoteJournal.read(NoteJournal.file("JR", in: journal))?.imports?.count == 1, "and the journal still has it until it's said stored")
         NoteJournal.importsDone(noteID: "JR", token: 7, in: journal)
@@ -330,7 +359,7 @@ struct NoteStoreCheck {
         both.imports = [NoteJournal.Import(token: 9, path: source.path, ext: "png", caption: "source"), waitingOne]
         NoteJournal.snapshot(both, in: journal)
         let (stored, left, landedText, _) = NoteJournal.putIn(both, token: 9, root: root)
-        expect(stored && left == [waitingOne] && text(partial)?.contains(NoteShelf.assetsFolder(id: "JQ")) == true && landedText == text(partial),
+        expect(stored && left == [waitingOne] && text(partial)?.contains(NoteShelf.pictureLink(id: "JQ", name: "")) == true && landedText == text(partial),
                "the read file goes in, the waiting one is said, and what landed in the note too", "\(left)")
         // The snapshot advances to what landed, keeping only the waiting file.
         if let landedText { NoteJournal.advance(noteID: "JQ", from: partialText, to: landedText, token: 9, keeping: left, in: journal) }
@@ -375,29 +404,36 @@ struct NoteStoreCheck {
         NoteJournal.recover(holding, root: root)
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: lockedNotes.path)
         let rest = NoteJournal.read(NoteJournal.file("JU", in: holding))
-        let unsavedFolder = rest?.landedAt.map { URL(fileURLWithPath: $0).deletingLastPathComponent() } ?? Config.supportFolder
+        // The rescue's own folder: the note in "Note", its pictures in "Pictures/<hash>" beside it.
+        let unsavedFolder = rest?.landedAt.map { URL(fileURLWithPath: $0).deletingLastPathComponent().deletingLastPathComponent() } ?? Config.supportFolder
         expect(rest?.landedAt?.contains("Unsaved notes") == true && rest?.pictures.count == 1 && rest?.imports?.count == 1 && text(lockedNote) == tripText,
                "landed in Unsaved notes: the rest continues there, the first picture's bytes kept", "\(String(describing: rest?.landedAt))")
         try? png?.write(to: later)
         NoteJournal.recover(holding, root: root)
         let continued = rest?.landedAt.flatMap { text(URL(fileURLWithPath: $0)) } ?? ""
-        let pictureFiles = (try? fm.contentsOfDirectory(atPath: unsavedFolder.appending(path: NoteShelf.assetsFolder(id: "JU")).path)) ?? []
+        let pictureFiles = (try? fm.contentsOfDirectory(atPath: unsavedFolder.appending(path: NoteShelf.pictureFolder(id: "JU")).path)) ?? []
         expect(continued.components(separatedBy: "![").count == 3 && pictureFiles.count == 2 && text(lockedNote) == tripText,
-               "the rest continues in that same file, both pictures beside it, the note untouched", "\(pictureFiles) \(continued)")
+               "the rest continues in that same file, both pictures where its links lead, the note untouched", "\(pictureFiles) \(continued)")
+        expect(URL(fileURLWithPath: rest?.landedAt ?? "/").deletingLastPathComponent().lastPathComponent == "Note"
+               && NoteShelf.referencedPictures(continued).allSatisfy { link in
+                   NoteShelf.resolvedLink(link, from: URL(fileURLWithPath: rest?.landedAt ?? "/").deletingLastPathComponent().path).map { fm.fileExists(atPath: $0) } == true
+               }, "every link of the rescued note resolves inside its rescue folder")
         expect(!fm.fileExists(atPath: NoteJournal.file("JU", in: holding).path), "and the entry goes once it's all there")
 
-        // A rescue into Unsaved notes carries the note's older pictures too (copied from beside it), and isn't
-        // complete without them.
+        // A rescue into Unsaved notes carries the note's older pictures too (copied from the notes' Pictures, where
+        // its links lead), laid out the same beside it, and isn't complete without them.
         let illustratedFolder = root.appending(path: "Illustrated")
-        let oldAssets = illustratedFolder.appending(path: NoteShelf.assetsFolder(id: "RS"))
+        try? fm.createDirectory(at: illustratedFolder, withIntermediateDirectories: true)
+        let oldAssets = root.appending(path: NoteShelf.pictureFolder(id: "RS"))
         try? fm.createDirectory(at: oldAssets, withIntermediateDirectories: true)
         try? png?.write(to: oldAssets.appending(path: "old.png"))
-        let rescuedText = NoteFile(id: "RS", body: "# Illustrated\n![](\(NoteShelf.assetsFolder(id: "RS"))/old.png)\n![](\(NoteShelf.assetsFolder(id: "RS"))/new.png)").serialized()
+        let rescuedText = NoteFile(id: "RS", body: "# Illustrated\n![](\(NoteShelf.pictureLink(id: "RS", name: "old.png")))\n![](\(NoteShelf.pictureLink(id: "RS", name: "new.png")))").serialized()
         let newBytes = NotePictureBytes(name: "new.png", data: png ?? Data(), caption: "")
         let rescuedTo = NoteStore.rescued(rescuedText, noteID: "RS", pictures: [newBytes], from: illustratedFolder)
-        let rescueAssets = (rescuedTo?.deletingLastPathComponent() ?? Config.supportFolder).appending(path: NoteShelf.assetsFolder(id: "RS"))
-        expect(rescuedTo != nil && fm.fileExists(atPath: rescueAssets.appending(path: "old.png").path) && fm.fileExists(atPath: rescueAssets.appending(path: "new.png").path),
-               "the older picture copied with the new one")
+        let rescueAssets = (rescuedTo?.deletingLastPathComponent().deletingLastPathComponent() ?? Config.supportFolder).appending(path: NoteShelf.pictureFolder(id: "RS"))
+        expect(rescuedTo != nil && fm.fileExists(atPath: rescueAssets.appending(path: "old.png").path) && fm.fileExists(atPath: rescueAssets.appending(path: "new.png").path)
+               && fm.fileExists(atPath: oldAssets.appending(path: "old.png").path),
+               "the older picture copied with the new one, into the rescue's own Pictures; the original kept")
         // Two notes with the same relative picture (`Trip.assets/photo.png`, different pictures): each rescue in its own
         // folder, each with its own picture.
         let workTrip = root.appending(path: "WorkTrip"), homeTrip = root.appending(path: "HomeTrip")
@@ -408,19 +444,20 @@ struct NoteStoreCheck {
         let workRescue = NoteStore.rescued(NoteFile(id: "W1", body: "# Work\n![](Trip.assets/photo.png)").serialized(), noteID: "W1", pictures: [], from: workTrip)
         let homeRescue = NoteStore.rescued(NoteFile(id: "H1", body: "# Home\n![](Trip.assets/photo.png)").serialized(), noteID: "H1", pictures: [], from: homeTrip)
         expect(workRescue?.deletingLastPathComponent() != homeRescue?.deletingLastPathComponent()
+               && workRescue?.deletingLastPathComponent().lastPathComponent == "Note"
                && workRescue.flatMap { text($0.deletingLastPathComponent().appending(path: "Trip.assets/photo.png")) } == "work photo"
                && homeRescue.flatMap { text($0.deletingLastPathComponent().appending(path: "Trip.assets/photo.png")) } == "home photo",
                "two notes' pictures of one name: each rescue its own folder and its own picture")
         expect(NoteShelf.acceptExisting(existing: Data("a".utf8), wanted: Data("a".utf8)) && !NoteShelf.acceptExisting(existing: Data("a".utf8), wanted: Data("b".utf8))
                && !NoteShelf.acceptExisting(existing: nil, wanted: Data("a".utf8)), "an existing picture counts only when it's the same bytes")
         // A picture already where a recovery puts its own, with other bytes: never taken for it.
-        let taken = root.appending(path: "Taken/" + NoteShelf.assetsFolder(id: "TK"))
+        let taken = root.appending(path: NoteShelf.pictureFolder(id: "TK"))
         try? fm.createDirectory(at: taken, withIntermediateDirectories: true)
         try? Data("someone else's".utf8).write(to: taken.appending(path: "p.png"))
-        expect(NoteStore.writePictures([NotePictureBytes(name: "p.png", data: Data("mine".utf8), caption: "")], into: taken, root: root).isEmpty
+        expect(NoteStore.writePictures([NotePictureBytes(name: "p.png", data: Data("mine".utf8), caption: "")], noteID: "TK", root: root).isEmpty
                && text(taken.appending(path: "p.png")) == "someone else's", "another picture by that name: not counted as written, and not written over")
 
-        let gapText = NoteFile(id: "RG", body: "# Gap\n![](\(NoteShelf.assetsFolder(id: "RG"))/nowhere.png)").serialized()
+        let gapText = NoteFile(id: "RG", body: "# Gap\n![](\(NoteShelf.pictureLink(id: "RG", name: "nowhere.png")))").serialized()
         expect(NoteStore.rescued(gapText, noteID: "RG", pictures: [], from: illustratedFolder) == nil, "a picture it references that isn't anywhere: not complete (the journal keeps it)")
 
         // Continuing at a destination that can't be read: kept, the rest written to a file of its own.
@@ -459,7 +496,7 @@ struct NoteStoreCheck {
         let hung = notes.appending(path: "Hung.md")
         let hungBase = NoteFile(id: "J1", body: "before").serialized()
         _ = NoteStore.create(hungBase, at: hung, root: root)
-        let picture = NoteShelf.assetsFolder(id: "J1") + "/picture-j.png"
+        let picture = NoteShelf.pictureLink(id: "J1", name: "picture-j.png")
         let typed = NoteFile(id: "J1", body: "typed just before quit\n![](\(picture))").serialized()
         snap("J1", hung, hungBase, typed, [NoteJournal.Picture(name: "picture-j.png", data: Data("jpg".utf8))])
 
@@ -492,7 +529,8 @@ struct NoteStoreCheck {
         expect(leftovers.count == 2 && leftovers.first?.lastPathComponent == "Notes journal, recovering 1" && !fm.fileExists(atPath: journal.path),
                "the journal and an unfinished recovery, oldest first", "\(leftovers.map(\.lastPathComponent))")
         for holding in leftovers { NoteJournal.recover(holding, root: root) }
-        expect(text(hung) == typed && fm.fileExists(atPath: notes.appending(path: picture).path), "an accepted edit and its picture, written at launch",
+        expect(text(hung) == typed && fm.fileExists(atPath: root.appending(path: NoteShelf.pictureFolder(id: "J1") + "/picture-j.png").path),
+               "an accepted edit and its picture (in the notes' Pictures), written at launch",
                text(hung) ?? "nil")
         expect(text(renamedTo) == typed2, "a note renamed since: found by its id and written there")
         let reusedCopies = ((try? fm.contentsOfDirectory(atPath: notes.path)) ?? []).filter { (try? String(contentsOf: notes.appending(path: $0), encoding: .utf8)) == typed3 }
@@ -616,17 +654,17 @@ struct NoteStoreCheck {
         expect(local.handle("U2") == firstLook && local.handles?[plainHolder] == nil, "an id-less note given its id keeps its handle, and its path's is retired")
     }
 
-    /// A move that only changes a notebook's case does nothing (the same folder by identity), and the leftover sweep
-    /// keeps a picture another note links, or any while a sibling can't be read.
-    @MainActor static func caseAndSweep(root: URL) {
+    /// A move that only changes a notebook's case does nothing (the same folder by identity).
+    @MainActor static func caseMove(root: URL) {
         let fm = FileManager.default
         // A case-only move: Notebook to notebook, on this (by default case-insensitive) volume.
         let books = root.appending(path: "Casebook")
-        let assets = books.appending(path: NoteShelf.assetsFolder(id: "CS"))
+        let assets = root.appending(path: NoteShelf.pictureFolder(id: "CS"))
         try? fm.createDirectory(at: assets, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: books, withIntermediateDirectories: true)
         try? Data("mine".utf8).write(to: assets.appending(path: "p.png"))
         let note = books.appending(path: "Case.md")
-        let text0 = NoteFile(id: "CS", body: "# Case\n![](\(assets.lastPathComponent)/p.png)").serialized()
+        let text0 = NoteFile(id: "CS", body: "# Case\n![](\(NoteShelf.pictureLink(id: "CS", name: "p.png")))").serialized()
         _ = NoteStore.create(text0, at: note, root: root)
         let insensitive = fm.fileExists(atPath: root.appending(path: "casebook").path)
         let stayed = NoteStore.move(note, noteID: "CS", into: root.appending(path: "casebook"), root: root)
@@ -641,87 +679,55 @@ struct NoteStoreCheck {
             store.move(paper.key, to: "casebook", then: { answer = $0 })
             expect(answer?.key == paper.key && text(assets.appending(path: "p.png")) == "mine", "the store too: \"casebook\" is Casebook, nothing to do")
         }
-
-        // The sweep: a leftover picture another note beside it links is kept.
-        let away = root.appending(path: "SweepAway"), left = root.appending(path: "SweepLeft")
-        let leftover = left.appending(path: NoteShelf.assetsFolder(id: "SA"))
-        let moved = away.appending(path: NoteShelf.assetsFolder(id: "SA"))
-        for dir in [leftover, moved] {
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-            try? Data("shared".utf8).write(to: dir.appending(path: "p.png"))
-        }
-        _ = NoteStore.create(NoteFile(id: "SA", body: "# A\n![](\(moved.lastPathComponent)/p.png)").serialized(), at: away.appending(path: "A.md"), root: root)
-        let bNote = left.appending(path: "B.md")
-        _ = NoteStore.create(NoteFile(id: "SB", body: "# B\n![](\(leftover.lastPathComponent)/p.png)").serialized(), at: bNote, root: root)
-        NoteStore.sweepLeftovers(root: root)
-        expect(fm.fileExists(atPath: leftover.appending(path: "p.png").path), "a leftover another note links: kept")
-        // B gone, but a note beside it that can't be read: kept (it might link it).
-        try? fm.removeItem(at: bNote)
-        let locked = left.appending(path: "Locked.md")
-        try? Data("?".utf8).write(to: locked)
-        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
-        NoteStore.sweepLeftovers(root: root)
-        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: locked.path)
-        expect(fm.fileExists(atPath: leftover.appending(path: "p.png").path), "a sibling that can't be read: kept")
-        // Nothing links it, every sibling read, its note elsewhere with the same bytes: swept.
-        try? fm.removeItem(at: locked)
-        NoteStore.sweepLeftovers(root: root)
-        expect(!fm.fileExists(atPath: leftover.path) && fm.fileExists(atPath: moved.appending(path: "p.png").path), "unlinked and verified elsewhere: swept")
     }
 
-    /// Moves copy then commit: Petal stopping after any step leaves no broken link; a listing or read failure refuses
-    /// the move; leftovers are swept only once verified; a folder is trashed only when verified empty.
-    @MainActor static func copyThenCommit(root: URL) {
+    /// Petal's pictures stay put whatever moves: another paper linking the same pictures keeps them, a note with an
+    /// older link beside it still shows its picture, and links resolve from wherever the note is.
+    @MainActor static func picturesStay(root: URL) {
         let fm = FileManager.default
         func linksHold(_ note: URL) -> Bool {
             guard let text = text(note) else { return false }
-            return NoteShelf.referencedPictures(text).allSatisfy { fm.fileExists(atPath: note.deletingLastPathComponent().appending(path: $0).path) }
+            return NoteShelf.referencedPictures(text).allSatisfy { link in
+                NoteShelf.resolvedLink(link, from: note.deletingLastPathComponent().path).map { fm.fileExists(atPath: $0) } == true
+            }
         }
-        func make(_ name: String, id: String) -> (note: URL, assets: URL) {
-            let folder = root.appending(path: name)
-            let assets = folder.appending(path: NoteShelf.assetsFolder(id: id))
-            try? fm.createDirectory(at: assets, withIntermediateDirectories: true)
-            try? Data("pic-\(id)".utf8).write(to: assets.appending(path: "p.png"))
-            let note = folder.appending(path: "Note.md")
-            _ = NoteStore.create(NoteFile(id: id, body: "# \(id)\n![](\(assets.lastPathComponent)/p.png)").serialized(), at: note, root: root)
-            return (note, assets)
+        // A note and its conflict copy beside it, both linking the note's pictures: the note moves, and both papers'
+        // links still hold (nothing of the pictures moved).
+        let folder = root.appending(path: "Stay")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let own = root.appending(path: NoteShelf.pictureFolder(id: "ST"))
+        try? fm.createDirectory(at: own, withIntermediateDirectories: true)
+        try? Data("p".utf8).write(to: own.appending(path: "p.png"))
+        let link = NoteShelf.pictureLink(id: "ST", name: "p.png")
+        let note = folder.appending(path: "Pictured.md"), copy = folder.appending(path: "Pictured (conflicted copy).md")
+        _ = NoteStore.create(NoteFile(id: "ST", body: "![](\(link))").serialized(), at: note, root: root)
+        _ = NoteStore.create(NoteFile(id: "ST", body: "copy ![](\(link))").serialized(), at: copy, root: root)
+        let landed = NoteStore.move(note, noteID: "ST", into: root.appending(path: "Gone"), root: root)
+        expect(landed.map(linksHold) == true && linksHold(copy) && text(own.appending(path: "p.png")) == "p",
+               "a note moved away from its conflict copy: both still show the picture")
+        // And back again: the same.
+        let back = landed.flatMap { NoteStore.move($0, noteID: "ST", into: folder, root: root) }
+        expect(back.map(linksHold) == true && linksHold(copy), "moved back: its links still hold")
+
+        // A note with an older link beside it ("pictures-<hash>.assets/p.png", from before Pictures): it still shows
+        // its picture where it is, and a move copies the picture along (a handwritten link), never deleting it.
+        let older = root.appending(path: "Older")
+        let oldFolder = older.appending(path: "pictures-0123456789abcdef.assets")
+        try? fm.createDirectory(at: oldFolder, withIntermediateDirectories: true)
+        try? Data("old".utf8).write(to: oldFolder.appending(path: "p.png"))
+        let oldNote = older.appending(path: "Old.md")
+        _ = NoteStore.create(NoteFile(id: "OL", body: "![](pictures-0123456789abcdef.assets/p.png)").serialized(), at: oldNote, root: root)
+        let paper = NoteStore.read(root).notes.first { $0.noteID == "OL" }
+        expect(paper.map { text($0.resolve("pictures-0123456789abcdef.assets/p.png")) == "old" } == true, "an older link still finds its picture")
+        let oldLanded = NoteStore.move(oldNote, noteID: "OL", into: root.appending(path: "OlderMoved"), root: root)
+        expect(oldLanded.map(linksHold) == true && text(oldFolder.appending(path: "p.png")) == "old", "moved: the older picture copied along, the original kept")
+        // A note's own picture shows from the editor's base, the folder its file is in.
+        if let paper = NoteStore.read(root).notes.first(where: { $0.noteID == "ST" }) {
+            expect(text(paper.resolve(link)) == "p", "a paper resolves its own picture's link to the notes' Pictures")
         }
-        // Stopped right after the copy: the note where it was, its links holding (a duplicate where it was going).
-        let a = make("CTC-A", id: "CA")
-        expect(NoteStore.move(a.note, noteID: "CA", into: root.appending(path: "CTC-Dest-A"), root: root, stop: { $0 == .copied }) == nil
-               && linksHold(a.note), "stopped after the copy: the note where it was, its pictures there")
-        // Stopped right after the Markdown moved: the note where it went, its links holding (the originals left behind).
-        let b = make("CTC-B", id: "CB")
-        let landed = NoteStore.move(b.note, noteID: "CB", into: root.appending(path: "CTC-Dest-B"), root: root, stop: { $0 == .committed })
-        expect(landed.map(linksHold) == true && fm.fileExists(atPath: b.assets.appending(path: "p.png").path),
-               "stopped after the commit: the note where it went, its pictures there, the originals still behind")
-        // The next launch's sweep: the leftovers go once their note is verifiably elsewhere with its own copy.
-        NoteStore.sweepLeftovers(root: root)
-        expect(!fm.fileExists(atPath: b.assets.path) && landed.map(linksHold) == true, "swept: the leftover folder gone, the note's links still holding")
-        // A leftover whose note's copy has other bytes: kept.
-        let c = make("CTC-C", id: "CC")
-        let landedC = NoteStore.move(c.note, noteID: "CC", into: root.appending(path: "CTC-Dest-C"), root: root, stop: { $0 == .committed })
-        try? Data("changed".utf8).write(to: (landedC ?? c.note).deletingLastPathComponent().appending(path: c.assets.lastPathComponent + "/p.png"))
-        NoteStore.sweepLeftovers(root: root)
-        expect(fm.fileExists(atPath: c.assets.appending(path: "p.png").path), "a leftover not verified (other bytes elsewhere): kept")
-        // The whole move: the originals and their folder go only after the commit, the folder only when verified empty.
-        let d = make("CTC-D", id: "CD")
-        let landedD = NoteStore.move(d.note, noteID: "CD", into: root.appending(path: "CTC-Dest-D"), root: root)
-        expect(landedD.map(linksHold) == true && !fm.fileExists(atPath: d.assets.path), "a whole move: the note and its pictures there, nothing left behind")
-        // A pictures' folder that can't be listed, or a picture that can't be read: the move refused.
-        let e = make("CTC-E", id: "CE")
-        try? fm.setAttributes([.posixPermissions: 0o311], ofItemAtPath: e.assets.path)
-        let unlisted = NoteStore.move(e.note, noteID: "CE", into: root.appending(path: "CTC-Dest-E"), root: root) == nil
-        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: e.assets.path)
-        expect(unlisted && linksHold(e.note) && fm.fileExists(atPath: e.assets.appending(path: "p.png").path), "its pictures can't be listed: refused, nothing moved")
-        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: e.assets.appending(path: "p.png").path)
-        let unread = NoteStore.move(e.note, noteID: "CE", into: root.appending(path: "CTC-Dest-E"), root: root) == nil
-        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: e.assets.appending(path: "p.png").path)
-        expect(unread && linksHold(e.note), "a picture that can't be read: refused, nothing moved")
     }
 
-    /// A move queued after a flush that was kept beside the file (changed elsewhere meanwhile): stopped and said; and a
-    /// pictures' folder another paper beside it links never moves away from it.
+    /// A move queued after a flush that was kept beside the file (changed elsewhere meanwhile): stopped and said.
     @MainActor static func moveAfterConflict(root: URL) {
         let fm = FileManager.default
         let folder = root.appending(path: "MoveConflict")
@@ -744,50 +750,6 @@ struct NoteStoreCheck {
         while moved == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
         expect((moved ?? nil) == nil && fm.fileExists(atPath: file.path) && !fm.fileExists(atPath: root.appending(path: "Elsewhere/Shared.md").path)
                && said.contains("wasn't moved"), "the move stops after the flush was kept beside, and says so", said)
-
-        // A conflict copy beside it links its pictures' folder: the note's move never takes the folder away.
-        let assets = folder.appending(path: NoteShelf.assetsFolder(id: "MC2"))
-        try? fm.createDirectory(at: assets, withIntermediateDirectories: true)
-        try? Data("p".utf8).write(to: assets.appending(path: "p.png"))
-        let note = folder.appending(path: "Pictured.md")
-        _ = NoteStore.create(NoteFile(id: "MC2", body: "![](\(assets.lastPathComponent)/p.png)").serialized(), at: note, root: root)
-        _ = NoteStore.create(NoteFile(id: "MC2", body: "copy ![](\(assets.lastPathComponent)/p.png)").serialized(), at: folder.appending(path: "Pictured (conflicted copy).md"), root: root)
-        expect(NoteStore.move(note, noteID: "MC2", into: root.appending(path: "Elsewhere"), root: root) == nil && fm.fileExists(atPath: assets.appending(path: "p.png").path),
-               "a pictures' folder another paper links: not moved")
-
-        // The same with the other paper named `.MD`, and with a sibling that can't be read.
-        let upper = root.appending(path: "UpperCase")
-        let upperAssets = upper.appending(path: NoteShelf.assetsFolder(id: "MC3"))
-        try? fm.createDirectory(at: upperAssets, withIntermediateDirectories: true)
-        try? Data("p".utf8).write(to: upperAssets.appending(path: "p.png"))
-        let upperNote = upper.appending(path: "Pictured.md")
-        _ = NoteStore.create(NoteFile(id: "MC3", body: "![](\(upperAssets.lastPathComponent)/p.png)").serialized(), at: upperNote, root: root)
-        let shouty = upper.appending(path: "Copy.MD")
-        _ = NoteStore.create(NoteFile(id: "MC3", body: "copy ![](\(upperAssets.lastPathComponent)/p.png)").serialized(), at: shouty, root: root)
-        expect(NoteStore.move(upperNote, noteID: "MC3", into: root.appending(path: "Elsewhere"), root: root) == nil && fm.fileExists(atPath: upperAssets.appending(path: "p.png").path),
-               "a `.MD` sibling linking its pictures: not moved")
-        try? fm.removeItem(at: shouty)
-        let locked = upper.appending(path: "Locked.md")
-        try? Data("unrelated".utf8).write(to: locked)
-        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
-        let stopped = NoteStore.move(upperNote, noteID: "MC3", into: root.appending(path: "Elsewhere"), root: root) == nil
-        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: locked.path)
-        expect(stopped && fm.fileExists(atPath: upperNote.path), "a sibling that can't be read: the move stops safely")
-        try? fm.removeItem(at: locked)
-        expect(NoteStore.move(upperNote, noteID: "MC3", into: root.appending(path: "Elsewhere"), root: root) != nil, "nothing else beside it: it moves")
-
-        // Its folder can't be listed (readable files, no listing): the move is refused, nothing moves.
-        let unlisted = root.appending(path: "Unlisted")
-        let unlistedAssets = unlisted.appending(path: NoteShelf.assetsFolder(id: "MC4"))
-        try? fm.createDirectory(at: unlistedAssets, withIntermediateDirectories: true)
-        try? Data("p".utf8).write(to: unlistedAssets.appending(path: "p.png"))
-        let unlistedNote = unlisted.appending(path: "Hidden.md")
-        _ = NoteStore.create(NoteFile(id: "MC4", body: "![](\(unlistedAssets.lastPathComponent)/p.png)").serialized(), at: unlistedNote, root: root)
-        try? fm.setAttributes([.posixPermissions: 0o311], ofItemAtPath: unlisted.path)
-        let refused = NoteStore.move(unlistedNote, noteID: "MC4", into: root.appending(path: "Elsewhere"), root: root) == nil
-        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: unlisted.path)
-        expect(refused && fm.fileExists(atPath: unlistedNote.path) && fm.fileExists(atPath: unlistedAssets.appending(path: "p.png").path),
-               "siblings that can't be listed: the move refused, nothing moved")
     }
 
     /// A file and its iCloud version with another id: one conflict, both papers read only with Keep this one.

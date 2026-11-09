@@ -92,7 +92,7 @@ Use, in this order:
 - Petal Notes (macOS): `iCloud Drive/Petal Notes/<notebook>/<note>.md` (or `~/Library/Application Support/Petal/Notes`,
   or `notesFolder`). Each file starts with a small front matter (`id`, `created`, `modified`, `places`); each
   notebook's `About this notebook.md` is its cover and holds its `color` ("accent" is the Mac's accent color).
-  Pictures sit beside a note in `pictures-<hash>.assets/`. Prefer the note tools; if you edit a file by hand, keep its front
+  Petal keeps a note's pictures at the notes folder's root, in `Pictures/<hash>/` (one folder per note), and links them as `../Pictures/<hash>/<name>`; moving a note moves only its Markdown. Prefer the note tools; if you edit a file by hand, keep its front
   matter and its `id`. A note changed in two places at once shows as two read-only papers (one may be a
   "(conflicted copy)" file) until the user keeps one. Which notes are open on this Mac is in `~/Library/Application Support/Petal/notes-state.json`.
 - `routines.json` (macOS): the routines; change them with the routine tools rather than by hand. What they did is in

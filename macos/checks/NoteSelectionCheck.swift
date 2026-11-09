@@ -75,8 +75,8 @@ struct NoteSelectionCheck {
 
         // A tool's answer holds no file name, path or pictures' folder: a handle, words derived after redaction, and
         // pictures as `![picture N]`.
-        let assets = NoteShelf.assetsFolder(id: "file:Inbox/Card 41111.md")
-        expect(!assets.contains("Card") && !assets.contains("Inbox") && !assets.contains("41") && assets.hasPrefix("pictures-"),
+        let assets = "../" + NoteShelf.pictureFolder(id: "file:Inbox/Card 41111.md")
+        expect(!assets.contains("Card") && !assets.contains("Inbox") && !assets.contains("41") && assets.hasPrefix("../Pictures/"),
                "a pictures' folder name copies nothing of the id or the file's name", assets)
         let body = "# Trip\nTickets for Friday\n![boarding pass](\(assets)/picture-1a2b.png)\nGate 12\n![](\(assets)/picture-3c4d.png)"
         var filePlace = NoteStick(kind: .file)
@@ -84,7 +84,7 @@ struct NoteSelectionCheck {
         let toolAnswer = NoteShield.shield(NoteShield.note(handle: "n1a2b3c4d5e6f", body: body, notebook: "Travel", places: [filePlace],
                                                        modified: "2026-11-09T10:00:00Z", onScreen: false, text: true), index: vaultIndex)
         let json = (try? JSONSerialization.data(withJSONObject: toolAnswer ?? [:], options: [.sortedKeys])).flatMap { String(data: $0, encoding: .utf8) } ?? ""
-        expect(!json.isEmpty && !json.contains("pictures-") && !json.contains(".assets") && !json.contains(".png") && !json.contains(".md")
+        expect(!json.isEmpty && !json.contains("Pictures") && !json.contains(".assets") && !json.contains(".png") && !json.contains(".md")
                && !json.contains("/Users/someone/Documents"), "no path, file name or pictures' folder in the answer", json)
         expect(json.contains("![picture 1]") && json.contains("![picture 2]") && json.contains("Gate 12") && json.contains("n1a2b3c4d5e6f"),
                "its words, its pictures by number, its handle", json)

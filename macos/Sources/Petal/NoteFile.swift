@@ -760,8 +760,6 @@ enum NoteShelf {
     static let inbox = "Inbox"
     /// A notebook's cover note's file name.
     static let coverName = "About this notebook.md"
-    /// Pictures pasted or dropped on a note live in a folder beside it: "<note's file name>.assets".
-    static let assets = ".assets"
 
     /// Untouched this long, a note rests as a faint line.
     static let fadeAfter: TimeInterval = 30 * 86400
@@ -771,7 +769,9 @@ enum NoteShelf {
     /// A notebook's name as a folder name: no slashes, no leading dots.
     static func folderName(_ name: String) -> String {
         let cleaned = NoteText.fileName(name)
-        return cleaned == "Note" && name.trimmingCharacters(in: .whitespaces).isEmpty ? inbox : cleaned
+        if cleaned == "Note" && name.trimmingCharacters(in: .whitespaces).isEmpty { return inbox }
+        // "Pictures" is where Petal keeps pictures, never a notebook.
+        return cleaned.compare(picturesRoot, options: .caseInsensitive) == .orderedSame ? cleaned + " notes" : cleaned
     }
 
     /// A name for a new file in a folder holding `taken` (lowercased names): "Name.md", else "Name 2.md", ….
@@ -929,23 +929,6 @@ enum NoteShelf {
     static func rebind(key: String, at paths: [String]) -> String? {
         guard paths.count == 1, let path = paths.first, path != key else { return nil }
         return path
-    }
-
-    /// Moving a note's pictures' folder into a notebook that has one by that name already (the same note, moved
-    /// there before): each picture moves unless the same file is there; one there with other bytes stops the whole
-    /// move (nothing moves, the note stays, its links never break). `source`/`destination`: name → content hash.
-    enum AssetPlan: Equatable { case move([String]), conflict(String) }
-
-    static func assetPlan(source: [String: Int], destination: [String: Int]) -> AssetPlan {
-        var moving: [String] = []
-        for name in source.keys.sorted() {
-            if let there = destination[name] {
-                if there != source[name] { return .conflict(name) }
-            } else {
-                moving.append(name)
-            }
-        }
-        return .move(moving)
     }
 
     /// Keep this one, on the papers exactly as they were shown: each candidate (a file's path, or a version iCloud
@@ -1189,8 +1172,8 @@ enum NoteShelf {
         source == .look && ticket == current && readPID == frontPID
     }
 
-    /// The pictures a note's text references in its own folder (relative paths, such as
-    /// "pictures-<hash>.assets/picture-1.png"): what a rescue must carry with it. Web addresses and absolute paths
+    /// The pictures a note's text references by relative links ("../Pictures/<hash>/picture-1.png", Petal's own, or
+    /// a handwritten "Trip.assets/photo.png"): what a rescue must carry with it. Web addresses and absolute paths
     /// aren't the note's own.
     static func referencedPictures(_ text: String) -> [String] {
         let body = NoteFile.parse(text, fallbackID: "", fallbackDate: Date()).body
@@ -1202,10 +1185,13 @@ enum NoteShelf {
         return out
     }
 
-    /// Pictures a note links outside its own pictures' folder (a handwritten `Trip.assets/photo.png`): copied along
-    /// when it moves, to the same place beside it, so its links hold (its text never changes). Its own folder moves
-    /// with it already.
-    static func carried(_ referenced: [String], own: String) -> [String] { referenced.filter { !$0.hasPrefix(own + "/") } }
+    /// Pictures a handwritten note links beside it in its notebook (`Trip.assets/photo.png`): copied along when it
+    /// moves, to the same place where it lands, so its links hold (its text never changes), and never deleted where
+    /// they were. Links that leave the notebook (`../Pictures/…`, Petal's own, or another notebook's) resolve the
+    /// same from anywhere and aren't carried.
+    static func carried(_ referenced: [String]) -> [String] {
+        referenced.filter { !$0.hasPrefix("../") && !$0.hasPrefix("/") && !$0.split(separator: "/").contains("..") }
+    }
 
     /// One carried picture where the note lands: copy it (none there), it's already there (the same bytes), or stop
     /// the move (another picture by that name: never over it).
@@ -1466,16 +1452,6 @@ enum NoteShelf {
     /// folder): stopped, and said on the paper; moved again once the conflict is settled.
     static func stopMove(afterFlush outcome: Bool) -> Bool { outcome }
 
-    /// A note's pictures' folder that another paper beside it still links (a conflict copy, a note written elsewhere):
-    /// never moved away from it.
-    static func picturesShared(_ folder: String, others: [String?]) -> Bool {
-        // A paper beside it that can't be read might link it too: the move stops rather than guess.
-        others.contains { $0.map { $0.contains(folder + "/") } ?? true }
-    }
-
-    /// A note file beside another, as the folder's read knows them: `.md` in any case.
-    static func isNoteFile(_ name: String) -> Bool { (name as NSString).pathExtension.lowercased() == "md" }
-
     /// A Desktop anchor only with the Desktop's number: unknown, nothing is stuck there (and nothing else changes).
     static func desktopAnchor(number: Int?, mode: String) -> NoteStick? {
         guard let number else { return nil }
@@ -1496,31 +1472,6 @@ enum NoteShelf {
     static func sameItem(_ a: String?, _ b: String?) -> Bool {
         guard let a, let b, !a.isEmpty else { return false }
         return a == b
-    }
-
-    /// The leftover sweep removes a file only when no note anywhere in the notes' folder links it, every note file
-    /// beside it could be listed and read, and its bytes are verifiably kept elsewhere; in doubt, it keeps it.
-    static func sweepFile(referenced: Bool, siblingsReadable: Bool, bytesElsewhere: Bool) -> Bool {
-        !referenced && siblingsReadable && bytesElsewhere
-    }
-
-    /// The steps of a move, copy then commit: the pictures copied to where it goes (bytes verified), then the
-    /// Markdown moved, then the originals trashed. Petal stopping after any step leaves at worst a duplicate, never a
-    /// broken link.
-    enum MoveStep: Equatable { case copied, committed, cleaned }
-
-    /// A folder trashed only when it's positively verified empty: listed, and nothing in it but hidden files.
-    static func verifiedEmpty(_ listing: [String]?) -> Bool {
-        guard let listing else { return false }
-        return listing.allSatisfy { $0.hasPrefix(".") }
-    }
-
-    /// Pictures a stopped move left behind: trashed only when their note isn't beside them, and is verifiably
-    /// elsewhere with its own copy of every one of them, byte for byte (`elsewhere`: that copy's pictures, nil when
-    /// not exactly one such note is found or they can't be read).
-    static func sweepLeftover(here: [String: Data], noteHere: Bool, elsewhere: [String: Data]?) -> Bool {
-        guard !noteHere, !here.isEmpty, let elsewhere else { return false }
-        return here.allSatisfy { elsewhere[$0.key] == $0.value }
     }
 
     /// The notes folder, resolved off the main thread (it may look at iCloud Drive) and kept until the `notesFolder`
@@ -1553,9 +1504,6 @@ enum NoteShelf {
 
     /// Stick here only once the answer is done: no reply being written and no turn queued (never half an answer).
     static func stickReady(running: Bool, queued: Int) -> Bool { !running && queued == 0 }
-
-    /// A note's siblings must be listed to move its pictures' folder: a listing that fails refuses the move.
-    static func siblingsListed<T>(_ listing: [T]?) -> Bool { listing != nil }
 
     /// Which Desktop each screen shows is followed (Space and screen changes) while notes are on, whether or not
     /// Accessibility is allowed: those notifications don't need it.
@@ -1705,13 +1653,36 @@ enum NoteShelf {
         return out
     }
 
-    /// A note's pictures' folder, named for the note's id (never its file's name), so it keeps its name wherever the
-    /// note moves and two notes never share one. Opaque: a hash of the id only, never a character of the id or a
-    /// file's name ("pictures-<hash>.assets").
-    static func assetsFolder(id: String) -> String {
+    /// Petal's pictures live at the notes folder's root, one folder per note, never beside notes in their notebooks:
+    /// "Pictures/<hash of the note's id>" (opaque: never a character of the id or a file's name). A note's links
+    /// to them are "../Pictures/<hash>/<name>", the same from every notebook (all one level deep), so moving a note
+    /// between notebooks moves only its Markdown.
+    static let picturesRoot = "Pictures"
+
+    static func pictureFolder(id: String) -> String {
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325   // FNV-1a, 64 bits: the same on every Mac and every run
         for byte in id.utf8 { hash = (hash ^ UInt64(byte)) &* 0x0000_0100_0000_01b3 }
-        return "pictures-" + String(format: "%016llx", hash) + assets
+        return picturesRoot + "/" + String(format: "%016llx", hash)
+    }
+
+    /// A picture's link as a note writes it (relative to its notebook folder).
+    static func pictureLink(id: String, name: String) -> String { "../" + pictureFolder(id: id) + "/" + name }
+
+    /// A note's relative link as a path, from the folder its file is in, ".." taken by the words alone (never through
+    /// the disk): "../Pictures/<hash>/p.png" from "/n/Inbox" is "/n/Pictures/<hash>/p.png". Nil for an absolute
+    /// link, or one that climbs above "/".
+    static func resolvedLink(_ link: String, from folder: String) -> String? {
+        guard folder.hasPrefix("/"), !link.hasPrefix("/"), !link.isEmpty else { return nil }
+        var parts = folder.split(separator: "/").map(String.init)
+        for part in link.split(separator: "/") where part != "." {
+            if part == ".." {
+                guard !parts.isEmpty else { return nil }
+                parts.removeLast()
+            } else {
+                parts.append(String(part))
+            }
+        }
+        return "/" + parts.joined(separator: "/")
     }
 
     /// A note with no id of its own is known by its path (`fallbackID`): Petal gives it a real one (written into its

@@ -139,9 +139,6 @@ final class NoteDesk {
                         guard !leftovers.isEmpty else { return }
                         NoteStore.io.async { for holding in leftovers { NoteJournal.recover(holding, root: root) } }
                     }
-                    // Pictures a move left behind when Petal stopped part way: trashed only once their note is
-                    // verifiably elsewhere with its own copy (NoteStore.sweepLeftovers).
-                    NoteStore.io.async { NoteStore.sweepLeftovers(root: root) }
                     self.store.switchRoot(to: root)
                     self.ready = true
                     // Read and watched only once the first folder is settled: the switch starts the store itself

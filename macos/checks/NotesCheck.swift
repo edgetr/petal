@@ -446,9 +446,10 @@ struct NotesCheck {
         expect(NoteBlock.parse("![a](b)c)") == .text("![a](b)c)") && NoteBlock.parse("![a[b](c)") == .text("![a[b](c)"), "a broken one stays words")
         expect(NoteBlock.parse("![cap](<a b.assets/p.png>)") == .image(path: "a b.assets/p.png", caption: "cap"), "older lines read as before")
 
-        // A move carries pictures linked outside the note's own folder, never over another picture.
-        expect(NoteShelf.carried(["pictures-x.assets/a.png", "Trip.assets/photo.png"], own: "pictures-x.assets") == ["Trip.assets/photo.png"],
-               "its own folder moves already; the rest are carried")
+        // A move carries only pictures linked beside the note (handwritten, or an older link), never Petal's own in
+        // the notes' Pictures, and never over another picture.
+        expect(NoteShelf.carried([NoteShelf.pictureLink(id: "X", name: "a.png"), "Trip.assets/photo.png", "pictures-x.assets/b.png", "../Other/c.png", "a/../../d.png"])
+               == ["Trip.assets/photo.png", "pictures-x.assets/b.png"], "Petal's own and links that leave the notebook stay; the rest are carried")
         expect(NoteShelf.carry(destinationExists: false, same: false) == .copy && NoteShelf.carry(destinationExists: true, same: true) == .already
                && NoteShelf.carry(destinationExists: true, same: false) == .stop, "copied, already there, or the move stops")
 
@@ -589,10 +590,8 @@ struct NotesCheck {
         expect(NoteShelf.shortcutGroups(shortcuts: true, dockShown: true, notes: false) == (true, false), "notes off: the dock's only")
         expect(NoteShelf.shortcutGroups(shortcuts: false, dockShown: true, notes: true) == (false, false), "shortcuts off: none")
 
-        // A queued move stops after its flush was kept beside the file; a shared pictures' folder never moves.
+        // A queued move stops after its flush was kept beside the file.
         expect(NoteShelf.stopMove(afterFlush: true) && !NoteShelf.stopMove(afterFlush: false), "kept beside: the move stops; written: it goes")
-        expect(NoteShelf.picturesShared("pictures-a.assets", others: ["![](pictures-a.assets/p.png)"])
-               && !NoteShelf.picturesShared("pictures-a.assets", others: ["![](pictures-b.assets/p.png)"]), "linked by another paper: shared")
 
         // A drop filtered again for privacy after its last wait.
         expect(NoteShelf.refilterDrop(readPrivacy: 3, nowPrivacy: 4, appPrivate: false) && NoteShelf.refilterDrop(readPrivacy: 3, nowPrivacy: 3, appPrivate: true)
@@ -608,10 +607,6 @@ struct NotesCheck {
         // Space and screen changes are followed while notes are on, with or without Accessibility.
         expect(NoteShelf.spaceSignals(notesOn: true, accessibility: false) && !NoteShelf.spaceSignals(notesOn: false, accessibility: true),
                "Accessibility taken away: Desktops still followed; notes off: not")
-
-        // The shared-pictures guard reads every note file beside it, `.md` in any case; one it can't read stops the move.
-        expect(NoteShelf.isNoteFile("Copy.MD") && NoteShelf.isNoteFile("a.md") && !NoteShelf.isNoteFile("a.txt"), "`.MD` is a note file too")
-        expect(NoteShelf.picturesShared("pictures-a.assets", others: [nil]), "a sibling that can't be read: the move stops")
 
         // A Desktop note's mode comes from its Desktop's number, never from the dock.
         expect(NoteShelf.modeID(desktop: 2, workspaces: ["2": "social"], defaultMode: "work") == "social", "its Desktop's mode")
@@ -632,18 +627,6 @@ struct NotesCheck {
         expect(!NoteShelf.stickReady(running: true, queued: 0) && !NoteShelf.stickReady(running: false, queued: 1) && NoteShelf.stickReady(running: false, queued: 0),
                "a reply being written or a turn waiting: not yet; done: sticks")
 
-        // A sibling listing that fails refuses the move.
-        expect(!NoteShelf.siblingsListed(Optional<[URL]>.none) && NoteShelf.siblingsListed(Optional([URL]())), "can't list: refused; listed (even empty): fine")
-
-        // A folder trashed only when positively verified empty; leftovers swept only when verified elsewhere.
-        expect(!NoteShelf.verifiedEmpty(nil) && NoteShelf.verifiedEmpty([".DS_Store"]) && !NoteShelf.verifiedEmpty(["p.png"]),
-               "can't be listed, or not empty: kept")
-        let pic = Data("p".utf8)
-        expect(NoteShelf.sweepLeftover(here: ["p.png": pic], noteHere: false, elsewhere: ["p.png": pic, "q.png": pic]), "its note elsewhere with the same bytes: swept")
-        expect(!NoteShelf.sweepLeftover(here: ["p.png": pic], noteHere: true, elsewhere: ["p.png": pic])
-               && !NoteShelf.sweepLeftover(here: ["p.png": pic], noteHere: false, elsewhere: ["p.png": Data("other".utf8)])
-               && !NoteShelf.sweepLeftover(here: ["p.png": pic], noteHere: false, elsewhere: nil), "its note beside it, other bytes, or not found once: kept")
-
         // The notes folder resolved off the main thread, kept until its setting changes.
         let resolved = URL(fileURLWithPath: "/notes/A")
         expect(NoteShelf.cachedRoot(setting: "", cached: ("", resolved)) == resolved, "the same setting: the folder already resolved, no probe")
@@ -658,11 +641,6 @@ struct NotesCheck {
                "\"inbox\" is Inbox; a new name stays as asked")
         expect(NoteShelf.sameItem("1:5", "1:5") && !NoteShelf.sameItem("1:5", "1:6") && !NoteShelf.sameItem(nil, nil) && !NoteShelf.sameItem("", ""),
                "the same volume and inode: the same; unknown: never")
-        // The sweep removes a file only when nothing links it, every sibling could be read, and its bytes are elsewhere.
-        expect(NoteShelf.sweepFile(referenced: false, siblingsReadable: true, bytesElsewhere: true), "unlinked, all read, kept elsewhere: removed")
-        expect(!NoteShelf.sweepFile(referenced: true, siblingsReadable: true, bytesElsewhere: true)
-               && !NoteShelf.sweepFile(referenced: false, siblingsReadable: false, bytesElsewhere: true)
-               && !NoteShelf.sweepFile(referenced: false, siblingsReadable: true, bytesElsewhere: false), "linked, a sibling unread, or not elsewhere: kept")
 
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
@@ -695,11 +673,6 @@ struct NotesCheck {
         expect(!NoteShelf.journalClears(snapshot: "t", landed: "t", referenced: [], unsaved: [], importing: true),
                "a snapshot with a paste still being read stays, with its source, when its text lands")
 
-        // A note's pictures moving into a notebook that has a folder by their name.
-        expect(NoteShelf.assetPlan(source: ["a.png": 1, "b.png": 2], destination: [:]) == .move(["a.png", "b.png"]), "all of them, into an empty place")
-        expect(NoteShelf.assetPlan(source: ["a.png": 1, "b.png": 2], destination: ["a.png": 1]) == .move(["b.png"]), "the same picture there already stays")
-        expect(NoteShelf.assetPlan(source: ["a.png": 1], destination: ["a.png": 9]) == .conflict("a.png"), "another picture in the way: nothing moves")
-
         // Keep this one: only on exactly what was shown.
         let shown = ["file:/n/A.md": "a", "version:v1": "b"]
         expect(NoteShelf.keepAllowed(shown: shown, now: ["file:/n/A.md": "a", "version:v1": "b"]), "unchanged: kept")
@@ -727,11 +700,22 @@ struct NotesCheck {
         expect(fenced == [Item(key: "a", body: "A typed"), Item(key: "b", body: "B on disk"), Item(key: "new", body: "made")],
                "changed since: kept; before: the disk's; made since: kept; removed since: gone", "\(fenced)")
 
-        // Pictures' folders by the note's id: stable through moves, never shared.
-        expect(NoteShelf.assetsFolder(id: "5F3A-1").hasPrefix("pictures-") && !NoteShelf.assetsFolder(id: "5F3A-1").contains("5F3A") && NoteShelf.assetsFolder(id: "5F3A-1").hasSuffix(".assets")
-               && NoteShelf.assetsFolder(id: "5F3A-1") == NoteShelf.assetsFolder(id: "5F3A-1"), "a note's pictures' folder, the same every time")
-        expect(NoteShelf.assetsFolder(id: "file:Inbox/My notes.md") != NoteShelf.assetsFolder(id: "file:Inbox/My-notes.md"),
-               "ids that read alike never share one", NoteShelf.assetsFolder(id: "file:Inbox/My notes.md"))
+        // Petal's pictures: one folder per note at the notes' root, by the note's id; never shared, never beside notes.
+        let ownFolder = NoteShelf.pictureFolder(id: "5F3A-1")
+        expect(ownFolder.hasPrefix("Pictures/") && !ownFolder.contains("5F3A") && ownFolder.split(separator: "/").count == 2
+               && ownFolder == NoteShelf.pictureFolder(id: "5F3A-1"), "a note's pictures' folder in Pictures, the same every time", ownFolder)
+        expect(NoteShelf.pictureFolder(id: "file:Inbox/My notes.md") != NoteShelf.pictureFolder(id: "file:Inbox/My-notes.md"),
+               "ids that read alike never share one", NoteShelf.pictureFolder(id: "file:Inbox/My notes.md"))
+        let ownLink = NoteShelf.pictureLink(id: "5F3A-1", name: "p.png")
+        expect(ownLink == "../" + ownFolder + "/p.png", "a note links its picture from its notebook", ownLink)
+        expect(NoteShelf.resolvedLink(ownLink, from: "/n/Inbox") == "/n/" + ownFolder + "/p.png"
+               && NoteShelf.resolvedLink(ownLink, from: "/n/Work") == "/n/" + ownFolder + "/p.png", "the same picture from every notebook")
+        expect(NoteShelf.resolvedLink("Trip.assets/photo.png", from: "/n/Inbox") == "/n/Inbox/Trip.assets/photo.png"
+               && NoteShelf.resolvedLink("./a/./b.png", from: "/n/Inbox") == "/n/Inbox/a/b.png", "a handwritten link: beside the note")
+        expect(NoteShelf.resolvedLink("../../../../x.png", from: "/n/Inbox") == nil && NoteShelf.resolvedLink("/abs.png", from: "/n/Inbox") == nil,
+               "above /, or absolute: none")
+        expect(NoteShelf.folderName("Pictures") == "Pictures notes" && NoteShelf.folderName("pictures") == "pictures notes" && NoteShelf.folderName("Trips") == "Trips",
+               "a notebook is never called Pictures")
 
         // Writes stay inside the notes' folder.
         expect(NoteShelf.within("/n/Inbox/a.md", "/n") == "Inbox/a.md", "inside")

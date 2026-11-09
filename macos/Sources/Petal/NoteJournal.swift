@@ -137,7 +137,7 @@ enum NoteJournal {
             }
             let name = "picture-\(UUID().uuidString.prefix(8).lowercased()).\(ext)"
             entry.pictures.append(Picture(name: name, data: data))
-            lines.append(NoteBlock.image(path: NoteShelf.assetsFolder(id: entry.noteID) + "/" + name, caption: source.caption).markdown)
+            lines.append(NoteBlock.image(path: NoteShelf.pictureLink(id: entry.noteID, name: name), caption: source.caption).markdown)
         }
         if !lines.isEmpty {
             // A text already in its file is the base the pictures' lines are written on.
@@ -256,19 +256,19 @@ enum NoteJournal {
         return recoverEntry(entry, notes: notes, root: root)
     }
 
-    /// The rest of an entry, at the file where its first part landed: its pictures beside that file (the notes'
-    /// folder's pictures' folder, or "Unsaved notes"' laid out the same), then its text over that file while it
+    /// The rest of an entry, at the file where its first part landed: its pictures where its links lead from that file
+    /// (the notes' Pictures, or "Unsaved notes"' laid out the same), then its text over that file while it
     /// still says what landed there (`base`) or already says it; changed since, a copy beside it (in the notes'
     /// folder) or a new file in "Unsaved notes".
     nonisolated static func continueAt(_ entry: Entry, _ file: URL, root: URL) -> URL? {
         let fm = FileManager.default
         let pictures = entry.pictures.map { NotePictureBytes(name: $0.name, data: $0.data, caption: "") }
-        let assets = file.deletingLastPathComponent().appending(path: NoteShelf.assetsFolder(id: entry.noteID))
         if NoteShelf.within(file.path, root.path) != nil {
-            guard pictures.isEmpty || NoteStore.writePictures(pictures, into: assets, root: root).count == pictures.count else { return nil }
+            guard pictures.isEmpty || NoteStore.writePictures(pictures, noteID: entry.noteID, root: root).count == pictures.count else { return nil }
             return landing(NoteStore.save(entry.text, to: file, base: entry.base, root: root, noteID: entry.noteID), at: file)
         }
-        // In "Unsaved notes" (outside the notes' folder): the same, by hand.
+        // In "Unsaved notes" (outside the notes' folder): the same, by hand, where its links lead from that file.
+        let assets = file.deletingLastPathComponent().deletingLastPathComponent().appending(path: NoteShelf.pictureFolder(id: entry.noteID))
         try? fm.createDirectory(at: assets, withIntermediateDirectories: true)
         for picture in pictures {
             let into = assets.appending(path: picture.name)
@@ -304,9 +304,9 @@ enum NoteJournal {
     nonisolated static func recoverEntry(_ entry: Entry, notes: [PaperNote], root: URL) -> URL? {
         let found = notes.filter { $0.noteID == entry.noteID && $0.version == nil }.map(\.url.path)
         let pictures = entry.pictures.map { NotePictureBytes(name: $0.name, data: $0.data, caption: "") }
+        // Its pictures' bytes into the notes' Pictures (the same place from every notebook).
         func picturesBeside(_ note: URL) -> Bool {
-            pictures.isEmpty || NoteStore.writePictures(pictures, into: note.deletingLastPathComponent().appending(path: NoteShelf.assetsFolder(id: entry.noteID)),
-                                                         root: root).count == pictures.count
+            pictures.isEmpty || NoteStore.writePictures(pictures, noteID: entry.noteID, root: root).count == pictures.count
         }
         switch NoteShelf.journalTarget(found: found) {
         case .note(let path):
@@ -333,7 +333,7 @@ enum NoteJournal {
                 return made
             }
         }
-        // Into "Unsaved notes", every picture it references with it (from beside the note, where it keeps them).
+        // Into "Unsaved notes", every picture it references with it (from where the note's links lead).
         let beside = found.count == 1 ? URL(fileURLWithPath: found[0]).deletingLastPathComponent() : URL(fileURLWithPath: entry.path).deletingLastPathComponent()
         return NoteStore.rescued(entry.text, noteID: entry.noteID, pictures: pictures, from: beside)
     }
