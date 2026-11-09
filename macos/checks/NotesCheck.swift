@@ -601,6 +601,18 @@ struct NotesCheck {
         // Accessibility taken away: window notes hide at once; given back: a fresh read first.
         expect(NoteShelf.onPermission(live: false) == (true, true) && NoteShelf.onPermission(live: true) == (false, true), "hide on revocation, read afresh on return")
 
+        // A Desktop anchor only with the Desktop's number: unknown, refused (nothing changes).
+        expect(NoteShelf.desktopAnchor(number: nil, mode: "work") == nil, "the Desktop showing unknown (macOS's Dock chosen, nothing read yet): refused")
+        expect(NoteShelf.desktopAnchor(number: 3, mode: "work")?.desktop == 3, "known: the anchor, with its number")
+
+        // Space and screen changes are followed while notes are on, with or without Accessibility.
+        expect(NoteShelf.spaceSignals(notesOn: true, accessibility: false) && !NoteShelf.spaceSignals(notesOn: false, accessibility: true),
+               "Accessibility taken away: Desktops still followed; notes off: not")
+
+        // The shared-pictures guard reads every note file beside it, `.md` in any case; one it can't read stops the move.
+        expect(NoteShelf.isNoteFile("Copy.MD") && NoteShelf.isNoteFile("a.md") && !NoteShelf.isNoteFile("a.txt"), "`.MD` is a note file too")
+        expect(NoteShelf.picturesShared("pictures-a.assets", others: [nil]), "a sibling that can't be read: the move stops")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

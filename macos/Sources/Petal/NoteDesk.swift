@@ -101,6 +101,19 @@ final class NoteDesk {
             self.local.save(pending: store.pendingIDs)
         }
         store.onProblem = { [weak self] text in self?.say(text) }
+        // Which Desktop each screen shows, followed on Space and screen changes whether or not Accessibility is
+        // allowed (those notifications don't need it; WindowEvents' stop with the permission): NoteShelf.spaceSignals.
+        let spaceChanged = { [weak self] in
+            guard let self, NoteShelf.spaceSignals(notesOn: self.on, accessibility: WindowEvents.shared.live) else { return }
+            self.refreshSpaces()
+            self.lookAgain(after: 0.2)
+        }
+        spaceTokens.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { spaceChanged() }
+        })
+        spaceTokens.append(NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { spaceChanged() }
+        })
         // Accessibility taken away: nothing tracks the windows notes are on, so they hide at once; given back, they
         // show again only after a fresh read of what's in front (NoteShelf.onPermission).
         WindowEvents.shared.onLive("papernotes") { [weak self] live in
@@ -1515,11 +1528,8 @@ final class NoteDesk {
         case .window: break
         case .unknown: return []
         case .desktop:
-            var desk = NoteStick(kind: .desktop)
-            desk.desktop = scene.desktop ?? app.docks.focusedDock?.desktop
-            desk.mode = app.docks.focusedDock?.mode?.id ?? ""
-            // Which Desktop it is, or no note: never one stuck to no Desktop.
-            return desk.desktop == nil ? [] : [desk]
+            // Which Desktop it is (read off the main thread with the scene), or no note: never one stuck to no Desktop.
+            return NoteShelf.desktopAnchor(number: scene.desktop ?? app.docks.focusedDock?.desktop, mode: app.docks.focusedDock?.mode?.id ?? "").map { [$0] } ?? []
         }
         if let passage, !passage.quote.isEmpty, scene.tab != nil || !scene.file.isEmpty {
             var s = stick(.passage)
@@ -1718,6 +1728,20 @@ final class NoteDesk {
     }
 
     @ObservationIgnored private var drops = 0
+    @ObservationIgnored private var spaceTokens: [NSObjectProtocol] = []
+
+    /// The Desktop a screen shows (the one under the pointer, or `screen`), read off the main thread; nil when it
+    /// can't be told. Everything that sticks a note to a Desktop asks here and refuses without a number.
+    func resolveDesktop(on screen: NSScreen? = nil, _ done: @escaping @MainActor (Int?) -> Void) {
+        let target = screen ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
+        guard let id = target.flatMap(Spaces.screenID) else { return done(nil) }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let number = Spaces.desktops([id])[id]
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(number) } }
+        }
+    }
+
+    static let desktopUnknown = "Petal couldn't tell which Desktop is showing, so nothing was changed."
     /// Handles of a conflict's papers beyond the note's own (by paper key), for this run.
     @ObservationIgnored private var handlesSaving = false
 
@@ -1944,10 +1968,17 @@ final class NoteDesk {
             }
         }
         menu.addItem(.separator())
-        var desk = NoteStick(kind: .desktop)
-        desk.desktop = scene?.desktop ?? app.docks.focusedDock?.desktop
-        desk.mode = app.docks.focusedDock?.mode?.id ?? ""
-        menu.addItem(ActionItem("Put it on this Desktop") { [weak self] in self?.restick(key, [desk]) })
+        // The Desktop the note's screen shows, read when chosen (off the main thread): only with its number is the note
+        // moved there; its places stay as they are until then, and stay unknown.
+        let mode = app.docks.focusedDock?.mode?.id ?? ""
+        let screen = panels[key]?.screen
+        menu.addItem(ActionItem("Put it on this Desktop") { [weak self] in
+            self?.resolveDesktop(on: screen) { number in
+                guard let self else { return }
+                guard let desk = NoteShelf.desktopAnchor(number: number, mode: mode) else { return self.say(Self.desktopUnknown) }
+                self.restick(key, [desk])
+            }
+        })
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 

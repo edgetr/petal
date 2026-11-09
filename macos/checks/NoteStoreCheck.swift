@@ -646,6 +646,27 @@ struct NoteStoreCheck {
         _ = NoteStore.create(NoteFile(id: "MC2", body: "copy ![](\(assets.lastPathComponent)/p.png)").serialized(), at: folder.appending(path: "Pictured (conflicted copy).md"), root: root)
         expect(NoteStore.move(note, noteID: "MC2", into: root.appending(path: "Elsewhere"), root: root) == nil && fm.fileExists(atPath: assets.appending(path: "p.png").path),
                "a pictures' folder another paper links: not moved")
+
+        // The same with the other paper named `.MD`, and with a sibling that can't be read.
+        let upper = root.appending(path: "UpperCase")
+        let upperAssets = upper.appending(path: NoteShelf.assetsFolder(id: "MC3"))
+        try? fm.createDirectory(at: upperAssets, withIntermediateDirectories: true)
+        try? Data("p".utf8).write(to: upperAssets.appending(path: "p.png"))
+        let upperNote = upper.appending(path: "Pictured.md")
+        _ = NoteStore.create(NoteFile(id: "MC3", body: "![](\(upperAssets.lastPathComponent)/p.png)").serialized(), at: upperNote, root: root)
+        let shouty = upper.appending(path: "Copy.MD")
+        _ = NoteStore.create(NoteFile(id: "MC3", body: "copy ![](\(upperAssets.lastPathComponent)/p.png)").serialized(), at: shouty, root: root)
+        expect(NoteStore.move(upperNote, noteID: "MC3", into: root.appending(path: "Elsewhere"), root: root) == nil && fm.fileExists(atPath: upperAssets.appending(path: "p.png").path),
+               "a `.MD` sibling linking its pictures: not moved")
+        try? fm.removeItem(at: shouty)
+        let locked = upper.appending(path: "Locked.md")
+        try? Data("unrelated".utf8).write(to: locked)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        let stopped = NoteStore.move(upperNote, noteID: "MC3", into: root.appending(path: "Elsewhere"), root: root) == nil
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: locked.path)
+        expect(stopped && fm.fileExists(atPath: upperNote.path), "a sibling that can't be read: the move stops safely")
+        try? fm.removeItem(at: locked)
+        expect(NoteStore.move(upperNote, noteID: "MC3", into: root.appending(path: "Elsewhere"), root: root) != nil, "nothing else beside it: it moves")
     }
 
     /// A file and its iCloud version with another id: one conflict, both papers read only with Keep this one.

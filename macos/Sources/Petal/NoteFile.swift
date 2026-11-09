@@ -1468,9 +1468,26 @@ enum NoteShelf {
 
     /// A note's pictures' folder that another paper beside it still links (a conflict copy, a note written elsewhere):
     /// never moved away from it.
-    static func picturesShared(_ folder: String, others: [String]) -> Bool {
-        others.contains { $0.contains(folder + "/") }
+    static func picturesShared(_ folder: String, others: [String?]) -> Bool {
+        // A paper beside it that can't be read might link it too: the move stops rather than guess.
+        others.contains { $0.map { $0.contains(folder + "/") } ?? true }
     }
+
+    /// A note file beside another, as the folder's read knows them: `.md` in any case.
+    static func isNoteFile(_ name: String) -> Bool { (name as NSString).pathExtension.lowercased() == "md" }
+
+    /// A Desktop anchor only with the Desktop's number: unknown, nothing is stuck there (and nothing else changes).
+    static func desktopAnchor(number: Int?, mode: String) -> NoteStick? {
+        guard let number else { return nil }
+        var stick = NoteStick(kind: .desktop)
+        stick.desktop = number
+        stick.mode = mode
+        return stick
+    }
+
+    /// Which Desktop each screen shows is followed (Space and screen changes) while notes are on, whether or not
+    /// Accessibility is allowed: those notifications don't need it.
+    static func spaceSignals(notesOn: Bool, accessibility: Bool) -> Bool { notesOn }
 
     /// A drop's read used after a wait: filtered again for privacy right before its offers are made, when the private
     /// apps changed since it was read or its app is private now.

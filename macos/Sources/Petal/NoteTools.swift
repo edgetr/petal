@@ -78,7 +78,7 @@ extension NoteDesk {
                         send(result)
                     }
                 }
-                if sticking { stickHere(kind: args["to"] as? String, live: live, make) } else { make(nil) }
+                if sticking { stickHere(kind: args["to"] as? String, live: live, refuse: fail, make) } else { make(nil) }
             }
         case "petal_note_move":
             let notebook = (args["notebook"] as? String ?? "").trimmingCharacters(in: .whitespaces)
@@ -111,7 +111,7 @@ extension NoteDesk {
             }
             let also = args["also"] as? Bool ?? false
             let ticket = Ticket(key: paper.key, noteID: paper.noteID, instance: paper.instance, unique: store.notes.filter { $0.holder == paper.holder }.count == 1)
-            stickHere(kind: args["to"] as? String, live: live) { place in
+            stickHere(kind: args["to"] as? String, live: live, refuse: fail) { place in
                 guard let place else { return fail("Petal couldn't tell what's in front (or it changed while Petal looked): nothing was stuck.") }
                 // The same note after the wait, by its id (its path may be another note's by now).
                 guard let paper = self.repick(ticket) else { return fail(Self.notThisNote) }
@@ -261,13 +261,21 @@ extension NoteDesk {
     /// privacy filter leaves an app kept private nothing but itself; its selection is never read for the AI, and a
     /// selection holding something from the vault isn't stuck to (VaultIndex, as petal_ui hides it). Nothing comes
     /// back once the asker hung up.
-    private func stickHere(kind: String?, live: @escaping @Sendable () -> Bool, _ done: @escaping @MainActor (NoteStick?) -> Void) {
+    /// `refuse`: told why when it can't be done at all (the Desktop showing can't be told).
+    private func stickHere(kind: String?, live: @escaping @Sendable () -> Bool, refuse: ((String) -> Void)? = nil,
+                           _ done: @escaping @MainActor (NoteStick?) -> Void) {
         let wanted = kind.flatMap(NoteStick.Kind.init(rawValue:))
         if wanted == .desktop {
-            var desk = NoteStick(kind: .desktop)
-            desk.desktop = app.docks.focusedDock?.desktop
-            desk.mode = app.docks.focusedDock?.mode?.id ?? ""
-            return done(desk)
+            // The Desktop showing under the pointer, read off the main thread (whichever dock): unknown, refused.
+            let mode = app.docks.focusedDock?.mode?.id ?? ""
+            return resolveDesktop { number in
+                guard live() else { return }
+                guard let desk = NoteShelf.desktopAnchor(number: number, mode: mode) else {
+                    if let refuse { refuse(Self.desktopUnknown) } else { done(nil) }
+                    return
+                }
+                done(desk)
+            }
         }
         guard let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return done(nil) }
         let name = running.localizedName ?? ""
