@@ -333,6 +333,16 @@ struct NoteLibraryCheck {
         let movedNow = NotePrivacy.currentNotebooks(of: ["N1"], notes: [("N1", "Health"), ("N2", "Garden")])
         expect(movedNow == ["Health"] && !NotePrivacy.deliverable(notebooks: Set(["Garden"]).union(movedNow), privateBooks: ["Health"], asker: nil),
                "a note moved into a Private notebook mid-read: not given")
+        // At delivery each note told of is followed the way tool requests are: an id-less note given its first id and
+        // moved into another notebook meanwhile is found where it is now (by its file's instance and the alias); an
+        // unrelated file now at its old path isn't, and nothing is found for a note that's gone (withheld).
+        let oldID = NoteShelf.fallbackID(relativePath: "Garden/Loose.md")
+        let aliasesNow = [NoteShelf.holderKey(id: oldID, instance: "1:77"): "NEW-ID"]
+        let followedNow: [(key: String, id: String, instance: String)] = [("/n/Health/Loose.md", "NEW-ID", "1:77"), ("/n/Garden/Loose.md", oldID, "1:99")]
+        expect(NoteShelf.follow(key: "/n/Garden/Loose.md", id: oldID, instance: "1:77", unique: true, aliases: aliasesNow, now: followedNow) == 0,
+               "a note given its first id and moved meanwhile is followed to where it is now")
+        expect(NoteShelf.follow(key: "/n/Garden/Loose.md", id: oldID, instance: "1:77", unique: true, aliases: aliasesNow, now: [("/n/Garden/Loose.md", oldID, "1:99")]) == nil,
+               "another file at its old path is never taken for it: withheld")
         expect(NoteShelf.standaloneGroup("b", group: ["a", "b", "c"]) == ["b", "a", "c"] && NoteShelf.standaloneGroup("x", group: []) == ["x"],
                "a note in a conflict opens with every other paper of it beside it")
         // The group fits the visible screen: from near its right edge, three papers wrap and move in.
