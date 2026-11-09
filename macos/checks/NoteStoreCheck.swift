@@ -113,6 +113,7 @@ struct NoteStoreCheck {
         idFirst(root: root)
         moveAfterConflict(root: root)
         copyThenCommit(root: root)
+        caseAndSweep(root: root)
         versionGroups(root: root)
         try? fm.removeItem(at: Config.supportFolder)
         finish()
@@ -613,6 +614,59 @@ struct NoteStoreCheck {
                "a new file at an id-less note's path gets a handle of its own")
         local.rekeyID("file:Inbox/Plain.md", holder: plainHolder, "U2")
         expect(local.handle("U2") == firstLook && local.handles?[plainHolder] == nil, "an id-less note given its id keeps its handle, and its path's is retired")
+    }
+
+    /// A move that only changes a notebook's case does nothing (the same folder by identity), and the leftover sweep
+    /// keeps a picture another note links, or any while a sibling can't be read.
+    @MainActor static func caseAndSweep(root: URL) {
+        let fm = FileManager.default
+        // A case-only move: Notebook to notebook, on this (by default case-insensitive) volume.
+        let books = root.appending(path: "Casebook")
+        let assets = books.appending(path: NoteShelf.assetsFolder(id: "CS"))
+        try? fm.createDirectory(at: assets, withIntermediateDirectories: true)
+        try? Data("mine".utf8).write(to: assets.appending(path: "p.png"))
+        let note = books.appending(path: "Case.md")
+        let text0 = NoteFile(id: "CS", body: "# Case\n![](\(assets.lastPathComponent)/p.png)").serialized()
+        _ = NoteStore.create(text0, at: note, root: root)
+        let insensitive = fm.fileExists(atPath: root.appending(path: "casebook").path)
+        let stayed = NoteStore.move(note, noteID: "CS", into: root.appending(path: "casebook"), root: root)
+        let names = (try? fm.contentsOfDirectory(atPath: books.path)) ?? []
+        expect(!insensitive || (stayed?.lastPathComponent == "Case.md" && text(assets.appending(path: "p.png")) == "mine" && !names.contains("Case 2.md")),
+               "a case-only move on a case-insensitive volume: nothing copied, renamed or trashed", "\(names)")
+        let store = NoteStore(root: root)
+        let read = NoteStore.read(root)
+        store.preview(read.notes, notebooks: read.notebooks)
+        if let paper = store.notes.first(where: { $0.noteID == "CS" }) {
+            var answer: PaperNote?
+            store.move(paper.key, to: "casebook", then: { answer = $0 })
+            expect(answer?.key == paper.key && text(assets.appending(path: "p.png")) == "mine", "the store too: \"casebook\" is Casebook, nothing to do")
+        }
+
+        // The sweep: a leftover picture another note beside it links is kept.
+        let away = root.appending(path: "SweepAway"), left = root.appending(path: "SweepLeft")
+        let leftover = left.appending(path: NoteShelf.assetsFolder(id: "SA"))
+        let moved = away.appending(path: NoteShelf.assetsFolder(id: "SA"))
+        for dir in [leftover, moved] {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? Data("shared".utf8).write(to: dir.appending(path: "p.png"))
+        }
+        _ = NoteStore.create(NoteFile(id: "SA", body: "# A\n![](\(moved.lastPathComponent)/p.png)").serialized(), at: away.appending(path: "A.md"), root: root)
+        let bNote = left.appending(path: "B.md")
+        _ = NoteStore.create(NoteFile(id: "SB", body: "# B\n![](\(leftover.lastPathComponent)/p.png)").serialized(), at: bNote, root: root)
+        NoteStore.sweepLeftovers(root: root)
+        expect(fm.fileExists(atPath: leftover.appending(path: "p.png").path), "a leftover another note links: kept")
+        // B gone, but a note beside it that can't be read: kept (it might link it).
+        try? fm.removeItem(at: bNote)
+        let locked = left.appending(path: "Locked.md")
+        try? Data("?".utf8).write(to: locked)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        NoteStore.sweepLeftovers(root: root)
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: locked.path)
+        expect(fm.fileExists(atPath: leftover.appending(path: "p.png").path), "a sibling that can't be read: kept")
+        // Nothing links it, every sibling read, its note elsewhere with the same bytes: swept.
+        try? fm.removeItem(at: locked)
+        NoteStore.sweepLeftovers(root: root)
+        expect(!fm.fileExists(atPath: leftover.path) && fm.fileExists(atPath: moved.appending(path: "p.png").path), "unlinked and verified elsewhere: swept")
     }
 
     /// Moves copy then commit: Petal stopping after any step leaves no broken link; a listing or read failure refuses

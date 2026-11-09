@@ -653,6 +653,17 @@ struct NotesCheck {
         // The quick question's capture: only the latest opening's lands.
         expect(NoteShelf.captureCurrent(3, latest: 3) && !NoteShelf.captureCurrent(2, latest: 3), "an earlier opening's late capture: dropped")
 
+        // A notebook by name whatever its case; places compared by the file system's identity.
+        expect(NoteShelf.canonicalNotebook("inbox", existing: ["Inbox", "Work"]) == "Inbox" && NoteShelf.canonicalNotebook("Trips", existing: ["Inbox"]) == "Trips",
+               "\"inbox\" is Inbox; a new name stays as asked")
+        expect(NoteShelf.sameItem("1:5", "1:5") && !NoteShelf.sameItem("1:5", "1:6") && !NoteShelf.sameItem(nil, nil) && !NoteShelf.sameItem("", ""),
+               "the same volume and inode: the same; unknown: never")
+        // The sweep removes a file only when nothing links it, every sibling could be read, and its bytes are elsewhere.
+        expect(NoteShelf.sweepFile(referenced: false, siblingsReadable: true, bytesElsewhere: true), "unlinked, all read, kept elsewhere: removed")
+        expect(!NoteShelf.sweepFile(referenced: true, siblingsReadable: true, bytesElsewhere: true)
+               && !NoteShelf.sweepFile(referenced: false, siblingsReadable: false, bytesElsewhere: true)
+               && !NoteShelf.sweepFile(referenced: false, siblingsReadable: true, bytesElsewhere: false), "linked, a sibling unread, or not elsewhere: kept")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

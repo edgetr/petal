@@ -1485,6 +1485,25 @@ enum NoteShelf {
         return stick
     }
 
+    /// A notebook asked for by name: the one that exists whatever its letters' case (`Inbox` for "inbox"), else
+    /// the name as asked.
+    static func canonicalNotebook(_ wanted: String, existing: [String]) -> String {
+        existing.first { $0.compare(wanted, options: .caseInsensitive) == .orderedSame } ?? wanted
+    }
+
+    /// Two places on disk are the same when the file system says so (their volume and inode: `NoteStore.instance`),
+    /// never by how their paths are spelled; unknown (not there, not read) is never the same.
+    static func sameItem(_ a: String?, _ b: String?) -> Bool {
+        guard let a, let b, !a.isEmpty else { return false }
+        return a == b
+    }
+
+    /// The leftover sweep removes a file only when no note anywhere in the notes' folder links it, every note file
+    /// beside it could be listed and read, and its bytes are verifiably kept elsewhere; in doubt, it keeps it.
+    static func sweepFile(referenced: Bool, siblingsReadable: Bool, bytesElsewhere: Bool) -> Bool {
+        !referenced && siblingsReadable && bytesElsewhere
+    }
+
     /// The steps of a move, copy then commit: the pictures copied to where it goes (bytes verified), then the
     /// Markdown moved, then the originals trashed. Petal stopping after any step leaves at worst a duplicate, never a
     /// broken link.
