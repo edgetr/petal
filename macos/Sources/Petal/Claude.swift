@@ -1064,7 +1064,10 @@ struct ClaudePanelView: View {
             .buttonStyle(.plain)
             // Stick here: the conversation becomes a note on what was in front when it opened.
             if app.paper.canStick && agent.messages.contains(where: { $0.kind == .user }) {
+                // Only once the answer is done (no reply being written, no turn waiting): never half an answer.
+                let ready = NoteShelf.stickReady(running: agent.running, queued: agent.queued.count)
                 Button {
+                    guard NoteShelf.stickReady(running: agent.running, queued: agent.queued.count) else { return }
                     app.paper.stick(agent.messages, chat: agent.chatID)
                     panel.close()
                 } label: {
@@ -1074,7 +1077,9 @@ struct ClaudePanelView: View {
                         .contentShape(.capsule)
                 }
                 .buttonStyle(.plain)
-                .help("Make this conversation a note on what's in front")
+                .disabled(!ready)
+                .opacity(ready ? 1 : 0.45)
+                .help(ready ? "Make this conversation a note on what's in front" : "Sticks once the answer is done")
             }
             if !agent.messages.isEmpty {
                 Button("New chat") { agent.reset(); panel.chatsOpen = false }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)

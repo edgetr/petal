@@ -796,7 +796,10 @@ final class NoteStore {
         // Its pictures' folder still linked by another paper beside it (a conflict copy, a note written elsewhere):
         // never moved away from it (NoteShelf.picturesShared).
         if fm.fileExists(atPath: assets.path) {
-            let others: [String?] = ((try? fm.contentsOfDirectory(at: from.deletingLastPathComponent(), includingPropertiesForKeys: nil)) ?? [])
+            // The papers beside it must be listed to know: a listing that fails refuses the move (NoteShelf.siblingsListed).
+            let listing = try? fm.contentsOfDirectory(at: from.deletingLastPathComponent(), includingPropertiesForKeys: nil)
+            guard NoteShelf.siblingsListed(listing), let listing else { return nil }
+            let others: [String?] = listing
                 .filter { NoteShelf.isNoteFile($0.lastPathComponent) && $0.lastPathComponent != from.lastPathComponent }
                 .map { try? String(contentsOf: $0, encoding: .utf8) }
             guard !NoteShelf.picturesShared(assets.lastPathComponent, others: others) else { return nil }

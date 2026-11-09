@@ -1485,6 +1485,29 @@ enum NoteShelf {
         return stick
     }
 
+    /// A Desktop note's mode: the one that Desktop is in (modes.json's workspaces), else the default; never asked of
+    /// the dock (which may not be showing).
+    static func modeID(desktop: Int?, workspaces: [String: String], defaultMode: String) -> String {
+        guard let desktop else { return "" }
+        return workspaces[String(desktop)] ?? defaultMode
+    }
+
+    /// Reads of what's in front: one at a time, later requests one follow-up (the same gate as passage scans), and a
+    /// read whose look is gone by the time it would query an app does nothing more.
+    typealias ReadGate = ScanGate
+
+    static func readCurrent(ticket: Int, now: Int) -> Bool { ticket == now }
+
+    /// Hiding a window's notes (a focus change, Accessibility taken away): any narrowing waiting for it is cancelled
+    /// and every window narrowed for a note gets its width back at once.
+    static func onHide() -> (cancelNarrowing: Bool, giveBack: Bool) { (true, true) }
+
+    /// Stick here only once the answer is done: no reply being written and no turn queued (never half an answer).
+    static func stickReady(running: Bool, queued: Int) -> Bool { !running && queued == 0 }
+
+    /// A note's siblings must be listed to move its pictures' folder: a listing that fails refuses the move.
+    static func siblingsListed<T>(_ listing: [T]?) -> Bool { listing != nil }
+
     /// Which Desktop each screen shows is followed (Space and screen changes) while notes are on, whether or not
     /// Accessibility is allowed: those notifications don't need it.
     static func spaceSignals(notesOn: Bool, accessibility: Bool) -> Bool { notesOn }

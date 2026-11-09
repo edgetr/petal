@@ -267,10 +267,9 @@ extension NoteDesk {
         let wanted = kind.flatMap(NoteStick.Kind.init(rawValue:))
         if wanted == .desktop {
             // The Desktop showing under the pointer, read off the main thread (whichever dock): unknown, refused.
-            let mode = app.docks.focusedDock?.mode?.id ?? ""
             return resolveDesktop { number in
                 guard live() else { return }
-                guard let desk = NoteShelf.desktopAnchor(number: number, mode: mode) else {
+                guard let desk = NoteShelf.desktopAnchor(number: number, mode: self.modeID(desktop: number)) else {
                     if let refuse { refuse(Self.desktopUnknown) } else { done(nil) }
                     return
                 }

@@ -202,7 +202,8 @@ final class NoteDesk {
         awaitingRead = true
         // A read already under way (of the window left behind) is stale from now on.
         looks = NoteShelf.hidingLook(looks)
-        Self.roomTurn.cancel()
+        // Narrowing waiting for it cancelled, and every narrowed window's width given back now (NoteShelf.onHide).
+        if NoteShelf.onHide().giveBack { giveBackAll {} }
         for (key, panel) in panels where !isDesktop(key) { panel.conceal() }
         for panel in tabPanels.values { panel.conceal() }
         for panel in pinPanels.values { panel.conceal() }
@@ -312,7 +313,11 @@ final class NoteDesk {
 
     /// Something couldn't be done to the notes' files: said by the AI button for a moment.
     private func say(_ text: String) {
-        guard let dock = app.docks.focusedDock else { return }
+        // Said by the AI button of the dock under the pointer (never a window-list lookup on the main thread); with
+        // macOS's Dock chosen there's no button to say it by.
+        let mouse = NSEvent.mouseLocation
+        guard app.docks.shown, let dock = app.docks.panels.values.first(where: { $0.screen?.frame.contains(mouse) == true })?.dock
+                ?? app.docks.panels.values.first?.dock else { return }
         app.tooltips.show(text, over: "claude", in: dock)
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.app.tooltips.show(nil, over: "claude", in: dock) }
     }
@@ -329,12 +334,21 @@ final class NoteDesk {
         // No note stuck to a window, tab or app: nothing to show on one, and nothing is read.
         let stuck = store.notes.contains { $0.file.places.contains { $0.kind != .desktop } }
         guard stuck || !here.isEmpty else { return }
+        // One read at a time; looks asked for meanwhile are one follow-up, of what's in front by then
+        // (NoteShelf.ReadGate): a slow browser's reads never pile up.
+        guard reads.request() else { return }
         looks += 1
         let ticket = looks
-        Self.read(running, mac: local.mac, tabs: pagesStuck) { scene, read in
+        Self.read(running, mac: local.mac, tabs: pagesStuck, ticket: ticket) { scene, read in
             self.activate(scene, read: read, ticket: ticket)
+            if self.reads.finished() {
+                self.reads = NoteShelf.ReadGate()
+                self.look()
+            }
         }
     }
+
+    @ObservationIgnored private var reads = NoteShelf.ReadGate()
 
     /// A fresh read made the active scene, only while its look is still the current one (hiding notes on a focus
     /// change starts a new look) and its app is still the one in front (NoteShelf.mayBecomeActive): a late read of
@@ -362,7 +376,10 @@ final class NoteDesk {
     /// An app kept private (`aiNeverLook`) has no file read or offered (its document's name is never read), and
     /// what was read is dropped when it's made private while the read was under way. A file's bookmark is made
     /// here, off the main thread.
-    static func read(_ running: NSRunningApplication, mac: String, tabs: Bool = true, _ done: @escaping @MainActor (NoteScene, ClaudePanel.FrontRead) -> Void) {
+    /// `ticket`: the look it's for; gone by the time the app's window would be read further, nothing more is asked of
+    /// the app (the answer is stale, and refused when it's used).
+    static func read(_ running: NSRunningApplication, mac: String, tabs: Bool = true, ticket: Int? = nil,
+                     _ done: @escaping @MainActor (NoteScene, ClaudePanel.FrontRead) -> Void) {
         let pid = running.processIdentifier
         let app = running.bundleIdentifier ?? ""
         let privacy = ClaudePanel.privacy.now
@@ -373,6 +390,12 @@ final class NoteDesk {
         let screen = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main).flatMap(Spaces.screenID)
         ClaudePanel.readFront(of: running, tabs: tabs) { read in
             queue.async {
+                // Stale before the app's window is read further: nothing more asked of it.
+                if let ticket, !NoteShelf.readCurrent(ticket: ticket, now: lookNow.now) {
+                    let scene = NoteScene(mac: mac, app: app, pid: pid, window: read.window)
+                    DispatchQueue.main.async { MainActor.assumeIsolated { done(scene, read) } }
+                    return
+                }
                 let desktop: Int? = read.window == nil && read.none ? screen.flatMap { Spaces.desktops([$0])[$0] } : nil
                 var file = ""
                 var bookmark = ""
@@ -1521,7 +1544,7 @@ final class NoteDesk {
             s.pid = scene.pid
             s.window = scene.window
             s.title = app.assist.neverLook(scene.app) ? "" : scene.title
-            s.mode = app.docks.focusedDock?.mode?.id ?? ""
+            s.mode = modeHere
             return s
         }
         switch NoteShelf.frontOffer(window: scene.window, none: read.none) {
@@ -1529,7 +1552,7 @@ final class NoteDesk {
         case .unknown: return []
         case .desktop:
             // Which Desktop it is (read off the main thread with the scene), or no note: never one stuck to no Desktop.
-            return NoteShelf.desktopAnchor(number: scene.desktop ?? app.docks.focusedDock?.desktop, mode: app.docks.focusedDock?.mode?.id ?? "").map { [$0] } ?? []
+            return NoteShelf.desktopAnchor(number: scene.desktop, mode: modeID(desktop: scene.desktop)).map { [$0] } ?? []
         }
         if let passage, !passage.quote.isEmpty, scene.tab != nil || !scene.file.isEmpty {
             var s = stick(.passage)
@@ -1717,7 +1740,7 @@ final class NoteDesk {
                         guard let desktop else { return self.say("Petal couldn't tell which Desktop that is, so no note was made.") }
                         var desk = NoteStick(kind: .desktop)
                         desk.desktop = desktop
-                        desk.mode = self.app.docks.focusedDock?.mode?.id ?? ""
+                        desk.mode = self.modeID(desktop: desktop)
                         self.make(on: desk, at: landing)
                         return
                     }
@@ -1742,6 +1765,12 @@ final class NoteDesk {
     }
 
     static let desktopUnknown = "Petal couldn't tell which Desktop is showing, so nothing was changed."
+
+    /// The mode a Desktop is in (modes.json's workspaces, NoteShelf.modeID): never asked of the dock.
+    func modeID(desktop: Int?) -> String { NoteShelf.modeID(desktop: desktop, workspaces: app.config.workspaces, defaultMode: app.config.defaultMode) }
+
+    /// The mode of the Desktop under the pointer, from the Desktops last read (no window server on the main thread).
+    var modeHere: String { modeID(desktop: Self.desktopShowing(on: NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main)) }
     /// Handles of a conflict's papers beyond the note's own (by paper key), for this run.
     @ObservationIgnored private var handlesSaving = false
 
@@ -1806,7 +1835,7 @@ final class NoteDesk {
         if ended {
             ghost?.orderOut(nil)
             ghost = nil
-            let overDock = app.docks.focusedDock?.panel.map { $0.frame.contains(mouse) } ?? false
+            let overDock = app.docks.shown && app.docks.panels.values.contains { $0.frame.contains(mouse) }
             // The real pointer is hit-tested; only the paper's landing is offset (NoteShelf.dropPoints).
             let drop = NoteShelf.dropPoints(pointer: mouse)
             if !overDock { note(at: drop.hit, paperAt: drop.paper) }
@@ -1970,12 +1999,11 @@ final class NoteDesk {
         menu.addItem(.separator())
         // The Desktop the note's screen shows, read when chosen (off the main thread): only with its number is the note
         // moved there; its places stay as they are until then, and stay unknown.
-        let mode = app.docks.focusedDock?.mode?.id ?? ""
         let screen = panels[key]?.screen
         menu.addItem(ActionItem("Put it on this Desktop") { [weak self] in
             self?.resolveDesktop(on: screen) { number in
                 guard let self else { return }
-                guard let desk = NoteShelf.desktopAnchor(number: number, mode: mode) else { return self.say(Self.desktopUnknown) }
+                guard let desk = NoteShelf.desktopAnchor(number: number, mode: self.modeID(desktop: number)) else { return self.say(Self.desktopUnknown) }
                 self.restick(key, [desk])
             }
         })

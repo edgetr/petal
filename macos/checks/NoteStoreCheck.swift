@@ -667,6 +667,19 @@ struct NoteStoreCheck {
         expect(stopped && fm.fileExists(atPath: upperNote.path), "a sibling that can't be read: the move stops safely")
         try? fm.removeItem(at: locked)
         expect(NoteStore.move(upperNote, noteID: "MC3", into: root.appending(path: "Elsewhere"), root: root) != nil, "nothing else beside it: it moves")
+
+        // Its folder can't be listed (readable files, no listing): the move is refused, nothing moves.
+        let unlisted = root.appending(path: "Unlisted")
+        let unlistedAssets = unlisted.appending(path: NoteShelf.assetsFolder(id: "MC4"))
+        try? fm.createDirectory(at: unlistedAssets, withIntermediateDirectories: true)
+        try? Data("p".utf8).write(to: unlistedAssets.appending(path: "p.png"))
+        let unlistedNote = unlisted.appending(path: "Hidden.md")
+        _ = NoteStore.create(NoteFile(id: "MC4", body: "![](\(unlistedAssets.lastPathComponent)/p.png)").serialized(), at: unlistedNote, root: root)
+        try? fm.setAttributes([.posixPermissions: 0o311], ofItemAtPath: unlisted.path)
+        let refused = NoteStore.move(unlistedNote, noteID: "MC4", into: root.appending(path: "Elsewhere"), root: root) == nil
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: unlisted.path)
+        expect(refused && fm.fileExists(atPath: unlistedNote.path) && fm.fileExists(atPath: unlistedAssets.appending(path: "p.png").path),
+               "siblings that can't be listed: the move refused, nothing moved")
     }
 
     /// A file and its iCloud version with another id: one conflict, both papers read only with Keep this one.

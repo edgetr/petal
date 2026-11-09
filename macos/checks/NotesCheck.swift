@@ -613,6 +613,28 @@ struct NotesCheck {
         expect(NoteShelf.isNoteFile("Copy.MD") && NoteShelf.isNoteFile("a.md") && !NoteShelf.isNoteFile("a.txt"), "`.MD` is a note file too")
         expect(NoteShelf.picturesShared("pictures-a.assets", others: [nil]), "a sibling that can't be read: the move stops")
 
+        // A Desktop note's mode comes from its Desktop's number, never from the dock.
+        expect(NoteShelf.modeID(desktop: 2, workspaces: ["2": "social"], defaultMode: "work") == "social", "its Desktop's mode")
+        expect(NoteShelf.modeID(desktop: 3, workspaces: ["2": "social"], defaultMode: "work") == "work", "a Desktop with none set: the default")
+        expect(NoteShelf.modeID(desktop: nil, workspaces: ["2": "social"], defaultMode: "work") == "", "no Desktop: none")
+
+        // Reads of what's in front: one at a time, one follow-up; a stale one asks the app nothing more.
+        var readGate = NoteShelf.ReadGate()
+        let readStarts = (0..<5).map { _ in readGate.request() }
+        expect(readStarts == [true, false, false, false, false] && readGate.finished() && !readGate.finished(),
+               "five looks while a slow browser answers: one read, then one follow-up")
+        expect(NoteShelf.readCurrent(ticket: 4, now: 4) && !NoteShelf.readCurrent(ticket: 4, now: 5), "its look gone: stale")
+
+        // Hiding a window's notes gives every narrowed window its width back at once.
+        expect(NoteShelf.onHide() == (true, true), "narrowing cancelled, widths given back")
+
+        // Stick here waits for the answer.
+        expect(!NoteShelf.stickReady(running: true, queued: 0) && !NoteShelf.stickReady(running: false, queued: 1) && NoteShelf.stickReady(running: false, queued: 0),
+               "a reply being written or a turn waiting: not yet; done: sticks")
+
+        // A sibling listing that fails refuses the move.
+        expect(!NoteShelf.siblingsListed(Optional<[URL]>.none) && NoteShelf.siblingsListed(Optional([URL]())), "can't list: refused; listed (even empty): fine")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")
