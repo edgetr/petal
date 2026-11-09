@@ -209,11 +209,13 @@ enum ViewerCheck {
             failed = !seventeenth(url, app: app) || failed
             failed = !eighteenth(url, app: app) || failed
             failed = !nineteenth(url, app: app) || failed
+            failed = !pagingThenClosing(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
             failed = !cleanup(url) || failed
             failed = !closingMidExport(url, app: PetalApp.shared) || failed
+            failed = !twentieth(deck: url, app: PetalApp.shared) || failed
         }
         failed = !remote() || failed
         try? FileManager.default.removeItem(at: trashed)
@@ -1246,6 +1248,109 @@ enum ViewerCheck {
         expect(exported.all.count == 1, "closed mid-export: the next copy never goes to Quick Look (\(exported.all.count) exports)")
         expect(made.map { set in set.versions.allSatisfy { $0.thumb == nil } } ?? true, "and nothing of it drawn")
         print("closing: " + (ok ? "a set closed mid-export stops at its next step" : "failed"))
+        return ok
+    }
+
+    /// A count kept from other threads, with the most it reached.
+    final class Gauge: @unchecked Sendable {
+        private let lock = NSLock()
+        private var now = 0
+        private var most = 0
+        private var total = 0
+        func add(_ step: Int) { lock.withLock { now += step; most = max(most, now); if step > 0 { total += 1 } } }
+        var running: Int { lock.withLock { now } }
+        var peak: Int { lock.withLock { most } }
+        var started: Int { lock.withLock { total } }
+    }
+
+    /// Round 20: a load is one unit until its result is accepted. Saves during a slow Office conversion never
+    /// overlap it (at most two conversions, one at a time); a version's conversion cut short by another copy's
+    /// change leaves that copy to be read again, so every copy ends with its current preview.
+    private static func twentieth(deck source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("twentieth: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let deck = URL(fileURLWithPath: ViewerPath.canonical(folder.path) ?? folder.path).appending(path: "Deck.\(source.pathExtension)")
+        try? FileManager.default.copyItem(at: source, to: deck)
+        let gauge = Gauge()
+        let touched = HangUp()
+        let touch = { (url: URL) in try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path) }
+        let model = ViewerModel(url: deck, kind: ViewerKind.of(deck.path) ?? .quickLook(.slide))
+        // Saves while its first conversion runs, each telling the viewer as the watcher does.
+        ViewerLoads.converting = { step in
+            gauge.add(step)
+            guard step > 0, !touched.gone else { return }
+            touched.gone = true
+            for _ in 0..<5 {
+                Thread.sleep(forTimeInterval: 0.01)
+                touch(deck)
+                model.load()
+            }
+        }
+        defer { ViewerLoads.converting = nil }
+        model.load()
+        wait(90) { !model.loading && gauge.running == 0 }
+        wait(1) { false }
+        expect(model.pageCount > 0, "the deck shown (set up)")
+        expect(gauge.peak == 1 && gauge.started <= 2, "saves during a slow conversion: one conversion at a time, at most two (\(gauge.started) started, \(gauge.peak) at once)")
+        expect(model.readsStarted <= 2, "and at most one follow-up load (\(model.readsStarted))")
+
+        // A version's conversion cut short (another copy changed meanwhile): every copy ends with its preview.
+        let cut = HangUp()
+        var made: ViewerVersionSet?
+        ViewerLoads.converting = { step in
+            guard step > 0, !cut.gone, let set = made else { return }
+            cut.gone = true
+            touch(set.versions[1].url)
+            model.refreshVersions(set)
+        }
+        model.makeVersions(["One", "Two"], asker: "check") { if case .success(let set) = $0 { made = set } }
+        wait(20) { made != nil }
+        guard let set = made else { expect(false, "versions made (set up)"); return false }
+        wait(120) { cut.gone && set.versions.allSatisfy { model.versionPageCount($0.id) == model.pageCount } }
+        expect(cut.gone, "a conversion was cut short (set up)")
+        expect(set.versions.allSatisfy { model.versionPageCount($0.id) == model.pageCount },
+               "a conversion cut short: every copy ends with its current preview (\(set.versions.map { model.versionPageCount($0.id) ?? 0 }))")
+        model.close()
+        print("twentieth: " + (ok ? "a load is one unit: saves during a slow conversion never overlap it; a conversion cut short is read again" : "failed"))
+        return ok
+    }
+
+    /// Round 20: each version's picture is a drawing unit of its own: paging quickly draws at most a follow-up per
+    /// version, and once the viewer closes nothing is drawn.
+    private static func pagingThenClosing(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("paging: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let deck = URL(fileURLWithPath: ViewerPath.canonical(home.path) ?? home.path).appending(path: "Pages.pdf")
+        try? pages(30, from: source)?.write(to: deck)
+        let model = app.viewers.show(deck, front: false)
+        wait(20) { !model.loading }
+        var made: ViewerVersionSet?
+        model.makeVersions(["One", "Two"], asker: "check") { if case .success(let set) = $0 { made = set } }
+        wait(20) { made.map { set in set.versions.allSatisfy { $0.thumb != nil } } == true }
+        let gauge = Gauge()
+        ViewerModel.versionDrawing = { step in
+            gauge.add(step)
+            if step > 0 { Thread.sleep(forTimeInterval: 0.05) }
+        }
+        defer { ViewerModel.versionDrawing = nil }
+        for page in 1...20 { model.go(to: page) }
+        wait(0.08) { false }
+        app.viewers.closed(model)
+        let atClose = gauge.started
+        wait(1) { false }
+        expect(gauge.running == 0, "closed: no picture still drawing")
+        expect(gauge.started - atClose <= 2, "closed: nothing more drawn but what was under way (\(gauge.started - atClose))")
+        expect(gauge.started <= 6, "paging twenty pages quickly: at most a follow-up per version (\(gauge.started) drawn)")
+        print("paging: " + (ok ? "paging quickly draws a follow-up per version; closing leaves nothing drawing" : "failed"))
         return ok
     }
 

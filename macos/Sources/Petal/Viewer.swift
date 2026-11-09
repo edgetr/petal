@@ -227,6 +227,21 @@ final class ViewerVersionSet {
     var pin: ViewerVersionStore.Pin?
     /// Its copies read one load at a time (the document's own lifecycle); closed when the set is retired.
     @ObservationIgnored let loads = ViewerLoads()
+    /// Each version's picture drawn one at a time (by version id); closed with the set.
+    @ObservationIgnored private var drawings: [String: ViewerLoads] = [:]
+
+    func drawing(_ id: String) -> ViewerLoads {
+        if let made = drawings[id] { return made }
+        let made = ViewerLoads()
+        drawings[id] = made
+        return made
+    }
+
+    /// Retired or its viewer closed: its reading and every drawing stop at their next step, and nothing starts.
+    func shut() {
+        loads.close()
+        for drawing in drawings.values { drawing.close() }
+    }
     /// Each copy as it was when last read (by version id): unchanged, it isn't read again.
     @ObservationIgnored var seen: [String: ViewerVersionStore.Made] = [:]
 
@@ -466,9 +481,7 @@ final class ViewerModel: Identifiable {
         unselected()
         // One read at a time per viewer (ViewerLoads, Phase 1's ScanGate): changes while one runs make exactly one
         // follow-up, which reads the file as it is then; an older one's work stops at its next step.
-        loads = documentLoads.request { [weak self] ticket, current, finished in
-            self?.read(ticket, current: current, finished: finished)
-        }
+        loads = documentLoads.request { [weak self] unit in self?.read(unit) }
     }
 
     /// The document's loads, one at a time (the same lifecycle each set of versions has).
@@ -478,16 +491,19 @@ final class ViewerModel: Identifiable {
     /// Reads started (Petal --viewer-check: changes during a slow load make at most one follow-up).
     var readsStarted: Int { documentLoads.started }
 
-    private func read(_ ticket: Int, current: @escaping @Sendable () -> Bool, finished: @escaping @MainActor () -> Void) {
+    /// The read, off the main thread once the watch is armed; then `loaded` carries the unit on through
+    /// conversion and parsing to the accepted result, and finishes it whatever happens.
+    private func read(_ unit: ViewerLoadUnit) {
         let url = url
         let kind = kind
+        let current = unit.current
         let finish: @Sendable (ViewerLoader.Read?) -> Void = { read in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if !self.closedNow, ticket == self.loads {
-                        if let read { self.loaded(read, ticket: ticket) } else { self.cantShow() }
-                    }
-                    finished()
+                    guard current() else { return unit.finish() }
+                    if let read { return self.loaded(read, unit) }
+                    unit.accept { self.cantShow() }
+                    unit.finish()
                 }
             }
         }
@@ -526,46 +542,67 @@ final class ViewerModel: Identifiable {
         loading = false
     }
 
-    private func loaded(_ read: ViewerLoader.Read, ticket: Int) {
+    /// A read in: its pages converted (WebKit, for Quick Look's HTML) and parsed, each step checking the unit is
+    /// still wanted; the result accepted (`adopt` and what's shown) only at the end, and the unit finished on every
+    /// path.
+    private func loaded(_ read: ViewerLoader.Read, _ unit: ViewerLoadUnit) {
+        switch read.pages {
+        case .failed(let text):
+            unit.accept {
+                self.adopt(read)
+                self.failed(text)
+            }
+            unit.finish()
+        case .pdf(let data): show(data, read, unit)
+        case .web(let preview):
+            // Quick Look's HTML preview made into pages: WebKit lays it out (out of process), the pages are cut
+            // off the main thread; stopped at its next step once superseded.
+            ViewerLoads.converting?(1)
+            ViewerWeb.pages(preview, current: unit.current) { data in
+                ViewerLoads.converting?(-1)
+                if let data { return self.show(data, read, unit) }
+                unit.accept {
+                    self.adopt(read)
+                    self.goLive()
+                }
+                unit.finish()
+            }
+        case .live:
+            unit.accept {
+                self.adopt(read)
+                self.goLive()
+            }
+            unit.finish()
+        }
+    }
+
+    /// What an accepted read tells about the file: its stamp, and its identity and bookmark (only ever from the
+    /// current accepted read, never one kept from a read before it).
+    private func adopt(_ read: ViewerLoader.Read) {
         if appName.isEmpty { appName = read.appName; appURL = read.appURL }
         let first = stamp == nil
         stamp = read.stamp
         if !first { updated = Date() }
-        if case .failed(let text) = read.pages {
-            failed(text)
-            return
-        }
-        // The file's identity and bookmark only ever from this, the current successful read (never one kept from
-        // a read before it).
         let changed = fileID != read.fileID
         bookmark = read.bookmark
         fileID = read.fileID
         // Which notes are on this file, worked out again for the file as it is now (refreshPlaces is fenced by
         // this load).
         if changed { refreshPlaces() }
-        switch read.pages {
-        case .pdf(let data): show(data, ticket: ticket)
-        case .web(let preview):
-            // Quick Look's HTML preview made into pages: WebKit lays it out (out of process), the pages are cut
-            // off the main thread.
-            ViewerWeb.pages(preview, current: documentLoads.token.current(ticket)) { data in
-                guard ticket == self.loads, !self.closedNow else { return }
-                if let data { self.show(data, ticket: ticket) } else { self.goLive() }
-            }
-        case .live: goLive()
-        case .failed: break
-        }
     }
 
-    /// The pages parsed off the main thread, then shown.
-    private func show(_ data: Data, ticket: Int) {
+    /// The pages parsed off the main thread, then accepted and shown.
+    private func show(_ data: Data, _ read: ViewerLoader.Read, _ unit: ViewerLoadUnit) {
+        let current = unit.current
         Viewers.queue.async {
-            let parsed = ViewerCarry(PDFDocument(data: data))
+            let parsed = ViewerCarry(current() ? PDFDocument(data: data) : nil)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard ticket == self.loads, !self.closedNow else { return }
-                    guard let document = parsed.value as? PDFDocument else { return self.goLive() }
-                    self.present(document, data)
+                    unit.accept {
+                        self.adopt(read)
+                        if let document = parsed.value as? PDFDocument { self.present(document, data) } else { self.goLive() }
+                    }
+                    unit.finish()
                 }
             }
         }
@@ -604,31 +641,40 @@ final class ViewerModel: Identifiable {
     }
 
     /// The pages' thumbnails from a copy of the document of their own, off the main thread, a few at a time.
+    /// A drawing unit of its own (`thumbLoads`): one pass at a time, a newer one coalesced; a pass stops between
+    /// pages once a newer pass or load is asked for, or the viewer closes.
     private func renderThumbs(_ data: Data) {
-        let ticket = loads
-        let current = documentLoads.token.current(ticket)
-        Viewers.queue.async {
-            guard let document = PDFDocument(data: data) else { return }
-            var batch: [Int: NSImage] = [:]
-            for index in 0..<min(document.pageCount, 400) {
-                // A newer load since, or the viewer closed: this pass stops between pages.
-                guard current() else { return }
-                guard let page = document.page(at: index) else { continue }
-                ViewerModel.thumbnailDrawn?(ticket)
-                batch[index] = page.thumbnail(of: CGSize(width: 300, height: 170), for: .cropBox)
-                if batch.count == 8 || index == document.pageCount - 1 {
-                    let sent = batch
-                    batch = [:]
-                    DispatchQueue.main.async {
-                        MainActor.assumeIsolated {
-                            guard ticket == self.loads else { return }
-                            self.thumbs.merge(sent) { $1 }
+        let document = documentLoads.token.current(loads)
+        thumbLoads.request { unit in
+            let wanted: @Sendable () -> Bool = { unit.current() && document() }
+            let ticket = unit.generation
+            Viewers.queue.async {
+                defer { unit.finish() }
+                guard wanted(), let pdf = PDFDocument(data: data) else { return }
+                var batch: [Int: NSImage] = [:]
+                for index in 0..<min(pdf.pageCount, 400) {
+                    // A newer pass or load since, or the viewer closed: this pass stops between pages.
+                    guard wanted() else { return }
+                    guard let page = pdf.page(at: index) else { continue }
+                    ViewerModel.thumbnailDrawn?(ticket)
+                    batch[index] = page.thumbnail(of: CGSize(width: 300, height: 170), for: .cropBox)
+                    if batch.count == 8 || index == pdf.pageCount - 1 {
+                        let sent = batch
+                        batch = [:]
+                        DispatchQueue.main.async {
+                            MainActor.assumeIsolated {
+                                guard wanted() else { return }
+                                self.thumbs.merge(sent) { $1 }
+                            }
                         }
                     }
                 }
             }
         }
     }
+
+    /// The thumbnails' passes, one at a time (their own unit, apart from the document's loads).
+    @ObservationIgnored private let thumbLoads = ViewerLoads()
 
     // MARK: Passages, found again by their words
 
@@ -758,8 +804,9 @@ final class ViewerModel: Identifiable {
         defer { NotePictures.shared.visibilityChanged() }
         closedNow = true
         closing.on = true
-        // Whatever the document's loads still have going stops at its next step.
+        // Whatever the document's loads and its thumbnails still have going stops at its next step.
         documentLoads.close()
+        thumbLoads.close()
         // Whoever waits for a selection or the file's identity goes on, and finds the viewer closed.
         settleSelection()
         identified()
@@ -1250,8 +1297,8 @@ final class ViewerModel: Identifiable {
     /// Returns whether a picked copy was kept.
     @discardableResult
     func retire(_ set: ViewerVersionSet, keepPick: Bool) -> Bool {
-        // Whatever reading of its copies is under way stops at its next step, and none starts.
-        set.loads.close()
+        // Whatever reading or drawing of its copies is under way stops at its next step, and none starts.
+        set.shut()
         set.closed = true
         set.settle(nil)
         let picked = keepPick ? set.picked.flatMap { id in set.versions.first { $0.id == id } } : nil
@@ -1299,9 +1346,9 @@ final class ViewerModel: Identifiable {
     func refreshVersions(_ set: ViewerVersionSet) {
         // One read of the copies at a time per set (ViewerLoads, the document's own lifecycle): saves while one
         // runs make one follow-up; a set closed or retired stops at its next step.
-        set.loads.request { [weak self, weak set] _, current, finished in
-            guard let self, let set else { return finished() }
-            self.readVersions(set, current: current, finished: finished)
+        set.loads.request { [weak self, weak set] unit in
+            guard let self, let set else { return unit.finish() }
+            self.readVersions(set, unit)
         }
     }
 
@@ -1309,7 +1356,11 @@ final class ViewerModel: Identifiable {
     /// the set's pinned folder): its bytes read, then its pages (a PDF's as they are; anything else through Quick
     /// Look from a copy of those bytes, never the path in the set, then WebKit), `current` checked before each read,
     /// each export and the WebKit conversion. `finished` once all of it is in, or it stopped.
-    private func readVersions(_ set: ViewerVersionSet, current: @escaping @Sendable () -> Bool, finished: @escaping @MainActor () -> Void) {
+    /// The unit runs until every changed copy's pages are in (WebKit's conversions too) or it stopped; what it
+    /// learned about each copy (`seen`, its pages) is committed only when accepted, so a conversion cut short leaves
+    /// that copy to be read again by the follow-up.
+    private func readVersions(_ set: ViewerVersionSet, _ unit: ViewerLoadUnit) {
+        let current = unit.current
         let kind = kind
         let pin = set.pin
         let versions = set.versions.map { (id: $0.id, name: $0.url.lastPathComponent) }
@@ -1346,37 +1397,44 @@ final class ViewerModel: Identifiable {
             let read = results
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard current(), set === self.versions else { return finished() }
+                    guard current(), set === self.versions else { return unit.finish() }
                     var waiting = 0
-                    let done = { waiting -= 1; if waiting == 0 { finished() } }
-                    let keep: @MainActor (String, Data?) -> Void = { id, data in
-                        guard current(), set === self.versions else { return }
-                        self.versionPages[id] = data
-                        self.drawVersion(set, id)
+                    let done = { waiting -= 1; if waiting == 0 { unit.finish() } }
+                    // A copy's result accepted: its pages kept, its state recorded as seen, its picture drawn.
+                    let keep: @MainActor (String, ViewerVersionStore.Made, Data?) -> Void = { id, made, data in
+                        unit.accept {
+                            guard set === self.versions, let index = set.versions.firstIndex(where: { $0.id == id }) else { return }
+                            set.seen[id] = made
+                            set.versions[index].refused = false
+                            self.versionPages[id] = data
+                            self.drawVersion(set, id)
+                        }
                     }
                     for result in read {
-                        guard let index = set.versions.firstIndex(where: { $0.id == result.id }) else { continue }
                         guard let made = result.made, let pages = result.pages else {
-                            set.seen[result.id] = nil
-                            self.versionPages[result.id] = nil
-                            set.versions[index].thumb = nil
-                            set.versions[index].refused = true
+                            unit.accept {
+                                guard let index = set.versions.firstIndex(where: { $0.id == result.id }) else { return }
+                                set.seen[result.id] = nil
+                                self.versionPages[result.id] = nil
+                                set.versions[index].thumb = nil
+                                set.versions[index].refused = true
+                            }
                             continue
                         }
-                        set.seen[result.id] = made
-                        set.versions[index].refused = false
                         switch pages {
-                        case .pdf(let data): keep(result.id, data)
+                        case .pdf(let data): keep(result.id, made, data)
                         case .web(let preview):
                             waiting += 1
+                            ViewerLoads.converting?(1)
                             ViewerWeb.pages(preview, current: current) { data in
-                                keep(result.id, data)
+                                ViewerLoads.converting?(-1)
+                                keep(result.id, made, data)
                                 done()
                             }
-                        default: keep(result.id, nil)
+                        default: keep(result.id, made, nil)
                         }
                     }
-                    if waiting == 0 { finished() }
+                    if waiting == 0 { unit.finish() }
                 }
             }
         }
@@ -1394,23 +1452,39 @@ final class ViewerModel: Identifiable {
     /// One copy's picture of the page shown, drawn off the main thread from its newest pages; kept only if it's that
     /// version's latest drawing (never an older read's or another page's over a newer one) and that page and these
     /// copies are still the ones shown.
+    /// A drawing unit of its own per version (`ViewerVersionSet.drawing`): one at a time, page changes while it
+    /// draws coalesced into one follow-up for the page shown then, its generation and the set's closing checked
+    /// before parsing and before drawing; the picture kept only when accepted.
     private func drawVersion(_ set: ViewerVersionSet, _ id: String) {
-        let page = current
-        let turn = turns.begin("version:" + set.id + ":" + id)
-        let carried = ViewerCarry(versionPages[id])
-        Viewers.queue.async {
-            let image = (carried.value as? Data).flatMap { PDFDocument(data: $0) }.flatMap { $0.page(at: min(page, $0.pageCount - 1)) }?
-                .thumbnail(of: CGSize(width: 400, height: 224), for: .cropBox)
-            let picture = ViewerCarry(image)
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard self.turns.isLatest("version:" + set.id + ":" + id, turn), page == self.current, set === self.versions,
-                          let index = set.versions.firstIndex(where: { $0.id == id }) else { return }
-                    set.versions[index].thumb = picture.value as? NSImage
+        guard !set.closed else { return }
+        set.drawing(id).request { [weak self, weak set] unit in
+            guard let self, let set, set === self.versions else { return unit.finish() }
+            let page = self.current
+            let carried = ViewerCarry(self.versionPages[id])
+            let current = unit.current
+            Viewers.queue.async {
+                var image: NSImage?
+                if current(), let data = carried.value as? Data, let pdf = PDFDocument(data: data), current() {
+                    ViewerModel.versionDrawing?(1)
+                    image = pdf.page(at: min(page, pdf.pageCount - 1))?.thumbnail(of: CGSize(width: 400, height: 224), for: .cropBox)
+                    ViewerModel.versionDrawing?(-1)
+                }
+                let picture = ViewerCarry(image)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        unit.accept {
+                            guard page == self.current, set === self.versions, let index = set.versions.firstIndex(where: { $0.id == id }) else { return }
+                            set.versions[index].thumb = picture.value as? NSImage
+                        }
+                        unit.finish()
+                    }
                 }
             }
         }
     }
+
+    /// Petal --viewer-check only: a version's picture starting (+1) and ending (-1) its drawing.
+    nonisolated(unsafe) static var versionDrawing: ((Int) -> Void)?
 
     /// "Use this": the pick reported to whatever asked for it. Nothing is changed by the viewer itself.
     func use(_ version: ViewerVersion) {
@@ -1450,21 +1524,65 @@ final class ViewerLoadToken: @unchecked Sendable {
     func current(_ generation: Int) -> @Sendable () -> Bool { { [self] in lock.withLock { !shut && newest == generation } } }
 }
 
-/// One load at a time for one thing the viewer shows (the document, a set of versions; the same lifecycle for
-/// both): each request is a generation; one asked for while another runs is coalesced into exactly one follow-up
-/// (Phase 1's `NoteShelf.ScanGate`), which runs once that load calls `finished`, with the newest request's work.
-/// Closing marks the token closed, so whatever's under way stops at its next step and nothing more starts.
+/// One load: one unit of work, from the read through export, WebKit's conversion or parsing, to the accepted
+/// result. `finish` releases the load's gate exactly once, whatever ends it (success, failure, cancellation,
+/// closure; or the unit simply let go of, which finishes it too). What a load learns (a cache, a seen state, an
+/// identity) is committed only through `accept`, which runs only while this is still the newest load and its owner
+/// open.
+final class ViewerLoadUnit: @unchecked Sendable {
+    let generation: Int
+    /// Still wanted: the newest load asked for, and its owner open (any thread).
+    let current: @Sendable () -> Bool
+    private let lock = NSLock()
+    private var ended = false
+    private let release: @Sendable () -> Void
+
+    init(generation: Int, current: @escaping @Sendable () -> Bool, release: @escaping @Sendable () -> Void) {
+        self.generation = generation
+        self.current = current
+        self.release = release
+    }
+
+    /// `commit` run (on the main thread) only when this load's result is accepted: still the newest, its owner
+    /// open. Returns whether it ran.
+    @MainActor @discardableResult
+    func accept(_ commit: () -> Void) -> Bool {
+        guard current() else { return false }
+        commit()
+        return true
+    }
+
+    /// The unit is over: its gate released, once (any later call does nothing).
+    func finish() {
+        let first = lock.withLock { () -> Bool in
+            if ended { return false }
+            ended = true
+            return true
+        }
+        if first { release() }
+    }
+
+    deinit { finish() }
+}
+
+/// One load at a time for one thing the viewer shows (the document, a set of versions, a version's picture, the
+/// thumbnails; the same lifecycle for each): each request is a generation; one asked for while a unit runs is
+/// coalesced into exactly one follow-up (Phase 1's `NoteShelf.ScanGate`), which runs once that unit finishes, with
+/// the newest request's work. Closing marks the token closed, so whatever's under way stops at its next step, and
+/// nothing more starts.
 @MainActor
 final class ViewerLoads {
-    typealias Run = @MainActor (_ generation: Int, _ current: @escaping @Sendable () -> Bool, _ finished: @escaping @MainActor () -> Void) -> Void
+    typealias Run = @MainActor (ViewerLoadUnit) -> Void
 
     let token = ViewerLoadToken()
     private var gate = NoteShelf.ScanGate()
     private var run: Run?
-    /// Loads started (not requests): Petal --viewer-check counts them.
+    /// Petal --viewer-check only: told (on the main thread) as a WebKit conversion starts (+1) and ends (-1).
+    nonisolated(unsafe) static var converting: ((Int) -> Void)?
+    /// Units started (not requests): Petal --viewer-check counts them.
     private(set) var started = 0
 
-    /// A new request: its generation. `run` starts now, or as the one follow-up after the load under way.
+    /// A new request: its generation. `run` starts now, or as the one follow-up after the unit under way.
     @discardableResult
     func request(_ run: @escaping Run) -> Int {
         let generation = token.bump()
@@ -1482,10 +1600,14 @@ final class ViewerLoads {
         guard let run, !token.closed else { gate = NoteShelf.ScanGate(); return }
         started += 1
         let generation = token.generation
-        run(generation, token.current(generation)) { [weak self] in
-            guard let self else { return }
-            if self.gate.finished() { self.start() }
+        let unit = ViewerLoadUnit(generation: generation, current: token.current(generation)) { [weak self] in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.ended() } }
         }
+        run(unit)
+    }
+
+    private func ended() {
+        if gate.finished() { start() }
     }
 }
 
