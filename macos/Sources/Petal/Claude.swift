@@ -627,6 +627,11 @@ final class InputPanel: NSPanel {
 
     override var canBecomeKey: Bool { true }
 
+    /// The Edit menu's keys (⌘C, ⌘V, ⌘Z…) here too, after the panel's own (EditMenu.keyEquivalent).
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        EditMenu.keyEquivalent(event, window: self, viewsHandled: super.performKeyEquivalent(with: event))
+    }
+
     override func resignKey() {
         super.resignKey()
         if !stays() { close() }

@@ -21,6 +21,11 @@ final class NoteStore {
 @MainActor final class Sites { static let shared = Sites(); func cachedIcon(_ id: String) -> NSImage? { nil }; func requestIcon(_ id: String) {} }
 struct PaperNote { var file: NoteFile; var url: URL; var revision: String? = nil; var instance = ""; var key: String { url.path }; var noteID: String { file.id } }
 
+/// What the note editor's coordinator answers for undo (NoteTextView.undo(for:)).
+final class UndoDelegate: NSObject, NSTextViewDelegate {
+    func undoManager(for view: NSTextView) -> UndoManager? { NoteTextView.undo(for: view) }
+}
+
 @main
 struct NoteRichCheck {
     @MainActor static func main() {
@@ -136,6 +141,8 @@ struct NoteRichCheck {
         try? FileManager.default.removeItem(at: png)
         // Text from outside (a sync, a tool, a reload): the undo history goes with the old text; ⌘Z then changes nothing.
         let typing = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 400))
+        let undoDelegate = UndoDelegate()
+        typing.delegate = undoDelegate
         typing.allowsUndo = true
         typing.isRichText = true
         typing.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("first words"), folder: typing.folderRef, style: style))
@@ -146,6 +153,62 @@ struct NoteRichCheck {
         typing.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("short"), folder: typing.folderRef, style: style))
         typing.undoManager?.undo()
         expect(!typing.history.canUndo && typing.string == "short", "after an outside load, nothing to undo and ⌘Z leaves the text as it is", typing.string)
+
+        // The Edit menu, never shown: its items, selectors and keys; the app menu empty (nothing acts unexpectedly).
+        let menu = EditMenu.make()
+        let editItems = menu.items.count == 2 ? (menu.items[1].submenu?.items ?? []).filter { !$0.isSeparatorItem } : []
+        let wanted: [(String, String, String, NSEvent.ModifierFlags)] = [
+            ("Undo", "undo:", "z", .command), ("Redo", "redo:", "z", [.command, .shift]), ("Cut", "cut:", "x", .command),
+            ("Copy", "copy:", "c", .command), ("Paste", "paste:", "v", .command),
+            ("Paste and Match Style", "pasteAsPlainText:", "v", [.command, .option, .shift]), ("Delete", "delete:", "", .command),
+            ("Select All", "selectAll:", "a", .command), ("Find…", "performFindPanelAction:", "f", .command)]
+        expect(editItems.count == wanted.count && zip(editItems, wanted).allSatisfy { item, want in
+            item.title == want.0 && item.action.map(NSStringFromSelector) == want.1 && item.keyEquivalent == want.2 && item.keyEquivalentModifierMask == want.3
+        }, "the Edit menu: its items, standard selectors and keys", editItems.map { "\($0.title) \($0.action.map(NSStringFromSelector) ?? "-") \($0.keyEquivalent)" }.joined(separator: ", "))
+        expect(menu.items.first?.submenu?.items.isEmpty == true, "the app menu is empty: no Quit, Hide or Settings key")
+        expect(editItems.last?.tag == Int(NSFindPanelAction.showFindPanel.rawValue), "Find… shows the find bar")
+
+        // The menu's Undo, sent through the responder chain as a key would, uses the editor's own history.
+        let menuEditor = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
+        menuEditor.delegate = undoDelegate
+        menuEditor.allowsUndo = true
+        let offscreen = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: 300, height: 100), styleMask: [.borderless], backing: .buffered, defer: true)
+        offscreen.contentView = menuEditor
+        offscreen.makeFirstResponder(menuEditor)
+        expect(menuEditor.undoManager === menuEditor.history, "the editor's undo manager is its own history")
+        menuEditor.insertText("typed", replacementRange: menuEditor.selectedRange())
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        expect(menuEditor.history.canUndo && offscreen.undoManager !== menuEditor.history, "typing undone in its own history, not the window's")
+        expect(menuEditor.tryToPerform(Selector(("undo:")), with: nil) && menuEditor.string.isEmpty, "the menu's undo: undoes it", menuEditor.string)
+
+        // A checkbox tick: undone and redone, saved and drawn each way.
+        let ticking = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
+        ticking.delegate = undoDelegate
+        var saves = 0
+        ticking.changed = { saves += 1 }
+        ticking.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("- [ ] buy milk"), folder: ticking.folderRef, style: style))
+        let box = { (ticking.textStorage?.attribute(.attachment, at: 0, effectiveRange: nil) as? NSTextAttachment)?.attachmentCell as? CheckCell }
+        ticking.toggleCheck(at: 0)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        expect(box()?.done == true && saves == 1 && ticking.history.canUndo, "ticked: saved, and it can be undone")
+        ticking.history.undo()
+        expect(box()?.done == false && saves == 2 && NoteBlock.body(NoteRich.blocks(ticking.textStorage!)) == "- [ ] buy milk" && ticking.history.canRedo,
+               "undone: unticked again, saved, and it can be redone")
+        ticking.history.redo()
+        expect(box()?.done == true && saves == 3 && NoteBlock.body(NoteRich.blocks(ticking.textStorage!)) == "- [x] buy milk", "redone: ticked again and saved")
+
+        // A picture pasted over a selection replaces it when it's in, if the text there is still what was selected.
+        let pasting = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
+        pasting.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("keep REPLACE end"), folder: pasting.folderRef, style: style))
+        _ = pasting.insertPicture(path: "../Pictures/x/p.png", file: URL(fileURLWithPath: "/tmp/p.png"), caption: "", at: 5, length: 7, selected: "REPLACE")
+        let pastedBody = NoteBlock.body(NoteRich.blocks(pasting.textStorage!))
+        expect(!pastedBody.contains("REPLACE") && pastedBody.contains("keep") && pastedBody.contains("end") && pastedBody.contains("../Pictures/x/p.png"),
+               "the selection replaced by the picture", pastedBody)
+        let changedMeanwhile = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 100))
+        changedMeanwhile.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("keep OTHERED end"), folder: changedMeanwhile.folderRef, style: style))
+        _ = changedMeanwhile.insertPicture(path: "../Pictures/x/p.png", file: URL(fileURLWithPath: "/tmp/p.png"), caption: "", at: 5, length: 7, selected: "REPLACE")
+        let keptBody = NoteBlock.body(NoteRich.blocks(changedMeanwhile.textStorage!))
+        expect(keptBody.contains("OTHERED") && keptBody.contains("../Pictures/x/p.png"), "text changed meanwhile: nothing replaced, the picture still put in", keptBody)
 
         // A note moved to another notebook: its open editor's pictures read their links from the new folder, the
         // text and selection untouched.
@@ -162,7 +225,7 @@ struct NoteRichCheck {
                "its picture now leads from the new notebook, not the old")
         expect(moving.string == textBefore && moving.selectedRange() == NSRange(location: 2, length: 3) && remeasured == 1,
                "the text and selection kept, the pictures laid out again")
-        print("note editor: \(roundTrips) of \(bodies.count + 1) round trips, \(checks) picture checks" + (failures > bodies.count + 1 - roundTrips ? " (some failed)" : ""))
+        print("note editor: \(roundTrips) of \(bodies.count + 1) round trips, \(checks) editor checks" + (failures > bodies.count + 1 - roundTrips ? " (some failed)" : ""))
         if failures > 0 { exit(1) }
     }
 }

@@ -12,6 +12,9 @@ struct NoteImport: @unchecked Sendable {
     var png: Data?
     var tiff: Data?
     var at: Int
+    /// The selection it replaces when it's in (its length, and the text it held then).
+    var length: Int = 0
+    var selected: String = ""
 }
 
 // MARK: - Places
@@ -1689,6 +1692,24 @@ enum NoteShelf {
             }
         }
         return keys
+    }
+
+    /// Where pasted pictures go when they're in: the selection they were pasted over when the text there still says
+    /// what it did then; else, never replacing anything, at that place (within the text).
+    static func pasteRange(at: Int, length: Int, selected: String, text: String) -> NSRange {
+        let count = (text as NSString).length
+        if length > 0, at >= 0, at + length <= count, (text as NSString).substring(with: NSRange(location: at, length: length)) == selected {
+            return NSRange(location: at, length: length)
+        }
+        return NSRange(location: min(max(0, at), count), length: 0)
+    }
+
+    /// Which app the keyboard goes back to when the paper that had it folds: the app in front when that isn't
+    /// Petal (the person's, under Petal's nonactivating paper), else the last other app the person used.
+    static func keyboardBack(paperWasKey: Bool, frontmost: Int32?, petal: Int32, lastOther: Int32?) -> Int32? {
+        guard paperWasKey else { return nil }
+        if let frontmost, frontmost != petal { return frontmost }
+        return lastOther
     }
 
     /// Which missing pictures to ask for again now: those still on screen whose last try was at least `every` ago.

@@ -714,6 +714,18 @@ struct NotesCheck {
                && NoteShelf.resolvedLink("./a/./b.png", from: "/n/Inbox") == "/n/Inbox/a/b.png", "a handwritten link: beside the note")
         expect(NoteShelf.resolvedLink("../../../../x.png", from: "/n/Inbox") == nil && NoteShelf.resolvedLink("/abs.png", from: "/n/Inbox") == nil,
                "above /, or absolute: none")
+        // A paste's range: the selection when it still holds what was selected; else no replacing, at that place.
+        expect(NoteShelf.pasteRange(at: 5, length: 7, selected: "REPLACE", text: "keep REPLACE end") == NSRange(location: 5, length: 7), "still there: replaced")
+        expect(NoteShelf.pasteRange(at: 5, length: 7, selected: "REPLACE", text: "keep OTHERED end") == NSRange(location: 5, length: 0)
+               && NoteShelf.pasteRange(at: 50, length: 7, selected: "REPLACE", text: "short") == NSRange(location: 5, length: 0)
+               && NoteShelf.pasteRange(at: 3, length: 0, selected: "", text: "short") == NSRange(location: 3, length: 0),
+               "changed or gone: nothing replaced, at the place (within the text)")
+        // Escape on the paper with the keyboard: the keyboard goes back to the person's app, never to Petal.
+        expect(NoteShelf.keyboardBack(paperWasKey: true, frontmost: 400, petal: 100, lastOther: 300) == 400, "the app in front under the paper")
+        expect(NoteShelf.keyboardBack(paperWasKey: true, frontmost: 100, petal: 100, lastOther: 300) == 300, "Petal in front: the last app used")
+        expect(NoteShelf.keyboardBack(paperWasKey: false, frontmost: 400, petal: 100, lastOther: 300) == nil
+               && NoteShelf.keyboardBack(paperWasKey: true, frontmost: 100, petal: 100, lastOther: nil) == nil, "a paper without the keyboard, or no app: nothing")
+
         // A missing picture is asked for again every 10 s, only while it's on screen.
         let t0 = Date()
         expect(NoteShelf.pictureRetry(broken: ["/n/P/a": t0], onScreen: ["/n/P/a"], now: t0.addingTimeInterval(10)) == (["/n/P/a"], true),

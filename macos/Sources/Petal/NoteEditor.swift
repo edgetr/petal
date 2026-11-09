@@ -626,18 +626,11 @@ final class NoteTextView: NSTextView {
         }
     }
     /// This editor's own undo history (never the window's, shared with other papers), cleared whenever its text
-    /// comes from outside.
+    /// comes from outside. The Edit menu's Undo and Redo reach it through the delegate (`undo(for:)`).
     let history = UndoManager()
-    override var undoManager: UndoManager? { history }
 
-    /// ⌘Z and ⇧⌘Z undo and redo this editor's own history while it has the keyboard (Petal has no Edit menu).
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        guard window?.firstResponder === self, event.charactersIgnoringModifiers?.lowercased() == "z",
-              mods == .command || mods == [.command, .shift] else { return super.performKeyEquivalent(with: event) }
-        if mods.contains(.shift) { if history.canRedo { history.redo() } } else if history.canUndo { history.undo() }
-        return true
-    }
+    /// What a note editor's delegate answers for `undoManager(for:)`: the editor's own history.
+    static func undo(for view: NSTextView) -> UndoManager? { (view as? NoteTextView)?.history }
 
     /// Text that came from outside (a sync, a tool, a reload): it replaces what's here and the undo history goes, so
     /// ⌘Z never applies an old range to new text.
@@ -702,6 +695,8 @@ final class NoteTextView: NSTextView {
         }
     }
 
+    /// A checkbox ticked or unticked: an undoable change (its undo toggles it back and registers the redo), saved and
+    /// drawn again whichever way it goes.
     func toggleCheck(at index: Int) {
         guard let storage = textStorage, index < storage.length,
               let attachment = storage.attribute(.attachment, at: index, effectiveRange: nil) as? NSTextAttachment,
@@ -710,6 +705,9 @@ final class NoteTextView: NSTextView {
         let line = (storage.string as NSString).lineRange(for: NSRange(location: index, length: 0))
         storage.addAttribute(NoteRich.line, value: cell.done ? "check1" : "check0", range: line)
         layoutManager?.invalidateDisplay(forCharacterRange: NSRange(location: index, length: 1))
+        let undo = undoManager ?? history
+        undo.registerUndo(withTarget: self) { view in MainActor.assumeIsolated { view.toggleCheck(at: index) } }
+        undo.setActionName(cell.done ? "Tick" : "Untick")
         changed()
     }
 
@@ -820,15 +818,19 @@ final class NoteTextView: NSTextView {
         let png = files.isEmpty && !anyFiles ? board.data(forType: .png) : nil
         let tiff = files.isEmpty && !anyFiles && png == nil ? board.data(forType: .tiff) : nil
         guard !files.isEmpty || png != nil || tiff != nil, let importPictures else { return false }
-        importPictures(NoteImport(files: files, png: png, tiff: tiff, at: selectedRange().location))
+        // The whole selection goes with it: replaced by the pictures when they're in, if it's still that text.
+        let range = selectedRange()
+        importPictures(NoteImport(files: files, png: png, tiff: tiff, at: range.location, length: range.length,
+                                  selected: (string as NSString).substring(with: range)))
         return true
     }
 
-    /// A picture saved beside the note, on its own line at `at` (the end, past it; -1: at the cursor). False when it
-    /// can't be.
-    func insertPicture(path: String, file: URL, caption: String, at: Int) -> Bool {
+    /// A picture saved for the note, on its own line at `at` (the end, past it; -1: at the cursor), replacing the
+    /// `length` characters there when they still say `selected` (what was selected when it was pasted; text that
+    /// changed meanwhile is never replaced: NoteShelf.pasteRange). False when it can't be.
+    func insertPicture(path: String, file: URL, caption: String, at: Int, length: Int = 0, selected: String = "") -> Bool {
         guard let storage = textStorage else { return false }
-        if at >= 0 { setSelectedRange(NSRange(location: min(at, storage.length), length: 0)) }
+        if at >= 0 { setSelectedRange(NoteShelf.pasteRange(at: at, length: length, selected: selected, text: storage.string)) }
         insertLine(PictureCell(path: path, folder: folderRef, caption: caption), kind: "image")
         return true
     }
@@ -865,7 +867,7 @@ final class NoteEditorHandle {
     var flush: () -> Void = {}
     /// Typed and not saved yet: the note is fenced against a read of the folder only then (NoteShelf.fenceEditor).
     var busy: () -> Bool = { false }
-    var insert: (String, URL, String, Int) -> Bool = { _, _, _, _ in false }
+    var insert: (String, URL, String, Int, Int, String) -> Bool = { _, _, _, _, _, _ in false }
 }
 
 /// The editor in SwiftUI: the note's lines in, the note's lines out (saved a moment after the person stops typing).
@@ -888,6 +890,9 @@ struct NoteEditorView: NSViewRepresentable {
     var sameNote: (String, String, String) -> Bool = { a, _, b in a == b }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
+        /// The Edit menu's Undo and Redo (and typing's undo) use the editor's own history.
+        func undoManager(for view: NSTextView) -> UndoManager? { NoteTextView.undo(for: view) }
+
         var saveLater: DispatchWorkItem?
         var key = ""
         var noteID = ""
@@ -1003,9 +1008,9 @@ struct NoteEditorView: NSViewRepresentable {
             MainActor.assumeIsolated { coordinator.flush(text) }
         }
         handle.busy = { [weak coordinator] in MainActor.assumeIsolated { coordinator?.marker.dirty == true } }
-        handle.insert = { [weak text] path, file, caption, at in
+        handle.insert = { [weak text] path, file, caption, at, length, selected in
             guard let text else { return false }
-            return MainActor.assumeIsolated { text.insertPicture(path: path, file: file, caption: caption, at: at) }
+            return MainActor.assumeIsolated { text.insertPicture(path: path, file: file, caption: caption, at: at, length: length, selected: selected) }
         }
         register(handle)
         let base = paper.url.deletingLastPathComponent()

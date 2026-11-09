@@ -87,6 +87,7 @@ final class NoteDesk {
         // vault can't be read, a plain name. And the names Petal made so, known again.
         NoteStore.nameRedactor = { text in VaultIndex.settled { $0.unreadable ? nil : $0.redacted(text) } ?? nil }
         store.onChange = { [weak self] in self?.refresh() }
+        watchApps()
         // The one visibility signal for missing pictures: papers revealed and open now.
         NotePictures.shared.visible = { [weak self] in self?.picturesOnScreen() ?? [] }
         store.onRekey = { [weak self] old, paper in self?.rekey(old, to: paper) }
@@ -1152,10 +1153,48 @@ final class NoteDesk {
         guard faces[key] == .open || faces[key] == .back else { return }
         Self.roomTurn.cancel()
         editors[key]?.flush()
+        let hadKeyboard = panels[key]?.isKeyWindow == true
         faces[key] = .folded
         if keyboard == key { keyboard = nil }
         letGoIfEmpty(key)
         faceChanged(key)
+        if hadKeyboard { giveKeyboardBack() }
+    }
+
+    /// The last app other than Petal the person brought forward (kept as apps activate).
+    @ObservationIgnored private var lastOtherApp: pid_t?
+    @ObservationIgnored private var appWatch: NSObjectProtocol?
+    /// Set while the keyboard is handed back on a fold: the paper losing it then isn't a click away.
+    @ObservationIgnored private var handingBack = false
+
+    /// The paper that had the keyboard folded (Escape): the keyboard goes back to the app the person was using
+    /// (NoteShelf.keyboardBack), activated, never by moving the pointer; the other open papers stay open.
+    private func giveKeyboardBack() {
+        let petal = getpid()
+        guard let pid = NoteShelf.keyboardBack(paperWasKey: true, frontmost: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                                               petal: petal, lastOther: lastOtherApp),
+              let app = NSRunningApplication(processIdentifier: pid) else { return }
+        handingBack = true
+        NSApp.yieldActivation(to: app)
+        app.activate()
+        // Already the active app under Petal's nonactivating paper: told through Accessibility too that it's in
+        // front, so its own window takes the keys again (off the main thread; a hung app never stalls the desk).
+        Self.queue.async {
+            let element = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(element, 0.3)
+            AXUIElementSetAttributeValue(element, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { self.handingBack = false } }
+    }
+
+    /// Keeps the last app other than Petal the person used, for giving the keyboard back.
+    private func watchApps() {
+        guard appWatch == nil else { return }
+        appWatch = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication, app.processIdentifier != getpid() else { return }
+            let pid = app.processIdentifier
+            MainActor.assumeIsolated { self?.lastOtherApp = pid }
+        }
     }
 
     func hide(_ key: String) {
@@ -1188,6 +1227,8 @@ final class NoteDesk {
 
     /// Clicked away from every note: the open ones fold back.
     func clickedAway() {
+        // The keyboard handed back on a fold (Escape) isn't a click away: the other open papers stay open.
+        if handingBack { handingBack = false; return }
         keyboardWanted.cancelAll()
         for (key, face) in faces where face == .open || face == .back { fold(key) }
     }
@@ -1454,7 +1495,7 @@ final class NoteDesk {
                     guard let (nowKey, accepted) = taken else { return }
                     for (index, picture) in accepted.enumerated() { NotePictures.shared.preview(picture.file, NSImage(data: ready[index].data) ?? NSImage()) }
                     self.fresh.remove(nowKey)
-                    if self.insertPictures(nowKey, accepted, at: items.at) {
+                    if self.insertPictures(nowKey, accepted, at: items.at, length: items.length, selected: items.selected) {
                         // Into the note now (and its snapshot), not a moment later.
                         self.editors[nowKey]?.flush()
                     } else {
@@ -1500,12 +1541,15 @@ final class NoteDesk {
 
     /// Pictures' references into a note's open editor, as ordinary text, at the cursor's place then; false when no
     /// editor is open on it.
-    private func insertPictures(_ key: String, _ pictures: [(path: String, file: URL, caption: String)], at: Int) -> Bool {
+    private func insertPictures(_ key: String, _ pictures: [(path: String, file: URL, caption: String)], at: Int, length: Int = 0,
+                                selected: String = "") -> Bool {
         guard let editor = editors[key] else { return false }
-        var at = at
+        var at = at, length = length
         for picture in pictures {
-            guard editor.insert(picture.path, picture.file, picture.caption, at) else { return false }
+            // The first replaces the selection it was pasted over (when it's still that text).
+            guard editor.insert(picture.path, picture.file, picture.caption, at, length, selected) else { return false }
             at = -1   // the next one after it, at the cursor
+            length = 0
         }
         return true
     }
@@ -2296,6 +2340,11 @@ final class NotePanel: NSPanel {
         refit()
         guard NoteShelf.mayTakeKeyboard(shown: unveiled) else { return }
         makeKeyAndOrderFront(nil)
+    }
+
+    /// The Edit menu's keys (⌘C, ⌘V, ⌘Z…) here too, after the paper's own (EditMenu.keyEquivalent).
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        EditMenu.keyEquivalent(event, window: self, viewsHandled: super.performKeyEquivalent(with: event))
     }
 
     override func resignKey() {
