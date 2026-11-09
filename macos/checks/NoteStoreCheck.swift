@@ -148,6 +148,23 @@ struct NoteStoreCheck {
         expect(first.outcome == .written && again.outcome == .written && first.pictures.first?.path == again.pictures.first?.path && text(pictureNote) == p0,
                "picture bytes written once, idempotent, the note untouched")
 
+        // A handwritten note linking a picture outside its own folder: the move carries it, its link holds; another
+        // picture by that name where it lands stops the move, and nothing is left behind.
+        let handwritten = work.appending(path: "Handwritten.md")
+        let tripAssets = work.appending(path: "Trip.assets")
+        try? fm.createDirectory(at: tripAssets, withIntermediateDirectories: true)
+        try? Data("photo".utf8).write(to: tripAssets.appending(path: "photo.png"))
+        let handText = NoteFile(id: "HW", body: "# Trip\n![](Trip.assets/photo.png)").serialized()
+        _ = NoteStore.create(handText, at: handwritten, root: root)
+        let clash = root.appending(path: "Clash/Trip.assets")
+        try? fm.createDirectory(at: clash, withIntermediateDirectories: true)
+        try? Data("someone else's".utf8).write(to: clash.appending(path: "photo.png"))
+        expect(NoteStore.move(handwritten, noteID: "HW", into: root.appending(path: "Clash"), root: root) == nil && text(handwritten) == handText
+               && text(clash.appending(path: "photo.png")) == "someone else's", "another picture by that name where it lands: the move stops")
+        let landedHW = NoteStore.move(handwritten, noteID: "HW", into: root.appending(path: "Carried"), root: root)
+        expect(landedHW != nil && text(root.appending(path: "Carried/Trip.assets/photo.png")) == "photo" && text(landedHW!) == handText
+               && text(tripAssets.appending(path: "photo.png")) == "photo", "moved with its picture copied along, its text unchanged, the original left for others")
+
         // Moving a note with pictures: the pictures go first and come along; one in the way stops it all.
         let assetsName = NoteShelf.assetsFolder(id: "P5")
         let moved = NoteStore.move(pictureNote, noteID: "P5", into: root.appending(path: "Away"), root: root)

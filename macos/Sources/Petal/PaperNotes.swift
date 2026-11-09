@@ -806,6 +806,32 @@ final class NoteStore {
                 movedPictures.append(name)
             }
         }
+        // Pictures it links outside its own folder (a handwritten `Trip.assets/photo.png`, inside the notebook and
+        // through no symbolic link) are copied along, to the same place beside it, so its links hold; another
+        // picture already there by that name stops the move (NoteShelf.carry). Copies made are taken back when the
+        // move doesn't happen.
+        var carriedCopies: [URL] = []
+        let undo = {
+            for copy in carriedCopies { try? fm.removeItem(at: copy) }
+            for back in movedPictures { try? fm.moveItem(at: newAssets.appending(path: back), to: assets.appending(path: back)) }
+        }
+        let source = from.deletingLastPathComponent()
+        if let text = try? String(contentsOf: from, encoding: .utf8) {
+            for path in NoteShelf.carried(NoteShelf.referencedPictures(text), own: assets.lastPathComponent) {
+                let picture = source.appending(path: path), into = folder.appending(path: path)
+                guard NoteShelf.within(picture.path, source.path) != nil, safe(picture, root: root), fm.fileExists(atPath: picture.path) else { continue }
+                guard going(), NoteShelf.within(into.path, folder.path) != nil, safe(into, root: root) else { undo(); return nil }
+                let there = fm.fileExists(atPath: into.path)
+                switch NoteShelf.carry(destinationExists: there, same: there && (try? Data(contentsOf: into)) == (try? Data(contentsOf: picture))) {
+                case .already: continue
+                case .stop: undo(); return nil
+                case .copy:
+                    try? fm.createDirectory(at: into.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    guard (try? fm.copyItem(at: picture, to: into)) != nil else { undo(); return nil }
+                    carriedCopies.append(into)
+                }
+            }
+        }
         let stem = from.deletingPathExtension().lastPathComponent
         var target: URL?
         for _ in 0..<20 where target == nil {
@@ -824,8 +850,8 @@ final class NoteStore {
             if moved { target = candidate } else if error != nil || cancelled { break }
         }
         guard let target else {
-            // The note couldn't move: its pictures go back where they were.
-            for back in movedPictures { try? fm.moveItem(at: newAssets.appending(path: back), to: assets.appending(path: back)) }
+            // The note couldn't move: its pictures go back where they were, and what was copied along goes.
+            undo()
             return nil
         }
         // The old pictures' folder, now empty, goes (to the Trash, never deleted outright).

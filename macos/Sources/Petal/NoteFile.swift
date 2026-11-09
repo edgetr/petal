@@ -598,14 +598,7 @@ enum NoteBlock: Equatable, Sendable {
         if line == ">" { return .ink("") }
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         if trimmed == line, NoteText.isAddress(line) { return .link(line) }
-        if line.hasPrefix("!["), line.hasSuffix(")"), let close = line.range(of: "]("),
-           !line[line.index(line.startIndex, offsetBy: 2)..<close.lowerBound].contains("]") {
-            let caption = String(line[line.index(line.startIndex, offsetBy: 2)..<close.lowerBound])
-            let path = String(line[close.upperBound..<line.index(before: line.endIndex)])
-            if !path.isEmpty, !path.contains(")") {
-                return .image(path: path.hasPrefix("<") && path.hasSuffix(">") ? String(path.dropFirst().dropLast()) : path, caption: caption)
-            }
-        }
+        if let picture = NoteText.picture(line) { return .image(path: picture.path, caption: picture.caption) }
         return .text(line)
     }
 
@@ -615,7 +608,7 @@ enum NoteBlock: Equatable, Sendable {
         case .check(let done, let text): (done ? "- [x] " : "- [ ] ") + text
         case .bullet(let text): "- " + text
         case .link(let url): url
-        case .image(let path, let caption): "![\(caption)](\(path.contains(" ") ? "<\(path)>" : path))"
+        case .image(let path, let caption): "![\(NoteText.escapeCaption(caption))](\(NoteText.wrapsPath(path) ? "<\(path)>" : path))"
         case .ink(let text): text.isEmpty ? ">" : "> " + text
         case .text(let text): text
         }
@@ -665,6 +658,46 @@ enum NoteText {
     }
 
     /// Inline Markdown links ([words](address)) as their words.
+    /// A picture's caption as written: `\`, `[` and `]` escaped with a backslash (a file named "Screenshot [draft]"
+    /// stays one caption).
+    static func escapeCaption(_ caption: String) -> String {
+        caption.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]")
+    }
+
+    /// A picture's path is written in angle brackets when it has a space or parentheses.
+    static func wrapsPath(_ path: String) -> Bool { path.contains(" ") || path.contains("(") || path.contains(")") }
+
+    /// A picture line, `![caption](path)` or `![caption](<path>)`: its caption (escapes undone) and path; nil when
+    /// the line isn't one.
+    static func picture(_ line: String) -> (path: String, caption: String)? {
+        guard line.hasPrefix("!["), line.hasSuffix(")") else { return nil }
+        var caption = ""
+        var index = line.index(line.startIndex, offsetBy: 2)
+        var closed = false
+        while index < line.endIndex {
+            let character = line[index]
+            if character == "\\", line.index(after: index) < line.endIndex, "\\[]".contains(line[line.index(after: index)]) {
+                caption.append(line[line.index(after: index)])
+                index = line.index(index, offsetBy: 2)
+                continue
+            }
+            if character == "[" { return nil }
+            if character == "]" { closed = true; break }
+            caption.append(character)
+            index = line.index(after: index)
+        }
+        guard closed else { return nil }
+        let rest = line[line.index(after: index)...]
+        guard rest.hasPrefix("("), rest.count >= 2 else { return nil }
+        let inner = String(rest.dropFirst().dropLast())
+        if inner.hasPrefix("<"), inner.hasSuffix(">"), inner.count >= 2 {
+            let path = String(inner.dropFirst().dropLast())
+            return path.isEmpty || path.contains(">") ? nil : (path, caption)
+        }
+        guard !inner.isEmpty, !inner.contains(")"), !inner.contains("("), !inner.contains(" ") else { return nil }
+        return (inner, caption)
+    }
+
     static func plain(_ text: String) -> String {
         guard text.contains("](") else { return text }
         return text.replacingOccurrences(of: #"\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
@@ -1169,6 +1202,17 @@ enum NoteShelf {
         return out
     }
 
+    /// Pictures a note links outside its own pictures' folder (a handwritten `Trip.assets/photo.png`): copied along
+    /// when it moves, to the same place beside it, so its links hold (its text never changes). Its own folder moves
+    /// with it already.
+    static func carried(_ referenced: [String], own: String) -> [String] { referenced.filter { !$0.hasPrefix(own + "/") } }
+
+    /// One carried picture where the note lands: copy it (none there), it's already there (the same bytes), or stop
+    /// the move (another picture by that name: never over it).
+    enum Carry: Equatable { case copy, already, stop }
+
+    static func carry(destinationExists: Bool, same: Bool) -> Carry { !destinationExists ? .copy : same ? .already : .stop }
+
     /// A rescue (into "Unsaved notes") is complete only once every picture its text references is there too.
     static func rescueComplete(referenced: [String], present: Set<String>) -> Bool { referenced.allSatisfy(present.contains) }
 
@@ -1201,6 +1245,9 @@ enum NoteShelf {
         mutating func shown(_ key: String) -> Bool { pending.remove(key) != nil }
 
         mutating func cancel(_ key: String) { pending.remove(key) }
+
+        /// A paper's key changed (its file moved or was renamed): its request follows.
+        mutating func rekey(_ old: String, _ new: String) { if pending.remove(old) != nil { pending.insert(new) } }
         mutating func cancelAll() { pending.removeAll() }
     }
 
@@ -1282,6 +1329,33 @@ enum NoteShelf {
     static func stillNote(found: String?, expected: String, missing: Bool) -> Bool {
         guard let found else { return missing }
         return found == expected
+    }
+
+    /// A per-paper record moved to a paper's new key (its file moved or renamed): every one of the desk's.
+    static func rekeyed<V>(_ records: [String: V], _ old: String, _ new: String) -> [String: V] {
+        guard old != new, let value = records[old] else { return records }
+        var out = records
+        out[old] = nil
+        out[new] = value
+        return out
+    }
+
+    /// Where a paper shows right now (its one placement): by the window in front when one of its places fits it, else
+    /// on a Desktop showing now that it's stuck to (`desktops`: its Desktop places' numbers; `showing`: the Desktops the
+    /// screens show), else nowhere.
+    static func placementNow(window: Int?, desktops: [Int?], showing: Set<Int>) -> Placement {
+        placement(window: window, onDesktopShowing: desktops.contains { $0.map(showing.contains) ?? false })
+    }
+
+    /// Whether a paper may be seen now: never while Mission Control is open (every surface hidden until it ends);
+    /// one placed by the window only once the front window's read is in; one on a Desktop showing; nothing else.
+    static func mayShow(_ placement: Placement, missionControl: Bool, awaitingRead: Bool) -> Bool {
+        guard !missionControl else { return false }
+        switch placement {
+        case .window: return !awaitingRead
+        case .desktop: return true
+        case .none: return false
+        }
     }
 
     /// Where a paper shows: by the window in front when one of its places fits it, else on the Desktop showing when

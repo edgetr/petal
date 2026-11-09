@@ -152,6 +152,8 @@ final class DockController {
         }
         app.previews.hold(on)
         for panel in panels.values { panel.aside = on }
+        // Petal Notes follow it too: every paper, tab and pin hidden until it ends (this safety net included).
+        app.paper.missionControl(on)
         missionControlCheck?.invalidate()
         missionControlCheck = nil
         guard on else { return }

@@ -437,6 +437,43 @@ struct NotesCheck {
         keys.cancelAll()
         expect(!keys.shown("x"), "the person clicked elsewhere first: dropped")
 
+        // Captions with brackets, backslashes and parentheses (and paths with them) round-trip.
+        for (path, caption) in [("pictures-a.assets/Screenshot [draft].png", "Screenshot [draft]"), ("x/(2).png", "back\\slash (and) [x]"),
+                                ("a b/c.png", "]["), ("p.png", "plain"), ("q/r[1].png", "\\[")] {
+            let line = NoteBlock.image(path: path, caption: caption).markdown
+            expect(NoteBlock.parse(line) == .image(path: path, caption: caption), "a picture line round-trips", line)
+        }
+        expect(NoteBlock.parse("![a](b)c)") == .text("![a](b)c)") && NoteBlock.parse("![a[b](c)") == .text("![a[b](c)"), "a broken one stays words")
+        expect(NoteBlock.parse("![cap](<a b.assets/p.png>)") == .image(path: "a b.assets/p.png", caption: "cap"), "older lines read as before")
+
+        // A move carries pictures linked outside the note's own folder, never over another picture.
+        expect(NoteShelf.carried(["pictures-x.assets/a.png", "Trip.assets/photo.png"], own: "pictures-x.assets") == ["Trip.assets/photo.png"],
+               "its own folder moves already; the rest are carried")
+        expect(NoteShelf.carry(destinationExists: false, same: false) == .copy && NoteShelf.carry(destinationExists: true, same: true) == .already
+               && NoteShelf.carry(destinationExists: true, same: false) == .stop, "copied, already there, or the move stops")
+
+        // A re-key moves every per-paper record, the pending keyboard request too.
+        expect(NoteShelf.rekeyed(["/n/A.md": 1, "/n/B.md": 2], "/n/A.md", "/n/Away/A.md") == ["/n/Away/A.md": 1, "/n/B.md": 2], "a record follows its paper")
+        expect(NoteShelf.rekeyed(["/n/B.md": 2], "/n/A.md", "/n/Away/A.md") == ["/n/B.md": 2], "none for it: nothing changes")
+        var wanted = NoteShelf.KeyboardRequests()
+        _ = wanted.request("/n/A.md", shown: false)
+        wanted.rekey("/n/A.md", "/n/Away/A.md")
+        expect(wanted.shown("/n/Away/A.md") && !wanted.shown("/n/A.md"), "a keyboard request waiting while its paper moved: kept")
+
+        // A paper shows only where its one placement says it belongs right now.
+        expect(NoteShelf.placementNow(window: nil, desktops: [2], showing: [1]) == .none, "its window anchor gone, its Desktop not showing: hidden")
+        expect(NoteShelf.placementNow(window: nil, desktops: [2], showing: [1, 2]) == .desktop, "its Desktop showing: there")
+        expect(NoteShelf.placementNow(window: 0, desktops: [2], showing: [2]) == .window(0), "its window in front: by the window")
+        expect(NoteShelf.placementNow(window: nil, desktops: [nil], showing: [1]) == .none, "a Desktop place with no number: nowhere")
+
+        // Mission Control hides every surface until it ends; nothing breaks when it's never said.
+        expect(!NoteShelf.mayShow(.window(0), missionControl: true, awaitingRead: false) && !NoteShelf.mayShow(.desktop, missionControl: true, awaitingRead: false),
+               "Mission Control open: nothing shows")
+        expect(NoteShelf.mayShow(.window(0), missionControl: false, awaitingRead: false) && NoteShelf.mayShow(.desktop, missionControl: false, awaitingRead: false),
+               "closed (or never said open): as placed")
+        expect(!NoteShelf.mayShow(.window(0), missionControl: false, awaitingRead: true) && NoteShelf.mayShow(.desktop, missionControl: false, awaitingRead: true)
+               && !NoteShelf.mayShow(.none, missionControl: false, awaitingRead: false), "a read awaited: the window's wait, Desktop notes stay; no placement: hidden")
+
         // A piece of work is claimed once: the queue and the quit drain never both do it.
         let claimed = NoteShelf.claim(5, [])
         expect(claimed == [5] && NoteShelf.claim(5, claimed ?? []) == nil, "claimed once; the second asker leaves it")

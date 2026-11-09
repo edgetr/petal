@@ -149,8 +149,7 @@ final class NoteDesk {
         case .moved, .resized: lookAgain(after: 0.03)
         case .activated, .focused, .closed, .titleChanged, .tabSwitched, .created, .minimized, .unminimized, .shown, .hidden, .quit: lookAgain(after: 0.12)
         case .space, .screens: lookAgain(after: 0.2); refreshSpaces()
-        case .missionControl: for panel in Array(panels.values) + tabPanels.values.map({ $0 as NSPanel }) { panel.conceal() }
-        case .missionControlEnded: lookAgain(after: 0.1)
+        // Mission Control: the dock's own state, which follows it (`missionControl(_:)`), not these events alone.
         default: break
         }
     }
@@ -730,18 +729,13 @@ final class NoteDesk {
 
     /// The tabs on the window in front, and its notes that are showing beside it.
     func layout() {
-        // The front window changed and its read isn't in yet: nothing of the old window shows again meanwhile.
-        if awaitingRead {
-            for (key, panel) in panels where !isDesktop(key) { panel.conceal() }
-            for panel in tabPanels.values { panel.conceal() }
-            for panel in pinPanels.values { panel.conceal() }
-            return
-        }
+        // Mission Control open, or the front window changed and its read isn't in yet: nothing shows meanwhile.
+        if missionControlOpen || awaitingRead { return concealUnplaced() }
         defer { reconcileRoom() }
         guard on, let frame, let scene, scene.window != nil else {
             for panel in tabPanels.values { panel.conceal() }
             for panel in pinPanels.values { panel.conceal() }
-            for (key, panel) in panels where !isDesktop(key) { panel.conceal() }
+            concealUnplaced()
             reconcilePassages()
             return
         }
@@ -789,7 +783,8 @@ final class NoteDesk {
             panel.place(paperFrame: rect)
             shown(key, panel)
         }
-        for (key, panel) in panels where !isDesktop(key) && !showing.contains(key) { panel.conceal() }
+        // Shown only where its one placement says it belongs now; every other paper hidden.
+        for (key, panel) in panels where !showing.contains(key) && placementNow(key) != .desktop { panel.conceal() }
         drawPins(showing)
         reconcilePassages()
     }
@@ -817,8 +812,41 @@ final class NoteDesk {
     /// A notebook's color as the tabs name it.
     private func notebookKey(_ notebook: String) -> String { store.color(of: notebook).hex }
 
-    private func isDesktop(_ key: String) -> Bool {
-        NoteShelf.placement(window: here[key], onDesktopShowing: store.paper(key)?.file.places.contains { $0.kind == .desktop } == true) == .desktop
+    /// Where a paper belongs right now (NoteShelf.placementNow): by the window in front, on a Desktop showing now, or
+    /// nowhere.
+    private func placementNow(_ key: String) -> NoteShelf.Placement {
+        let desktops = store.paper(key)?.file.places.filter { $0.kind == .desktop }.map(\.desktop) ?? []
+        return NoteShelf.placementNow(window: here[key], desktops: desktops, showing: Set(Self.spaces.values))
+    }
+
+    private func isDesktop(_ key: String) -> Bool { placementNow(key) == .desktop }
+
+    /// Everything that may not be seen now hidden (NoteShelf.mayShow): every surface while Mission Control is open,
+    /// the window's notes while a new front window's read is awaited, and any paper not where its one placement
+    /// says it belongs.
+    private func concealUnplaced() {
+        for (key, panel) in panels where !NoteShelf.mayShow(placementNow(key), missionControl: missionControlOpen, awaitingRead: awaitingRead) { panel.conceal() }
+        if missionControlOpen || awaitingRead {
+            for panel in tabPanels.values { panel.conceal() }
+            for panel in pinPanels.values { panel.conceal() }
+        }
+    }
+
+    /// Mission Control (or App Exposé) open, as the dock knows it (its events, and its check that macOS's Dock still
+    /// has a window up, for when they don't come): every paper, tab and pin hidden, and nothing shown again until it
+    /// ends.
+    @ObservationIgnored private(set) var missionControlOpen = false
+
+    func missionControl(_ open: Bool) {
+        guard open != missionControlOpen else { return }
+        missionControlOpen = open
+        if open {
+            Self.roomTurn.cancel()
+            concealUnplaced()
+        } else {
+            lookAgain(after: 0.1)
+            refreshSpaces()
+        }
     }
 
     private func panel(for key: String) -> NotePanel {
@@ -863,7 +891,7 @@ final class NoteDesk {
     /// Notes stuck to the Desktop showing now (on each screen's Desktop), where the person left them; never one
     /// placed by the window in front (NoteShelf.placement: the window wins).
     func placeDesktop() {
-        guard on, !Headless.on else { return }
+        guard on, !Headless.on, !missionControlOpen else { return }
         var showing: Set<String> = []
         for screen in NSScreen.screens {
             guard let number = Self.desktopShowing(on: screen) else { continue }
@@ -1290,15 +1318,26 @@ final class NoteDesk {
     }
 
     /// A note's file got another name on disk than it was shown with: everything showing it follows.
+    /// A paper's key changed (its file moved or was renamed): every per-paper record of the desk follows it
+    /// (NoteShelf.rekeyed), the pending keyboard request too; tabs are drawn again by the next layout.
     private func rekey(_ old: String, to paper: PaperNote) {
         let new = paper.key
-        if let face = faces.removeValue(forKey: old) { faces[new] = face }
+        guard old != new else { return }
+        faces = NoteShelf.rekeyed(faces, old, new)
         if keyboard == old { keyboard = new }
-        if let height = heights.removeValue(forKey: old) { heights[new] = height }
-        if let index = here.removeValue(forKey: old) { here[new] = index }
+        if hovered == old { hovered = new }
+        keyboardWanted.rekey(old, new)
+        heights = NoteShelf.rekeyed(heights, old, new)
+        here = NoteShelf.rekeyed(here, old, new)
+        found = NoteShelf.rekeyed(found, old, new)
         if fresh.remove(old) != nil { fresh.insert(new) }
-        if let line = lines.removeValue(forKey: old) { lines[new] = line }
-        if let editor = editors.removeValue(forKey: old) { editors[new] = editor }
+        lines = NoteShelf.rekeyed(lines, old, new)
+        passageRects = NoteShelf.rekeyed(passageRects, old, new)
+        anchors = NoteShelf.rekeyed(anchors, old, new)
+        lost = NoteShelf.rekeyed(lost, old, new)
+        editors = NoteShelf.rekeyed(editors, old, new)
+        pinPanels = NoteShelf.rekeyed(pinPanels, old, new)
+        if let tab = tabPanels.removeValue(forKey: old) { tab.conceal() }
         if let panel = panels.removeValue(forKey: old) { panel.rekey(new); panels[new] = panel }
     }
 
