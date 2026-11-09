@@ -233,6 +233,23 @@ final class ViewerVersionSet {
     var closed = false
     /// Its folder, pinned when it was made (ViewerVersionStore): every copy is read through it, never by its path.
     var pin: ViewerVersionStore.Pin?
+    /// The original it was made from: its incarnation and stamp. Picks are offered and settle only while the
+    /// viewer's loaded document is that very file, unchanged.
+    var base: (id: ViewerFileID, stamp: ViewerUpdated.Stamp)?
+    /// The viewer showing it (what's loaded there now is checked against `base`).
+    @ObservationIgnored weak var viewer: ViewerModel?
+
+    /// Where a pick stands: made, waiting, held back with why (the original changed, gone, refused or being read
+    /// again), or closed.
+    enum PickState { case picked(ViewerVersion), waiting, suspended(String), closed }
+
+    var pickState: PickState {
+        if closed { return .closed }
+        if let reason = viewer?.pickSuspended(self) ?? (viewer == nil ? ViewerModel.originalChangedText : nil) { return .suspended(reason) }
+        if let picked, let version = versions.first(where: { $0.id == picked }) { return .picked(version) }
+        return .waiting
+    }
+
     /// Its copies read one load at a time (the document's own lifecycle); closed when the set is retired.
     @ObservationIgnored let loads = ViewerLoads()
     /// Each version's picture drawn one at a time (by version id); closed with the set.
@@ -263,9 +280,11 @@ final class ViewerVersionSet {
     /// Phase 2's helpers: `done` once the person picks a version (nil: the viewer closed first, or newer versions
     /// replaced these). At once when that's already so.
     func whenPicked(_ done: @escaping (ViewerVersion?) -> Void) {
-        if let picked, let version = versions.first(where: { $0.id == picked }) { return done(version) }
-        if closed { return done(nil) }
-        waiting.append(done)
+        switch pickState {
+        case .picked(let version): done(version)
+        case .closed, .suspended: done(nil)
+        case .waiting: waiting.append(done)
+        }
     }
 
     func settle(_ version: ViewerVersion?) {
@@ -496,6 +515,10 @@ final class ViewerModel: Identifiable {
     /// For Petal --snapshot: made-up pages (drawn, never read from a file).
     func preview(pages: [NSImage], current: Int, app: String = "Preview", passages: [String: ViewerFound] = [:]) {
         thumbs = Dictionary(uniqueKeysWithValues: pages.enumerated().map { ($0, $1) })
+        // A made-up loaded document: its own made-up identity (what a snapshot's versions are made from).
+        previewing = true
+        fileID = ViewerFileID(volume: "snapshot", inode: 1, created: 0)
+        stamp = ViewerUpdated.Stamp(size: 0, modified: 0, inode: 1)
         pageCount = pages.count
         self.current = current
         appName = app
@@ -583,6 +606,7 @@ final class ViewerModel: Identifiable {
     /// refusal, not found, closing) invalidates every outstanding load and drawing generation, clears the pages,
     /// the selection and all anchor state (identity, bookmark, stamp), and settles every waiter with that outcome.
     private func transition(_ outcome: DocumentOutcome) {
+        defer { picksFollowOriginal() }
         switch outcome {
         case .loading:
             if !loading { loading = true }
@@ -1305,6 +1329,8 @@ final class ViewerModel: Identifiable {
         let labels = ViewerCopies.labels(labels)
         guard !labels.isEmpty else { return done(.failure(.noLabels)) }
         guard live(), !closedNow else { return done(.failure(.cancelled)) }
+        // Made only from the document as the viewer has it loaded: its incarnation and stamp are the set's base.
+        guard !loading, document != nil || self.live, let baseID = fileID, let baseStamp = stamp else { return done(.failure(.notLoaded)) }
         // Each request a generation, from when it starts: only the newest may replace the set shown.
         let generation = turns.begin("versions")
         let url = url
@@ -1325,6 +1351,22 @@ final class ViewerModel: Identifiable {
                 return DispatchQueue.main.async { MainActor.assumeIsolated { done(.failure(.vault)) } }
             }
             let ext = url.pathExtension
+            // The original read first, the one way it's read (ViewerLoader.readPinned, inside a coordinated read):
+            // the path rule and its identity checked right before, through a pinned descriptor, and only the very
+            // incarnation and state the viewer has loaded. Anything else: nothing is made or copied.
+            var pinned: ViewerLoader.PinnedRead = .unreadable
+            var error: NSError?
+            NSFileCoordinator().coordinate(readingItemAt: url, options: [.withoutChanges], error: &error) { readable in
+                ViewerModel.versionsSourceRead?(readable)
+                pinned = ViewerLoader.readPinned(readable, expected: baseID)
+            }
+            let original: Data
+            switch pinned {
+            case .read(let bytes, _, let stamp) where stamp == baseStamp: original = bytes
+            case .read, .changed: return DispatchQueue.main.async { MainActor.assumeIsolated { done(.failure(.originalChanged)) } }
+            case .refused: return DispatchQueue.main.async { MainActor.assumeIsolated { done(.failure(.refused)) } }
+            case .unreadable: return DispatchQueue.main.async { MainActor.assumeIsolated { done(.failure(.copy)) } }
+            }
             // The set's folder made and pinned in Petal's own versions root (ViewerVersionStore): the copies are
             // written and read through its descriptor, never through a path that could be swapped.
             guard let store = ViewerVersionStore.shared, let pin = store.makeSet(String(id)) else {
@@ -1333,13 +1375,7 @@ final class ViewerModel: Identifiable {
             let folder = store.path(pin)
             var made: [ViewerVersion] = []
             var failure: ViewerCopyError?
-            // Read coordinated once (a file iCloud hasn't downloaded comes down first); the copies are the viewer's own.
-            var original: Data?
-            var error: NSError?
-            NSFileCoordinator().coordinate(readingItemAt: url, options: [.withoutChanges], error: &error) { readable in
-                original = try? Data(contentsOf: readable)
-            }
-            if let original {
+            do {
                 var taken: Set<String> = []
                 for (index, label) in labels.enumerated() {
                     // Its asker gone or the viewer closed: no more copies.
@@ -1349,7 +1385,7 @@ final class ViewerModel: Identifiable {
                     guard store.write(pin, file: name, data: original) else { failure = .copy; break }
                     made.append(ViewerVersion(id: ViewerCopies.versionID(index), label: label, url: folder.appending(path: name)))
                 }
-            } else { failure = .copy }
+            }
             let versions = made
             let failed = failure ?? (going() ? .cancelled : nil)
             // Nothing made shown: whatever was copied goes, through the set's pinned folder (never its path).
@@ -1375,6 +1411,8 @@ final class ViewerModel: Identifiable {
                     }
                     let set = ViewerVersionSet(id: String(id), asker: asker, folder: folder, versions: versions)
                     set.pin = pin
+                    set.base = (baseID, baseStamp)
+                    set.viewer = self
                     self.versions = set
                     self.versionPages = [:]
                     self.app.viewers.versionSets[set.id] = set
@@ -1582,6 +1620,9 @@ final class ViewerModel: Identifiable {
         }
     }
 
+    /// Petal --viewer-check only: run inside the coordinated read, just before the original is read for versions.
+    nonisolated(unsafe) static var versionsSourceRead: ((URL) -> Void)?
+
     /// Petal --viewer-check only: run just before a passage is checked against the vault (off the main thread).
     nonisolated(unsafe) static var vaultChecking: (() -> Void)?
 
@@ -1589,17 +1630,48 @@ final class ViewerModel: Identifiable {
     nonisolated(unsafe) static var versionDrawing: ((Int) -> Void)?
 
     /// "Use this": the pick reported to whatever asked for it. Nothing is changed by the viewer itself.
+    /// Why a pick from `set` is held back now (nil: it isn't): only while the document loaded here is the very
+    /// incarnation, unchanged, the set was made from. The copies are kept either way.
+    func pickSuspended(_ set: ViewerVersionSet) -> String? {
+        guard let base = set.base else { return Self.originalChangedText }
+        if closedNow { return Self.originalChangedText }
+        if loading { return "The original is being read again: pick once it's back." }
+        guard document != nil || live || previewing, fileID == base.id, stamp == base.stamp else { return Self.originalChangedText }
+        return nil
+    }
+
+    /// Snapshots only: the made-up document `preview` loads.
+    @ObservationIgnored private var previewing = false
+    /// The loaded document's incarnation and stamp (what a set of versions records as its base).
+    var loadedBase: (id: ViewerFileID, stamp: ViewerUpdated.Stamp)? {
+        guard let fileID, let stamp else { return nil }
+        return (fileID, stamp)
+    }
+
+    nonisolated static let originalChangedText = "The original changed — make versions again."
+
+    /// The document's state changed: a set whose original isn't the loaded document any more holds its picks back,
+    /// and whoever waits for one is told (with why, `pickState`).
+    private func picksFollowOriginal() {
+        guard let set = versions, pickSuspended(set) != nil else { return }
+        set.settle(nil)
+    }
+
     func use(_ version: ViewerVersion) {
-        guard let set = versions, set.picked == nil, set.versions.contains(where: { $0.id == version.id }) else { return }
+        guard let set = versions, set.picked == nil, set.versions.contains(where: { $0.id == version.id }),
+              pickSuspended(set) == nil else { return }
         set.picked = version.id
         set.settle(version)
     }
 }
 
 enum ViewerCopyError: Error, CustomStringConvertible {
-    case noLabels, copy, vault, cancelled, superseded
+    case noLabels, copy, vault, cancelled, superseded, notLoaded, refused, originalChanged
     var description: String {
         switch self {
+        case .notLoaded: "The document isn't read yet: ask again once it shows."
+        case .refused: "This file can't be read here (it's outside the places Petal's viewer opens): nothing was made."
+        case .originalChanged: "The original changed while the versions were being made: nothing was made. Ask again."
         case .superseded: "Newer versions of this file were asked for while these were being made: these weren't made, and the newer ones are shown."
         case .cancelled: "The viewer was closed, or the request ended, before the versions were made: nothing was made."
         case .vault: VaultStore.unreadableText + " Nothing was made (the copies' names are checked first)."
@@ -1795,6 +1867,39 @@ enum ViewerLoader {
     /// bytes and its identity and stamp again after them (and again after a Quick Look export, which reads the file
     /// itself); the load is used only when both agree. A save in between (a new file swapped in, or a write in
     /// place) is read again, `attempts` times at most, then the load fails (`keptChanging`).
+    /// What a pinned read of the original found.
+    enum PinnedRead {
+        case read(Data, ViewerFileID, ViewerUpdated.Stamp)
+        /// Not a file the viewer may read (the path rule, or a link where the file was).
+        case refused
+        /// Another file, or this one changed, between its checks and its bytes (or not the incarnation expected).
+        case changed
+        case unreadable
+    }
+
+    /// The original's bytes, the one way they're read (the document's load and the versions made from it): the path
+    /// rule checked right before (`ViewerPath.check`), its identity read, then the file opened with `O_NOFOLLOW`
+    /// (never through a link swapped in) and that descriptor checked to be that very file (`fstat`: a regular file,
+    /// the same inode and size) before its bytes are read from it; afterwards the path still allowed and still that
+    /// file, unchanged. `expected`: the incarnation it must be (the one the viewer has loaded). Off the main thread,
+    /// inside the caller's coordinated read.
+    nonisolated static func readPinned(_ url: URL, expected: ViewerFileID?) -> PinnedRead {
+        guard case .success(let checked) = ViewerPath.check(url.path) else { return .refused }
+        guard let id = ViewerFileID.of(checked.path), let before = stamp(checked) else { return .unreadable }
+        if let expected, id != expected { return .changed }
+        let fd = open(checked.path, O_RDONLY | O_NOFOLLOW)
+        guard fd >= 0 else { return errno == ELOOP ? .refused : .unreadable }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, UInt64(info.st_ino) == id.inode, Int64(info.st_size) == before.size else {
+            return .changed
+        }
+        guard let bytes = try? handle.readToEnd() else { return .unreadable }
+        guard case .success = ViewerPath.check(url.path) else { return .refused }
+        guard ViewerFileID.of(checked.path) == id, stamp(checked) == before else { return .changed }
+        return .read(bytes ?? Data(), id, before)
+    }
+
     /// `current`: still the newest load asked for; checked before each try and before a Quick Look export, and a
     /// superseded read stops there (`superseded`).
     static func read(_ url: URL, kind: ViewerKind, current: @Sendable () -> Bool = { true }) -> Read {
@@ -1806,15 +1911,24 @@ enum ViewerLoader {
             var after: (id: ViewerFileID?, stamp: ViewerUpdated.Stamp?) = (nil, nil)
             var mark: Data?
             var data: Data?
+            var refused = false
             var error: NSError?
             NSFileCoordinator().coordinate(readingItemAt: url, options: [.withoutChanges], error: &error) { readable in
                 before = (ViewerFileID.of(readable.path), stamp(readable))
                 guard before.stamp != nil else { return }
                 mark = bookmark(readable)
                 duringRead?(readable, attempt)
-                if kind == .pdf { data = try? Data(contentsOf: readable) }
+                // The one way the original is read (the versions read it the same way): pinned (readPinned).
+                if kind == .pdf {
+                    switch readPinned(readable, expected: before.id) {
+                    case .read(let bytes, _, _): data = bytes
+                    case .refused: refused = true
+                    case .changed, .unreadable: break
+                    }
+                }
                 after = (ViewerFileID.of(readable.path), stamp(readable))
             }
+            if refused { return Read(pages: .failed(ViewerModel.cantShowText), stamp: nil, appName: appName, appURL: app) }
             guard let stamp = before.stamp else { return Read(pages: .failed("The file isn't there any more."), stamp: nil, appName: appName, appURL: app) }
             guard let id = before.id, after.id == id, after.stamp == stamp else { continue }
             switch kind {

@@ -59,18 +59,25 @@ extension Viewers {
             guard let set = versionSets[args["set"] as? String ?? ""], set.asker == caller else {
                 return fail("No versions by that id were made for you (petal_view_versions makes them).")
             }
-            let answer = { (picked: ViewerVersion?) in
-                if let picked { send(["picked": ["id": picked.id, "name": picked.label, "path": picked.url.path]]) }
-                else { send(["picked": NSNull(), "note": set.closed ? "The viewer was closed without a pick." : "Not picked yet."]) }
+            // A pick is told only while the viewer's loaded document is the very original the versions were made from,
+            // unchanged (ViewerVersionSet.pickState); else why it's held back (the copies stay).
+            let answer = {
+                switch set.pickState {
+                case .picked(let picked):
+                    send(["picked": ["id": picked.id, "name": picked.label, "path": picked.url.path],
+                          "note": "The original is as it was when these were made. Change it only after the person allows it, and ask petal_view_pick again right before you do: once the original changes, the pick isn't told."])
+                case .suspended(let reason): send(["picked": NSNull(), "note": reason])
+                case .closed: send(["picked": NSNull(), "note": "The viewer was closed without a pick."])
+                case .waiting: send(["picked": NSNull(), "note": "Not picked yet."])
+                }
             }
-            if let id = set.picked, let version = set.versions.first(where: { $0.id == id }) { return answer(version) }
             let wait = min(120, max(0, (args["wait"] as? NSNumber)?.doubleValue ?? 0))
-            guard wait > 0, !set.closed else { return answer(nil) }
+            guard wait > 0, case .waiting = set.pickState else { return answer() }
             var answered = false
-            let once = { (version: ViewerVersion?) in
+            let once = { (_: ViewerVersion?) in
                 guard !answered else { return }
                 answered = true
-                if live() { answer(version) }
+                if live() { answer() }
             }
             set.waiting.append(once)
             DispatchQueue.main.asyncAfter(deadline: .now() + wait) { once(nil) }

@@ -72,7 +72,7 @@ Use, in this order:
    changes the file. To change a document, try it on copies first:
    `petal_view_versions` (`path`, `names`) makes a copy per name in a folder of Petal's own and shows them under the
    document with Use this (each version has an `id`; names may repeat); edit the copies (never the file), and
-   `petal_view_pick` (`set`, `wait` up to 120 s) says which one the user picked (its `id`, name and path). Newer versions replace a set (its copies go, all but a picked one; a copy you changed goes to the Trash), and every copy goes when the viewer closes, so read the picked one while it's open. Change their own file only after they allow it. `petal_note_pdf_comments` writes the
+   `petal_view_pick` (`set`, `wait` up to 120 s) says which one the user picked (its `id`, name and path), only while the original is the very file, unchanged, the versions were made from (else null with why: make versions again; the copies stay), so ask again right before changing the original. Newer versions replace a set (its copies go, all but a picked one; a copy you changed goes to the Trash), and every copy goes when the viewer closes, so read the picked one while it's open. Change their own file only after they allow it. `petal_note_pdf_comments` writes the
    notes on a PDF into a copy beside it as comments (`into_original: true` writes into the PDF itself, only after the
    user allows it, keeping the original beside it).
    Changes apply instantly. `petal_export_recipe` / `petal_import_recipe` share a dock as a `.petal` file (modes,

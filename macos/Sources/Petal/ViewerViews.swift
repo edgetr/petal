@@ -757,6 +757,18 @@ struct ViewerVersionsStrip: View {
     }
 
     private var row: some View {
+        let held = model.pickSuspended(set)
+        return VStack(alignment: .leading, spacing: 8) {
+            // Picks held back while the original isn't the one these were made from (the copies stay).
+            if let held {
+                Text(held).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(ViewerLook.caption)
+                    .padding(.leading, 20).padding(.top, 12)
+            }
+            copies(held: held != nil)
+        }
+    }
+
+    private func copies(held: Bool) -> some View {
         HStack(alignment: .top, spacing: 16) {
             ForEach(set.versions) { version in
                 VStack(alignment: .leading, spacing: 6) {
@@ -778,7 +790,7 @@ struct ViewerVersionsStrip: View {
                         Text(version.label + " · ").foregroundStyle(ViewerLook.caption)
                         if set.picked == version.id {
                             Text("Picked").foregroundStyle(ViewerLook.caption).fontWeight(.semibold)
-                        } else if set.picked == nil, !version.refused {
+                        } else if set.picked == nil, !version.refused, !held {
                             Button { model.use(version) } label: { Text("Use this").underline().foregroundStyle(ViewerLook.caption) }
                                 .buttonStyle(.plain)
                                 .help("Tell whoever made these that this is the one (the file itself isn't changed here)")

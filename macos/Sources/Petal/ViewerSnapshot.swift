@@ -74,6 +74,8 @@ extension Snapshot {
             ViewerVersion(id: "v1", label: "Short title", url: root.appending(path: "Quarterly plan (Short title).pptx"), thumb: sampleSlide(2, title: "Plan: faster")),
             ViewerVersion(id: "v2", label: "With figures", url: root.appending(path: "Quarterly plan (With figures).pptx"), thumb: sampleSlide(2, title: "Plan: five wins in a row", dark: true)),
         ])
+        set.base = deck.loadedBase
+        set.viewer = deck
         deck.versions = set
         lay(deck, size: size, strip: true)
         write(render(AnyView(ViewerView(model: deck)), app: app, size: size), name: "viewer-versions", folder: folder)
@@ -216,6 +218,7 @@ enum ViewerCheck {
             failed = !pagingThenClosing(url, app: app) || failed
             failed = !twentyfirst(url, app: app, versionsRoot: versionsRoot) || failed
             failed = !twentysecond(url, app: app) || failed
+            failed = !twentythird(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -1510,6 +1513,80 @@ enum ViewerCheck {
         return ok
     }
 
+    /// Round 23: a set of versions is tied to the original it was made from. Deleted, then replaced: picking is
+    /// held back with why (the strip, Use this, petal_view_pick), and the copies stay. The source swapped for a link
+    /// out of the allowed places while versions are made: refused, nothing copied.
+    private static func twentythird(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("twentythird: FAIL \(what)"); ok = false } }
+        let folder = scratch()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let home = folder.appending(path: "Home")
+        let outside = folder.appending(path: "Outside")
+        for made in [home, outside] { try? FileManager.default.createDirectory(at: made, withIntermediateDirectories: true) }
+        let kept = ViewerPath.home
+        ViewerPath.home = home.path
+        defer { ViewerPath.home = kept }
+        let root = URL(fileURLWithPath: ViewerPath.canonical(home.path) ?? home.path)
+        let original = root.appending(path: "Original.pdf")
+        try? FileManager.default.copyItem(at: source, to: original)
+        let model = app.viewers.show(original, front: false)
+        wait(20) { !model.loading }
+        var made: ViewerVersionSet?
+        model.makeVersions(["One", "Two"], asker: "pick-check") { if case .success(let set) = $0 { made = set } }
+        wait(20) { made != nil }
+        guard let set = made else { expect(false, "versions made (set up)"); return false }
+        if case .waiting = set.pickState {} else { expect(false, "the original as it was: picks offered (set up)") }
+        func pickAnswer() -> [String: Any]? {
+            var told: [String: Any]?
+            app.viewers.handle("petal_view_pick", ["set": set.id], caller: "pick-check", live: { true }, { told = $0 as? [String: Any] }, { _ in told = [:] })
+            wait(5) { told != nil }
+            return told
+        }
+        let copiesThere = { set.versions.allSatisfy { FileManager.default.fileExists(atPath: $0.url.path) } }
+
+        // Deleted: picking held back, with why; the copies stay.
+        try? FileManager.default.removeItem(at: original)
+        model.fileChanged()
+        wait(5) { model.problem != nil }
+        expect(model.pickSuspended(set) == ViewerModel.originalChangedText, "the original deleted: picking held back with why")
+        model.use(set.versions[0])
+        expect(set.picked == nil, "Use this does nothing then")
+        expect(pickAnswer()?["note"] as? String == ViewerModel.originalChangedText, "petal_view_pick answers why")
+        expect(copiesThere(), "and the copies stay")
+
+        // Replaced by another file at its path: still held back (another incarnation); the copies stay.
+        try? pages(3, from: source)?.write(to: original)
+        model.fileChanged()
+        wait(20) { !model.loading && model.pageCount == 3 }
+        expect(model.pageCount == 3 && model.pickSuspended(set) == ViewerModel.originalChangedText, "replaced: another file, picking still held back")
+        model.use(set.versions[0])
+        expect(set.picked == nil && pickAnswer()?["note"] as? String == ViewerModel.originalChangedText && copiesThere(), "nothing picked, why told, the copies kept")
+        app.viewers.closed(model)
+
+        // The source swapped for a link out of the allowed places while versions are made: refused, nothing copied.
+        let sourceFile = root.appending(path: "Source.pdf")
+        try? FileManager.default.copyItem(at: source, to: sourceFile)
+        try? FileManager.default.copyItem(at: source, to: outside.appending(path: "Private.pdf"))
+        let viewer = app.viewers.show(sourceFile, front: false)
+        wait(20) { !viewer.loading }
+        let setsBefore = Set((try? FileManager.default.contentsOfDirectory(atPath: ViewerVersionStore.location.path)) ?? [])
+        ViewerModel.versionsSourceRead = { readable in
+            try? FileManager.default.removeItem(at: readable)
+            try? FileManager.default.createSymbolicLink(atPath: readable.path, withDestinationPath: outside.appending(path: "Private.pdf").path)
+        }
+        defer { ViewerModel.versionsSourceRead = nil }
+        var outcome: Result<ViewerVersionSet, ViewerCopyError>?
+        viewer.makeVersions(["One"], asker: "pick-check") { outcome = $0 }
+        wait(20) { outcome != nil }
+        if case .failure(.refused)? = outcome {} else { expect(false, "swapped for a link outside: refused (\(String(describing: outcome)))") }
+        let setsAfter = Set((try? FileManager.default.contentsOfDirectory(atPath: ViewerVersionStore.location.path)) ?? [])
+        expect(setsAfter == setsBefore, "and nothing copied")
+        app.viewers.closed(viewer)
+        print("twentythird: " + (ok ? "picks held back with why once the original is deleted or replaced, the copies kept; a source swapped for a link outside refused, nothing copied" : "failed"))
+        return ok
+    }
+
     /// The eighth review: one path rule at every load and follow (a reload swapped to a link out of the home folder
     /// shows nothing); a refused save's snapshot is the whole note and comes back with its front matter; undoing the
     /// refused typing retires its snapshot.
@@ -1768,16 +1845,24 @@ enum ViewerCheck {
             return result
         }
         let left = { Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []).subtracting(before) }
-        if case .failure(.cancelled)? = make(ViewerModel(url: source, kind: .pdf), live: { false }) {} else { expect(false, "a hung-up asker: nothing made") }
+        // Versions are made only from the document as it's loaded: each model is loaded first, as a viewer is.
+        func loaded() -> ViewerModel {
+            let model = ViewerModel(url: source, kind: .pdf)
+            model.load()
+            wait(20) { !model.loading }
+            return model
+        }
+        if case .failure(.cancelled)? = make(loaded(), live: { false }) {} else { expect(false, "a hung-up asker: nothing made") }
+        if case .failure(.notLoaded)? = make(ViewerModel(url: source, kind: .pdf)) {} else { expect(false, "a document not read yet: nothing made") }
         let late = HangUp()
-        let model = ViewerModel(url: source, kind: .pdf)
+        let model = loaded()
         DispatchQueue.main.async { late.gone = true }
         if case .failure(.cancelled)? = make(model, live: { !late.gone }) {} else { expect(false, "hung up while copying: nothing shown") }
         expect(model.versions == nil && left().isEmpty, "and its copies gone")
-        let closed = ViewerModel(url: source, kind: .pdf)
+        let closed = loaded()
         if case .failure(.cancelled)? = make(closed, closeAtOnce: true) {} else { expect(false, "the viewer closed while copying: nothing shown") }
         expect(closed.versions == nil && left().isEmpty, "and its copies gone")
-        let open = ViewerModel(url: source, kind: .pdf)
+        let open = loaded()
         if case .success(let set)? = make(open) {
             expect(set.versions.count == 2 && open.versions === set, "made and shown while it's open")
             try? FileManager.default.removeItem(at: set.folder)
