@@ -482,15 +482,20 @@ struct NoteRichCheck {
         undoRemove.delegate = undoDelegate
         undoRemove.allowsUndo = true
         var restored = 0, retiredAgain = 0
-        undoRemove.removePictures(named: ["lost.png"], restore: { restored += 1 }, retire: { retiredAgain += 1 })
+        var restoredFor: [String] = []
+        undoRemove.removePictures(named: ["lost.png"], restore: { restored += 1; restoredFor.append($0) }, retire: { _ in retiredAgain += 1 })
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         expect(body(undoRemove) == "before\nafter", "removed", body(undoRemove))
         undoRemove.history.undo()
         expect(body(undoRemove) == "before\n![](../Pictures/x/lost.png)\nafter" && restored == 1, "undo: the picture back, its bytes accepted again", body(undoRemove))
         undoRemove.history.redo()
         expect(body(undoRemove) == "before\nafter" && retiredAgain == 1, "redo: removed again", body(undoRemove))
+        // Moved (and given another id) before the undo: the undo acts on the note as it is now.
+        undoRemove.noteFolder = inbox
+        undoRemove.noteID = "N2-now"
         undoRemove.history.undo()
-        expect(restored == 2 && body(undoRemove).contains("lost.png"), "and undo again restores again")
+        expect(restored == 2 && body(undoRemove).contains("lost.png") && restoredFor == ["N2", "N2-now"],
+               "undo again after a move: restored for the note as it is now, never a path from before", "\(restoredFor)")
 
         // A change the folder watcher reports is read from the file: the held bytes and the cached image replaced.
         let staleKey = "/tmp/petal-rich/Pictures/stale/p.png"
@@ -511,6 +516,43 @@ struct NoteRichCheck {
                "the watcher's change read from the file: bytes and image replaced", "\(String(describing: NotePictures.shared.size(staleKey)))")
         NotePictures.shared.unregister(watcher)
         try? FileManager.default.removeItem(at: newerFile)
+
+        // A cut never takes a picture still loading: refused, nothing written or deleted, the selection as it was.
+        let loadingCut = editor("words\n![](../Pictures/notyet/p.png)\nmore", note: "N2", folder: work)
+        var loadingTold: [String] = []
+        loadingCut.say = { loadingTold.append($0) }
+        loadingCut.selectAll(nil)
+        let selectionBefore = loadingCut.selectedRange(), boardBefore = board.changeCount
+        expect(loadingCut.performCut(to: board) == .loading && body(loadingCut) == "words\n![](../Pictures/notyet/p.png)\nmore"
+               && loadingCut.selectedRange() == selectionBefore && board.changeCount == boardBefore && loadingTold == [NoteTextView.stillLoading],
+               "a cut with a picture still loading: refused, nothing deleted, the selection intact", body(loadingCut))
+        expect(loadingCut.copySelection(to: board) == .copied, "a copy of it still goes, the picture as a line")
+
+        // A refresh that finds the file gone drops the image and bytes and shows the broken mark; one that can't
+        // read it for now keeps the old image and is tried again.
+        let goneKey = "/tmp/petal-rich/Pictures/fresh/gone.png", busyKey = "/tmp/petal-rich/Pictures/fresh/busy.png"
+        let refresher = editor("![](../Pictures/fresh/gone.png)\n![](../Pictures/fresh/busy.png)", note: "N2", folder: work)
+        NotePictures.shared.register(refresher)
+        for key in [goneKey, busyKey] {
+            NotePictures.shared.preview(URL(fileURLWithPath: key), NSImage(data: pngData) ?? NSImage(), data: pngData)
+            NotePictures.shared.written([key])
+        }
+        _ = NotePictures.shared.image("../Pictures/fresh/gone.png", in: work)
+        _ = NotePictures.shared.image("../Pictures/fresh/busy.png", in: work)
+        NoteStore.files[goneKey] = FileManager.default.temporaryDirectory.appending(path: "petal-rich-nowhere-\(UUID().uuidString).png")
+        let busyFile = FileManager.default.temporaryDirectory.appending(path: "petal-rich-busy-\(UUID().uuidString).png")
+        try? pngData.write(to: busyFile)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: busyFile.path)
+        NoteStore.files[busyKey] = busyFile
+        NotePictures.shared.filesChanged([goneKey, busyKey])
+        spin { NotePictures.shared.cached(goneKey) == nil && NotePictures.shared.isBroken("../Pictures/fresh/busy.png", in: work) }
+        expect(NotePictures.shared.cached(goneKey) == nil && NotePictures.shared.bytes(goneKey) == nil && NotePictures.shared.isBroken("../Pictures/fresh/gone.png", in: work),
+               "confirmed gone: image and bytes dropped, the broken mark shown")
+        expect(NotePictures.shared.cached(busyKey) != nil && NotePictures.shared.retryTick(now: Date().addingTimeInterval(11), onScreen: [busyKey]) == [busyKey],
+               "unreadable for now: the old image kept, and tried again")
+        try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: busyFile.path)
+        try? FileManager.default.removeItem(at: busyFile)
+        NotePictures.shared.unregister(refresher)
 
         // A moved editor's pictures are weighed by the holding rule where they lead now.
         let movingHolder = editor("![](Trip.assets/held.png)", note: "N2", folder: inbox)

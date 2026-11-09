@@ -1555,12 +1555,17 @@ final class NoteDesk {
             // them again.
             let bytes = store.asideBytes(key)
             guard let names = store.retirePictures(key, write: false) else { return }
-            editor.removePictures(names, { [weak self] in
-                guard let self, let now = self.store.paper(key) else { return }
+            // Undo and redo find the note by the editor's id as it is when they run (moved since, renamed, given its
+            // own id), never by this key.
+            editor.removePictures(names, { [weak self] noteID in
+                guard let self, let now = self.store.current(noteID) else { return }
                 self.store.reaccept(now.key, bytes)
                 let folder = self.store.root.appending(path: NoteShelf.pictureFolder(id: now.noteID))
                 NotePictures.shared.accepted(bytes.map { (folder.appending(path: $0.name), $0.data) })
-            }, { [weak self] in self?.store.retireAgain(key, names: names) })
+            }, { [weak self] noteID in
+                guard let self, let now = self.store.current(noteID) else { return }
+                self.store.retireAgain(now.key, names: names)
+            })
             editor.flush()
         } else {
             store.retirePictures(key, write: true)

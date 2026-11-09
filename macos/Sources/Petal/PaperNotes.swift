@@ -1152,6 +1152,10 @@ final class NoteStore {
         return names
     }
 
+    /// A note's paper as it is now, found by its id (the editor keeps its note's id current through moves, renames and
+    /// an id given): where an undo or a completion acts, never a key captured before a move or a rename.
+    func current(_ noteID: String) -> PaperNote? { notes.first { $0.noteID == noteID && $0.version == nil } }
+
     /// The pictures set aside on a paper right now (their bytes), for Remove's undo.
     func asideBytes(_ key: String) -> [NotePictureBytes] { pictureTrouble[key] ?? [] }
 

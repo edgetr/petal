@@ -260,12 +260,29 @@ final class NotePictures {
         asked.insert(key)
         let inMemory = fromDisk ? nil : held[key], pixels = Self.shownPixels
         NoteStore.io.async {
-            let data = inMemory ?? NoteStore.pictureFile(source.link, noteFolder: source.folder).flatMap { NoteStore.coordinatedData($0) }
+            let file = inMemory == nil ? NoteStore.pictureFile(source.link, noteFolder: source.folder) : nil
+            let data = inMemory ?? file.flatMap { NoteStore.coordinatedData($0) }
             let image = data.flatMap { Self.downsample($0, maxPixels: pixels) }
+            // What a failed read means: gone (no file, refused, or not a picture) or unreadable for now.
+            let outcome = NoteShelf.readOutcome(exists: file.map { FileManager.default.fileExists(atPath: $0.path) } ?? (inMemory != nil),
+                                                read: data != nil, picture: image != nil)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.asked.remove(key)
-                    if let data, let image {
+                    if outcome == .gone, fromDisk, self.cached(key) != nil {
+                        // Confirmed gone (or not a picture) on a refresh: its image and bytes dropped, the broken mark
+                        // shown (and retried as usual).
+                        self.evict(key)
+                        self.held[key] = nil
+                        self.broken[key] = Date()
+                        self.version += 1
+                        self.announce([key])
+                        self.reconsider()
+                    } else if outcome == .transient, self.cached(key) != nil {
+                        // Unreadable for now: the old image kept, and the retry path asks again.
+                        self.broken[key] = Date()
+                        self.reconsider()
+                    } else if let data, let image {
                         // Its bytes kept only by the rule (an open editor contains it, or its write is pending).
                         if self.holds(key) { self.held[key] = data } else { self.held[key] = nil }
                         let known = self.sizes[key] == image.size
@@ -869,7 +886,7 @@ final class NoteTextView: NSTextView {
     /// them back and calls `restore` (their unsaved bytes accepted again), its redo removes them again and calls
     /// `retire`. Returns how many it removed.
     @discardableResult
-    func removePictures(named names: Set<String>, restore: @escaping () -> Void = {}, retire: @escaping () -> Void = {}) -> Int {
+    func removePictures(named names: Set<String>, restore: @escaping (String) -> Void = { _ in }, retire: @escaping (String) -> Void = { _ in }) -> Int {
         guard let storage = textStorage else { return 0 }
         var ranges: [NSRange] = []
         let ns = storage.string as NSString
@@ -894,14 +911,18 @@ final class NoteTextView: NSTextView {
         return ranges.count
     }
 
-    /// Undo of a Remove: `restore` (the pictures' bytes accepted again); its redo: `retire`, and so on.
-    private static func registerRestore(_ undo: UndoManager, target: NoteTextView, restore: @escaping () -> Void, retire: @escaping () -> Void) {
+    /// Undo of a Remove: `restore` (the pictures' bytes accepted again); its redo: `retire`, and so on. Each is given
+    /// the editor's note id as it is when it runs (the note may have moved, or been given its own id, meanwhile),
+    /// never a path captured when it was removed.
+    private static func registerRestore(_ undo: UndoManager, target: NoteTextView, restore: @escaping (String) -> Void, retire: @escaping (String) -> Void) {
         undo.registerUndo(withTarget: target) { view in
-            restore()
+            MainActor.assumeIsolated { restore(view.noteID) }
             let again = view.undoManager ?? view.history
             again.registerUndo(withTarget: view) { view in
-                retire()
-                MainActor.assumeIsolated { registerRestore(view.undoManager ?? view.history, target: view, restore: restore, retire: retire) }
+                MainActor.assumeIsolated {
+                    retire(view.noteID)
+                    registerRestore(view.undoManager ?? view.history, target: view, restore: restore, retire: retire)
+                }
             }
         }
     }
@@ -1093,27 +1114,34 @@ final class NoteTextView: NSTextView {
 
     /// What a copy did: written, nothing selected, or refused (its pictures past the size bound: nothing written,
     /// and a cut deletes nothing).
-    enum CopyResult: Equatable { case copied, nothing, tooMany }
+    enum CopyResult: Equatable { case copied, nothing, tooMany, loading }
 
     /// Said on the paper when a copy is refused.
     static let tooManyPictures = "Too many pictures to copy at once."
+    /// Said when a cut is refused because a picture in it hasn't loaded (a copy writes it as a line instead).
+    static let stillLoading = "A picture is still loading — try again in a moment."
     var say: (String) -> Void = { _ in }
 
     /// The selection, written at once as the note's own fragment and as plain text for other apps, with no disk
     /// access: each picture's bytes as held (an open editor holds those of every picture it contains once loaded);
     /// one not loaded yet is copied as "(A picture couldn't be copied.)". Past the size bound, nothing is written.
     /// The fragment is offered lazily (FragmentProvider), encoded from these bytes only when a note pastes it.
+    /// `cutting`: a cut never takes a picture whose bytes aren't in memory yet (it would be lost): refused, nothing
+    /// written.
     @discardableResult
-    func copySelection(to board: NSPasteboard) -> CopyResult {
+    func copySelection(to board: NSPasteboard, cutting: Bool = false) -> CopyResult {
         let range = selectedRange()
         guard range.length > 0, let storage = textStorage, NSMaxRange(range) <= storage.length else { return .nothing }
         let blocks = NoteRich.blocks(storage.attributedSubstring(from: range))
         var bytes: [Int: Data] = [:]
+        var pictures = 0
         for (index, block) in blocks.enumerated() {
-            guard case .image(let path, _) = block, let key = NotePictures.target(path, in: noteFolder),
-                  let held = MainActor.assumeIsolated({ NotePictures.shared.bytes(key) }) else { continue }
+            guard case .image(let path, _) = block else { continue }
+            pictures += 1
+            guard let key = NotePictures.target(path, in: noteFolder), let held = MainActor.assumeIsolated({ NotePictures.shared.bytes(key) }) else { continue }
             bytes[index] = held
         }
+        if cutting, bytes.count < pictures { return .loading }
         guard let body = NoteShelf.fragmentBody(blocks, bytes: bytes, limit: NoteRich.fragmentLimit) else { return .tooMany }
         let fragment = NoteRich.Fragment(markdown: body.markdown, folder: noteFolder.path, note: noteID,
                                          root: noteFolder.deletingLastPathComponent().path, pictures: body.pictures)
@@ -1125,17 +1153,28 @@ final class NoteTextView: NSTextView {
         switch copySelection(to: .general) {
         case .copied: break
         case .tooMany: say(Self.tooManyPictures)
+        case .loading: say(Self.stillLoading)
         case .nothing: super.copy(sender)
         }
     }
 
     override func cut(_ sender: Any?) {
-        // Written, then the selection deleted, in the same step; refused, nothing is deleted.
-        switch copySelection(to: .general) {
-        case .copied: delete(sender)
+        // Written, then the selection deleted, in the same step; refused (too much, or a picture still loading),
+        // nothing is written or deleted.
+        _ = performCut(to: .general)
+    }
+
+    /// A cut to `board`: what it did (for checks too).
+    @discardableResult
+    func performCut(to board: NSPasteboard) -> CopyResult {
+        let result = copySelection(to: board, cutting: true)
+        switch result {
+        case .copied: delete(nil)
         case .tooMany: say(Self.tooManyPictures)
-        case .nothing: super.cut(sender)
+        case .loading: say(Self.stillLoading)
+        case .nothing: super.cut(nil)
         }
+        return result
     }
 
     /// How pictures pasted as bytes are taken by this note: the screenshot paste's path (the desk's accept: in
@@ -1269,7 +1308,7 @@ final class NoteEditorHandle {
     var insert: (String, URL, String, Int, Int, String) -> Bool = { _, _, _, _, _, _ in false }
     /// Remove on the paper while this editor is open: those pictures deleted here, as typing is; undo calls the
     /// first closure (their bytes accepted again), redo the second (removed again).
-    var removePictures: (Set<String>, @escaping () -> Void, @escaping () -> Void) -> Void = { _, _, _ in }
+    var removePictures: (Set<String>, @escaping (String) -> Void, @escaping (String) -> Void) -> Void = { _, _, _ in }
 }
 
 /// The editor in SwiftUI: the note's lines in, the note's lines out (saved a moment after the person stops typing).

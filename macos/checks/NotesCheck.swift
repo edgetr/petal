@@ -739,6 +739,10 @@ struct NotesCheck {
         expect(!NoteShelf.isHere(NoteShelf.placementNow(window: 7, desktops: [], showing: [], windowValid: false))
                && NoteShelf.placementNow(window: 7, desktops: [3], showing: [3], windowValid: false) == .desktop,
                "a window placement awaiting a fresh read isn't here (a Desktop showing still is)")
+        // A failed read: gone (no file, or not a picture) or unreadable for now (there, but couldn't be read).
+        expect(NoteShelf.readOutcome(exists: true, read: true, picture: true) == .image && NoteShelf.readOutcome(exists: false, read: false, picture: false) == .gone
+               && NoteShelf.readOutcome(exists: true, read: true, picture: false) == .gone && NoteShelf.readOutcome(exists: true, read: false, picture: false) == .transient,
+               "gone, not a picture, or unreadable for now")
         // Remove: only the attachment when words share its line; the whole line when it's alone.
         expect(NoteShelf.removalRange(attachment: NSRange(location: 4, length: 1), line: NSRange(location: 4, length: 7), lineText: "\u{FFFC}words\n") == NSRange(location: 4, length: 1)
                && NoteShelf.removalRange(attachment: NSRange(location: 4, length: 1), line: NSRange(location: 4, length: 2), lineText: "\u{FFFC}\n") == NSRange(location: 4, length: 2),

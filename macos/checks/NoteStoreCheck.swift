@@ -709,6 +709,33 @@ struct NoteStoreCheck {
         let reopened = NoteStore.read(root).notes.first { $0.noteID == "RM2" }
         expect(reopened?.file.body.contains(refLine) == true && (try? Data(contentsOf: pictureFile)) == Data("bytes".utf8) && !store.keepsBytes("RM2", name),
                "Remove, saved, undone: the picture back, written, and there after a reopen")
+
+        // Remove, then the note moves to another notebook, then undo: found by its id as it is now, never the key
+        // from before the move; its bytes accepted again and written beside its new place's note.
+        let blocker3 = root.appending(path: NoteShelf.pictureFolder(id: "RM3"))
+        try? Data("not a folder".utf8).write(to: blocker3)
+        _ = NoteStore.create(NoteFile(id: "RM3", body: "moving").serialized(), at: folder.appending(path: "Moving.md"), root: root)
+        let read3 = NoteStore.read(root)
+        store.preview(read3.notes, notebooks: read3.notebooks)
+        guard let moving = store.notes.first(where: { $0.noteID == "RM3" }), let refs3 = store.acceptPictures(moving.key, [("png", Data("three".utf8), "")]) else {
+            return expect(false, "the moving note's picture accepted")
+        }
+        let name3 = refs3[0].file.lastPathComponent
+        while store.pictureTrouble[moving.key] == nil && Date() < until.addingTimeInterval(10) { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let bytes3 = store.asideBytes(moving.key)
+        _ = store.retirePictures(moving.key, write: true)
+        var movedThere = false
+        store.move(moving.key, to: "Elsewhere", then: { _ in movedThere = true })
+        while !movedThere && Date() < until.addingTimeInterval(15) { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        try? fm.removeItem(at: blocker3)
+        let now3 = store.current("RM3")
+        expect(now3 != nil && now3?.key != moving.key && store.paper(moving.key) == nil, "after the move, the note found by its id at its new place")
+        if let now3 {
+            store.reaccept(now3.key, bytes3)
+            let written3 = root.appending(path: NoteShelf.pictureFolder(id: "RM3") + "/" + name3)
+            while !fm.fileExists(atPath: written3.path) && Date() < until.addingTimeInterval(20) { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            expect((try? Data(contentsOf: written3)) == Data("three".utf8), "Remove, move, undo: its bytes accepted again and written")
+        }
     }
 
     /// The one rule for picture links (NoteStore.pictureFile), journal recovery putting bytes exactly where each saved

@@ -1766,6 +1766,15 @@ enum NoteShelf {
     /// showing (the one current-placement rule, placementNow).
     static func isHere(_ placement: Placement) -> Bool { placement != .none }
 
+    /// What a picture's read came to: an image; gone (no file, refused, or not a picture: confirmed, the broken
+    /// mark); or unreadable for now (the file is there but couldn't be read: the old image kept, tried again).
+    enum ReadOutcome: Equatable { case image, gone, transient }
+
+    static func readOutcome(exists: Bool, read: Bool, picture: Bool) -> ReadOutcome {
+        if picture { return .image }
+        return exists && !read ? .transient : .gone
+    }
+
     /// What Remove deletes for one picture: its attachment only, or its whole line (with the break) when nothing
     /// else is on that line, so words beside it stay.
     static func removalRange(attachment: NSRange, line: NSRange, lineText: String) -> NSRange {
