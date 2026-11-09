@@ -13,8 +13,18 @@ extension NoteDesk {
     static let hungUp = "The request ended before this was done: nothing was changed."
     static let notThisNote = "That note's file is another note's now (it was renamed or moved meanwhile): nothing was changed. petal_notes lists them."
 
-    func handle(_ name: String, _ args: [String: Any], live: @escaping @Sendable () -> Bool = { true },
+    func handle(_ name: String, _ args: [String: Any], caller: String? = nil, live: @escaping @Sendable () -> Bool = { true },
                 _ answer: @escaping (Any) -> Void, _ refuse: @escaping (String) -> Void) {
+        // A Private notebook's notes are read only by a helper of a note inside it (NoteHelpers.mayRead).
+        let asking = caller.flatMap { app.claude.note(withID: $0)?.paper }.flatMap { helpers.paper($0) }
+        let readable = { (paper: PaperNote) in self.helpers.mayRead(paper.notebook, from: asking) }
+        // The notes a quick question (or a helper) used: chips under its answer, each opening its note.
+        let used = { (papers: [PaperNote]) in
+            guard let agent = caller.flatMap({ self.app.claude.note(withID: $0)?.agent }) else { return }
+            for paper in papers where !agent.sources.contains(where: { $0.noteID == paper.noteID }) {
+                agent.sources.append(NoteSource(noteID: paper.noteID, title: paper.file.title.isEmpty ? "A note" : paper.file.title))
+            }
+        }
         // Everything told goes through the vault's redaction first (NoteShield, the rule petal_ui and petal_look
         // follow), off the main thread; while the vault can't be read, nothing of the notes is told.
         let send: (Any) -> Void = { value in Self.shielded(value) { out in if let out { answer(out) } else { refuse(NoteShield.unreadable) } } }
@@ -29,7 +39,7 @@ extension NoteDesk {
             // Searched, filtered by notebook and counted only on what the agent may see of each note (redacted),
             // never its raw text: matching can't be used to guess a secret one character at a time.
             // "Here": placed now, by the window in front or on a Desktop showing (the one current-placement rule).
-            let papers = store.notes.filter { $0.version == nil && (!onlyHere || NoteShelf.isHere(placementNow($0.key))) }
+            let papers = store.notes.filter { $0.version == nil && readable($0) && (!onlyHere || NoteShelf.isHere(placementNow($0.key))) }
             let sources = papers.map { ($0.file.body, $0.notebook) }
             let books = papers.map(\.notebook)
             Self.onShield({ index -> [Int]? in
@@ -41,11 +51,13 @@ extension NoteDesk {
                 // The vault unreadable, or changing all the while: nothing searched, and said why.
                 guard let hits = hits ?? nil else { return refuse(NoteShield.unreadable) }
                 let found = hits.map { papers[$0] }
+                if found.count <= 3 { used(found) }
                 send(["notes": found.prefix(limit).map { self.summary($0) }, "count": found.count,
-                      "notebooks": self.store.notebooks.map { ["name": $0.name, "color": $0.color.isEmpty ? "accent" : $0.color, "notes": $0.count] }])
+                      "notebooks": self.store.notebooks.filter { self.helpers.mayRead($0.name, from: asking) }.map { ["name": $0.name, "color": $0.color.isEmpty ? "accent" : $0.color, "notes": $0.count] }])
             }
         case "petal_note_read":
-            resolve(args["id"] as? String ?? "", refuse, fail) { paper in
+            resolve(args["id"] as? String ?? "", readable: readable, refuse, fail) { paper in
+            used([paper])
             // Its whole text, its pictures as `![picture N]`: never a pictures' folder or file name.
             var result = self.summary(paper, text: true)
             if paper.file.cover { result["cover"] = true }
@@ -56,7 +68,7 @@ extension NoteDesk {
             let text = args["text"] as? String ?? ""
             if let id = args["id"] as? String, !id.isEmpty {
                 let append = args["append"] as? Bool ?? false
-                resolve(id, refuse, fail) { paper in
+                resolve(id, readable: readable, refuse, fail) { paper in
                     self.persist(paper.key, live: live, send, fail, touch: true, edit: { file in
                         // `![picture N]` lines are the note's own pictures again.
                         let words = NoteTold.restorePictures(text, from: file.body)
@@ -84,7 +96,7 @@ extension NoteDesk {
         case "petal_note_move":
             let notebook = (args["notebook"] as? String ?? "").trimmingCharacters(in: .whitespaces)
             guard !notebook.isEmpty else { return fail("Which notebook? (a new name makes one)") }
-            resolve(args["id"] as? String ?? "", refuse, fail) { paper in
+            resolve(args["id"] as? String ?? "", readable: readable, refuse, fail) { paper in
                 guard !self.store.readOnly(paper) else { return fail(Self.readOnlyWords) }
                 guard live() else { return fail(Self.hungUp) }
                 // The same move as the letterhead's: what's typed in it goes with it, and its panel and editor follow.
@@ -94,7 +106,7 @@ extension NoteDesk {
                 }
             }
         case "petal_note_stick":
-            resolve(args["id"] as? String ?? "", refuse, fail) { paper in self.stickTool(paper, args, live: live, send, fail) }
+            resolve(args["id"] as? String ?? "", readable: readable, refuse, fail) { paper in self.stickTool(paper, args, live: live, send, fail) }
         default:
             fail("Unknown tool \(name)")
         }
@@ -127,9 +139,9 @@ extension NoteDesk {
 
     /// The note an agent names, found on what it may see of ids, files and titles (NoteShield.find, redacted with a
     /// settled index); while the vault can't be read, nothing is looked up and it's told why.
-    private func resolve(_ name: String, _ refuse: @escaping (String) -> Void, _ fail: @escaping (String) -> Void,
+    private func resolve(_ name: String, readable: (PaperNote) -> Bool = { _ in true }, _ refuse: @escaping (String) -> Void, _ fail: @escaping (String) -> Void,
                          _ then: @escaping @MainActor (PaperNote) -> Void) {
-        let papers = store.notes
+        let papers = store.notes.filter(readable)
         let rows = papers.map { (handle: handle($0), body: $0.file.body, version: $0.version != nil) }
         Self.onShield({ NoteShield.find(name, rows: rows, index: $0) }) { (lookup: NoteShield.Lookup?) in
             switch lookup {

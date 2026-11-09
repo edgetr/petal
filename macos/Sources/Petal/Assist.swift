@@ -92,7 +92,10 @@ final class Assist {
         answer = done
         // In the chat when it's open and the question is its own (the card shows there); over the dock otherwise
         // (another chat or AI session asking).
-        if !app.claude.isOpen || !showsInChat(request) {
+        if let owner, app.paper.helpers.owns(owner) {
+            // A helper in a note asks on the note itself.
+            app.paper.helpers.asking(owner)
+        } else if !app.claude.isOpen || !showsInChat(request) {
             // Over the dock; with no Petal dock showing (macOS's in use), in the chat asking, which shows the question.
             if app.docks.focusedDock?.panel != nil { app.popups.show(FocusCard(kind: .ask, title: title, reason: detail)) }
             else if let owner, let note = app.claude.note(withID: owner) { app.claude.present(note) }
@@ -119,6 +122,7 @@ final class Assist {
         }
         formTyped = nil
         if choice == .always, pending.keep != nil { keptAlways?() }
+        app.paper.helpers.answered(pending, choice)
         if choice == .always, !pending.every {
             var allowed = config.strings("aiAllowed")
             if !allowed.contains(pending.kind) { allowed.append(pending.kind); config.set("aiAllowed", allowed) }
@@ -191,7 +195,7 @@ final class Assist {
         let fail = { (text: String) in send(["error": text]) }
         switch name {
         // The note's window as it is now (a note stuck to none, or notes off: what's in front).
-        case "petal_look": look(args, place: app.claude.notesOn ? note.flatMap { app.claude.note(withID: $0) }?.place : nil, note: note, send)
+        case "petal_look": look(args, place: app.claude.placed(note), note: note, send)
         case "petal_apps": apps(args, caller: note, live: live, send, fail)
         case "petal_windows": windows(args, caller: note, live: live, send, fail)
         case "petal_trash": trash(args, caller: note, live: live, send, fail)
@@ -223,7 +227,7 @@ final class Assist {
             app.routines.handle(name, args, send, fail, caller: note, live: live, stop: stop)
         case _ where NoteDesk.tools.contains(name):
             // Its asker hanging up stops what's still to come: each change checks `live` right before it's made.
-            app.paper.handle(name, args, live: live, send, fail)
+            app.paper.handle(name, args, caller: note, live: live, send, fail)
         case "petal_memories":
             let mode = args["mode"] as? String
             send(["memories": memories.filter { mode == nil || $0.mode == mode || $0.mode.isEmpty }.map(record)])

@@ -844,6 +844,12 @@ final class PictureCell: NSTextAttachmentCell {
 final class NoteTextView: NSTextView {
     var style = NoteRich.Style(ink: .black, dim: .gray, petal: .black, accent: .systemBlue)
     var changed: () -> Void = {}
+    /// Helpers (NoteHelpers): Return at the end of a line that calls one runs it; the names the @ menu offers and
+    /// chips bind to; the notebook's color the mentions are drawn in. The @ menu and the chips' state.
+    var helperReturn: (String) -> Void = { _ in }
+    var mentionNames: () -> (notes: [String], notebooks: [String], place: String) = { ([], [], "") }
+    var tint = NoteInk.RGB(r: 0, g: 0.48, b: 1)
+    let mentions = MentionState()
     var escape: () -> Void = {}
     /// The note's folder, which its picture links are read from.
     /// Shared with every picture in this editor's text (NoteFolder).
@@ -877,7 +883,27 @@ final class NoteTextView: NSTextView {
     /// Typed, pasted, undone: the pictures it contains may have changed (the holding rule weighs them again).
     override func didChangeText() {
         super.didChangeText()
-        MainActor.assumeIsolated { NotePictures.shared.editorChanged() }
+        MainActor.assumeIsolated {
+            NotePictures.shared.editorChanged()
+            decorateMentions()
+            updateMentionMenu()
+        }
+    }
+
+    override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+        MainActor.assumeIsolated { if mentions.menu?.isVisible == true { updateMentionMenu() } }
+    }
+
+    /// The @ menu takes the arrows, Tab and Escape while it's open (Return picks, in insertNewline).
+    override func doCommand(by selector: Selector) {
+        let handled = MainActor.assumeIsolated { mentionCommand(selector) }
+        if !handled { super.doCommand(by: selector) }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        MainActor.assumeIsolated { drawMentionChips() }
     }
 
     /// Remove on the paper, while this editor is open: those pictures' attachments deleted here, as an edit saved
@@ -1043,6 +1069,18 @@ final class NoteTextView: NSTextView {
     }
 
     override func insertNewline(_ sender: Any?) {
+        // The @ menu open: Return picks what's selected in it.
+        if MainActor.assumeIsolated({ pickMention() }) { return }
+        // Return at the very end of a line that calls a helper (only here, the person's own key): it's asked, once the
+        // line is saved.
+        let calling = MainActor.assumeIsolated { helperLine() }
+        defer {
+            if let calling {
+                flushNow()
+                let ask = helperReturn
+                DispatchQueue.main.async { ask(calling) }
+            }
+        }
         let kind = lineKind
         let line = lineRange
         let words = ((textStorage?.string ?? "") as NSString).substring(with: line).trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FFFC}")))
@@ -1296,7 +1334,10 @@ final class NoteTextView: NSTextView {
         changed()
     }
 
-    override func cancelOperation(_ sender: Any?) { escape() }
+    override func cancelOperation(_ sender: Any?) {
+        if MainActor.assumeIsolated({ mentions.menu?.isVisible == true }) { MainActor.assumeIsolated { closeMentionMenu() }; return }
+        escape()
+    }
 }
 
 /// An open editor, as the desk reaches it: save what's typed now; put a picture in.
@@ -1333,6 +1374,12 @@ struct NoteEditorView: NSViewRepresentable {
     var say: (String) -> Void = { _ in }
     /// Pictures pasted as bytes (a copy from a note): taken by the screenshot paste's path.
     var acceptPictures: ([(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? = { _ in nil }
+    /// Return at the end of a line that calls a helper (@Petal): the line.
+    var helperReturn: (String) -> Void = { _ in }
+    /// What the @ menu offers and the chips bind to.
+    var names: () -> (notes: [String], notebooks: [String], place: String) = { ([], [], "") }
+    var accent: NSColor = .controlAccentColor
+    var tint = NoteInk.RGB(r: 0, g: 0.48, b: 1)
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         /// The Edit menu's Undo and Redo (and typing's undo) use the editor's own history.
@@ -1464,6 +1511,9 @@ struct NoteEditorView: NSViewRepresentable {
             MainActor.assumeIsolated { _ = text.removePictures(named: names, restore: restore, retire: retire) }
         }
         text.say = say
+        text.helperReturn = helperReturn
+        text.mentionNames = names
+        text.tint = tint
         text.flushNow = { [weak coordinator, weak text] in
             guard let coordinator, let text else { return }
             MainActor.assumeIsolated { coordinator.flush(text) }
@@ -1478,6 +1528,7 @@ struct NoteEditorView: NSViewRepresentable {
         NotePictures.shared.register(text)
         // From outside (a sync, a tool, a reload, another note): its undo history goes with the old text.
         text.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks(paper.file.body), folder: text.folderRef, style: style))
+        text.decorateMentions()
         text.typingAttributes = NoteRich.attributes("text", style)
         text.insertionPointColor = style.ink
         DispatchQueue.main.async { coordinator.measure(text) }
@@ -1491,6 +1542,9 @@ struct NoteEditorView: NSViewRepresentable {
         text.noteID = paper.noteID
         text.noteFolder = paper.url.deletingLastPathComponent()
         text.escape = escape
+        text.helperReturn = helperReturn
+        text.mentionNames = names
+        text.tint = tint
         let coordinator = context.coordinator
         // Another note in this paper, or the file changed elsewhere while the person isn't typing here: read again.
         // A newer version (another Mac, another editor) taken at once by an idle editor, typing here or not; one with
@@ -1530,6 +1584,7 @@ struct NoteEditorView: NSViewRepresentable {
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
         if let text = scroll.documentView as? NoteTextView {
             MainActor.assumeIsolated {
+                text.closeMentionMenu()
                 coordinator.flush(text)
                 coordinator.parent.register(nil)
                 // Closed: the pictures it showed let their bytes go once nothing else needs them.

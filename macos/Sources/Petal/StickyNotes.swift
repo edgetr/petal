@@ -36,6 +36,8 @@ final class StickyNote {
     @ObservationIgnored var away = false
     /// Its window closed or its app quit: it opens as a plain chat.
     @ObservationIgnored var windowGone = false
+    /// A helper in one of Petal Notes (NoteHelpers): that note's id. Its cards, steps and answer go on the note.
+    @ObservationIgnored var paper: String?
 
     var place: NotePlace? {
         get { agent.place }
@@ -60,6 +62,12 @@ extension ClaudePanel {
     var working: Int { notes.filter { $0.agent.running }.count }
 
     func note(withID id: String) -> StickyNote? { notes.first { $0.id.uuidString == id } }
+
+    /// The place a chat's tools look at: its note's (a helper's always; an AI sticky note's while those are on).
+    func placed(_ id: String?) -> NotePlace? {
+        guard let id, let note = note(withID: id), notesOn || note.paper != nil else { return nil }
+        return note.place
+    }
 
     /// The note holding a kept chat, if one does: a chat is only ever carried on by one note.
     func live(chat id: UUID) -> StickyNote? { notes.first { $0.agent.chatID == id } }
@@ -513,6 +521,7 @@ extension ClaudePanel {
     func prune(sparing spared: StickyNote? = nil) {
         let keep = { (note: StickyNote) in
             note === spared || note === self.current || note === self.loose || note.agent.running || note.ready || !note.agent.waiting.isEmpty
+                || note.paper != nil
         }
         // A window's link to a chat let go here holds the chat as it is now, never an older copy.
         for note in notes where !keep(note) {
@@ -1118,6 +1127,8 @@ extension ClaudePanel {
     /// and a note from another mode nudges that mode's button too, with a card to open it here.
     func finished(_ note: StickyNote) {
         startWaiting()
+        // A helper in a note: its answer goes on the note.
+        if note.paper != nil { return PetalApp.shared.paper.helpers.finished(note) }
         guard notesOn, !(isOpen && current === note), note.agent.messages.contains(where: { $0.kind == .user }) else { return }
         note.ready = true
         updateReady()

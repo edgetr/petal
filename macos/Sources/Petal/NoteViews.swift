@@ -48,6 +48,12 @@ struct PaperView: View {
     var unsaved = false
     /// Pictures whose bytes couldn't be saved: said on the paper, with Try again and Remove.
     var pictureTrouble = 0
+    /// What @ binds to where there's no desk (snapshots): notes and notebooks by name, and the place's words.
+    var names: (notes: [String], notebooks: [String], place: String)? = nil
+
+    private var bindable: (notes: [String], notebooks: [String], place: String) {
+        names ?? desk?.helpers.names(for: paper.key) ?? ([], [], "")
+    }
 
     @Environment(\.snapshotting) private var snapshotting
 
@@ -87,9 +93,11 @@ struct PaperView: View {
     /// The folded corner (flip to the back) and the faint @.
     private var corner: some View {
         HStack(alignment: .bottom, spacing: 0) {
+            // A folded watcher's line takes the room (the sketch's watchers carry no @).
             Text("@").font(.system(size: 13, weight: .semibold)).foregroundStyle(glass ? Color.primary.opacity(0.22) : Color.black.opacity(0.22))
                 .padding(.trailing, 8).padding(.bottom, 9)
-                .help("@ for a helper, a note or a place (coming soon)")
+                .opacity(face == .folded && paper.file.watch != nil ? 0 : 1)
+                .help("@ for a helper, a note or a notebook; Return on the line asks it")
             Button { desk?.flip(paper.key) } label: { FoldCorner().fill(Color.black.opacity(0.13)).frame(width: 24, height: 24).contentShape(.rect) }
                 .buttonStyle(.plain)
                 .help(face == .back ? "Turn it back over" : "Turn it over")
@@ -99,7 +107,9 @@ struct PaperView: View {
     @ViewBuilder private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Folded, a page is its site alone, as the sketch's folded notes say it.
-            Letterhead(place: face == .folded ? NoteText.site(place) : place, notebook: notebook, others: face == .folded ? "" : others, tint: tint, glass: glass,
+            // Petal's own note (a morning note) says so, with the time it was left: "from Petal · 08:00".
+            Letterhead(place: paper.file.fromPetal ? "from Petal · " + paper.file.created.formatted(date: .omitted, time: .shortened)
+                       : face == .folded ? NoteText.site(place) : place, notebook: notebook, others: face == .folded ? "" : others, tint: tint, glass: glass,
                        tapPlace: { desk?.placeMenu(paper.key) }, tapNotebook: { desk?.notebookMenu(paper.key) })
                 .padding(.bottom, 9)
             switch face {
@@ -112,6 +122,10 @@ struct PaperView: View {
 
     private var foldedBody: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // A watcher's newest value in the corner, the old ones struck (the sketch's .num).
+            if let watch = paper.file.watch, !watch.last.isEmpty {
+                WatchCorner(watch: watch, tint: tint, glass: glass).frame(maxWidth: .infinity, alignment: .trailing).padding(.top, -4).padding(.bottom, 2)
+            }
             Group {
                 let titled = NoteBlock.blocks(paper.file.body).first { !$0.words.trimmingCharacters(in: .whitespaces).isEmpty }.map { if case .heading = $0 { true } else { false } } ?? false
                 let title = paper.file.title
@@ -123,7 +137,7 @@ struct PaperView: View {
                         .font(.system(size: 13.5, weight: .medium))
                         .lineSpacing(13.5 * 1.32 - 16.1)
                 }
-                    .foregroundStyle(words)
+                    .foregroundStyle(paper.file.fromPetal && !glass ? HelperLook.ink(tint) : words)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .clipped()
             }
@@ -132,11 +146,23 @@ struct PaperView: View {
                     .font(.system(size: 11, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
                     .padding(.bottom, 4)
             }
-            HStack(spacing: 6) {
+            HStack(spacing: paper.file.watch != nil ? 4 : 6) {
+                // Something coming (back at a time, a helper at work): the sketch's dot before the line.
+                if !unsaved, paper.file.back != nil || paper.file.helper.map({ $0.state != .done }) == true {
+                    PulseDot(color: Color(nsColor: color), pulsing: paper.file.helper?.state == .working)
+                }
                 Text(unsaved ? "Not saved yet: trying again" : footer).font(.system(size: 11))
                     .foregroundStyle(unsaved ? Color(red: 0.7, green: 0.15, blue: 0.12) : glass ? .secondary : PaperLook.footer).lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                // A watcher's Pause (or Go on), on the folded note.
+                if !unsaved, let watch = paper.file.watch {
+                    Text("·").font(.system(size: 11)).foregroundStyle(glass ? .secondary : PaperLook.footer).padding(.horizontal, -2)
+                    Button(watch.paused ? "Go on" : "Pause") { desk?.helpers.pause(paper.noteID) }.buttonStyle(.plain)
+                        .font(.system(size: 11)).foregroundStyle(glass ? .secondary : PaperLook.footer).underline(watch.paused)
+                }
             }
-            .padding(.trailing, 44)
+            .padding(.trailing, paper.file.watch != nil ? 0 : 44)
+            .opacity(paper.file.fromPetal && !unsaved ? 0 : 1)
         }
     }
 
@@ -167,10 +193,12 @@ struct PaperView: View {
         }
         // One of a conflict's papers is read only, with Keep this one: nothing typed into it could be kept.
         if snapshotting || desk == nil {
-            NoteBodyView(paper: paper, tint: tint, accent: color, glass: glass).padding(.bottom, 18)
+            NoteBodyView(paper: paper, tint: tint, accent: color, glass: glass, names: bindable)
+            HelperFront(paper: paper, tint: tint, glass: glass, desk: desk).padding(.bottom, 18)
         } else if conflict {
             // Read only, in a scroll view as tall as the editor may be: a long one never runs off the screen.
-            ConflictBody(paper: paper, tint: tint, accent: color, glass: glass, resized: { desk?.measured(paper.key, $0) }).padding(.bottom, 18)
+            ConflictBody(paper: paper, tint: tint, accent: color, glass: glass, resized: { desk?.measured(paper.key, $0) })
+            HelperFront(paper: paper, tint: tint, glass: glass, desk: desk).padding(.bottom, 18)
         } else if let desk {
             NoteEditorView(paper: paper, style: desk.style(color, glass: glass), focus: keyboard,
                            height: { desk.measured(paper.key, $0) },
@@ -181,15 +209,20 @@ struct PaperView: View {
                            idle: { desk.store.takeDeferred(paper.key) },
                            sameNote: { desk.store.sameNote($0, instance: $1, $2) },
                            say: { desk.tell($0) },
-                           acceptPictures: { desk.acceptCopiedPictures(paper.key, $0) })
-                .frame(height: min(PaperLook.maxOpen - 70, max(PaperLook.minOpen - 70, editorHeight)))
-                .padding(.bottom, 18)
+                           acceptPictures: { desk.acceptCopiedPictures(paper.key, $0) },
+                           helperReturn: { desk.helpers.returned(paper.key, line: $0) },
+                           names: { desk.helpers.names(for: paper.key) },
+                           accent: color, tint: tint)
+                .frame(height: min(PaperLook.maxOpen - 70 - (paper.file.ink.isEmpty ? 0 : 90), max(PaperLook.minOpen - 70, editorHeight)))
+            HelperFront(paper: paper, tint: tint, glass: glass, desk: desk).padding(.bottom, 18)
         }
     }
 
     private var back: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("The back of this note").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(words)
+            // What a helper did, and what was allowed (tap a stamp to take it back).
+            HelperBack(paper: paper, tint: tint, glass: glass, desk: desk)
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(Array(paper.file.places.enumerated()), id: \.offset) { _, stick in
                     Text(NoteDesk.describe(stick)).font(.system(size: 12.5)).foregroundStyle(words).lineLimit(2)
@@ -275,6 +308,7 @@ struct NoteBodyView: View {
     let tint: NoteInk.RGB
     let accent: NSColor
     let glass: Bool
+    var names: (notes: [String], notebooks: [String], place: String) = ([], [], "")
 
     var body: some View {
         let words: Color = glass ? .primary : PaperLook.words
@@ -302,6 +336,8 @@ struct NoteBodyView: View {
                         .padding(.vertical, 4)
                 case .bullet(let text):
                     Text("• " + NoteText.plain(text)).font(.system(size: 13.5)).foregroundStyle(words).lineSpacing(3)
+                case .text(let text) where text.contains("@"):
+                    Text(MentionLine.attributed(text, tint: tint, names: names)).font(.system(size: 13.5)).foregroundStyle(words).lineSpacing(3)
                 case .text(let text):
                     Text(NoteText.plain(text).isEmpty ? " " : NoteText.plain(text)).font(.system(size: 13.5)).foregroundStyle(words).lineSpacing(3)
                 }
@@ -358,6 +394,11 @@ struct PictureView: View {
         }
         .frame(height: 96).frame(maxWidth: .infinity).clipped()
         .clipShape(.rect(cornerRadius: 9))
+        // Dragged out of the note: the picture's own file.
+        .onDrag {
+            guard let path = NoteShelf.pictureTarget(link, noteFolder: folder.path) else { return NSItemProvider() }
+            return NSItemProvider(contentsOf: URL(fileURLWithPath: path)) ?? NSItemProvider()
+        }
         .overlay { RoundedRectangle(cornerRadius: 9).stroke(.black.opacity(0.15), lineWidth: 0.5) }
         .overlay(alignment: .bottomLeading) {
             if !caption.isEmpty {

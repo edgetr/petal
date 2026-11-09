@@ -27,11 +27,16 @@ swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift check
 swiftc -parse-as-library -O -o "$out/papernotes" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift checks/NotesCheck.swift
 "$out/papernotes"
 # A note's text in the editor and back: the same Markdown, line for line (AppKit, nothing shown).
-swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteEditor.swift Sources/Petal/EditMenu.swift checks/NoteRichCheck.swift
+swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteMentions.swift Sources/Petal/NoteEditor.swift Sources/Petal/EditMenu.swift checks/NoteRichCheck.swift
 "$out/noterich"
 # Petal Notes' files on throwaway folders in the temporary folder: saves that keep both, names from the disk, no
 # writes through symbolic links, two notebooks' Todo.md, a renamed file's bookmark, the journal's launch recovery
 # after a hang, and a cancelled tool write leaving nothing (never the Trash).
+# Helpers in notes: what an @ line binds and asks, the helper's front matter (ink, steps, stamps, a watcher, a task, a
+# chain) read back exactly, times and models in words, prices on a page, a notebook's memory, plain arithmetic,
+# chained notes' loops and the person's checkouts (no file, no window, no AI).
+swiftc -parse-as-library -O -o "$out/notehelp" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteHelp.swift checks/NoteHelpCheck.swift
+"$out/notehelp"
 swiftc -parse-as-library -O -o "$out/notestore" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/PaperNotes.swift Sources/Petal/NoteJournal.swift checks/NoteStoreCheck.swift
 "$out/notestore"
 # A passage for Petal AI follows petal_look's rule for selected text (UIMap.selectionHidden), and what the note tools

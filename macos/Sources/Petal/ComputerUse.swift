@@ -179,7 +179,7 @@ final class ComputerUse {
                       _ fail: @escaping (String) -> Void) {
         let named = (args["app"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         // A sticky note's own window, as petal_look does, unless an app or what's in front is asked for.
-        let place = named.isEmpty && args["front"] as? Bool != true && app.claude.notesOn ? app.claude.note(withID: caller)?.place : nil
+        let place = named.isEmpty && args["front"] as? Bool != true ? app.claude.placed(caller) : nil
         let target: NSRunningApplication?
         if let place {
             target = place.running

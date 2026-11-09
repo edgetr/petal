@@ -70,6 +70,7 @@ extension ClaudePanel {
     /// (or one whose window is gone) opens as it is.
     func openFromPreview(_ id: UUID) {
         guard let note = notes.first(where: { $0.id == id }) else { return }
+        if note.paper != nil { return PetalApp.shared.paper.helpers.show(note) }
         if notesOn, note.attached, let place = note.place { go(to: note, place: place) } else { present(note) }
     }
 

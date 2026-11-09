@@ -10,6 +10,8 @@ import SwiftUI
 @MainActor @Observable
 final class NoteDesk {
     let store = NoteStore()
+    /// Helpers in notes (@Petal), watchers, chains, notes coming back and morning notes.
+    let helpers = NoteHelpers()
     /// Notes showing, each folded, open or turned over (by paper key). Opening or folding one changes which
     /// pictures are on screen (NotePictures' retry).
     var faces: [String: PaperFace] = [:] { didSet { NotePictures.shared.visibilityChanged() } }
@@ -87,6 +89,7 @@ final class NoteDesk {
         // vault can't be read, a plain name. And the names Petal made so, known again.
         NoteStore.nameRedactor = { text in VaultIndex.settled { $0.unreadable ? nil : $0.redacted(text) } ?? nil }
         store.onChange = { [weak self] in self?.refresh() }
+        helpers.start(self)
         watchApps()
         // The one visibility signal for missing pictures: papers revealed and open now.
         NotePictures.shared.visible = { [weak self] in self?.picturesOnScreen() ?? [] }
@@ -1016,7 +1019,7 @@ final class NoteDesk {
     /// Where a paper belongs right now (NoteShelf.placementNow): by the window in front, on a Desktop showing now, or
     /// nowhere.
     func placementNow(_ key: String) -> NoteShelf.Placement {
-        let desktops = store.paper(key)?.file.places.filter { $0.kind == .desktop }.map(\.desktop) ?? []
+        let desktops = store.paper(key).map(desktops(of:)) ?? []
         // A window placement counts only once it's fresh: never while a read is awaited (permission lost, focus
         // changed) or its tab is being read again.
         return NoteShelf.placementNow(window: here[key], desktops: desktops, showing: Set(Self.spaces.values),
@@ -1024,6 +1027,20 @@ final class NoteDesk {
     }
 
     private func isDesktop(_ key: String) -> Bool { placementNow(key) == .desktop }
+
+    /// The Desktops a paper shows on: its own Desktop places, and, while it's summoned (coming back, a watcher's hit,
+    /// a source picked) and its place isn't in front, the Desktop showing on the main screen.
+    func desktops(of paper: PaperNote) -> [Int?] {
+        var list = paper.file.places.filter { $0.kind == .desktop }.map(\.desktop)
+        if helpers.summoned.contains(paper.key) { list.append(Self.desktopShowing(on: NSScreen.screens.first)) }
+        return list
+    }
+
+    /// A note was summoned: the Desktops are read (when no note was on one) and it's placed the one way.
+    func summoned() {
+        if Self.spaces.isEmpty { refreshSpaces() } else { placeDesktop() }
+        layout()
+    }
 
     /// Everything that may not be seen now hidden (NoteShelf.mayShow): every surface while Mission Control is open,
     /// the window's notes while a new front window's read is awaited, and any paper not where its one placement
@@ -1073,7 +1090,7 @@ final class NoteDesk {
     /// Reads which Desktop each screen shows, off the main thread, then places the Desktop's notes. Skipped while no
     /// note is on a Desktop.
     func refreshSpaces() {
-        guard on, !Headless.on, store.notes.contains(where: { $0.file.places.contains { $0.kind == .desktop } }) else {
+        guard on, !Headless.on, !helpers.summoned.isEmpty || store.notes.contains(where: { $0.file.places.contains { $0.kind == .desktop } }) else {
             if !Self.spaces.isEmpty { Self.spaces = [:]; placeDesktop() }
             return
         }
@@ -1101,7 +1118,7 @@ final class NoteDesk {
             guard let number = Self.desktopShowing(on: screen) else { continue }
             // The validated placement (placementNow's rule): a stale window placement never keeps a note off it.
             let notes = store.notes.filter { paper in
-                NoteShelf.onDesktop(window: here[paper.key], desktops: paper.file.places.filter { $0.kind == .desktop }.map(\.desktop), screenDesktop: number,
+                NoteShelf.onDesktop(window: here[paper.key], desktops: desktops(of: paper), screenDesktop: number,
                                     windowValid: !awaitingRead && !hiddenForTab(paper.key))
             }
             for (index, paper) in notes.enumerated() {
@@ -1217,6 +1234,7 @@ final class NoteDesk {
         editors[key]?.flush()
         faces[key] = nil
         if keyboard == key { keyboard = nil }
+        helpers.dismissed(key)
         panels[key]?.conceal()
         if let paper = store.paper(key) {
             local.shown.removeAll { $0 == paper.noteID }
@@ -1253,7 +1271,7 @@ final class NoteDesk {
         panels[key]?.refit()
     }
 
-    private func isDesktopNote(_ key: String) -> Bool { store.paper(key)?.file.places.contains { $0.kind == .desktop } == true }
+    private func isDesktopNote(_ key: String) -> Bool { store.paper(key).map { !desktops(of: $0).isEmpty } == true }
 
     /// A note made just now and put away with nothing written goes (to the Trash: never deleted outright).
     private func letGoIfEmpty(_ key: String) {
@@ -1611,6 +1629,7 @@ final class NoteDesk {
         let new = paper.key
         guard old != new else { return }
         faces = NoteShelf.rekeyed(faces, old, new)
+        helpers.rekeyed(old, new)
         if keyboard == old { keyboard = new }
         if hovered == old { hovered = new }
         keyboardWanted.rekey(old, new)
@@ -1669,7 +1688,20 @@ final class NoteDesk {
         return (place, paper.notebook, others)
     }
 
-    func footer(_ paper: PaperNote) -> String { Self.when(paper.file.modified) }
+    /// The folded note's one line of what's coming: a helper at work, when it comes back, its watcher, or when it
+    /// was written.
+    func footer(_ paper: PaperNote) -> String {
+        let file = paper.file
+        if let run = helpers.runs[paper.noteID] {
+            let step = run.sticky.agent.activity
+            return run.paused ? "Paused" : step.isEmpty ? "Working" : step
+        }
+        if let helper = file.helper, helper.state != .done { return helper.step.isEmpty ? "Working" : helper.step }
+        if let back = file.back { return NoteHelp.backLine(back, now: Date()) }
+        if let watch = file.watch { return watch.foot(thisMac: watch.mac == local.mac) }
+        if file.fromPetal { return "From Petal · " + Self.when(file.created) }
+        return Self.when(file.modified)
+    }
 
     static func when(_ date: Date) -> String {
         let calendar = Calendar.current
@@ -2430,6 +2462,12 @@ struct NotePanelContent: View {
     let key: String
     weak var panel: NotePanel?
 
+    /// What changes a paper's height from a helper: its file as written, a run, a question waiting on it.
+    private func helperShape(_ paper: PaperNote) -> String {
+        let run = desk.helpers.runs[paper.noteID]
+        return "\(paper.revision?.count ?? 0)|\(paper.file.ink.count)|\(run != nil)|\(run?.sticky.agent.pendingAsk.count ?? 0)|\(desk.helpers.card(paper.noteID)?.id.uuidString ?? "")"
+    }
+
     var body: some View {
         if let paper = desk.store.paper(key) {
             let face = desk.faces[key] ?? .folded
@@ -2448,6 +2486,8 @@ struct NotePanelContent: View {
                 .modifier(FoldedTouch(folded: face == .folded, open: { desk.open(key) }, drag: { panel?.drag() }, dropped: { panel?.dragEnded() }))
                 .padding(PaperLook.margin)
                 .onChange(of: face) { _, _ in DispatchQueue.main.async { panel?.refit() } }
+                // A helper's ink, step or card came or went: the paper fits itself again.
+                .onChange(of: helperShape(paper)) { _, _ in DispatchQueue.main.async { panel?.refit() } }
         }
     }
 }

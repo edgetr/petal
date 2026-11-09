@@ -69,6 +69,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         let allowed: [String]
         var api = false            // on an API key (APIKeys.swift)
         var note: String?          // a sticky note's id: Petal's tools answer about its window
+        var folder: String?        // where it works (a note's coding helper: its worktree); the home folder otherwise
     }
 
     /// One turn of the chat; the prompt goes on stdin.
@@ -89,7 +90,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
             return arguments + ["--allowedTools", "mcp__petal", "Bash(petal doctor:*)", "Bash(petal logs:*)",
                                 "Bash(\(petal) doctor:*)", "Bash(\(petal) logs:*)"] + chat.allowed
         case .codex:
-            var arguments = ["exec", "--json", "--skip-git-repo-check", "-C", NSHomeDirectory()]
+            var arguments = ["exec", "--json", "--skip-git-repo-check", "-C", chat.folder ?? NSHomeDirectory()]
             arguments += chat.fullAccess ? ["--dangerously-bypass-approvals-and-sandbox"] : ["--sandbox", "workspace-write"]
             if !chat.model.isEmpty { arguments += ["-m", chat.model] }
             arguments += ["-c", "model_reasoning_effort=\(Self.toml(chat.effort))",
