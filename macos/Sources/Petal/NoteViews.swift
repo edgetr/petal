@@ -125,10 +125,7 @@ struct PaperView: View {
 
     private var foldedBody: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // A watcher's newest value in the corner, the old ones struck (the sketch's .num).
-            if let watch = paper.file.watch, !watch.last.isEmpty {
-                WatchCorner(watch: watch, tint: tint, glass: glass).frame(maxWidth: .infinity, alignment: .trailing).padding(.top, -4).padding(.bottom, 2)
-            }
+            watchCorner
             Group {
                 let titled = NoteBlock.blocks(paper.file.body).first { !$0.words.trimmingCharacters(in: .whitespaces).isEmpty }.map { if case .heading = $0 { true } else { false } } ?? false
                 let title = paper.file.title
@@ -173,7 +170,9 @@ struct PaperView: View {
     /// with room always kept for the helper's controls.
     private var heights: (editor: CGFloat, ink: CGFloat) {
         let screen = NSScreen.main?.visibleFrame.height ?? 800
-        return NoteHelp.paperHeights(screen: screen, chrome: 110, editor: PaperLook.maxOpen - 70, ink: .greatestFiniteMagnitude, controls: max(controlsHeight, 40))
+        // (The watcher's corner, when it has one, takes its room above the words.)
+        let corner: CGFloat = paper.file.watch.map { $0.last.isEmpty ? 0 : 44 } ?? 0
+        return NoteHelp.paperHeights(screen: screen, chrome: 110 + corner, editor: PaperLook.maxOpen - 70, ink: .greatestFiniteMagnitude, controls: max(controlsHeight, 40))
     }
 
     /// The helper's ink and its controls, the controls measured (a form's buttons too) so the paper keeps their room.
@@ -182,7 +181,16 @@ struct PaperView: View {
             .onPreferenceChange(HelperControlsHeight.self) { controlsHeight = $0 }
     }
 
+    /// A watcher's newest value in the corner, the old ones struck (the sketch's .num): on the open paper as on the
+    /// folded one, so a crossing it's told is seen whichever face shows.
+    @ViewBuilder private var watchCorner: some View {
+        if let watch = paper.file.watch, !watch.last.isEmpty {
+            WatchCorner(watch: watch, tint: tint, glass: glass).frame(maxWidth: .infinity, alignment: .trailing).padding(.top, -4).padding(.bottom, 2)
+        }
+    }
+
     @ViewBuilder private var openBody: some View {
+        watchCorner
         if pictureTrouble > 0, let desk {
             HStack(spacing: 10) {
                 Text(pictureTrouble == 1 ? "Picture couldn't be saved" : "\(pictureTrouble) pictures couldn't be saved")

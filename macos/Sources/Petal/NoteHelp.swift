@@ -406,6 +406,9 @@ enum NoteHelp {
         var id = ""
         /// The time zone `at` was said in (its clock is read there, wherever the Mac is now).
         var tz = ""
+        /// The newest value exactly as read (`last` is it rounded for the corner): every threshold and delivery
+        /// decision is made on this, never on `last`.
+        var amount: Double? = nil
 
         init(every: String, line: String, mac: String, at: String = "", url: String = "") {
             self.every = every; self.line = line; self.mac = mac; self.at = at; self.url = url
@@ -426,6 +429,7 @@ enum NoteHelp {
             hit = value.text("hit") == "true"
             id = value.text("id")
             tz = value.text("tz")
+            amount = Double(value.text("amount"))
         }
 
         var value: NoteValue {
@@ -441,6 +445,7 @@ enum NoteHelp {
             if hit { pairs.append(("hit", .text("true"))) }
             if !id.isEmpty { pairs.append(("id", .text(id))) }
             if !tz.isEmpty { pairs.append(("tz", .text(tz))) }
+            if let amount { pairs.append(("amount", .text(String(amount)))) }
             return .map(pairs)
         }
 
@@ -930,11 +935,34 @@ enum NoteHelp {
         case ask(String)
     }
 
-    /// What `line` asks, its @Petal taken out (`notes`/`notebooks` bind names).
+    /// Whether words are a plain instruction: not a question ("is it done?", "check whether it's done"), a condition
+    /// ("if it's done, …") or a negation ("don't remove the worktree"). Keyword routing acts only on these; anything
+    /// else goes to the helper as an ordinary request, so a word in passing never removes or forgets anything.
+    static func imperative(_ words: String) -> Bool {
+        // ("no more …" is an instruction to stop, not a negation.)
+        let lower = words.lowercased().replacingOccurrences(of: "’", with: "'").replacingOccurrences(of: "no more", with: "stop")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !lower.isEmpty, !lower.contains("?") else { return false }
+        let tokens = lower.split(whereSeparator: { !$0.isLetter && $0 != "'" }).map(String.init)
+        let asks: Set<String> = ["is", "are", "was", "were", "did", "does", "has", "have", "had", "can", "could", "should", "would", "will", "shall",
+                                 "may", "might", "what", "why", "how", "when", "where", "which", "who", "whom", "whose"]
+        if let first = tokens.first, asks.contains(first) { return false }
+        let conditions: Set<String> = ["if", "whether", "unless", "once", "until", "before", "after", "maybe", "perhaps"]
+        let negations: Set<String> = ["don't", "dont", "not", "never", "no", "nor", "without", "doesn't", "isn't", "aren't", "won't", "wouldn't",
+                                      "shouldn't", "can't", "cannot", "didn't", "hasn't", "haven't", "mustn't", "neither", "nothing"]
+        return !tokens.contains { conditions.contains($0) || negations.contains($0) }
+    }
+
+    /// What `line` asks, its @Petal taken out (`notes`/`notebooks` bind names). The local routes (remember, forget,
+    /// put away, stop, pause, bring back, the worktree's removal) are taken only for a plain instruction
+    /// (`imperative`); a question, a condition or a negation is an ordinary request for the helper.
     static func request(_ line: String, now: Date, calendar: Calendar = .current) -> Request {
         if let chain = chainWords(line) { return .chain(after: chain.after, ask: chain.ask, then: chain.then) }
         let words = spoken(line)
         let lower = words.lowercased()
+        // Routes found by a phrase anywhere in the line act only on a plain instruction ("remember …" and
+        // "forget …" are one by how they start).
+        let plain = imperative(words)
         if lower.hasPrefix("remember ") || lower == "remember" {
             var item = String(words.dropFirst(9)).trimmingCharacters(in: .whitespaces)
             if item.lowercased().hasPrefix("that ") { item = String(item.dropFirst(5)) }
@@ -945,15 +973,15 @@ enum NoteHelp {
             if item.lowercased().hasPrefix("that ") { item = String(item.dropFirst(5)) }
             return .forget(trimmed(item))
         }
-        if lower.contains("put this away") || lower.contains("put it away") || lower.hasPrefix("put away") { return .putAway }
-        if (lower.contains("stop") || lower.contains("no more")) && lower.contains("morning") { return .stopMorning }
-        if lower.contains("stop watching") || lower.contains("stop checking") { return .stopWatching }
-        if ["pause", "pause it", "pause this", "pause that", "pause it for now", "hold on"].contains(lower.trimmingCharacters(in: .punctuationCharacters)) { return .pause }
-        if ["it's done", "it is done", "we're done", "all done", "remove the worktree", "clean up the worktree", "done with this"].contains(where: lower.contains) { return .done }
+        if plain, lower.contains("put this away") || lower.contains("put it away") || lower.hasPrefix("put away") { return .putAway }
+        if plain, (lower.contains("stop") || lower.contains("no more")) && lower.contains("morning") { return .stopMorning }
+        if plain, lower.contains("stop watching") || lower.contains("stop checking") { return .stopWatching }
+        if plain, ["pause", "pause it", "pause this", "pause that", "pause it for now", "hold on"].contains(lower.trimmingCharacters(in: .punctuationCharacters)) { return .pause }
+        if plain, ["it's done", "it is done", "we're done", "all done", "remove the worktree", "clean up the worktree", "done with this"].contains(where: lower.contains) { return .done }
         if lower.contains("recalculate") || lower.contains("keep this calculated") || lower.contains("keep it calculated") || lower.contains("keep the total") {
             return .recalculate
         }
-        if lower.contains("bring") && lower.contains("back") || lower.hasPrefix("remind me") {
+        if plain, lower.contains("bring") && lower.contains("back") || plain && lower.hasPrefix("remind me") {
             if let when = when(words, now: now, calendar: calendar) {
                 let others = mentions(line).map(\.name).filter { $0.caseInsensitiveCompare(petal) != .orderedSame && !["this", "here"].contains($0.lowercased()) && self.when($0, now: now, calendar: calendar) == nil }
                 return .bringBack(when.date, label: when.label, others: others)
@@ -1689,7 +1717,7 @@ extension NoteHelp {
     /// goes in the corner (the newest, the ones before struck); `hit` is kept only once the person has been told
     /// (`told`), so a crossing they never saw is told again by the next look. A hit stays while the value stays past
     /// the line (never said again) and clears only once it comes back.
-    static func applyLook(_ watch: inout Watch?, id: String, shown: String?, hint: String?, past: Bool, confirmed: Bool, at time: Date) -> Bool? {
+    static func applyLook(_ watch: inout Watch?, id: String, shown: String?, amount: Double? = nil, hint: String?, past: Bool, confirmed: Bool, at time: Date) -> Bool? {
         guard var current = watch, current.id == id, !current.paused else { return nil }
         guard let shown else {
             current.checked = time
@@ -1697,6 +1725,7 @@ extension NoteHelp {
             return false
         }
         current.record(shown, at: time)
+        current.amount = amount
         if let hint, !hint.isEmpty { current.hint = hint }
         let newly = past && confirmed && !current.hit
         current.hit = past && current.hit
@@ -1704,11 +1733,16 @@ extension NoteHelp {
         return newly
     }
 
+    /// Whether a crossing reached the person: the paper on the screen, on a face with the watcher's corner, shows
+    /// that very value (its exact amount landed in the note).
+    static func delivered(_ watch: Watch, amount: Double, cornerShowing: Bool) -> Bool { cornerShowing && watch.amount == amount }
+
     /// The person was shown a crossing (its note on the screen, the number in its corner): `hit` is kept, while the
     /// watcher is still that one and its newest value still past the line.
     static func told(_ watch: inout Watch?, id: String) -> Bool {
+        // On the exact value (never the corner's rounded one: ¥11,900 shown as ¥12k is still under ¥12,000).
         guard var current = watch, current.id == id, !current.paused,
-              let value = amounts(current.last, needCurrency: false).first?.value, crossed(value, line: current.line) else { return false }
+              let value = current.amount, crossed(value, line: current.line) else { return false }
         current.hit = true
         watch = current
         return true

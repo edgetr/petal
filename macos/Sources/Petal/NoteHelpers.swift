@@ -321,9 +321,12 @@ final class NoteHelpers {
         case .succeeded(let ink, let who, let steps):
             guard run.token.complete(.succeeded) else { return }
             release(run)
-            // A watcher's look never writes ink or the helper line (its output is its `watch`, `keepWatch`).
+            // A watcher's look never writes ink or the helper line (its output is its `watch`, `keepWatch`); a run that
+            // succeeded with nothing to say (a worktree removed) leaves the ink and clears its line.
             if let ink, !look {
                 output(run, ink, helper: .set(NoteHelp.Helper(state: .done, who: who ?? run.who, step: "", asked: run.asked, mac: mac, at: Date())), steps: steps)
+            } else if !look {
+                output(run, nil, helper: .clear)
             }
             run.line = nil
             handOn(run)
@@ -572,7 +575,7 @@ final class NoteHelpers {
         case .chain(let after, _, let then): chain(paper, after: after, then: then, asked: trimmed)
         case .check(let against): check(paper, against: against, asked: trimmed)
         case .morning(let time): morning(paper, time: time, asked: trimmed)
-        case .done where paper.file.worktree != nil: removeWorktree(paper, why: "you said it's done", asked: trimmed)
+        case .done where paper.file.worktree != nil: askToRemoveWorktree(paper, asked: trimmed)
         case .done, .ask: ask(paper, trimmed, asked: trimmed)
         case .bringBack, .remember, .forget, .putAway, .stopWatching, .stopMorning, .pause: control(paper, request, asked: trimmed)
         }
@@ -697,6 +700,10 @@ final class NoteHelpers {
         }
         guard let target = then.map({ note(named: $0, from: paper) }) ?? paper else {
             return reply(paper.noteID, giveBack: taking, [then ?? ""]) { "Petal couldn't find one note called “\($0[0])”." }
+        }
+        // The note that runs reads the one it waits for: only one it may read (the gate's rule, checked again when it fires).
+        guard mayRead(first.notebook, from: target) else {
+            return reply(paper.noteID, giveBack: taking) { _ in "The note that would run can't read the one it waits for (it's in a private notebook), so nothing was set up." }
         }
         // Never a loop: no note ends up waiting, through others, for itself.
         let edges = (store?.notes ?? []).compactMap { note in note.file.chain.map { (waiting: note.noteID, on: $0.after) } }
@@ -984,7 +991,8 @@ final class NoteHelpers {
         // their ids held on the run, so the gate checks each one's access again right before anything goes.
         raw.sourceBook = compare?.book ?? ""
         raw.sources = compare?.notes ?? []
-        run.sources = compare?.ids ?? []
+        // (A chain's run keeps its predecessor among them.)
+        run.sources = (compare?.ids ?? []) + run.sources.filter { !(compare?.ids ?? []).contains($0) }
         if case .placed(let index) = anchor {
             raw.place = paper.file.places[index]
             raw.placePrivate = app.assist.neverLook(paper.file.places[index].app)
@@ -1479,8 +1487,8 @@ final class NoteHelpers {
     /// A question was answered on a helper's card: allowed, a stamp on the note's back, held by the run asking.
     func answered(_ request: Assist.Request, _ choice: Assist.Choice) {
         guard choice != .no, let owner = request.owner, let noteID = app.claude.note(withID: owner)?.paper else { return }
-        // The coding helper's own Allow is stamped by its run.
-        guard !request.kind.hasPrefix("code:") else { return }
+        // The coding helper's own Allow is stamped by its run; a removal's confirmation is no permission to keep.
+        guard !request.kind.hasPrefix("code:"), !request.kind.hasPrefix("remove:") else { return }
         let always = choice == .always && !request.every
         let label = (always ? "ALWAYS · " : "ALLOWED · ") + request.title.uppercased()
         // Allow once and Buy: this note's and this run's alone; only a real Always is shared.
@@ -1574,7 +1582,7 @@ final class NoteHelpers {
                 mergeChecked[paper.noteID] = now
                 Self.merged(link) { merged in
                     if merged, let paper = self.paper(paper.noteID), paper.file.worktree != nil, self.runs[paper.noteID] == nil {
-                        self.removeWorktree(paper, why: "its pull request merged", asked: paper.file.helper?.asked ?? "")
+                        self.removeWorktree(paper, why: "its pull request merged", token: RunToken()) { _ in }
                     }
                 }
             }
@@ -1586,8 +1594,15 @@ final class NoteHelpers {
     /// any run (a coding page gets its worktree and its project's Allow). A restart or a sync never runs it twice.
     private func fire(_ paper: PaperNote) {
         guard var chain = paper.file.chain, runs[paper.noteID] == nil else { return }
+        // Its predecessor is a source of this run: read by its id, in its notebook now, by the same rule as the gate
+        // (a note private to a notebook this one isn't in, or gone, is never read): else it doesn't fire, and says so.
+        guard let first = self.paper(chain.after), mayRead(first.notebook, from: paper) else {
+            write(paper.noteID) { file in file.chain = nil; if file.helper?.state == .waiting { file.helper = nil } }
+            return reply(paper.noteID, giveBack: nil) { _ in "The note this one was waiting for can't be read from here now (private, or gone), so it didn't start." }
+        }
         let asked = "when @" + chain.afterTitle + " is done, " + chain.ask
         let run = begin(paper, asked: asked, step: "\(chain.afterTitle) is done: starting")
+        run.sources = [first.noteID]
         let fired = Date()
         chain.fired = fired
         write(paper.noteID, { $0.chain = chain }) { landed in
@@ -1595,8 +1610,13 @@ final class NoteHelpers {
                   mine.after == chain.after, mine.fired.map({ abs($0.timeIntervalSince(fired)) < 1 }) == true else {
                 return self.stopped(run, saying: "Petal couldn't record that this chain started, so it didn't.")
             }
-            // The done note's whole body goes with it: its title is derived only after it's shielded (NoteHelp.brief).
-            run.afterBody = self.paper(chain.after)?.file.body ?? ""
+            // The done note's whole body goes with it, checked again (its access may have changed meanwhile): its title
+            // is derived only after it's shielded (NoteHelp.brief), and the gate checks its access again before it goes.
+            guard let first = self.paper(chain.after), self.mayRead(first.notebook, from: now) else {
+                self.reply(paper.noteID, giveBack: nil) { _ in "The note this one was waiting for can't be read from here now (private, or gone), so it didn't start." }
+                return self.stopped(run)
+            }
+            run.afterBody = first.file.body
             self.ask(now, chain.ask, asked: asked, run: run)
         }
     }
@@ -1695,7 +1715,7 @@ final class NoteHelpers {
         guard let watch = current(noteID, id), token.admits else { return end(run, .stopped(nil)) }
         let text = told.extra.text
         let line = NoteHelp.line(watch.line)
-        let last = NoteHelp.amounts(watch.last, needCurrency: false).first?.value
+        let last = watch.amount ?? NoteHelp.amounts(watch.last, needCurrency: false).first?.value
         // The look's end: its value recorded; a hit only with an explicit yes (NoteHelp.watchVerdict), said only from
         // this write's own "newly crossed" result; unconfirmed, shown as such and never a hit.
         // The look's output is its own kind (keepWatch): its value in the corner (the newest, older ones struck), never
@@ -1708,10 +1728,10 @@ final class NoteHelpers {
             let past = value.map { NoteHelp.crossed($0, line: watch.line) } ?? false
             let newly = Flag()
             self.keepWatch(noteID) { current in
-                newly.value = NoteHelp.applyLook(&current, id: id, shown: shown, hint: hint, past: past, confirmed: verdict == .hit, at: now) ?? false
+                newly.value = NoteHelp.applyLook(&current, id: id, shown: shown, amount: value, hint: hint, past: past, confirmed: verdict == .hit, at: now) ?? false
             }
             self.end(run, .succeeded(ink: nil))
-            if newly.value { self.tellHit(noteID, watchID: id) }
+            if newly.value, let value { self.tellHit(noteID, watchID: id, amount: value) }
         }
         // A value that crossed the line (and wasn't a hit already) is confirmed first, whichever way it was read.
         let decide = { (value: Double?, hint: String?, found: Shielded, hintWords: Shielded) in
@@ -1744,13 +1764,18 @@ final class NoteHelpers {
 
     private final class Flag { var value = false }
 
-    /// A watcher's confirmed new crossing, told by the note itself: summoned, open, its corner showing the number.
-    /// Only once it's on the screen is `hit` kept (through the journal, on that watcher only); a note that couldn't
-    /// be shown keeps it unsaid, and the next look tells the person again.
-    private func tellHit(_ noteID: String, watchID: String) {
-        summon(noteID, open: true)
+    /// A watcher's confirmed new crossing, told by the note itself: summoned, open, its corner showing the number
+    /// (on the open paper as on the folded one). Only once the paper showing that very value (its watcher, its exact
+    /// amount, landed) has been on the screen, on a face with the corner, is `hit` kept (through the journal, on that
+    /// watcher only); a note that couldn't be shown keeps it unsaid, and the next look tells the person again.
+    private func tellHit(_ noteID: String, watchID: String, amount: Double, tries: Int = 6) {
+        if tries == 6 { summon(noteID, open: true) }
+        guard tries > 0 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated {
-            guard let key = self.paper(noteID)?.key, self.desk?.isShowing(key) == true else { return }
+            guard let paper = self.paper(noteID), let watch = paper.file.watch, watch.id == watchID else { return }
+            guard NoteHelp.delivered(watch, amount: amount, cornerShowing: self.desk?.isShowingCorner(paper.key) == true) else {
+                return self.tellHit(noteID, watchID: watchID, amount: amount, tries: tries - 1)
+            }
             self.keepWatch(noteID) { watch in _ = NoteHelp.told(&watch, id: watchID) }
         } }
     }
@@ -1759,31 +1784,80 @@ final class NoteHelpers {
 
     /// The note's worktree goes (its PR merged, or the person said it's done), and the note says so. One with changes
     /// not committed stays, and the note says that instead.
-    /// The one way a note's worktree is removed: only once it's checked to be this note's (`ownedTree`: where it
-    /// belongs, that checkout's, on the saved branch), by its canonical paths; anything else is left where it is.
-    private func removeWorktree(_ paper: PaperNote, why: String, asked: String) {
+    /// Removing the note's worktree because the person said so: never by keyword alone. Its run holds the line;
+    /// the worktree is checked to be this note's (`ownedTree`) and clean, then the note asks with a card, Don't the
+    /// default: "Remove the worktree for <branch>? It has no changes." Only Remove removes it; anything else leaves it
+    /// and the note's ink as they are (the line given back).
+    private func askToRemoveWorktree(_ paper: PaperNote, asked: String) {
         guard let tree = paper.file.worktree else { return }
+        if runs[paper.noteID] != nil {
+            return reply(paper.noteID, giveBack: taking) { _ in "A helper is at work on this note: stop it first, then ask again." }
+        }
+        let run = begin(paper, asked: asked, step: "Asking to remove the worktree")
+        run.kind = .quick
+        let sticky = sticky(for: paper)
+        run.sticky = sticky
+        let noteID = paper.noteID
+        let token = run.token
+        let left = { (why: Shielded) in
+            self.reply(noteID, giveBack: nil) { _ in why }
+            self.end(run, .stopped(nil))
+        }
+        DispatchQueue.global(qos: .utility).async {
+            let check = Self.ownedTree(tree, noteID: noteID, token: token)
+            var clean: Bool?
+            if case .owned(let path, _) = check, token.admits {
+                clean = Self.git(path, ["status", "--porcelain"], token: token).output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            DispatchQueue.main.async { MainActor.assumeIsolated {
+                guard self.live(run) else { return }
+                guard case .owned = check, let clean else {
+                    // Not this note's any more: left as it is, and the note stops looking after it.
+                    self.write(noteID) { $0.worktree = nil }
+                    return left("That worktree isn't this note's any more (another branch, or saved pointing elsewhere), so Petal left it.")
+                }
+                guard clean else { return left("The worktree has changes not committed, so Petal left it.") }
+                self.app.assist.ask("remove:" + noteID, "Remove the worktree for \(tree.branch)? It has no changes.",
+                                    detail: (tree.path as NSString).abbreviatingWithTildeInPath, warn: true, allow: "Remove", owner: sticky.id.uuidString) { allowed in
+                    guard self.live(run) else { return }
+                    guard allowed else { return left("Kept the worktree.") }
+                    self.removeWorktree(paper, why: "you said it's done", token: token) { removed in
+                        guard self.live(run) else { return }
+                        if removed { self.end(run, .succeeded(ink: nil)) } else { self.end(run, .stopped(nil)) }
+                    }
+                }
+            } }
+        }
+    }
+
+    /// The one way a note's worktree is removed (after its pull request merged, or the person's Remove): only once
+    /// it's checked to be this note's (`ownedTree`: where it belongs, that checkout's, on the saved branch), by its
+    /// canonical paths, never with --force; anything else is left where it is.
+    private func removeWorktree(_ paper: PaperNote, why: String, token: RunToken, _ done: @escaping @MainActor (Bool) -> Void) {
+        guard let tree = paper.file.worktree else { return done(false) }
         let short = (tree.checkout as NSString).abbreviatingWithTildeInPath
         let noteID = paper.noteID
-        let line = taking
         DispatchQueue.global(qos: .utility).async {
-            let check = Self.ownedTree(tree, noteID: noteID, token: RunToken())
-            let gone: (status: Int32, output: String)? = if case .owned(let path, let checkout) = check { Self.git(checkout, ["worktree", "remove", path]) } else { nil }
+            let check = Self.ownedTree(tree, noteID: noteID, token: token)
+            let gone: (status: Int32, output: String)? = if case .owned(let path, let checkout) = check { Self.git(checkout, ["worktree", "remove", path], token: token) } else { nil }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let gone else {
                         // Not this note's any more (moved to another branch, or saved pointing elsewhere): left as it is,
                         // and the note stops looking after it.
-                        self.write(paper.noteID) { $0.worktree = nil }
-                        return self.reply(paper.noteID, giveBack: nil, [tree.path, short, tree.branch]) {
+                        if check == .notOwned { self.write(paper.noteID) { $0.worktree = nil } }
+                        self.reply(paper.noteID, giveBack: nil, [tree.path, short, tree.branch]) {
                             "The worktree at \($0[0]) isn't this note's worktree of \($0[1]) on \($0[2]) any more, so Petal left it."
                         }
+                        return done(false)
                     }
                     guard gone.status == 0 || !FileManager.default.fileExists(atPath: tree.path) else {
-                        return self.reply(paper.noteID, giveBack: line, [short, tree.path]) { "The worktree of \($0[0]) has changes not committed, so Petal left it at \($0[1])." }
+                        self.reply(paper.noteID, giveBack: nil, [short, tree.path]) { "The worktree of \($0[0]) has changes not committed, so Petal left it at \($0[1])." }
+                        return done(false)
                     }
                     self.write(paper.noteID) { $0.worktree = nil }
                     self.reply(paper.noteID, giveBack: nil, [short, why, tree.branch]) { "Removed the worktree of \($0[0]): \($0[1]). The branch \($0[2]) stays." }
+                    done(true)
                 }
             }
         }

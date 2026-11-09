@@ -231,25 +231,25 @@ struct NoteHelpCheck {
         watched?.id = watchID
         expect(NoteFile.parse({ var f = NoteFile(id: "W1", created: now); f.watch = watched; return f.serialized() }(), fallbackID: "x", fallbackDate: now).watch?.id == watchID,
                "a watcher's id reads back")
-        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$99", hint: "from", past: true, confirmed: true, at: now) == true && watched?.last == "$99" && watched?.hit == false,
+        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$99", amount: 99, hint: "from", past: true, confirmed: true, at: now) == true && watched?.last == "$99" && watched?.hit == false,
                "a look under its own id: written, newly crossed (the only thing that says it), not a hit until the person is told")
-        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$99", hint: nil, past: true, confirmed: true, at: now) == true,
+        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$99", amount: 99, hint: nil, past: true, confirmed: true, at: now) == true,
                "not shown yet: the next look tells them again")
         expect(NoteHelp.told(&watched, id: watchID) && watched?.hit == true, "shown to the person: the hit is kept")
-        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$98", hint: nil, past: true, confirmed: false, at: now) == false && watched?.hit == true, "still past the line: the hit stays, not said again")
-        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$120", hint: nil, past: false, confirmed: false, at: now) == false && watched?.hit == false, "back over the line")
-        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$90", hint: nil, past: true, confirmed: true, at: now) == true, "crossed again after coming back: said again")
+        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$98", amount: 98, hint: nil, past: true, confirmed: false, at: now) == false && watched?.hit == true, "still past the line: the hit stays, not said again")
+        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$120", amount: 120, hint: nil, past: false, confirmed: false, at: now) == false && watched?.hit == false, "back over the line")
+        expect(NoteHelp.applyLook(&watched, id: watchID, shown: "$90", amount: 90, hint: nil, past: true, confirmed: true, at: now) == true, "crossed again after coming back: said again")
         var pausedWatch = watched
         pausedWatch?.paused = true
         pausedWatch?.id = UUID().uuidString
         let before = pausedWatch
-        expect(NoteHelp.applyLook(&pausedWatch, id: watchID, shown: "$80", hint: nil, past: true, confirmed: true, at: now) == nil && pausedWatch == before,
+        expect(NoteHelp.applyLook(&pausedWatch, id: watchID, shown: "$80", amount: 80, hint: nil, past: true, confirmed: true, at: now) == nil && pausedWatch == before,
                "paused meanwhile (a new id): the look writes nothing (Pause stays)")
         var samePaused = watched
         samePaused?.paused = true
-        expect(NoteHelp.applyLook(&samePaused, id: watchID, shown: "$80", hint: nil, past: true, confirmed: true, at: now) == nil, "paused under the same id: nothing either")
+        expect(NoteHelp.applyLook(&samePaused, id: watchID, shown: "$80", amount: 80, hint: nil, past: true, confirmed: true, at: now) == nil, "paused under the same id: nothing either")
         var stoppedWatch: NoteHelp.Watch? = nil
-        expect(NoteHelp.applyLook(&stoppedWatch, id: watchID, shown: "$80", hint: nil, past: true, confirmed: true, at: now) == nil && stoppedWatch == nil, "stopped meanwhile: nothing comes back")
+        expect(NoteHelp.applyLook(&stoppedWatch, id: watchID, shown: "$80", amount: 80, hint: nil, past: true, confirmed: true, at: now) == nil && stoppedWatch == nil, "stopped meanwhile: nothing comes back")
         // Its place: the one in front, else wait for it (never what happens to be in front).
         var tabPlace = NoteStick(kind: .tab)
         tabPlace.url = "https://shop.example/x"
@@ -569,12 +569,12 @@ struct NoteHelpCheck {
         expect(!NoteHelp.documentShowing(placePath: "/Users/someone/Talk.key", sceneFile: ""), "no document read: not its place")
         var held: NoteHelp.Watch? = NoteHelp.Watch(every: "1d", line: "under $100", mac: "m", at: "09:00")
         held?.id = "W"
-        expect(NoteHelp.applyLook(&held, id: "W", shown: "$95", hint: nil, past: true, confirmed: true, at: now) == true && NoteHelp.told(&held, id: "W") && held?.hit == true, "confirmed and told: a hit")
-        expect(NoteHelp.applyLook(&held, id: "W", shown: "$94", hint: nil, past: true, confirmed: false, at: now) == false && held?.hit == true,
+        expect(NoteHelp.applyLook(&held, id: "W", shown: "$95", amount: 95, hint: nil, past: true, confirmed: true, at: now) == true && NoteHelp.told(&held, id: "W") && held?.hit == true, "confirmed and told: a hit")
+        expect(NoteHelp.applyLook(&held, id: "W", shown: "$94", amount: 94, hint: nil, past: true, confirmed: false, at: now) == false && held?.hit == true,
                "still past the line, nothing confirmed this time: the hit stays (never re-armed)")
-        expect(NoteHelp.applyLook(&held, id: "W", shown: "$93", hint: nil, past: true, confirmed: true, at: now) == false, "still past and confirmed again: not said again")
-        expect(NoteHelp.applyLook(&held, id: "W", shown: "$105", hint: nil, past: false, confirmed: false, at: now) == false && held?.hit == false, "back over the line: cleared")
-        expect(NoteHelp.applyLook(&held, id: "W", shown: "$90", hint: nil, past: true, confirmed: false, at: now) == false && held?.hit == false, "past again but not confirmed: no hit")
+        expect(NoteHelp.applyLook(&held, id: "W", shown: "$93", amount: 93, hint: nil, past: true, confirmed: true, at: now) == false, "still past and confirmed again: not said again")
+        expect(NoteHelp.applyLook(&held, id: "W", shown: "$105", amount: 105, hint: nil, past: false, confirmed: false, at: now) == false && held?.hit == false, "back over the line: cleared")
+        expect(NoteHelp.applyLook(&held, id: "W", shown: "$90", amount: 90, hint: nil, past: true, confirmed: false, at: now) == false && held?.hit == false, "past again but not confirmed: no hit")
         let routeHome = "/Users/someone"
         expect(NoteHelp.followUpTarget(runCheckout: nil, runProvider: "claude", runModel: "", words: "and make it shorter", home: routeHome) == .same, "naming nothing: steers its run")
         expect(NoteHelp.followUpTarget(runCheckout: nil, runProvider: "claude", runModel: "", words: "now ask Codex", home: routeHome) == .newRun,
@@ -913,6 +913,43 @@ struct NoteHelpCheck {
         let chainBrief = NoteHelp.brief(NoteHelp.Told(after: afterShown[0]))
         expect(chainBrief.text.contains("This runs because") && !chainBrief.text.contains("Q7m"), "a chain's done note is named by a title derived after redaction", chainBrief.text)
         expect(NoteHelp.bareHint.text == "Ask Petal something after @Petal", "replies are Shielded words")
+
+        // MARK: Round fifteen: keyword routes never destructive by themselves, exact watcher values, chains' sources
+
+        let routes: [(String, NoteHelp.Request)] = [
+            ("@Petal check whether it's done", .ask("check whether it's done")), ("@Petal don't remove the worktree", .ask("don't remove the worktree")),
+            ("@Petal is it done?", .ask("is it done?")), ("@Petal if it's done, remove the worktree", .ask("if it's done, remove the worktree")),
+            ("@Petal remove the worktree", .done), ("@Petal it's done", .done),
+            ("@Petal stop watching", .stopWatching), ("@Petal don't stop watching", .ask("don't stop watching")),
+            ("@Petal can you stop watching this", .ask("can you stop watching this")), ("@Petal no more morning notes", .stopMorning),
+            ("@Petal put this away", .putAway), ("@Petal don't put this away yet", .ask("don't put this away yet")),
+            ("@Petal pause", .pause), ("@Petal should I pause", .ask("should I pause"))]
+        for (line, want) in routes {
+            let got = NoteHelp.request(line, now: now)
+            expect(got == want, "“\(line)” routes \(want)", "\(got)")
+        }
+        if case .bringBack = NoteHelp.request("@Petal bring this back Friday", now: now) { expect(true, "") } else { expect(false, "a plain bring back") }
+        if case .ask = NoteHelp.request("@Petal should I bring this back Friday?", now: now) { expect(true, "") } else { expect(false, "a question about bringing it back goes to the helper") }
+        if case .forget = NoteHelp.request("@Petal forget that the code isn't 1234", now: now) { expect(true, "") } else { expect(false, "forget is a plain imperative by how it starts") }
+        if case .watch = NoteHelp.request("@Petal check this every morning, tell me if it's under $300", now: now) { expect(true, "") } else { expect(false, "a watcher's own words still make a watcher") }
+        var yen = NoteHelp.Watch(every: "1d", line: "under ¥12,000", mac: "m")
+        yen.id = "Y"
+        var yenWatch: NoteHelp.Watch? = yen
+        expect(NoteHelp.applyLook(&yenWatch, id: "Y", shown: "¥12k", amount: 11_900, hint: nil, past: NoteHelp.crossed(11_900, line: yen.line), confirmed: true, at: now) == true,
+               "¥11,900 crossed under ¥12,000")
+        let roundTrip = NoteFile.parse({ var f = NoteFile(id: "Y1", created: now); f.watch = yenWatch; return f.serialized() }(), fallbackID: "x", fallbackDate: now).watch
+        expect(roundTrip?.amount == 11_900 && roundTrip?.last == "¥12k", "the exact value is kept beside the corner's rounded one")
+        var reread = roundTrip
+        expect(NoteHelp.told(&reread, id: "Y") && reread?.hit == true, "a hit kept on the exact value (the rounded ¥12k would read as not crossed)")
+        expect(NoteHelp.delivered(roundTrip!, amount: 11_900, cornerShowing: true) && !NoteHelp.delivered(roundTrip!, amount: 11_900, cornerShowing: false)
+               && !NoteHelp.delivered(roundTrip!, amount: 11_800, cornerShowing: true), "delivered only once a face with the corner showed that very value")
+        expect(!NoteHelp.mayRead(.closed, notebook: "Diary", asking: "Work") && NoteHelp.mayRead(.closed, notebook: "Diary", asking: "Diary"),
+               "a chain's predecessor in a private notebook is read only from inside it")
+        var chainFacts = NoteHelp.GateFacts()
+        chainFacts.notebook = "Work"; chainFacts.startNotebook = "Work"; chainFacts.provider = "claude"; chainFacts.available = ["claude"]
+        chainFacts.sources = [("R1", "Diary")]
+        chainFacts.privacy = { $0 == "Diary" ? .closed : .open }
+        if case .fail = NoteHelp.admit(chainFacts) { expect(true, "") } else { expect(false, "a predecessor moved into a private notebook: the gate fails the chain's run") }
 
         // MARK: Open all never launches an app or a script (NoteTasks)
 

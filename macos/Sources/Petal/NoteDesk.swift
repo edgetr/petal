@@ -990,6 +990,9 @@ final class NoteDesk {
     /// Whether a paper is on the screen now (its panel revealed, not hidden by going clear).
     func isShowing(_ key: String) -> Bool { panels[key]?.unveiled == true }
 
+    /// Whether a paper is on the screen on a face that shows its watcher's corner (folded or open, not its back).
+    func isShowingCorner(_ key: String) -> Bool { isShowing(key) && (faces[key] ?? .folded) != .back }
+
     /// The pictures on screen: those of papers whose panel is revealed (not hidden by going clear) and open
     /// (NoteShelf.picturesOnScreen), editors and read-only papers alike.
     func picturesOnScreen() -> Set<String> {

@@ -207,7 +207,7 @@ perl -0777 -ne '
 # Every worktree removal goes through the one ownership check (where it belongs, that checkout's, on the saved branch).
 perl -0777 -ne '
     my $removes = () = /"worktree", "remove"/g;
-    unless ($removes == 1 && /let check = Self\.ownedTree\(tree, noteID: noteID, token: RunToken\(\)\)\s*let gone: \(status: Int32, output: String\)\? = if case \.owned\(let path, let checkout\) = check \{ Self\.git\(checkout, \["worktree", "remove", path\]\)/
+    unless ($removes == 1 && /let check = Self\.ownedTree\(tree, noteID: noteID, token: token\)\s*let gone: \(status: Int32, output: String\)\? = if case \.owned\(let path, let checkout\) = check \{ Self\.git\(checkout, \["worktree", "remove", path\], token: token\)/
             && /func verifyTree\(.*?ownedTree\(stored/s) { print "NoteHelpers: every worktree removal goes through ownedTree\n"; exit 1 }
     print "helpers: worktrees removed only once checked to be the note'"'"'s own\n";
 ' Sources/Petal/NoteHelpers.swift
@@ -278,7 +278,7 @@ perl -0777 -ne '
 # kept only once the person was shown it; no ink, no faint word from a look.
 perl -0777 -ne '
     unless (/self\.keepWatch\(noteID\) \{ current in\s*newly\.value = NoteHelp\.applyLook\(/s && /if let ink, !look \{/
-            && /private func tellHit\(.*?self\.desk\?\.isShowing\(key\) == true.*?NoteHelp\.told\(&watch, id: watchID\)/s
+            && /private func tellHit\(.*?NoteHelp\.delivered\(watch, amount: amount.*?NoteHelp\.told\(&watch, id: watchID\)/s
             && !/not confirmed\./ && !/reply\?\["say"\]/) { print "NoteHelpers: a watcher writes only its watch, its hit kept once told\n"; exit 1 }
     print "helpers: a watcher writes only its own watch fields\n";
 ' Sources/Petal/NoteHelpers.swift
@@ -301,6 +301,34 @@ perl -0777 -ne '
         print "NoteHelpers: a reviewer is registered before its AI is checked\n"; exit 1 }
     print "helpers: a reviewer ends through end, its AI checked after it holds its line\n";
 ' Sources/Petal/NoteHelpers.swift
+# Keyword routing never does anything destructive by itself: the routes found by a phrase act only on a plain
+# instruction, and removing a worktree from words asks first (a card, Don't the default); only Remove, or a merged
+# pull request, removes it.
+perl -0777 -ne '
+    my $plain = () = /if plain, /g;
+    unless (/let plain = imperative\(words\)/ && $plain >= 6) { print "NoteHelp: phrase routes act only on a plain instruction\n"; exit 1 }
+    print "helpers: phrase routes act only on plain instructions\n";
+' Sources/Petal/NoteHelp.swift
+perl -0777 -ne '
+    unless (/case \.done where paper\.file\.worktree != nil: askToRemoveWorktree\(paper, asked: trimmed\)/
+            && /private func askToRemoveWorktree\(.*?app\.assist\.ask\("remove:" \+ noteID, "Remove the worktree for .*?warn: true, allow: "Remove".*?guard allowed else \{ return left\(.*?self\.removeWorktree\(paper, why: "you said it.s done", token: token\)/s
+            && /self\.removeWorktree\(paper, why: "its pull request merged"/ && !/request\.kind\.hasPrefix\("remove:"\) \{ stamp/) {
+        print "NoteHelpers: a worktree is removed from words only after Remove on its card\n"; exit 1 }
+    print "helpers: a worktree is removed from words only after Remove\n";
+' Sources/Petal/NoteHelpers.swift
+# A chain's predecessor is a source of its run: checked by its id and current notebook when the chain is made and when
+# it fires, and by the gate before anything goes.
+perl -0777 -ne '
+    unless (/guard mayRead\(first\.notebook, from: target\) else/ && /private func fire\(.*?guard let first = self\.paper\(chain\.after\), mayRead\(first\.notebook, from: paper\) else.*?run\.sources = \[first\.noteID\].*?guard let first = self\.paper\(chain\.after\), self\.mayRead\(first\.notebook, from: now\) else/s) {
+        print "NoteHelpers: a chain checks its predecessor as a source\n"; exit 1 }
+    print "helpers: a chain checks its predecessor as a source\n";
+' Sources/Petal/NoteHelpers.swift
+# A watcher decides on its exact value, shows it on every face with a corner, and is acknowledged only once seen.
+grep -q 'let value = current.amount, crossed(value, line: current.line)' Sources/Petal/NoteHelp.swift \
+    && grep -q 'NoteHelp.delivered(watch, amount: amount, cornerShowing: self.desk?.isShowingCorner(paper.key) == true)' Sources/Petal/NoteHelpers.swift \
+    && perl -0777 -ne 'exit(/private var openBody: some View \{\s*watchCorner/ ? 0 : 1)' Sources/Petal/NoteViews.swift \
+    || { echo "watchers: exact values, the corner on the open paper, delivery once seen"; exit 1; }
+echo "helpers: watchers decide on exact values and are told on any face with the corner"
 # Every reviewer output, its turns on the way included, goes through opinion (output).
 perl -0777 -ne '
     if (/Something said meanwhile.*?\n\s*return\n/s && $& !~ /output\(run,/) { print "NoteHelpers: a reviewer turn must go through output\n"; exit 1 }
