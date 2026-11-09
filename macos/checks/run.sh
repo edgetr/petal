@@ -161,24 +161,47 @@ grep -q 'if let room { BoundedScroll(maxHeight: room) { fields } } else { fields
     && grep -q 'controls: max(controlsHeight, 40)' Sources/Petal/NoteViews.swift \
     || { echo "forms: buttons must stay outside the scroll, and the paper keep their room"; exit 1; }
 echo "forms: fields scroll, buttons stay on the screen"
-# A second opinion is part of its primary run: it carries the primary's ink, and every outcome of it (an answer,
+# A second opinion is part of its primary run: it carries the note's complete ink, and every outcome of it (an answer,
 # objections, a failure, a stop) is added after the primary through one path (output → opinion), never in its place.
 # A reviewer outside a worktree is bound to the note's place like any run.
 perl -0777 -ne '
-    unless (/run\.primary = primary/ && /private func output\(_ run: Run.*?if let primary = run\.primary \{\s*return opinion\(/s
-            && /private func opinion\(.*?NoteHelp\.withOpinion\(/s && /secondOpinion\(paper, holes, after: run, primary: \[ink\]/
+    unless (/run\.carried = carried/ && /private func output\(_ run: Run.*?if let carried = run\.carried \{\s*return opinion\(/s
+            && /private func opinion\(.*?NoteHelp\.withOpinion\(/s && /secondOpinion\(paper, holes, after: run, carried: \[ink\]/
             && /folder: tree, placed: tree == nil\)/ && /where run\.launched && run\.kind\.placed/ && /= run\.kind\.placed \? NoteHelp\.requirement\(/
             && /if run\.kind\.placed \{\s*facts\.document/) { print "NoteHelpers: a second opinion must add to its primary and be bound to its place\n"; exit 1 }
     for my $f (qw(fail stopped)) { unless (/func $f\(.*?\n    \}/s && $& =~ /output\(run,/) { print "NoteHelpers: $f must report through output\n"; exit 1 } }
     print "helpers: second opinions add to their primary, failures included; reviewers bound to their place\n";
 ' Sources/Petal/NoteHelpers.swift
-# An @ line runs once: its receipt (words and position) is checked and kept before anything runs; a bare @Petal is
-# refused before any run is registered, and an empty prompt never reaches an agent.
+# Return runs a line only if the person wrote or edited it (DirtyLines, in memory, nothing stored): checked first;
+# a bare @Petal and a note whose id isn't lasting are refused or waited on before the line is taken or any run
+# registered; control requests are handled on the note before any follow-up routing; an empty prompt never reaches
+# an agent. The editor reports only its own changes, never text from outside.
 perl -0777 -ne '
-    unless (/func returned\(.*?if NoteHelp\.bare\(trimmed\) \{ return hint\(.*?let receipt = NoteHelp\.receipt\(trimmed, occurrence: occurrence\)\s*guard !paper\.file\.answered\.contains\(receipt\) else \{ return \}/s
-            && /func deliver\(.*?guard !prompt\.text\.trimmingCharacters/s) { print "NoteHelpers: receipts and the bare @Petal refusal must come before any run\n"; exit 1 }
-    if (/func returned\(.*?NoteHelp\.bare\(trimmed\)/s && $& =~ /begin\(|ask\(paper/) { print "NoteHelpers: a run begins before a bare @Petal is refused\n"; exit 1 }
-    print "helpers: a line runs once (receipts); a bare \@Petal is refused before a run\n";
+    unless (/func returned\(_ key: String, line: String\) \{.*?guard dirty\.runs\(noteID, trimmed\) else \{ return \}.*?if NoteHelp\.bare\(trimmed\) \{ return hint\(.*?guard NoteShelf\.lasting\(noteID, pending: desk\.store\.pendingIDs\) else \{\s*return desk\.store\.ensureID\(.*?_ = dirty\.take\(noteID, trimmed\).*?if NoteHelp\.isControl\(request\) \{ return control\(.*?NoteHelp\.followUpTarget\(/s
+            && /func deliver\(.*?guard !prompt\.text\.trimmingCharacters/s && /func letGo\(.*?dirty\.again\(/s && /followUps\.add\(told\.ask, note: noteID, token: run\.token, line: trimmed\)/) {
+        print "NoteHelpers: Return must run only dirty lines, after the bare and id checks, with control requests before follow-ups\n"; exit 1 }
+    if (/func returned\(.*?_ = dirty\.take/s && $& =~ /begin\(|ask\(paper|followUps\.add/) { print "NoteHelpers: something runs before the line is taken\n"; exit 1 }
+    if (/\.answered\b|receipt/) { print "NoteHelpers: receipts are gone; nothing about lines is stored\n"; exit 1 }
+    print "helpers: Return runs only lines written or edited (in memory); control requests never become follow-ups\n";
+' Sources/Petal/NoteHelpers.swift
+perl -0777 -ne '
+    unless (/override func shouldChangeText\(inRanges.*?record\(/s && /override func didChangeText\(\) \{.*?NoteHelp\.editedLines\(.*?linesEdited\(lines\)/s
+            && /func replaceFromOutside\(_ text: NSAttributedString\) \{\s*textStorage\?\.setAttributedString\(text\)/) { print "NoteEditor: only the person'"'"'s own edits make a line dirty\n"; exit 1 }
+    print "helpers: the editor marks only the person'"'"'s own edits\n";
+' Sources/Petal/NoteEditor.swift
+if grep -n '"answered"' Sources/Petal/NoteHelp.swift; then echo "NoteHelp: the answered key is gone"; exit 1; fi
+# Quick calls check a named AI and go through the gate when they start; a second opinion in a worktree is checked first.
+perl -0777 -ne '
+    my $quick = () = /guard let provider = quickProviderOrFail\(run\) else \{ return \}/g;
+    my $gated = () = /provider: provider, gate: self\.quickGate\(run\)\)/g;
+    unless ($quick == 2 && $gated == 2 && /func quickGate\(.*?switch self\.admit\(run\)/s && /Self\.verifyTree\(stored, noteID: paper\.noteID, token: run\.token\)/
+            && /NoteHelp\.reviewTreeOK\(/) { print "NoteHelpers: quick calls must check their AI and gate; reviewers their worktree\n"; exit 1 }
+    print "helpers: quick calls check their AI and pass the gate; reviewers check their worktree\n";
+' Sources/Petal/NoteHelpers.swift
+# Every reviewer output, its turns on the way included, goes through opinion (output).
+perl -0777 -ne '
+    if (/Something said meanwhile.*?\n\s*return\n/s && $& !~ /output\(run,/) { print "NoteHelpers: a reviewer turn must go through output\n"; exit 1 }
+    print "helpers: every reviewer output goes through opinion\n";
 ' Sources/Petal/NoteHelpers.swift
 # Helpers read and write a cover only by the cover rule (the file named for it in the notebook's own folder).
 if grep -n 'file\.cover\b' Sources/Petal/NoteHelpers.swift; then echo "NoteHelpers: helpers find covers by name, never by cover: true"; exit 1; fi

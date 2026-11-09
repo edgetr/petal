@@ -681,43 +681,103 @@ struct NoteHelpCheck {
             expect(room >= 60 && (screen < 334 || room + 230 + 44 <= screen), "a form's fields scroll; its buttons stay on the screen (\(screen))", "\(room)")
         }
 
-        // MARK: Round nine: second opinions add to their primary, receipts, the helper cover rule, a bare @Petal
+        // MARK: Round nine and ten: second opinions add to the complete ink, dirty lines, the helper cover rule, a bare @Petal
 
         let primaryInk = NoteHelp.Ink(who: "✦ Petal · Codex", text: "Fixed it.", proof: ["tests pass"], link: "https://github.com/o/r/pull/7", code: true)
         let objectionsInk = NoteHelp.Ink(who: "GPT 6.1 Sol", text: "1. Is the week view covered?", objections: 1)
-        let added = NoteHelp.withOpinion(objectionsInk, held: nil, primary: [primaryInk])
+        let added = NoteHelp.withOpinion(objectionsInk, held: nil, carried: [primaryInk])
         expect(added.count == 2 && added[0] == primaryInk && added[1].opinion && added[1].objections == 1,
                "a second opinion's objections are added after the primary it carries (ink, PR link, proof)", "\(added)")
         let failed = NoteHelp.withOpinion(NoteHelp.Ink(who: "GPT 6.1 Sol", text: "No second opinion: Codex isn't set up in Petal.", link: NoteHelp.settingsLink),
-                                          held: nil, primary: [primaryInk])
+                                          held: nil, carried: [primaryInk])
         expect(failed.count == 2 && failed[0] == primaryInk && failed[1].opinion && failed[1].link == NoteHelp.settingsLink,
                "a second opinion that fails (not set up, sign-in, launch) is added too, never in the primary's place")
         let heldInk = [primaryInk, NoteHelp.Ink(who: "Opus 5.5", text: "1. One more?", objections: 1)]
-        let again = NoteHelp.withOpinion(NoteHelp.Ink(who: "GPT 6.1 Sol", text: "No objections.", objections: 0), held: heldInk, primary: [])
+        let again = NoteHelp.withOpinion(NoteHelp.Ink(who: "GPT 6.1 Sol", text: "No objections.", objections: 0), held: heldInk, carried: [])
         expect(again.count == 3 && again[0] == primaryInk && again[1].who == "Opus 5.5" && again[2].objections == 0,
                "built on the latest held answer: the primary and another reviewer's opinion stay", "\(again)")
-        let redo = NoteHelp.withOpinion(NoteHelp.Ink(who: "Opus 5.5", text: "No objections.", objections: 0), held: heldInk, primary: [])
+        let redo = NoteHelp.withOpinion(NoteHelp.Ink(who: "Opus 5.5", text: "No objections.", objections: 0), held: heldInk, carried: [])
         expect(redo.count == 2 && redo[0] == primaryInk && redo[1].objections == 0, "the same reviewer again replaces only its own opinion")
-        let onlyOpinions = NoteHelp.withOpinion(objectionsInk, held: [NoteHelp.Ink(who: "Opus 5.5", text: "x", objections: 1)], primary: [primaryInk])
-        expect(onlyOpinions.first == primaryInk, "a held answer without the primary: the carried primary is the base")
+        let carriedBoth = NoteHelp.withOpinion(objectionsInk, held: nil, carried: [primaryInk, NoteHelp.Ink(who: "Opus 5.5", text: "1. One more?", objections: 1)])
+        expect(carriedBoth.count == 3 && carriedBoth[0] == primaryInk && carriedBoth[1].who == "Opus 5.5" && carriedBoth[2].who == "GPT 6.1 Sol",
+               "the carried state is the complete ink: the primary and another reviewer's opinion stay", "\(carriedBoth)")
+        let turn = NoteHelp.withOpinion(NoteHelp.Ink(who: "GPT 6.1 Sol", text: "Looking at the week view next."), held: carriedBoth, carried: [])
+        expect(turn.count == 3 && turn[0] == primaryInk && turn[1].who == "Opus 5.5" && turn[2].text.hasPrefix("Looking"),
+               "a reviewer's turn on the way replaces only its own earlier opinion")
         var opinionFile = NoteFile(id: "OP1", created: now)
         opinionFile.ink = failed
         let opinionBack = NoteFile.parse(opinionFile.serialized(), fallbackID: "OP1", fallbackDate: now).ink
         expect(opinionBack == failed, "a failed opinion stays an opinion through the front matter", "\(opinionBack)")
 
+        // Dirty lines: Return runs only what the person wrote or edited (in memory; nothing stored).
         let lineA = "@Petal summarize this page"
-        let rA = NoteHelp.receipt(lineA, occurrence: 0)
-        expect(rA == NoteHelp.receipt("@Petal   summarize this page ", occurrence: 0), "a receipt reads the words, spaces collapsed")
-        expect(rA != NoteHelp.receipt(lineA, occurrence: 1), "two lines alike are two lines (their position)")
-        expect(rA != NoteHelp.receipt("@Petal summarize this page again", occurrence: 0), "editing a line's words makes it new")
-        expect(NoteHelp.occurrence(of: lineA, before: ["intro", lineA, "@Petal other", " @Petal  summarize this page"]) == 2, "its position counts the lines above that read the same")
-        var receipts = NoteFile(id: "RC1", created: now)
-        receipts.answered = [rA]
-        let rB = NoteHelp.receipt("@Petal remember the side door", occurrence: 0)
-        receipts.answered += [rB]
-        let receiptsBack = NoteFile.parse(receipts.serialized(), fallbackID: "RC1", fallbackDate: now)
-        expect(receiptsBack.answered == [rA, rB] && receiptsBack.answered.contains(rA),
-               "after another request is answered, the first line's receipt is still there: Return on it runs nothing again")
+        var lines = NoteHelp.DirtyLines()
+        expect(!lines.runs("N1", lineA), "a line loaded from disk or a sync, never touched: Return doesn't run it")
+        lines.edited("N1", lineA)
+        expect(lines.runs("N1", "@Petal   summarize this page "), "typed in this session: it runs (spaces don't matter)")
+        expect(lines.take("N1", lineA) && !lines.runs("N1", lineA), "Return runs it and marks it clean")
+        lines.edited("N1", "@Petal remember the side door")
+        _ = lines.take("N1", "@Petal remember the side door")
+        expect(!lines.take("N1", lineA), "after another request ran, the first line still doesn't run again")
+        lines.edited("N1", lineA + " ")
+        expect(lines.runs("N1", lineA) == true, "an edit (even a space) makes it run again")
+        _ = lines.take("N1", lineA)
+        lines.again("N1", lineA)
+        expect(lines.runs("N1", lineA), "its run failed, was stopped or refused: dirty again, Return runs it")
+        lines.edited("N1", "just words")
+        expect(!lines.runs("N1", "just words"), "only lines that call a helper are kept")
+        lines.rekey("N1", "N2")
+        expect(lines.runs("N2", lineA) && !lines.runs("N1", lineA), "a note given its own id keeps its dirty lines")
+        expect(NoteHelp.DirtyLines().runs("N2", lineA) == false, "after a restart nothing is dirty")
+        let typedText = "intro\n@Petal summarize this page\nmore"
+        let at = ("intro\n@Petal summarize this pag" as NSString).length
+        expect(NoteHelp.editedLines(after: typedText, location: at, inserted: "e") == ["@Petal summarize this page"], "typing a character touches its line")
+        let returned = "intro\n@Petal summarize this page\n\nmore"
+        let end = ("intro\n@Petal summarize this page" as NSString).length
+        expect(NoteHelp.editedLines(after: returned, location: end, inserted: "\n").isEmpty, "Return at the end of a line touches nothing (no rerun by pressing it)")
+        let split = "intro\n@Petal summarize\n this page"
+        expect(NoteHelp.editedLines(after: split, location: ("intro\n@Petal summarize" as NSString).length, inserted: "\n").count == 2, "Return inside a line edits both halves")
+        let deleted = "intro\n@Petal summarize this pag\nmore"
+        expect(NoteHelp.editedLines(after: deleted, location: at, inserted: "") == ["@Petal summarize this pag"], "a deletion touches its line")
+        var followQueue = FollowUpQueue()
+        let followToken = RunToken()
+        followQueue.add("go on", note: "N1", token: followToken, line: "@Petal and the side door")
+        followQueue.clear(followToken)
+        let dropped = followQueue.takeDropped()
+        expect(dropped.count == 1 && dropped[0].line == "@Petal and the side door", "a follow-up that never ran gives its line back (dirty again)")
+
+        // Control requests are done on the note, also while a helper works: never a follow-up.
+        for (words, control) in [("@Petal stop watching", true), ("@Petal pause", true), ("@Petal remember the side door", true),
+                                 ("@Petal forget the side door", true), ("@Petal bring this back Friday", true), ("@Petal put this away", true),
+                                 ("@Petal stop the morning notes", true), ("@Petal what about the side door?", false), ("@Petal recalculate", false)] {
+            expect(NoteHelp.isControl(NoteHelp.request(words, now: now)) == control, "“\(words)” is \(control ? "" : "not ")a control request")
+        }
+        expect(NoteHelp.request("@Petal pause", now: now) == .pause, "pause is said in words too")
+
+        // Quick calls: a named AI is checked (not set up: fails, never another), and the gate admits it when it starts.
+        expect(NoteHelp.providerChoice(named: .codex, available: ["claude"], chat: "claude") == .missing("Codex"), "a quick call naming Codex without it: not set up")
+        var quickFacts = NoteHelp.GateFacts()
+        quickFacts.provider = "codex"; quickFacts.available = ["claude"]
+        if case .fail = NoteHelp.admit(quickFacts) { expect(true, "") } else { expect(false, "a queued quick call whose AI went away fails when it starts") }
+        quickFacts.available = ["claude", "codex"]
+        expect(NoteHelp.admit(quickFacts) == .go, "its AI there when it starts: it goes")
+
+        // A second opinion in a saved worktree: only where this note's worktree of its saved checkout belongs.
+        let savedTree = NoteHelp.Worktree(path: "/s/Worktrees/" + NoteHelp.worktreeName(checkout: "/u/garden", noteID: "W1"), branch: "petal/fix-w1", checkout: "/u/garden", remote: "origin")
+        expect(NoteHelp.reviewTreeOK(savedTree, resolvedTree: savedTree.path, canonicalCheckout: "/u/garden", noteID: "W1", worktrees: "/s/Worktrees"),
+               "its own worktree, where it belongs: checked with git next")
+        var movedTree = savedTree; movedTree.path = "/tmp/elsewhere"
+        expect(!NoteHelp.reviewTreeOK(movedTree, resolvedTree: movedTree.path, canonicalCheckout: "/u/garden", noteID: "W1", worktrees: "/s/Worktrees"),
+               "a saved path elsewhere is never trusted")
+        expect(!NoteHelp.reviewTreeOK(savedTree, resolvedTree: savedTree.path, canonicalCheckout: "/u/garden", noteID: "W2", worktrees: "/s/Worktrees"),
+               "another note's worktree is never this one's")
+        var branchless = savedTree; branchless.branch = ""
+        expect(!NoteHelp.reviewTreeOK(branchless, resolvedTree: branchless.path, canonicalCheckout: "/u/garden", noteID: "W1", worktrees: "/s/Worktrees"),
+               "no stored branch: not reviewed")
+
+        // A note's id must be lasting before a helper's run is registered for it.
+        expect(!NoteShelf.lasting("file:/n/Trips/Plan.md", pending: []) && !NoteShelf.lasting("ID-1", pending: ["ID-1"]) && NoteShelf.lasting("ID-1", pending: []),
+               "a hand-written note, or one whose id is still being written, waits for its id to land")
 
         let coverHere = NoteHelp.CoverCandidate(key: "/n/Trips/About this notebook.md", name: "About this notebook.md", inFolder: true)
         let flagged = NoteHelp.CoverCandidate(key: "/n/Trips/Plan.md", name: "Plan.md", inFolder: true)

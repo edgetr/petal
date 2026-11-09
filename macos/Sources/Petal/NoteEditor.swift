@@ -846,7 +846,11 @@ final class NoteTextView: NSTextView {
     var changed: () -> Void = {}
     /// Helpers (NoteHelpers): Return at the end of a line that calls one runs it; the names the @ menu offers and
     /// chips bind to; the notebook's color the mentions are drawn in. The @ menu and the chips' state.
-    var helperReturn: (String, Int) -> Void = { _, _ in }
+    var helperReturn: (String) -> Void = { _ in }
+    /// The lines the person typed or edited (only they run on Return: NoteHelp.DirtyLines), never text from outside.
+    var linesEdited: ([String]) -> Void = { _ in }
+    /// The changes about to be made (where, in the text after them, and what's inserted), read in `didChangeText`.
+    private var pendingEdits: [(location: Int, inserted: String)] = []
     var mentionNames: () -> (notes: [String], notebooks: [String], place: String) = { ([], [], "") }
     var tint = NoteInk.RGB(r: 0, g: 0.48, b: 1)
     let mentions = MentionState()
@@ -880,8 +884,35 @@ final class NoteTextView: NSTextView {
         MainActor.assumeIsolated { NotePictures.shared.editorChanged() }
     }
 
+    /// What the person changes (typing, pasting, deleting, undoing) is recorded before it's made; text from outside
+    /// (`replaceFromOutside`) never comes through here.
+    override func shouldChangeText(inRanges affectedRanges: [NSValue], replacementStrings: [String]?) -> Bool {
+        let allowed = super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
+        if allowed, let replacementStrings { record(affectedRanges.map(\.rangeValue), replacementStrings) }
+        return allowed
+    }
+
+    override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        let before = pendingEdits.count
+        let allowed = super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
+        if allowed, pendingEdits.count == before, let replacementString { record([affectedCharRange], [replacementString]) }
+        return allowed
+    }
+
+    private func record(_ ranges: [NSRange], _ strings: [String]) {
+        var delta = 0
+        for (range, text) in zip(ranges, strings).sorted(by: { $0.0.location < $1.0.location }) {
+            pendingEdits.append((range.location + delta, text))
+            delta += (text as NSString).length - range.length
+        }
+    }
+
     /// Typed, pasted, undone: the pictures it contains may have changed (the holding rule weighs them again).
     override func didChangeText() {
+        let text = string
+        let lines = pendingEdits.flatMap { NoteHelp.editedLines(after: text, location: $0.location, inserted: $0.inserted) }
+        pendingEdits = []
+        if !lines.isEmpty { linesEdited(lines) }
         super.didChangeText()
         MainActor.assumeIsolated {
             NotePictures.shared.editorChanged()
@@ -1078,7 +1109,7 @@ final class NoteTextView: NSTextView {
             if let calling {
                 flushNow()
                 let ask = helperReturn
-                DispatchQueue.main.async { ask(calling.words, calling.occurrence) }
+                DispatchQueue.main.async { ask(calling) }
             }
         }
         let kind = lineKind
@@ -1380,7 +1411,9 @@ struct NoteEditorView: NSViewRepresentable {
     /// Pictures pasted as bytes (a copy from a note): taken by the screenshot paste's path.
     var acceptPictures: ([(ext: String, data: Data, caption: String)]) -> [(path: String, file: URL, caption: String)]? = { _ in nil }
     /// Return at the end of a line that calls a helper (@Petal): the line.
-    var helperReturn: (String, Int) -> Void = { _, _ in }
+    var helperReturn: (String) -> Void = { _ in }
+    /// The lines the person typed or edited (NoteTextView.linesEdited).
+    var linesEdited: ([String]) -> Void = { _ in }
     /// What the @ menu offers and the chips bind to.
     var names: () -> (notes: [String], notebooks: [String], place: String) = { ([], [], "") }
     var accent: NSColor = .controlAccentColor
@@ -1536,6 +1569,7 @@ struct NoteEditorView: NSViewRepresentable {
         }
         text.say = say
         text.helperReturn = helperReturn
+        text.linesEdited = linesEdited
         text.mentionNames = names
         text.tint = tint
         text.flushNow = { [weak coordinator, weak text] in
@@ -1567,6 +1601,7 @@ struct NoteEditorView: NSViewRepresentable {
         text.noteFolder = paper.url.deletingLastPathComponent()
         text.escape = escape
         text.helperReturn = helperReturn
+        text.linesEdited = linesEdited
         text.mentionNames = names
         text.tint = tint
         let coordinator = context.coordinator

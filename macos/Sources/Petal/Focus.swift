@@ -4,7 +4,8 @@ import AppKit
 /// Haiku; Codex at low effort): one at a time, answers cached.
 @MainActor
 final class Brain {
-    private var queue: [(prompt: String, key: String, token: RunToken?, done: ([String: Any]?) -> Void)] = []
+    private typealias Job = (prompt: String, key: String, token: RunToken?, provider: Provider?, gate: (() -> Bool)?, done: ([String: Any]?) -> Void)
+    private var queue: [Job] = []
     private var busy = false
     private var cache: [String: [String: Any]] = [:]
 
@@ -76,14 +77,17 @@ final class Brain {
     /// One quick JSON call (answers cached by `key`).
     func ask(_ prompt: String, key: String, done: @escaping ([String: Any]?) -> Void) {
         if let cached = cache[key] { return done(cached) }
-        queue.append((prompt, key, nil, done))
+        queue.append((prompt, key, nil, nil, nil, done))
         next()
     }
 
     /// A note helper's quick call: only words NoteShield made, admitted only while its run runs (paused, it waits
     /// in the queue, and a call under way is ended and kept for Go on; stopped, it's dropped and its process ended).
-    func ask(_ prompt: Shielded, key: String, token: RunToken, done: @escaping ([String: Any]?) -> Void) {
-        queue.append((prompt.text, key, token, done))
+    /// `provider`: the AI the person named (validated by the helper), else the chat's. `gate`: the helper's admission,
+    /// asked right when the call would start (false: it waits, or its run already failed).
+    func ask(_ prompt: Shielded, key: String, token: RunToken, provider: Provider? = nil, gate: (() -> Bool)? = nil,
+             done: @escaping ([String: Any]?) -> Void) {
+        queue.append((prompt.text, key, token, provider, gate, done))
         next()
     }
 
@@ -94,26 +98,38 @@ final class Brain {
         guard !busy, !queue.isEmpty else { return }
         // No AI chosen (all of them turned off): everyone waiting hears nothing, so a routine waiting on an answer
         // moves on. One chosen but not found yet (at launch) is waited for.
-        guard let provider = PetalApp.shared.chatProvider else {
+        guard let chat = PetalApp.shared.chatProvider else {
             let waiting = queue
             queue = []
             for job in waiting { job.done(nil) }
             return
         }
-        guard let path = PetalApp.shared.paths[provider] else { return }
+        guard PetalApp.shared.paths[chat] != nil else { return }
         // On an API key with none saved, nothing is asked (and nothing falls back to the subscription).
-        guard PetalApp.shared.aiReady(provider) else {
+        guard PetalApp.shared.aiReady(chat) else {
             let waiting = queue
             queue = []
             for job in waiting { job.done(nil) }
             return
         }
-        // Calls of stopped runs go; calls of paused runs wait where they are; the first admitted goes now.
-        for job in queue where job.token.map({ $0.state == .cancelled || $0.state == .finished }) == true { job.done(nil) }
-        queue.removeAll { $0.token.map { $0.state == .cancelled || $0.state == .finished } == true }
-        guard let index = queue.firstIndex(where: { $0.token?.admits ?? true }) else { return }
-        busy = true
+        // Calls of stopped runs go; calls of paused runs wait where they are; the first admitted goes now, a helper's
+        // only once its gate admits it right then (a run that fails there is dropped on the next pass).
+        let over = { (job: Job) in job.token.map { $0.state == .cancelled || $0.state == .finished } == true }
+        for job in queue where over(job) { job.done(nil) }
+        queue.removeAll(where: over)
+        guard let index = queue.firstIndex(where: { ($0.token?.admits ?? true) && ($0.gate?() ?? true) }) else {
+            // A gate that failed its run: that call goes now.
+            if queue.contains(where: over) { next() }
+            return
+        }
         let job = queue.remove(at: index)
+        // The AI the person named for it (the helper checked it's set up), else the chat's.
+        let provider = job.provider ?? chat
+        guard let path = PetalApp.shared.paths[provider], PetalApp.shared.aiReady(provider) else {
+            job.done(nil)
+            return next()
+        }
+        busy = true
         let environment = PetalApp.shared.aiEnvironment(provider)
         let api = PetalApp.shared.usesAPIKey(provider)
         var arguments = provider.quickArguments

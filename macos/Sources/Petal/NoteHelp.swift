@@ -217,12 +217,6 @@ extension NoteFile {
         set { set("chain", newValue?.value) }
     }
 
-    /// `answered:`: the receipts of the @ lines already taken (NoteHelp.receipt): Return on one runs nothing again.
-    var answered: [String] {
-        get { value("answered")?.items.compactMap(\.string) ?? [] }
-        set { set("answered", newValue.isEmpty ? nil : .list(newValue.suffix(NoteHelp.receiptsKept).map { .text($0) })) }
-    }
-
     /// A cover's `morning:` (when, in words: "8:00") and the Mac that leaves the note (`morningMac`).
     var morning: (time: String, mac: String)? {
         get { value("morning")?.string.flatMap { $0.isEmpty ? nil : ($0, value("morningMac")?.string ?? "") } }
@@ -237,7 +231,6 @@ extension NoteFile {
 
 enum NoteHelp {
     static let stepsKept = 40
-    static let receiptsKept = 200
     /// An ink's link that is Settings › AI (a key or a sign-in to fix), not an address.
     static let settingsLink = "petal:settings/ai"
     static let historyKept = 5
@@ -662,23 +655,67 @@ enum NoteHelp {
         }
     }
 
-    // MARK: Receipts: a line runs once
+    // MARK: Dirty lines: Return runs only what the person wrote or edited
 
-    /// A line as its receipt reads it: its words, spaces collapsed (editing its words makes it another line).
+    /// A line as the dirty set knows it: its words, picture and card marks out, spaces collapsed.
     static func normalizedLine(_ line: String) -> String {
         line.replacingOccurrences(of: "\u{FFFC}", with: "").split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
-    /// Its position in the note: how many lines before it read the same (two alike are two lines).
-    static func occurrence(of line: String, before lines: [String]) -> Int {
-        let words = normalizedLine(line)
-        return lines.filter { normalizedLine($0) == words }.count
+    /// The lines one change in an editor touched, read from the text after it (`location` and the inserted text's
+    /// length in UTF-16, as NSString counts): every line the inserted text (or a deletion's spot) is on. A Return at
+    /// the very end of a line touches nothing (it only makes a new line).
+    static func editedLines(after text: String, location: Int, inserted: String) -> [String] {
+        let ns = text as NSString
+        let length = (inserted as NSString).length
+        guard location >= 0, location + length <= ns.length else { return [] }
+        if inserted == "\n" {
+            let next = location + 1
+            if next >= ns.length || ns.character(at: next) == 10 { return [] }
+        }
+        // One character past what's inserted: a line split by it counts on both sides.
+        let range = ns.lineRange(for: NSRange(location: location, length: min(length + 1, ns.length - location)))
+        return ns.substring(with: range).components(separatedBy: "\n").filter { !$0.isEmpty }
     }
 
-    /// An @ line's receipt: a hash of its words and its position. Kept in the note's `answered` once the line is
-    /// taken; a line runs only when its receipt isn't there. A run that failed or was stopped lets its line go.
-    static func receipt(_ line: String, occurrence: Int) -> String {
-        hash8(normalizedLine(line) + "\u{1F}" + String(occurrence))
+    /// Which @ lines may run on Return, in memory only (nothing is stored, so a restart makes every line clean):
+    /// those the person typed or edited since Petal opened, or since that line last ran. Return on one runs it and
+    /// marks it clean; one whose run failed, was stopped, was refused or whose follow-up never ran is dirty again.
+    struct DirtyLines {
+        private(set) var lines: [String: Set<String>] = [:]
+
+        /// The person typed or edited `line` in the note `note` (only lines that call a helper count).
+        mutating func edited(_ note: String, _ line: String) {
+            guard calls(line) else { return }
+            lines[note, default: []].insert(normalizedLine(line))
+        }
+
+        func runs(_ note: String, _ line: String) -> Bool { lines[note]?.contains(normalizedLine(line)) == true }
+
+        /// Return on it: it runs (true) and is clean now; an untouched line doesn't (false).
+        mutating func take(_ note: String, _ line: String) -> Bool {
+            lines[note]?.remove(normalizedLine(line)) != nil
+        }
+
+        /// Its run failed, was stopped or refused, or its follow-up never ran: Return runs it again.
+        mutating func again(_ note: String, _ line: String) {
+            guard !line.isEmpty else { return }
+            lines[note, default: []].insert(normalizedLine(line))
+        }
+
+        /// A note given its own id: its dirty lines go with it.
+        mutating func rekey(_ old: String, _ new: String) {
+            guard old != new, let moved = lines.removeValue(forKey: old) else { return }
+            lines[new, default: []].formUnion(moved)
+        }
+    }
+
+    /// Requests handled on the note at once, never sent to a helper at work as a follow-up.
+    static func isControl(_ request: Request) -> Bool {
+        switch request {
+        case .stopWatching, .stopMorning, .pause, .remember, .forget, .bringBack, .putAway: true
+        default: false
+        }
     }
 
     /// Return on a bare @Petal: nothing asked (refused before any run is registered, with a faint hint).
@@ -876,6 +913,8 @@ enum NoteHelp {
         case morning(String)
         /// "stop the mornings", "stop watching".
         case stopMorning, stopWatching
+        /// "pause": the helper at work (or the watcher) pauses.
+        case pause
         /// "it's done", "remove the worktree": a coding helper's worktree goes.
         case done
         /// Anything else: the helper does it (with Petal's tools, or in the person's checkout).
@@ -900,6 +939,7 @@ enum NoteHelp {
         if lower.contains("put this away") || lower.contains("put it away") || lower.hasPrefix("put away") { return .putAway }
         if (lower.contains("stop") || lower.contains("no more")) && lower.contains("morning") { return .stopMorning }
         if lower.contains("stop watching") || lower.contains("stop checking") { return .stopWatching }
+        if ["pause", "pause it", "pause this", "pause that", "pause it for now", "hold on"].contains(lower.trimmingCharacters(in: .punctuationCharacters)) { return .pause }
         if ["it's done", "it is done", "we're done", "all done", "remove the worktree", "clean up the worktree", "done with this"].contains(where: lower.contains) { return .done }
         if lower.contains("recalculate") || lower.contains("keep this calculated") || lower.contains("keep it calculated") || lower.contains("keep the total") {
             return .recalculate
@@ -1716,19 +1756,32 @@ extension NoteHelp {
 /// that token is still the note's run's and running; Stop clears its run's, so nothing said to a stopped run is ever
 /// sent in a later one.
 struct FollowUpQueue {
-    private(set) var entries: [(note: String, token: RunToken, text: Shielded)] = []
+    private(set) var entries: [(note: String, token: RunToken, text: Shielded, line: String)] = []
+    /// Lines whose follow-up was dropped without being sent (their run ended): dirty again (DirtyLines.again).
+    private(set) var dropped: [(note: String, line: String)] = []
 
-    mutating func add(_ text: Shielded, note: String, token: RunToken) { entries.append((note, token, text)) }
+    mutating func add(_ text: Shielded, note: String, token: RunToken, line: String = "") { entries.append((note, token, text, line)) }
 
     /// The next follow-up for `note` its current run may send; entries of any other token are dropped.
     mutating func next(note: String, current: RunToken?) -> Shielded? {
-        entries.removeAll { $0.note == note && ($0.token !== current || !$0.token.admits) }
+        drop { $0.note == note && ($0.token !== current || !$0.token.admits) }
         guard let index = entries.firstIndex(where: { $0.note == note }) else { return nil }
         return entries.remove(at: index).text
     }
 
-    /// A run stopped: everything said to it goes.
-    mutating func clear(_ token: RunToken) { entries.removeAll { $0.token === token } }
+    /// A run ended: everything said to it goes, never sent.
+    mutating func clear(_ token: RunToken) { drop { $0.token === token } }
+
+    /// The lines dropped since last asked, taken.
+    mutating func takeDropped() -> [(note: String, line: String)] {
+        defer { dropped = [] }
+        return dropped
+    }
+
+    private mutating func drop(_ which: ((note: String, token: RunToken, text: Shielded, line: String)) -> Bool) {
+        dropped += entries.filter(which).filter { !$0.line.isEmpty }.map { ($0.note, $0.line) }
+        entries.removeAll(where: which)
+    }
 
     func count(note: String) -> Int { entries.filter { $0.note == note }.count }
 }
@@ -1941,14 +1994,27 @@ extension NoteHelp {
     enum AnswerTarget: Equatable { case write, hold }
     static func answerTarget(papers: Int, readOnly: Bool) -> AnswerTarget { papers == 1 && !readOnly ? .write : .hold }
 
-    /// A second opinion is part of its primary run: its outcome (objections, an answer, or a failure) is added after
-    /// the primary's ink, never in its place. Built on the latest held answer's ink when there is one, else on the
-    /// primary the run carries (its ink, PR link and proof); an earlier opinion of the same reviewer is replaced.
-    static func withOpinion(_ ink: Ink, held: [Ink]?, primary: [Ink]) -> [Ink] {
+    /// A second opinion is part of its primary run: its outcome (objections, an answer, a turn of it, or a
+    /// failure) is added to the note's complete latest ink (the primary answer, with its PR link and proof, and every
+    /// opinion), replacing only an earlier opinion of the same reviewer. Built on the latest held answer when there
+    /// is one, else on the complete ink the run carries.
+    static func withOpinion(_ ink: Ink, held: [Ink]?, carried: [Ink]) -> [Ink] {
         var added = ink
         added.opinion = true
-        let base = held.flatMap { $0.contains { !$0.opinion } ? $0 : nil } ?? primary
+        let base = held ?? carried
         return base.filter { !($0.opinion && $0.who == ink.who) } + [added]
+    }
+
+    /// Where a note's worktree must be: Petal's own folder of worktrees, named for the checkout and the note.
+    static func expectedTree(checkout canonical: String, noteID: String, worktrees: String) -> String {
+        standard(worktrees) + "/" + worktreeName(checkout: canonical, noteID: noteID)
+    }
+
+    /// A second opinion works in a note's saved worktree only when it's where this note's worktree of its saved
+    /// checkout belongs, with a checkout and branch saved (git then confirms it's that checkout's, on that branch).
+    static func reviewTreeOK(_ stored: Worktree, resolvedTree: String, canonicalCheckout: String, noteID: String, worktrees: String) -> Bool {
+        !stored.checkout.isEmpty && !stored.branch.isEmpty
+            && standard(resolvedTree) == expectedTree(checkout: canonicalCheckout, noteID: noteID, worktrees: worktrees)
     }
 
     /// The cover helpers read and write, by the same rule as privacy: a file named "About this notebook*.md" in the
