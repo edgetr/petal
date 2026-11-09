@@ -78,8 +78,6 @@ final class NoteHelpers {
         /// The AI and model it runs on: a follow-up naming another starts its own run.
         var provider = ""
         var model = ""
-        /// A file helper's document: its place is good only while that file is the one showing.
-        var document: String?
         /// What the admission gate re-derives against, held on the run (independent of `here`): the notebook the
         /// note was in when it began, the place it must be on, the source notes it compares against.
         var startNotebook = ""
@@ -1271,11 +1269,14 @@ final class NoteHelpers {
         let bundle = front.bundleIdentifier ?? ""
         let pid = front.processIdentifier
         let file = desk?.scene?.file ?? ""
+        // The file as the disk knows it, read with the scene (its incarnation and a bookmark): what Open all finds again.
+        let fileID = desk?.scene?.fileID ?? ""
+        let fileBookmark = desk?.scene?.fileBookmark ?? ""
         let token = run.token
         NoteDesk.queue.async {
             guard token.admits else { return }
             var items = Self.windowTabs(bundle).map { NoteHelp.TaskItem(kind: .tab, title: $0.title, target: $0.url) }
-            if !file.isEmpty { items.append(NoteHelp.TaskItem(kind: .file, title: (file as NSString).lastPathComponent, target: file)) }
+            if !file.isEmpty { items.append(NoteHelp.TaskItem(kind: .file, title: (file as NSString).lastPathComponent, target: file, bookmark: fileBookmark, fileID: fileID)) }
             if bundle == "com.apple.mail", let mail = Self.selectedMail() { items.append(NoteHelp.TaskItem(kind: .mail, title: mail.subject, target: mail.url)) }
             if items.isEmpty, let title = Self.windowTitle(pid), !title.isEmpty { items.append(NoteHelp.TaskItem(kind: .window, title: title, target: bundle)) }
             DispatchQueue.main.async {
@@ -1319,7 +1320,7 @@ final class NoteHelpers {
     /// from sync or a tool).
     func openAll(_ key: String) {
         guard let paper = store?.paper(key) else { return }
-        NoteTasks.openAll(paper.file.task)
+        NoteTasks.openAll(paper.file.task, mac: mac, follow: { ViewerLoader.follow($0) })
     }
 
     // MARK: Helpers that think: the chat AI, or the person's own coding AI
@@ -1336,14 +1337,16 @@ final class NoteHelpers {
             guard let self, let paper = self.paper(paper.noteID) else { return }
             self.ask(paper, text, asked: asked, compare: compare)
         }
-        let stick = desk?.here[paper.key].flatMap { paper.file.places.indices.contains($0) ? paper.file.places[$0] : nil } ?? paper.file.places.first
+        let stick = here(paper).flatMap { paper.file.places.indices.contains($0) ? paper.file.places[$0] : nil } ?? paper.file.places.first
         if compare == nil, let stick, let repo = NoteHelp.repository(url: stick.url) {
             return code(run, paper, text, slug: repo.slug, number: NoteHelp.pullNumber(repo), file: nil, pick: pick)
         }
-        if compare == nil, let stick, stick.kind == .file || stick.kind == .passage, !stick.path.isEmpty {
-            // The file's real git repository, as AgentAccess resolves a project: the nearest one above it, a linked
-            // worktree's main checkout only when git made it one (so a file under a T3 worktree of ~/petal is ~/petal's).
-            return Self.repository(holding: stick.path) { found in
+        if compare == nil, let stick, ViewerFiles.namesFile(stick) {
+            // The file the place names now, by the one file resolver (its own file wherever it went, else its
+            // bookmark's, else its path's), and that file's real git repository, as AgentAccess resolves a project:
+            // the nearest one above it, a linked worktree's main checkout only when git made it one (so a file under
+            // a T3 worktree of ~/petal is ~/petal's).
+            return Self.repository(holding: stick, mac: mac) { found in
                 guard self.live(run) else { return }
                 if let found {
                     self.code(run, paper, text, slug: nil, number: nil, file: found, pick: pick)
@@ -1373,7 +1376,7 @@ final class NoteHelpers {
             raw.after = run.after.flatMap(readable) ?? ""
             raw.sourceBook = compare?.book ?? ""
             raw.sources = (compare?.ids ?? []).compactMap(readable)
-            if case .placed(let index) = NoteHelp.anchor(paper.file.places, here: self.desk?.here[paper.key]) {
+            if case .placed(let index) = NoteHelp.anchor(paper.file.places, here: self.here(paper)) {
                 raw.place = paper.file.places[index]
                 raw.placePrivate = self.app.assist.neverLook(paper.file.places[index].app)
             }
@@ -1393,29 +1396,49 @@ final class NoteHelpers {
         }
     }
 
-    /// The run's requirement (place, document) and its agent's tool target, set together from the note's places and
-    /// what's in front now (NoteHelp.requirement); what it read or queued for an old target is dropped.
+    /// Which of a note's places it's on now: its place on the file Petal's viewer shows, while the viewer has the
+    /// keyboard and the note is on that file (it's the current place then, as for the note tools: NoteDesk.hereNow);
+    /// else the one that fits the window in front (`here`).
+    private func here(_ paper: PaperNote) -> Int? {
+        if let place = app.viewers.front?.notes.first(where: { $0.paper.key == paper.key })?.place,
+           let index = paper.file.places.firstIndex(where: { $0.samePlace(place) }) { return index }
+        return desk?.here[paper.key]
+    }
+
+    /// The run's requirement (the place it must be on) and its agent's tool target, set together from the note's
+    /// places and what's in front now (NoteHelp.requirement); what it read or queued for an old target is dropped. A
+    /// place is the same only by `samePlace` (a file's: the same file as the one file resolver knows it, never a path
+    /// that reads alike).
     private func bind(_ run: Run, _ paper: PaperNote) {
         guard runs[run.noteID] === run, let sticky = run.sticky else { return }
-        let requirement: (place: NoteStick?, document: String?) = run.kind.placed ? NoteHelp.requirement(paper.file.places, here: desk?.here[paper.key]) : (nil, nil)
-        let moved = !(run.requiredPlace.map { old in requirement.place.map { old.samePlace($0) } ?? false } ?? (requirement.place == nil))
-            || run.document != requirement.document
-        run.requiredPlace = requirement.place
-        run.document = requirement.document
+        let required = run.kind.placed ? NoteHelp.requirement(paper.file.places, here: here(paper)) : nil
+        let moved = !(run.requiredPlace.map { old in required.map { old.samePlace($0) } ?? false } ?? (required == nil))
+        run.requiredPlace = required
         let showing = requirementShowing(run)
-        let target = showing && requirement.place != nil ? place(of: paper) : nil
-        let waiting = !showing && requirement.place != nil
+        let target = showing ? required.flatMap { place(of: paper, on: $0) } : nil
+        let waiting = !showing && required != nil
         guard moved || sticky.agent.place != target || sticky.waitingForPlace != waiting else { return }
         sticky.agent.place = target
         sticky.waitingForPlace = waiting
         app.assist.computer.placeChanged(sticky.id.uuidString)
     }
 
-    /// Whether the run's required place (and file) is the one showing now: from the run's own requirement, never `here`.
+    /// Whether the run's required place is the one showing now: from the run's own requirement, never `here`. A
+    /// file's place (or a sentence in a file) by the one file resolver's answer for the window in front
+    /// (`NoteMatch.fits`: the very file by its `fileID`, a file renamed is it, a path another file took isn't), or as
+    /// the file Petal's viewer shows while it has the keyboard (its margin's notes, resolved the same way).
     private func requirementShowing(_ run: Run) -> Bool {
-        if let document = run.document { return NoteHelp.documentShowing(placePath: document, sceneFile: desk?.scene?.file ?? "") }
         guard let required = run.requiredPlace else { return true }
+        if let shown = app.viewers.front?.notes.first(where: { $0.paper.noteID == run.noteID && $0.paper.version == nil })?.place, shown.samePlace(required) { return true }
         return desk?.scene.map { NoteMatch.fits(required, $0) } ?? false
+    }
+
+    /// Petal's viewer took or gave up the keyboard, or the notes on its file changed: a helper's place is what it
+    /// shows now (bound again, and what waited for it goes on).
+    func viewerChanged() {
+        guard !runs.isEmpty else { return }
+        placesFollow()
+        placedNow()
     }
 
     /// Layout placed notes: a run waiting for its note's place goes on once its note is on the window in front.
@@ -1565,9 +1588,12 @@ final class NoteHelpers {
 
     /// Where the note is now, as its helper's tools see it (NotePlace): the window in front when the note is on it,
     /// its tab, or all of its app; nil when it isn't placed on a window now.
-    private func place(of paper: PaperNote) -> NotePlace? {
+    /// `required`: the run's own place; the window in front is its tools' target only as that very place (in Petal's
+    /// viewer, or on another of the note's places, there's none: its tools then say what they look at).
+    private func place(of paper: PaperNote, on required: NoteStick) -> NotePlace? {
         guard let desk, let scene = desk.scene, let index = desk.here[paper.key], paper.file.places.indices.contains(index) else { return nil }
         let stick = paper.file.places[index]
+        guard stick.samePlace(required), NoteMatch.fits(required, scene) else { return nil }
         let scope: NoteScope = stick.kind == .app ? .app : (stick.kind == .tab || stick.kind == .passage) && scene.tab != nil ? .tab : .window
         let name = NSRunningApplication(processIdentifier: scene.pid)?.localizedName ?? stick.appName
         return NotePlace(pid: scene.pid, app: scene.app, appName: name, window: scene.window, title: scene.title,
@@ -1590,7 +1616,7 @@ final class NoteHelpers {
         run.sticky = sticky
         run.launch = launch
         // Its requirement and its tools' target, bound together (and again on every re-stick, `placesFollow`).
-        if launch.placed { bind(run, paper) } else { run.requiredPlace = nil; run.document = nil; agent.place = nil }
+        if launch.placed { bind(run, paper) } else { run.requiredPlace = nil; agent.place = nil }
         // Its process starts only through the gate, too.
         agent.gate = { [weak self, weak run] in
             guard let self, let run else { return .fail("This helper isn't running any more.") }
@@ -1634,14 +1660,11 @@ final class NoteHelpers {
         facts.builtPrivacy = run.privacy
         facts.nowPrivacy = ClaudePanel.privacy.now
         facts.placePrivate = run.requiredPlace.map { app.assist.neverLook($0.app) } ?? false
-        if run.kind.placed {
-            facts.document = run.document
-            facts.sceneFile = desk?.scene?.file ?? ""
-            if let required = run.requiredPlace, run.document == nil {
-                // That it's waiting for a place, never its name (only what's shielded is ever said).
-                facts.place = required.kind.rawValue
-                facts.placeShowing = requirementShowing(run)
-            }
+        if run.kind.placed, let required = run.requiredPlace {
+            // That it's waiting for a place (or a file), never its name (only what's shielded is ever said).
+            facts.place = required.kind.rawValue
+            facts.placeIsFile = ViewerFiles.namesFile(required)
+            facts.placeShowing = requirementShowing(run)
         }
         return NoteHelp.admit(facts)
     }
@@ -2339,11 +2362,13 @@ final class NoteHelpers {
     /// The git repository a file is really in, as AgentAccess resolves a project (`AgentAccess.repository`: the
     /// nearest one above it, a linked worktree's main checkout only when git made it one), with its remotes from its
     /// own .git/config; only one in the home folder. Off the main thread, no git run.
-    static func repository(holding file: String, _ done: @escaping @MainActor ((path: String, remotes: [(name: String, url: String)])?) -> Void) {
+    static func repository(holding stick: NoteStick, mac: String, _ done: @escaping @MainActor ((path: String, remotes: [(name: String, url: String)])?) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
-            let folder = (URL(fileURLWithPath: file).resolvingSymlinksInPath().path as NSString).deletingLastPathComponent
+            // Where the place's file is now (ViewerFiles: its own file by its `fileID`, then its bookmark, then its path).
+            let file = ViewerFiles.locate(stick, mac: mac, follow: ViewerLoader.follow)?.path
+            let folder = file.map { (URL(fileURLWithPath: $0).resolvingSymlinksInPath().path as NSString).deletingLastPathComponent }
             var found: (path: String, remotes: [(name: String, url: String)])?
-            if let repository = AgentAccess.repository(folder, files: AgentCallers.disk), NoteHelp.inHome(repository, home: NSHomeDirectory()),
+            if let folder, let repository = AgentAccess.repository(folder, files: AgentCallers.disk), NoteHelp.inHome(repository, home: NSHomeDirectory()),
                let config = try? String(contentsOf: URL(fileURLWithPath: repository).appending(path: ".git/config"), encoding: .utf8) {
                 found = (NoteHelp.standard(repository), NoteHelp.remotes(config: config))
             }

@@ -69,7 +69,7 @@ Use, in this order:
   to a GitHub repository, or a file in a checkout, gets their own Claude Code or Codex in a git worktree of their
   checkout), writes its answer as ink on the note's front and its steps and stamps (what was allowed; tapping one takes
   it back) on the back. Said in words: "bring this back Friday" (`back:`), "remember …"/"forget …" (the cover's
-  "Petal remembers" lines), "put this away" (`task:`, Open all), "check this every morning, tell me under $300"
+  "Petal remembers" lines), "put this away" (`task:`, Open all; a file's part keeps its `fileID` and `bookmark`), "check this every morning, tell me under $300"
   (`watch:`, on one Mac), "make this recalculate" (`calc:`), "when @A is done, draft @B" (`chain:`), "check this
   against @Notebook", "leave me a note every morning" (the cover's `morning:`). Models are named in words ("use Opus
   5.5 … have GPT 6.1 Sol look for holes"). A Private notebook (`private: true` on its cover) is read only by a note

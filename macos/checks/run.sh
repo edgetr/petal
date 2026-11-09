@@ -36,7 +36,7 @@ swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sour
 # chain) read back exactly, times and models in words, prices on a page, a notebook's memory, plain arithmetic,
 # chained notes' loops and the person's checkouts (no window, no AI), and Open all never launching an app or a script
 # (NoteTasks: real files, a link and a Finder alias in a throwaway folder in the temporary folder; nothing is opened).
-swiftc -parse-as-library -O -o "$out/notehelp" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteTasks.swift checks/NoteHelpCheck.swift
+swiftc -parse-as-library -O -o "$out/notehelp" Sources/Petal/NoteFile.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteTasks.swift Sources/Petal/ViewerFile.swift checks/NoteHelpCheck.swift
 "$out/notehelp"
 # The Shielded boundary is the compiler's: what a helper tells an AI can't be made from a raw string. Each of these
 # must fail to compile (a raw string interpolated into a prompt, put into what a helper is told, or made Shielded
@@ -107,8 +107,27 @@ perl -0777 -ne '
     unless (/guard let paper = self\.repick\(chosen\).*?guard readable\(paper\) else \{ return fail/s && /sendAbout\(\[paper\.noteID\], result\)/) { print "NoteTools: access must be rechecked after the wait and before answering\n"; exit 1 }
     print "notes: access rechecked after every wait\n";
 ' Sources/Petal/NoteTools.swift
-# A file helper's document is revalidated on every placement change.
-grep -q 'NoteHelp.documentShowing(placePath:' Sources/Petal/NoteHelpers.swift || { echo "NoteHelpers: a file helper's document must be revalidated"; exit 1; }
+# A file helper's document is revalidated on every placement change, by the one file resolver (NoteMatch.fits, which
+# asks ViewerFiles' answer for the window in front, or the file Petal's viewer shows): never a path compared. A file's
+# repository, and a task's file at Open all, are found by ViewerFiles.locate (identity, then bookmark, then path).
+grep -q 'return desk?.scene.map { NoteMatch.fits(required, $0) } ?? false' Sources/Petal/NoteHelpers.swift \
+    && grep -q 'shown.samePlace(required)' Sources/Petal/NoteHelpers.swift \
+    && grep -q 'let file = ViewerFiles.locate(stick, mac: mac, follow: ViewerLoader.follow)?.path' Sources/Petal/NoteHelpers.swift \
+    && grep -q 'if compare == nil, let stick, ViewerFiles.namesFile(stick) {' Sources/Petal/NoteHelpers.swift \
+    && grep -q 'let found = located(item, mac: mac, follow: follow)' Sources/Petal/NoteTasks.swift \
+    && ! grep -n 'documentShowing\|sceneFile\|run\.document' Sources/Petal/NoteHelpers.swift Sources/Petal/NoteHelp.swift \
+    || { echo "NoteHelpers: a helper's files go by the one file resolver, never a path comparison"; exit 1; }
+echo "helpers: a helper's documents and a task's file go by the one file resolver"
+# The viewer's tools tell an agent only of notes it may read, and write only those into a PDF for it (a Private
+# notebook's never leave it); a helper is answered only through its admission gate (Assist.handle wraps every tool).
+perl -0777 -ne '
+    unless (/func readable\(_ paper: PaperNote, by caller: String\?\) -> Bool \{\s*guard let caller else \{ return true \}.*?return helpers\.mayRead\(paper\.notebook, from: asking\)/s
+            && /result\["notes"\] = model\.notes\.filter \{ readable\(\$0\.paper, by: caller\) \}\.count/
+            && /guard paper\.version == nil, readable\(paper, by: caller\),/ && /var told = self\.told\(model, caller: caller\)/) {
+        print "ViewerTools: an agent is told of, and handed, only the notes it may read\n"; exit 1 }
+    print "viewer tools: only the notes their asker may read\n";
+' Sources/Petal/ViewerTools.swift
+grep -q 'app.viewers.handle(name, args, caller: note ?? "petal", live: live, send, fail)' Sources/Petal/Assist.swift || { echo "Assist: the viewer tools answer through handle (the helpers gate)"; exit 1; }
 # Rule C: one admission gate. Every prompt a helper's agent gets, and every quick call, goes through NoteHelpers.start
 # (whose `prepare` asks admit right before the words are built), every turn's process starts only after the agent asks
 # its gate, every tool answer to a helper goes through admitTool (before the tool, and again right before its answer),
@@ -172,7 +191,7 @@ perl -0777 -ne '
             && !/withOpinion|run\.carried|carried:/ && /run\.reviewed = NoteHelp\.inkHash\(primary\)\s*raw\.answer = primary\?\.text/
             && /let model = asked\?\.model \?\? run\.holes.*?self\.secondOpinion\(paper, model, asked: words, tree: run\.tree\)/s
             && /folder: tree, placed: tree == nil\)\)/ && /where run\.launch != nil && run\.kind\.placed/ && /= run\.kind\.placed \? NoteHelp\.requirement\(/
-            && /if run\.kind\.placed \{\s*facts\.document/) { print "NoteHelpers: a second opinion must add only its own opinion and be bound to its place\n"; exit 1 }
+            && /if run\.kind\.placed, let required = run\.requiredPlace \{/) { print "NoteHelpers: a second opinion must add only its own opinion and be bound to its place\n"; exit 1 }
     for my $f (qw(fail stopped)) { unless (/func $f\([^\n]*end\(run, \./) { print "NoteHelpers: $f must end through end\n"; exit 1 } }
     print "helpers: second opinions add only their own opinion, failures included; reviewers bound to their place\n";
 ' Sources/Petal/NoteHelpers.swift
@@ -401,7 +420,7 @@ perl -0777 -ne '
             && !/var held: Shielded/ && !/private func told\(/ && !/private func deliver\(/ && !/private func (recalculate|putAway)\((?:(?!\n    \}\n).)*?Raw\(\)/s
             && /private func recalculate\((?:(?!\n    \}\n).)*?start\(run, Call\(sources:/s && /private func putAway\((?:(?!\n    \}\n).)*?self\.start\(run, Call\(sources: sources/s
             && /self\.start\(run, Call\(sources: sources, words: \{ told in/ && /start\(run, Call\(sources: sources, words: \{ NoteHelp\.watchFind\(\$0\) \}/
-            && /return Self\.repository\(holding: stick\.path\) \{ found in/ && /AgentAccess\.repository\(folder, files: AgentCallers\.disk\)/ && !/NoteHelp\.checkout\(holding:/) {
+            && /return Self\.repository\(holding: stick, mac: mac\) \{ found in/ && /AgentAccess\.repository\(folder, files: AgentCallers\.disk\)/ && !/NoteHelp\.checkout\(holding:/) {
         print "NoteHelpers: every paid call starts through start, built at launch from its sources\n"; exit 1 }
     print "helpers: one start for every paid call; what waits is its sources, its words made at launch\n";
 ' Sources/Petal/NoteHelpers.swift

@@ -69,16 +69,25 @@ enum NoteTasks {
         return (url, (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType)
     }
 
+    /// A task's file as it is now, found by the one file resolver (ViewerFiles: the very file it was put away as, by
+    /// its `fileID`, wherever it went; that gone, the one its bookmark finds; with no bookmark, the one at its path:
+    /// never another file that took its path while its own still exists), then resolved for what it really is. Off
+    /// the main thread. `mac`: this Mac's id; `follow`: a bookmark's file.
+    nonisolated static func located(_ item: NoteHelp.TaskItem, mac: String, follow: (Data) -> URL?) -> (url: URL, type: UTType?)? {
+        guard item.kind == .file, let found = ViewerFiles.locate(item.stick, mac: mac, follow: follow) else { return nil }
+        return resolve(found.path)
+    }
+
     /// Open all: each part resolved off the main thread, then opened or revealed by the rule. A window's app is
     /// brought forward only when it's already running (never launched).
-    @MainActor static func openAll(_ items: [NoteHelp.TaskItem]) {
+    @MainActor static func openAll(_ items: [NoteHelp.TaskItem], mac: String, follow: @escaping @Sendable (Data) -> URL?) {
         for item in items where item.kind == .window {
             if let running = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == item.target && !$0.isTerminated }) { running.activate() }
         }
         let rest = items.filter { $0.kind != .window }
         DispatchQueue.global(qos: .userInitiated).async {
             let actions = rest.map { item -> Action in
-                let found = item.kind == .file ? resolve(item.target) : nil
+                let found = located(item, mac: mac, follow: follow)
                 return action(item, resolved: found?.url, type: found?.type)
             }
             DispatchQueue.main.async {

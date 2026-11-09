@@ -12,6 +12,10 @@ final class NoteDesk {
     let store = NoteStore()
     /// Helpers in notes (@Petal), watchers, chains, notes coming back and morning notes.
     let helpers = NoteHelpers()
+
+    /// The helpers know their desk (its store, this Mac's id) from the first moment, started or not: what they
+    /// decide for the note tools and Petal's viewer (which notes a caller may read) never runs without the store.
+    init() { helpers.desk = self }
     /// Notes showing, each folded, open or turned over (by paper key). Opening or folding one changes which
     /// pictures are on screen (NotePictures' retry).
     var faces: [String: PaperFace] = [:] { didSet { NotePictures.shared.visibilityChanged() } }

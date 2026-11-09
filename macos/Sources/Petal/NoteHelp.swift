@@ -376,15 +376,36 @@ enum NoteHelp {
         var kind: Kind
         var title: String
         var target: String
+        /// A file's: the very file it was put away as (its `fileID`, as a note's file place records it: this Mac, its
+        /// volume, inode and creation date) and a bookmark to it, so Open all finds it again wherever it went, and
+        /// never another file that took its path.
+        var bookmark = ""
+        var fileID = ""
 
-        init(kind: Kind, title: String, target: String) { self.kind = kind; self.title = title; self.target = target }
+        init(kind: Kind, title: String, target: String, bookmark: String = "", fileID: String = "") {
+            self.kind = kind; self.title = title; self.target = target; self.bookmark = bookmark; self.fileID = fileID
+        }
 
         init?(_ value: NoteValue) {
             guard let kind = Kind(rawValue: value.text("kind")) else { return nil }
-            self.init(kind: kind, title: value.text("title"), target: value.text("url_or_path"))
+            self.init(kind: kind, title: value.text("title"), target: value.text("url_or_path"), bookmark: value.text("bookmark"), fileID: value.text("fileID"))
         }
 
-        var value: NoteValue { .map([("kind", .text(kind.rawValue)), ("title", .text(title)), ("url_or_path", .text(target))]) }
+        var value: NoteValue {
+            var pairs: [(String, NoteValue)] = [("kind", .text(kind.rawValue)), ("title", .text(title)), ("url_or_path", .text(target))]
+            if !bookmark.isEmpty { pairs.append(("bookmark", .text(bookmark))) }
+            if !fileID.isEmpty { pairs.append(("fileID", .text(fileID))) }
+            return .map(pairs)
+        }
+
+        /// A file's part as a file place, for the one file resolver (ViewerFiles.locate).
+        var stick: NoteStick {
+            var stick = NoteStick(kind: .file)
+            stick.path = target
+            stick.bookmark = bookmark
+            stick.fileID = fileID
+            return stick
+        }
     }
 
     /// What the chips on a task's note say: "2 tabs", a file's name, "Mail · …".
@@ -2044,14 +2065,6 @@ extension NoteHelp {
         return named.id.isEmpty || named.id == runModel ? .same : .newRun
     }
 
-    /// Whether the document a file helper's place is about is the one showing in the window in front now: the
-    /// front window's document (its AXDocument, its bookmark followed) is that file, by its standardized path. Not
-    /// showing, the helper's maps are dropped and it waits.
-    static func documentShowing(placePath: String, sceneFile: String) -> Bool {
-        guard !placePath.isEmpty, !sceneFile.isEmpty else { return false }
-        return standard(placePath) == standard(sceneFile)
-    }
-
     /// After a wait, which of the papers a tool would answer about may still be told to this caller: a note whose
     /// notebook became private (or unknown) meanwhile is no longer readable from outside it.
     static func visibleAfterWait(_ notebooks: [String], privacy: (String) -> Privacy, asking: String?) -> [Bool] {
@@ -2080,9 +2093,10 @@ extension NoteHelp {
         /// The run's own required place (held on the run, independent of `here`) and whether it shows now.
         var place: String? = nil
         var placeShowing = true
-        /// A file helper's required document, and the file the window in front shows now.
-        var document: String? = nil
-        var sceneFile = ""
+        /// Its required place names a file (a file's place, or a sentence in a file): whether that file is the one
+        /// showing is the one file resolver's answer (`NoteMatch.fits`, ViewerFiles: the very file by its `fileID`,
+        /// then its bookmark, then its path), given in `placeShowing`; never a path compared here.
+        var placeIsFile = false
         /// Each source note it compares against: its notebook now (nil: gone).
         var sources: [(id: String, notebook: String?)] = []
         /// The exact AI and model it was pinned to, and what's available now (`models` nil: not known).
@@ -2114,11 +2128,10 @@ extension NoteHelp {
             return .fail("\(f.provider == "codex" ? "Codex" : "Claude Code") isn't set up in Petal.")
         }
         if let models = f.models, !f.model.isEmpty, !models.contains(f.model) { return .fail("\(f.model) isn't available in Petal now.") }
-        if let document = f.document, !documentShowing(placePath: document, sceneFile: f.sceneFile) {
-            return .wait("Waiting for this note's file to be in front.")
-        }
         // (Said without its name: a reason goes on the note and to the AI, and only what's shielded is ever named.)
-        if f.place != nil, !f.placeShowing { return .wait("Waiting for this note's place to be in front.") }
+        if f.place != nil, !f.placeShowing {
+            return .wait(f.placeIsFile ? "Waiting for this note's file to be in front." : "Waiting for this note's place to be in front.")
+        }
         return .go
     }
 
@@ -2134,18 +2147,15 @@ extension NoteHelp {
         }
     }
 
-    /// A run's requirement, held on the run and set in one step with its tools' target: the place it must be on
-    /// (the one in front now, or the one it waits for) and, for a file, that file. Re-stuck, both change together.
-    static func requirement(_ places: [NoteStick], here: Int?) -> (place: NoteStick?, document: String?) {
-        let stick: NoteStick?
+    /// A run's requirement, held on the run and set in one step with its tools' target: the place it must be on (the
+    /// one in front now, or the one it waits for). A file's place is that very file as the one file resolver knows
+    /// it (the place itself, `samePlace` and `NoteMatch.fits`; never its path alone).
+    static func requirement(_ places: [NoteStick], here: Int?) -> NoteStick? {
         switch anchor(places, here: here) {
-        case .placed(let index): stick = places[index]
-        case .away: stick = places.first { $0.kind != .desktop }
-        case .free: stick = nil
+        case .placed(let index): return places[index]
+        case .away: return places.first { $0.kind != .desktop }
+        case .free: return nil
         }
-        guard let stick else { return (nil, nil) }
-        let isFile = (stick.kind == .file || stick.kind == .passage) && !stick.path.isEmpty && stick.url.isEmpty
-        return (stick, isFile ? stick.path : nil)
     }
 
     /// A form's room on this screen: its fields scroll within it, its buttons (Submit, Allow, Don't, Buy) measured and

@@ -6,8 +6,21 @@ import AppKit
 /// `petal_view_pick` tells the agent which one the person picked ("Use this"), only the agent that asked;
 /// `petal_note_pdf_comments` writes the notes on a PDF into it as comments (a copy beside it by default; the PDF
 /// itself only when asked, after the person allows it, keeping the original beside it). No note's words are told:
-/// the answers name the file the agent gave and the copies Petal made.
+/// the answers name the file the agent gave and the copies Petal made. The notes an answer counts, and the notes
+/// written into a PDF for an agent, are sources like any other: only those their asker may read (a Private
+/// notebook's only for a helper of a note inside it: NoteHelpers.mayRead, the note tools' rule), and a note's helper
+/// is answered only through its admission gate (Assist.handle, NoteHelpers.admitTool: before the tool, and again
+/// right before its answer).
 extension Viewers {
+    /// Whether an agent may be told of (or handed, in a PDF's comments) a note: a Private notebook's only for a
+    /// helper of a note inside it. `caller` nil: the person themselves (the viewer's own button).
+    func readable(_ paper: PaperNote, by caller: String?) -> Bool {
+        guard let caller else { return true }
+        let helpers = app.paper.helpers
+        let asking = app.claude.note(withID: caller)?.paper.flatMap { helpers.paper($0) }
+        return helpers.mayRead(paper.notebook, from: asking)
+    }
+
     func handle(_ name: String, _ args: [String: Any], caller: String, live: @escaping @Sendable () -> Bool,
                 _ answer: @escaping (Any) -> Void, _ refuse: @escaping (String) -> Void) {
         // Everything told goes through the vault's redaction first (NoteShield, as the note tools' answers): file
@@ -47,7 +60,7 @@ extension Viewers {
                         // meanwhile, told again as it is then.
                         told {
                             guard !model.isClosed else { return Told(refusal: Self.closedText) }
-                            var told = self.told(model)
+                            var told = self.told(model, caller: caller)
                             // The page asked for is checked only against a finished document: while it loads or
                             // reloads the answer says it's loading (never the pages of the document before).
                             if let page, !model.loading, !model.live, model.pageCount > 0, ViewerPages.index(page, count: model.pageCount) == nil {
@@ -189,7 +202,8 @@ extension Viewers {
 
     /// What `petal_view` says about a file once it's shown: its name, how it's shown, and its pages or slides; still
     /// being read at the limit, that it's still loading (never a count of pages it hasn't read yet).
-    func told(_ model: ViewerModel) -> [String: Any] {
+    /// `caller`: who's told (its notes are counted only as far as it may read them).
+    func told(_ model: ViewerModel, caller: String? = nil) -> [String: Any] {
         var result: [String: Any] = ["opened": model.name]
         if model.loading {
             result["loading"] = true
@@ -203,7 +217,7 @@ extension Viewers {
             result["shown"] = model.kind == .pdf ? "PDF" : "Quick Look's pages"
             result[model.unit == .slide ? "slides" : "pages"] = model.pageCount
         }
-        result["notes"] = model.notes.count
+        result["notes"] = model.notes.filter { readable($0.paper, by: caller) }.count
         return result
     }
 
@@ -234,7 +248,9 @@ extension Viewers {
     private func comments(_ pdf: URL, file: ViewerFileID, onFile: Set<String>, intoOriginal: Bool, caller: String?, live: @escaping @Sendable () -> Bool,
                           _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let comments = app.paper.store.notes.compactMap { paper -> ViewerPDFComments.Comment? in
-            guard paper.version == nil, let index = ViewerMatch.place(paper.file.places, onFile: { onFile.contains(ViewerFiles.key($0)) }) else { return nil }
+            // For an agent, only the notes it may read (a Private notebook's never leave it in a file an agent reads).
+            guard paper.version == nil, readable(paper, by: caller),
+                  let index = ViewerMatch.place(paper.file.places, onFile: { onFile.contains(ViewerFiles.key($0)) }) else { return nil }
             // The words as written: the writer redacts them whole before anything is cut.
             return ViewerPDFComments.Comment(stick: paper.file.places[index], body: paper.file.body,
                                             color: PaperLook.rgb(app.paper.store.color(of: paper.notebook)))

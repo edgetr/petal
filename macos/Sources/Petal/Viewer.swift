@@ -88,7 +88,10 @@ final class Viewers {
 
     /// The viewer whose window has the keyboard, by its model's id (ViewerWindow): while it does, it's the desk's
     /// current place (NoteDesk.hereNow, stickHere, ⌃⌥N).
-    @ObservationIgnored var keyID: UUID?
+    @ObservationIgnored var keyID: UUID? {
+        // A note's helper is on its place on the file shown here while this has the keyboard (NoteHelpers.here).
+        didSet { if keyID != oldValue { app.paper.helpers.viewerChanged() } }
+    }
 
     /// The viewer that's the desk's current place now: the one with the keyboard, still open.
     var front: ViewerModel? { keyID.flatMap { id in open.first { $0.id == id } } }

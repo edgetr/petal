@@ -566,9 +566,24 @@ struct NoteHelpCheck {
         rules.value = ["Bash(npm test)"]
         rules.adopt(nil)
         expect(rules.value.isEmpty, "no run: none")
-        expect(NoteHelp.documentShowing(placePath: "/Users/someone/Talk.key", sceneFile: "/Users/someone/Talk.key/"), "its file showing: its place is good")
-        expect(!NoteHelp.documentShowing(placePath: "/Users/someone/Talk.key", sceneFile: "/Users/someone/Other.key"), "another file in the same window: not its place (it waits)")
-        expect(!NoteHelp.documentShowing(placePath: "/Users/someone/Talk.key", sceneFile: ""), "no document read: not its place")
+        // A file helper's document is the one showing by the one file resolver's answer (NoteMatch.fits, what the
+        // helpers' gate asks): the very file by its `fileID`, a file renamed is still it, and another file that took
+        // its path is not; never a path compared.
+        var talkPlace = NoteStick(kind: .file)
+        talkPlace.path = "/Users/someone/Talk.key"
+        talkPlace.fileID = "mac-1|VOL|41|1000"
+        var talkScene = NoteScene(mac: "mac-1", app: "com.apple.iWork.Keynote", pid: 7, window: 3, title: "Talk")
+        talkScene.file = "/Users/someone/Talk.key"
+        talkScene.fileID = "mac-1|VOL|41|1000"
+        expect(NoteMatch.fits(talkPlace, talkScene), "its file showing: its place is good")
+        talkScene.file = "/Users/someone/Talk final.key"
+        expect(NoteMatch.fits(talkPlace, talkScene), "its file renamed (the same file, another path): still its place")
+        talkScene.file = "/Users/someone/Talk.key"
+        talkScene.fileID = "mac-1|VOL|77|2000"
+        talkScene.onFile = []
+        expect(!NoteMatch.fits(talkPlace, talkScene), "another file that took its path: not its place (it waits)")
+        talkScene.file = ""
+        expect(!NoteMatch.fits(talkPlace, talkScene), "no document read: not its place")
         var held: NoteHelp.Watch? = NoteHelp.Watch(every: "1d", line: "under $100", mac: "m", at: "09:00")
         held?.id = "W"
         expect(NoteHelp.applyLook(&held, id: "W", shown: "$95", amount: 95, hint: nil, past: true, confirmed: true, at: now) == true && NoteHelp.told(&held, id: "W") && held?.hit == true, "confirmed and told: a hit")
@@ -600,10 +615,11 @@ struct NoteHelpCheck {
         facts.provider = "claude"; facts.available = ["claude"]
         expect(NoteHelp.admit(facts) == .go, "all true now: go")
         var fileHelper = facts
-        fileHelper.document = "/Users/someone/Talk.key"
-        fileHelper.sceneFile = "/Users/someone/Other.key"
-        if case .wait = NoteHelp.admit(fileHelper) { expect(true, "") } else { expect(false, "a file helper with another document showing waits", "\(NoteHelp.admit(fileHelper))") }
-        fileHelper.sceneFile = "/Users/someone/Talk.key"
+        fileHelper.place = "file"; fileHelper.placeIsFile = true
+        fileHelper.placeShowing = false
+        if case .wait(let why) = NoteHelp.admit(fileHelper) { expect(why.contains("file"), "a file helper with another document showing waits for its file", why) }
+        else { expect(false, "a file helper with another document showing waits", "\(NoteHelp.admit(fileHelper))") }
+        fileHelper.placeShowing = true
         expect(NoteHelp.admit(fileHelper) == .go, "its own document showing: go")
         var placed = facts
         placed.place = "a.example"; placed.placeShowing = false
@@ -676,11 +692,17 @@ struct NoteHelpCheck {
         var windowA = NoteStick(kind: .window); windowA.title = "Window A"
         var talk = NoteStick(kind: .file); talk.path = "/Users/someone/Talk.key"
         let onWindow = NoteHelp.requirement([windowA], here: 0)
-        expect(onWindow.place == windowA && onWindow.document == nil, "placed on its window: that window is required")
+        expect(onWindow == windowA, "placed on its window: that window is required")
         let restuck = NoteHelp.requirement([talk], here: nil)
-        expect(restuck.place == talk && restuck.document == talk.path, "re-stuck to a file while running: the file is required, both together", "\(restuck)")
+        expect(restuck == talk, "re-stuck to a file while running: the file's place is required", "\(String(describing: restuck))")
+        var talkElsewhere = talk
+        talkElsewhere.fileID = "mac-1|VOL|9|9"
+        var talkRecorded = talk
+        talkRecorded.fileID = "mac-1|VOL|41|1000"
+        expect(restuck.map { !$0.samePlace(talkElsewhere) || talkElsewhere.fileID.isEmpty } == true && !talkRecorded.samePlace(talkElsewhere),
+               "the same path with another file behind it is another place (samePlace goes by the file, never the path)")
         let deskOnly = NoteHelp.requirement([NoteStick(kind: .desktop)], here: 0)
-        expect(deskOnly.place == nil && deskOnly.document == nil, "re-stuck to the Desktop only: nothing in an app is required")
+        expect(deskOnly == nil, "re-stuck to the Desktop only: nothing in an app is required")
         for screen in [300.0, 500.0, 900.0] as [CGFloat] {
             let room = NoteHelp.formRoom(screen: screen, chrome: 230, actions: 44)
             expect(room >= 60 && (screen < 334 || room + 230 + 44 <= screen), "a form's fields scroll; its buttons stay on the screen (\(screen))", "\(room)")
@@ -915,8 +937,8 @@ struct NoteHelpCheck {
         waitsNamed.place = "Bank of Q7m!a2Z:91"; waitsNamed.placeShowing = false
         if case .wait(let why) = NoteHelp.admit(waitsNamed) { expect(!why.contains("Q7m") && !why.contains("Bank"), "a wait's reason never names the place (it goes on the note and to the AI)", why) }
         else { expect(false, "a place not in front waits") }
-        waitsNamed.place = nil; waitsNamed.document = "/Users/someone/Q7m!a2Z:91.key"; waitsNamed.sceneFile = "/Users/someone/Other.key"
-        if case .wait(let why) = NoteHelp.admit(waitsNamed) { expect(!why.contains("Q7m"), "nor its file", why) } else { expect(false, "a file not showing waits") }
+        waitsNamed.placeIsFile = true
+        if case .wait(let why) = NoteHelp.admit(waitsNamed) { expect(!why.contains("Q7m") && why.contains("file"), "nor its file", why) } else { expect(false, "a file not showing waits") }
         guard let afterShown = NoteShield.shield(["# Research \(saved) and more\nIts words"], index: savedIndex) else { return expect(false, "after") }
         let chainBrief = NoteHelp.brief(NoteHelp.Told(after: afterShown[0]))
         expect(chainBrief.text.contains("This runs because") && !chainBrief.text.contains("Q7m"), "a chain's done note is named by a title derived after redaction", chainBrief.text)
@@ -1284,6 +1306,32 @@ struct NoteHelpCheck {
         let pausedSettled = pausedQueue.settle(note: "N1", token: pausedAsked, succeeded: false)
         expect(pausedSettled.review == nil && Set(pausedSettled.dropped) == ["follow-up line", "review line"],
                "paused at its end: nothing asked of it is handed on, every line is given back (Pause stops what would happen next)")
+
+        // Where the phases meet: a task's file is found again by the one file resolver (ViewerFiles), on throwaway
+        // files: the very file it was put away as wherever it went, never another file that took its path.
+        let taskFolder = FileManager.default.temporaryDirectory.appending(path: "petal-task-check-\(UUID().uuidString)").resolvingSymlinksInPath()
+        try? FileManager.default.createDirectory(at: taskFolder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: taskFolder) }
+        let report = taskFolder.appending(path: "Report.txt")
+        try? Data("the report".utf8).write(to: report)
+        let reportID = ViewerFileID.of(report.path)?.record(mac: "this-mac") ?? ""
+        let reportMark = (try? report.bookmarkData())?.base64EncodedString() ?? ""
+        let putAway = NoteHelp.TaskItem(kind: .file, title: "Report.txt", target: report.path, bookmark: reportMark, fileID: reportID)
+        let followMark = { (mark: Data) -> URL? in var stale = false; return try? URL(resolvingBookmarkData: mark, options: [.withoutUI], relativeTo: nil, bookmarkDataIsStale: &stale) }
+        var taskFile = NoteFile(id: "TK1", created: now)
+        taskFile.task = [putAway]
+        expect(!reportID.isEmpty && NoteFile.parse(taskFile.serialized(), fallbackID: "TK1", fallbackDate: now).task == [putAway], "a task's file keeps its fileID and bookmark in the note")
+        expect(NoteTasks.located(putAway, mac: "this-mac", follow: followMark)?.url.path == report.path, "a task's file where it was: found")
+        let renamed = taskFolder.appending(path: "Report final.txt")
+        try? FileManager.default.moveItem(at: report, to: renamed)
+        expect(NoteTasks.located(putAway, mac: "this-mac", follow: followMark)?.url.path == renamed.path, "renamed: found by its identity, wherever it went",
+               NoteTasks.located(putAway, mac: "this-mac", follow: followMark)?.url.path ?? "nil")
+        try? Data("another file at the old path".utf8).write(to: report)
+        expect(NoteTasks.located(putAway, mac: "this-mac", follow: followMark)?.url.path == renamed.path, "another file took its path: Open all still opens the file put away, never that one")
+        try? FileManager.default.removeItem(at: renamed)
+        let older = NoteHelp.TaskItem(kind: .file, title: "Report.txt", target: report.path)
+        expect(NoteTasks.located(older, mac: "this-mac", follow: followMark)?.url.path == report.path, "a task put away before files were recorded goes by its path")
+        expect(NoteTasks.located(NoteHelp.TaskItem(kind: .tab, title: "", target: report.path), mac: "this-mac", follow: followMark) == nil, "only a file's part is looked up on the disk")
 
         // D. An ordinary chat's events are delivered with the vault index unsettled, with no wait: they never pass the
         // ingestion queue or `shield` (which, here, would never come back).
