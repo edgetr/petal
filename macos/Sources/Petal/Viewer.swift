@@ -320,6 +320,8 @@ final class ViewerModel: Identifiable {
     @ObservationIgnored private var bookmark: Data?
     @ObservationIgnored private var loads = 0
     @ObservationIgnored private var closedNow = false
+    /// `closedNow` as work off the main thread sees it.
+    @ObservationIgnored private let closing = ViewerFlag()
     @ObservationIgnored private var lensSoon: DispatchWorkItem?
 
     init(url: URL, kind: ViewerKind) {
@@ -544,6 +546,7 @@ final class ViewerModel: Identifiable {
 
     func close() {
         closedNow = true
+        closing.on = true
         watcher = nil
         versionWatch = nil
         lensSoon?.cancel()
@@ -687,7 +690,22 @@ final class ViewerModel: Identifiable {
         if how.letsGoIfEmpty { desk.letGoIfEmpty(key) }
     }
 
-    func flip() { face = face == .back ? .open : .back }
+    /// The corner of `paper` used: that paper turned over (opened here first, or handed over from the desk, when it
+    /// isn't the one open here), or back again.
+    func flip(_ paper: PaperNote) {
+        if openKey == paper.key {
+            face = face == .back ? .open : .back
+            return
+        }
+        openPaper(paper)
+        face = .back
+    }
+
+    /// A margin paper's identity for its view (ViewerPaperID): an editable one by its note's identity, so a rename
+    /// keeps its editor and what's typed in it.
+    func paperID(_ paper: PaperNote) -> String {
+        ViewerPaperID.of(key: paper.key, holder: paper.holder, readOnly: desk.store.readOnly(paper))
+    }
 
     /// A new note here: on the selection's passage (its page and words; found again by them wherever it moves),
     /// else on the page or slide shown, else on the file. A file anchor all the same, so Preview and Acrobat show it
@@ -800,17 +818,25 @@ final class ViewerModel: Identifiable {
     /// Makes a copy of the file for each label in a temporary folder of its own ("Roadmap (Shorter).pptx"), off
     /// the main thread, and shows them under the document with "Use this". Whoever asked edits the copies; their
     /// pictures follow the copies as they change, and the page shown. The original is never touched.
-    func makeVersions(_ labels: [String], asker: String, then done: @escaping @MainActor (Result<ViewerVersionSet, ViewerCopyError>) -> Void) {
+    /// `live`: its asker still there; gone (or the viewer closed) while the copies are made, nothing more is copied,
+    /// what was is removed, and nothing is shown.
+    func makeVersions(_ labels: [String], asker: String, live: @escaping @Sendable () -> Bool = { true },
+                      then done: @escaping @MainActor (Result<ViewerVersionSet, ViewerCopyError>) -> Void) {
         let labels = ViewerCopies.labels(labels)
         guard !labels.isEmpty else { return done(.failure(.noLabels)) }
+        guard live(), !closedNow else { return done(.failure(.cancelled)) }
         let url = url
         let id = UUID().uuidString.prefix(8).lowercased()
+        let closing = closing
+        let going: @Sendable () -> Bool = { !live() || closing.on }
         Viewers.queue.async {
-            // The copies' names from the file's name and each label redacted whole first (Phase 1's safeStem): a name,
-            // and the path an agent is given, never holds a secret. The vault unreadable: nothing is made.
+            // The copies' names from the file's whole name and each label redacted first (Phase 1's safeStem), the
+            // stem taken from the redacted name only then: a name, and the path an agent is given, never holds a
+            // secret. The vault unreadable: nothing is made.
             let names = VaultIndex.settled { index -> (stem: String, labels: [String])? in
                 guard !index.unreadable else { return nil }
-                let stem = NoteShelf.safeStem(redacted: index.redacted(url.deletingPathExtension().lastPathComponent), fallback: "Document")
+                let stem = NoteShelf.safeStem(redacted: ViewerCopies.stem(redactedName: index.redacted(url.lastPathComponent), ext: url.pathExtension),
+                                              fallback: "Document")
                 return (stem, labels.enumerated().map { NoteShelf.safeStem(redacted: index.redacted($1), fallback: "Version \($0 + 1)") })
             } ?? nil
             guard let names else {
@@ -824,6 +850,8 @@ final class ViewerModel: Identifiable {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                 var taken: Set<String> = []
                 for (index, label) in labels.enumerated() {
+                    // Its asker gone or the viewer closed: no more copies.
+                    if going() { failure = .cancelled; break }
                     let name = ViewerCopies.version(original: names.stem + (ext.isEmpty ? "" : "." + ext), label: names.labels[index], taken: taken)
                     taken.insert(name.lowercased())
                     let copy = folder.appending(path: name)
@@ -838,10 +866,17 @@ final class ViewerModel: Identifiable {
                 }
             } catch { failure = .copy }
             let versions = made
-            let failed = failure
+            let failed = failure ?? (going() ? .cancelled : nil)
+            // Nothing made shown: whatever was copied goes.
+            if failed != nil { try? FileManager.default.removeItem(at: folder) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     if let failed { return done(.failure(failed)) }
+                    // Closed or hung up after the copies were made: they go, and nothing is shown.
+                    guard !self.closedNow, live() else {
+                        Viewers.queue.async { try? FileManager.default.removeItem(at: folder) }
+                        return done(.failure(.cancelled))
+                    }
                     if let older = self.versions {
                         older.closed = true
                         older.settle(nil)
@@ -931,13 +966,24 @@ final class ViewerModel: Identifiable {
 }
 
 enum ViewerCopyError: Error, CustomStringConvertible {
-    case noLabels, copy, vault
+    case noLabels, copy, vault, cancelled
     var description: String {
         switch self {
+        case .cancelled: "The viewer was closed, or the request ended, before the versions were made: nothing was made."
         case .vault: VaultStore.unreadableText + " Nothing was made (the copies' names are checked first)."
         case .noLabels: "Name each version (names: [\"Shorter\", \"With numbers\"])."
         case .copy: "Petal couldn't copy the file into a temporary folder: nothing was made."
         }
+    }
+}
+
+/// A flag work on another thread reads (the viewer closed).
+final class ViewerFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var on: Bool {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
     }
 }
 
@@ -1377,7 +1423,9 @@ enum ViewerPDFComments {
         // name redacted whole too (Phase 1's safeStem: a file name never holds a secret).
         let told = VaultIndex.settled { index -> (texts: [String], stem: String)? in
             guard !index.unreadable else { return nil }
-            let stem = NoteShelf.safeStem(redacted: index.redacted(pdf.deletingPathExtension().lastPathComponent), fallback: "Document")
+            // The whole name redacted first, the stem taken from it only then.
+            let stem = NoteShelf.safeStem(redacted: ViewerCopies.stem(redactedName: index.redacted(pdf.lastPathComponent), ext: pdf.pathExtension),
+                                          fallback: "Document")
             return (comments.map { ViewerComments.text($0.body, redact: index.redacted) }, stem)
         } ?? nil
         guard let told else { return .failed("Your vault can't be read right now, so Petal wrote nothing (a note's words are checked first).") }

@@ -312,10 +312,13 @@ enum ViewerFiles {
     enum Way: Equatable { case own, bookmark, path, none }
 
     /// The rule, from what the disk says: whether the place's own file (recorded on this Mac) was found as that very
-    /// incarnation, whether it has a bookmark and whether that found a file, and whether its path has one.
-    static func way(ownFound: Bool, hasBookmark: Bool, bookmarkFound: Bool, pathFound: Bool) -> Way {
+    /// incarnation, whether it was recorded on another Mac (`foreign`), whether it has a bookmark and whether that
+    /// found a file, and whether its path has one. A bookmark made on this Mac that finds nothing is never replaced
+    /// by the path; one made on another Mac says nothing here, so there the path decides (Phase 1's rule).
+    static func way(ownFound: Bool, foreign: Bool = false, hasBookmark: Bool, bookmarkFound: Bool, pathFound: Bool) -> Way {
         if ownFound { return .own }
-        if hasBookmark { return bookmarkFound ? .bookmark : .none }
+        if hasBookmark, bookmarkFound { return .bookmark }
+        if hasBookmark, !foreign { return .none }
         return pathFound ? .path : .none
     }
 
@@ -323,15 +326,17 @@ enum ViewerFiles {
     /// names none it can be sure of. `mac`: this Mac's id (a record made on another Mac isn't looked up here).
     static func locate(_ stick: NoteStick, mac: String, follow: (Data) -> URL?) -> (path: String, id: ViewerFileID)? {
         guard namesFile(stick) else { return nil }
-        let own = ViewerFileID.parse(stick.fileID).flatMap { record -> (String, ViewerFileID)? in
+        let record = ViewerFileID.parse(stick.fileID)
+        let foreign = record.map { $0.mac != mac } ?? false
+        let own = record.flatMap { record -> (String, ViewerFileID)? in
             guard record.mac == mac, let path = record.id.path() else { return nil }
             return (path, record.id)
         }
         // No bookmark written is no bookmark (an empty one decodes to empty data, which finds nothing).
         let mark = stick.bookmark.isEmpty ? nil : Data(base64Encoded: stick.bookmark)
         let viaBookmark = own == nil ? mark.flatMap(follow).flatMap { url in ViewerFileID.of(url.path).map { (url.path, $0) } } : nil
-        let viaPath = own == nil && mark == nil ? ViewerFileID.of(stick.path).map { (stick.path, $0) } : nil
-        switch way(ownFound: own != nil, hasBookmark: mark != nil, bookmarkFound: viaBookmark != nil, pathFound: viaPath != nil) {
+        let viaPath = own == nil && viaBookmark == nil && (mark == nil || foreign) ? ViewerFileID.of(stick.path).map { (stick.path, $0) } : nil
+        switch way(ownFound: own != nil, foreign: foreign, hasBookmark: mark != nil, bookmarkFound: viaBookmark != nil, pathFound: viaPath != nil) {
         case .own: return own.map { (path: $0.0, id: $0.1) }
         case .bookmark: return viaBookmark.map { (path: $0.0, id: $0.1) }
         case .path: return viaPath.map { (path: $0.0, id: $0.1) }
@@ -339,8 +344,12 @@ enum ViewerFiles {
         }
     }
 
-    /// A place as the resolver keys it: everything it goes by.
-    static func key(_ stick: NoteStick) -> String { [stick.path, stick.bookmark, stick.fileID].joined(separator: "\u{1}") }
+    /// A place as the resolver keys it: everything it goes by (NoteStick.fileKey, which the desk's scene uses too).
+    static func key(_ stick: NoteStick) -> String { stick.fileKey }
+
+    /// Whether "Open in Petal's viewer" is offered for a place: one that names a file (a file's place, or a sentence
+    /// noted in Preview) of a kind the viewer shows.
+    static func offersViewer(_ stick: NoteStick) -> Bool { namesFile(stick) && ViewerKind.of(stick.path) != nil }
 
     /// Which of `places` name `file` (by key), each resolved on its own (off the main thread).
     static func on(_ file: ViewerFileID, _ places: [NoteStick], mac: String, follow: (Data) -> URL?) -> Set<String> {
@@ -353,6 +362,12 @@ enum ViewerFiles {
         }
         return found
     }
+}
+
+/// A margin paper's identity for its view: an editable paper by its note's identity (its holder key, so a rename
+/// keeps the same editor, and its typing), each read-only paper of a conflict by its own file.
+enum ViewerPaperID {
+    static func of(key: String, holder: String, readOnly: Bool) -> String { readOnly ? "copy:" + key : "note:" + holder }
 }
 
 /// How a margin paper stops being open in the viewer: folded or closed there (a note made there and left empty is let
@@ -421,6 +436,15 @@ enum ViewerCopies {
         let ext = (original as NSString).pathExtension
         let stem = ((original as NSString).deletingPathExtension as NSString).lastPathComponent
         return free(stem + " (" + NoteText.fileName(label) + ")", ext: ext, taken: taken)
+    }
+
+    /// A copy's stem from a file's name redacted whole (`redactedName`: the complete name, its extension too, through
+    /// the vault's redaction first, so a secret is never cut in two before it's looked for): its extension taken
+    /// off only when it's still the one the viewer knows the file by (`ext`), never one redaction changed.
+    static func stem(redactedName: String, ext: String) -> String {
+        let tail = ext.isEmpty ? "" : "." + ext
+        if !tail.isEmpty, redactedName.lowercased().hasSuffix(tail.lowercased()) { return String(redactedName.dropLast(tail.count)) }
+        return redactedName
     }
 
     static func withNotes(original: String, taken: Set<String>) -> String {

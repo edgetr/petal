@@ -182,7 +182,8 @@ struct PaperView: View {
         } else if let desk {
             NoteEditorView(paper: paper, style: desk.style(color, glass: glass), focus: keyboard,
                            height: { desk.measured(paper.key, $0) },
-                           save: { desk.write(paper.key, body: $0, base: $1) },
+                           // Saved through the note's identity: renamed or moved meanwhile, it lands on that note.
+                           save: { desk.write(paper.key, noteID: paper.noteID, instance: paper.instance, body: $0, base: $1) },
                            register: { [editorToken] in desk.editorRegistered(paper.key, $0, token: editorToken) },
                            importPictures: { desk.importPictures($0, into: paper.key) },
                            escape: { if let folded { folded() } else { desk.fold(paper.key) } },

@@ -340,6 +340,13 @@ struct ViewerFileCheck {
             let reused = ViewerFileID.of(realPDF.path)
             expect(reused != nil && reused != report && ViewerFiles.on(reused!, [made], mac: mac, follow: follow).isEmpty
                    && ViewerFiles.on(report, [made], mac: mac, follow: follow).count == 1, "a reused path never attaches notes; they stay on the renamed file")
+            // The desk, as its read works it out: the new file at the old path in front doesn't get the note; the
+            // renamed file in front does.
+            var reusedScene = NoteScene(file: realPDF.path)
+            reusedScene.onFile = reused.map { ViewerFiles.on($0, [made], mac: mac, follow: follow) }
+            var renamedScene = NoteScene(file: renamed.path)
+            renamedScene.onFile = ViewerFiles.on(report, [made], mac: mac, follow: follow)
+            expect(!NoteMatch.fits(made, reusedScene) && NoteMatch.fits(made, renamedScene), "the desk matches by incarnation: a reused path doesn't, the renamed file does")
             // A record that isn't this very incarnation (its inode reused: another creation date; or another Mac's):
             // never taken for it, the bookmark decides instead.
             var recycled = made
@@ -356,6 +363,65 @@ struct ViewerFileCheck {
             expect(ViewerFiles.locate(elsewhere, mac: "ANOTHER-MAC", follow: follow)?.id == reused, "another Mac's record isn't looked up here: the bookmark")
         } else { expect(false, "a throwaway file") }
         try? FileManager.default.removeItem(at: aliasBase)
+
+        // MARK: Fifth review: identity of papers and saves, names, the desk's match, the viewer offered
+
+        let papersNow = [(key: "/n/Inbox/Renamed.md", id: "N1", version: String?.none), (key: "/n/Inbox/Other.md", id: "N2", version: nil),
+                         (key: "/n/Inbox/Twin.md", id: "N3", version: nil), (key: "/n/Work/Twin.md", id: "N3", version: nil)]
+        let same = { (id: String, _: String) in id }
+        expect(NoteShelf.saveTarget(key: "/n/Inbox/Other.md", noteID: "N2", instance: "", papers: papersNow, current: same) == "/n/Inbox/Other.md", "its own paper")
+        expect(NoteShelf.saveTarget(key: "/n/Inbox/Old name.md", noteID: "N1", instance: "", papers: papersNow, current: same) == "/n/Inbox/Renamed.md",
+               "renamed while the editor was open: the final save lands on the note as it is now")
+        expect(NoteShelf.saveTarget(key: "/n/Inbox/Gone.md", noteID: "N3", instance: "", papers: papersNow, current: same) == nil, "two papers of one id: never a guess")
+        expect(NoteShelf.saveTarget(key: "/n/Inbox/Handwritten.md", noteID: "file:Inbox/Handwritten.md", instance: "1:2", papers: papersNow,
+                                    current: { id, _ in id == "file:Inbox/Handwritten.md" ? "N1" : id }) == "/n/Inbox/Renamed.md", "an id given meanwhile, followed")
+        expect(ViewerPaperID.of(key: "/n/Old.md", holder: "N1", readOnly: false) == ViewerPaperID.of(key: "/n/New.md", holder: "N1", readOnly: false)
+               && ViewerPaperID.of(key: "/n/A.md", holder: "N3", readOnly: true) != ViewerPaperID.of(key: "/n/B.md", holder: "N3", readOnly: true),
+               "a margin paper's editor kept across a rename; each read-only copy its own")
+
+        let secretName = "ab9Xq.pdf"
+        let redactName = { (text: String) in text.replacingOccurrences(of: secretName, with: "(hidden)") }
+        let whole = "Plan ab9Xq.pdf"
+        expect(!ViewerCopies.stem(redactedName: redactName(whole), ext: "pdf").contains("ab9Xq") && ViewerCopies.stem(redactedName: redactName(whole), ext: "pdf") == "Plan (hidden)",
+               "the whole name redacted before the stem is taken")
+        let cutFirst = redactName((whole as NSString).deletingPathExtension)
+        expect(cutFirst.contains("ab9Xq"), "(cutting first would have kept part of it)")
+        expect(ViewerCopies.stem(redactedName: "Report.PDF", ext: "pdf") == "Report" && ViewerCopies.stem(redactedName: "Report (hidden)", ext: "pdf") == "Report (hidden)",
+               "the extension taken off only when it's still there")
+
+        var front = NoteScene(file: "/Users/someone/Report.pdf")
+        var onPath = NoteStick(kind: .file)
+        onPath.path = "/Users/someone/Report.pdf"
+        onPath.bookmark = "b2xk"
+        var renamedHere = NoteStick(kind: .file)
+        renamedHere.path = "/Users/someone/Old name.pdf"
+        renamedHere.bookmark = "cmVu"
+        front.onFile = [renamedHere.fileKey]
+        expect(!NoteMatch.fits(onPath, front), "the desk: a path another file took is never it")
+        expect(NoteMatch.fits(renamedHere, front), "the desk: a file renamed since is, by the resolver")
+        var previewSentence = NoteStick(kind: .passage)
+        previewSentence.path = "/Users/someone/Report.pdf"
+        previewSentence.quote = "Growth"
+        expect(!NoteMatch.fits(previewSentence, front), "a sentence in a file goes by the resolver too")
+        front.onFile = nil
+        expect(NoteMatch.fits(onPath, front) && NoteMatch.fits(previewSentence, front), "not worked out: Phase 1's path rule")
+        var madeNow = onPath
+        madeNow.fileID = "MAC|VOL|1|2"
+        front.fileID = madeNow.fileID
+        front.onFile = []
+        expect(NoteMatch.fits(madeNow, front), "made from this very read: the same incarnation")
+        expect(ViewerFiles.way(ownFound: false, foreign: true, hasBookmark: true, bookmarkFound: false, pathFound: true) == .path
+               && ViewerFiles.way(ownFound: false, foreign: false, hasBookmark: true, bookmarkFound: false, pathFound: true) == .none,
+               "another Mac's bookmark says nothing here (its path decides, Phase 1's rule); this Mac's that finds nothing, nothing")
+
+        var sentenceInPDF = NoteStick(kind: .passage)
+        sentenceInPDF.path = "/Users/someone/Report.pdf"
+        var sentenceOnPage = NoteStick(kind: .passage)
+        sentenceOnPage.url = "https://example.com/report.pdf"
+        var unknownKind = NoteStick(kind: .file)
+        unknownKind.path = "/Users/someone/run.sh"
+        expect(ViewerFiles.offersViewer(sentenceInPDF) && ViewerFiles.offersViewer(onPath) && !ViewerFiles.offersViewer(sentenceOnPage)
+               && !ViewerFiles.offersViewer(unknownKind) && !ViewerFiles.offersViewer(tab), "Open in Petal's viewer offered for a sentence noted in Preview")
 
         print("viewer: \(passed) passed" + (failures > 0 ? ", \(failures) failed" : ""))
         if failures > 0 { exit(1) }

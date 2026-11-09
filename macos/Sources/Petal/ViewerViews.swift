@@ -546,7 +546,9 @@ struct ViewerMarginView: View {
     private func content(_ notes: [(paper: PaperNote, place: NoteStick)], _ layout: (spots: [String: Spot], height: CGFloat)) -> some View {
         ZStack(alignment: .topLeading) {
             Color.clear.frame(width: ViewerLook.margin, height: layout.height)
-            ForEach(notes, id: \.paper.key) { item in
+            // By the note's identity, so a rename keeps the same editor and what's typed in it (ViewerPaperID).
+            ForEach(notes.map { (id: model.paperID($0.paper), item: $0) }, id: \.id) { entry in
+                let item = entry.item
                 if let spot = layout.spots[item.paper.key] {
                     paper(item.paper, item.place)
                         .rotationEffect(.degrees(spot.tilt))
@@ -618,7 +620,7 @@ struct ViewerMarginView: View {
                   footer: model.lensKey == paper.key ? "Follows your selection" : desk.footer(paper),
                   keyboard: open, editorHeight: desk.heights[paper.key] ?? 0, desk: snapshotting ? nil : desk,
                   conflict: desk.store.readOnly(paper), unsaved: desk.store.failed.contains(paper.key), pictureTrouble: desk.troubleCount(paper),
-                  width: ViewerLook.openWidth, flipped: { model.flip() }, folded: { model.fold(paper.key) })
+                  width: ViewerLook.openWidth, flipped: { model.flip(paper) }, folded: { model.fold(paper.key) })
             .background(GeometryReader { box in
                 Color.clear.onAppear { model.heights[paper.key] = box.size.height }
                     .onChange(of: box.size.height) { _, height in model.heights[paper.key] = height }

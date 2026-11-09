@@ -42,7 +42,7 @@ extension Viewers {
                 switch result {
                 case .failure(let refusal): fail(refusal.description)
                 case .success(let model):
-                    model.makeVersions(labels, asker: caller) { made in
+                    model.makeVersions(labels, asker: caller, live: live) { made in
                         switch made {
                         case .failure(let error): fail(error.description)
                         case .success(let set):

@@ -283,7 +283,7 @@ extension NoteDesk {
         let privacy = ClaudePanel.privacy.now
         let quiet = app.assist.neverLook(bundle)
         if quiet && wanted == .passage { return done(nil) }
-        Self.read(running, mac: local.mac) { scene, read in
+        Self.read(running, mac: local.mac, anchors: fileAnchors) { scene, read in
             guard live() else { return }
             let finish = { (passage: (quote: String, before: String, after: String)?) in
                 guard live() else { return }

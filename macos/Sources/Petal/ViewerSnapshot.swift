@@ -180,6 +180,7 @@ enum ViewerCheck {
             failed = !places(url, app: app) || failed
             failed = !opening(url, app: app) || failed
             failed = !answers(url, app: app) || failed
+            failed = !versions(url, app: app) || failed
             failed = !window(url, app: app) || failed
         }
         if let deck = files.first(where: { ViewerKind.of($0) == .quickLook(.slide) }), case .success(let url) = ViewerPath.check(deck) {
@@ -338,6 +339,41 @@ enum ViewerCheck {
     }
 
     final class HangUp: @unchecked Sendable { var gone = false }
+
+    /// Versions made only while their asker is there and the viewer open: a hang-up or the viewer closing makes
+    /// nothing show, and the copies go.
+    private static func versions(_ source: URL, app: PetalApp) -> Bool {
+        var ok = true
+        func expect(_ condition: Bool, _ what: String) { if !condition { print("versions: FAIL \(what)"); ok = false } }
+        let root = FileManager.default.temporaryDirectory.appending(path: "Petal Versions")
+        let before = Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [])
+        func make(_ model: ViewerModel, live: @escaping @Sendable () -> Bool = { true }, closeAtOnce: Bool = false) -> Result<ViewerVersionSet, ViewerCopyError>? {
+            var result: Result<ViewerVersionSet, ViewerCopyError>?
+            model.makeVersions(["One", "Two"], asker: "check", live: live) { result = $0 }
+            if closeAtOnce { model.close() }
+            wait(20) { result != nil }
+            wait(0.5) { false }
+            return result
+        }
+        let left = { Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []).subtracting(before) }
+        if case .failure(.cancelled)? = make(ViewerModel(url: source, kind: .pdf), live: { false }) {} else { expect(false, "a hung-up asker: nothing made") }
+        let late = HangUp()
+        let model = ViewerModel(url: source, kind: .pdf)
+        DispatchQueue.main.async { late.gone = true }
+        if case .failure(.cancelled)? = make(model, live: { !late.gone }) {} else { expect(false, "hung up while copying: nothing shown") }
+        expect(model.versions == nil && left().isEmpty, "and its copies gone")
+        let closed = ViewerModel(url: source, kind: .pdf)
+        if case .failure(.cancelled)? = make(closed, closeAtOnce: true) {} else { expect(false, "the viewer closed while copying: nothing shown") }
+        expect(closed.versions == nil && left().isEmpty, "and its copies gone")
+        let open = ViewerModel(url: source, kind: .pdf)
+        if case .success(let set)? = make(open) {
+            expect(set.versions.count == 2 && open.versions === set, "made and shown while it's open")
+            try? FileManager.default.removeItem(at: set.folder)
+            open.close()
+        } else { expect(false, "made and shown while it's open") }
+        print("versions: " + (ok ? "made only while asked and open; a hang-up or a closed viewer leaves nothing" : "failed"))
+        return ok
+    }
 
     /// "Open in Petal's viewer" goes through the one resolver: a place whose bookmark finds nothing opens nothing,
     /// even with a file at its old path.
@@ -708,7 +744,25 @@ enum ViewerCheck {
         given.file.id = "W4"
         app.paper.releaseFromViewer(given)
         expect(model.openKey == nil && app.paper.heldByViewer.isEmpty, "given its own id, the desk opening it still closes it in the margin")
-        print("window: " + (ok ? "PDF view, selection read off the main thread, passages found by their words, highlight, margin and pages in step, a link's note, ownership across an id change, the old selection cleared at once, an empty draft kept across a hand-off, notes off closing the margin" : "failed"))
+        // A folded paper's corner turns that paper over (opened first), never the one open.
+        let linkPaper = PaperNote(file: throughLink, url: FileManager.default.temporaryDirectory.appending(path: "W3.md"), notebook: "Inbox")
+        model.openPaper(handwritten)
+        model.flip(linkPaper)
+        expect(model.openKey == linkPaper.key && model.face == .back, "the corner used turns its own paper over")
+        model.flip(linkPaper)
+        expect(model.openKey == linkPaper.key && model.face == .open, "and back")
+        model.close(linkPaper.key, .transfer)
+        // Renamed while its editor is open: the same margin paper (its editor and typing kept), and its last save
+        // lands on the note as it is now.
+        let before = model.paperID(linkPaper)
+        var renamedPaper = linkPaper
+        renamedPaper.url = FileManager.default.temporaryDirectory.appending(path: "W3 renamed.md")
+        app.paper.store.preview([renamedPaper, handwritten], notebooks: [])
+        expect(model.paperID(renamedPaper) == before, "renamed: the same margin paper, so its editor and what's typed stay")
+        let target = NoteShelf.saveTarget(key: linkPaper.key, noteID: "W3", instance: "", papers: app.paper.store.notes.map { ($0.key, $0.noteID, $0.version) },
+                                          current: app.paper.store.currentID)
+        expect(target == renamedPaper.key, "the editor's final save goes to the renamed note")
+        print("window: " + (ok ? "PDF view, selection read off the main thread, passages found by their words, highlight, margin and pages in step, a link's note, ownership across an id change, the old selection cleared at once, an empty draft kept across a hand-off, notes off closing the margin, the right paper flipped, a rename keeping its editor" : "failed"))
         window.close()
         return ok
     }
