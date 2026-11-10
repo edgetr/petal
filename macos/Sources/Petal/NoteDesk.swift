@@ -1435,7 +1435,7 @@ final class NoteDesk {
         var showing: Set<String> = []
         // Kept on the screen (placementNow's rule: not while the window in front is one of its places).
         var resting = 0
-        for paper in store.notes where standalone[paper.key] == nil && placementNow(paper.key) == .screen {
+        for paper in store.notes where keptOnScreen(paper) && standalone[paper.key] == nil && placementNow(paper.key) == .screen {
             showing.insert(paper.key)
             if faces[paper.key] == nil { faces[paper.key] = .folded }
             let panel = panel(for: paper.key)
@@ -2174,7 +2174,8 @@ final class NoteDesk {
         } else if NoteShelf.restsOffWindow(placementNow(key)) {
             // On its Desktop or the screen: a point on the screen, its top-left corner.
             local.desk[paper.noteID] = [rect.minX, rect.maxY]
-        } else if let frame {
+        } else if let frame, here[key] != nil {
+            // By the window in front as last read (`frame` and `here` are of the same read): one of its places.
             local.spots[paper.noteID] = NoteSpot.stick(panel: rect, window: NoteRules.appKitFrame(frame, primaryHeight: primaryHeight))
         }
         local.save(pending: store.pendingIDs)
