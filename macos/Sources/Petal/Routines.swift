@@ -4,15 +4,18 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Routines: what Petal does by itself, made from the person's own words ("keep my Downloads tidy", "when a PDF
-/// lands in Downloads, file it under Receipts", "when I open Figma, switch to Design"). Petal AI turns the words into
+/// lands in Downloads, file it under Receipts", "when I open Xcode, hide Messages"). Petal AI turns the words into
 /// a trigger and actions once, when the routine is made (`petal_routine_save`), so running one costs nothing; only
 /// sorting files by what they are asks the quick AI (Claude Haiku, Codex's Luna), and its answers are kept by the
 /// file's name pattern, so similar files after the first cost nothing either.
 ///
 /// Triggers: a file lands in a folder (settled first: its size has stopped changing, and partial downloads are left
-/// to finish), an app opens or comes to the front, a Desktop enters a mode, a time of day. Actions: sort files into
-/// subfolders (by what they are, or by kind with no AI), move them to a folder, switch mode, open or hide apps, run a
-/// Shortcut. Files are only ever moved, never deleted, and every move is in the history, which puts them back.
+/// to finish), an app opens or comes to the front, a time of day. Actions: sort files into subfolders (by what they
+/// are, or by kind with no AI), move them to a folder, open or hide apps, run a Shortcut. Files are only ever moved,
+/// never deleted, and every move is in the history, which puts them back.
+///
+/// The Mac had modes once, and a routine could start when a Desktop entered one, or switch to one. One saved then is
+/// kept as it was written, listed with a line saying so, and never runs (`usesModes`).
 ///
 /// `~/.config/petal/routines.json` holds the routines; `~/Library/Application Support/Petal/routines-log.json` what
 /// they did and `routines-sorted.json` the folder each name pattern went to (`PETAL_ROUTINES` points all three at
@@ -22,13 +25,13 @@ final class Routines {
     // MARK: What a routine is
 
     struct Trigger: Equatable {
-        var on = ""              // "file", "app", "mode" or "time"
+        var on = ""              // "file", "app" or "time" ("mode" in a routine from when the Mac had modes)
         var folder = ""          // file: the folder watched (~/Downloads)
         var types: [String] = [] // file: kinds (pdf, image, video, audio, archive, installer, document, code) or extensions; empty: any
         var named: [String] = [] // file: words in its name; empty: any
         var app = ""             // app: its bundle id
         var when = "opens"       // app: "opens" (launches) or "front" (comes to the front)
-        var mode = ""            // mode: the mode's id
+        var mode = ""            // mode: the mode's id, kept only so such a routine is written back as it was
         var at = ""              // time: "HH:MM"
         var days: [Int] = []     // time: 1 = Monday … 7 = Sunday; empty: every day
 
@@ -58,12 +61,12 @@ final class Routines {
     }
 
     struct Action: Equatable {
-        var kind = ""            // "sort", "move", "mode", "open", "hide" or "shortcut"
+        var kind = ""            // "sort", "move", "open", "hide" or "shortcut" ("mode" from when the Mac had modes)
         var folder = ""          // sort, move: the files' folder (the trigger's by default)
         var into = ""            // sort: where the subfolders go (the files' folder by default)
         var by = "ai"            // sort: "ai" (what each file is) or "kind" (Images, PDFs, …; no AI)
         var to = ""              // move: the folder they go into
-        var mode = ""            // mode
+        var mode = ""            // mode: kept only so such a routine is written back as it was
         var apps: [String] = []  // open, hide: bundle ids (open also takes addresses and files)
         var name = ""            // shortcut: its name in the Shortcuts app
 
@@ -124,6 +127,11 @@ final class Routines {
 
         /// The folder its file actions take files from.
         func source(_ action: Action) -> String { action.folder.isEmpty ? trigger.folder : action.folder }
+
+        /// Made when the Mac had modes, to start with one or switch to one: it can't do what it says any more, so it
+        /// doesn't run at all.
+        var usesModes: Bool { trigger.on == "mode" || actions.contains { $0.kind == "mode" } }
+        static let modesGone = "It used modes, which Petal for macOS no longer has, so it doesn't run."
     }
 
     struct Move: Equatable, Sendable {
@@ -439,12 +447,6 @@ final class Routines {
         }
     }
 
-    /// The Desktop in front entered a mode (and stayed a second): ModeAutomation tells us.
-    func modeEntered(_ id: String) {
-        guard isOn else { return }
-        for routine in list where routine.on && routine.trigger.on == "mode" && routine.trigger.mode == id { run(routine, file: nil) }
-    }
-
     /// A file settled in a watched folder: every routine for that folder that wants it, the pickiest first.
     private func arrived(_ file: URL, in folder: String) {
         guard isOn else { return }
@@ -467,7 +469,7 @@ final class Routines {
         let job = jobs.removeFirst()
         // Routines turned off meanwhile ("Run my routines", or this one): what's still queued is dropped.
         guard isOn else { jobs = []; return }
-        guard let routine = list.first(where: { $0.id == job.id }), routine.on, !job.stop.isStopped else { return next() }
+        guard let routine = list.first(where: { $0.id == job.id }), routine.on, !routine.usesModes, !job.stop.isStopped else { return next() }
         working = true
         execute(routine, file: job.file, stop: job.stop) { [weak self] _ in
             self?.working = false
@@ -476,7 +478,7 @@ final class Routines {
     }
 
     /// A routine's actions in order. With a file (it just arrived), the file actions move that file; without (a time,
-    /// an app, a mode), they tidy their folder's files.
+    /// an app), they tidy their folder's files.
     /// `approved`: how many files the person already allowed for the routine's first file action (from the plan they
     /// saw). Each file action is planned when the run reaches it, after the actions before it are done (a Shortcut's
     /// export is there by then); it asks again only when there are more files than they allowed.
@@ -529,7 +531,7 @@ final class Routines {
                 let use = { (plan: Plan, allowed: Bool) in
                     // Its asker hung up, or the routine changed, while this folder was planned: no card goes up.
                     guard current() else { return finish() }
-                    // Many files ask first, however the routine was started (a time, an app, a mode, or by hand).
+                    // Many files ask first, however the routine was started (a time, an app, or by hand).
                     self.confirm(!allowed && plan.items.count >= 10, "Tidy \(plan.items.count) files in \(plan.source.lastPathComponent)",
                                  "\(routine.name). You can put them back.", owner: caller) { yes in
                         guard yes else {
@@ -592,7 +594,7 @@ final class Routines {
         setLastRun(routine.id, Date(), result: text)
     }
 
-    /// Switching mode, opening, hiding, a Shortcut: decided when the routine was made, so it costs nothing now.
+    /// Opening, hiding, a Shortcut: decided when the routine was made, so it costs nothing now.
     /// One action that isn't moving files; `done` hears what it did (nil: nothing to do). Opening addresses and
     /// files and hiding apps wait on Launch Services and the apps: off the main thread, the answer back on it, each
     /// change there right after reading `stop` (its asker hung up, the routine changed or went).
@@ -600,11 +602,6 @@ final class Routines {
         guard !standalone else { return done(nil) }
         let app = PetalApp.shared
         switch action.kind {
-        case "mode":
-            guard let mode = app.config.modes.first(where: { $0.id == action.mode }), app.docks.focusedDock?.mode?.id != mode.id,
-                  let desktop = app.docks.focusedDock?.desktop ?? Spaces.desktop(on: NSScreen.main ?? NSScreen.screens[0]) else { return done(nil) }
-            app.setModeNow(mode.id, desktop: desktop)
-            done("switched to \(mode.name)")
         case "open":
             var opened: [String] = []
             var urls: [URL] = []
@@ -622,7 +619,7 @@ final class Routines {
                     opened.append(Apps.name(item))
                 }
             }
-            let said = opened.isEmpty ? nil : "opened " + Insights.list(opened)
+            let said = opened.isEmpty ? nil : "opened " + Apps.listed(opened)
             guard !urls.isEmpty || !launched.isEmpty else { return done(said) }
             // The next step waits until the apps are running (30 s at most) and the addresses and files are opened.
             Assist.off({ !stop.isStopped }, {
@@ -638,7 +635,7 @@ final class Routines {
         case "hide":
             let running = NSWorkspace.shared.runningApplications.filter { r in action.apps.contains { $0 == r.bundleIdentifier } && !r.isHidden }
             guard !running.isEmpty else { return done(nil) }
-            let said = "hid " + Insights.list(running.compactMap(\.localizedName))
+            let said = "hid " + Apps.listed(running.compactMap(\.localizedName))
             Assist.off({ !stop.isStopped }, {
                 for app in running {
                     guard !stop.isStopped else { return }
@@ -663,7 +660,7 @@ final class Routines {
         guard !standalone else { return nil }
         let app = PetalApp.shared
         guard app.chatProvider.flatMap({ app.paths[$0] }) != nil else { return nil }
-        return { prompt, key, done in app.focus.brain.ask(prompt, key: key, done: done) }
+        return { prompt, key, done in app.brain.ask(prompt, key: key, done: done) }
     }
 
     /// One file that just arrived: where it goes (the AI's answer for files named like it, if there is one), then
@@ -953,6 +950,7 @@ final class Routines {
             send(["on": isOn, "routines": list.map { r -> [String: Any] in
                 var o = r.json
                 o["does"] = summary(r)
+                if r.usesModes { o["skipped"] = Routine.modesGone + " Delete it, or save it again with another trigger and actions." }
                 return o
             }, "history": log.prefix(15).map { e -> [String: Any] in
                 ["id": e.id, "routine": e.name, "text": e.text, "at": e.at.timeIntervalSince1970, "canPutBack": e.canUndo]
@@ -979,19 +977,16 @@ final class Routines {
         var actions = (args["actions"] as? [[String: Any]])?.map(Action.init) ?? old?.actions ?? []
         let words = ((args["words"] as? String) ?? old?.words ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !words.isEmpty else { return fail("words: what the person asked for, in their own words") }
-        guard ["file", "app", "mode", "time"].contains(trigger.on) else { return fail("trigger.on is file, app, mode or time") }
+        guard ["file", "app", "time"].contains(trigger.on) else { return fail("trigger.on is file, app or time") }
         guard !actions.isEmpty else { return fail("actions: at least one") }
-        let modes = standalone ? [] : PetalApp.shared.config.modes.map(\.id)
-        if trigger.on == "mode" && !modes.contains(trigger.mode) { return fail("No mode \(trigger.mode); petal_get_state lists them.") }
         for action in actions {
             switch action.kind {
             case "sort", "move":
                 if action.folder.isEmpty && trigger.on != "file" { return fail("\(action.kind) needs folder: the folder whose files it takes") }
                 if action.kind == "move" && action.to.isEmpty { return fail("move needs to: the folder files go into") }
-            case "mode": if !modes.contains(action.mode) { return fail("No mode \(action.mode); petal_get_state lists them.") }
             case "open", "hide": if action.apps.isEmpty { return fail("\(action.kind) needs apps") }
             case "shortcut": if action.name.isEmpty { return fail("shortcut needs name") }
-            default: return fail("Each action's do is sort, move, mode, open, hide or shortcut")
+            default: return fail("Each action's do is sort, move, open, hide or shortcut")
             }
         }
         if trigger.on == "time", Self.minutes(trigger.at) == nil { return fail("trigger.at is \"HH:MM\"") }
@@ -1056,6 +1051,7 @@ final class Routines {
                          _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let id = args["id"] as? String ?? ""
         guard let routine = list.first(where: { $0.id == id }) else { return fail("No routine with id \(id); petal_routines lists them.") }
+        guard !routine.usesModes else { return fail(Routine.modesGone) }
         let dry = args["dryRun"] as? Bool ?? false
         let rule = ruleVersion[id, default: 0]   // the routine as it is now; a change while its card waits stops it
         let changed = { send(["note": "The routine changed while it waited; nothing moved. Run it again."]) }
@@ -1134,7 +1130,7 @@ final class Routines {
             let only = t.types + t.named.map { "“\($0)”" }
             if !only.isEmpty { when += " (\(only.joined(separator: ", ")))" }
         case "app": when = "When \(standalone ? t.app : Apps.name(t.app)) " + (t.when == "front" ? "comes to the front" : "opens")
-        case "mode": when = "When a Desktop enters \(modeName(t.mode))"
+        case "mode": when = "When a Desktop entered the mode “\(t.mode)”"
         case "time":
             let days: String
             switch t.days.sorted() {
@@ -1151,18 +1147,14 @@ final class Routines {
             switch a.kind {
             case "sort": return "sorts \(them) into folders" + (a.by == "kind" ? " by kind" : "") + (a.into.isEmpty ? "" : " in \(Self.short(a.into))")
             case "move": return "moves \(them) to \(Self.short(a.to))"
-            case "mode": return "switches to \(modeName(a.mode))"
-            case "open": return "opens " + Insights.list(a.apps.map { $0.contains("://") || $0.hasPrefix("/") || $0.hasPrefix("~") ? $0 : (standalone ? $0 : Apps.name($0)) })
-            case "hide": return "hides " + Insights.list(a.apps.map { standalone ? $0 : Apps.name($0) })
+            case "mode": return "switched to the mode “\(a.mode)”"
+            case "open": return "opens " + Apps.listed(a.apps.map { $0.contains("://") || $0.hasPrefix("/") || $0.hasPrefix("~") ? $0 : (standalone ? $0 : Apps.name($0)) })
+            case "hide": return "hides " + Apps.listed(a.apps.map { standalone ? $0 : Apps.name($0) })
             case "shortcut": return "runs the Shortcut “\(a.name)”"
             default: return a.kind
             }
         }
         return when + ": " + what.joined(separator: ", then ")
-    }
-
-    private func modeName(_ id: String) -> String {
-        standalone ? id : (PetalApp.shared.config.modes.first { $0.id == id }?.name ?? id)
     }
 
     // MARK: Helpers (off the main thread)
@@ -1513,6 +1505,33 @@ final class FolderWatch: @unchecked Sendable {
     }
 }
 
+// MARK: - Shortcuts
+
+/// The Shortcuts app's shortcuts, through its own command.
+enum Shortcuts {
+    /// Runs one, off the main thread. `done` (on the main thread) hears whether it finished within `timeout`
+    /// seconds; one still running then is stopped.
+    static func run(_ name: String, timeout: Double, done: @escaping @MainActor (Bool) -> Void) {
+        DispatchQueue.global(qos: .utility).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
+            process.arguments = ["run", name]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            process.standardInput = FileHandle.nullDevice
+            let exited = DispatchSemaphore(value: 0)
+            process.terminationHandler = { _ in exited.signal() }
+            var finished = false
+            if (try? process.run()) != nil {
+                finished = exited.wait(timeout: .now() + timeout) == .success
+                if !finished { process.terminate() }
+            }
+            let ok = finished && process.terminationStatus == 0
+            DispatchQueue.main.async { MainActor.assumeIsolated { done(ok) } }
+        }
+    }
+}
+
 // MARK: - Settings: Routines
 
 struct RoutinesSettings: View {
@@ -1521,7 +1540,7 @@ struct RoutinesSettings: View {
     var body: some View {
         let _ = BodyCount.hit("RoutinesSettings")
         let routines = app.routines
-        Card(title: "Routines", footer: "Ask Petal AI in your own words: “keep my Downloads tidy”, “when a PDF lands in Downloads, file it under Receipts”, “when I open Figma, switch to Design”. Files are only moved into folders, never deleted, and everything a routine moves can be put back.") {
+        Card(title: "Routines", footer: "Ask Petal AI in your own words: “keep my Downloads tidy”, “when a PDF lands in Downloads, file it under Receipts”, “when I open Xcode, hide Messages”. Files are only moved into folders, never deleted, and everything a routine moves can be put back.") {
             SettingToggle(key: "routines", title: "Run my routines", detail: "Petal does them by itself, without asking each time.")
             Button("Make one with Petal AI") { app.claude.open(asking: "Make a routine: ", send: false) }.buttonStyle(.glass)
         }
@@ -1532,14 +1551,18 @@ struct RoutinesSettings: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(routine.words).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
                             Text(routines.summary(routine)).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                            if let last = routine.lastRun {
+                            if routine.usesModes {
+                                Text(Routines.Routine.modesGone).font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                            } else if let last = routine.lastRun {
                                 Text("Last ran \(last, format: .relative(presentation: .named))\(routine.lastResult.isEmpty ? "" : ": " + routine.lastResult.prefix(1).lowercased() + routine.lastResult.dropFirst())")
                                     .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
                             }
                         }
                         Spacer(minLength: 8)
-                        Toggle("", isOn: Binding(get: { routine.on }, set: { routines.setOn(routine.id, $0) }))
-                            .toggleStyle(.switch).labelsHidden().controlSize(.small)
+                        if !routine.usesModes {
+                            Toggle("", isOn: Binding(get: { routine.on }, set: { routines.setOn(routine.id, $0) }))
+                                .toggleStyle(.switch).labelsHidden().controlSize(.small)
+                        }
                         RoundButton(symbol: "xmark") { routines.delete(routine.id) }
                     }
                 }

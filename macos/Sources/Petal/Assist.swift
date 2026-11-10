@@ -12,8 +12,7 @@ import ScreenCaptureKit
 /// Always, Don't), unless the chat has Full access or the person said Always for that kind of thing. Files go to the
 /// Trash, never away for good, and the last batch can be put back.
 ///
-/// It also remembers (per mode, or everywhere): what the person says to remember, what the AI notices on its own,
-/// and once a day what it learns from how each mode is used (`aiLearns`). And at `dailySummary` it shows the day.
+/// It also remembers what the person says to remember and what the AI notices on its own (`aiMemory`).
 @MainActor @Observable
 final class Assist {
     struct Request: Identifiable, Equatable {
@@ -40,7 +39,6 @@ final class Assist {
     struct Memory: Identifiable, Equatable {
         let id: String
         var text: String
-        var mode: String      // a mode's id, or "" for everywhere
         var learned: Bool     // noticed by Petal AI rather than asked for
         var at: Date
     }
@@ -52,7 +50,6 @@ final class Assist {
     @ObservationIgnored private var answer: ((Bool) -> Void)?
     @ObservationIgnored private var giveUp: DispatchWorkItem?
     @ObservationIgnored private var trashed: [(from: URL, to: URL)] = []
-    @ObservationIgnored private var timer: Timer?
     /// Using the person's apps with a pointer of its own (ComputerUse.swift).
     @ObservationIgnored let computer = ComputerUse()
     nonisolated private static let queue = DispatchQueue(label: "petal.assist", qos: .userInitiated, attributes: .concurrent)
@@ -63,9 +60,6 @@ final class Assist {
     func start() {
         loadMemories()
         loadHistory()
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.minute() }
-        }
     }
 
     // MARK: Asking first
@@ -102,7 +96,7 @@ final class Assist {
             app.paper.helpers.asking(owner)
         } else if !app.claude.isOpen || !showsInChat(request) {
             // Over the dock; with no Petal dock showing (macOS's in use), in the chat asking, which shows the question.
-            if app.docks.focusedDock?.panel != nil { app.popups.show(FocusCard(kind: .ask, title: title, reason: detail)) }
+            if app.docks.focusedDock?.panel != nil { app.popups.showAsk() }
             else if let owner, let note = app.claude.note(withID: owner) { app.claude.present(note) }
             else if !app.claude.isOpen { app.claude.open(asking: nil) }
         }
@@ -142,9 +136,8 @@ final class Assist {
         giveUp = nil
         let done = answer
         answer = nil
-        let asked = pending != nil
         pending = nil
-        if asked, app.popups.card?.kind == .ask { app.popups.dismissCard() }
+        app.popups.closeAsk()
         done?(allowed)
     }
 
@@ -224,12 +217,12 @@ final class Assist {
             guard config.bool("aiMemory") else { return fail("Memory is off in Petal's settings (aiMemory).") }
             let text = (args["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return fail("Nothing to remember.") }
-            let memory = remember(text, mode: args["mode"] as? String ?? "", learned: args["learned"] as? Bool ?? false)
+            let memory = remember(text, learned: args["learned"] as? Bool ?? false)
             did("Remembered \(quoted: memory.text, else: "something")", undo: .forget(memory.id))
-            send(["remembered": memory.text, "id": memory.id, "mode": memory.mode.isEmpty ? "everywhere" : memory.mode])
+            send(["remembered": memory.text, "id": memory.id])
         case "petal_forget":
             let gone = forget(id: args["id"] as? String, matching: args["text"] as? String)
-            for memory in gone { did("Forgot \(quoted: memory.text, else: "something")", undo: .remember(memory.text, memory.mode)) }
+            for memory in gone { did("Forgot \(quoted: memory.text, else: "something")", undo: .remember(memory.text)) }
             send(["forgot": gone.map(\.text)])
         case "petal_show":
             do {
@@ -253,8 +246,7 @@ final class Assist {
             // `asker`: the note a helper's request comes from (its paper's id), what Private notebooks go by; `caller`: its chat.
             app.paper.handle(name, args, asker: note.flatMap { app.claude.note(withID: $0)?.paper }, caller: note, live: live, send, fail)
         case "petal_memories":
-            let mode = args["mode"] as? String
-            send(["memories": memories.filter { mode == nil || $0.mode == mode || $0.mode.isEmpty }.map(record)])
+            send(["memories": memories.map(record)])
         default:
             fail("Unknown tool \(name)")
         }
@@ -275,7 +267,7 @@ final class Assist {
             || Reader.inJoinedSecret(pid: pid, window: window, controls: [field])
     }
 
-    /// What's in front: the app, its window, the browser's tab, selected text, the mode, the other windows showing;
+    /// What's in front: the app, its window, the browser's tab, selected text, the other windows showing;
     /// with `screenshot` ("window" or "screen") a picture saved where the AI can read it, and the clipboard if asked.
     /// A sticky note (`place`) looks at its own window instead, wherever the person is now, unless it asks for an app
     /// or for what's in front (`front`).
@@ -286,8 +278,6 @@ final class Assist {
         let front = place == nil ? frontApp(named: named) : stuck
         let wanted: CGWindowID? = if case .window(let number)? = place?.target { number } else { nil }
         var result: [String: Any] = [:]
-        if let place, let mode = config.modes.first(where: { $0.id == place.mode }) { result["mode"] = ["id": mode.id, "name": mode.name] }
-        else if let mode = app.docks.focusedDock?.mode { result["mode"] = ["id": mode.id, "name": mode.name] }
         if let place {
             // A note's window that's gone is said so, and nothing else is looked at in its place.
             guard stuck != nil else {
@@ -897,13 +887,13 @@ final class Assist {
         let list = (Config.parse(memoryFile)?["memories"] as? [[String: Any]]) ?? []
         memories = list.compactMap { item in
             guard let id = item["id"] as? String, let text = item["text"] as? String else { return nil }
-            return Memory(id: id, text: text, mode: item["mode"] as? String ?? "", learned: item["by"] as? String == "petal",
+            return Memory(id: id, text: text, learned: item["by"] as? String == "petal",
                           at: Date(timeIntervalSince1970: item["at"] as? Double ?? 0))
         }
     }
 
     private func record(_ memory: Memory) -> [String: Any] {
-        ["id": memory.id, "text": memory.text, "mode": memory.mode, "by": memory.learned ? "petal" : "you", "at": memory.at.timeIntervalSince1970]
+        ["id": memory.id, "text": memory.text, "by": memory.learned ? "petal" : "you", "at": memory.at.timeIntervalSince1970]
     }
 
     private func saveMemories() {
@@ -911,10 +901,9 @@ final class Assist {
     }
 
     @discardableResult
-    func remember(_ text: String, mode: String, learned: Bool) -> Memory {
-        let mode = config.modes.contains { $0.id == mode } ? mode : ""
-        if let same = memories.first(where: { $0.text.caseInsensitiveCompare(text) == .orderedSame && $0.mode == mode }) { return same }
-        let memory = Memory(id: String(UUID().uuidString.prefix(8)).lowercased(), text: text, mode: mode, learned: learned, at: Date())
+    func remember(_ text: String, learned: Bool) -> Memory {
+        if let same = memories.first(where: { $0.text.caseInsensitiveCompare(text) == .orderedSame }) { return same }
+        let memory = Memory(id: String(UUID().uuidString.prefix(8)).lowercased(), text: text, learned: learned, at: Date())
         memories.append(memory)
         saveMemories()
         return memory
@@ -932,82 +921,9 @@ final class Assist {
         return gone
     }
 
-    /// What the chat is told it remembers: everywhere, then the mode in front (or a note's own mode).
-    func memoryBrief(mode id: String? = nil) -> String {
+    /// What the chat is told it remembers.
+    func memoryBrief() -> String {
         guard config.bool("aiMemory") else { return "" }
-        let mode = id.flatMap { id in config.modes.first { $0.id == id } } ?? app.docks.focusedDock?.mode
-        let general = memories.filter { $0.mode.isEmpty }
-        let here = memories.filter { !$0.mode.isEmpty && $0.mode == mode?.id }
-        var text = ""
-        if !general.isEmpty { text += general.map { "- \($0.text) [\($0.id)]" }.joined(separator: "\n") }
-        if let mode, !here.isEmpty { text += (text.isEmpty ? "" : "\n") + "In \(mode.name):\n" + here.map { "- \($0.text) [\($0.id)]" }.joined(separator: "\n") }
-        return text
-    }
-
-    // MARK: Once a minute: learning and the day's summary
-
-    private func minute() {
-        let now = Date()
-        let calendar = Calendar.current
-        let today = calendar.startOfDay(for: now).timeIntervalSince1970
-        let defaults = UserDefaults.standard
-        // The day's summary, at its time.
-        let when = config.string("dailySummary")
-        if let at = Self.time(when, on: now), now >= at, defaults.double(forKey: "dailySummaryShown") < today {
-            defaults.set(today, forKey: "dailySummaryShown")
-            showDay()
-        }
-        // Learning, once a day, in the evening.
-        if config.bool("aiMemory"), config.bool("aiLearns"), app.focus.brain.enabled, calendar.component(.hour, from: now) >= 17,
-           defaults.double(forKey: "learnedOn") < today {
-            defaults.set(today, forKey: "learnedOn")
-            learn()
-        }
-    }
-
-    private static func time(_ text: String, on day: Date) -> Date? {
-        let parts = text.split(separator: ":").compactMap { Int($0) }
-        guard parts.count == 2 else { return nil }
-        return Calendar.current.date(bySettingHour: parts[0], minute: parts[1], second: 0, of: day)
-    }
-
-    /// Today's time in each mode as a card, with a line from Petal AI when it's on.
-    func showDay() {
-        Task {
-            let summary = await Task.detached { Insights.summary(from: Calendar.current.startOfDay(for: Date()), to: Date(), title: "Today") }.value
-            var card = FocusCard(kind: .summary)
-            card.summary = summary
-            guard app.focus.brain.enabled, !summary.modes.isEmpty else { return app.popups.show(card) }
-            let prompt = """
-            Here is how someone spent today on their Mac, by focus mode: \(summary.lines.joined(separator: " "))
-            Write ONE short, kind sentence summing up their day for a card on their dock (no greeting, under 20 words).
-            Reply with ONLY JSON: {"line": "<sentence>"}
-            """
-            app.focus.brain.ask(prompt, key: "day|\(Int(Date().timeIntervalSince1970))") { answer in
-                card.reason = (answer?["line"] as? String) ?? ""
-                self.app.popups.show(card)
-            }
-        }
-    }
-
-    /// What Petal AI learns from the last week of each mode (the apps and when), kept as memories it made.
-    func learn() {
-        Task {
-            let week = await Task.detached { Insights.summary(lastWeek: false) }.value
-            for mode in week.modes where mode.minutes >= 60 {
-                let known = memories.filter { $0.mode == mode.id }.map(\.text)
-                let prompt = """
-                You help someone with their Mac. Their focus mode "\(mode.name)" took \(Insights.Summary.duration(mode.minutes)) this week, mostly in \(Insights.list(mode.apps.map { Insights.name($0.id) })).
-                What you already remember about this mode: \(known.isEmpty ? "nothing" : known.joined(separator: "; ")).
-                Note at most 2 new, short facts about how they use this mode that would help you help them later (habits, tools they rely on). No guesses about their life; nothing already remembered; [] if there's nothing new.
-                Reply with ONLY JSON: {"facts": ["<under 15 words>", ...]}
-                """
-                app.focus.brain.ask(prompt, key: "learn|\(mode.id)|\(Int(Date().timeIntervalSince1970))") { answer in
-                    for fact in (answer?["facts"] as? [String] ?? []).prefix(2) where !fact.isEmpty {
-                        self.remember(fact, mode: mode.id, learned: true)
-                    }
-                }
-            }
-        }
+        return memories.map { "- \($0.text) [\($0.id)]" }.joined(separator: "\n")
     }
 }

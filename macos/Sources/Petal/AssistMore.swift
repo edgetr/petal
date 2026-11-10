@@ -9,7 +9,7 @@ extension Assist {
     enum Undo: Codable, Equatable {
         case putBack([[String]])          // [from, to in the Trash]
         case forget(String)               // a memory's id
-        case remember(String, String)     // text, mode
+        case remember(String)             // a memory's text
         case open(String, String)         // a page: path, title (not an undo: open it again)
     }
 
@@ -88,7 +88,7 @@ extension Assist {
             }
             return
         case .forget(let id): forget(id: id, matching: nil)
-        case .remember(let text, let mode): remember(text, mode: mode, learned: false)
+        case .remember(let text): remember(text, learned: false)
         case .open(let path, let title):
             Pages.open(URL(fileURLWithPath: path), title: title)
             return
