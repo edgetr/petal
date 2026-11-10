@@ -650,7 +650,7 @@ private final class BrowserChecker {
             return "Don't filled nothing; Buy filled number, expiry and code on shop.example; another page asked again"
         }
 
-        var made = ""
+        var newPassword = ""
         let typedPassword = "typed-Kq7-by-the-person-55"
         step("10", "the vault: a new login, and one the person types in") {
             _ = browser("open", ["address": base() + "/signup"])
@@ -659,11 +659,11 @@ private final class BrowserChecker {
             let before = VaultStore.itemsForCheck().count
             let new = call("petal_vault", ["action": "new_login", "password_id": fresh, "confirm_id": again, "username_id": user, "username": "new@example.com", "title": "Check signup"])
             expect((new["filled"] as? [String])?.count == 3 && new["saved"] != nil, "it made a password, saved it and filled all three (\(new))")
-            made = current?.checkEvaluate("document.getElementById('np').value") ?? ""
-            expect(made.count >= 20 && current?.checkEvaluate("document.getElementById('nc').value") == made, "both fields hold the same strong password")
+            newPassword = current?.checkEvaluate("document.getElementById('np').value") ?? ""
+            expect(newPassword.count >= 20 && current?.checkEvaluate("document.getElementById('nc').value") == newPassword, "both fields hold the same strong password")
             let saved = VaultStore.itemsForCheck().first { $0.title == "Check signup" }
-            expect(VaultStore.itemsForCheck().count == before + 1 && saved?[.password] == made && saved?.sites == ["127.0.0.1"], "saved for the site the browser said the page is (\(saved?.sites ?? []))")
-            expect(!made.isEmpty && !(answers.last ?? "").contains(made), "and never told")
+            expect(VaultStore.itemsForCheck().count == before + 1 && saved?[.password] == newPassword && saved?.sites == ["127.0.0.1"], "saved for the site the browser said the page is (\(saved?.sites ?? []))")
+            expect(!newPassword.isEmpty && !(answers.last ?? "").contains(newPassword), "and never told")
             // On another site's page, where a login would only fill after asking: no password is made at all.
             _ = browser("open", ["address": base("localhost") + "/signup"])
             read = page(browser("read"))
@@ -717,12 +717,12 @@ private final class BrowserChecker {
         step("12", "no secret in any answer") {
             let all = answers.joined(separator: "\n")
             for (name, secret) in [("the password", password), ("the key", key), ("the card number", cardNumber), ("the page's own password", "letmein-shown-by-page"),
-                                   ("the password Petal made", made.isEmpty ? "never-made" : made), ("the password the person typed", typedPassword)] {
+                                   ("the password Petal made", newPassword.isEmpty ? "never-made" : newPassword), ("the password the person typed", typedPassword)] {
                 expect(!all.contains(secret), "\(name) is in an answer")
             }
             expect(!all.contains("\"" + code + "\"") && !all.contains(" " + code + " "), "the security code is in an answer")
             let history = app.assist.history.map(\.text).joined(separator: "\n")
-            expect(!history.contains(password) && !history.contains(cardNumber) && !history.contains(key) && !history.contains(typedPassword) && (made.isEmpty || !history.contains(made)),
+            expect(!history.contains(password) && !history.contains(cardNumber) && !history.contains(key) && !history.contains(typedPassword) && (newPassword.isEmpty || !history.contains(newPassword)),
                    "a secret is in What Petal AI did")
             expect(history.contains("Filled your Check shop password on 127.0.0.1") && history.contains("Buy on shop.example"), "What Petal AI did says what was filled where (\(history.components(separatedBy: "\n").prefix(3)))")
             return "\(answers.count) answers and \(app.assist.history.count) lines of What Petal AI did hold none of them"
