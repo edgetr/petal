@@ -48,6 +48,9 @@ VIEWS = {
     # Petal AI in apps
     'card-use': ('film-card-use', (16, 0, 1280, 336), 880, 66),
     'card-trash': ('film-card-trash', (16, 0, 1280, 336), 880, 66),
+    # a display of its own for each run
+    'preview-run': ('film-run-preview', (17, 18, 1327, 585), 1100, 60),
+    'run-note': ('film-run-note', None, 1000, 0),
     'chip-export': ('film-pill-export', None, 430, 0),
     # the vault
     'vault-items': ('vault-items', (14, 14, 1884, 1044), 1300, 0),
