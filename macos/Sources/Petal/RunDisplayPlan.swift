@@ -173,6 +173,8 @@ enum RunDisplayRules {
         var empty: Bool
         /// The person took it to their screen (Show me), or moved it off the display themselves.
         var shown: Bool
+        /// Its app is one the run started and the person then used: theirs now, so nothing of it is closed.
+        var theirs = false
     }
 
     enum Leftover: Equatable {
@@ -187,10 +189,119 @@ enum RunDisplayRules {
     /// When a run ends, each window still on its display: one that's the run's own and empty is closed (nothing is
     /// lost, nothing asked); anything else (a document, a page, anything with work in it, anything Petal can't tell
     /// is empty) is brought back to the person's main screen, behind what they're doing, never closed. A window they
-    /// already took to their screen is left where it is.
+    /// already took to their screen is left where it is, and one in an app that became theirs comes back to them
+    /// even when empty.
     static func leftover(_ window: Left) -> Leftover {
         if window.shown { return .leave }
-        return window.opened && window.empty ? .close : .bringBack
+        return window.opened && window.empty && !window.theirs ? .close : .bringBack
+    }
+
+    /// Something Petal read of an app or a window: yes, no, or it couldn't be read (an error, a timeout), which is
+    /// never taken for no.
+    enum Told: Equatable { case yes, no, unknown }
+
+    /// A window holds nothing to keep. `document`: it shows a file or an address; `modified`: it says it has unsaved
+    /// changes (a kind of window that never says is `no`). Anything that couldn't be read holds something. A dialog
+    /// or panel with no document behind it (an Open panel, a welcome window: `panel`) is nothing to keep whatever it
+    /// was opened with; an ordinary window only when the run opened it `bare` (no file, no address) and did nothing
+    /// in it since (`changed`).
+    static func holdsNothing(bare: Bool, changed: Bool, panel: Bool, document: Told, modified: Told) -> Bool {
+        guard document == .no, modified == .no else { return false }
+        if panel { return true }
+        return bare && !changed
+    }
+
+    /// Whether an app has unsaved changes, from its windows: `listed`: its windows could be read at all; `modified`:
+    /// what each says. One that says yes is yes; else one that couldn't be read is unknown; else no.
+    static func unsaved(listed: Bool, modified: [Told]) -> Told {
+        guard listed else { return .unknown }
+        if modified.contains(.yes) { return .yes }
+        return modified.contains(.unknown) ? .unknown : .no
+    }
+
+    // MARK: An app a run started
+
+    /// An app a run's open touched, as it is when the run ends.
+    struct LeftApp: Equatable {
+        /// The run's own open started it: it wasn't running before. Never true of an app the person had open.
+        var launched: Bool
+        /// The person used it since (`personUsed`).
+        var used: Bool
+        /// One of its windows was taken to the person's screen: Show me, or the run's own petal_windows show.
+        var shown: Bool
+        /// It has unsaved changes Petal can read (`unsaved`).
+        var unsaved: Told
+    }
+
+    enum AppLeftover: Equatable {
+        /// Asked to quit, politely: the run started it, nobody used it, and it holds nothing unsaved.
+        case quit
+        /// Left running: its windows follow `leftover`.
+        case keep
+    }
+
+    /// An app the run started is the run's to put away: when the run ends it's asked to quit, unless the person used
+    /// it since, one of its windows was brought to their screen, or it has unsaved changes. When Petal can't tell
+    /// whether it has (`unknown`), it's kept and its windows come back. An app the person already had open is never
+    /// quit. An app that's kept, or doesn't quit in time (`quitBound`: it asked to save, say), has its windows
+    /// settled one by one (`leftover`).
+    static func leftover(app: LeftApp) -> AppLeftover {
+        guard app.launched, !app.used, !app.shown, app.unsaved == .no else { return .keep }
+        return .quit
+    }
+
+    /// Whose an app is, when a run asks to quit, hide or bring it forward (petal_apps).
+    enum AppOwner: Equatable {
+        /// The person's: they had it open, or used it since a run started it.
+        case persons
+        /// The asking run started it, on its own display, and nobody used it since.
+        case own
+        /// Another run started it, on its display, and nobody used it since.
+        case another
+    }
+
+    enum AppAnswer: Equatable {
+        case go
+        /// The person is asked first.
+        case ask
+        case refuse
+    }
+
+    /// An app another run started is none of this one's: nothing of it is quit, hidden or brought forward. A run's
+    /// own, which the person never saw, quits without asking them (it's the run's to put away) and never comes
+    /// forward (nothing on a hidden display does). The person's app is as always: quitting asks them first.
+    static func apps(_ action: String, owner: AppOwner) -> AppAnswer {
+        switch owner {
+        case .another: return .refuse
+        case .own: return action == "focus" ? .refuse : .go
+        case .persons: return action == "quit" ? .ask : .go
+        }
+    }
+
+    /// How long an app asked to quit has to go, before its windows are settled as if it had been kept.
+    static let quitBound: TimeInterval = 3
+
+    /// How Petal knows the person used an app a run started, from what it can observe. Petal itself never brings a
+    /// run's app forward (its opens don't activate, and nothing on a hidden display is raised), so:
+    /// - the app came to the front within a moment (`byHand`) of the person's last key, click or scroll: they
+    ///   switched to it (the Dock, ⌘Tab, a click on its window, Show me). One that comes forward while the person's
+    ///   hands are still did so by itself, which is nobody's use;
+    /// - or, while it was in front, the person pressed a key, clicked or scrolled (`usedInFront`), whoever brought it.
+    /// Both go by the hardware's own times (keys Petal posts never count). Typing elsewhere at the very moment an
+    /// app comes forward by itself reads as use: the app is then kept, never the other way round.
+    static let byHand: TimeInterval = 1.5
+
+    /// `idle`: seconds since the person's last key, click or scroll, read as the app came to the front.
+    static func cameForwardByPerson(idle: TimeInterval) -> Bool { idle <= byHand }
+
+    /// `idle`: seconds since the person's last key, click or scroll, read while the app is in front; `frontFor`: how
+    /// long it has been. Their last input came after it did.
+    static func usedInFront(idle: TimeInterval, frontFor: TimeInterval) -> Bool { idle < frontFor }
+
+    static func personUsed(idleAtFront: TimeInterval?, idleNow: TimeInterval?, frontFor: TimeInterval?) -> Bool {
+        if let idleAtFront, cameForwardByPerson(idle: idleAtFront) { return true }
+        if let idleNow, let frontFor, usedInFront(idle: idleNow, frontFor: frontFor) { return true }
+        return false
     }
 
     // MARK: Words
@@ -319,5 +430,111 @@ struct RunDisplayPlan: Equatable {
             effects.append(.make(next))
         }
         return effects
+    }
+}
+
+/// Two runs, one app: they take turns. Most Mac apps run once, with one set of menus, one keyboard focus and one
+/// window in front, so a second run in an app a first one is using on its display would act on the first one's
+/// windows, or open its own among them. A run holds an app while it has windows of it on its display (or started it);
+/// another run that asks to open something in that app, or to act in it, waits in order and gets it when the holder
+/// ends or lets it go. Reads never wait (and never show another run's window). A group is who shares a display
+/// (`RunDisplayRules.group`); an app is its bundle identifier.
+struct AppTurns: Equatable {
+    enum Standing: Equatable {
+        /// It may go ahead now.
+        case has
+        /// Another run has the app: waiting, with this many ahead of it plus one (1: next).
+        case waiting(Int)
+        /// Waiting would never end: the run that has the app is itself waiting for one this run has. Nothing waits.
+        case circular
+    }
+
+    /// The next in line has the app now.
+    struct Grant: Equatable {
+        let app: String
+        let group: String
+    }
+
+    /// Who has each app.
+    private(set) var holders: [String: String] = [:]
+    /// Who waits for each, in order.
+    private(set) var queues: [String: [String]] = [:]
+
+    func holder(of app: String) -> String? { holders[app] }
+
+    /// The apps a group has, in a fixed order.
+    func apps(of group: String) -> [String] { holders.filter { $0.value == group }.keys.sorted() }
+
+    /// The apps a group waits for, in a fixed order.
+    func waits(of group: String) -> [String] { queues.filter { $0.value.contains(group) }.keys.sorted() }
+
+    func standing(of group: String, app: String) -> Standing? {
+        if holders[app] == group { return .has }
+        if let index = queues[app]?.firstIndex(of: group) { return .waiting(index + 1) }
+        return nil
+    }
+
+    /// A group asks for an app. `hold`: it's about to put a window of it on its display, so it has the app from now
+    /// (until `letGo` or `leave`); without, it only acts in it once and takes nothing. Free, or its own already: it
+    /// goes ahead. Another group's: it waits in order, unless that could never end (`circular`).
+    mutating func ask(_ group: String, app: String, hold: Bool) -> Standing {
+        guard let holder = holders[app] else {
+            if hold { holders[app] = group }
+            return .has
+        }
+        if holder == group { return .has }
+        if let index = queues[app]?.firstIndex(of: group) { return .waiting(index + 1) }
+        if blocked(holder, by: group) { return .circular }
+        queues[app, default: []].append(group)
+        return .waiting(queues[app]?.count ?? 1)
+    }
+
+    /// `first` waits, directly or through others, for an app `group` has.
+    private func blocked(_ first: String, by group: String) -> Bool {
+        var seen: Set<String> = []
+        var next = [first]
+        while let one = next.popLast() {
+            if one == group { return true }
+            guard seen.insert(one).inserted else { continue }
+            for app in waits(of: one) {
+                if let holder = holders[app] { next.append(holder) }
+            }
+        }
+        return false
+    }
+
+    /// A group is done with an app (its windows of it are closed or went to the person, the app quit, or its one act
+    /// is over): the next in line has it now.
+    mutating func letGo(_ group: String, app: String) -> [Grant] {
+        guard holders[app] == group else { return [] }
+        holders[app] = nil
+        guard var queue = queues[app], !queue.isEmpty else {
+            queues[app] = nil
+            return []
+        }
+        let next = queue.removeFirst()
+        queues[app] = queue.isEmpty ? nil : queue
+        holders[app] = next
+        return [Grant(app: app, group: next)]
+    }
+
+    /// A group no longer waits for an app (whoever asked gave up).
+    mutating func stopWaiting(_ group: String, app: String) {
+        guard var queue = queues[app] else { return }
+        queue.removeAll { $0 == group }
+        queues[app] = queue.isEmpty ? nil : queue
+    }
+
+    /// A group ended: it waits for nothing, and every app it had goes to the next in line.
+    mutating func leave(_ group: String) -> [Grant] {
+        for app in waits(of: group) { stopWaiting(group, app: app) }
+        var grants: [Grant] = []
+        for app in apps(of: group) { grants += letGo(group, app: app) }
+        return grants
+    }
+
+    /// What the AI is told when waiting could never end.
+    static func circularWords(_ app: String) -> String {
+        "\(app) is in use by another helper, which is itself waiting for an app you're using, so waiting would never end. Nothing was done. Finish with what you have open first (petal_windows close, or show to hand it to the person), or do this part another way."
     }
 }

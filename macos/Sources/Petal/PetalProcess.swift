@@ -33,8 +33,9 @@ enum PetalProcess {
         case viewerCheck
         /// `Petal --helpers-check [--ai]`: helpers in notes run end to end, headless, on throwaway folders.
         case helpersCheck(ai: Bool)
-        /// `Petal --display-check <folder>`: makes one real hidden display and puts a TextEdit window on it
-        /// (DisplayCheck.swift). It changes the screens for a few seconds: only ever run on purpose, by a person.
+        /// `Petal --display-check <folder> [--full]`: makes one real hidden display and puts a TextEdit window on it;
+        /// with `--full`, three runs on two displays with TextEdit and Calculator (DisplayCheck.swift, which reads
+        /// `--full` itself). It changes the screens for a while: only ever run on purpose, by a person.
         case displayCheck(String)
         /// A tool's flag written wrong (`--snapshot` with no folder, a `--bench…` there isn't): its usage, printed
         /// before anything starts, and a non-zero exit. Never a dock.
@@ -45,7 +46,7 @@ enum PetalProcess {
     /// How each tool is written, for `.usage`.
     static let usages: [String: String] = [
         "--snapshot": "Petal --snapshot <folder>",
-        "--display-check": "Petal --display-check <folder>",
+        "--display-check": "Petal --display-check <folder> [--full]",
         "--bench-windows-idle": "Petal --bench-windows-idle <window>",
         "--bench-windows": "Petal --bench-windows [--runs <n>] [--only <window>] [--json <file>] [--png <folder>]",
         "--bench-settings": "Petal --bench-settings [--runs <n>] [--only <window>] [--json <file>] [--png <folder>]",

@@ -243,7 +243,7 @@ struct HelperBar: View {
             if working {
                 HStack(spacing: 7) {
                     PulseDot(color: PaperLook.color(tint), pulsing: run.map { !$0.paused } ?? (helper?.state == .working))
-                    Text(line(run: run, helper: helper)).font(.system(size: 11.5)).foregroundStyle(glass ? Color.secondary : PaperLook.footer).lineLimit(1)
+                    Text(Self.line(run: run, helper: helper, displays: app.displays)).font(.system(size: 11.5)).foregroundStyle(glass ? Color.secondary : PaperLook.footer).lineLimit(1)
                     Spacer(minLength: 6)
                     // It works on a hidden display of its own: its window comes to the person's screen.
                     if let caller = run?.sticky?.id.uuidString, app.displays.display(for: caller) != nil {
@@ -279,10 +279,13 @@ struct HelperBar: View {
         .padding(.top, working || !denials.isEmpty || desk?.helpers.hints[noteID] != nil ? 6 : 0)
     }
 
-    private func line(run: NoteHelpers.Run?, helper: NoteHelp.Helper?) -> String {
+    /// The bar's line: who, and its latest step; while it waits its turn for a display or an app, that.
+    @MainActor
+    static func line(run: NoteHelpers.Run?, helper: NoteHelp.Helper?, displays: RunDisplays) -> String {
         if let run {
             if run.paused { return "\(run.who) · paused" }
-            if app.displays.waits(run.sticky?.id.uuidString) { return run.who + " · " + NoteStatus.waitingForDisplay }
+            if displays.waits(run.sticky?.id.uuidString) { return run.who + " · " + NoteStatus.waitingForDisplay }
+            if let waited = displays.waitsForApp(run.sticky?.id.uuidString) { return run.who + " · " + NoteStatus.waiting(for: waited) }
             let step = run.sticky?.agent.activity.text ?? ""
             return run.who + " · " + (step.isEmpty ? "working" : step)
         }
