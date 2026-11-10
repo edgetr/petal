@@ -4,7 +4,7 @@
 Your own Claude Code or Codex lives in the dock, so you change anything about it by asking.
 On the Mac it also has sticky notes that can do things; on Omarchy, a focus mode for every workspace.
 
-**[Download](https://petal-dock.vercel.app)** · [Releases](https://github.com/edgetr/petal/releases)
+**[Download](https://petal.codes)** · [Releases](https://github.com/edgetr/petal/releases)
 
 ## On both
 
@@ -49,14 +49,14 @@ your own Dock back whenever you quit.
 
 ### Install
 
-Download **Petal for Mac** from [the website](https://petal-dock.vercel.app) and open it. Petal has
+Download **Petal for Mac** from [the website](https://petal.codes) and open it. Petal has
 no Apple Developer ID, so the first time macOS won't open it: go to System Settings › Privacy &
 Security and choose **Open Anyway**.
 
 Or, in a terminal, which skips that step:
 
 ```bash
-curl -fsSL https://petal-dock.vercel.app/install.sh | bash
+curl -fsSL https://petal.codes/install.sh | bash
 ```
 
 Petal asks for Accessibility (to see your windows, and to use apps when you ask it to) and Screen
@@ -97,10 +97,10 @@ The rest of this page is about Petal for Omarchy.
 
 ## Install
 
-**One line** (or use the download button on [the website](https://petal-dock.vercel.app)):
+**One line** (or use the download button on [the website](https://petal.codes)):
 
 ```bash
-curl -fsSL https://petal-dock.vercel.app/install.sh | bash
+curl -fsSL https://petal.codes/install.sh | bash
 ```
 
 This downloads the latest [release](https://github.com/edgetr/petal/releases), checks its

@@ -46,7 +46,7 @@ The owner works on two machines: this Mac and an Omarchy machine. GitHub is the 
 
 - **Git authorship:** the repository config sets `78312456+edgetr@users.noreply.github.com` (the owner's GitHub noreply address). Keep it; the repository is public, so never commit a personal email address.
 - **GitHub:** the `edgetr` account.
-- **Vercel:** project `petal-dock`, root directory `site/`, builds `main` and serves https://petal-dock.vercel.app.
+- **Vercel:** project `petal-dock`, root directory `site/`, builds `main` and serves https://petal.codes, the address to use everywhere. https://petal-dock.vercel.app still serves the same site: released Petals and old install lines point at it, so it must keep working.
 - **Before sending mail or submitting details,** verify the selected account and sender.
 
 ## Git, PRs and authority
