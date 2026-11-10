@@ -3,8 +3,8 @@ import AppKit
 /// Whether Mission Control (or App Exposé) is open, for everything that steps aside for it: Petal's dock and Petal
 /// Notes. Owned by neither. Two ways of knowing, while anyone needs it (`need`):
 /// - **While Petal's dock is shown** it keeps macOS's Dock hidden, so macOS's Dock on the screen is Mission Control
-///   bringing it out: its one window is watched (`DockProbe`, a few times a second, off the main thread), and that
-///   alone says open and closed. macOS 27 no longer sends the Dock's `AXExpose…` notifications, so this is what works
+///   bringing it out: whether it's really showing is watched (`DockProbe`, off the main thread: its window on the
+///   screen and its bar sitting on a screen), and that alone says open and closed. macOS 27 no longer sends the Dock's `AXExpose…` notifications, so this is what works
 ///   there.
 /// - **With macOS's Dock chosen** its window is always on the screen and says nothing: the windows' events (the
 ///   Dock's `AXExpose…`, on a macOS that sends them) say open and closed, with a check while it's open that the Dock
@@ -122,24 +122,48 @@ final class MissionControlWatch {
     }
 }
 
-/// macOS's Dock's one window, watched for coming onto the screen: only ever used on MissionControlWatch's queue. The
-/// Dock's windows are found once in the whole window list (a couple of milliseconds) and then asked about by their
-/// ids alone (under a tenth of one); found again when the Dock restarted or they went.
+/// Whether macOS's Dock is really showing, watched for a change: only ever used on MissionControlWatch's queue.
+/// Two reads, the cheap one first. The Dock's one window is found once in the whole window list (a couple of
+/// milliseconds) and then asked about by its id alone (under a tenth of one): off the screen, the Dock isn't showing.
+/// On the screen isn't enough to say it is: a Dock that just started (Petal restarts it when it hides it) keeps its
+/// window on the screen with nothing in it. So then the Dock's own bar is asked where it is through Accessibility (a
+/// couple of milliseconds): it's showing only when the bar has a size and sits on a screen. Without Accessibility
+/// nothing can be told, and it's taken as not showing: two docks in Mission Control, never none on the desktop.
 private final class DockProbe: @unchecked Sendable {
     private var pid: pid_t = 0
     private var ids: [CGWindowID] = []
     private var found = Date.distantPast
     private var last = false
+    /// When the Dock's window was last seen coming onto the screen, and when its bar was last asked about.
+    private var cameOn = Date.distantPast
+    private var asked = Date.distantPast
+    private var windowOn = false
 
-    /// Whether the Dock is on the screen, when that changed since it was last asked; nil when it didn't.
+    /// Whether the Dock is showing, when that changed since it was last asked; nil when it didn't.
     func changed() -> Bool? {
-        let now = onScreen()
+        let now = showing()
         guard now != last else { return nil }
         last = now
         return now
     }
 
-    private func onScreen() -> Bool {
+    private func showing() -> Bool {
+        let on = windowOnScreen()
+        let now = Date()
+        if on != windowOn {
+            windowOn = on
+            if on { cameOn = now }
+        }
+        guard on else { return false }
+        // The bar is asked at once for the first moments its window is up (Mission Control opening), a few times a
+        // second while it shows (so its going is seen), and once a second while its window is up with nothing in it.
+        let every: TimeInterval = now.timeIntervalSince(cameOn) < 0.8 ? 0 : (last ? 0.3 : 1)
+        guard now.timeIntervalSince(asked) >= every else { return last }
+        asked = now
+        return barShowing()
+    }
+
+    private func windowOnScreen() -> Bool {
         if ids.isEmpty { find() }
         guard !ids.isEmpty else { return false }
         // The window server takes the ids as a plain C array of numbers (a bridged Swift array describes nothing).
@@ -149,6 +173,24 @@ private final class DockProbe: @unchecked Sendable {
         // A window gone (the Dock restarted): found again next time, at most once a second.
         if described.count < ids.count { ids = [] }
         return described.contains { $0[kCGWindowOwnerPID as String] as? pid_t == pid && ($0[kCGWindowIsOnscreen as String] as? Bool ?? false) }
+    }
+
+    /// The Dock's bar (its list of icons), where Accessibility says it is, against the screens.
+    private func barShowing() -> Bool {
+        guard AXIsProcessTrusted(), pid != 0 else { return false }
+        let dock = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(dock, 0.2)
+        guard let children: [AXUIElement] = Windows.value(dock, kAXChildrenAttribute),
+              let bar = children.first(where: { (Windows.value($0, kAXRoleAttribute) as String?) == (kAXListRole as String) }),
+              let position: AXValue = Windows.value(bar, kAXPositionAttribute), let size: AXValue = Windows.value(bar, kAXSizeAttribute) else { return false }
+        var origin = CGPoint.zero, extent = CGSize.zero
+        AXValueGetValue(position, .cgPoint, &origin)
+        AXValueGetValue(size, .cgSize, &extent)
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &count)
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetActiveDisplayList(count, &displays, &count)
+        return NoteShelf.dockBarShowing(CGRect(origin: origin, size: extent), screens: displays.map { CGDisplayBounds($0) })
     }
 
     private func find() {

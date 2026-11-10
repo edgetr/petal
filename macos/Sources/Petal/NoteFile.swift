@@ -1831,6 +1831,17 @@ enum NoteShelf {
         return now.isEmpty || now == (madeWith ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// macOS's Dock's bar is showing: it has a size and at least half of it sits on a screen. Hidden, it waits just
+    /// past its screen's edge; a Dock that just started has no size yet.
+    static func dockBarShowing(_ bar: CGRect, screens: [CGRect]) -> Bool {
+        guard bar.width > 1, bar.height > 1 else { return false }
+        let area = bar.width * bar.height
+        return screens.contains { screen in
+            let seen = screen.intersection(bar)
+            return !seen.isNull && seen.width * seen.height >= area / 2
+        }
+    }
+
     /// What macOS's Dock coming onto the screen (`dockOut`) or leaving it says about Mission Control while Petal's
     /// dock is shown and keeps macOS's hidden: out is Mission Control open, gone is closed. Except in a full-screen
     /// app's Space, where macOS shows its Dock whenever the pointer pushes on the screen's edge: coming out there says
