@@ -1673,8 +1673,6 @@ final class AppSearch {
 
     var results: [Result] {
         let q = query.trimmingCharacters(in: .whitespaces)
-        // Nothing typed, nothing listed: the panel is its title and its field until there's something to find.
-        guard !q.isEmpty else { return [] }
         var list: [Result] = []
         let typedPath = q.hasPrefix("/") || q.hasPrefix("~")
         // A web address typed or pasted: a website shortcut.
