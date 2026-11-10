@@ -290,11 +290,9 @@ extension Viewers {
                 case .failed(let text): fail(text)
                 case .wrote(let file, let count):
                     // What Petal AI did is kept in ai-history.json: the file's name only through the vault's settled
-                    // redaction, left out while the vault can't be read.
-                    let line = "Wrote \(count) note\(count == 1 ? "" : "s") into a PDF as comments"
-                    Self.shielded(file.lastPathComponent) { name in
-                        self.app.assist.did((name as? String).map { line + " (\($0))" } ?? line, undo: nil)
-                    }
+                    // redaction, left out while the vault can't be read (Assist.did, as every line there).
+                    let notes: HistoryLine = count == 1 ? "note" : "notes"
+                    self.app.assist.did("Wrote \(count) \(notes) into a PDF as comments\(named: " (" + file.lastPathComponent + ")", else: "")", undo: nil)
                     send(["wrote": count, "file": file.lastPathComponent,
                           "where": intoOriginal ? "into the PDF itself; the original is kept beside it" : "a copy beside the PDF"])
                 }

@@ -82,7 +82,7 @@ final class Drafts {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(draft.text, forType: .string)
         if draft.text != draft.original { Self.keep(draft.text) }
-        app.assist.did("Drafted a reply to \(draft.note.title)")
+        app.assist.did("Drafted a reply to \(named: draft.note.title, else: "a message")")
         Notes.reveal(draft.note)
         drop(draft)
     }

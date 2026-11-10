@@ -42,13 +42,18 @@ final class NoteHelpers {
             case petal, code(folder: String), holes(folder: String?), quick
             /// A watcher's look: not in `runs` (it never stops the helper at work there), it ends like any run.
             case look
+            /// The reading lens's call (a margin note in Petal's viewer following the selection): not in `runs`
+            /// either; its answer shows beside the paragraph, never on the note.
+            case lens
+            /// A run of its own, apart from the note's helper: never in `runs`, never writing ink or the helper line.
+            var apart: Bool { self == .look || self == .lens }
             /// Bound to the note's place (NoteHelpers.bind), like any run that looks at apps: @Petal, and a second
             /// opinion that isn't in a worktree. A coding run works in its checkout.
             var placed: Bool {
                 switch self {
                 case .petal: true
                 case .holes(let folder): folder == nil
-                case .code, .quick, .look: false
+                case .code, .quick, .look, .lens: false
                 }
             }
         }
@@ -439,7 +444,7 @@ final class NoteHelpers {
     /// or stop gives its own line back too.
     private func end(_ run: Run, _ ending: Ending) {
         let noteID = run.noteID
-        let look = run.kind == .look
+        let look = run.kind.apart
         // Once per token: an end for a run that already ended returns at once.
         guard run.token.completion == nil, runs[noteID] === run || look else { return }
         switch ending {
@@ -477,7 +482,7 @@ final class NoteHelpers {
     /// nothing on (every line asked of it is given back); otherwise what was asked of it is handed on (a second
     /// opinion, with its own line) while anything else asked of it gives its line back (`FollowUpQueue.settle`).
     private func complete(_ run: Run, made: (ink: NoteHelp.Ink, steps: [Shielded])?, _ also: Made) {
-        let look = run.kind == .look
+        let look = run.kind.apart
         guard run.token.completion == nil, runs[run.noteID] === run || look else { return }
         if !look, let refused = landing(run) { return end(run, .failed(refused)) }
         let paused = run.token.paused
@@ -505,6 +510,10 @@ final class NoteHelpers {
             looks.finish(run.noteID, run.token)
             looking.remove(run.noteID)
         }
+        if run.kind == .lens {
+            lenses.finish(run.noteID, run.token)
+            if lensAt[run.noteID] === run { lensAt.removeValue(forKey: run.noteID) }
+        }
         retire(run)
         // Its calls waiting in the quick queue are dropped on the next pass (asked later, never from inside one).
         app.focus.brain.resume()
@@ -516,7 +525,7 @@ final class NoteHelpers {
     private func handOn(_ run: Run, paused: Bool) -> (@MainActor () -> Void)? {
         // (A look has nothing asked of it; this only hands on, the run already ended.)
         let noteID = run.noteID
-        if run.kind == .look { dropFollowUps(run.token); return nil }
+        if run.kind.apart { dropFollowUps(run.token); return nil }
         let settled = followUps.settle(note: noteID, token: run.token, succeeded: !paused)
         for line in settled.dropped { line.again() }
         guard !paused else { return nil }
@@ -595,7 +604,7 @@ final class NoteHelpers {
     private func live(_ run: Run) -> Bool { runs[run.noteID] === run && run.token.admits }
 
     /// Still that run (the note's, or a watcher's look), not ended: paused or not. What a finished answer needs to land.
-    private func mine(_ run: Run) -> Bool { run.token.completion == nil && (runs[run.noteID] === run || run.kind == .look) }
+    private func mine(_ run: Run) -> Bool { run.token.completion == nil && (runs[run.noteID] === run || run.kind.apart) }
 
     /// Stops a run where it is: its token cancelled (its processes ended, nothing of it admitted again), its card
     /// answered Don't, its turn still waiting withdrawn.
@@ -1169,7 +1178,7 @@ final class NoteHelpers {
                 case .paused: then(.wait)
                 case .wait(let reason):
                     run.gateHeld = true
-                    if run.kind != .look { self.write(run.noteID) { file in file.helper?.state = .waiting; file.helper?.step = reason } }
+                    if !run.kind.apart { self.write(run.noteID) { file in file.helper?.state = .waiting; file.helper?.step = reason } }
                     then(.wait)
                 case .gone, .refused: then(.over(nil))
                 case .vaultUnreadable:
@@ -1202,12 +1211,12 @@ final class NoteHelpers {
             case .one(let key): raw.cover = store?.paper(key)?.file.body ?? ""
             case .notHere, .conflict:
                 guard waited < Self.coverWait else {
-                    if run.kind != .look { reply(run.noteID, giveBack: nil, [notebook]) { "Couldn't read \($0[0])'s cover yet." } }
+                    if !run.kind.apart { reply(run.noteID, giveBack: nil, [notebook]) { "Couldn't read \($0[0])'s cover yet." } }
                     end(run, .stopped(nil))
                     return done(.refused)
                 }
                 if waited == 0 { askForCover(notebook) }
-                if run.kind != .look { write(run.noteID) { file in if file.helper?.state == .working { file.helper?.step = "Waiting for the notebook's cover" } } }
+                if !run.kind.apart { write(run.noteID) { file in if file.helper?.state == .working { file.helper?.step = "Waiting for the notebook's cover" } } }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { self.gather(run, call, waited: waited + 1, done) } }
                 return
             }
@@ -1501,6 +1510,7 @@ final class NoteHelpers {
     /// journal, bound to that folder (its notebook's binding): never applied in another, waiting for its own.
     func folderSwitching() {
         for run in Array(runs.values) { end(run, .stopped(nil)) }
+        for run in Array(lensAt.values) { end(run, .stopped(nil)) }
         for noteID in looking { looks.cancel(noteID) }
         looking = []
         firing = []
@@ -1729,7 +1739,7 @@ final class NoteHelpers {
     /// notebook access, the run's own required place and document, and its exact AI being available.
     /// `landing`: asked for a finished result about to land (`landing`), not for something about to be sent.
     func admit(_ run: Run, landing: Bool = false) -> NoteHelp.Admission {
-        guard runs[run.noteID] === run || run.kind == .look, run.token.admits || run.token.paused else { return .fail("This helper isn't running any more.") }
+        guard runs[run.noteID] === run || run.kind.apart, run.token.admits || run.token.paused else { return .fail("This helper isn't running any more.") }
         var facts = NoteHelp.GateFacts()
         facts.landing = landing
         let paper = paper(run.noteID)
@@ -2308,6 +2318,79 @@ final class NoteHelpers {
     }
 
     private final class Flag { var value = false }
+
+    // MARK: The reading lens
+
+    /// The lens's call under way for each note (one at a time), and its tokens.
+    @ObservationIgnored private var lensAt: [String: Run] = [:]
+    @ObservationIgnored private let lenses = TokenTable()
+
+    /// What the lens has to show beside the paragraph: the answer, or in plain words why there is none.
+    enum LensAnswer {
+        case said(Shielded)
+        case couldnt(String)
+    }
+
+    /// A selection settled in Petal's viewer while a margin note follows it ("Follow what I select"): the quick AI is
+    /// asked to do what the note says to those words, with their paragraph for context (a note with no words:
+    /// explain them plainly). A paid call like any other, through `start`: the vault readable, the gate (the note
+    /// still one paper in the notebook it was in, the AI set up), then its words built and shielded from the note as
+    /// it is then, the selection and the paragraph (cut in the viewer only after the whole page was checked against
+    /// the vault). One call at a time per note: a newer selection ends the one before, so only the newest answers.
+    /// Its answer is shielded whole before it's shown beside the paragraph (`answer`); nothing is written on the
+    /// note, and the note's own helper, if one is at work, is left alone.
+    func lens(_ request: ViewerLensRequest, _ answer: @escaping @MainActor (LensAnswer) -> Void) {
+        lensOff(request.noteID)
+        guard let desk, desk.on else { return answer(.couldnt("Petal Notes is off.")) }
+        guard desk.acceptsChanges else { return answer(.couldnt(NoteStore.gettingReady)) }
+        guard let paper = paper(request.noteID) else { return answer(.couldnt("This note has two versions: keep one first.")) }
+        guard app.focus.brain.enabled else { return answer(.couldnt("Choose an AI in Petal's settings, under AI, and this note can answer here.")) }
+        let made = Run(token: lenses.start(paper.noteID), noteID: paper.noteID, asked: "", who: Self.petalWho)
+        made.kind = .lens
+        made.startNotebook = paper.notebook
+        made.startBook = store?.binding(paper.notebook)
+        // The quick AI is the chat's (Haiku at low effort, or Codex's quick setting): the gate checks it's set up.
+        made.provider = app.chatProvider?.rawValue ?? ""
+        lensAt[paper.noteID] = made
+        start(made, Call(sources: { _, raw in
+            // The note's own words say what to do (its body, read again as the call starts). What was selected and
+            // its paragraph are the viewer's. Its notebook's cover isn't part of what's asked.
+            raw.line = request.selected
+            raw.extra = request.paragraph
+            raw.coverOf = nil
+            return nil
+        }, words: { NoteHelp.lensAsk($0) }, to: .quick(key: "lens|\(paper.noteID)|\(request.id.uuidString)", provider: nil) { [weak self] reply, _ in
+            guard let self else { return }
+            guard self.mine(made) else {
+                // It ended before an answer: failed (its reason is said beside the paragraph), or stopped for a newer
+                // selection (which answers instead).
+                if case .failed(let reason)? = made.token.completion { answer(.couldnt(reason)) }
+                return
+            }
+            let words = (reply?["answer"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if words.isEmpty {
+                self.end(made, .failed("no answer"))
+                return answer(.couldnt("Petal couldn't answer that just now. Select it again to ask again."))
+            }
+            // Shielded whole as it arrives, like everything a helper says.
+            Self.shield([words]) { shown in
+                let still = self.mine(made)
+                if still, let said = shown?.first {
+                    self.end(made, .succeeded(nil))
+                    answer(.said(said))
+                } else if still {
+                    self.end(made, .failed(Self.vaultWords.text))
+                    answer(.couldnt(Self.vaultWords.text))
+                }
+            }
+        }))
+    }
+
+    /// The lens off for a note (the person stopped it, a newer selection, its viewer closed, the notes' folder
+    /// switched): its call ends, and nothing of it is shown.
+    func lensOff(_ noteID: String) {
+        if let old = lensAt[noteID] { end(old, .stopped(nil)) }
+    }
 
     /// A watcher's confirmed new crossing, told by the note itself: summoned, open, its corner showing the number
     /// (on the open paper as on the folded one). Only once the paper showing that very value (its watcher, its exact

@@ -7,7 +7,7 @@ import Foundation
 enum PetalProcess {
     /// Flags that start Petal as something other than a dock (main.swift handles each before the dock starts).
     static let notDockFlags: Set<String> = ["--snapshot", "--routines-check", "--viewer-check", "--helpers-check", "--mcp", "--restore-dock"]
-    /// Every benchmark: --bench, --bench-dock, --bench-settings, --bench-windows, --bench-windows-child, -idle.
+    /// Every benchmark: --bench, --bench-dock, --bench-settings, --bench-windows, --bench-windows-child, -idle, --bench-notes.
     static let benchPrefix = "--bench"
 
     /// What a process started with these arguments (argv, its first being the program) does: main.swift starts it as
@@ -25,9 +25,11 @@ enum PetalProcess {
         case benchWindows(settingsOnly: Bool)
         case benchDock
         case bench
+        /// `Petal --bench-notes [--json <file>]`: Petal Notes with many notes, timed headless on folders of its own.
+        case benchNotes
         case routinesCheck(ai: Bool)
         case snapshot(String)
-        /// `Petal --viewer-check <file>…`: the viewer's loading, headless, on throwaway files.
+        /// `Petal --viewer-check [<file>…]`: the viewer's loading, headless, on throwaway files (its own, given none).
         case viewerCheck
         /// `Petal --helpers-check [--ai]`: helpers in notes run end to end, headless, on throwaway folders.
         case helpersCheck(ai: Bool)
@@ -43,7 +45,8 @@ enum PetalProcess {
         "--bench-windows-idle": "Petal --bench-windows-idle <window>",
         "--bench-windows": "Petal --bench-windows [--runs <n>] [--only <window>] [--json <file>] [--png <folder>]",
         "--bench-settings": "Petal --bench-settings [--runs <n>] [--only <window>] [--json <file>] [--png <folder>]",
-        "--bench": "Petal --bench | --bench-dock [folder] | --bench-settings | --bench-windows | --bench-windows-child [settings] | --bench-windows-idle <window>",
+        "--bench-notes": "Petal --bench-notes [--json <file>]",
+        "--bench": "Petal --bench | --bench-dock [folder] | --bench-settings | --bench-windows | --bench-windows-child [settings] | --bench-windows-idle <window> | --bench-notes",
     ]
 
     static func parse(_ arguments: [String]) -> Launch {
@@ -60,7 +63,7 @@ enum PetalProcess {
         }
         func usage(_ flag: String) -> Launch { .usage("usage: " + (usages[flag] ?? usages["--bench"]!)) }
         if words.contains("--restore-dock") { return .restoreDock }
-        let known: Set<String> = ["--bench", "--bench-dock", "--bench-settings", "--bench-windows", "--bench-windows-child", "--bench-windows-idle"]
+        let known: Set<String> = ["--bench", "--bench-dock", "--bench-settings", "--bench-windows", "--bench-windows-child", "--bench-windows-idle", "--bench-notes"]
         if let unknown = words.first(where: { $0.hasPrefix(benchPrefix) && !known.contains($0) }) {
             return .usage("petal: no benchmark \"\(unknown)\"\n" + "usage: " + usages["--bench"]!)
         }
@@ -75,14 +78,15 @@ enum PetalProcess {
             }
             return .benchWindows(settingsOnly: flag == "--bench-settings")
         }
+        if words.contains("--bench-notes") {
+            if words.contains("--json"), value(after: "--json") == nil { return usage("--bench-notes") }
+            return .benchNotes
+        }
         if words.contains("--bench-dock") { return .benchDock }
         if words.contains("--bench") { return .bench }
         if words.contains("--routines-check") { return .routinesCheck(ai: words.contains("--ai")) }
         if words.contains("--helpers-check") { return .helpersCheck(ai: words.contains("--ai")) }
-        if words.contains("--viewer-check") {
-            guard value(after: "--viewer-check") != nil else { return .usage("usage: Petal --viewer-check <file>… [--out <folder>]") }
-            return .viewerCheck
-        }
+        if words.contains("--viewer-check") { return .viewerCheck }
         if words.contains("--snapshot") {
             guard let folder = value(after: "--snapshot") else { return usage("--snapshot") }
             return .snapshot(folder)

@@ -876,8 +876,40 @@ enum NoteText {
         return text.replacingOccurrences(of: #"\[([^\]]*)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
     }
 
-    static func title(_ body: String) -> String {
+    static func title(_ body: String) -> String { derived(body).title }
+
+    /// The lines after the title, for a folded note.
+    static func preview(_ body: String) -> String { derived(body).preview }
+
+    /// Whether a note's first words are a heading (the grid shows it as the paper's title, bold, over the rest).
+    static func titled(_ body: String) -> Bool { derived(body).titled }
+
+    /// A note's title and preview, as they're made from its words. Asked for again and again for the same words
+    /// (every paper drawn, every list, every tab's label), so what a body gave is kept by the body itself: the same
+    /// words always give the same answer, and a body is read into lines once, not once per question.
+    final class Derived: Sendable {
+        let title: String, preview: String, titled: Bool
+        init(title: String, preview: String, titled: Bool) { self.title = title; self.preview = preview; self.titled = titled }
+    }
+
+    nonisolated(unsafe) private static let derivedCache: NSCache<NSString, Derived> = {
+        let cache = NSCache<NSString, Derived>()
+        cache.countLimit = 4000
+        return cache
+    }()
+
+    static func derived(_ body: String) -> Derived {
+        let key = body as NSString
+        if let known = derivedCache.object(forKey: key) { return known }
         let blocks = NoteBlock.blocks(body)
+        let title = title(of: blocks)
+        let titled = blocks.first { !$0.words.trimmingCharacters(in: .whitespaces).isEmpty }.map { if case .heading = $0 { true } else { false } } ?? false
+        let made = Derived(title: title, preview: preview(of: blocks, title: title), titled: titled)
+        derivedCache.setObject(made, forKey: key)
+        return made
+    }
+
+    private static func title(of blocks: [NoteBlock]) -> String {
         if let first = blocks.first(where: { if case .heading = $0 { true } else { false } }), blocks.prefix(3).contains(first) {
             return plain(first.words).trimmingCharacters(in: .whitespaces)
         }
@@ -889,12 +921,10 @@ enum NoteText {
         return ""
     }
 
-    /// The lines after the title, for a folded note.
-    static func preview(_ body: String) -> String {
-        let title = self.title(body)
+    private static func preview(of blocks: [NoteBlock], title: String) -> String {
         var lines: [String] = []
         var skipped = false
-        for block in NoteBlock.blocks(body) {
+        for block in blocks {
             let words = plain(block.words).trimmingCharacters(in: .whitespaces)
             if words.isEmpty { continue }
             if !skipped, words == title || title.hasPrefix(words.prefix(60)) { skipped = true; continue }
@@ -918,11 +948,24 @@ enum NoteText {
     }
 
     /// Matches a search: every word of `query` somewhere in the note (title, body, notebook), ignoring case and accents.
-    static func matches(_ query: String, _ haystack: String) -> Bool {
-        let words = query.lowercased().split(separator: " ").map(String.init)
-        guard !words.isEmpty else { return true }
-        let folded = haystack.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
-        return words.allSatisfy { folded.contains($0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)) }
+    static func matches(_ query: String, _ haystack: String) -> Bool { matches(words: searchWords(query), folded: folded(haystack)) }
+
+    /// The same in two steps, for a search over many notes typed a character at a time: each note's words folded
+    /// once (`folded`), each query's words once (`searchWords`), then only looked for. Folded text is kept as its
+    /// bytes: looking for a word in them is one pass over memory, whatever the text's length or script.
+    typealias Folded = ContiguousArray<UInt8>
+
+    static func folded(_ text: String) -> Folded { Folded(text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).utf8) }
+
+    static func searchWords(_ query: String) -> [Folded] { query.lowercased().split(separator: " ").map { folded(String($0)) } }
+
+    static func matches(words: [Folded], folded haystack: Folded) -> Bool {
+        haystack.withUnsafeBytes { text in
+            words.allSatisfy { word in
+                guard !word.isEmpty else { return true }
+                return word.withUnsafeBytes { memmem(text.baseAddress, text.count, $0.baseAddress, $0.count) != nil }
+            }
+        }
     }
 }
 

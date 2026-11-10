@@ -1,4 +1,5 @@
 import AppKit
+import PDFKit
 import SwiftUI
 
 /// `Petal --helpers-check [--ai]`: helpers in notes run end to end, without showing anything.
@@ -338,6 +339,7 @@ private final class HelpersChecker {
         eleventh()
         twelfth()
         thirteenth()
+        fourteenth(number: "14")
         if ai { real() }
         settle()
         print(failures == 0 ? "helpers-check: all passed" : "helpers-check: \(failures) failed")
@@ -710,6 +712,127 @@ private final class HelpersChecker {
         }
     }
 
+    /// 14. The reading lens: a note in the viewer's margin that follows the selection. Off until it's turned on for
+    /// the note; then each selection that settles asks the quick AI to do what the note says to it, with its
+    /// paragraph (an empty note: explain it plainly); the newest selection wins; a vault secret on the page never
+    /// reaches the AI; the answer shows beside the paragraph, nothing is written on the note; off when the viewer closes.
+    func fourteenth(number: String, real: Bool = false) {
+        step(number, real ? "the reading lens (the real quick AI)" : "the reading lens") {
+            let limit: Double = real ? 120 : 20
+            let pdf = papers.appending(path: real ? "Lens real.pdf" : "Lens.pdf")
+            let lines = ["A made-up report", "The committee deferred the decision until the spring.", "Its made-up key is \(secret) for now.",
+                         "Costs fell a little, and nobody was hired."]
+            guard ViewerSamples.pdf([lines], to: pdf) else { expect(false, "the document couldn't be made"); return "" }
+            var stick = NoteStick(kind: .file)
+            stick.path = pdf.path
+            let wish = "Say it again in five words."
+            let id = note(wish, places: [stick])
+            let model = app.viewers.show(pdf, front: false, window: true)
+            defer { app.viewers.closed(model) }
+            expect(wait(30) { !model.loading && model.fileID != nil }, "the viewer read the document")
+            model.refreshPlaces()
+            expect(wait(10) { model.notes.contains { $0.paper.noteID == id } }, "the note is in the viewer's margin")
+            guard let key = helpers.paper(id)?.key, let text = PDFDocument(url: pdf)?.page(at: 0)?.string else { expect(false, "the note and the page's words (set up)"); return "" }
+            let select = { (words: String) in
+                let range = (text as NSString).range(of: words)
+                model.selected(page: 0, bounds: CGRect(x: 72, y: 660, width: 200, height: 14), range: range, anchor: .zero)
+            }
+            let sent = { (call: Call?) in (call?.prompt ?? "") + "\n" + (call?.arguments ?? "") }
+            let before = calls("quick").count
+            let diskBefore = diskText(id)
+
+            // Off until the person turns it on for this note: a selection asks nothing.
+            select("deferred the decision")
+            wait(1.5)
+            expect(calls("quick").count == before && model.lensAnswer == nil, "not following: a selection asks nothing")
+            model.unselected()
+
+            // On: a selection that settles is asked about, with the note's words and its paragraph; the answer shows
+            // beside the paragraph.
+            model.follow(key)
+            if !real { plan("quick", quick(["answer": "Decision waits until spring."]), match: "deferred the decision") }
+            select("deferred the decision")
+            expect(model.lensAnswer == nil && (real || calls("quick").count == before), "nothing is asked the moment a selection is made (it may still be moving)")
+            expect(wait(limit) { model.lensAnswer.map { !$0.text.isEmpty } == true }, "the lens never answered (\(model.lensAnswer?.text ?? "nothing"))")
+            let first = calls("quick").last
+            let answered = model.lensAnswer?.text ?? ""
+            expect(model.lensAnswer?.faint == false && !answered.isEmpty, "its answer shows beside the paragraph (“\(answered)”)")
+            if !real { expect(answered == "Decision waits until spring.", "the answer is the quick AI's (“\(answered)”)") }
+            expect(diskText(id) == diskBefore && helpers.runs[id] == nil, "nothing is written on the note, and it has no helper at work")
+            // (The person's own AI app keeps no record here of what it was sent: the rest is the stand-in's to show.)
+            guard !real else { return "the real quick AI answered “\(answered.prefix(80))” beside the paragraph" }
+            expect(calls("quick").count == before + 1, "one call for one selection (\(calls("quick").count - before))")
+            expect(sent(first).contains(wish) && sent(first).contains("deferred the decision") && sent(first).contains("The committee deferred the decision until the spring."),
+                   "it's sent the note's words, what was selected and its paragraph")
+            expect(!sent(first).contains("Costs fell"), "and only that paragraph of the page")
+
+            // A secret from the vault on the page never reaches the AI.
+            plan("quick", quick(["answer": "A key is mentioned."]), match: "made-up key")
+            select("made-up key")
+            expect(wait(limit) { model.lensAnswer?.text == "A key is mentioned." }, "the second selection answered (\(model.lensAnswer?.text ?? "nothing"))")
+            let second = calls("quick").last
+            expect(!sent(second).contains(secret) && sent(second).contains("(hidden)"), "a vault secret in the paragraph is hidden from what's sent")
+
+            // Still moving: two selections in a row ask once, about the last.
+            let moving = calls("quick").count
+            plan("quick", quick(["answer": "Cheaper, same team."]), match: "nobody was hired")
+            select("Costs fell")
+            select("nobody was hired")
+            expect(wait(limit) { model.lensAnswer?.text == "Cheaper, same team." }, "the settled selection answered (\(model.lensAnswer?.text ?? "nothing"))")
+            expect(calls("quick").count == moving + 1 && !sent(calls("quick").last).contains("<selected>\nCosts fell"), "a selection still moving asks nothing: one call, about where it settled")
+
+            // Cleared before it settled: a selection made and let go asks nothing (no call for a selection that's gone).
+            let cleared = calls("quick").count
+            select("Costs fell")
+            model.unselected()
+            wait(1.5)
+            expect(calls("quick").count == cleared, "a selection cleared before it settled asks nothing (\(calls("quick").count - cleared) call(s))")
+
+            // The newest wins: a slow answer for an older selection never shows once a newer one was asked.
+            let racing = calls("quick").count
+            plan("quick", ["#sleep 4"] + quick(["answer": "The old answer."]), match: "<selected>\nA made-up report")
+            plan("quick", quick(["answer": "The new answer."]), match: "<selected>\nuntil the spring")
+            select("A made-up report")
+            expect(wait(limit) { self.calls("quick").count == racing + 1 }, "the older selection was asked")
+            let older = calls("quick").last
+            select("until the spring")
+            expect(wait(limit) { model.lensAnswer?.text == "The new answer." }, "the newer selection answered (\(model.lensAnswer?.text ?? "nothing"))")
+            expect(wait(6) { older?.alive == false }, "the older call was ended")
+            wait(1)
+            expect(model.lensAnswer?.text == "The new answer.", "the older answer never shows (“\(model.lensAnswer?.text ?? "")”)")
+
+            // A note with no words of its own: explain it plainly.
+            let empty = note("", places: [stick])
+            model.refreshPlaces()
+            expect(wait(10) { model.notes.contains { $0.paper.noteID == empty } }, "the empty note is in the margin")
+            if let emptyKey = helpers.paper(empty)?.key {
+                model.follow(emptyKey)
+                plan("quick", quick(["answer": "They put the decision off."]), match: "plain words")
+                select("deferred the decision")
+                expect(wait(limit) { model.lensAnswer?.text == "They put the decision off." }, "the empty note's lens answered (\(model.lensAnswer?.text ?? "nothing"))")
+                expect(sent(calls("quick").last).contains("Explain what they selected in plain words"), "an empty note asks for it in plain words")
+            }
+
+            // While the vault can't be read nothing is asked.
+            let unread = calls("quick").count
+            VaultStore.standUnreadable = true
+            VaultIndex.changed()
+            select("Costs fell a little")
+            wait(2)
+            VaultStore.standUnreadable = false
+            VaultIndex.changed()
+            expect(calls("quick").count == unread, "the vault unreadable: nothing is asked")
+
+            // The viewer closed: the lens is off, and nothing more is asked.
+            let closing = calls("quick").count
+            app.viewers.closed(model)
+            expect(model.lensKey == nil, "closing the viewer turns the lens off")
+            wait(1.5)
+            expect(calls("quick").count == closing, "and nothing more is asked")
+            return "off until turned on; a settled selection is asked about with the note's words and its paragraph, answered beside it (“\(answered)”); a vault secret hidden; the newest selection wins; an empty note asks for plain words; nothing asked while the vault can't be read or once the viewer closed"
+        }
+    }
+
     /// 13. Allow while every place is taken (the third review finding).
     func thirteenth() {
         step("13", "Allow with every place taken") {
@@ -763,7 +886,7 @@ private final class HelpersChecker {
     /// Codex's), when it's installed and signed in.
     func real() {
         guard let found = Self.signedIn() else {
-            print("skip  1 (--ai), 6 (--ai): neither Claude Code nor Codex is installed and signed in here")
+            print("skip  1 (--ai), 6 (--ai), 14 (--ai): neither Claude Code nor Codex is installed and signed in here")
             return
         }
         let provider = found.provider
@@ -782,6 +905,7 @@ private final class HelpersChecker {
             return "\(provider.appName) answered “\((file?.ink.first?.text ?? "").prefix(80))”; helper: done"
         }
         sixth(number: "6 (--ai)", real: true)
+        fourteenth(number: "14 (--ai)", real: true)
     }
 
     /// The person's own AI app, when it's installed and says someone is signed in (its own status command; nothing of

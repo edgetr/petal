@@ -61,6 +61,26 @@ boundary no 'print(NoteHelp.system(NoteHelp.Told(), provider: "Claude", computer
 boundary no 'var t = NoteHelp.Told(); t.place = raw; t.instructions = raw; print(NoteHelp.system(t, provider: "Claude", computerUse: false, brief: ""))'
 boundary yes 'if let s = NoteShield.shield([raw], index: UIMap.SecretIndex([])) { let p: Shielded = "ask: \(s[0]) \(3)"; print(NoteHelp.brief(NoteHelp.Told(ask: p))) }'
 echo "Shielded boundary: a raw string never makes a helper's prompt"
+# What Petal AI did (ai-history.json): a line is Petal's own words, and whatever it names goes in only as a name
+# (HistoryLine), redacted with the vault's index before it's kept (Assist.did, the one way in). The compiler's again:
+# a raw string is not a line, and can't be put into one; the named way compiles and leaves a name out when it must.
+history() {
+    printf '@main struct H { static func main() {\n let raw = String(CommandLine.arguments.count)\n func did(_ line: HistoryLine) { print(line.text(nil), "|", line.text { _ in "(hidden)" }) }\n %s\n } }\n' "$2" > "$out/history.swift"
+    if swiftc -parse-as-library -o "$out/history" Sources/Petal/HistoryLine.swift "$out/history.swift" >/dev/null 2>&1; then built=yes; else built=no; fi
+    if [ "$built" != "$1" ]; then echo "History line: expected compiling '$2' to be $1"; exit 1; fi
+}
+history no 'did(raw)'
+history no 'did("Quit \(raw)")'
+history no 'let line: HistoryLine = "Closed “\(raw)”"; did(line)'
+history no 'did("Quit " + raw)'
+history yes 'did("Quit \(named: raw, else: "an app") and \(quoted: raw, else: "a window"), \(3) times")'
+[ "$("$out/history")" = "Quit an app and a window, 3 times | Quit (hidden) and “(hidden)”, 3 times" ] || { echo "History line: a name left out, or redacted: $("$out/history")"; exit 1; }
+# One `did`, taking only a line; nothing makes a line from a string by its initializer; an entry is made nowhere else.
+[ "$(cat Sources/Petal/*.swift | grep -c 'func did(')" = 1 ] && grep -q 'func did(_ line: HistoryLine, undo: Undo? = nil)' Sources/Petal/AssistMore.swift \
+    && ! grep -n 'HistoryLine(stringLiteral\|HistoryLine(stringInterpolation\|HistoryLine\.init\|as HistoryLine' Sources/Petal/*.swift \
+    && [ "$(grep -l 'Done(at:' Sources/Petal/*.swift | tr '\n' ' ')" = "Sources/Petal/AssistMore.swift " ] \
+    || { echo "Assist.did: every line of What Petal AI did goes through the one function, as a HistoryLine"; exit 1; }
+echo "history: a raw string never makes a line of What Petal AI did"
 # A helper's quick calls go through Brain's Shielded overload only (the one that takes its run's token).
 if grep -nE 'brain\.ask\(' Sources/Petal/NoteHelpers.swift | grep -v 'token:'; then echo "NoteHelpers: a Brain call without its Shielded prompt and token"; exit 1; fi
 # Every run ends in one of three outcomes, early exits too: each `return` in a chat turn's start (Agent.run) is a
@@ -541,10 +561,30 @@ grep -q 'if let watch = paper.file.watch, NoteHelp.corner(watch) != nil' Sources
 echo "helpers: rejected readings keep the last accepted value; only drawing rounds"
 # A cover that can't be read yet is waited for (iCloud asked), then refused; never skipped.
 perl -0777 -ne '
-    unless (/private func gather\(.*?case \.notHere, \.conflict:\s*guard waited < Self\.coverWait else \{\s*if run\.kind != \.look \{ reply\(.*?Couldn.t read .*?cover yet.*?end\(run, \.stopped\(nil\)\)\s*return done\(\.refused\)/s
+    unless (/private func gather\(.*?case \.notHere, \.conflict:\s*guard waited < Self\.coverWait else \{\s*if !run\.kind\.apart \{ reply\(.*?Couldn.t read .*?cover yet.*?end\(run, \.stopped\(nil\)\)\s*return done\(\.refused\)/s
             && /raw\.coverOf = / && !/raw\.cover = mayRead/) { print "NoteHelpers: a cover that can.t be read is waited for, then refused\n"; exit 1 }
     print "helpers: an unreadable cover is waited for, then refused, never skipped\n";
 ' Sources/Petal/NoteHelpers.swift
+# The reading lens (a margin note in Petal's viewer following the selection) is a paid call like any other: it asks
+# only through `start` (so the vault, the gate and the shielded prompt come first), one call at a time per note (a
+# newer selection ends the one before), its answer shielded whole before it's shown, and nothing of it written on
+# the note (a run apart, like a watcher's look). The viewer asks nobody else, and closing it turns the lens off.
+# (Petal --helpers-check drives it, step 14; this keeps its shape in the source.)
+perl -0777 -ne '
+    unless (/func lens\(_ request: ViewerLensRequest, _ answer: [^\n]*\{\s*lensOff\(request\.noteID\)/
+            && /made\.kind = \.lens.*?start\(made, Call\(sources: .*?words: \{ NoteHelp\.lensAsk\(\$0\) \}, to: \.quick\(key: "lens\|.*?Self\.shield\(\[words\]\) \{ shown in/s
+            && /var apart: Bool \{ self == \.look \|\| self == \.lens \}/ && /func lensOff\(_ noteID: String\) \{\s*if let old = lensAt\[noteID\] \{ end\(old, \.stopped\(nil\)\) \}/) {
+        print "NoteHelpers: the reading lens asks through start, one call per note, its answer shielded\n"; exit 1 }
+    print "helpers: the reading lens is a paid call through start, its answer shielded, nothing written on the note\n";
+' Sources/Petal/NoteHelpers.swift
+perl -0777 -ne '
+    my $asks = () = /helpers\.lens\(/g;
+    unless ($asks == 1 && /private func askLens\(_ request: ViewerLensRequest\) \{\s*lensRequest = request\s*if let onLens \{ return onLens\(request\) \}/
+            && /lensSoon\?\.cancel\(\)\s*(?:\/\/[^\n]*\n\s*)*follow\(nil\)/ && /DispatchQueue\.main\.asyncAfter\(deadline: \.now\(\) \+ 0\.6, execute: work\)/) {
+        print "Viewer: the lens asks only the note helpers, once the selection settled, and goes off when the viewer closes\n"; exit 1 }
+    print "viewer: the lens asks once a selection settles, through the helpers, and is off when the viewer closes\n";
+' Sources/Petal/Viewer.swift
+grep -q 'static func lensAsk(_ t: Told) -> Shielded?' Sources/Petal/NoteHelp.swift || { echo "NoteHelp: the lens words are made only from what was shielded"; exit 1; }
 # Every reviewer output, its turns on the way included, goes through its one result (an opinion).
 perl -0777 -ne '
     if (/Something said meanwhile.*?\n\s*return\n/s && $& !~ /turnOutput\(run, Said\(who: run\.who, text: answer, steps: steps, form: run\.reviewed == nil \? \.answer : \.opinion\)\)/) { print "NoteHelpers: a reviewer turn must go through output\n"; exit 1 }

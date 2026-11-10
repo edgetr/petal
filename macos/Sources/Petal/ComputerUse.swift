@@ -969,21 +969,25 @@ final class ComputerUse {
     }
 
     /// What it did, for Settings › AI (never what it typed: that may be private).
-    private func historyLine(_ job: Job, _ outcome: Acting.Outcome) -> String {
-        let thing = job.entry.map { UIMap.name($0.node) }.flatMap { $0.isEmpty ? nil : "“\($0)”" } ?? "a control"
+    /// What an act did, for What Petal AI did: the control's name, the menu item, the app and the site are names
+    /// (HistoryLine: redacted with the vault's index before the line is kept, left out while it can't be read).
+    private func historyLine(_ job: Job, _ outcome: Acting.Outcome) -> HistoryLine {
+        let thing: HistoryLine = "\(quoted: job.entry.map { UIMap.name($0.node) } ?? "", else: "a control")"
+        let app: HistoryLine = "\(named: job.appName, else: "an app")"
         switch job.action {
-        case "press": return "Pressed \(thing) in \(job.appName)"
-        case "type": return "Typed into \(thing) in \(job.appName)"
-        case "focus": return "Went to \(thing) in \(job.appName)"
-        case "scroll": return "Scrolled in \(job.appName)"
-        case "menu": return "Chose \(outcome.chose ?? job.options.path.joined(separator: " › ")) in \(job.appName)"
+        case "press": return "Pressed \(thing) in \(app)"
+        case "type": return "Typed into \(thing) in \(app)"
+        case "focus": return "Went to \(thing) in \(app)"
+        case "scroll": return "Scrolled in \(app)"
+        case "menu": return "Chose \(named: outcome.chose ?? job.options.path.joined(separator: " › "), else: "a menu item") in \(app)"
         case "fill":
             let plan = job.options.fill
             let place = plan?.place.web == true ? plan?.place.host ?? job.appName : job.appName
-            return "Filled your \(plan.map { $0.title.isEmpty ? "" : $0.title + " " } ?? "")\(plan?.field.words ?? "details") on \(place)"
+            let what = (plan.map { $0.title.isEmpty ? "" : $0.title + " " } ?? "") + (plan?.field.words ?? "details")
+            return "Filled your \(named: what, else: "details") on \(named: place, else: "a page")"
         default:
-            let key = job.options.key?.label ?? "a key"
-            return "Pressed \(key)\(outcome.chose.map { " (\($0))" } ?? "") in \(job.appName)"
+            let chose: HistoryLine = outcome.chose.map { " (\(named: $0, else: "a menu item"))" } ?? ""
+            return "Pressed \(named: job.options.key?.label ?? "a key", else: "a key")\(chose) in \(app)"
         }
     }
 
