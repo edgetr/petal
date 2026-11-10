@@ -13,7 +13,7 @@ struct NoteLayoutCheck {
     }
 
     static func place(_ scope: NoteScope?, pid: Int32 = 10, app: String = "com.apple.Safari", window: UInt32? = 5, tab: NoteTab? = nil) -> NotePlace {
-        NotePlace(pid: pid, app: app, appName: "Safari", window: window, title: "", mode: "", desktop: 1, scope: scope, tab: tab)
+        NotePlace(pid: pid, app: app, appName: "Safari", window: window, title: "", desktop: 1, scope: scope, tab: tab)
     }
 
     static let s1Tab = NoteTab(element: 1, index: 2, count: 4, shared: 1, url: "https://apple.com/mac", title: "Mac")
