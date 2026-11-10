@@ -4,7 +4,7 @@ Updated 2026-11-10. This file holds Petal's current rules for every coding agent
 
 ## Project
 
-Petal is an AI-native dock with Claude built in. On Omarchy it is a plugin for Omarchy's shell (Quickshell/QML on Hyprland 0.56, Lua config), with a focus mode for every workspace. Petal for macOS (macOS 26 and later, in `macos/`) is being built: a native app that replaces macOS's Dock with one dock of the person's apps, and has Petal AI, the vault, routines and Petal Notes. Modes are an Omarchy feature: the Mac has none. Windows is not planned.
+Petal is an AI-native dock with Claude built in. On Omarchy it is a plugin for Omarchy's shell (Quickshell/QML on Hyprland 0.56, Lua config), with a focus mode for every workspace. Petal for macOS (macOS 26 and later, in `macos/`) is a native app that replaces macOS's Dock with one dock of the person's apps, and has Petal AI, the vault, routines and Petal Notes. Modes are an Omarchy feature: the Mac has none. Windows is not planned.
 
 - **Focus modes** (Omarchy): each mode has its own apps (the dock's order), color, icon and rules. Every workspace remembers its mode, so switching workspace swaps the dock.
 - **Distracting modes** (Omarchy): a mode like Social or Gaming is `distracting` (the AI decides once when it isn't set). Only these wait to get in (30 s, Stay cancels, each extra press halves it); every other mode switches at once.
@@ -22,7 +22,7 @@ Petal is an AI-native dock with Claude built in. On Omarchy it is a plugin for O
 
 The owner is Gökay Ege Süren. The repository is `edgetr/petal` on GitHub (public, MIT; where it is checked out is under Fleet). Petal is an Edgetr product; the studio site (`edgetr/edgetr`: `~/Projects/edgetr` on Omarchy, `~/edgetr` on the Mac) describes it and follows this file for facts.
 
-- **Status:** 3.1.x is released (`plugin/manifest.json` holds the version) and updates itself from GitHub Releases.
+- **Status:** both are released and update themselves from GitHub Releases: Omarchy's plugin at 3.1.x (`plugin/manifest.json` holds the version), Petal for macOS at 2.0.x (`macos/VERSION`).
 - **Business model:** free and open source. Petal has no server and no analytics. Its AI features use the user's own Claude Code or Codex login, and count toward that plan's usage, or (macOS) the user's own Anthropic or OpenAI API key. Without an AI app, everything else works.
 - **Wording:** say Omarchy, not Linux, for where Petal runs today.
 
@@ -61,7 +61,7 @@ The owner works on two machines: this Mac and an Omarchy machine. GitHub is the 
 - **Before every commit:** check the staged files for secrets, tokens, personal data (the repository is public), whitespace errors (`git diff --cached --check`) and unrelated changes. Stage files by name.
 - **Commits:** a short imperative subject that says what changed for the user; the body says why.
 - **Releases:** bump `plugin/manifest.json`, tag `vX.Y.Z` to match, push the tag. `.github/workflows/release.yml` checks the tag against the manifest, builds `Petal-<v>-linux.tar.gz` and `latest.json`, and publishes the GitHub Release. Every installed Petal updates itself from it within hours, so releasing is outward-facing: only when the owner says to.
-- **macOS releases** have their own tags, `macos-vX.Y.Z`, matching `macos/VERSION`, so each platform ships on its own. `.github/workflows/release-macos.yml` builds `Petal-<v>-macos.zip` and `latest-macos.json` and publishes the release with `--latest=false`: Omarchy's updater reads the release marked latest, which must stay a Linux one. Releasing is outward-facing either way: only when the owner says to.
+- **macOS releases** have their own tags, `macos-vX.Y.Z`, matching `macos/VERSION`, so each platform ships on its own. `.github/workflows/release-macos.yml` builds `Petal-<v>-macos.zip` and `latest-macos.json` and publishes the release with `--latest=false`: Omarchy's updater reads the release marked latest, which must stay a Linux one. A Mac release also needs `/download/mac` in `site/vercel.json` pointed at its zip (the workflow refuses the tag otherwise) and `macos/notes/<version>.md`, which becomes the release's text and What's New in the app: written for the person, by what changed for them. Releasing is outward-facing either way: only when the owner says to.
 - **History rewrites and force-pushes:** only when the owner asks. Make a backup bundle outside the repository first.
 - **Repository visibility:** never change it.
 - **Worktrees:** remove a worktree, and its local branch, once its branch has merged or been pushed to `main`.
@@ -228,7 +228,7 @@ Desktop ids are the file names in `/usr/share/applications` or `~/.local/share/a
 
 ### Marketing site
 
-`site/` follows Edgetr's design language (`~/Projects/edgetr/AGENTS.md`, Design language): Geist, solid fills, light and dark, one static sample of the dock, no real screenshots. Describe Petal by what it does. `site/vercel.json` holds the redirects (`/install.sh` → `get.sh` on `main`, `/download/linux`, `/github`); keep them.
+`site/` follows Edgetr's design language (`~/Projects/edgetr/AGENTS.md`, Design language): Geist, solid fills, light and dark, one static sample of the dock (drawn in `index.html`, with one note; its words are made up), no real screenshots. One page: `index.html`, `styles.css`, `theme.js` (light or dark and the visitor's system, before the first paint) and `site.js`; no inline styles or scripts. Describe Petal by what it does, and say which platform a feature is on. `site/vercel.json` holds the redirects (`/install.sh` → `get.sh` on `main`, `/download/mac` → the newest Mac release's zip, `/download/omarchy` and `/download/linux`, `/github`); keep them.
 
 ## Verification
 
