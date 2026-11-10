@@ -451,9 +451,13 @@ final class NoteDesk {
 
     /// For `Petal --helpers-check` only: what the desk says (nothing shows headless), as it's said.
     @ObservationIgnored var heard: ((String) -> Void)?
+    /// Shows a few words by what the person just clicked (true when it did); else they're said by the AI button.
+    @ObservationIgnored private var sayNear: ((String) -> Bool)?
 
     private func say(_ text: String) {
         heard?(text)
+        // Said where the person is looking when whoever asked can show it there (Note by a selection).
+        if let near = sayNear, near(text) { return }
         // Said by the AI button of the dock under the pointer (never a window-list lookup on the main thread); with
         // macOS's Dock chosen there's no button to say it by.
         let mouse = NSEvent.mouseLocation
@@ -2264,14 +2268,16 @@ final class NoteDesk {
     func newHere() { noteOnSelection() }
 
     /// "Note" by a selection: a new note on that sentence (its page or file); its text is read again here, under
-    /// petal_look's rule, never taken from the button's capture.
-    func note(on quote: String) { noteOnSelection() }
+    /// petal_look's rule, never taken from the button's capture. `near` shows what Petal says when it makes no
+    /// note, by the selection.
+    func note(on quote: String, near: ((String) -> Bool)? = nil) { noteOnSelection(near: near) }
 
     /// A new note on what's in front: the selected sentence, read and checked (`passage`), else its tab, file,
     /// window or Desktop. A selection refused (a secret, a field named for one, an app made private, the window or
     /// tab changed while it was read) makes no note at all: never a note without the check.
-    private func noteOnSelection() {
+    private func noteOnSelection(near: ((String) -> Bool)? = nil, again: Bool = true) {
         guard on else { return }
+        sayNear = near
         // Petal's viewer with the keyboard: a note on its selection (checked), else its page or slide, in its margin
         // (through the same readiness gate, in the viewer's own way of making a note).
         if let viewer = app.viewers.front { return viewer.newNote() }
@@ -2280,26 +2286,41 @@ final class NoteDesk {
         let name = running.localizedName ?? ""
         let privacy = ClaudePanel.privacy.now
         let ticket = looks
+        // No note, and why: said (by the selection when it was asked there) and kept in Petal's log. A read that only
+        // came back stale or unreadable (an app slow to answer for a moment) is tried once more first: the person
+        // asked for this note.
+        func none(_ why: String, mayRetry: Bool = false) {
+            if mayRetry, again {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.noteOnSelection(near: near, again: false) }
+                return
+            }
+            PetalLog.notes.notice("no note made: \(why, privacy: .public)")
+            say(why)
+        }
         Self.read(running, mac: local.mac, anchors: fileAnchors) { scene, read in
             // A read refused (stale, or its app no longer in front): no note.
-            guard self.activate(scene, read: read, ticket: ticket) else { return self.say(Self.frontChanged) }
+            guard self.activate(scene, read: read, ticket: ticket) else { return none(Self.frontChanged, mayRetry: true) }
             self.passage(in: scene, privacy: privacy) { selected in
                 // Checked again after the selection read: still the active scene, its app still in front.
                 guard NoteShelf.mayCreate(activated: true, activePID: self.scene?.pid, activeWindow: self.scene?.window, readPID: scene.pid,
                                           readWindow: scene.window, frontPID: NSWorkspace.shared.frontmostApplication?.processIdentifier) else {
-                    return self.say(Self.frontChanged)
+                    return none(Self.frontChanged, mayRetry: true)
                 }
                 let passage: (quote: String, before: String, after: String)?
                 switch selected {
-                case .refused: return self.say("Petal doesn't keep that selection in a note.")
-                case .changed: return self.say(Self.frontChanged)
+                case .refused: return none("Petal doesn't keep that selection in a note.")
+                case .changed: return none(Self.frontChanged, mayRetry: true)
                 case .none: passage = nil
                 case .text(let quote, let before, let after): passage = (quote, before, after)
                 }
                 // Filtered again as it's used: an app made private since the read gives nothing of itself.
                 let (scene, read) = Self.filtered(scene, read, since: privacy)
-                guard let first = self.places(for: scene, read: read, appName: name, passage: passage).first else { return self.say(Self.unknownFront) }
-                self.make(on: first)
+                guard let first = self.places(for: scene, read: read, appName: name, passage: passage).first else { return none(Self.unknownFront, mayRetry: true) }
+                // Where the sentence itself can't be the place (an app with no page or file to find it in again), the
+                // note goes on the window and starts with the words that were selected, so they aren't lost.
+                let body = first.kind == .passage ? "" : NoteShelf.quoted(passage?.quote)
+                self.make(on: first, body: body)
+                self.sayNear = nil
             }
         }
     }

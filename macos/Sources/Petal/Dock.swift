@@ -143,6 +143,10 @@ final class DockController {
     /// As MissionControlWatch says (its events, and its check that macOS's Dock still has a window up).
     private(set) var missionControl = false
 
+    /// Some screen shows a full-screen app's Space: macOS brings its Dock out there at the screen's edge, which
+    /// isn't Mission Control (MissionControlWatch).
+    var inFullScreen: Bool { panels.values.contains { $0.fullScreen } }
+
     private func setMissionControl(_ on: Bool) {
         guard on != missionControl else { return }
         missionControl = on

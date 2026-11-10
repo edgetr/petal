@@ -16,6 +16,9 @@ final class SelectionAsk {
     private var monitors: [Any] = []
     private var down: (point: NSPoint, at: Date)?
     private var found: (text: String, source: String)?
+    /// Where the buttons were shown (and on which screen): what Note says, when it makes no note, is said there.
+    private var shownAt: (anchor: CGRect, screen: NSScreen)?
+    private var toldLater: DispatchWorkItem?
     private var hideLater: DispatchWorkItem?
     private var looking = 0
     nonisolated private static let queue = DispatchQueue(label: "petal.selection", qos: .userInitiated)
@@ -99,6 +102,8 @@ final class SelectionAsk {
         // Just above the selection's end, else just above the pointer.
         let anchor = bounds.map { CGRect(x: $0.maxX - 2, y: $0.maxY, width: 2, height: 2) } ?? CGRect(x: mouse.x, y: mouse.y + 10, width: 2, height: 2)
         let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main ?? NSScreen.screens[0]
+        toldLater?.cancel()
+        shownAt = (anchor, screen)
         panel.show(SelectionButton(note: app.paper.on, ask: { [weak self] in self?.ask() }, write: { [weak self] in self?.note() }), near: anchor, on: screen)
         hideLater?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.hide() }
@@ -116,12 +121,29 @@ final class SelectionAsk {
     /// "Note": a new Petal Note on the selected sentence (its page or file), open to write in.
     private func note() {
         guard let found else { return hide() }
+        let at = shownAt
         hide()
-        app.paper.note(on: found.text)
+        // What it says when it makes no note is said here, by the selection, where the person is looking.
+        app.paper.note(on: found.text) { [weak self] words in
+            guard let self, let at else { return false }
+            self.tell(words, at: at)
+            return true
+        }
+    }
+
+    /// A few words where the buttons were (why Note made no note), gone after a moment or with the next click or key.
+    private func tell(_ words: String, at: (anchor: CGRect, screen: NSScreen)) {
+        hideLater?.cancel()
+        toldLater?.cancel()
+        panel.show(SelectionWords(words: words), near: at.anchor, on: at.screen)
+        let work = DispatchWorkItem { [weak self] in self?.panel.hide() }
+        toldLater = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: work)
     }
 
     private func hide() {
         hideLater?.cancel()
+        toldLater?.cancel()
         looking += 1   // a look still on its way is for a selection that's gone
         found = nil
         panel.hide()
@@ -139,40 +161,52 @@ extension GlassPanel {
     }
 }
 
-/// The small buttons by a selection: Note (with Petal Notes on) and Ask Petal AI.
+/// The small buttons by a selection: Note (with Petal Notes on) and Ask Petal AI. They stay still under the pointer:
+/// a surface to click doesn't move or grow as the pointer reaches it (the glass's own press is its only reaction).
 private struct SelectionButton: View {
     let note: Bool
     let ask: () -> Void
     let write: () -> Void
-    @State private var hovering: String?
 
     var body: some View {
         GlassEffectContainer(spacing: 4) {
             HStack(spacing: 4) {
                 if note {
-                    pill("note", action: write) {
+                    pill(action: write) {
                         Image(systemName: "note.text").font(.system(size: 11, weight: .medium))
                         Text("Note").font(.system(size: 12, weight: .medium))
                     }
                 }
-                pill("ask", action: ask) {
+                pill(action: ask) {
                     ProviderMark(provider: PetalApp.shared.chatProvider).frame(width: 13, height: 13)
                     Text("Ask Petal AI").font(.system(size: 12, weight: .medium))
                 }
             }
         }
-        .animation(.easeOut(duration: 0.12), value: hovering)
         .padding(4)
     }
 
-    private func pill<Label: View>(_ id: String, action: @escaping () -> Void, @ViewBuilder label: () -> Label) -> some View {
+    private func pill<Label: View>(action: @escaping () -> Void, @ViewBuilder label: () -> Label) -> some View {
         Button(action: action) {
             HStack(spacing: 5) { label() }
                 .padding(.horizontal, 11).frame(height: 26)
-                .glassEffect(.regular.interactive(), in: .capsule)
-                .scaleEffect(hovering == id ? 1.04 : 1)
+                .contentShape(.capsule)
+                .glassEffect(.regular, in: .capsule)
         }
         .buttonStyle(.plain)
-        .onHover { hovering = $0 ? id : (hovering == id ? nil : hovering) }
+    }
+}
+
+/// A few words by the selection (why Note made no note).
+private struct SelectionWords: View {
+    let words: String
+
+    var body: some View {
+        Text(words).font(.system(size: 12, weight: .medium))
+            .lineLimit(2).multilineTextAlignment(.center)
+            .padding(.horizontal, 12).padding(.vertical, 7)
+            .frame(maxWidth: 320)
+            .glassEffect(.regular, in: .rect(cornerRadius: 12))
+            .padding(4)
     }
 }

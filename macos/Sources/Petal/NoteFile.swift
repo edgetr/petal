@@ -1767,6 +1767,25 @@ enum NoteShelf {
         return barHiddenByPetal && dockWindows.contains { $0.onScreen && $0.name == "Dock" }
     }
 
+    /// The words selected when a note was made, as the note's first lines (a Markdown quote, then a blank line to
+    /// write under): for a note whose place can't hold the sentence itself. At most 500 characters; nothing for none.
+    static func quoted(_ quote: String?) -> String {
+        let words = (quote ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty else { return "" }
+        let lines = String(words.prefix(500)).split(separator: "\n", omittingEmptySubsequences: false)
+            .map { "> " + $0.trimmingCharacters(in: .whitespaces) }
+        return lines.joined(separator: "\n") + "\n\n"
+    }
+
+    /// What macOS's Dock coming onto the screen (`dockOut`) or leaving it says about Mission Control while Petal's
+    /// dock is shown and keeps macOS's hidden: out is Mission Control open, gone is closed. Except in a full-screen
+    /// app's Space, where macOS shows its Dock whenever the pointer pushes on the screen's edge: coming out there says
+    /// nothing (nil), while leaving still closes one that was open.
+    static func missionControl(dockOut: Bool, fullScreen: Bool, open: Bool) -> Bool? {
+        if dockOut { return fullScreen ? nil : true }
+        return open ? false : nil
+    }
+
     /// Who needs a shared watcher (Mission Control's): it runs while anyone does, whichever of them.
     struct TrackerUsers: Equatable {
         private(set) var users: Set<String> = []

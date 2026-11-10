@@ -550,6 +550,17 @@ struct NotesCheck {
         expect(!NoteShelf.missionControlOpen(dockWindows: [("Dock", true)], barHiddenByPetal: true, lastOpened: opened, now: opened.addingTimeInterval(61)),
                "only the bar while Petal hides it, a minute without a fresh opening: taken as closed")
         expect(!NoteShelf.missionControlOpen(dockWindows: [], barHiddenByPetal: true, lastOpened: opened, now: opened.addingTimeInterval(3)), "no Dock window: closed")
+        // A note made from a selection whose place can't hold the sentence starts with the words selected.
+        expect(NoteShelf.quoted("Growth held steady") == "> Growth held steady\n\n", "the words selected, as a quote to write under")
+        expect(NoteShelf.quoted("one\n  two ") == "> one\n> two\n\n", "each line quoted")
+        expect(NoteShelf.quoted(nil).isEmpty && NoteShelf.quoted("  \n").isEmpty, "nothing selected: an empty note")
+        expect(NoteShelf.quoted(String(repeating: "a", count: 900)).count == 2 + 500 + 2, "never more than 500 characters of it")
+        // While Petal hides macOS's Dock, its window coming onto the screen is Mission Control (macOS 27 sends no event).
+        expect(NoteShelf.missionControl(dockOut: true, fullScreen: false, open: false) == true, "macOS's Dock came out while Petal hides it: Mission Control opened")
+        expect(NoteShelf.missionControl(dockOut: false, fullScreen: false, open: true) == false, "it left the screen: Mission Control closed")
+        expect(NoteShelf.missionControl(dockOut: false, fullScreen: false, open: false) == nil, "gone while nothing was open: nothing to say")
+        expect(NoteShelf.missionControl(dockOut: true, fullScreen: true, open: false) == nil, "in a full-screen app's Space the Dock comes out at the screen's edge: not Mission Control")
+        expect(NoteShelf.missionControl(dockOut: false, fullScreen: true, open: true) == false, "and leaving still closes one that was open")
 
         // An open editor fences its note only while it has typing not saved yet; an idle one takes another Mac's version.
         expect(NoteShelf.fenceEditor(dirty: true) && !NoteShelf.fenceEditor(dirty: false), "fenced only while dirty")
