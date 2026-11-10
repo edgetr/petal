@@ -624,7 +624,9 @@ private final class BrowserChecker {
             expect((second["tab"] as? String) == "t2 of 2", "a new tab (\(second["tab"] ?? "none"))")
             let list = browser("tabs")["tabs"] as? [[String: Any]] ?? []
             expect(list.count == 2 && list.last?["current"] as? Bool == true, "tabs lists both, the new one current")
-            _ = browser("tab", ["tab": "t1"])
+            // (The tab named as an id, as an AI may well write it.)
+            let switched = browser("tab", ["id": "t1"])
+            expect(error(switched).isEmpty, "tab takes the tab's name as id too (\(error(switched)))")
             home = page(browser("read"))
             expect(home.contains("# Petal check"), "tab works in the first again")
             let closed = browser("close_tab", ["tab": "t2"])

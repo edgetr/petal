@@ -59,7 +59,7 @@ extension Assist {
         // The control an id names is bound now, before anyone is asked anything: whatever the page is read as while a
         // card waits, this call acts on this very element or not at all.
         var bound: RunBrowser.Bound?
-        if !id.isEmpty, let browser = runBrowsers.browser(for: caller) {
+        if BrowserOutline.isID(id), action != "tab", action != "close_tab", let browser = runBrowsers.browser(for: caller) {
             guard let field = browser.bind([id])?.first else {
                 if case .failure(let problem) = browser.ref(id) { return fail(problem.words) }
                 return fail(RunBrowserRules.stale)
