@@ -348,8 +348,13 @@ struct NoteBodyView: View {
 
     var body: some View {
         let words: Color = glass ? .primary : PaperLook.words
+        let blocks = NoteBlock.blocks(paper.file.body)
+        // A card or a picture keeps 8 points above and below it, and two in a row share them (8 between, as the
+        // sketch's margins do, never 16).
+        let boxed = blocks.map { if case .link = $0 { true } else if case .image = $0 { true } else { false } }
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(NoteBlock.blocks(paper.file.body).enumerated()), id: \.offset) { _, block in
+            ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
+                let above: CGFloat = index > 0 && boxed[index - 1] ? 0 : 8
                 switch block {
                 case .heading(let level, let text):
                     Text(text).font(.system(size: level == 1 ? 17 : level == 2 ? 15 : 14, weight: .bold)).tracking(-0.17).foregroundStyle(words)
@@ -362,9 +367,9 @@ struct NoteBodyView: View {
                     }
                     .lineSpacing(3)
                 case .link(let url):
-                    LinkCardView(url: url).padding(.vertical, 8)
+                    LinkCardView(url: url).padding(.top, above).padding(.bottom, 8)
                 case .image(let path, let caption):
-                    PictureView(link: path, folder: paper.url.deletingLastPathComponent(), caption: caption).padding(.vertical, 8)
+                    PictureView(link: path, folder: paper.url.deletingLastPathComponent(), caption: caption).padding(.top, above).padding(.bottom, 8)
                 case .ink(let text):
                     Text(NoteText.plain(text)).font(.system(size: 13.5)).foregroundStyle(glass ? .primary : PaperLook.color(NoteInk.ink(tint)))
                         .padding(.leading, 9)

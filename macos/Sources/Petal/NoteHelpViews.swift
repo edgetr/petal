@@ -36,7 +36,11 @@ struct HelperFront: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if !file.task.isEmpty { PaperTaskChips(paper: paper, tint: tint, desk: desk).padding(.vertical, 6) }
                     if let calc = file.calc { CalcLine(calc: calc, body: file.body, tint: tint, glass: glass) }
-                    ForEach(Array(file.ink.enumerated()), id: \.offset) { _, ink in InkView(ink: ink, heading: ink.heading(among: file.ink), tint: !ink.opinion ? tint : NoteInk.hex("#a550a7") ?? tint, glass: glass) }
+                    ForEach(Array(file.ink.enumerated()), id: \.offset) { index, ink in
+                        // Each block of ink keeps 8 points above and below; two in a row share them (8 between, not 16).
+                        InkView(ink: ink, heading: ink.heading(among: file.ink), tint: !ink.opinion ? tint : NoteInk.hex("#a550a7") ?? tint, glass: glass)
+                            .padding(.top, index > 0 ? -8 : 0)
+                    }
                 }
             }
             // Allow, Don't, Buy, Stop and Pause: pinned outside the scroll, always on the screen.

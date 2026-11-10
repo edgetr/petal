@@ -914,7 +914,7 @@ struct GridSlots: Layout {
 struct GridPaper: View, Equatable {
     /// Drawn again only when the note or how it's shown changed (not whenever the grid around it is laid out again).
     static func == (a: GridPaper, b: GridPaper) -> Bool {
-        a.paper == b.paper && a.across == b.across && a.now == b.now && a.size == b.size && a.draggable == b.draggable
+        a.paper == b.paper && a.across == b.across && a.now == b.now && a.size == b.size && a.draggable == b.draggable && a.words == b.words
     }
 
     @Environment(PetalApp.self) private var app
@@ -926,6 +926,8 @@ struct GridPaper: View, Equatable {
     var opening: () -> Void = {}
     /// Dragged out to another notebook or an app in the dock (not on a canvas, where dragging moves it).
     var draggable = true
+    /// Its words' size: 12.5 points in the grid, a note's own 13.5 on a canvas (the sketch's).
+    var words: CGFloat = 12.5
 
     var body: some View {
         let color = app.paper.store.color(of: paper.notebook)
@@ -942,8 +944,10 @@ struct GridPaper: View, Equatable {
                 if titled { Text(paper.file.title).font(.system(size: 14, weight: .bold)).lineLimit(2) }
                 // (No more of its words than a paper this size can show: the rest would be laid out only to be cut off.)
                 Text(String((titled ? paper.file.preview : [paper.file.title, paper.file.preview].filter { !$0.isEmpty }.joined(separator: " ")).prefix(Self.shownWords)))
-                    .font(.system(size: 12.5, weight: .medium)).lineLimit(Self.shownLines)
+                    .font(.system(size: words, weight: .medium)).lineLimit(Self.shownLines)
             }
+            // The sketch's line height for a paper's words (1.32).
+            .lineSpacing(words * (1.32 - 1.193))
             .foregroundStyle(PaperLook.words)
             .padding(.top, watch == nil ? 0 : watch?.history.isEmpty == false ? 46 : 34)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -1053,7 +1057,7 @@ struct CoverPaper: View {
             Text("About this notebook").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
                 .padding(.bottom, 9)
             Text(parts.about.isEmpty ? "What this notebook is for." : parts.about).font(.system(size: 12.5)).foregroundStyle(PaperLook.words)
-                .lineLimit(6)
+                .lineSpacing(12.5 * (1.32 - 1.193)).lineLimit(6)
             Text("PETAL REMEMBERS").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color(white: 0.47)).padding(.top, 10).padding(.bottom, 2)
             if parts.remembers.isEmpty {
                 Text("Nothing yet.").font(.system(size: 11.5)).foregroundStyle(Color(white: 0.55)).padding(.vertical, 4)
@@ -1277,7 +1281,7 @@ struct CanvasPaper: View {
     @State private var start: NoteCanvas.Spot?
 
     var body: some View {
-        GridPaper(paper: paper, now: Date(), draggable: false)
+        GridPaper(paper: paper, now: Date(), draggable: false, words: 13.5)
             .rotationEffect(.degrees(Self.turn(paper.noteID)))
             .offset(x: spot.x, y: spot.y)
             .gesture(DragGesture(minimumDistance: 3, coordinateSpace: .global)
