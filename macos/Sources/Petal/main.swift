@@ -66,6 +66,10 @@ MainActor.assumeIsolated {
         app.setActivationPolicy(.prohibited)
         SettingsBench.isolate()
         WindowBench.run(CommandLine.arguments, settingsOnly: settingsOnly)
+    case .benchNotes:
+        // Its own throwaway folders, set before anything reads a setting (never a copy of the person's).
+        app.setActivationPolicy(.prohibited)
+        NotesBench.run(CommandLine.arguments)
     case .benchDock:
         app.setActivationPolicy(.prohibited)
         SettingsBench.isolate()

@@ -2898,6 +2898,19 @@ final class NoteDesk {
         self.here = here
         self.found = found
     }
+
+    /// For `Petal --bench-notes` only: a made-up window in front with these notes on it (nothing read), for `layout`
+    /// to lay out as it does any window's notes. Headless, no panel is ordered in (NSPanel.unveil).
+    func previewWindow(_ scene: NoteScene?, frame: CGRect?, here: [String: Int]) {
+        self.scene = scene
+        self.frame = frame
+        self.here = here
+        scenePrivacy = ClaudePanel.privacy.now
+    }
+
+    /// For `Petal --bench-notes` only: a paper's own panel and the tabs on the window's edge, to draw them off screen.
+    func benchPanel(_ key: String) -> NSPanel? { panels[key] }
+    var benchTabs: [NSPanel] { Array(tabPanels.values) }
 }
 
 /// A menu item that runs a closure.
@@ -3233,7 +3246,8 @@ extension NSPanel {
     /// Showing again: on screen once, then only made opaque. `mouse`: whether it takes clicks (a pin never does).
     func unveil(mouse: Bool = true) {
         let was = unveiled
-        if !isVisible { orderFrontRegardless() }
+        // A headless run (a check, a bench) never orders a window of Petal's in: laid out and drawn, never shown.
+        if !isVisible, !Headless.on { orderFrontRegardless() }
         if alphaValue != 1 { alphaValue = 1 }
         if ignoresMouseEvents == mouse { ignoresMouseEvents = !mouse }
         // A paper revealed: missing pictures on it are retried again (NotePictures' retry).

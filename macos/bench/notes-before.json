@@ -1,0 +1,110 @@
+{
+  "idleClosed": 0.1475800000000163,
+  "idleOpen": 1.9427800000000206,
+  "idleOpenQuiet": 0.12259999999998399,
+  "memory": 125.6729736328125,
+  "notebooks": 20,
+  "notes": 500,
+  "pictures": 20,
+  "rows": [
+    {
+      "mainHeld": 0.716875,
+      "ms": 368.289792,
+      "name": "first read until ready",
+      "note": "520 papers in 20 notebooks"
+    },
+    {
+      "mainHeld": 0.016125,
+      "ms": 351.219292,
+      "name": "  of which the files' read alone",
+      "note": "off the main thread"
+    },
+    {
+      "mainHeld": 0.024208,
+      "ms": 381.195542,
+      "name": "a read after one file changed",
+      "note": ""
+    },
+    {
+      "mainHeld": 4.433,
+      "ms": 132.5255,
+      "name": "the Petal Notes window opens on 100 notes",
+      "note": "update 96.5, draw 24.5 ms"
+    },
+    {
+      "mainHeld": 48.881917,
+      "ms": 44.501292,
+      "name": "switching notebooks",
+      "note": "median of 6; the slowest 50.8 ms"
+    },
+    {
+      "mainHeld": 0,
+      "ms": 124.489416,
+      "name": "switching to the canvas of 100 notes",
+      "note": "its first frame 26.3 ms, then the canvas read and laid out"
+    },
+    {
+      "mainHeld": 185.648541,
+      "ms": 18.561834,
+      "name": "search, a keystroke (the person's own)",
+      "note": "median of 44; p95 171.0, the slowest 186.6 ms"
+    },
+    {
+      "mainHeld": 1041.128417,
+      "ms": 1110.148208,
+      "name": "search, the tools' (redacted)",
+      "note": "median of 5; the first 1110.1 ms"
+    },
+    {
+      "mainHeld": 0,
+      "ms": 0.26,
+      "name": "the grid scrolled, a step",
+      "note": "302 steps; p95 0.9, over 8.3 ms: 0, over 16.7 ms: 0"
+    },
+    {
+      "mainHeld": 0,
+      "ms": 128.8625,
+      "name": "edge tabs for a window with 30 notes",
+      "note": "23 tabs made in 124.6 ms, then drawn"
+    },
+    {
+      "mainHeld": 0,
+      "ms": 87.019208,
+      "name": "  laid out again as the window moves",
+      "note": "median of 20 moves; the slowest 90.6 ms"
+    },
+    {
+      "mainHeld": 0,
+      "ms": 28.0845,
+      "name": "a note with 20 pictures opens",
+      "note": "its words, the pictures' room kept"
+    },
+    {
+      "mainHeld": 6.635916,
+      "ms": 172.458083,
+      "name": "  until its 20 pictures are in",
+      "note": "read and decoded off the main thread; the slowest frame meanwhile 0.2 ms"
+    }
+  ],
+  "scrolling": {
+    "bodies": 0,
+    "height": 1860,
+    "jitter": 0.2305261716404301,
+    "jump": 0.12472453156146159,
+    "max": 1.650459,
+    "median": 0.26,
+    "over16": 0,
+    "over8": 0,
+    "p95": 0.900834,
+    "p99": 1.348083,
+    "steps": 302
+  },
+  "typing": {
+    "max": 186.58725,
+    "median": 18.561834,
+    "over16": 33,
+    "over8": 44,
+    "p95": 171.026542,
+    "steps": 44
+  }
+}

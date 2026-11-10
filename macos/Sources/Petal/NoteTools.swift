@@ -98,7 +98,7 @@ extension NoteDesk {
                 // Every match counted (not only those listed) goes through the delivery fence: a notebook made Private
                 // while the search ran can't show up in the count either.
                 told.books.formUnion(found.map(\.notebook))
-                told.notes += found.map(self.ticket)
+                told.notes += self.tickets(found)
                 told.books.formUnion(self.store.notebooks.filter { readable($0.name) }.map(\.name))
                 send(["notes": found.prefix(limit).map { self.summary($0) }, "count": found.count,
                       "notebooks": self.store.notebooks.filter { readable($0.name) }.map { ["name": $0.name, "color": $0.color.isEmpty ? "accent" : $0.color, "notes": $0.count] }])
@@ -260,9 +260,23 @@ extension NoteDesk {
         Ticket(key: paper.key, noteID: paper.noteID, instance: paper.instance, unique: store.notes.filter { $0.holder == paper.holder }.count == 1)
     }
 
+    /// The same for many papers at once (a search's every match): how many papers each id names counted once.
+    func tickets(_ papers: [PaperNote]) -> [Ticket] {
+        var named: [String: Int] = [:]
+        for paper in store.notes { named[paper.holder, default: 0] += 1 }
+        return papers.map { Ticket(key: $0.key, noteID: $0.noteID, instance: $0.instance, unique: named[$0.holder] == 1) }
+    }
+
     /// The ticket's paper as the notes are now (NoteShelf.pick): its file while it's still that note; moved, by its
     /// id only when that id named one paper at the start and still does.
     func repick(_ ticket: Ticket) -> PaperNote? {
+        // Still at its file (nearly always): found through the store's index, with the answer `follow` gives for
+        // a key that's there (NoteShelf.pick's first rule: that file while it's still that note, else nothing).
+        if let paper = store.paper(ticket.key) {
+            let current = NoteShelf.current(ticket.noteID, instance: ticket.instance, aliases: store.aliases)
+            let holder = current == ticket.noteID ? NoteShelf.holderKey(id: ticket.noteID, instance: ticket.instance) : current
+            return paper.holder == holder ? paper : nil
+        }
         let now = store.notes
         // By holder keys (NoteShelf.follow): a new file at an id-less note's old path is never it.
         return NoteShelf.follow(key: ticket.key, id: ticket.noteID, instance: ticket.instance, unique: ticket.unique, aliases: store.aliases,

@@ -1,0 +1,39 @@
+Petal --bench-notes: 500 made-up notes in 20 notebooks (one of 100 notes, one a canvas of 100, one note with 20
+pictures of 1600 by 1000), headless, on throwaway folders. Each number is the median of three runs, in ms.
+Before: the commit before the speed work (47dad43) with only the bench added. After: this work.
+"Main held" is the longest the main thread was busy in one piece during the step (for steps the bench itself
+runs on the main thread, laying a window out and drawing it, that is the step).
+Machine: Apple M4 Max, macOS 27.3.
+
+                                                  before     after   main held, before / after
+first read until ready                             374.0     363.1   0.7 / 1.0
+  of which the files' read alone                   360.3     351.3   0.0 / 0.0
+a read after one file changed                      379.6      41.1   0.0 / 0.0
+the Petal Notes window opens on 100 notes          132.5     122.0   4.4 / 3.0
+switching notebooks                                 45.7      33.9   48.9 / 41.1
+switching to the canvas of 100 notes               119.3     107.1   25.0 / 10.9
+search, a keystroke (the person's own)              18.6       6.9   185.4 / 36.5
+search, the tools' (redacted)                     1127.6       6.1   1043.9 / 0.2
+the grid scrolled, a step                            0.3       0.2   0.0 / 0.0
+edge tabs for a window with 30 notes               120.0      35.7   0.0 / 0.0
+  laid out again as the window moves                85.9       1.7   0.0 / 0.0
+a note with 20 pictures opens                       28.3      25.3   0.0 / 0.0
+  until its 20 pictures are in                     172.5     168.9   6.6 / 5.9
+
+search keystroke, p95                                  171.0      32.1
+search keystroke, the slowest                          186.6      38.4
+search keystrokes over 8.3 ms (of 44)                     44        16
+search keystrokes over 16.7 ms (of 44)                    34        14
+grid scroll step, p95                                    0.8       1.1
+grid scroll steps over 8.3 ms (of 302)                     0         0
+idle CPU, window open, drawn 60 times a second, %       1.91      1.87
+idle CPU, window open, nothing asking, %                0.15      0.19
+idle CPU, window closed, %                              0.17      0.17
+memory at the end, MB                                    125       117
+
+The targets: a read of 500 notes ready within about a second (met: 0.36 s); search keystrokes and grid scrolling
+under 8.3 ms a step at the median (met: 6.9 and 0.2 ms) and under 16.7 ms at p95 (met for scrolling; not for the
+search: a keystroke that changes which notes are found takes 22 to 38 ms, because the forty or so papers in
+sight are set in type again by Core Text; one that doesn't takes 5 to 7 ms); idle CPU near zero (0.2% of a core
+with the window open or closed; the 1.9% is the bench laying the window out and drawing it 60 times a second,
+as --bench-windows does for every window).

@@ -235,10 +235,19 @@ enum NoteLibrary {
     /// The person's own search: every note's words, its title and notebook, plain (this is the person's view; what
     /// reaches a tool is searched only on redacted text, NoteShield.search).
     static func search(_ query: String, _ items: [Item]) -> [Int] {
-        let words = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !words.isEmpty else { return [] }
-        return items.indices.filter { NoteText.matches(words, items[$0].file.body + "\n" + items[$0].notebook) }
-            .sorted { items[$0].file.modified > items[$1].file.modified }
+        search(query, folded: items.map(searched), modified: items.map(\.file.modified))
+    }
+
+    /// What of a note the person's search looks through (its words and its notebook's name), folded once.
+    static func searched(_ item: Item) -> NoteText.Folded { NoteText.folded(item.file.body + "\n" + item.notebook) }
+
+    /// The same search over notes already folded (`searched`): what the window keeps while the notes don't change,
+    /// so a character typed only looks for the words, never folds every note again.
+    static func search(_ query: String, folded: [NoteText.Folded], modified: [Date]) -> [Int] {
+        let asked = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !asked.isEmpty else { return [] }
+        let words = NoteText.searchWords(asked)
+        return folded.indices.filter { NoteText.matches(words: words, folded: folded[$0]) }.sorted { modified[$0] > modified[$1] }
     }
 
     /// Notebook names are one notebook whatever their case (as NoteShelf.canonicalNotebook has them).
@@ -461,7 +470,10 @@ extension NotePrivacy {
     /// that the latest read of the folder didn't find (gone, renamed, not read): unknown, so Private, never readable.
     static func privateBooks(notebooks: [(name: String, isPrivate: Bool)], held: [String]) -> Set<String> {
         var out = Set(notebooks.filter(\.isPrivate).map(\.name))
-        for name in held where !notebooks.contains(where: { NoteLibrary.same($0.name, name) }) { out.insert(name) }
+        // Each notebook held notes are in weighed once (not once per note), and only when its name as written
+        // isn't a notebook's.
+        let names = Set(notebooks.map(\.name))
+        for name in Set(held) where !names.contains(name) && !notebooks.contains(where: { NoteLibrary.same($0.name, name) }) { out.insert(name) }
         return out
     }
 

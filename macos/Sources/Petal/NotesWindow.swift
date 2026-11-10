@@ -93,6 +93,37 @@ final class NotesModel {
     var desk: NoteDesk { PetalApp.shared.paper }
     var store: NoteStore { desk.store }
 
+    /// Every note as the window weighs them (iCloud's other versions left out: their paper shows them), with what
+    /// its search looks through folded once. Worked out for the notes as they are and kept until they change, so a
+    /// character typed in the search, a notebook picked or a row hovered never goes through every note's words again.
+    struct Index {
+        var papers: [PaperNote] = []
+        var items: [NoteLibrary.Item] = []
+        var folded: [NoteText.Folded] = []
+        var modified: [Date] = []
+    }
+    @ObservationIgnored private var kept: (session: ObjectIdentifier, version: Int, index: Index)?
+
+    var index: Index {
+        // (`notes` read first, so the window is drawn again when they change.)
+        let notes = store.notes
+        let session = ObjectIdentifier(store.session), version = store.notesVersion
+        if let kept, kept.session == session, kept.version == version { return kept.index }
+        var made = Index()
+        made.papers = notes.filter { $0.version == nil }
+        made.items = made.papers.map { NoteLibrary.Item(notebook: $0.notebook, file: $0.file) }
+        made.folded = made.items.map(NoteLibrary.searched)
+        made.modified = made.items.map(\.file.modified)
+        kept = (session, version, made)
+        return made
+    }
+
+    /// The person's search over every note (NoteLibrary.search), newest first.
+    func found(_ query: String) -> [PaperNote] {
+        let index = index
+        return NoteLibrary.search(query, folded: index.folded, modified: index.modified).map { index.papers[$0] }
+    }
+
     /// The canvas of `notebook`, read again (after any read of the notes' folder: another Mac may have moved things).
     func loadCanvas(_ notebook: String) {
         let captured = store.session
@@ -359,7 +390,7 @@ final class NotesModel {
 // MARK: - The look
 
 /// The window's colors: the sketch's in light, their dark counterparts in dark. Paper stays paper.
-struct NotesLook {
+struct NotesLook: Equatable {
     let dark: Bool
     var sidebar: Color { dark ? Color(white: 0.16) : Color(.sRGB, red: 0xf1 / 255.0, green: 0xf1 / 255.0, blue: 0xf4 / 255.0) }
     var main: Color { dark ? Color(white: 0.11) : .white }
@@ -386,14 +417,12 @@ struct NotesWindowView: View {
     var now = Date()
     /// Snapshots: where the files live, as words (live: the notes' folder).
     var rootPath: String? = nil
+    /// The page's scroll view, put back at its top when it shows other notes.
+    @State private var top = ScrollPosition(edge: .top)
 
     private var look: NotesLook { NotesLook(dark: scheme == .dark) }
     private var store: NoteStore { app.paper.store }
 
-    /// Every note as the window weighs them (iCloud's other versions left out: their paper shows them).
-    private var items: [(paper: PaperNote, item: NoteLibrary.Item)] {
-        store.notes.filter { $0.version == nil }.map { ($0, NoteLibrary.Item(notebook: $0.notebook, file: $0.file)) }
-    }
 
     private var book: Notebook? {
         guard case .notebook(let name) = model.shelf else { return nil }
@@ -407,12 +436,12 @@ struct NotesWindowView: View {
     private var showingPrivate: Bool {
         let books = store.privateBooks
         guard !books.isEmpty else { return false }
-        let all = items
-        let shown: [Int]
-        if !model.query.isEmpty { shown = NoteLibrary.search(model.query, all.map(\.item)) }
+        let all = model.index
+        let shown: [PaperNote]
+        if !model.query.isEmpty { shown = model.found(model.query) }
         else if let book { return book.isPrivate }
-        else { shown = NoteLibrary.listed(model.shelf, all.map(\.item), now: now) }
-        return shown.contains { index in books.contains { NoteLibrary.same($0, all[index].paper.notebook) } }
+        else { shown = NoteLibrary.listed(model.shelf, all.items, now: now).map { all.papers[$0] } }
+        return shown.contains { paper in books.contains { NoteLibrary.same($0, paper.notebook) } }
     }
 
     var body: some View {
@@ -437,8 +466,7 @@ struct NotesWindowView: View {
     // MARK: Sidebar
 
     private var sidebar: some View {
-        let all = items
-        let files = all.map(\.item)
+        let files = model.index.items
         let books = store.notebooks
         return VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 7) {
@@ -485,7 +513,16 @@ struct NotesWindowView: View {
     /// window's glass misbehaves as a settings page's does). While snapshotting, where scroll views draw as
     /// placeholders, a stand-in of the same size: the rows from the top, cut where the scroll view ends.
     @ViewBuilder private func notebookList(_ books: [Notebook]) -> some View {
-        let rows = VStack(alignment: .leading, spacing: 1) { ForEach(books) { book in notebookRow(book) } }
+        let stacks = Set(app.config.strings("stackFolders"))
+        let rows = VStack(alignment: .leading, spacing: 1) {
+            ForEach(books) { book in
+                // Drawn again only when something it shows changed (not for every character typed in the search).
+                NotebookRow(book: book, on: model.query.isEmpty && model.shelf == .notebook(book.name),
+                            isDefault: NoteLibrary.same(app.paper.defaultNotebook, book.name), color: store.color(of: book.name),
+                            inDock: stacks.contains(NotesModel.stackPath(book.folder)), look: look, droppable: !snapshotting, model: model)
+                    .equatable()
+            }
+        }
         if snapshotting {
             ViewThatFits(in: .vertical) {
                 rows
@@ -521,83 +558,42 @@ struct NotesWindowView: View {
         .buttonStyle(.plain)
     }
 
-    private func notebookRow(_ book: Notebook) -> some View {
-        let on = model.query.isEmpty && model.shelf == .notebook(book.name)
-        let isDefault = NoteLibrary.same(app.paper.defaultNotebook, book.name)
-        return Button { model.query = ""; model.shelf = .notebook(book.name) } label: {
-            HStack(spacing: 9) {
-                RoundedRectangle(cornerRadius: 3).fill(Color(nsColor: store.color(of: book.name))).frame(width: 10, height: 10)
-                Text(book.name).fontWeight(on ? .semibold : .regular).lineLimit(1)
-                if isDefault { Text("default").font(.system(size: 11)).foregroundStyle(look.dim) }
-                if book.isPrivate { Text("private").font(.system(size: 11)).foregroundStyle(look.dim) }
-                Spacer(minLength: 4)
-                Text("\(book.count)").foregroundStyle(look.dim)
-            }
-            .font(.system(size: 13.5)).foregroundStyle(look.text)
-            .padding(.horizontal, 8).padding(.vertical, 6)
-            .background(on ? look.picked : .clear, in: .rect(cornerRadius: 7))
-            .contentShape(.rect)
-        }
-        .buttonStyle(.plain)
-        .modifier(NoteDropTarget(on: !snapshotting) { drop($0, into: book.name) })
-        .contextMenu { notebookMenu(book) }
-    }
-
-    @ViewBuilder private func notebookMenu(_ book: Notebook) -> some View {
-        Button("Rename…") { model.rename(book) }.disabled(NoteLibrary.same(book.name, NoteShelf.inbox))
-        Menu("Color") {
-            ForEach(NotesColors.choices, id: \.value) { choice in
-                Button(choice.name) { app.paper.recolor(book.name, choice.value) }
-            }
-        }
-        Button(book.view == .canvas ? "Show as a grid" : "Show as a canvas") { model.setView(book, book.view == .canvas ? .grid : .canvas) }
-        Divider()
-        Button("Make it the default") { model.makeDefault(book) }.disabled(NoteLibrary.same(app.paper.defaultNotebook, book.name))
-        Toggle("Private", isOn: Binding(get: { book.isPrivate }, set: { model.setPrivate(book, $0) }))
-        Toggle("In the dock as a stack", isOn: Binding(get: { model.inDock(book) }, set: { _ in model.toggleDock(book) }))
-        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([book.folder]) }
-        Divider()
-        Button("Move to Trash…") { model.trash(book) }
-            .disabled(NoteLibrary.same(app.paper.defaultNotebook, book.name) || NoteLibrary.same(book.name, NoteShelf.inbox))
-    }
-
-    /// Notes dropped on a notebook: each moved there (the one move: what's typed goes along).
-    private func drop(_ providers: [NSItemProvider], into notebook: String) {
-        for provider in providers {
-            provider.loadDataRepresentation(forTypeIdentifier: UTType.petalNote.identifier) { data, _ in
-                guard let data else { return }
-                let id = String(decoding: data, as: UTF8.self)
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard let paper = app.paper.store.current(id) else { return }
-                        app.paper.move(paper.key, to: notebook)
-                    }
-                }
-            }
-        }
-    }
-
     // MARK: Main
 
-    @ViewBuilder private var main: some View {
+    /// What the main area shows: a search's hits, a notebook's notes (its cover first), or a view across notebooks.
+    private struct Shown {
+        var title: String, subtitle: String
+        var book: Notebook?
+        var papers: [PaperNote]
+        var cover: PaperNote?
+        var across: Bool
+    }
+
+    private var shown: Shown {
         if !model.query.isEmpty {
-            let all = items
-            let hits = NoteLibrary.search(model.query, all.map(\.item)).map { all[$0].paper }
-            page(title: "Search", subtitle: hits.count == 1 ? "1 note" : "\(hits.count) notes", book: nil, papers: hits, cover: nil, across: true)
-        } else if let book {
-            let all = items
-            let listed = NoteLibrary.listed(.notebook(book.name), all.map(\.item), now: now).map { all[$0].paper }
-            let cover = book.cover.flatMap { store.paper($0) }
-            if book.view == .canvas {
-                NotesCanvasView(model: model, book: book, papers: listed, look: look)
-            } else {
-                page(title: book.name, subtitle: subtitle(book), book: book, papers: listed, cover: cover, across: false)
-            }
+            let hits = model.found(model.query)
+            return Shown(title: "Search", subtitle: hits.count == 1 ? "1 note" : "\(hits.count) notes", book: nil, papers: hits, cover: nil, across: true)
+        }
+        let all = model.index
+        if let book {
+            let listed = NoteLibrary.listed(.notebook(book.name), all.items, now: now).map { all.papers[$0] }
+            return Shown(title: book.name, subtitle: subtitle(book), book: book, papers: listed, cover: book.cover.flatMap { store.paper($0) }, across: false)
+        }
+        let listed = NoteLibrary.listed(model.shelf, all.items, now: now).map { all.papers[$0] }
+        let (title, empty) = shelfWords
+        return Shown(title: title, subtitle: listed.isEmpty ? empty : listed.count == 1 ? "1 note" : "\(listed.count) notes", book: nil, papers: listed, cover: nil, across: true)
+    }
+
+    /// One page for a search, a notebook and a view alike: typing in the search or picking another notebook puts new
+    /// notes in the page that's there (its papers reused, NotesGrid), never a new page built from nothing.
+    @ViewBuilder private var main: some View {
+        let shown = self.shown
+        if canvasShowing, let book = shown.book {
+            NotesCanvasView(model: model, book: book, papers: shown.papers, look: look)
         } else {
-            let all = items
-            let listed = NoteLibrary.listed(model.shelf, all.map(\.item), now: now).map { all[$0].paper }
-            let (title, empty) = shelfWords
-            page(title: title, subtitle: listed.isEmpty ? empty : listed.count == 1 ? "1 note" : "\(listed.count) notes", book: nil, papers: listed, cover: nil, across: true)
+            page(title: shown.title, subtitle: shown.subtitle, book: shown.book, papers: shown.papers, cover: shown.cover, across: shown.across)
+                // Other notes to show: from their top.
+                .onChange(of: "\(model.shelf)\n\(model.query)") { _, _ in top = ScrollPosition(edge: .top) }
         }
     }
 
@@ -646,12 +642,86 @@ struct NotesWindowView: View {
                 .padding(.horizontal, 36).padding(.top, 20).padding(.bottom, 30)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .scrollPosition($top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private func viewToggle(_ book: Notebook) -> some View {
         NotesViewToggle(view: book.view, look: look) { model.setView(book, $0) }.padding(.top, 4)
+    }
+}
+
+/// One notebook in the sidebar: its color, name, what it is (default, private) and how many notes; its menu on a
+/// right-click; notes dropped on it are moved there. Drawn again only when something it shows changed (`==`), so a
+/// character typed in the search doesn't build every notebook's row and menu again.
+struct NotebookRow: View, Equatable {
+    @Environment(PetalApp.self) private var app
+    let book: Notebook
+    let on: Bool
+    let isDefault: Bool
+    let color: NSColor
+    let inDock: Bool
+    let look: NotesLook
+    let droppable: Bool
+    let model: NotesModel
+
+    static func == (a: NotebookRow, b: NotebookRow) -> Bool {
+        a.book == b.book && a.on == b.on && a.isDefault == b.isDefault && a.color == b.color && a.inDock == b.inDock && a.look == b.look
+            && a.droppable == b.droppable && a.model === b.model
+    }
+
+    var body: some View {
+        Button { model.query = ""; model.shelf = .notebook(book.name) } label: {
+            HStack(spacing: 9) {
+                RoundedRectangle(cornerRadius: 3).fill(Color(nsColor: color)).frame(width: 10, height: 10)
+                Text(book.name).fontWeight(on ? .semibold : .regular).lineLimit(1)
+                if isDefault { Text("default").font(.system(size: 11)).foregroundStyle(look.dim) }
+                if book.isPrivate { Text("private").font(.system(size: 11)).foregroundStyle(look.dim) }
+                Spacer(minLength: 4)
+                Text("\(book.count)").foregroundStyle(look.dim)
+            }
+            .font(.system(size: 13.5)).foregroundStyle(look.text)
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .background(on ? look.picked : .clear, in: .rect(cornerRadius: 7))
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .modifier(NoteDropTarget(on: droppable) { drop($0, into: book.name) })
+        .contextMenu { menu }
+    }
+
+    @ViewBuilder private var menu: some View {
+        Button("Rename…") { model.rename(book) }.disabled(NoteLibrary.same(book.name, NoteShelf.inbox))
+        Menu("Color") {
+            ForEach(NotesColors.choices, id: \.value) { choice in
+                Button(choice.name) { app.paper.recolor(book.name, choice.value) }
+            }
+        }
+        Button(book.view == .canvas ? "Show as a grid" : "Show as a canvas") { model.setView(book, book.view == .canvas ? .grid : .canvas) }
+        Divider()
+        Button("Make it the default") { model.makeDefault(book) }.disabled(isDefault)
+        Toggle("Private", isOn: Binding(get: { book.isPrivate }, set: { model.setPrivate(book, $0) }))
+        Toggle("In the dock as a stack", isOn: Binding(get: { inDock }, set: { _ in model.toggleDock(book) }))
+        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([book.folder]) }
+        Divider()
+        Button("Move to Trash…") { model.trash(book) }.disabled(isDefault || NoteLibrary.same(book.name, NoteShelf.inbox))
+    }
+
+    /// Notes dropped on a notebook: each moved there (the one move: what's typed goes along).
+    private func drop(_ providers: [NSItemProvider], into notebook: String) {
+        for provider in providers {
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.petalNote.identifier) { data, _ in
+                guard let data else { return }
+                let id = String(decoding: data, as: UTF8.self)
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let paper = app.paper.store.current(id) else { return }
+                        app.paper.move(paper.key, to: notebook)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -726,10 +796,14 @@ struct FlowRows<Item: Identifiable, Content: View>: View {
 // MARK: - The grid
 
 /// A notebook's notes as the sketch's grid: 150-point papers, 14 apart, the cover first and two rows tall.
+/// Every paper has its place by arithmetic (NoteLibrary.gridSlots), so the grid is as tall as all its rows, but only
+/// the rows in or near what its scroll view shows are made, and their views are reused as it scrolls and as its notes
+/// change: a notebook of hundreds of notes, or a search that finds them all, opens and scrolls like one of twenty.
 struct NotesGrid: View {
     @Environment(PetalApp.self) private var app
-    /// The grid's width as laid out (its height follows the columns that fit in it).
-    @State private var width: CGFloat = 900
+    @Environment(\.snapshotting) private var snapshotting
+    /// The grid's width as laid out (its height follows the columns that fit in it), and the rows in sight.
+    @State private var sight = Sight(width: 900, first: 0, count: 6)
     let papers: [PaperNote]
     let cover: PaperNote?
     /// Notes from several notebooks (a view, a search): each says its notebook.
@@ -739,36 +813,110 @@ struct NotesGrid: View {
     static let cell: CGFloat = 150
     static let gap: CGFloat = 14
 
+    /// The grid's width, and the rows made: `count` of them from `first`.
+    struct Sight: Equatable {
+        var width: CGFloat
+        var first: Int, count: Int
+    }
+
+    struct Placed: Identifiable {
+        let paper: PaperNote
+        let column: Int, row: Int
+        /// Which of the views made shows it (`reuse`).
+        let id: Int
+    }
+
+    /// Rows made beyond what shows, above and below: there before they scroll in.
+    static let ahead = 1
+    /// Every row (no scroll view: a snapshot).
+    static let everyRow = Int.max / 4
+
+    /// Which view shows the paper at (`row`, `column`): one per place among the rows made, so a row scrolled out of
+    /// them hands its views to the row scrolling in, and a search's hits are shown in the views that were there, as
+    /// a table reuses its cells. With every row made (a snapshot), each paper its own.
+    static func reuse(row: Int, column: Int, rows count: Int) -> Int { (count >= everyRow ? row : row % max(1, count)) * 4096 + column }
+
+    /// The rows to make for what a scroll view shows of the grid (`visible`, in the grid's own coordinates): as many
+    /// as it's tall and `ahead` more either side, the same number wherever it's scrolled to (so their views can be
+    /// reused). No scroll view (a snapshot): every row.
+    static func sight(width: CGFloat, showing visible: CGRect?) -> Sight {
+        guard let visible, visible.height > 0 else { return Sight(width: width, first: 0, count: everyRow) }
+        let pitch = cell + gap
+        return Sight(width: width, first: max(0, Int((visible.minY / pitch).rounded(.down)) - ahead),
+                     count: Int((visible.height / pitch).rounded(.up)) + 1 + 2 * ahead)
+    }
+
     var body: some View {
-        GeometryReader { geometry in
-            let columns = NoteLibrary.columns(width: geometry.size.width, cell: Self.cell, gap: Self.gap)
-            let slots = NoteLibrary.gridSlots(count: papers.count, columns: columns, cover: cover != nil)
-            ZStack(alignment: .topLeading) {
-                if let cover {
-                    CoverPaper(paper: cover).frame(width: Self.cell, height: Self.cell * 2 + Self.gap)
-                }
-                ForEach(Array(papers.enumerated()), id: \.element.key) { index, paper in
-                    let slot = slots[index]
-                    GridPaper(paper: paper, across: across, now: now)
-                        .offset(x: CGFloat(slot.column) * (Self.cell + Self.gap), y: CGFloat(slot.row) * (Self.cell + Self.gap))
-                }
+        let columns = NoteLibrary.columns(width: sight.width, cell: Self.cell, gap: Self.gap)
+        let slots = NoteLibrary.gridSlots(count: papers.count, columns: columns, cover: cover != nil)
+        let rows = snapshotting ? Sight(width: sight.width, first: 0, count: Self.everyRow) : sight
+        let made = papers.indices.compactMap { index -> Placed? in
+            let slot = slots[index]
+            guard slot.row >= rows.first, slot.row - rows.first < rows.count else { return nil }
+            return Placed(paper: papers[index], column: slot.column, row: slot.row, id: Self.reuse(row: slot.row, column: slot.column, rows: rows.count))
+        }
+        // Each paper put where its slot is, at its own size: the grid never asks a paper how big it would like to
+        // be or where its edges are (GridSlots), so laying it out costs the same however much each paper holds.
+        GridSlots(height: height(columns: columns)) {
+            if let cover {
+                CoverPaper(paper: cover).layoutValue(key: GridSlots.Slot.self, value: GridSlots.Place(column: 0, row: 0, tall: true))
+            }
+            ForEach(made) { placed in
+                GridPaper(paper: placed.paper, across: across, now: now).equatable()
+                    .layoutValue(key: GridSlots.Slot.self, value: GridSlots.Place(column: placed.column, row: placed.row, tall: false))
             }
         }
-        .frame(height: height)
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+        .onGeometryChange(for: Sight.self) { geometry in
+            Self.sight(width: geometry.size.width, showing: geometry.bounds(of: .scrollView(axis: .vertical)))
+        } action: { sight = $0 }
     }
 
     /// The grid's height: its rows at the columns that fit its width now.
-    private var height: CGFloat {
-        let columns = NoteLibrary.columns(width: width, cell: Self.cell, gap: Self.gap)
+    private func height(columns: Int) -> CGFloat {
         let rows = NoteLibrary.gridRows(count: papers.count, columns: columns, cover: cover != nil)
         return rows == 0 ? 0 : CGFloat(rows) * (Self.cell + Self.gap) - Self.gap + 4
     }
 }
 
+/// The grid's layout: as wide as it's offered and as tall as its rows, each paper placed at its slot (a cell of 150
+/// points, the cover two rows tall) without being measured.
+struct GridSlots: Layout {
+    struct Place: Equatable {
+        var column = 0, row = 0
+        var tall = false
+    }
+    struct Slot: LayoutValueKey {
+        static let defaultValue = Place()
+    }
+    let height: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        CGSize(width: proposal.width ?? 900, height: height)
+    }
+
+    // (No guides of its own: nothing that lines the grid up needs to place and measure its papers to find any.)
+    func explicitAlignment(of guide: HorizontalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGFloat? { nil }
+    func explicitAlignment(of guide: VerticalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGFloat? { nil }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let pitch = NotesGrid.cell + NotesGrid.gap
+        for subview in subviews {
+            let place = subview[Slot.self]
+            let size = CGSize(width: NotesGrid.cell, height: place.tall ? NotesGrid.cell * 2 + NotesGrid.gap : NotesGrid.cell)
+            subview.place(at: CGPoint(x: bounds.minX + CGFloat(place.column) * pitch, y: bounds.minY + CGFloat(place.row) * pitch), anchor: .topLeading,
+                          proposal: ProposedViewSize(size))
+        }
+    }
+}
+
 /// One note in the grid: its words on its notebook's paper, and the one line of what's coming or where it's stuck.
 /// Clicking it opens it on its own; it can be dragged to another notebook or onto an app in the dock.
-struct GridPaper: View {
+struct GridPaper: View, Equatable {
+    /// Drawn again only when the note or how it's shown changed (not whenever the grid around it is laid out again).
+    static func == (a: GridPaper, b: GridPaper) -> Bool {
+        a.paper == b.paper && a.across == b.across && a.now == b.now && a.size == b.size && a.draggable == b.draggable
+    }
+
     @Environment(PetalApp.self) private var app
     let paper: PaperNote
     var across = false
@@ -784,7 +932,7 @@ struct GridPaper: View {
         let tint = PaperLook.rgb(color)
         let watch = NoteContract.watch(paper.file)
         let footer = NoteLibrary.footer(paper.file, place: Self.place(paper), now: now)
-        let titled = NoteBlock.blocks(paper.file.body).first { !$0.words.trimmingCharacters(in: .whitespaces).isEmpty }.map { if case .heading = $0 { true } else { false } } ?? false
+        let titled = NoteText.titled(paper.file.body)
         VStack(alignment: .leading, spacing: 0) {
             if across {
                 Text(paper.notebook).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
@@ -792,8 +940,9 @@ struct GridPaper: View {
             }
             VStack(alignment: .leading, spacing: 3) {
                 if titled { Text(paper.file.title).font(.system(size: 14, weight: .bold)).lineLimit(2) }
-                Text(titled ? paper.file.preview : [paper.file.title, paper.file.preview].filter { !$0.isEmpty }.joined(separator: " "))
-                    .font(.system(size: 12.5, weight: .medium))
+                // (No more of its words than a paper this size can show: the rest would be laid out only to be cut off.)
+                Text(String((titled ? paper.file.preview : [paper.file.title, paper.file.preview].filter { !$0.isEmpty }.joined(separator: " ")).prefix(Self.shownWords)))
+                    .font(.system(size: 12.5, weight: .medium)).lineLimit(Self.shownLines)
             }
             .foregroundStyle(PaperLook.words)
             .padding(.top, watch == nil ? 0 : watch?.history.isEmpty == false ? 46 : 34)
@@ -817,6 +966,11 @@ struct GridPaper: View {
         .onTapGesture { opening(); Self.open(paper, app: app) }
         .modifier(NoteDragSource(paper: paper, on: draggable))
     }
+
+    /// More lines and characters than a 150-point paper shows at this size (seven lines of about twenty): what's
+    /// past them is never set in type only to be cut off.
+    static let shownLines = 8
+    static let shownWords = 170
 
     /// Opens it on its own, its corner by the pointer.
     static func open(_ paper: PaperNote, app: PetalApp) {

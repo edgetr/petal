@@ -24,6 +24,7 @@ struct PetalProcessCheck {
             [petal, "--bench-windows-child", "settings"], [petal, "--bench-windows-idle", "Chat, 60 messages"],
             [petal, "--snapshot", "/tmp/snap"], [petal, "--routines-check", "--ai"], [petal, "--restore-dock"],
             [petal, "--helpers-check"], [petal, "--helpers-check", "--ai"], [petal, "--viewer-check", "/tmp/a.pdf"], [petal, "--viewer-check"],
+            [petal, "--bench-notes"], [petal, "--bench-notes", "--json", "/tmp/n.json"],
             [petal, "mode", "social"], [petal, "doctor"], [petal, "report"], [petal, "run", "--key", "x", "--", "env"],
             [petal, "no-such-command"], [petal, "-psn_0_1", "--mcp"],
         ]
@@ -44,6 +45,7 @@ struct PetalProcessCheck {
             ([petal, "--bench-windows-child"], .benchWindowsChild(settingsOnly: false)),
             ([petal, "--bench-windows", "--runs", "20", "--only", "Chat, 60 messages", "--json", "/tmp/a.json"], .benchWindows(settingsOnly: false)),
             ([petal, "--bench-settings"], .benchWindows(settingsOnly: true)),
+            ([petal, "--bench-notes", "--json", "/tmp/n.json"], .benchNotes),
             ([petal, "--bench-dock"], .benchDock), ([petal, "--bench-dock", "/tmp/strips"], .benchDock), ([petal, "--bench"], .bench),
             ([petal, "--routines-check", "--ai"], .routinesCheck(ai: true)), ([petal, "--routines-check"], .routinesCheck(ai: false)),
             ([petal, "--helpers-check", "--ai"], .helpersCheck(ai: true)), ([petal, "--helpers-check"], .helpersCheck(ai: false)),
@@ -57,7 +59,7 @@ struct PetalProcessCheck {
             [petal, "--snapshot"], [petal, "--snapshot", "--ai"], [petal, "--bench-windows-idle"],
             [petal, "--bench-windows-idle", "--runs"], [petal, "--bench-nope"], [petal, "--benchmark"], [petal, "-psn_0_1", "--bench-x"],
             [petal, "--bench-windows", "--runs"], [petal, "--bench-windows", "--runs", "many"], [petal, "--bench-settings", "--json"],
-            [petal, "--bench-windows", "--only"],
+            [petal, "--bench-windows", "--only"], [petal, "--bench-notes", "--json"],
         ]
         for argv in malformed {
             guard case .usage(let message) = PetalProcess.parse(argv) else { expect(false, "\(argv) is written wrong: \(PetalProcess.parse(argv))"); continue }

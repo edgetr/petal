@@ -6,11 +6,11 @@ import Observation
 /// `key` (the file's path) tells papers apart: two files holding the same note (an iCloud conflict) are two papers.
 struct PaperNote: Identifiable, Equatable {
     var file: NoteFile
-    var url: URL
+    var url: URL { didSet { key = Self.key(url, version) } }
     var notebook: String
     /// One of the versions iCloud kept when the file changed on two Macs at once (NSFileVersion): shown beside the
     /// file until one is kept.
-    var version: String? = nil
+    var version: String? = nil { didSet { key = Self.key(url, version) } }
     /// The file's text as Petal last read or wrote it: what an edit is made on. A save finds the file changed since
     /// (another editor, another Mac) when it no longer says this, and keeps both.
     var revision: String? = nil
@@ -24,8 +24,23 @@ struct PaperNote: Identifiable, Equatable {
     /// What a holder keeps to name this note (NoteShelf.holderKey).
     var holder: String { NoteShelf.holderKey(id: noteID, instance: instance) }
 
-    var key: String { version.map { url.path + "#" + $0 } ?? url.path }
+    /// What names this paper everywhere: its file's path (and, for one of iCloud's versions, which). Kept with the
+    /// paper, never worked out from its URL each time: it's asked of every note in every lookup.
+    private(set) var key: String
     var id: String { key }
+
+    init(file: NoteFile, url: URL, notebook: String, version: String? = nil, revision: String? = nil, followed: Bool = false, instance: String = "") {
+        self.file = file
+        self.url = url
+        self.notebook = notebook
+        self.version = version
+        self.revision = revision
+        self.followed = followed
+        self.instance = instance
+        key = Self.key(url, version)
+    }
+
+    private static func key(_ url: URL, _ version: String?) -> String { version.map { url.path + "#" + $0 } ?? url.path }
     var noteID: String { file.id }
     /// Where one of its picture links leads, by the words alone (NoteShelf.pictureTarget: inside the notes' root,
     /// never absolute or out by ".."); nil is a broken picture. The disk's check is NoteStore.pictureFile.
@@ -201,8 +216,15 @@ final class RootSession {
     /// Ended by a switch (or replaced): nothing captured by it acts any more.
     @ObservationIgnored private(set) var ended = false
 
-    var notes: [PaperNote] = []
-    var notebooks: [Notebook] = []
+    var notes: [PaperNote] = [] { didSet { byKey = nil; privateBooks = nil; notesVersion += 1 } }
+    /// Moves on with every change of `notes`: what's worked out from them elsewhere (the Petal Notes window's index)
+    /// is kept until it does.
+    @ObservationIgnored private(set) var notesVersion = 0
+    var notebooks: [Notebook] = [] { didSet { privateBooks = nil } }
+    /// Worked out from `notes` and `notebooks` when first asked, and again only after either changed: where each
+    /// paper is by its key (NoteStore.paper), and the Private notebooks (NoteStore.privateBooks).
+    @ObservationIgnored var byKey: [String: Int]?
+    @ObservationIgnored var privateBooks: Set<String>?
     var conflicts: [String: [PaperNote]] = [:]
     var loaded: Bool = false
     var reads: Int = 0
@@ -245,6 +267,8 @@ final class RootSession {
     @ObservationIgnored var ready = false
     /// Made by NoteStore.switchRoot for the folder it's entering (never the placeholder a store begins with).
     @ObservationIgnored var entering = false
+    /// What this folder's last read made of each file (NoteStore.ReadCache: the files' queue's own).
+    @ObservationIgnored let readCache = NoteStore.ReadCache()
     /// The folder changed while it was being entered: read again once it's ready.
     @ObservationIgnored var reloadWanted = false
     /// A read of the folder is under way (NoteStore.reload: one at a time), and one more was asked for meanwhile.
@@ -285,6 +309,7 @@ final class NoteStore {
     /// each paper's whole group (NoteShelf.conflictGroups).
     private(set) var conflicts: [String: [PaperNote]] { get { session.conflicts } set { session.conflicts = newValue } }
     private(set) var loaded: Bool { get { session.loaded } set { session.loaded = newValue } }
+    var notesVersion: Int { session.notesVersion }
     /// Counts reads of the folder: anything else kept in it (a notebook's canvas) is read again after each.
     private(set) var reads: Int { get { session.reads } set { session.reads = newValue } }
     /// Cover changes made in memory (a notebook made Private, its view, its color) shown over reads of the folder
@@ -452,6 +477,7 @@ final class NoteStore {
         // Watched from now, so nothing that changes during the steps below is missed: a change heard meanwhile is
         // read once the folder is ready (`reloadWanted`).
         watch()
+        let cache = fresh.readCache
         Self.io.async {
             Self.drain(jobs, unsaved: unsaved, root: oldRoot)
             NoteDisk.states = [:]
@@ -465,7 +491,7 @@ final class NoteStore {
                     for holding in journal.notes { NoteJournal.recover(holding, root: newRoot) }
                     for holding in journal.canvases { NoteJournal.recoverCanvas(holding, root: newRoot) }
                     // 3. The first read, in the same step as the recovery it follows.
-                    let read = Self.read(newRoot)
+                    let read = Self.read(newRoot, cache: cache)
                     DispatchQueue.main.async {
                         MainActor.assumeIsolated {
                             guard self.session === fresh else { return }
@@ -656,9 +682,9 @@ final class NoteStore {
         captured.readWaiters = []
         clock += 1
         let started = clock
-        let root = self.root
+        let root = self.root, cache = captured.readCache
         Self.io.async {
-            let read = Self.read(root)
+            let read = Self.read(root, cache: cache)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // A session a switch ended reads nothing more (its `reading` goes with it).
@@ -731,8 +757,13 @@ final class NoteStore {
     /// (`followed`), never written here.
     /// `complete`: every note file there was read (none still downloading from iCloud, none unreadable): only then
     /// can a notebook or cover not found be taken for gone.
-    nonisolated static func read(_ root: URL) -> (notes: [PaperNote], notebooks: [Notebook], complete: Bool) {
+    /// `cache`: what the folder's last read made of each file (only ever used on the files' queue): a file that is
+    /// still the same file, unchanged, isn't read or parsed again, so a read after one note changed costs a listing
+    /// and that one file, however many notes there are.
+    nonisolated static func read(_ root: URL, cache: ReadCache? = nil) -> (notes: [PaperNote], notebooks: [Notebook], complete: Bool) {
         let fm = FileManager.default
+        var seen: Set<String> = []
+        defer { cache?.keep(only: seen) }
         try? fm.createDirectory(at: root, withIntermediateDirectories: true)
         let inbox = root.appending(path: NoteShelf.inbox)
         if !fm.fileExists(atPath: inbox.path), safe(inbox, root: root) {
@@ -782,15 +813,29 @@ final class NoteStore {
                     continue
                 }
                 let date = values.contentModificationDate ?? Date()
-                guard let text = coordinatedRead(url) else { complete = false; if coverNamed { unreadCovers += 1 }; continue }
                 // A file with no id of its own is known by where it is under the notes' folder, never its name alone.
                 let fallback = NoteShelf.fallbackID(relativePath: NoteShelf.relative(url.path, to: root.path) ?? name + "/" + url.lastPathComponent)
-                var paper = PaperNote(file: NoteFile.parse(text, fallbackID: fallback, fallbackDate: date), url: url, notebook: name, revision: text)
-                // A cover by its name only (front matter or not); another note's own `cover: true` is kept as written,
-                // never taken for one, but with `private: true` it makes the notebook's privacy unknown.
-                if NoteLibrary.strayPrivateCover(fileName: url.lastPathComponent, file: paper.file) { strayPrivate = true }
-                NoteLibrary.coverFlag(&paper.file, fileName: url.lastPathComponent)
-                paper.instance = instance(of: url)
+                // The file as the disk has it now (which file, how long, and when its words or anything about it
+                // last changed): still as it was at the folder's last read, what was made of it then stands.
+                let stamp = cache == nil ? nil : ReadCache.stamp(of: url)
+                seen.insert(url.path)
+                var paper: PaperNote
+                if let stamp, let known = cache?.entry(url.path, stamp) {
+                    paper = known.paper
+                    if known.strayPrivate { strayPrivate = true }
+                } else {
+                    guard let text = coordinatedRead(url) else { complete = false; if coverNamed { unreadCovers += 1 }; continue }
+                    paper = PaperNote(file: NoteFile.parse(text, fallbackID: fallback, fallbackDate: date), url: url, notebook: name, revision: text)
+                    // A cover by its name only (front matter or not); another note's own `cover: true` is kept as written,
+                    // never taken for one, but with `private: true` it makes the notebook's privacy unknown.
+                    let stray = NoteLibrary.strayPrivateCover(fileName: url.lastPathComponent, file: paper.file)
+                    if stray { strayPrivate = true }
+                    NoteLibrary.coverFlag(&paper.file, fileName: url.lastPathComponent)
+                    paper.instance = instance(of: url)
+                    // Kept only when the file was the same before and after it was read: never words paired with a
+                    // stamp they weren't read under.
+                    if let stamp, ReadCache.stamp(of: url) == stamp { cache?.keep(url.path, ReadCache.Entry(stamp: stamp, paper: paper, strayPrivate: stray)) }
+                }
                 paper.followed = followBookmarks(&paper.file)
                 here.append(paper)
                 // The versions iCloud kept from a change made on two Macs at once: each one a paper of its own.
@@ -834,6 +879,36 @@ final class NoteStore {
             notes += here
         }
         return (notes, notebooks, complete)
+    }
+
+    /// What a read of the folder made of each note file, for the next read of the same folder (NoteStore.read). Only
+    /// ever touched on the files' queue. An entry stands only for the very file it was read from, unchanged: the
+    /// same volume and inode, the same length, and the same times its words and its inode last changed (the second
+    /// moves on every write, rename or change of the file, and can't be set back), so a file written in place, saved
+    /// as a new file, replaced or restored is always read again.
+    final class ReadCache: @unchecked Sendable {
+        struct Stamp: Equatable {
+            let device: Int32, inode: UInt64, size: Int64
+            let modified: Int64, modifiedNano: Int, changed: Int64, changedNano: Int
+        }
+        struct Entry {
+            let stamp: Stamp
+            let paper: PaperNote
+            let strayPrivate: Bool
+        }
+        private var entries: [String: Entry] = [:]
+
+        static func stamp(of url: URL) -> Stamp? {
+            var info = stat()
+            guard stat(url.path, &info) == 0 else { return nil }
+            return Stamp(device: info.st_dev, inode: UInt64(info.st_ino), size: Int64(info.st_size), modified: Int64(info.st_mtimespec.tv_sec),
+                         modifiedNano: info.st_mtimespec.tv_nsec, changed: Int64(info.st_ctimespec.tv_sec), changedNano: info.st_ctimespec.tv_nsec)
+        }
+
+        func entry(_ path: String, _ stamp: Stamp) -> Entry? { entries[path].flatMap { $0.stamp == stamp ? $0 : nil } }
+        func keep(_ path: String, _ entry: Entry) { entries[path] = entry }
+        /// After a read: what's no longer in the folder is let go.
+        func keep(only paths: Set<String>) { entries = entries.filter { paths.contains($0.key) } }
     }
 
     /// The files a note is stuck to, found again through their bookmarks: a file moved or renamed takes its notes
@@ -1885,7 +1960,20 @@ final class NoteStore {
 
     // MARK: Finding
 
-    func paper(_ key: String) -> PaperNote? { notes.first { $0.key == key } }
+    /// The paper with this key, found through an index of the notes as they are now (never by weighing every note:
+    /// this is asked for every paper on the screen, every tool answer and every completion).
+    func paper(_ key: String) -> PaperNote? {
+        // (`notes` read first, so a view that asks is drawn again when the notes change, found or not.)
+        let all = notes
+        if session.byKey == nil {
+            var index: [String: Int] = [:]
+            index.reserveCapacity(all.count)
+            // The first paper with a key, as a scan from the front finds it.
+            for (position, paper) in all.enumerated() where index[paper.key] == nil { index[paper.key] = position }
+            session.byKey = index
+        }
+        return session.byKey?[key].map { all[$0] }
+    }
 
     /// The note with this id (its first paper, when iCloud made two), or a word of its title.
     func find(_ idOrTitle: String) -> PaperNote? {
@@ -1893,7 +1981,10 @@ final class NoteStore {
             ?? notes.first { $0.version == nil && $0.file.title.localizedCaseInsensitiveCompare(idOrTitle) == .orderedSame }
     }
 
-    func notebook(_ name: String) -> Notebook? { notebooks.first { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame } }
+    func notebook(_ name: String) -> Notebook? {
+        // By its name as written first (what nearly every lookup has), then whatever its case.
+        notebooks.first { $0.name == name } ?? notebooks.first { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }
+    }
 
     /// A paper that can't be written: a version iCloud kept, or one of a note's papers while it has two. Each shows
     /// read only, with Keep this one.
@@ -2328,13 +2419,12 @@ final class NoteStore {
     /// Each notebook's name, folder path, folder (volume and inode) and cover id (its one canonical cover's own id;
     /// "" when it has none, or one with no id in its file). Off the main thread too (recovery at launch).
     nonisolated static func places(notes: [PaperNote], notebooks: [Notebook]) -> [NotebookPlace] {
-        notebooks.map { book in
-            let covers = notes.filter {
-                $0.version == nil && NoteLibrary.isCanonicalCover($0.url.lastPathComponent) && NoteLibrary.same($0.notebook, book.name)
-                    && !NoteShelf.needsID($0.noteID)
-            }
+        // (The covers found once, then each notebook's own among them: not every note weighed for every notebook.)
+        let covers = notes.filter { $0.version == nil && !NoteShelf.needsID($0.noteID) && NoteLibrary.isCanonicalCover($0.url.lastPathComponent) }
+        return notebooks.map { book in
+            let own = covers.filter { NoteLibrary.same($0.notebook, book.name) }
             return NotebookPlace(name: book.name, path: book.folder.lastPathComponent, instance: book.instance,
-                                 coverID: covers.count == 1 ? covers[0].noteID : "")
+                                 coverID: own.count == 1 ? own[0].noteID : "")
         }
     }
 
@@ -2641,8 +2731,14 @@ extension NoteStore {
     /// The Private notebooks' names.
     /// The Private notebooks' names, and every notebook a note held here is in that the latest read didn't find
     /// (a note kept while it's open or being written, its notebook gone or not read): unknown, so Private.
+    /// (Worked out once for the notes and notebooks as they are, and again only after either changed: it's asked
+    /// for every note a tool weighs and every paper the window draws.)
     var privateBooks: Set<String> {
-        NotePrivacy.privateBooks(notebooks: notebooks.map { ($0.name, $0.isPrivate) }, held: notes.map(\.notebook))
+        let books = notebooks, held = notes
+        if let known = session.privateBooks { return known }
+        let found = NotePrivacy.privateBooks(notebooks: books.map { ($0.name, $0.isPrivate) }, held: held.map(\.notebook))
+        session.privateBooks = found
+        return found
     }
 
     /// A notebook's notes busy now (a write, a move, pictures, a paste on the way): a rename or trash waits for them.
