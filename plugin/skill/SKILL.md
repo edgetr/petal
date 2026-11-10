@@ -84,7 +84,9 @@ Use, in this order:
    Petal's viewer (macOS, part of Petal Notes) shows a document with the notes on that file in a margin: a PDF
    through PDFKit (notes lined up with their passage, a dashed line to its highlight), Word, PowerPoint, Keynote,
    Excel, Pages and Numbers through macOS's own Quick Look preview (notes per page or slide), Open in <app> one click
-   away. `petal_view` opens one (`path`: a file whose final destination, every link followed, is in their home folder
+   away. A note in its margin can follow what the user selects (right-click it: Follow what I select): each selection
+   is handed to the quick AI with what the note says to do (an empty note: explain it plainly), answered beside the
+   paragraph; it's the user's to turn on, not a tool. `petal_view` opens one (`path`: a file whose final destination, every link followed, is in their home folder
    and theirs, or on a drive or share mounted under /Volumes and readable by them; `page` from 1); it never moves or
    changes the file, and answers with the words of the page or slide it shows (`text`). To change a document, try it
    on copies first:
