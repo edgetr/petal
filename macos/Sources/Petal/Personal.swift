@@ -1,12 +1,13 @@
 import AppKit
 import CryptoKit
 
-/// The person's own changes to Petal's code, kept through every update: the Mac's side of bin/petal-personal, which
-/// does the git work on both platforms (inside Petal.app at Resources/personal/petal-personal). It keeps Petal's
-/// source in ~/Library/Application Support/Petal/source: branch `upstream` holds released source, `mine` the
-/// person's changes on top. This side gets Apple's command line tools (git, Swift and python3; macOS's own installer
-/// asks), builds the changed Petal with the source's macos/build.sh, signs it with a certificate made once for this
-/// Mac (so macOS keeps Petal's permissions from one personal build to the next), and installs it over this Petal.
+/// The person's own changes to Petal's code, kept through every update. The git work is petal-personal's (a script
+/// inside Petal.app at Resources/personal/petal-personal; in the repository, macos/Resources/personal/): it keeps
+/// Petal's source in ~/Library/Application Support/Petal/source, where branch `upstream` holds released source and
+/// `mine` the person's changes on top. This file gets Apple's command line tools (git, Swift and python3; macOS's
+/// own installer asks), builds the changed Petal with the source's macos/build.sh, signs it with a certificate made
+/// once for this Mac (so macOS keeps Petal's permissions from one personal build to the next), and installs it over
+/// this Petal.
 ///
 /// Updates (Updater.check): while changes exist, a new release's source is combined with them and built, instead of
 /// the release's own Petal.app being installed. If that can't be done, this Petal keeps running and the person is
@@ -32,12 +33,12 @@ enum Personal {
     nonisolated static var exists: Bool { !state.isEmpty }
     nonisolated static var inUse: Bool { state["in_use"] as? Bool == true }
 
-    /// Where an agent changes Petal's Swift (petal_get_state's plugin_source), once the source is set up.
+    /// Where an agent changes Petal's Swift (petal_get_state's `files.source`), once the source is set up.
     nonisolated static var sourceForAgents: String? {
         FileManager.default.fileExists(atPath: source.appending(path: "macos/Package.swift").path) ? source.appending(path: "macos").path : nil
     }
 
-    /// For agents, in petal_get_state (petal-mcp.py says the same).
+    /// For agents, in petal_get_state.
     nonisolated static let how = "To change Petal's code so it survives updates: `petal personal init` (once), edit the files in source, then "
         + "`petal personal save \"<what changed>\"`, which builds it and restarts Petal into it. `petal personal help` lists the rest."
 
@@ -65,18 +66,17 @@ enum Personal {
 
     // MARK: The shared core
 
-    /// The environment bin/petal-personal runs in: the tools, this Petal's version, and the AI the person chose for
+    /// The environment petal-personal runs in: the tools, this Petal's version, and the AI the person chose for
     /// the chat, which combines updates with their changes when both touch the same code.
     nonisolated static func environment(tools: String, aiPath: String? = nil) -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         let home = NSHomeDirectory()
         environment["PATH"] = ["\(tools)/usr/bin", "\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")
-        environment["PETAL_PLATFORM"] = "macos"
         environment["PETAL_PERSONAL_SOURCE"] = source.path
         environment["PETAL_INSTALLED_VERSION"] = version
         environment["PETAL_SOURCE_COMMIT"] = Bundle.main.object(forInfoDictionaryKey: "PetalSourceCommit") as? String ?? ""
         let settings = MCP.read(MCP.settingsFile) ?? [:]
-        let chosen = (settings["aiProviders"] as? [String] ?? MCP.schema["aiProviders"]?.first as? [String] ?? ["claude"]).compactMap(Provider.init(rawValue:))
+        let chosen = (settings["aiProviders"] as? [String] ?? Settings.defaults["aiProviders"] as? [String] ?? ["claude"]).compactMap(Provider.init(rawValue:))
         let provider = Provider(rawValue: settings["chatProvider"] as? String ?? "").flatMap { chosen.contains($0) ? $0 : nil } ?? chosen.first
         if let provider {
             environment["PETAL_AI"] = provider.rawValue
@@ -93,7 +93,7 @@ enum Personal {
         return environment
     }
 
-    /// Runs bin/petal-personal. With `echo`, its output goes straight to the terminal (`petal personal …`).
+    /// Runs petal-personal. With `echo`, its output goes straight to the terminal (`petal personal …`).
     nonisolated static func core(_ arguments: [String], tools: String, aiPath: String? = nil, echo: Bool = false) -> (status: Int32, output: String) {
         guard let script = Bundle.main.path(forResource: "petal-personal", ofType: nil, inDirectory: "personal") else {
             return (1, "This Petal.app is missing its petal-personal script; reinstall Petal.")
@@ -101,7 +101,7 @@ enum Personal {
         return run("\(tools)/usr/bin/python3", ["-I", script] + arguments, environment: environment(tools: tools, aiPath: aiPath), echo: echo)
     }
 
-    /// The JSON line bin/petal-personal ends with when asked for --json.
+    /// The JSON line petal-personal ends with when asked for --json.
     nonisolated static func result(_ output: String) -> [String: Any] {
         output.split(separator: "\n").last.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] } ?? [:]
     }

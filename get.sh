@@ -1,154 +1,55 @@
 #!/usr/bin/env bash
-# Petal installer and updater, from GitHub Releases.
+# Installs Petal: Petal.app from the newest release, into /Applications (or ~/Applications).
 #
-#   curl -fsSL https://petal.codes/install.sh | bash   # install
-#   petal update            # update now
-#   petal update --check    # is there a newer version?
+#   curl -fsSL https://petal.codes/install.sh | bash
 #
-# Releases live in ~/.local/share/petal/releases/<version>, with
-# ~/.local/share/petal/current pointing at the one in use. With --auto or
-# --check it prints one JSON line (for the dock), otherwise plain text.
+# Once installed, Petal updates itself. A download by curl isn't quarantined, so macOS opens it without the
+# "unidentified developer" prompt. JSON is read with macOS's own JavaScript: a Mac needs nothing installed for this.
+#
+#   PETAL_APPS=<folder>            install there instead of /Applications
+#   PETAL_NO_OPEN=1                don't open Petal afterwards
+#   PETAL_MACOS_MANIFEST=<url>     read this latest-macos.json instead of the newest release's
 set -euo pipefail
 
 REPO="edgetr/petal"
-ROOT="${PETAL_HOME:-$HOME/.local/share/petal}"
-mode="install"
-case "${1:-}" in
-  --update) mode="update" ;;
-  --auto) mode="auto" ;;
-  --check) mode="check" ;;
-esac
 
-say() { if [[ $mode == install || $mode == update ]]; then echo "$@"; fi; }
-emit() { if [[ $mode == auto || $mode == check ]]; then echo "$1"; fi; }
-fail() { emit "{\"status\":\"error\",\"message\":\"$1\"}"; say "Petal: $1" >&2; exit 1; }
+fail() { echo "Petal: $1" >&2; exit 1; }
 
-# Petal for macOS: Petal.app from the newest macos-v release, into /Applications (or ~/Applications). A download
-# by curl isn't quarantined, so macOS opens it without the "unidentified developer" prompt. JSON is read with
-# macOS's own JavaScript, since a Mac without developer tools has no python3.
-if [[ $(uname) == Darwin ]]; then
-  # Petal.app updates itself; the dock's --auto and --check are Omarchy's.
-  if [[ $mode == auto || $mode == check ]]; then emit '{"status":"dev"}'; exit 0; fi
-  json() { osascript -l JavaScript -e "function run(argv) { var d = JSON.parse(argv[0]); return ($1); }" "$2"; }
-  manifest="${PETAL_MACOS_MANIFEST:-}"
-  if [[ -z $manifest ]]; then
-    releases="$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=100")" || fail "couldn't reach GitHub"
-    manifest="$(json "((d.find(function (r) { return r.tag_name.indexOf('macos-v') === 0 && !r.draft && !r.prerelease; }) || {assets: []}).assets.filter(function (a) { return a.name === 'latest-macos.json'; })[0] || {}).browser_download_url || ''" "$releases")"
-  fi
-  [[ -n $manifest ]] || fail "Petal for macOS has no release yet"
-  latest="$(curl -fsSL "$manifest")" || fail "couldn't reach GitHub"
-  version="$(json 'd.version' "$latest")"
-  url="$(json 'd.url' "$latest")"
-  sha="$(json 'd.sha256' "$latest")"
-  dest="${PETAL_APPS:-/Applications}"
-  if [[ ! -w $dest ]]; then dest="$HOME/Applications"; mkdir -p "$dest"; fi
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
-  say "Downloading Petal $version for macOS…"
-  curl -fsSL "$url" -o "$tmp/Petal.zip" || fail "couldn't download Petal $version"
-  [[ $(shasum -a 256 "$tmp/Petal.zip" | cut -d' ' -f1) == "$sha" ]] || fail "the download didn't match its checksum"
-  ditto -x -k "$tmp/Petal.zip" "$tmp/unpacked" || fail "couldn't unpack Petal $version"
-  [[ -d $tmp/unpacked/Petal.app ]] || fail "the download had no Petal.app"
-  if pgrep -xq Petal; then osascript -e 'tell application id "tech.edgetr.petal" to quit' >/dev/null 2>&1 || true; sleep 1; fi
-  rm -rf "$dest/Petal.app"
-  ditto "$tmp/unpacked/Petal.app" "$dest/Petal.app"
-  xattr -dr com.apple.quarantine "$dest/Petal.app" 2>/dev/null || true
-  [[ -n ${PETAL_NO_OPEN:-} ]] || open "$dest/Petal.app"
-  say "Petal $version is in $dest and open. Its welcome window lets you bring your Dock along."
-  exit 0
+[[ $(uname) == Darwin ]] || fail "Petal is for the Mac (macOS 26 or later)."
+
+json() { osascript -l JavaScript -e "function run(argv) { var d = JSON.parse(argv[0]); return ($1); }" "$2"; }
+
+# Petal's releases are the tags macos-v<version>; each carries latest-macos.json: its version, zip and checksum.
+manifest="${PETAL_MACOS_MANIFEST:-}"
+if [[ -z $manifest ]]; then
+  releases="$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=100")" || fail "couldn't reach GitHub"
+  manifest="$(json "((d.find(function (r) { return r.tag_name.indexOf('macos-v') === 0 && !r.draft && !r.prerelease; }) || {assets: []}).assets.filter(function (a) { return a.name === 'latest-macos.json'; })[0] || {}).browser_download_url || ''" "$releases")"
 fi
+[[ -n $manifest ]] || fail "couldn't find Petal's newest release on GitHub"
+latest="$(curl -fsSL "$manifest")" || fail "couldn't reach GitHub"
+version="$(json 'd.version' "$latest")"
+url="$(json 'd.url' "$latest")"
+sha="$(json 'd.sha256' "$latest")"
 
-for tool in curl tar python3 sha256sum; do
-  command -v "$tool" >/dev/null || fail "missing $tool"
-done
-
-# A dock linked to a source checkout (a developer install) updates with git.
-link="$(readlink -f "$HOME/.config/omarchy/plugins/egesuren.petal" 2>/dev/null || true)"
-if [[ $mode != install && -n $link && $link != "$ROOT"/* ]]; then
-  emit '{"status":"dev"}'
-  say "Petal is installed from source ($link); update it with git pull."
-  exit 0
-fi
-
-# Ask the API for the newest tag (the /latest/download link is cached for a
-# few minutes after a release), then read that release's latest.json.
-tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
-  | python3 -c "import json,sys; print(json.load(sys.stdin).get('tag_name',''))" 2>/dev/null || true)"
-if [[ -n $tag ]]; then
-  latest="$(curl -fsSL "https://github.com/$REPO/releases/download/$tag/latest.json")" || fail "couldn't reach GitHub"
-else
-  latest="$(curl -fsSL "https://github.com/$REPO/releases/latest/download/latest.json")" || fail "couldn't reach GitHub"
-fi
-field() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)" <<<"$latest"; }
-version="$(field "d['version']")"
-url="$(field "d['linux']['url']")"
-sha="$(field "d['linux']['sha256']")"
-
-current=""
-if [[ -f $ROOT/current/plugin/manifest.json ]]; then
-  current="$(python3 -c "import json; print(json.load(open('$ROOT/current/plugin/manifest.json'))['version'])")"
-fi
-
-newest="$(printf '%s\n%s\n' "$version" "${current:-0}" | sort -V | tail -1)"
-if [[ -n $current && ($current == "$version" || $newest == "$current") ]]; then
-  emit "{\"status\":\"current\",\"version\":\"$current\"}"
-  say "Petal $current is up to date."
-  exit 0
-fi
-if [[ $mode == check ]]; then
-  emit "{\"status\":\"available\",\"version\":\"$version\",\"current\":\"$current\"}"
-  exit 0
-fi
-
-say "Downloading Petal $version…"
+dest="${PETAL_APPS:-/Applications}"
+if [[ ! -w $dest ]]; then dest="$HOME/Applications"; mkdir -p "$dest"; fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-curl -fsSL "$url" -o "$tmp/petal.tar.gz" || fail "download failed"
-echo "$sha  $tmp/petal.tar.gz" | sha256sum -c --quiet - || fail "checksum mismatch"
 
-mkdir -p "$ROOT/releases"
-rm -rf "$ROOT/releases/$version"
-mkdir -p "$ROOT/releases/$version"
-tar -xzf "$tmp/petal.tar.gz" -C "$ROOT/releases/$version" --strip-components=1
+echo "Downloading Petal ${version}…"
+curl -fsSL "$url" -o "$tmp/Petal.zip" || fail "couldn't download Petal $version"
+[[ $(shasum -a 256 "$tmp/Petal.zip" | cut -d' ' -f1) == "$sha" ]] || fail "the download didn't match its checksum"
+ditto -x -k "$tmp/Petal.zip" "$tmp/unpacked" || fail "couldn't unpack Petal $version"
+[[ -d $tmp/unpacked/Petal.app ]] || fail "the download had no Petal.app"
 
-# The person's own changes to Petal's code (`petal personal`): the new release is combined with them first, away
-# from the files in use. If that can't be done, they keep the Petal they have, with their changes, and are told why.
-personal=""
-if [[ -d $ROOT/source/.git ]] && PETAL_HOME="$ROOT" python3 "$ROOT/releases/$version/bin/petal-personal" active 2>/dev/null; then
-  personal=1
-  say "Bringing your own changes over to Petal ${version}…"
-  args=(update "$ROOT/releases/$version" --json)
-  [[ $mode == auto ]] && args+=(--auto)
-  result="$(PETAL_HOME="$ROOT" python3 "$ROOT/releases/$version/bin/petal-personal" "${args[@]}" 2>/dev/null | tail -1)" || true
-  combined="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("status", ""))' "$result" 2>/dev/null || true)"
-  if [[ $combined != updated && $combined != nothing ]]; then
-    rm -rf "$ROOT/releases/$version"
-    message="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("message", ""))' "$result" 2>/dev/null || true)"
-    again="$(python3 -c 'import json,sys; print("1" if json.loads(sys.argv[1]).get("again") else "")' "$result" 2>/dev/null || true)"
-    emit "$(python3 -c 'import json,sys; print(json.dumps({"status": "kept", "version": sys.argv[1], "current": sys.argv[2], "message": sys.argv[3], "again": bool(sys.argv[4])}))' \
-      "$version" "$current" "${message:-it stopped partway}" "$again")"
-    say "Petal $version couldn't take your own changes, so you keep Petal $current with them: ${message:-it stopped partway}."
-    say "\`petal personal status\` says more; \`petal report\` tells Petal's maker."
-    [[ $mode == auto ]] && exit 0
-    exit 1
-  fi
-fi
-
-ln -sfn "releases/$version" "$ROOT/current.new"
-mv -T "$ROOT/current.new" "$ROOT/current"
-
-"$ROOT/current/install.sh" >/dev/null
-
-# Keep the two newest releases.
-ls -1 "$ROOT/releases" | sort -V | head -n -2 | while read -r old; do rm -rf "$ROOT/releases/$old"; done
-
-emit "{\"status\":\"updated\",\"version\":\"$version\",\"from\":\"$current\"}"
-if [[ $mode == install && -z $current ]]; then
-  say "Petal $version installed."
-  command -v omarchy >/dev/null && omarchy restart shell >/dev/null 2>&1 || true
-  say "Turn off Omarchy's own dock if it's on, and click the Claude button to get started."
-elif [[ -n $personal ]]; then
-  say "Petal updated to $version, with your own changes. Restart to finish (it checks the dock comes up): petal restart"
+# A Petal that's running quits first, so the new one can take its place.
+if pgrep -xq Petal; then osascript -e 'tell application id "tech.edgetr.petal" to quit' >/dev/null 2>&1 || true; sleep 1; fi
+rm -rf "$dest/Petal.app"
+ditto "$tmp/unpacked/Petal.app" "$dest/Petal.app"
+xattr -dr com.apple.quarantine "$dest/Petal.app" 2>/dev/null || true
+if [[ -n ${PETAL_NO_OPEN:-} ]]; then
+  echo "Petal $version is in $dest."
 else
-  say "Petal updated to $version. Restart the shell to finish: omarchy restart shell"
+  open "$dest/Petal.app"
+  echo "Petal $version is in $dest and open. Its welcome window lets you bring your Dock along."
 fi

@@ -3,7 +3,7 @@
 #
 #   tools/fleet sync        fetch every checkout and fast-forward what can be fast-forwarded
 #   tools/fleet status      each checkout's branch, what it is behind or ahead, uncommitted files
-#   tools/fleet install     sync at login and every 5 minutes (launchd on macOS, a systemd timer on Omarchy)
+#   tools/fleet install     sync at login and every 5 minutes (launchd on macOS, a systemd user timer elsewhere)
 #   tools/fleet uninstall   stop that
 #
 # Checkouts are the git repositories one level under ~ and ~/Projects whose origin belongs to the
@@ -132,7 +132,7 @@ EOF
   launchctl bootstrap "gui/$(id -u)" "$plist" && echo "fleet syncs at login and every 5 minutes; log: ${log/#$HOME/~}"
 }
 
-install_linux() {
+install_systemd() {
   local dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   mkdir -p "$dir"
   cat > "$dir/fleet.service" <<EOF
@@ -175,7 +175,7 @@ uninstall() {
 case "${1:-}" in
   sync) sync_all ;;
   status) status_all ;;
-  install) if [ "$(uname)" = Darwin ]; then install_macos; else install_linux; fi ;;
+  install) if [ "$(uname)" = Darwin ]; then install_macos; else install_systemd; fi ;;
   uninstall) uninstall ;;
   *) sed -n '2,7p' "$SELF" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

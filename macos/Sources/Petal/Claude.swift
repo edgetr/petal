@@ -2,7 +2,7 @@ import AppKit
 import Observation
 import SwiftUI
 
-/// The chat (Agent.qml): the person's own Claude Code or Codex, one process per turn, resumed across turns, with
+/// The chat: the person's own Claude Code or Codex, one process per turn, resumed across turns, with
 /// Petal's tools (Petal itself, `Petal --mcp`). Steps the AI takes show as one-line steps. Claude's permission
 /// denials become an "Allow" card that re-runs with per-part Bash(...) rules; Codex can't ask mid-turn, so its
 /// sandbox (or Full access) decides.
@@ -930,7 +930,7 @@ final class InputPanel: NSPanel {
     }
 }
 
-/// The Claude panel (AskBox.qml): the quick question, a chat stuck nowhere, over the dock. Stick here makes the
+/// The Claude panel: the quick question, a chat stuck nowhere, over the dock. Stick here makes the
 /// conversation a Petal Note on what was in front when it opened (NoteDesk). Its notes (StickyNotes.swift) each keep
 /// their own chat and can work at once; for now only the one stuck to nothing is used.
 @MainActor @Observable

@@ -7,8 +7,7 @@ struct InstalledApp: Identifiable, Hashable {
     let url: URL
 }
 
-/// Installed apps by bundle id, their names and icons, and the "+" search: the macOS side of AppSearch.qml and of
-/// Omarchy's desktop entries.
+/// Installed apps by bundle id, their names and icons, and the "+" search.
 @MainActor
 enum Apps {
     private static var icons: [String: NSImage] = [:]

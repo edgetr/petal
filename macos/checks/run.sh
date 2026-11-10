@@ -8,8 +8,9 @@
 # throwaway folders in the temporary folder; writing through a full pipe; an unreadable answer and which signals it
 # passes on), the notes for the AI keeping both sides of a change made elsewhere (Instructions), a routine's tidy stopping once its asker hangs up (RoutineStop), a request whose client hung up before its
 # turn never being done (IPC, on a throwaway socket), an act's or vault call's Stop seen at once on any thread when its
-# caller hangs up (Acting.Cancel), and that every card Petal AI's tools put up names its owner, without running Petal,
-# moving any window or touching the Keychain:
+# caller hangs up (Acting.Cancel), and that every card Petal AI's tools put up names its owner,
+# and that the settings list and the AI's tools are well formed and the sources agree with them (Settings), without
+# running Petal, moving any window or touching the Keychain:
 #   macos/checks/run.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -21,6 +22,11 @@ swiftc -parse-as-library -O -o "$out/check" Sources/Petal/WindowLayout.swift che
 # second launch changes nothing, and an unreadable modes.json gives an empty dock and is left alone.
 swiftc -parse-as-library -O -o "$out/modes" Sources/Petal/ModesMigration.swift checks/ModesMigrationCheck.swift
 "$out/modes"
+# The settings, in one list: no key twice, every one with help and a default of its type, and every read of a setting
+# in the sources naming one that's listed, as the type it is. The AI's tools (Resources/mcp/tools.json): valid, no name
+# twice, each with a description and an input schema, and the same tools MCP.swift does.
+swiftc -parse-as-library -O -o "$out/settings" Sources/Petal/Settings.swift checks/SettingsCheck.swift
+"$out/settings" Resources/mcp/tools.json Sources/Petal
 swiftc -parse-as-library -O -o "$out/look" Sources/Petal/LookSchedule.swift checks/LookScheduleCheck.swift
 "$out/look"
 swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIMapCheck.swift

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""The person's own changes to Petal's code, kept across every update (`petal personal`), on Omarchy and macOS.
+"""The person's own changes to Petal's code, kept across every update (`petal personal`).
 
 Petal's source lives in a git repository of its own: branch `upstream` holds released source only, one commit per
 release; branch `mine` is upstream plus the person's own commits, and is what the source folder has checked out
 (agents edit it there). When a release arrives, it's committed onto upstream and mine is rebased onto it, in a
 separate worktree, so the files in use never hold a half-done merge. Conflicts go to the person's chosen AI
 (`claude -p` or `codex exec`), told to keep both the update's intent and the person's change; the result must have
-no conflict markers and pass a check (on macOS: it builds). If it can't be made to work, mine stays as it was, the
+no conflict markers and pass a check (it builds). If it can't be made to work, mine stays as it was, the
 Petal the person has keeps running, and they're told. A backup ref (refs/petal/backups/...) is kept before every
 rewrite, so nothing the person made is ever lost.
 
-  petal personal init [--from <dir>]      set the source up (once; from a release's files) and print where it is
+  petal personal init                     set the source up (once) and print where it is
   petal personal status [--json]          what's in it: changes, unsaved edits, the last update
   petal personal list                     the person's changes, newest first
   petal personal save "<what changed>"    commit the edits and use them (agents run this after a change)
@@ -19,10 +19,9 @@ rewrite, so nothing the person made is ever lost.
   petal personal retry                    try combining the newest release with the changes again
   petal personal restore [<backup>]       bring back a backup (the newest by default)
 
-Used by Petal itself: update, verify, restart, active, doctor, mark-good. Omarchy: ~/.local/share/petal/source,
-and the dock runs its plugin/ while it's in use. macOS: ~/Library/Application Support/Petal/source; Petal.app does
-the building, signing and installing (Personal.swift) and runs this with Apple's command line tools' python3.
-Standard library only; Python 3.9 and later.
+Used by Petal itself: update, doctor, mark-good. The source is ~/Library/Application Support/Petal/source;
+Petal.app does the building, signing and installing (Personal.swift) and runs this with Apple's command line tools'
+python3. Standard library only; Python 3.9 and later.
 """
 import contextlib
 import fcntl
@@ -36,16 +35,12 @@ import tempfile
 import time
 
 HOME = os.path.expanduser("~")
-MAC = (os.environ.get("PETAL_PLATFORM") or ("macos" if sys.platform == "darwin" else "omarchy")) == "macos"
 CONFIG = os.path.join(HOME, ".config", "petal")
-ROOT = os.environ.get("PETAL_HOME") or os.path.join(HOME, ".local", "share", "petal")   # Omarchy's installs
-SOURCE = os.environ.get("PETAL_PERSONAL_SOURCE") or (
-    os.path.join(HOME, "Library", "Application Support", "Petal", "source") if MAC else os.path.join(ROOT, "source"))
+SOURCE = os.environ.get("PETAL_PERSONAL_SOURCE") or os.path.join(HOME, "Library", "Application Support", "Petal", "source")
 WORK = SOURCE + "-update"           # where a release is combined with the changes, away from the files in use
 GIT = os.path.join(SOURCE, ".git")
 STATE = os.path.join(GIT, "petal-personal.json")
 BUILT = os.path.join(GIT, "petal-built")
-LINK = os.path.join(HOME, ".config", "omarchy", "plugins", "egesuren.petal")
 REPO = "edgetr/petal"
 PETAL = ("Petal", "petal@localhost")      # who commits releases onto upstream
 YOU = ("You", "you@localhost")            # the person's own commits
@@ -121,10 +116,6 @@ def exists():
     return os.path.isdir(GIT) and os.path.exists(STATE)
 
 
-def in_use():
-    return exists() and state().get("in_use", False)
-
-
 def count_changes():
     if not rev("refs/heads/upstream") or not rev("refs/heads/mine"):
         return 0
@@ -177,20 +168,11 @@ def backups():
 # ── Where releases come from ──────────────────────────────────────────
 
 def installed_version():
-    """The version of Petal installed now (what upstream should hold)."""
-    if MAC:
-        return os.environ.get("PETAL_INSTALLED_VERSION", "")
-    return read_json(os.path.join(ROOT, "current", "plugin", "manifest.json"), {}).get("version", "")
+    """The version of Petal installed now (what upstream should hold): Petal.app says which it is."""
+    return os.environ.get("PETAL_INSTALLED_VERSION", "")
 
 
-def omarchy_release_dir():
-    current = os.path.join(ROOT, "current")
-    if not os.path.exists(os.path.join(current, "plugin", "manifest.json")):
-        raise Problem("Petal isn't installed from a release here (%s is missing), so there's no release to start from." % short(current))
-    return os.path.realpath(current)
-
-
-def mac_release_dir(version, into):
+def download_release(version, into):
     """GitHub's source tarball for the macos-v<version> tag, unpacked into `into`."""
     if not version or version == "dev":
         raise Problem("This Petal has no release version to take the source from.")
@@ -216,25 +198,20 @@ def mac_release_dir(version, into):
 
 @contextlib.contextmanager
 def release_tree(version=None, release_dir=None):
-    """The released files of a version: a folder given (Omarchy's unpacked release), or the source downloaded."""
+    """The released source of a version: downloaded, or a folder given (a test's own release)."""
     if release_dir:
         yield os.path.realpath(release_dir)
         return
-    if not MAC:
-        yield omarchy_release_dir()
-        return
     with tempfile.TemporaryDirectory(prefix="petal-release-") as tmp:
-        yield mac_release_dir(version, tmp)
+        yield download_release(version, tmp)
 
 
 def release_version(tree, fallback=""):
-    if MAC:
-        try:
-            with open(os.path.join(tree, "macos", "VERSION")) as f:
-                return f.read().strip() or fallback
-        except OSError:
-            return fallback
-    return read_json(os.path.join(tree, "plugin", "manifest.json"), {}).get("version", fallback)
+    try:
+        with open(os.path.join(tree, "macos", "VERSION")) as f:
+            return f.read().strip() or fallback
+    except OSError:
+        return fallback
 
 
 def commit_release(tree, version):
@@ -271,22 +248,9 @@ def configure():
                 "__pycache__/\n*.pyc\nmacos/.build/\nmacos/build/\n.DS_Store\n")
 
 
-def developer_install():
-    """On Omarchy, a dock linked to a git checkout is changed with git, not here."""
-    if MAC:
-        return ""
-    target = os.path.realpath(LINK) if os.path.lexists(LINK) else ""
-    if target and not target.startswith(os.path.realpath(ROOT) + os.sep):
-        return target
-    return ""
-
-
 def init(quiet=False, release_dir=None):
     """Sets the source up once, from the installed release (or a release's files in `release_dir`), and puts it in
     use. Returns its path."""
-    checkout = developer_install()
-    if checkout:
-        raise Problem("Petal runs from a source checkout (%s); change that checkout instead, with git." % short(checkout))
     if os.path.isdir(GIT) and not exists() and os.listdir(SOURCE) == [".git"]:
         shutil.rmtree(GIT)   # a set-up that stopped halfway (the download failed, say)
     if not exists():
@@ -303,8 +267,7 @@ def init(quiet=False, release_dir=None):
         git("branch", "mine", "upstream")
         git("checkout", "-q", "-f", "mine")
         head = rev("HEAD")
-        save_state(platform="macos" if MAC else "omarchy", version=version, in_use=True, good=head, good_version=version,
-                   pending=None, failed=None)
+        save_state(version=version, in_use=True, good=head, good_version=version, failed=None)
         if not quiet:
             say("Petal %s's source is ready to change in %s." % (version, short(SOURCE)))
     else:
@@ -312,8 +275,6 @@ def init(quiet=False, release_dir=None):
         if not state().get("in_use"):
             save_state(in_use=True)
         sync_to_installed()
-    if not MAC:
-        link_plugin(os.path.join(SOURCE, "plugin"))
     return SOURCE
 
 
@@ -328,24 +289,10 @@ def sync_to_installed():
         with release_tree(installed) as tree:
             commit_release(tree, installed)
         git("reset", "-q", "--hard", "upstream")
-        save_state(version=installed, good=rev("HEAD"), good_version=installed, failed=None, pending=None)
+        save_state(version=installed, good=rev("HEAD"), good_version=installed, failed=None)
     else:
         say("Your changes are on Petal %s and Petal %s is installed: bringing them over first." % (s.get("version"), installed))
         update(installed, auto=False)
-
-
-def link_plugin(target):
-    """Omarchy: points the dock at the source's plugin (or back at the release's), never at someone's checkout."""
-    if MAC or developer_install():
-        return
-    if os.path.realpath(LINK) == os.path.realpath(target):
-        return
-    os.makedirs(os.path.dirname(LINK), exist_ok=True)
-    tmp = LINK + ".petal-new"
-    with contextlib.suppress(OSError):
-        os.remove(tmp)
-    os.symlink(target, tmp)
-    os.replace(tmp, LINK)
 
 
 def require():
@@ -362,7 +309,7 @@ def changes():
 
 
 def check(cmd, cwd):
-    """Runs the check (macOS: the build) in a tree. Returns (ok, output)."""
+    """Runs the check (the build) in a tree. Returns (ok, output)."""
     if not cmd:
         return True, ""
     out = subprocess.run(["/bin/bash", "-c", cmd], cwd=cwd, capture_output=True, text=True)
@@ -394,8 +341,7 @@ def save(message, check_cmd=None, keep=None):
         git("commit", "-q", "-m", message)
         keep_built(SOURCE, keep)
         s = save_state()
-        say("Saved \"%s\" (%d change%s to Petal %s)." % (message, s["changes"], "" if s["changes"] == 1 else "s", s.get("version"))
-            + ("" if MAC else " `petal restart` loads it."))
+        say("Saved \"%s\" (%d change%s to Petal %s)." % (message, s["changes"], "" if s["changes"] == 1 else "s", s.get("version")))
     return 0
 
 
@@ -448,9 +394,7 @@ def reset():
             git("commit", "-q", "-m", "Edits not saved yet")
         saved = backup("reset")
         git("reset", "-q", "--hard", "upstream")
-        save_state(in_use=False, pending=None, failed=None, good=rev("HEAD"), good_version=state().get("version"))
-    if not MAC:
-        link_plugin(os.path.join(ROOT, "current", "plugin"))
+        save_state(in_use=False, failed=None, good=rev("HEAD"), good_version=state().get("version"))
     say("Back to plain Petal releases. Your changes are kept in %s; `petal personal restore` brings them back." % saved
         if saved else "Back to plain Petal releases.")
     return 0
@@ -471,8 +415,6 @@ def restore(name=None):
         backup("before-restore")
         git("reset", "-q", "--hard", ref)
         save_state(in_use=True)
-    if not MAC:
-        link_plugin(os.path.join(SOURCE, "plugin"))
     behind = git("merge-base", "--is-ancestor", "upstream", "mine", check=False, quiet=True).returncode != 0
     say("Brought back %s." % ref.rsplit("/", 1)[-1] + (" It's on an older Petal; `petal personal retry` brings it up to date." if behind else ""))
     return 0
@@ -548,7 +490,7 @@ def update(version=None, release_dir=None, auto=False, check_cmd=None, keep=None
         if unsaved() or rev("refs/heads/mine") != mine:
             raise Problem("Petal's source changed while the update ran; it'll try again later.")
         git("reset", "-q", "--hard", result)
-        s = save_state(version=version, pending=None if MAC else result, failed=None, upstream=upstream)
+        s = save_state(version=version, failed=None, upstream=upstream)
     say("Combined Petal %s with your %d change%s." % (version, s["changes"], "" if s["changes"] == 1 else "s"))
     return "updated"
 
@@ -629,8 +571,10 @@ changes already on it), the part after ||||||| is the code both started from, an
 closing marker line) is the person's change.
 
 Edit those files so each one keeps what the update meant to do and what the person's change does, and remove every \
-conflict marker. Keep the code working and consistent with the code around it; change nothing else. You can read any \
-file here, and `git log`, `git show` and `git diff` show what each side changed (`git show REBASE_HEAD` is the \
+conflict marker. A file in that list with no markers in it is one the update removed or moved: put the person's \
+change where that code lives in Petal {version} and delete the old file; if that code is gone from Petal \
+altogether, leave the file as it is. Keep the code working and consistent with the code around it; change nothing \
+else. You can read any file here, and `git log`, `git show` and `git diff` show what each side changed (`git show REBASE_HEAD` is the \
 person's change). Don't run any other git command (no add, commit, rebase, checkout or reset): Petal finishes the \
 rebase itself.
 
@@ -718,69 +662,12 @@ def ask_ai(cwd, prompt):
     return (lines[-1] if lines else ("it stopped with an error" if out.returncode else ""))[:300]
 
 
-# ── Omarchy: does the dock come up? ──────────────────────────────────
-
-def dock_answers(seconds=30):
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            out = subprocess.run(["omarchy-shell", "petal", "current"], capture_output=True, text=True, timeout=5)
-            if out.returncode == 0 and out.stdout.strip():
-                return True
-        time.sleep(1.5)
-    return False
-
-
-def restart_shell():
-    subprocess.run(["omarchy", "restart", "shell"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-def restart():
-    """`petal restart` on Omarchy while the source is in use: restarts the shell and checks the dock comes back.
-    After an update, a dock that doesn't is put back to the last one that worked."""
-    restart_shell()
-    if not in_use():
-        return 0
-    return verify()
-
-
-def verify():
-    require()
-    s = state()
-    head = rev("refs/heads/mine")
-    if dock_answers():
-        if head:
-            save_state(good=head, good_version=s.get("version"), pending=None)
-        return 0
-    if not s.get("pending") or not s.get("good") or s.get("good") == head:
-        say("The dock didn't come back after the last change. `petal personal undo` takes the newest change out, "
-            "and `petal logs` shows what went wrong.")
-        return 1
-    with lock():
-        saved = backup("dock-down-" + str(s.get("version")))
-        if unsaved():
-            git("add", "-A")
-            git("commit", "-q", "-m", "Edits not saved yet")
-            saved = backup("dock-down-" + str(s.get("version")))
-        git("reset", "-q", "--hard", s["good"])
-        reason = "The dock didn't come up with Petal %s and your changes" % s.get("version")
-        save_state(pending=None, version=s.get("good_version"), failed={
-            "version": s.get("version"), "mine": s["good"], "reason": reason, "at": time.strftime("%Y-%m-%d %H:%M"), "backup": saved})
-    restart_shell()
-    back = dock_answers()
-    message = "You're back on your own Petal as it was; the combined one is kept in %s." % saved
-    if back:
-        with contextlib.suppress(OSError):
-            subprocess.run(["omarchy-shell", "petal", "personalNotice", str(s.get("version")), "The dock didn't come up with it. " + message],
-                           capture_output=True, timeout=5)
-    say("Petal %s didn't come up with your changes. %s" % (s.get("version"), message))
-    return 3
-
+# ── Installed ─────────────────────────────────────────────────────────
 
 def mark_good():
-    """macOS: the personal build Petal.app just installed."""
+    """The personal build Petal.app just installed."""
     require()
-    save_state(good=rev("refs/heads/mine"), good_version=state().get("version"), pending=None)
+    save_state(good=rev("refs/heads/mine"), good_version=state().get("version"))
     return 0
 
 
@@ -792,13 +679,12 @@ def status():
     s = state()
     return {"exists": True, "in_use": bool(s.get("in_use")), "source": SOURCE, "version": s.get("version"),
             "installed": installed_version(), "changes": count_changes(), "list": [{"n": i + 1, "date": d, "what": w} for i, (_, d, w) in enumerate(changes())],
-            "unsaved": unsaved(), "failed": s.get("failed"), "pending": bool(s.get("pending")),
-            "leftover": os.path.isdir(WORK), "backups": [r.rsplit("/", 1)[-1] for r in backups()[:10]],
-            "plugin_linked": None if MAC else os.path.realpath(LINK) == os.path.realpath(os.path.join(SOURCE, "plugin"))}
+            "unsaved": unsaved(), "failed": s.get("failed"),
+            "leftover": os.path.isdir(WORK), "backups": [r.rsplit("/", 1)[-1] for r in backups()[:10]]}
 
 
 def doctor(fix=False):
-    """Findings for `petal doctor` on both platforms (area "code")."""
+    """Findings for `petal doctor` (area "code")."""
     found = []
     note = lambda level, text, fixed=None: found.append(dict({"level": level, "area": "code", "text": text}, **({"fixed": fixed} if fixed else {})))
     if not exists():
@@ -822,17 +708,6 @@ def doctor(fix=False):
         f = st["failed"]
         note("error", "Petal %s couldn't take your changes: %s. You still have your own Petal. `petal personal retry` "
              "tries again; `petal report` tells Petal's maker." % (f.get("version"), f.get("reason", "").split("\n")[0].rstrip(".")))
-    if st["pending"]:
-        fixed = None
-        if fix:
-            fixed = {0: "the dock comes up with it", 3: "it didn't come up, so the last working one is back"}.get(verify(), "the dock still doesn't answer")
-        note("warn", "Petal %s with your changes hasn't been checked yet: `petal restart` loads it and checks the dock comes up." % st["version"], fixed)
-    if st["plugin_linked"] is False and not developer_install():
-        fixed = None
-        if fix:
-            link_plugin(os.path.join(SOURCE, "plugin"))
-            fixed = "pointed the dock at it"
-        note("error", "The dock isn't running your changed Petal (the plugin link points elsewhere).", fixed)
     if st.get("installed") and st["installed"] != st["version"] and not st["failed"]:
         note("warn", "Your changes are on Petal %s, but %s is installed: `petal personal retry` brings them over." % (st["version"], st["installed"]))
     return found
@@ -868,12 +743,10 @@ def main(argv):
     rest = args[1:]
     try:
         if command == "init":
-            init(release_dir=option(rest, "--from"))
+            init(release_dir=option(rest, "--from"))   # --from <dir>: a test's own release
             say(SOURCE)
         elif command == "path":
             say(SOURCE)
-        elif command == "active":
-            return 0 if in_use() else 1
         elif command == "status":
             st = status()
             if as_json:
@@ -916,20 +789,10 @@ def main(argv):
         elif command == "retry":
             require()
             failed = state().get("failed") or {}
-            target = version or (installed_version() if not MAC else failed.get("version") or installed_version())
-            if not MAC and failed.get("version") and failed.get("version") != installed_version():
-                # The release itself was never installed (get.sh keeps the old one): `petal update` brings it.
-                get = os.path.join(ROOT, "current", "get.sh")
-                return subprocess.run(["bash", get, "--update"]).returncode
+            target = version or failed.get("version") or installed_version()
             update(target, None, False, check_cmd, keep)
             if as_json:
                 print(json.dumps({"status": "updated", "version": state().get("version")}))
-            if not MAC:
-                return restart()
-        elif command == "verify":
-            return verify()
-        elif command == "restart":
-            return restart()
         elif command == "mark-good":
             return mark_good()
         elif command == "doctor":

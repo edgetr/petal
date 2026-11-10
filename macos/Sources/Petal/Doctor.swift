@@ -1,6 +1,6 @@
 import AppKit
 
-/// Petal's doctor and reporter on macOS, the same two commands as bin/petal-doctor on Omarchy:
+/// Petal's doctor and reporter:
 ///
 ///     Petal doctor [--fix] [--json]      check Petal; --fix repairs what's safe to repair (backing up what it replaces)
 ///     Petal report "<what happened>" [--yes] [--preview]
@@ -53,7 +53,7 @@ enum Doctor {
             note("error", "files", "\(name) isn't valid JSON, so Petal ignores it.", fixed: fixed)
         }
         let settings = Config.parse(folder.appending(path: "settings.json")) ?? [:]
-        let unknown = settings.keys.filter { Config.defaults[$0] == nil }.sorted()
+        let unknown = settings.keys.filter { Settings.defaults[$0] == nil }.sorted()
         if !unknown.isEmpty { note("warn", "files", "Unknown settings (ignored): \(unknown.joined(separator: ", ")).") }
 
         // The dock's apps.
@@ -90,7 +90,7 @@ enum Doctor {
         }
 
         // The AI apps.
-        let chosen = (settings["aiProviders"] as? [String] ?? Config.defaults["aiProviders"] as? [String] ?? []).compactMap(Provider.init(rawValue:))
+        let chosen = (settings["aiProviders"] as? [String] ?? Settings.defaults["aiProviders"] as? [String] ?? []).compactMap(Provider.init(rawValue:))
         if chosen.isEmpty { note("ok", "ai", "No AI chosen: Petal works as a dock without it.") }
         for provider in chosen {
             guard let path = PetalApp.find(provider, setting: settings[provider.pathSetting] as? String ?? "") else {
@@ -242,7 +242,7 @@ enum Doctor {
     }
 }
 
-/// Petal's skill for Claude Code and Codex (plugin/skill/SKILL.md, inside Petal.app): copied into
+/// Petal's skill for Claude Code and Codex (macos/Resources/skill/SKILL.md, inside Petal.app): copied into
 /// ~/.claude/skills/petal and ~/.codex/skills/petal, so any session knows Petal and its doctor.
 @MainActor
 enum Skill {

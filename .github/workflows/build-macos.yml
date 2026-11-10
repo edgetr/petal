@@ -1,10 +1,10 @@
-# Builds Petal for macOS on every pull request that touches it, with the same runner and compiler as a release, so
-# a tag never meets a compiler error first. Nothing is signed with Petal's certificate or published.
+# Builds Petal on every pull request that touches the app, with the same runner and compiler as a release, so a tag
+# never meets a compiler error first. Nothing is signed with Petal's certificate or published.
 name: Build macOS
 
 on:
   pull_request:
-    paths: ["macos/**", "plugin/mcp/petal-mcp.py", ".github/workflows/build-macos.yml", ".github/workflows/release-macos.yml"]
+    paths: ["macos/**", "brand/macos/**", ".github/workflows/build-macos.yml", ".github/workflows/release-macos.yml"]
 
 permissions:
   contents: read

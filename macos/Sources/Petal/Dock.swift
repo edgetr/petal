@@ -2,7 +2,7 @@ import AppKit
 import Observation
 import SwiftUI
 
-/// An app in the dock (DockModel.js and Dock.qml's itemsFor on Omarchy).
+/// An app in the dock.
 struct DockItem: Identifiable, Equatable {
     let id: String          // bundle identifier
     let pinned: Bool        // one of the dock's apps (dock.json), not just running
@@ -362,7 +362,7 @@ final class DockController {
 
     /// macOS keeps no room for a dock other than its own, so windows would run under Petal's. While auto-hide is
     /// off, a window reaching into the dock's strip is shortened to end where the dock's glass begins (or narrowed,
-    /// for a side dock); one too small to shorten is moved out instead. Omarchy reserves the same strip for its dock.
+    /// for a side dock); one too small to shorten is moved out instead.
     ///
     /// Petal remembers each window's frame from before it touched it. A new position (or icon size) starts again
     /// from that frame, so windows never shrink step by step as the dock moves around; turning this off, or
@@ -761,7 +761,7 @@ final class DockPanel: NSPanel {
                       width: content.width - room.leading - room.trailing, height: content.height - room.top - room.bottom)
     }
 
-    /// The gap between the dock and the screen's edge (Omarchy's `gap`).
+    /// The gap between the dock and the screen's edge.
     var gap: CGFloat { config.number("dockMargin") >= 0 ? config.number("dockMargin") : 4 }
 
     /// How far the glass reaches in from the screen's edge: windows kept clear of the dock end right there.

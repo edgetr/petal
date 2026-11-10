@@ -1,7 +1,7 @@
 import AppKit
 
-/// `petal` on macOS: Petal.app's own executable, linked as ~/.local/bin/petal, with the same commands as bin/petal on
-/// Omarchy, so any agent (T3 Code, Claude Code, Codex in a terminal) or person can drive the dock from a shell.
+/// `petal`: Petal.app's own executable, linked as ~/.local/bin/petal, so any agent (T3 Code, Claude Code, Codex in a
+/// terminal) or person can drive the dock from a shell.
 enum CLI {
     static let commands: Set<String> = ["desktop", "ask", "chat", "search", "settings", "reveal", "dock", "restart", "version", "update",
                                         "apps", "get", "set", "restore-dock", "help", "logs", "chats", "personal", "bench", "run"]

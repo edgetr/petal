@@ -2,7 +2,7 @@ import AppKit
 import ApplicationServices
 import Observation
 
-/// What apps signal to the dock, the macOS side of Signals.qml: unread badges, download progress and what's playing.
+/// What apps signal to the dock: unread badges, download progress and what's playing.
 @MainActor @Observable
 final class Signals {
     /// Badge text by bundle id ("3", "•").

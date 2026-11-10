@@ -438,9 +438,9 @@ final class PetalApp {
 
     // MARK: IPC
 
-    /// What `bin/petal` and Claude's tools can ask the running Petal (IpcHandler in Dock.qml).
+    /// What `petal` and the AI's tools can ask the running Petal, over its socket (IPC.swift).
     private func registerIPC() {
-        // Petal's tools changing settings or the dock (`Petal --mcp`, petal-mcp.py): done here, in order.
+        // Petal's tools changing settings or the dock (`Petal --mcp`): done here, in order.
         ipc.on("mcpCall") { args in MCP.answer(args.first ?? "", args.dropFirst().first ?? "{}") }
         // Petal AI's tools (`Petal --mcp` asks here): ["assist", tool, json]; one that changes something waits for the
         // person to allow it.

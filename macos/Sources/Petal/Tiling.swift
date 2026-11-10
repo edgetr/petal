@@ -3,7 +3,7 @@ import Carbon.HIToolbox
 import SwiftUI
 
 /// Tiling (`tiling`, off by default): a tiling window manager inside Petal. The ordinary, resizable windows on each
-/// Desktop showing fill its screen, dwindle-style as Hyprland lays them out (WindowLayout.swift holds the maths),
+/// Desktop showing fill its screen as a dwindle layout (WindowLayout.swift holds the maths),
 /// inside the visible frame less Petal's dock strip, with `tilingGaps` around and between them. Dialogs, sheets,
 /// windows that can't be resized, minimized and full-screen windows, apps in `tilingFloat`, and Petal's own panels
 /// float. Turning it off leaves every window where it is.
