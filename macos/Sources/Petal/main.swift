@@ -98,7 +98,7 @@ MainActor.assumeIsolated {
     case .displayCheck(let folder):
         // One real hidden display, for whoever is at the Mac (it changes the screens for a few seconds).
         app.setActivationPolicy(.prohibited)
-        DisplayCheck.run(folder: folder)
+        DisplayCheck.run(folder: folder, full: CommandLine.arguments.contains("--full"))
     case .browserCheck(let live):
         // A run's own browser, driven for real: headless on its own throwaway folders, or (--live) on a real hidden
         // display with a real browser, for whoever is at the Mac.

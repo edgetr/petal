@@ -103,6 +103,40 @@ enum Background {
         return changed ? .stop : .again
     }
 
+    // MARK: The person's own use of an app wins
+
+    /// A run in its window on its own display needs something that reaches the app's window in front (real keys, the
+    /// cursor, a menu), and the person is using that app: its keys would be theirs. The run waits for them to leave
+    /// the app and says so ("Waiting for TextEdit"), then tries again; past `personPatience` it's told, as before.
+    enum PersonFirst: Equatable {
+        /// Wait for the person to leave the app.
+        case wait
+        /// They left: try the act again.
+        case retry
+        /// Tell the AI it can't be done now (`Reason.words`).
+        case tell
+    }
+
+    /// How long a run waits for the person to leave an app before it's told to find another way.
+    static let personPatience: TimeInterval = 120
+
+    /// What needs the app out of the person's hands, and nothing else: keys, the cursor, a menu.
+    static func waitsForPerson(_ reason: Reason) -> Bool { [.keys, .focus, .menu].contains(reason) }
+
+    /// An act came back needing the window in front. `hidden`: its window is on the run's own display; `untouched`:
+    /// nothing of the act was done yet; `appFront`: the person has that app in front (unknown: Petal couldn't tell);
+    /// `waited`: how long this act has waited for them already.
+    static func personFirst(_ reason: Reason, hidden: Bool, untouched: Bool, appFront: Known, waited: TimeInterval) -> PersonFirst {
+        guard hidden, untouched, waitsForPerson(reason), appFront == .yes, waited < personPatience else { return .tell }
+        return .wait
+    }
+
+    /// While it waits, asked again now and then: the app still in front, or gone from it.
+    static func personStill(appFront: Bool, waited: TimeInterval) -> PersonFirst {
+        if !appFront { return .retry }
+        return waited < personPatience ? .wait : .tell
+    }
+
     /// The person is working in the note's window right now: it's in front and they pressed a key, clicked or
     /// scrolled within the last two seconds.
     static func typingThere(_ situation: Situation) -> Bool {
@@ -645,17 +679,29 @@ enum NoteStatus {
         var activity = ""
         /// Its turn for a hidden display hasn't come (RunDisplayPlan): it waits in line.
         var waitingForDisplay = false
+        /// The app it waits its turn for (another run is using it on its display, or the person is using it and the
+        /// run needs real keys there): its name.
+        var waitingForApp: String?
     }
 
     /// What a run waiting its turn for a display says, wherever its state shows.
     static let waitingForDisplay = "Waiting for a display"
+
+    /// What a run waiting its turn for an app says, wherever its state shows: "Waiting for TextEdit".
+    static func waiting(for app: String) -> String { "Waiting for " + (app.isEmpty ? "an app" : app) }
+
+    /// What a run that waits its turn says: the display first (without one it can't use the app either), then the app.
+    static func turn(_ facts: Facts) -> String? {
+        if facts.waitingForDisplay { return waitingForDisplay }
+        return facts.waitingForApp.map { waiting(for: $0) }
+    }
 
     /// The preview shows this many tiles side by side; more scroll sideways, none left out.
     static let tilesInView = 4
     static func previewScrolls(_ count: Int) -> Bool { count > tilesInView }
 
     /// Shown in the preview: working (or queued for room: `running`), waiting for the person, or done and not seen.
-    static func shows(_ facts: Facts) -> Bool { facts.running || facts.ready || needsYou(facts) || facts.waitingForDisplay }
+    static func shows(_ facts: Facts) -> Bool { facts.running || facts.ready || needsYou(facts) || turn(facts) != nil }
 
     /// Waiting for the person: the AI button gets a small ✦.
     static func needsYou(_ facts: Facts) -> Bool { facts.asking != nil || facts.needs != nil }
@@ -663,7 +709,7 @@ enum NoteStatus {
     static func line(_ facts: Facts) -> String {
         if let asking = facts.asking { return "Waiting for you: " + asking }
         if let needs = facts.needs { return "Waiting for you: " + needs }
-        if facts.waitingForDisplay { return waitingForDisplay }
+        if let turn = turn(facts) { return turn }
         if facts.running { return step(facts.activity) }
         return facts.ready ? "Done" : ""
     }

@@ -3,8 +3,10 @@ import Foundation
 
 // Checks RunDisplayPlan.swift: who gets a hidden display and who waits, sharing within a note, release on every
 // ending, the limit by memory, where a display goes (a corner of the person's screens, never beside one), which
-// displays are the person's, what an open would do, and what happens to a window a run leaves. No display is made:
-// these are the plan's own decisions. Run with macos/checks/run.sh.
+// displays are the person's, what an open would do, what happens to a window a run leaves and to an app it started
+// (asked to quit only when nobody used it and nothing is unsaved; kept when Petal can't tell), how Petal knows the
+// person used an app, and two runs taking turns on one app. No display is made, no app touched: these are the plan's
+// own decisions. Run with macos/checks/run.sh.
 @main
 struct RunDisplayCheck {
     nonisolated(unsafe) static var failures = 0
@@ -50,6 +52,11 @@ struct RunDisplayCheck {
         expect(RunDisplayRules.place(asked: "Display", on: true, asker: .chat) == .display, "unless it says its own display")
         expect(RunDisplayRules.place(asked: "screen", on: true, asker: .helper) == .screen, "a helper may say the person's screen")
         expect(RunDisplayRules.place(asked: "elsewhere", on: true, asker: .helper) == .display, "a word it doesn't know is no word")
+
+        expect(!RunDisplayRules.takesTurns(asker: .chat, hold: false), "the quick question acting in an app is the person's own request: it never waits behind a helper")
+        expect(RunDisplayRules.takesTurns(asker: .chat, hold: true), "its own open on a display of its own takes turns like any")
+        expect(RunDisplayRules.takesTurns(asker: .helper, hold: false) && RunDisplayRules.takesTurns(asker: .helper, hold: true), "a helper takes turns for acts and opens")
+        expect(RunDisplayRules.takesTurns(asker: .outside, hold: false) && RunDisplayRules.takesTurns(asker: .outside, hold: true), "and so does an AI session outside Petal")
 
         // MARK: The plan: not before it's needed
 
@@ -248,6 +255,126 @@ struct RunDisplayCheck {
         expect(RunDisplayRules.leftover(Left(opened: false, empty: false, shown: false)) == .bringBack, "nor one with work in it")
         expect(RunDisplayRules.leftover(Left(opened: true, empty: true, shown: true)) == .leave, "one the person took to their screen is left alone")
         expect(RunDisplayRules.leftover(Left(opened: true, empty: false, shown: true)) == .leave, "whatever is in it")
+        expect(RunDisplayRules.leftover(Left(opened: true, empty: true, shown: false, theirs: true)) == .bringBack,
+               "an empty window in an app the person made theirs comes back to them, never closed")
+        expect(RunDisplayRules.leftover(Left(opened: true, empty: true, shown: true, theirs: true)) == .leave, "and one already on their screen is left alone")
+
+        // MARK: A window that holds nothing
+
+        typealias Told = RunDisplayRules.Told
+        expect(RunDisplayRules.holdsNothing(bare: true, changed: false, panel: false, document: .no, modified: .no), "a blank window the run opened and never touched holds nothing")
+        expect(!RunDisplayRules.holdsNothing(bare: true, changed: true, panel: false, document: .no, modified: .no), "one it did something in holds something")
+        expect(!RunDisplayRules.holdsNothing(bare: false, changed: false, panel: false, document: .no, modified: .no), "one opened with a file or an address holds something")
+        expect(!RunDisplayRules.holdsNothing(bare: true, changed: false, panel: false, document: .yes, modified: .no), "one that shows a document holds it")
+        expect(!RunDisplayRules.holdsNothing(bare: true, changed: false, panel: false, document: .no, modified: .yes), "one with unsaved changes holds them")
+        expect(!RunDisplayRules.holdsNothing(bare: true, changed: false, panel: false, document: .unknown, modified: .no), "a document Petal couldn't read counts as one")
+        expect(!RunDisplayRules.holdsNothing(bare: true, changed: false, panel: false, document: .no, modified: .unknown), "and so do changes it couldn't read")
+        expect(RunDisplayRules.holdsNothing(bare: false, changed: false, panel: true, document: .no, modified: .no),
+               "an Open panel or a welcome window, with no document behind it, is nothing to keep, even in an app opened with a file")
+        expect(RunDisplayRules.holdsNothing(bare: false, changed: true, panel: true, document: .no, modified: .no), "even one the run pressed something in")
+        expect(!RunDisplayRules.holdsNothing(bare: true, changed: false, panel: true, document: .yes, modified: .no), "a dialog with a document behind it is kept")
+        expect(!RunDisplayRules.holdsNothing(bare: true, changed: false, panel: true, document: .unknown, modified: .no), "and one Petal couldn't read")
+
+        // MARK: Whether an app has unsaved changes
+
+        expect(RunDisplayRules.unsaved(listed: true, modified: []) == .no, "an app with no windows has nothing unsaved")
+        expect(RunDisplayRules.unsaved(listed: true, modified: [.no, .no]) == .no, "nor one whose windows all say so")
+        expect(RunDisplayRules.unsaved(listed: true, modified: [.no, .yes]) == .yes, "one window with changes is enough")
+        expect(RunDisplayRules.unsaved(listed: true, modified: [.no, .unknown]) == Told.unknown, "a window that couldn't be read: Petal can't tell")
+        expect(RunDisplayRules.unsaved(listed: true, modified: [.unknown, .yes]) == .yes, "changes it did read count over one it couldn't")
+        expect(RunDisplayRules.unsaved(listed: false, modified: []) == Told.unknown, "windows that couldn't be listed at all: Petal can't tell")
+
+        // MARK: An app the run started
+
+        typealias LeftApp = RunDisplayRules.LeftApp
+        expect(RunDisplayRules.leftover(app: LeftApp(launched: true, used: false, shown: false, unsaved: .no)) == .quit,
+               "an app the run started, nobody used, with nothing unsaved, is asked to quit")
+        expect(RunDisplayRules.leftover(app: LeftApp(launched: false, used: false, shown: false, unsaved: .no)) == .keep,
+               "an app the person already had open is never quit")
+        expect(RunDisplayRules.leftover(app: LeftApp(launched: false, used: true, shown: true, unsaved: .yes)) == .keep, "whatever else is true of it")
+        expect(RunDisplayRules.leftover(app: LeftApp(launched: true, used: true, shown: false, unsaved: .no)) == .keep,
+               "one the run started and the person then used is theirs now")
+        expect(RunDisplayRules.leftover(app: LeftApp(launched: true, used: false, shown: true, unsaved: .no)) == .keep,
+               "one with a window brought to their screen (Show me, or the run's own show) stays")
+        expect(RunDisplayRules.leftover(app: LeftApp(launched: true, used: false, shown: false, unsaved: .yes)) == .keep, "one with unsaved changes stays")
+        expect(RunDisplayRules.leftover(app: LeftApp(launched: true, used: false, shown: false, unsaved: .unknown)) == .keep,
+               "can't tell whether anything is unsaved: kept, never quit")
+        for used in [false, true] {
+            for shown in [false, true] {
+                for unsaved in [Told.yes, .no, .unknown] {
+                    let quit = RunDisplayRules.leftover(app: LeftApp(launched: true, used: used, shown: shown, unsaved: unsaved)) == .quit
+                    expect(quit == (!used && !shown && unsaved == .no), "quit only when all three are clear (\(used), \(shown), \(unsaved))")
+                    expect(RunDisplayRules.leftover(app: LeftApp(launched: false, used: used, shown: shown, unsaved: unsaved)) == .keep,
+                           "the person's own app, in every case (\(used), \(shown), \(unsaved))")
+                }
+            }
+        }
+        expect(RunDisplayRules.quitBound > 0 && RunDisplayRules.quitBound <= 5, "an app asked to quit gets a short while, no more")
+
+        // MARK: Quit, hide and bring forward
+
+        expect(RunDisplayRules.apps("quit", owner: .persons) == .ask, "quitting the person's app asks them first, as always")
+        expect(RunDisplayRules.apps("hide", owner: .persons) == .go && RunDisplayRules.apps("focus", owner: .persons) == .go, "hiding it and bringing it forward go ahead")
+        expect(RunDisplayRules.apps("quit", owner: .own) == .go, "a run quits the app it started, which nobody saw, without asking the person")
+        expect(RunDisplayRules.apps("focus", owner: .own) == .refuse, "but never brings it forward: nothing on a hidden display does")
+        expect(RunDisplayRules.apps("hide", owner: .own) == .go, "hiding its own is harmless")
+        for action in ["quit", "hide", "focus"] {
+            expect(RunDisplayRules.apps(action, owner: .another) == .refuse, "another run's app is none of this one's: no \(action)")
+        }
+
+        // MARK: Whether the person used it
+
+        expect(RunDisplayRules.cameForwardByPerson(idle: 0.2), "it came forward right after their click: they switched to it")
+        expect(RunDisplayRules.cameForwardByPerson(idle: RunDisplayRules.byHand), "up to the moment allowed")
+        expect(!RunDisplayRules.cameForwardByPerson(idle: 30), "it came forward with their hands still: by itself, nobody's use")
+        expect(RunDisplayRules.usedInFront(idle: 0.5, frontFor: 4), "a key or click since it came forward is theirs")
+        expect(!RunDisplayRules.usedInFront(idle: 10, frontFor: 4), "their last one was before it came forward: not in it")
+        expect(!RunDisplayRules.usedInFront(idle: 4, frontFor: 4), "exactly as it came forward doesn't count")
+        expect(RunDisplayRules.personUsed(idleAtFront: 0.3, idleNow: nil, frontFor: nil), "used: they brought it forward")
+        expect(RunDisplayRules.personUsed(idleAtFront: nil, idleNow: 0.1, frontFor: 3), "used: they typed in it while it was in front")
+        expect(RunDisplayRules.personUsed(idleAtFront: 60, idleNow: 1, frontFor: 5), "used: it came forward by itself, then they clicked in it")
+        expect(!RunDisplayRules.personUsed(idleAtFront: 60, idleNow: 65, frontFor: 5), "not used: forward by itself, and they never touched it")
+        expect(!RunDisplayRules.personUsed(idleAtFront: nil, idleNow: nil, frontFor: nil), "never in front: not used")
+
+        // MARK: Two runs, one app
+
+        var turns = AppTurns()
+        expect(turns.ask("a", app: "writer", hold: true) == .has, "a free app goes to whoever asks")
+        expect(turns.holder(of: "writer") == "a", "and it has it from then")
+        expect(turns.ask("a", app: "writer", hold: true) == .has, "its own app again: at once")
+        expect(turns.ask("b", app: "writer", hold: true) == .waiting(1), "a second run waits, next in line")
+        expect(turns.ask("c", app: "writer", hold: false) == .waiting(2), "a third after it, in order")
+        expect(turns.ask("b", app: "writer", hold: true) == .waiting(1), "asking again keeps its place")
+        expect(turns.waits(of: "b") == ["writer"] && turns.apps(of: "a") == ["writer"], "who waits for what, who has what")
+        expect(turns.standing(of: "c", app: "writer") == .waiting(2) && turns.standing(of: "z", app: "writer") == nil, "each one's standing")
+        expect(turns.ask("b", app: "sums", hold: true) == .has, "another app is free meanwhile")
+        expect(turns.letGo("b", app: "writer") == [], "letting go of what it doesn't have does nothing")
+        expect(turns.letGo("a", app: "writer") == [AppTurns.Grant(app: "writer", group: "b")], "the first lets it go: the second has it")
+        expect(turns.holder(of: "writer") == "b" && turns.ask("c", app: "writer", hold: false) == .waiting(1), "and the third is next")
+        expect(turns.leave("b") == [AppTurns.Grant(app: "writer", group: "c")], "the second ends: everything it had goes to the next in line")
+        expect(turns.holder(of: "sums") == nil && turns.holder(of: "writer") == "c", "an app nobody waited for is free again")
+        expect(turns.letGo("c", app: "writer") == [] && turns.holder(of: "writer") == nil && turns.queues.isEmpty, "the last lets go: nobody has it, nobody waits")
+
+        turns = AppTurns()
+        expect(turns.ask("a", app: "writer", hold: false) == .has && turns.holder(of: "writer") == nil, "one act in a free app takes nothing")
+        expect(turns.ask("b", app: "writer", hold: true) == .has, "so another may open in it")
+        expect(turns.ask("a", app: "writer", hold: false) == .waiting(1), "and now an act there waits its turn")
+        turns.stopWaiting("a", app: "writer")
+        expect(turns.queues.isEmpty && turns.letGo("b", app: "writer") == [], "one that gave up waiting is never handed the app")
+
+        turns = AppTurns()
+        _ = turns.ask("a", app: "writer", hold: true)
+        _ = turns.ask("b", app: "sums", hold: true)
+        expect(turns.ask("b", app: "writer", hold: true) == .waiting(1), "b waits for what a has")
+        expect(turns.ask("a", app: "sums", hold: true) == .circular, "a asking for what b has would never end: it doesn't wait")
+        expect(turns.waits(of: "a").isEmpty && turns.queues["sums"] == nil, "and isn't in line")
+        _ = turns.ask("c", app: "draw", hold: true)
+        expect(turns.ask("c", app: "sums", hold: true) == .waiting(1), "c waits for b, who waits for a")
+        expect(turns.ask("a", app: "draw", hold: true) == .circular, "a asking for what c has: a circle through three")
+        expect(turns.ask("d", app: "draw", hold: true) == .waiting(1), "one outside the circle waits as usual")
+        expect(turns.leave("a") == [AppTurns.Grant(app: "writer", group: "b")], "a ends: b gets the app, the circle is gone")
+        expect(turns.leave("zz") == [], "one that was never there leaves nothing")
+        expect(AppTurns.circularWords("TextEdit").contains("TextEdit"), "what the AI is told names the app")
 
         if failures > 0 { print("run displays: \(failures) failed"); exit(1) }
         print("run displays: \(passed) checks passed")

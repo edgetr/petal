@@ -38,8 +38,9 @@ enum PetalProcess {
         case viewerCheck
         /// `Petal --helpers-check [--ai]`: helpers in notes run end to end, headless, on throwaway folders.
         case helpersCheck(ai: Bool)
-        /// `Petal --display-check <folder>`: makes one real hidden display and puts a TextEdit window on it
-        /// (DisplayCheck.swift). It changes the screens for a few seconds: only ever run on purpose, by a person.
+        /// `Petal --display-check <folder> [--full]`: makes one real hidden display and puts a TextEdit window on it;
+        /// with `--full`, three runs on two displays with TextEdit and Calculator (DisplayCheck.swift, which reads
+        /// `--full` itself). It changes the screens for a while: only ever run on purpose, by a person.
         case displayCheck(String)
         /// `Petal --browser-check`: a run's own browser driven for real, headless, on pages of a local server it
         /// starts (BrowserCheck.swift). `--live <folder>`: with a real hidden display and a real installed browser: it
@@ -54,7 +55,7 @@ enum PetalProcess {
     /// How each tool is written, for `.usage`.
     static let usages: [String: String] = [
         "--snapshot": "Petal --snapshot <folder>",
-        "--display-check": "Petal --display-check <folder>",
+        "--display-check": "Petal --display-check <folder> [--full]",
         "--browser-check": "Petal --browser-check [--live <folder>]",
         "--bench-windows-idle": "Petal --bench-windows-idle <window>",
         "--bench-windows": "Petal --bench-windows [--runs <n>] [--only <window>] [--json <file>] [--png <folder>]",

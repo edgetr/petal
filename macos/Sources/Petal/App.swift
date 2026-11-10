@@ -457,8 +457,11 @@ final class PetalApp {
             let claimed = args.dropFirst(2).first ?? ""
             let caller = who.agent == .petal && !claimed.isEmpty ? claimed : "mcp-\(who.pid)"
             // Its card keeps it waiting however long the person takes; its asker gone, what it had going stops.
-            // (Waiting its turn for a hidden display keeps it waiting the same way.)
-            request.waiting = { [unowned self] in assist.pending?.owner == caller || displays.waits(caller) }
+            // (Waiting its turn for a hidden display, or for an app another run or the person is using, keeps it
+            // waiting the same way.)
+            request.waiting = { [unowned self] in
+                assist.pending?.owner == caller || displays.waits(caller) || displays.waitsForApp(caller) != nil
+            }
             request.onHangUp { [unowned self] in assist.hungUp(caller) }
             // Who it is goes with the request itself, never looked up again later.
             assist.handle(args.first ?? "", args.dropFirst().first ?? "{}", note: caller, who: who, request: request, reply: reply)

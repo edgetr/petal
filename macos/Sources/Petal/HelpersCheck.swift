@@ -341,6 +341,8 @@ private final class HelpersChecker {
         thirteenth()
         fourteenth(number: "14")
         fifteenth()
+        sixteenth()
+        seventeenth()
         if ai { real() }
         settle()
         print(failures == 0 ? "helpers-check: all passed" : "helpers-check: \(failures) failed")
@@ -939,7 +941,9 @@ private final class HelpersChecker {
             expect(app.displays.waits(callers[1]) && !app.displays.waits(callers[0]), "it's known to wait for a display")
             let waiting = app.claude.note(withID: callers[1])
             expect(waiting.map { NoteStatus.line(self.app.claude.facts($0)) } == NoteStatus.waitingForDisplay, "its line says Waiting for a display")
-            expect(waiting?.agent.activity.text == NoteStatus.waitingForDisplay, "and so does its note's bar")
+            expect(waiting?.agent.activity.text == NoteStatus.waitingForDisplay, "and so does its note's step")
+            expect(HelperBar.line(run: helpers.runs[ids[1]], helper: nil, displays: app.displays).hasSuffix(NoteStatus.waitingForDisplay),
+                   "and its note's bar (\(HelperBar.line(run: helpers.runs[ids[1]], helper: nil, displays: app.displays)))")
             // The first is stopped: its display goes, and the one waiting gets the next.
             helpers.stop(ids[0])
             expect(wait(5) { removed == Array(made.prefix(1)) }, "Stop removed the first run's display (\(removed))")
@@ -955,6 +959,262 @@ private final class HelpersChecker {
             expect(offAnswer == RunDisplayRules.off && made.count == 2, "and asking for one says they're off")
             app.config.set("runDisplaysLimit", 0)
             return "none before it was needed, the second waited its turn and said so, Stop and the switch each removed theirs (\(made.count) made, \(removed.count) removed, none real)"
+        }
+    }
+
+    /// A helper at work with a made-up display of its own: its note, its chat's name for Petal's tools, its display.
+    /// `lines`: what the stand-in plays (else it works for a minute).
+    func displayRun(_ name: String, lines: [String]? = nil) -> (id: String, caller: String, display: RunDisplays.Display)? {
+        let id = note("Display \(name)")
+        plan("chat", lines ?? turn("\(name) is done.", sleep: 60, session: "display-\(name)"), match: "work on the \(name) thing")
+        ask(id, "@Petal work on the \(name) thing")
+        guard wait(15, until: { self.helpers.runs[id]?.sticky?.agent.running == true }),
+              let caller = helpers.runs[id]?.sticky?.id.uuidString else { return nil }
+        var got: RunDisplays.Display?
+        app.displays.need(caller) { result in if case .success(let display) = result { got = display } }
+        guard wait(5, until: { got != nil }), let display = got else { return nil }
+        return (id, caller, display)
+    }
+
+    /// A made-up window's place on a made-up display.
+    func spot(on display: RunDisplays.Display, _ index: Int = 0) -> CGRect {
+        CGRect(x: display.frame.minX + 40 + CGFloat(index) * 20, y: display.frame.minY + 40 + CGFloat(index) * 20, width: 700, height: 500)
+    }
+
+    /// 16. What a run leaves when its display goes, however it ends, with made-up displays, apps and windows (nothing
+    /// real is read, moved, closed or quit): an app the run started is asked to quit only when nobody used it and
+    /// nothing in it is unsaved, an app the person had is never quit, and every window is closed or brought back by
+    /// the rule.
+    func sixteenth() {
+        step("16", "what a run leaves on its display (made up)") {
+            let world = MadeUpApps()
+            var made: [CGDirectDisplayID] = []
+            var removed: [CGDirectDisplayID] = []
+            var next: CGDirectDisplayID = 9100
+            app.displays.useMadeUp({ _, _, _ in
+                next += 1
+                let id = next
+                made.append(id)
+                return RunDisplays.Made(id: id, hiDPI: true, remove: { removed.append(id) })
+            }, placed: { id, size in
+                RunDisplays.Placing(frame: CGRect(x: -40_000 - CGFloat(id - 9100) * 2000, y: -40_000, width: size.width, height: size.height), tried: [])
+            }, hands: world.hands)
+            app.config.set("runDisplays", true)
+            app.config.set("runDisplaysLimit", 1)
+            let displays = app.displays
+            let area = RunDisplays.personArea()
+            let back = { (window: CGWindowID) -> Bool in world.placed(window).map { area.contains(CGPoint(x: $0.midX, y: $0.midY)) } ?? false }
+
+            // Stop, with one of every kind on the display.
+            guard let stopped = displayRun("stopped") else { expect(false, "a helper with a display"); return "" }
+            let quiet = world.app(), used = world.app(), clicked = world.app(), dirty = world.app(unsaved: .yes)
+            let unread = world.app(unsaved: .unknown), stubborn = world.app(refusesQuit: true), theirs = world.app()
+            for (index, pid) in [quiet, used, clicked, dirty, unread, stubborn].enumerated() {
+                displays.launched(pid, bundle: "com.example.started\(index)", name: "Started \(index)", by: stopped.caller)
+            }
+            expect(displays.launchedApps(for: stopped.caller).count == 6, "six apps the run started are known as its own")
+            let place = { (index: Int) in self.spot(on: stopped.display, index) }
+            let quietWindow = world.window(of: quiet, at: place(0))
+            let usedWindow = world.window(of: used, at: place(1))
+            let clickedWindow = world.window(of: clicked, at: place(2))
+            let dirtyWindow = world.window(of: dirty, at: place(3), modified: .yes)
+            let dirtyPanel = world.window(of: dirty, at: place(4))
+            let unreadWindow = world.window(of: unread, at: place(5), modified: .unknown)
+            let stubbornWindow = world.window(of: stubborn, at: place(6))
+            let theirDocument = world.window(of: theirs, at: place(7), document: .yes)
+            let theirBlank = world.window(of: theirs, at: place(8))
+            displays.track([quietWindow, usedWindow, clickedWindow, unreadWindow, stubbornWindow].map(\.item), for: stopped.caller, bare: true)
+            displays.track([dirtyWindow].map(\.item), for: stopped.caller, bare: false)
+            displays.track([dirtyPanel].map(\.item), for: stopped.caller, bare: false, panels: [dirtyPanel.window])
+            displays.track([theirDocument].map(\.item), for: stopped.caller, bare: false, app: ("com.example.theirs", "Theirs"))
+            displays.track([theirBlank].map(\.item), for: stopped.caller, bare: true, app: ("com.example.theirs", "Theirs"))
+            // The person switched to one (their click a moment before it came forward): theirs now.
+            world.set(idle: 0.3)
+            displays.cameForward(used)
+            // One came forward by itself (their hands still), and they then clicked in it: theirs too.
+            world.set(idle: 600)
+            displays.cameForward(clicked)
+            world.set(front: clicked)
+            displays.sampleFront()
+            expect(displays.launchedApps(for: stopped.caller).first { $0.pid == clicked }?.used == false, "an app in front by itself, untouched, isn't used")
+            world.set(idle: 0)
+            displays.sampleFront()
+            // And one came forward by itself and was never touched: nobody's use.
+            world.set(idle: 600)
+            displays.cameForward(quiet)
+            world.set(front: quiet)
+            displays.sampleFront()
+            world.set(front: nil)
+            let usedNow = Set(displays.launchedApps(for: stopped.caller).filter(\.used).map(\.pid))
+            expect(usedNow == [used, clicked], "the person used two of them (\(usedNow.count))")
+            helpers.stop(stopped.id)
+            expect(wait(10) { removed.contains(stopped.display.number) }, "Stop removed its display (\(removed))")
+            expect(Set(world.askedToQuit) == [quiet, stubborn], "asked to quit: the two nobody used with nothing unsaved (\(world.askedToQuit.count))")
+            expect(!world.isRunning(quiet), "the one that could go is gone")
+            expect([used, clicked, dirty, unread, stubborn, theirs].allSatisfy(world.isRunning), "the used ones, the unsaved one, the unreadable one and the person's own still run")
+            expect(Set(world.closed) == [stubbornWindow.window, dirtyPanel.window, theirBlank.window],
+                   "closed: the blank window of the one that wouldn't quit, a dialog with no document, a blank window in the person's app (\(world.closed.count))")
+            expect([usedWindow, clickedWindow, dirtyWindow, unreadWindow, theirDocument].allSatisfy { back($0.window) },
+                   "brought back to the person's screen: the windows of apps that became theirs, the unsaved one, the unreadable one, their document")
+            expect(world.placed(quietWindow.window) == nil && world.raised.isEmpty, "nothing of the app that quit was moved, nothing came forward")
+            let last = displays.settled.last
+            expect(last?.quit == [quiet] && last?.stayed == [stubborn] && Set(last?.kept ?? []) == [used, clicked, dirty, unread],
+                   "settled as: one quit, one that wouldn't, four kept (\(String(describing: last)))")
+
+            // Pause, after Show me: what the person took is theirs; what nobody used goes.
+            guard let paused = displayRun("paused") else { expect(false, "a second helper with a display"); return "" }
+            let seen = world.app(), tidy = world.app()
+            displays.launched(seen, bundle: "com.example.seen", name: "Seen", by: paused.caller)
+            displays.launched(tidy, bundle: "com.example.tidy", name: "Tidy", by: paused.caller)
+            let seenWindow = world.window(of: seen, at: spot(on: paused.display))
+            displays.track([seenWindow].map(\.item), for: paused.caller, bare: true)
+            displays.showMe(caller: paused.caller)
+            expect(wait(5) { back(seenWindow.window) && world.raised == [seenWindow.window] }, "Show me brought its window to the person's screen and forward")
+            expect(displays.display(for: paused.caller) != nil && helpers.runs[paused.id]?.sticky?.agent.running == true, "its display stays, and the run goes on")
+            let tidyWindow = world.window(of: tidy, at: spot(on: paused.display, 1))
+            displays.track([tidyWindow].map(\.item), for: paused.caller, bare: true)
+            expect(world.placed(tidyWindow.window) == nil, "what it opens next is still on its display")
+            let movesBefore = world.moves
+            helpers.pause(paused.id)
+            expect(wait(10) { removed.contains(paused.display.number) }, "Pause removed its display (\(removed))")
+            expect(!world.askedToQuit.contains(seen) && world.isRunning(seen), "the app the person was shown is left running")
+            expect(world.askedToQuit.contains(tidy) && !world.isRunning(tidy), "the one nobody used was asked to quit and went")
+            expect(world.moves == movesBefore && !world.closed.contains(seenWindow.window), "the window on their screen was left alone")
+
+            // The run fails.
+            let failing = [session("display-failed"), "#mark started", "#sleep 8", "#stderr boom: the stand-in gave up", "#exit 3"]
+            guard let failed = displayRun("failed", lines: failing) else { expect(false, "a third helper with a display"); return "" }
+            let orphan = world.app()
+            displays.launched(orphan, bundle: "com.example.orphan", name: "Orphan", by: failed.caller)
+            let orphanWindow = world.window(of: orphan, at: spot(on: failed.display))
+            let keptDocument = world.window(of: theirs, at: spot(on: failed.display, 1), document: .yes)
+            displays.track([orphanWindow].map(\.item), for: failed.caller, bare: true)
+            displays.track([keptDocument].map(\.item), for: failed.caller, bare: false, app: ("com.example.theirs", "Theirs"))
+            expect(wait(30) { self.state(failed.id) == .failed }, "the run failed (\(String(describing: state(failed.id))))")
+            expect(wait(10) { removed.contains(failed.display.number) }, "a failed run's display is removed (\(removed))")
+            expect(world.askedToQuit.contains(orphan) && back(keptDocument.window) && world.isRunning(theirs), "its app was asked to quit, the person's document came back, their app runs on")
+
+            // The note is thrown away while its helper works (its file gone from the check's own folder; never the Trash).
+            guard let thrown = displayRun("thrown") else { expect(false, "a fourth helper with a display"); return "" }
+            let left = world.app()
+            displays.launched(left, bundle: "com.example.left", name: "Left", by: thrown.caller)
+            if let url = helpers.paper(thrown.id)?.url { try? fm.removeItem(at: url) }
+            app.paper.store.reload()
+            expect(wait(15) { self.helpers.paper(thrown.id) == nil }, "the note is gone")
+            // What its next tool call meets: the gate, which ends a run whose note is gone.
+            wait(10) { self.helpers.admitTool(thrown.caller) != nil && self.helpers.runs[thrown.id] == nil }
+            expect(helpers.runs[thrown.id] == nil, "its run ended at its next tool call")
+            expect(wait(10) { removed.contains(thrown.display.number) }, "the display of a note thrown away is removed (\(removed))")
+            expect(world.askedToQuit.contains(left), "and its app was asked to quit")
+
+            // Petal quits.
+            guard let quitting = displayRun("quitting") else { expect(false, "a fifth helper with a display"); return "" }
+            let last5 = world.app(), unsavedLast = world.app(unsaved: .yes)
+            displays.launched(last5, bundle: "com.example.last", name: "Last", by: quitting.caller)
+            displays.launched(unsavedLast, bundle: "com.example.unsaved", name: "Unsaved", by: quitting.caller)
+            let unsavedWindow = world.window(of: unsavedLast, at: spot(on: quitting.display), modified: .yes)
+            displays.track([unsavedWindow].map(\.item), for: quitting.caller, bare: true)
+            displays.quit()
+            expect(removed.contains(quitting.display.number) && displays.displays.isEmpty, "Petal quitting removes every display at once")
+            expect(world.askedToQuit.contains(last5) && !world.askedToQuit.contains(unsavedLast), "the unused app was asked to quit, the one with unsaved changes wasn't")
+            expect(back(unsavedWindow.window), "and its window was put on the person's screen first")
+            expect(!world.askedToQuit.contains(theirs), "the person's own app was never asked to quit, through all of it")
+            expect(Screens.runIDs.isEmpty, "nothing real was made")
+            app.config.set("runDisplays", false)
+            app.config.set("runDisplaysLimit", 0)
+            return "Stop, Pause, a failed run, a note thrown away and Petal quitting each removed the display (\(removed.count) of \(made.count)); \(world.askedToQuit.count) apps asked to quit, never one the person used, was shown, had open, or with unsaved or unreadable changes; \(world.closed.count) empty windows closed, the rest brought back (none real)"
+        }
+    }
+
+    /// 17. Two runs, one app, with made-up displays, apps and windows: the second waits its turn and says so, a run
+    /// never has another's window, a circle is refused, and Show me hands an app back.
+    func seventeenth() {
+        step("17", "two runs take turns on an app (made up)") {
+            let world = MadeUpApps()
+            var removed: [CGDirectDisplayID] = []
+            var next: CGDirectDisplayID = 9200
+            app.displays.useMadeUp({ _, _, _ in
+                next += 1
+                let id = next
+                return RunDisplays.Made(id: id, hiDPI: true, remove: { removed.append(id) })
+            }, placed: { id, size in
+                RunDisplays.Placing(frame: CGRect(x: -60_000 - CGFloat(id - 9200) * 2000, y: -60_000, width: size.width, height: size.height), tried: [])
+            }, hands: world.hands)
+            app.config.set("runDisplays", true)
+            app.config.set("runDisplaysLimit", 0)
+            let displays = app.displays
+            // Whatever this Mac's memory allows, the check needs two at once.
+            guard displays.limit >= 2 else {
+                app.config.set("runDisplays", false)
+                return "skipped: this Mac's memory allows one hidden display at a time, and turns need two runs with one each"
+            }
+            guard let one = displayRun("one"), let two = displayRun("two") else { expect(false, "two helpers with a display each"); return "" }
+            let writer = "com.example.writer", sums = "com.example.sums"
+            let writerApp = world.app(), sumsApp = world.app()
+            // The first opens something in Writer: free, so it goes ahead and has it.
+            var firstAnswer: RunDisplays.Failure?
+            var firstAnswered = false
+            displays.turn(one.caller, app: writer, name: "Writer", hold: true) { firstAnswer = $0; firstAnswered = true }
+            expect(firstAnswered && firstAnswer == nil, "the first run opens in a free app at once")
+            let oneWindow = world.window(of: writerApp, at: spot(on: one.display), document: .yes)
+            displays.track([oneWindow].map(\.item), for: one.caller, bare: false, app: (writer, "Writer"))
+            displays.finished(one.caller, app: writer)
+            expect(displays.appTurns.holder(of: writer) == displays.group(of: one.caller), "and has it while its window is on its display")
+            // The second asks to open there, and to act there: both wait, in order, and say so.
+            var opens: [Bool] = []
+            var acts: [Bool] = []
+            displays.turn(two.caller, app: writer, name: "Writer", hold: true) { opens.append($0 == nil) }
+            displays.turn(two.caller, app: writer, name: "Writer", hold: false) { acts.append($0 == nil) }
+            expect(opens.isEmpty && acts.isEmpty, "the second run's open and its act both wait")
+            expect(displays.waitsForApp(two.caller) == "Writer" && displays.waitsForApp(one.caller) == nil, "it's known to wait for Writer")
+            let waiting = app.claude.note(withID: two.caller)
+            expect(waiting.map { NoteStatus.line(self.app.claude.facts($0)) } == "Waiting for Writer", "the AI button's preview says Waiting for Writer")
+            let bar = HelperBar.line(run: helpers.runs[two.id], helper: nil, displays: displays)
+            expect(bar.hasSuffix("Waiting for Writer"), "and so does its note's bar (\(bar))")
+            expect(!displays.waits(two.caller), "it isn't waiting for a display: it has one")
+            // A run never has another's window.
+            expect(displays.foreign(window: oneWindow.window, to: two.caller) && !displays.foreign(window: oneWindow.window, to: one.caller),
+                   "the first run's window is none of the second's, and its own")
+            expect(displays.foreign(oneWindow.frame, to: two.caller) && displays.holds(oneWindow.frame, for: one.caller), "by where it is, too")
+            // A circle: the second has Sums and waits for Writer; the first asking for Sums would never end.
+            var sumsAnswered = false
+            displays.turn(two.caller, app: sums, name: "Sums", hold: true) { sumsAnswered = $0 == nil }
+            let twoSums = world.window(of: sumsApp, at: spot(on: two.display))
+            displays.track([twoSums].map(\.item), for: two.caller, bare: true, app: (sums, "Sums"))
+            displays.finished(two.caller, app: sums)
+            var circle: RunDisplays.Failure?
+            displays.turn(one.caller, app: sums, name: "Sums", hold: true) { circle = $0 }
+            expect(sumsAnswered && circle?.words == AppTurns.circularWords("Sums"), "a circle is refused in words, never waited on (\(circle?.words ?? "no answer"))")
+            // The person's own use wins: a run that needs real keys in an app they're using says it waits for it.
+            displays.personBusy(one.caller, app: "Writer")
+            expect(app.claude.note(withID: one.caller).map { NoteStatus.line(self.app.claude.facts($0)) } == "Waiting for Writer",
+                   "a run waiting for the person to leave an app says so the same way")
+            displays.personBusy(one.caller, app: nil)
+            expect(displays.waitsForApp(one.caller) == nil, "and no longer once they've left it")
+            // The first ends: its window is put away, and the second gets the app.
+            helpers.stop(one.id)
+            expect(wait(10) { removed.contains(one.display.number) }, "the first run's display is removed (\(removed))")
+            expect(wait(5) { opens == [true] && acts == [true] }, "the second run's open and act both go ahead (\(opens), \(acts))")
+            expect(displays.waitsForApp(two.caller) == nil, "it no longer says it waits")
+            expect(waiting.map { NoteStatus.line(self.app.claude.facts($0)) } != "Waiting for Writer", "nor does the preview")
+            let twoWindow = world.window(of: writerApp, at: spot(on: two.display, 1), document: .yes)
+            displays.track([twoWindow].map(\.item), for: two.caller, bare: false, app: (writer, "Writer"))
+            displays.finished(two.caller, app: writer)
+            expect(displays.appTurns.holder(of: writer) == displays.group(of: two.caller), "the second has Writer now")
+            // Show me on the second: its windows are the person's from then on, the run goes on, and Writer is free.
+            let area = RunDisplays.personArea()
+            displays.showMe(caller: two.caller)
+            expect(wait(5) { world.placed(twoWindow.window).map { area.contains(CGPoint(x: $0.midX, y: $0.midY)) } ?? false },
+                   "Show me moved its window to the person's screen")
+            expect(displays.display(for: two.caller) != nil && helpers.runs[two.id]?.sticky?.agent.running == true, "its display stays, and the run goes on")
+            expect(displays.appTurns.holder(of: writer) == nil && !displays.foreign(window: twoWindow.window, to: one.caller),
+                   "what it showed is the person's: the app is nobody's alone")
+            var third = false
+            displays.turn(two.caller, app: writer, name: "Writer", hold: false) { third = $0 == nil }
+            expect(third, "and anyone may act in it again")
+            expect(Screens.runIDs.isEmpty && world.askedToQuit.isEmpty, "nothing real was made, and no app the runs didn't start was asked to quit")
+            app.config.set("runDisplays", false)
+            return "the second run waited for Writer and said so on its note and in the preview, never had the first's window, a circle was refused in words, it got Writer when the first ended, and Show me handed it back while the run went on (none real)"
         }
     }
 
@@ -1144,4 +1404,104 @@ private final class PageServer: @unchecked Sendable {
     func stop() {
         if socketFD >= 0 { close(socketFD); socketFD = -1 }
     }
+}
+
+/// Made-up apps and windows for hidden displays (`RunDisplays.Hands`), for the steps that settle what a run leaves:
+/// what the check says of them is all there is. Nothing real is read, moved, closed or quit, and none of their
+/// numbers is a real process or window.
+private final class MadeUpApps: @unchecked Sendable {
+    typealias Told = RunDisplayRules.Told
+    private let lock = NSLock()
+    private var alive: Set<pid_t> = []
+    private var changes: [pid_t: Told] = [:]
+    private var refusing: Set<pid_t> = []
+    private var owners: [CGWindowID: pid_t] = [:]
+    private var frames: [CGWindowID: CGRect] = [:]
+    private var states: [CGWindowID: (document: Told, modified: Told)] = [:]
+    private var moved: [CGWindowID: CGRect] = [:]
+    private var quits: [pid_t] = []
+    private var closes: [CGWindowID] = []
+    private var raises: [CGWindowID] = []
+    private var moveCount = 0
+    private var frontApp: pid_t?
+    private var still: TimeInterval = 600
+    private var nextApp: pid_t = 900_000
+    private var nextWindow: CGWindowID = 800_000
+
+    /// A made-up app that's running. `refusesQuit`: asked to quit, it stays (as one that asks to save).
+    func app(unsaved: Told = .no, refusesQuit: Bool = false) -> pid_t {
+        lock.withLock {
+            nextApp += 1
+            alive.insert(nextApp)
+            changes[nextApp] = unsaved
+            if refusesQuit { refusing.insert(nextApp) }
+            return nextApp
+        }
+    }
+
+    /// A made-up window of it, as `RunDisplays.track` takes one (its Accessibility element is never asked anything).
+    func window(of pid: pid_t, at frame: CGRect, document: Told = .no, modified: Told = .no) -> MadeUpWindow {
+        let number: CGWindowID = lock.withLock {
+            nextWindow += 1
+            owners[nextWindow] = pid
+            frames[nextWindow] = frame
+            states[nextWindow] = (document, modified)
+            return nextWindow
+        }
+        return MadeUpWindow(window: number, pid: pid, frame: frame)
+    }
+
+    func set(idle: TimeInterval) { lock.withLock { still = idle } }
+    func set(front: pid_t?) { lock.withLock { frontApp = front } }
+    func isRunning(_ pid: pid_t) -> Bool { lock.withLock { alive.contains(pid) } }
+    func placed(_ window: CGWindowID) -> CGRect? { lock.withLock { moved[window] } }
+    var askedToQuit: [pid_t] { lock.withLock { quits } }
+    var closed: [CGWindowID] { lock.withLock { closes } }
+    var raised: [CGWindowID] { lock.withLock { raises } }
+    var moves: Int { lock.withLock { moveCount } }
+
+    var hands: RunDisplays.Hands {
+        RunDisplays.Hands(
+            frame: { tracked in self.lock.withLock { self.frames[tracked.window] } },
+            exists: { tracked in self.lock.withLock { self.frames[tracked.window] != nil } },
+            state: { tracked in self.lock.withLock { self.states[tracked.window] ?? (.unknown, .unknown) } },
+            close: { tracked in
+                self.lock.withLock {
+                    self.closes.append(tracked.window)
+                    self.frames[tracked.window] = nil
+                }
+            },
+            place: { tracked, frame in
+                self.lock.withLock {
+                    guard self.frames[tracked.window] != nil else { return }
+                    self.frames[tracked.window] = frame
+                    self.moved[tracked.window] = frame
+                    self.moveCount += 1
+                }
+            },
+            raise: { tracked in self.lock.withLock { self.raises.append(tracked.window) } },
+            unsaved: { pid in self.lock.withLock { self.changes[pid] ?? .unknown } },
+            running: { pid in self.lock.withLock { self.alive.contains(pid) } },
+            quit: { pid in
+                self.lock.withLock {
+                    self.quits.append(pid)
+                    guard !self.refusing.contains(pid) else { return }
+                    self.alive.remove(pid)
+                    for (window, owner) in self.owners where owner == pid { self.frames[window] = nil }
+                }
+            },
+            front: { self.lock.withLock { self.frontApp } },
+            idle: { self.lock.withLock { self.still } },
+            pause: { _ in usleep(5_000) })
+    }
+}
+
+/// A made-up window, as `MadeUpApps` knows it.
+private struct MadeUpWindow {
+    let window: CGWindowID
+    let pid: pid_t
+    /// Where it was put at first (the window server's coordinates).
+    let frame: CGRect
+    /// As `RunDisplays.track` takes a window: its Accessibility element is this process's own, and never asked anything.
+    var item: (window: CGWindowID, pid: pid_t, element: AXUIElement) { (window, pid, AXUIElementCreateApplication(getpid())) }
 }

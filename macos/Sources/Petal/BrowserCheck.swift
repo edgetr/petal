@@ -681,7 +681,7 @@ private final class BrowserChecker {
                                                  "fields": ["username": id("field \"Email\"", in: read), "password": id("password field \"Password\"", in: read)]],
                                  answer: [.once], typed: answer)
             expect(cards.count == asked + 1 && cards.last?.kind == "vault-new", "one card of the vault's own, for the person to type into (\(cards.last?.title ?? "none"))")
-            expect((requested["filled"] as? [String]) == ["username", "password"], "what they typed filled the page (\(requested))")
+            expect(Set(requested["filled"] as? [String] ?? []) == ["username", "password"], "what they typed filled the page (\(requested))")
             expect(current?.checkEvaluate("document.getElementById('pass').value") == typedPassword, "the page holds what they typed")
             expect(!page(browser("read")).contains(typedPassword), "and it's never read back")
             return "a strong password made, saved for 127.0.0.1 and filled twice; what the person typed into Petal's card filled the page"

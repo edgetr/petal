@@ -104,6 +104,9 @@ final class ComputerUse {
         let fail: (String) -> Void
         /// Done in the background, with no pointer.
         var quiet = false
+        /// It waited for the person to leave its app (they were using it, and it needs real keys there) from then:
+        /// taken up again, its patience still counts from there.
+        var waitedFrom: Date?
         var appName: String { map.appName }
     }
 
@@ -259,8 +262,8 @@ final class ComputerUse {
                     }
                     guard let window = reading.window else { return fail("\(name) has no window open.") }
                     // Another run's display is none of this one's: nothing read there goes back.
-                    if self.app.displays.foreign(reading.windowFrame, to: caller) {
-                        return fail("\(name)'s window there belongs to another helper's work, on a display of its own: Petal keeps them apart.")
+                    if self.app.displays.foreign(reading.windowFrame, to: caller) || self.app.displays.foreign(window: reading.windowID, to: caller) {
+                        return fail("\(name)'s window there belongs to another helper's work, on a display of its own: Petal keeps them apart, and you never see or use its windows. For a window of your own in \(name), open a file or an address in it with petal_apps (it waits its turn for \(name) and says so).")
                     }
                     // On the caller's own display: worked on in the background, always.
                     let hidden = self.app.displays.holds(reading.windowFrame, for: caller)
@@ -403,8 +406,22 @@ final class ComputerUse {
     /// A job the reply may do now, or the first in an app it hasn't used yet (asked first).
     private func proceed(_ job: Job) {
         guard let session = sessions[job.caller], !session.stopped, !job.cancel.stopped else { return job.fail(whyStopped(job)) }
-        if session.apps.contains(job.bundle) { return enqueue(job) }
-        admit(job, session: session)
+        // Another run's window is never acted in, whatever a map says.
+        if app.displays.foreign(window: job.map.windowID, to: job.caller) { return job.fail(Self.anothers(job.appName)) }
+        // Two runs, one app: while another run uses this app on its display, this one waits its turn ("Waiting for
+        // TextEdit"), and hears when the other ends or lets it go. With no run on a display, it goes ahead at once.
+        app.displays.turn(job.caller, app: job.bundle, name: job.appName, hold: false) { [weak self] refused in
+            guard let self else { return }
+            if let refused { return job.fail(refused.words) }
+            // Stopped, or its turn ended, while it waited.
+            guard let session = self.sessions[job.caller], !session.stopped, !job.cancel.stopped else { return job.fail(self.whyStopped(job)) }
+            if session.apps.contains(job.bundle) { return self.enqueue(job) }
+            self.admit(job, session: session)
+        }
+    }
+
+    static func anothers(_ app: String) -> String {
+        "That window of \(app) belongs to another helper's work, on a display of its own: Petal keeps them apart. Nothing was done. Call petal_ui again."
     }
 
     /// The reply a vault call belongs to, taken as the call comes in (nil when that reply can't act): every later
@@ -765,6 +782,7 @@ final class ComputerUse {
         if job.cancel.stopped || sessions[job.caller]?.stopped == true { return whyStopped(job) }
         if let refusal = refusal(for: job.bundle, name: job.appName) { return refusal }
         if job.map.place != places[job.caller, default: 0] { return Self.moved }
+        if app.displays.foreign(window: job.map.windowID, to: job.caller) { return Self.anothers(job.appName) }
         guard let map = maps[job.caller], map.id == job.map.id, Date().timeIntervalSince(map.made) <= UIMap.lifetime else {
             return "The window was looked at again (or 5 minutes passed) since these ids. " + Acting.changed
         }
@@ -800,7 +818,7 @@ final class ComputerUse {
             agent.caption(job.caption, turn: agent.turn)
         }
         guard map.ownPlace else { return show(job, map) }
-        decide(job, map, since: Date())
+        decide(job, map, since: job.waitedFrom ?? Date())
     }
 
     /// A note acting on its own window: in the background, unless the person has that very window in front (then
@@ -885,13 +903,56 @@ final class ComputerUse {
                     _ = RunDisplays.move(item.element, pid: item.pid, to: display, index: next + offset, live: { !cancel.stopped })
                 }
             }
+            // What it needs reaches its app's window in front (real keys, the cursor, a menu): is the person in that app?
+            let personThere = outcome.needs == nil ? Background.Known.no : Acting.frontState(map.pid)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     if !opened.isEmpty { self.app.displays.track(opened, for: job.caller, bare: false) }
+                    // The person's own use of an app wins: on its own display, an act that needs the app out of
+                    // their hands waits for them to leave it, and says so, instead of being refused at once.
+                    if let reason = outcome.needs, !cancel.stopped,
+                       Background.personFirst(reason, hidden: map.hidden, untouched: outcome.untouched, appFront: personThere,
+                                              waited: Date().timeIntervalSince(since)) == .wait {
+                        return self.waitForPerson(job, reason, since: since)
+                    }
                     // The person came back to that window before anything changed: decided again, by the same
                     // rules (the pointer and its pause if it's in front now), within the same patience.
                     guard outcome.again else { return self.done(job, outcome) }
                     self.again(job, map, since: since)
+                }
+            }
+        }
+    }
+
+    /// The person is using the app a run needs real keys in (its window is on its own display, where a key, the
+    /// cursor or a menu would be theirs): nothing was done, and the act waits for them to leave that app. The line
+    /// moves on meanwhile (other chats' acts never wait for it), its note says "Waiting for TextEdit", and once they
+    /// leave it takes its turn in the line again; past `Background.personPatience` the AI is told as before.
+    private func waitForPerson(_ job: Job, _ reason: Background.Reason, since: Date) {
+        app.displays.personBusy(job.caller, app: job.appName)
+        finished()
+        waitsForPerson(job, reason, since: since)
+    }
+
+    private func waitsForPerson(_ job: Job, _ reason: Background.Reason, since: Date) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+            MainActor.assumeIsolated {
+                if let error = self.stale(job) {
+                    self.app.displays.personBusy(job.caller, app: nil)
+                    return job.fail(error)
+                }
+                let front = NSWorkspace.shared.frontmostApplication?.processIdentifier == job.map.pid
+                switch Background.personStill(appFront: front, waited: Date().timeIntervalSince(since)) {
+                case .wait:
+                    self.waitsForPerson(job, reason, since: since)
+                case .retry:
+                    self.app.displays.personBusy(job.caller, app: nil)
+                    var again = job
+                    again.waitedFrom = since
+                    self.enqueue(again)
+                case .tell:
+                    self.app.displays.personBusy(job.caller, app: nil)
+                    job.fail(reason.words(job.appName, hidden: true))
                 }
             }
         }
@@ -1573,6 +1634,8 @@ enum Acting {
         var copied: CopyMark?
         /// In the background, it can't be done without the window in front: nothing was done.
         var needs: Background.Reason?
+        /// With `needs`: decided before anything of the act was tried, so trying the whole act again later is safe.
+        var untouched = false
         /// In the background, the person came back to the note's window before anything changed: nothing was done,
         /// and it's decided again (Background.behind).
         var again = false

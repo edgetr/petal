@@ -550,6 +550,44 @@ struct BackgroundCheck {
                "a question for the person comes first")
         expect(NoteStatus.shows(NoteStatus.Facts(waitingForDisplay: true)), "it shows even between turns")
 
+        // MARK: Waiting for an app
+
+        let waitingApp = NoteStatus.Facts(running: true, activity: "Opening a file", waitingForApp: "TextEdit")
+        expect(NoteStatus.line(waitingApp) == "Waiting for TextEdit", "its turn for an app hasn't come", NoteStatus.line(waitingApp))
+        expect(NoteStatus.waiting(for: "") == "Waiting for an app", "an app with no name")
+        expect(NoteStatus.line(NoteStatus.Facts(running: true, waitingForDisplay: true, waitingForApp: "TextEdit")) == "Waiting for a display",
+               "waiting for a display comes first: without one it can't use the app either")
+        expect(NoteStatus.line(NoteStatus.Facts(running: true, asking: "Let Petal AI use TextEdit?", waitingForApp: "TextEdit")) == "Waiting for you: Let Petal AI use TextEdit?",
+               "a question for the person still comes before it")
+        expect(NoteStatus.shows(NoteStatus.Facts(waitingForApp: "TextEdit")), "it shows even between turns")
+        expect(!NoteStatus.needsYou(waitingApp), "waiting for an app isn't waiting for the person: no mark on the AI button")
+        expect(NoteStatus.line(NoteStatus.Facts(running: true, activity: "Reading")) == "Reading…", "with nothing to wait for, its step as before")
+
+        // MARK: The person's own use of an app wins
+
+        typealias First = Background.PersonFirst
+        expect(Background.personFirst(.keys, hidden: true, untouched: true, appFront: .yes, waited: 0) == First.wait,
+               "keys needed in the app the person is using: the run waits for them")
+        expect(Background.personFirst(.focus, hidden: true, untouched: true, appFront: .yes, waited: 30) == First.wait, "so does moving the cursor there")
+        expect(Background.personFirst(.menu, hidden: true, untouched: true, appFront: .yes, waited: 30) == First.wait, "and a menu")
+        expect(Background.personFirst(.keys, hidden: true, untouched: true, appFront: .yes, waited: Background.personPatience) == First.tell,
+               "past its patience the AI is told instead")
+        expect(Background.personFirst(.keys, hidden: true, untouched: true, appFront: .no, waited: 0) == First.tell,
+               "the person isn't in that app: waiting wouldn't help")
+        expect(Background.personFirst(.keys, hidden: true, untouched: true, appFront: .unknown, waited: 0) == First.tell, "Petal couldn't tell: never a wait on a guess")
+        expect(Background.personFirst(.keys, hidden: true, untouched: false, appFront: .yes, waited: 0) == First.tell,
+               "something of the act was already tried: it isn't done over")
+        expect(Background.personFirst(.keys, hidden: false, untouched: true, appFront: .yes, waited: 0) == First.tell,
+               "a note on the person's own window asks them to bring it forward, as before")
+        for reason in Background.Reason.allCases where ![.keys, .focus, .menu].contains(reason) {
+            expect(Background.personFirst(reason, hidden: true, untouched: true, appFront: .yes, waited: 0) == First.tell,
+                   "\(reason.rawValue) doesn't get better when the person leaves: told at once")
+        }
+        expect(Background.personStill(appFront: true, waited: 5) == First.wait, "still in that app: it goes on waiting")
+        expect(Background.personStill(appFront: false, waited: 5) == First.retry, "they left it: the act is tried again")
+        expect(Background.personStill(appFront: false, waited: Background.personPatience + 1) == First.retry, "even at the last moment")
+        expect(Background.personStill(appFront: true, waited: Background.personPatience) == First.tell, "still there past its patience: told")
+
         print("Background: \(passed) passed, \(failures) failed")
         if failures > 0 { exit(1) }
     }

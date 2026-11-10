@@ -1248,7 +1248,7 @@ final class RunBrowsers {
                 case .off: done(.failure(.init(RunBrowserRules.off)))
                 case .unavailable: done(.failure(.init("This Mac can't make a hidden display for Petal AI (macOS didn't allow it)." + none)))
                 case .placing: done(.failure(.init("macOS wouldn't keep a hidden display out of the pointer's way, so Petal made none." + none)))
-                case .ended: done(.failure(.init(why.words)))
+                case .ended, .circular, .turnEnded: done(.failure(.init(why.words)))
                 }
             case .success(let display): self.start(group, caller: caller, display: display, done)
             }

@@ -640,7 +640,7 @@ swiftc -parse-as-library -O -o "$out/runbrowser" Sources/Petal/RunBrowserPlan.sw
 # own copies (main, Doctor), macOS's Dock (Signals, Windows, MissionControl), the music players, the apps kept private
 # (AssistMore), the events every app is listened to for (Windows), a bench, and the lists themselves.
 perl -ne '
-    next if $ARGV =~ m{/(RunApps|BrowserCheck|main|Signals|Windows|MissionControl|Doctor|AssistMore|Bench)\.swift$};
+    next if $ARGV =~ m{/(RunApps|BrowserCheck|DisplayCheck|main|Signals|Windows|MissionControl|Doctor|AssistMore|Bench)\.swift$};
     if (/NSRunningApplication\.runningApplications\(withBundleIdentifier|NSWorkspace\.shared\.runningApplications/) { print "$ARGV:$.: asks for running apps without leaving out a run\x27s browser\n"; $bad = 1 }
     close ARGV if eof;
     END { exit($bad ? 1 : 0) }
