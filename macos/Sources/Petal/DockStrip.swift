@@ -405,8 +405,7 @@ final class AppStripView: NSView {
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        guard let dock, let tile = tile(at: convert(event.locationInWindow, from: nil)) else { return }
-        if let item = tile.item { Menus.app(item, in: dock) }
+        if let item = tile(at: convert(event.locationInWindow, from: nil))?.item { Menus.app(item) }
     }
 
     override func otherMouseDown(with event: NSEvent) {

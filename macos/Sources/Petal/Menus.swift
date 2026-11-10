@@ -36,16 +36,16 @@ enum Menus {
 
     /// An app's menu. Its windows (listed as the pointer reached the icon, or else now, off the main thread) and its
     /// recent files' icons are gathered first, for 150 ms at most: past that, the menu opens without what isn't in.
-    static func app(_ item: DockItem, in dock: ScreenDock) {
-        if Sites.isWeb(item.id) { return site(item, in: dock) }
+    static func app(_ item: DockItem) {
+        if Sites.isWeb(item.id) { return site(item) }
         let known = app.previews.knownWindows(item.id)
         let wantWindows = config.bool("quickActions") && item.running && known == nil
         let recent = config.bool("recentFiles") ? Apps.recent(item.id) : []
-        guard wantWindows || !recent.isEmpty else { return appMenu(item, in: dock, windows: known ?? [], icons: [:]) }
+        guard wantWindows || !recent.isEmpty else { return appMenu(item, windows: known ?? [], icons: [:]) }
         let once = Once()
         let open = { (windows: [AppWindow], icons: [URL: NSImage]) in
             guard once.first() else { return }
-            appMenu(item, in: dock, windows: windows, icons: icons)
+            appMenu(item, windows: windows, icons: icons)
         }
         let id = item.id
         openers.async {
@@ -62,7 +62,7 @@ enum Menus {
         func first() -> Bool { defer { done = true }; return !done }
     }
 
-    private static func appMenu(_ item: DockItem, in dock: ScreenDock, windows: [AppWindow], icons: [URL: NSImage]) {
+    private static func appMenu(_ item: DockItem, windows: [AppWindow], icons: [URL: NSImage]) {
         let menu = NSMenu()
         let name = Apps.name(item.id)
         var listed = false
@@ -112,7 +112,7 @@ enum Menus {
     }
 
     /// A website shortcut: open it, or take it out of the dock.
-    static func site(_ item: DockItem, in dock: ScreenDock) {
+    static func site(_ item: DockItem) {
         let menu = NSMenu()
         menu.addItem(header(Apps.name(item.id)))
         menu.addItem(ClosureMenuItem(title: "Open in Browser") { Sites.open(item.id) })

@@ -1249,7 +1249,7 @@ struct FinderButton: View {
                                  // Its windows forward; none open, a new one, as macOS's Dock does.
                                  if item.windows > 0 { app.docks.activate(item) } else { NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory())) }
                              },
-                             right: { Menus.app(item, in: dock) },
+                             right: { Menus.app(item) },
                              hover: { on in
                                  hovering = on
                                  app.tooltips.show(on ? "Finder" : nil, over: DockView.finderSlot, in: dock)
@@ -1408,7 +1408,7 @@ struct AppSlot: View {
         .slotFrame(dock, item.id)
         .slotMouse(SlotMouse(
             left: { app.popups.closeAll(); app.docks.activate(item) },
-            right: { Menus.app(item, in: dock) },
+            right: { Menus.app(item) },
             middle: { app.docks.newWindow(item.id) },
             hover: { on in
                 hovering = on
