@@ -2,8 +2,10 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// The first launch: bring macOS's Dock along, let Petal see windows, then Petal takes the Dock's place.
-/// "Not now" keeps macOS's Dock; Petal's settings can switch any time.
+/// The first launch: what Petal is, as its four parts in their colors, then only what has to be decided now (the
+/// Dock's apps, which AI, seeing windows, opening at login). "Use Petal" takes the Dock's place; "Keep macOS's Dock"
+/// leaves it, and Petal's settings can switch any time. Everything else Petal may be allowed (pictures of windows,
+/// browsers' tabs, what's playing) is asked where it's first used, never here.
 @MainActor
 final class Welcome {
     private var window: NSWindow?
@@ -11,7 +13,7 @@ final class Welcome {
 
     func show() {
         PetalApp.shared.refreshSystemFacts()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: WelcomeView.height),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: WelcomeView.width, height: WelcomeView.height),
                               styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
@@ -30,70 +32,49 @@ struct WelcomeView: View {
     let done: () -> Void
     @State private var bringDock = true
     @State private var atLogin = true
-    /// Checked every second; the window draws again only when one changes.
+    /// Checked every second; the window draws again only when it changes.
     @State private var trusted = Windows.trusted
-    @State private var capture = Capture.allowed
-    @State private var askingBrowsers = false
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
-    private let browsersTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
-    static let height: CGFloat = 780
+    static let width: CGFloat = 640
+    static let height: CGFloat = 524
 
     var body: some View {
-        let accent = SettingsSection.dock.tint
         ZStack {
             Backdrop()
-            VStack(spacing: 14) {
-                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 84, height: 84)
-                    .shadow(color: .black.opacity(0.35), radius: 20, y: 10)
-                VStack(spacing: 6) {
-                    Text("Meet Petal").font(.system(size: 32, weight: .bold))
-                    Text("A dock with your notes on it, and AI built in if you want it.")
-                        .font(.system(size: 14)).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 14) {
+                    Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 48, height: 48)
+                    Text("Meet Petal").font(.system(size: TextSize.large, weight: .bold))
                 }
-                GlassEffectContainer(spacing: 12) {
-                    VStack(spacing: 12) {
-                        step(symbol: "dock.rectangle", title: "Bring your Dock along",
-                             detail: "Your Dock's apps become Petal's, in the same order, and its folders become stacks.") {
-                            Toggle("", isOn: $bringDock).toggleStyle(.switch).labelsHidden()
-                        } extra: {
-                            HStack(spacing: -6) {
-                                ForEach(app.systemDockApps.prefix(10), id: \.self) { id in
-                                    Image(nsImage: Apps.icon(id)).resizable().frame(width: 30, height: 30)
-                                }
-                            }
+                FourParts().padding(.top, 20)
+                VStack(spacing: 0) {
+                    WelcomeRow(title: "Bring your Dock along") {
+                        Image(systemName: "dock.rectangle")
+                    } trailing: {
+                        DockIcons()
+                        Toggle("", isOn: $bringDock).toggleStyle(.switch).labelsHidden().controlSize(.small)
+                    }
+                    ProviderList()
+                    WelcomeRow(title: "Let Petal see your windows") {
+                        Image(systemName: "macwindow.on.rectangle")
+                    } trailing: {
+                        if trusted {
+                            Label("Allowed", systemImage: "checkmark.circle.fill")
+                                .font(.system(size: TextSize.callout, weight: .medium)).foregroundStyle(.green)
+                        } else {
+                            Button("Allow…") { Windows.askForPermission() }.buttonStyle(.glass).controlSize(.small)
                         }
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                Text("AI").font(.system(size: 14, weight: .semibold))
-                                Text("Optional. Without it, Petal is still a whole dock.").font(.system(size: 12)).foregroundStyle(.secondary)
-                            }
-                            ProviderList()
-                        }
-                        .padding(14).frame(width: 520).glassEffect(.regular, in: .rect(cornerRadius: 20))
-                        step(symbol: "macwindow.on.rectangle", title: "Let Petal see your windows",
-                             detail: "For window lists, badges and notes on windows. macOS asks once.") {
-                            if trusted {
-                                Label("Allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 12, weight: .medium))
-                            } else {
-                                Button("Allow…") { Windows.askForPermission() }.buttonStyle(.glass)
-                            }
-                        } extra: { EmptyView() }
-                        step(symbol: "safari", title: "Let Petal see your tabs",
-                             detail: "Optional. Which site a tab is on, for notes on a tab and for Petal AI. Each browser asks once.") {
-                            BrowserAccessButton(asking: $askingBrowsers)
-                        } extra: { EmptyView() }
-                        step(symbol: "rectangle.dashed.badge.record", title: "Window previews",
-                             detail: "Optional. A still of each window when you hover its app.") {
-                            if capture {
-                                Label("Allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 12, weight: .medium))
-                            } else {
-                                Button("Allow…") { Capture.askForPermission() }.buttonStyle(.glass)
-                            }
-                        } extra: { EmptyView() }
+                    }
+                    WelcomeRow(title: "Open Petal at login") {
+                        Image(systemName: "power")
+                    } trailing: {
+                        Toggle("", isOn: $atLogin).toggleStyle(.switch).labelsHidden().controlSize(.small)
                     }
                 }
-                Toggle("Open Petal at login", isOn: $atLogin).toggleStyle(.switch).controlSize(.small)
+                .padding(.top, 12)
+                Spacer(minLength: 0)
                 HStack(spacing: 12) {
+                    Spacer()
                     Button("Keep macOS’s Dock") {
                         app.config.setDock("welcomed", true)
                         app.useDock("macos")
@@ -109,21 +90,20 @@ struct WelcomeView: View {
                         done()
                     }
                     .buttonStyle(.glassProminent)
-                    .tint(accent)
+                    .tint(Part.dock.color)
                     .controlSize(.large)
                     .keyboardShortcut(.defaultAction)
                 }
-                Text("You can switch back any time in Petal’s settings.").font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            .padding(28)
+            .padding(.horizontal, WelcomeLook.margin)
+            .padding(.top, 44)
+            .padding(.bottom, 24)
         }
-        .frame(width: 640, height: Self.height)
+        .frame(width: Self.width, height: Self.height)
         .onReceive(timer) { _ in
-            let nowTrusted = Windows.trusted, nowCapture = Capture.allowed
-            if nowTrusted != trusted { trusted = nowTrusted }
-            if nowCapture != capture { capture = nowCapture }
+            let now = Windows.trusted
+            if now != trusted { trusted = now }
         }
-        .onReceive(browsersTimer) { _ in app.browsers.refresh() }
         .task {
             // Start with the AIs already on this Mac switched on, and none otherwise: it's optional.
             guard !Headless.on else { return }   // a benchmark changes no setting by itself
@@ -132,50 +112,153 @@ struct WelcomeView: View {
             app.aiSetup.refreshAll()
         }
     }
+}
 
-    private func step<Trailing: View, Extra: View>(symbol: String, title: String, detail: String,
-                                                    @ViewBuilder trailing: () -> Trailing, @ViewBuilder extra: () -> Extra) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 14) {
-                Image(systemName: symbol).font(.system(size: 18)).frame(width: 40, height: 40).glassEffect(.regular, in: .circle)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.system(size: 14, weight: .semibold))
-                    Text(detail).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer()
-                trailing()
+/// The welcome's measures, shared by its rows and the AI apps' rows (which Settings lists too).
+enum WelcomeLook {
+    static let margin: CGFloat = 32
+    static let rowHeight: CGFloat = 38
+    static let mark: CGFloat = 20
+}
+
+/// The Dock's own apps, small, in its order: what "Bring your Dock along" brings.
+struct DockIcons: View {
+    @Environment(PetalApp.self) private var app
+    @Environment(\.snapshotting) private var snapshotting
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(app.systemDockApps.prefix(10), id: \.self) { id in
+                Image(nsImage: snapshotting ? Self.flat(Apps.icon(id)) : Apps.icon(id)).resizable().frame(width: 24, height: 24)
             }
-            extra()
         }
-        .padding(14)
-        .frame(width: 520)
-        .glassEffect(.regular, in: .rect(cornerRadius: 20))
+    }
+
+    /// An icon as plain pixels, for `Petal --snapshot` only: macOS's own icon images, drawn off-screen as they are
+    /// on a Mac set to tinted icons, wash the whole drawing out.
+    static func flat(_ icon: NSImage) -> NSImage {
+        let side = 96
+        guard let pixels = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side, bitsPerSample: 8, samplesPerPixel: 4,
+                                            hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return icon }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: pixels)
+        icon.draw(in: NSRect(x: 0, y: 0, width: side, height: side))
+        NSGraphicsContext.restoreGraphicsState()
+        let flat = NSImage(size: NSSize(width: 24, height: 24))
+        flat.addRepresentation(pixels)
+        return flat
     }
 }
 
-/// Allowed, Allow…, or Open Settings… for a browser that said no. Each browser asks once, from this button only.
-struct BrowserAccessButton: View {
-    @Environment(PetalApp.self) private var app
-    @Binding var asking: Bool
+/// Petal's four parts as one strip of four colors, as the site's first screen has them: each part's mark, its name
+/// and three words at most.
+struct FourParts: View {
+    static let parts: [(part: Part, name: String, words: String)] = [
+        (.notes, "Notes", "Stick to anything"),
+        (.ai, "Petal AI", "Asks before acting"),
+        (.vault, "A vault", "Logins, cards, keys"),
+        (.dock, "A dock", "Replaces your Dock"),
+    ]
 
     var body: some View {
-        let browsers = app.browsers
-        if asking {
-            ProgressView().controlSize(.small)
-        } else if !browsers.refused.isEmpty {
-            Button("Open Settings…") {
-                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") { NSWorkspace.shared.open(url) }
+        HStack(spacing: 0) {
+            ForEach(Self.parts, id: \.part) { item in
+                VStack(alignment: .leading, spacing: 2) {
+                    PartMark(part: item.part, size: 26)
+                    Spacer(minLength: 0)
+                    Text(item.name).font(.system(size: TextSize.subtitle, weight: .semibold))
+                    Text(item.words).font(.system(size: TextSize.callout, weight: .medium)).lineLimit(1)
+                }
+                .foregroundStyle(item.part.onColor)
+                .padding(14)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                .background(item.part.color)
             }
-            .buttonStyle(.glass)
-        } else if browsers.allAllowed || Browsers.installed().isEmpty {
-            Label("Allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 12, weight: .medium))
-        } else {
-            Button("Allow…") {
-                asking = true
-                browsers.askAll { asking = false }
-            }
-            .buttonStyle(.glass)
         }
+        .frame(height: 128)
+        .clipShape(.rect(cornerRadius: Radius.card))
+    }
+}
+
+/// A part's line mark, the one the site's dock shows for it (notes, Petal AI, the vault, the dock), drawn in the
+/// site's 24-point box and scaled to `size`; it takes the color of the text around it.
+struct PartMark: View {
+    let part: Part
+    var size: CGFloat = 24
+
+    var body: some View {
+        let scale = size / 24
+        let fit = CGAffineTransform(scaleX: scale, y: scale)
+        ZStack {
+            Self.lines(part).applying(fit).stroke(style: StrokeStyle(lineWidth: 1.7 * scale, lineCap: .round, lineJoin: .round))
+            Self.solid(part).applying(fit).fill()
+        }
+        .frame(width: size, height: size)
+    }
+
+    /// What's drawn as a line.
+    static func lines(_ part: Part) -> Path {
+        var path = Path()
+        switch part {
+        case .notes:   // a paper with its corner folded
+            path.move(to: CGPoint(x: 6, y: 5))
+            path.addLine(to: CGPoint(x: 18, y: 5))
+            path.addLine(to: CGPoint(x: 18, y: 14))
+            path.addLine(to: CGPoint(x: 13.5, y: 19))
+            path.addLine(to: CGPoint(x: 6, y: 19))
+            path.closeSubpath()
+            path.move(to: CGPoint(x: 18, y: 14))
+            path.addLine(to: CGPoint(x: 13.5, y: 14))
+            path.addLine(to: CGPoint(x: 13.5, y: 19))
+        case .vault:   // a key
+            path.addEllipse(in: CGRect(x: 5, y: 12, width: 7, height: 7))
+            path.move(to: CGPoint(x: 11, y: 13))
+            path.addLine(to: CGPoint(x: 18.5, y: 5.5))
+            path.move(to: CGPoint(x: 15.5, y: 8.5))
+            path.addLine(to: CGPoint(x: 18, y: 11))
+        case .dock:    // the dock's bar
+            path.addRoundedRect(in: CGRect(x: 3.5, y: 12.5, width: 17, height: 6.5), cornerSize: CGSize(width: 3.25, height: 3.25))
+        default: break
+        }
+        return path
+    }
+
+    /// What's drawn filled.
+    static func solid(_ part: Part) -> Path {
+        var path = Path()
+        switch part {
+        case .ai:      // Petal's own pointer
+            path.move(to: CGPoint(x: 6.5, y: 3.5))
+            path.addLine(to: CGPoint(x: 6.5, y: 18.7))
+            path.addLine(to: CGPoint(x: 10.6, y: 14.9))
+            path.addLine(to: CGPoint(x: 12.8, y: 20.4))
+            path.addLine(to: CGPoint(x: 15.6, y: 19.2))
+            path.addLine(to: CGPoint(x: 13.4, y: 14))
+            path.addLine(to: CGPoint(x: 18.3, y: 14.2))
+            path.closeSubpath()
+        case .dock:    // three apps on the bar
+            for x in [7.8, 12, 16.2] { path.addEllipse(in: CGRect(x: x - 1.2, y: 14.55, width: 2.4, height: 2.4)) }
+        default: break
+        }
+        return path
+    }
+}
+
+/// One line of the welcome: a small mark, what it is, and its one control at the end.
+struct WelcomeRow<Mark: View, Trailing: View>: View {
+    let title: String
+    @ViewBuilder var mark: Mark
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        HStack(spacing: 12) {
+            mark.font(.system(size: TextSize.heading)).foregroundStyle(.secondary)
+                .frame(width: WelcomeLook.mark, height: WelcomeLook.mark)
+            Text(title).font(.system(size: TextSize.body, weight: .medium))
+            Spacer(minLength: 12)
+            trailing
+        }
+        .frame(height: WelcomeLook.rowHeight)
     }
 }
 
@@ -193,45 +276,57 @@ struct ProviderRow: View {
         case .signedOut, .ready: app.usesAPIKey(provider) ? app.apiKeyCheck.savedKey(provider) != nil : nil
         default: nil
         }
-        HStack(spacing: 14) {
-            ProviderMark(provider: provider).frame(width: 20, height: 20).frame(width: 40, height: 40).glassEffect(.regular, in: .circle)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(provider.name).font(.system(size: 14, weight: .semibold))
-                Text(!on ? provider.plan : keyed.map { $0 ? "Uses your \(provider.keyMaker) API key." : "Add your \(provider.keyMaker) API key to use it." } ?? detail(state))
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer()
-            if on, let keyed {
-                Image(systemName: keyed ? "checkmark.circle.fill" : "key").foregroundStyle(keyed ? .green : .secondary)
-            } else if on {
-                switch state {
-                case .checking, .installing, .signingIn:
-                    ProgressView().controlSize(.small)
-                case .missing:
-                    Button("Install") { setup.install(provider) }.buttonStyle(.glassProminent).tint(SettingsSection.claude.tint)
-                case .signedOut:
-                    Button("Sign in…") { setup.signIn(provider) }.buttonStyle(.glassProminent).tint(SettingsSection.claude.tint)
-                case .failed:
-                    Button("Try again") { setup.refresh(provider) }.buttonStyle(.glass)
-                case .ready:
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                }
-            }
+        HStack(spacing: 12) {
+            ProviderMark(provider: provider).frame(width: WelcomeLook.mark, height: WelcomeLook.mark)
+            Text(provider.name).font(.system(size: TextSize.body, weight: .medium))
+            Spacer(minLength: 12)
+            if on { ProviderStatus(provider: provider, state: state, keyed: keyed) }
             Toggle("", isOn: $on).toggleStyle(.switch).labelsHidden().controlSize(.small)
+        }
+        .frame(height: WelcomeLook.rowHeight)
+    }
+}
+
+/// Where an AI app that's switched on stands, in a few words at most, and the one thing to do next.
+struct ProviderStatus: View {
+    @Environment(PetalApp.self) private var app
+    let provider: Provider
+    let state: AISetup.State
+    /// On an API key: whether one is saved (nil: it uses the person's own sign-in).
+    let keyed: Bool?
+
+    var body: some View {
+        let setup = app.aiSetup
+        if let keyed {
+            said(keyed ? "\(provider.keyMaker) API key" : "Needs your \(provider.keyMaker) API key")
+            Image(systemName: keyed ? "checkmark.circle.fill" : "key").foregroundStyle(keyed ? .green : .secondary)
+        } else {
+            switch state {
+            case .checking:
+                ProgressView().controlSize(.small)
+            case .installing:
+                said("Installing…")
+                ProgressView().controlSize(.small)
+            case .signingIn:
+                said("Finish in your browser")
+                ProgressView().controlSize(.small)
+            case .missing:
+                Button("Install") { setup.install(provider) }.buttonStyle(.glassProminent).tint(Part.ai.color).controlSize(.small)
+            case .signedOut:
+                Button("Sign in…") { setup.signIn(provider) }.buttonStyle(.glassProminent).tint(Part.ai.color).controlSize(.small)
+            case .failed(let text):
+                said(text)
+                Button("Try again") { setup.refresh(provider) }.buttonStyle(.glass).controlSize(.small)
+            case .ready(let email):
+                if !email.isEmpty { said(email) }
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            }
         }
     }
 
-    private func detail(_ state: AISetup.State) -> String {
-        switch state {
-        case .checking: "Looking for \(provider.appName)…"
-        case .missing: "Petal installs \(provider.appName) for you. \(provider.plan)"
-        case .installing: "Installing \(provider.appName)…"
-        case .signedOut: "Sign in with your own account. \(provider.plan)"
-        case .signingIn: "Finish signing in in your browser."
-        case .ready(let email): email.isEmpty ? "Ready." : "Signed in as \(email)."
-        case .failed(let text): text
-        }
+    private func said(_ text: String) -> some View {
+        Text(text).font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
+            .lineLimit(2).multilineTextAlignment(.trailing).truncationMode(.middle)
     }
 }
 
@@ -240,7 +335,7 @@ struct ProviderList: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 0) {
             ForEach(Provider.allCases) { provider in
                 ProviderRow(provider: provider, on: Binding(
                     get: { app.providers.contains(provider) },
