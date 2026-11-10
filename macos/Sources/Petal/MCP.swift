@@ -1,10 +1,9 @@
 import Foundation
 
-/// Claude's Petal tools on macOS: `Petal --mcp` speaks the Model Context Protocol on stdin and stdout, so a Mac
-/// needs nothing installed for them (petal-mcp.py would need python3, which a Mac only has with Apple's developer
-/// tools). The tools' names, descriptions and settings come from petal-mcp.py (the ones the Mac has: modes and
-/// their tools are Omarchy's), written into the app by build.sh as Resources/mcp/tools.json, so both platforms
-/// describe them the same way; what each tool does on a Mac is here, as in petal-mcp.py's macOS branch.
+/// Petal's tools for the AI: `Petal --mcp` speaks the Model Context Protocol on stdin and stdout, so nothing needs
+/// installing for them. Each tool's name, description and input schema is in Resources/mcp/tools.json (in the
+/// repository at macos/Resources/mcp/tools.json), served as it is; the settings they list and change are
+/// `Settings`; what each tool does is here.
 enum MCP {
     static let folder = Config.folder
     static let settingsFile = folder.appending(path: "settings.json")
@@ -12,13 +11,13 @@ enum MCP {
     /// The running Petal's socket (`PETAL_SOCKET` points a client at another, for testing).
     static let socket = ProcessInfo.processInfo.environment["PETAL_SOCKET"].flatMap { $0.isEmpty ? nil : $0 } ?? folder.appending(path: "petal.sock").path
 
-    static let description: [String: Any] = {
+    /// The tools as `tools/list` gives them.
+    static let tools: [[String: Any]] = {
         guard let url = Bundle.main.url(forResource: "tools", withExtension: "json", subdirectory: "mcp"),
               let data = try? Data(contentsOf: url),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
-        return object
+              let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        return list
     }()
-    static var schema: [String: [Any]] { description["settings"] as? [String: [Any]] ?? [:] }
 
     static func run() -> Never {
         while let line = readLine(strippingNewline: true) {
@@ -46,7 +45,7 @@ enum MCP {
                     "serverInfo": ["name": "petal", "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? ""],
                     "instructions": "Tools to customize the Petal dock. Call petal_get_state first."]
         case "tools/list":
-            return ["tools": description["tools"] ?? []]
+            return ["tools": tools]
         case "tools/call":
             let name = params["name"] as? String ?? ""
             let arguments = params["arguments"] as? [String: Any] ?? [:]
@@ -84,9 +83,9 @@ enum MCP {
             let settings = read(settingsFile) ?? [:]
             var effective: [String: Any] = [:]
             var help: [String: Any] = [:]
-            for (key, entry) in schema {
-                effective[key] = settings[key] ?? entry.first ?? NSNull()
-                help[key] = entry.count > 1 ? entry[1] : ""
+            for setting in Settings.forTools {
+                effective[setting.key] = settings[setting.key] ?? setting.fallback.value
+                help[setting.key] = setting.help
             }
             let dock = read(dockFile) ?? [:]
             let environment = ProcessInfo.processInfo.environment
@@ -95,12 +94,12 @@ enum MCP {
                              "autohide": dock["autoHide"] ?? false, "dock": dock["dock"] ?? "petal"],
                     "files": ["settings": settingsFile.path, "dock": dockFile.path,
                               "instructions": folder.appending(path: "instructions.md").path,
-                              "plugin_source": Personal.sourceForAgents ?? environment["PETAL_SOURCE"] ?? "",
+                              "source": Personal.sourceForAgents ?? environment["PETAL_SOURCE"] ?? "",
                               "app": environment["PETAL_APP"] ?? Bundle.main.bundlePath],
                     "personal": ["source": Personal.source.path, "set_up": Personal.exists, "how": Personal.how]]
         case "petal_set_settings":
             let changes = args["settings"] as? [String: Any] ?? [:]
-            let unknown = changes.keys.filter { schema[$0] == nil }.sorted()
+            let unknown = changes.keys.filter { Settings.named($0)?.forTools != true }.sorted()
             guard unknown.isEmpty else { throw Failure("Unknown settings: \(unknown.joined(separator: ", ")). Use petal_get_state to see them all.") }
             // What Petal AI may do unasked, and what it may look at, are the person's to widen, never the AI's.
             let current = read(settingsFile) ?? [:]
@@ -120,7 +119,7 @@ enum MCP {
             }
             if changes.keys.contains("aiAllowed"), !(changes["aiAllowed"] is [String]) { throw Failure("aiAllowed is a list.") }
             if let hidden = changes["aiNeverLook"] as? [String] {
-                let had = Set(current["aiNeverLook"] as? [String] ?? (schema["aiNeverLook"]?.first as? [String] ?? []))
+                let had = Set(current["aiNeverLook"] as? [String] ?? Settings.defaults["aiNeverLook"] as? [String] ?? [])
                 if !had.isSubset(of: Set(hidden)) { throw Failure("Only the person can take an app off the private list, in Petal's settings.") }
             }
             try update(settingsFile) { $0.merge(changes) { _, new in new } }
@@ -131,8 +130,8 @@ enum MCP {
             // turn back on.
             try update(settingsFile) { settings in
                 let off = !computerUseOn(settings)
-                for key in asked.isEmpty ? Array(schema.keys) : asked where key != "claudePath" && key != "aiNeverLook" && !(off && key == "computerUse") {
-                    if let entry = schema[key] { settings[key] = entry.first }
+                for key in asked.isEmpty ? Settings.forTools.map(\.key) : asked where key != "aiNeverLook" && !(off && key == "computerUse") {
+                    if let setting = Settings.named(key), setting.forTools { settings[key] = setting.fallback.value }
                 }
             }
             return ["ok": true, "reset": asked.isEmpty ? "all" as Any : asked as Any]
@@ -199,7 +198,7 @@ enum MCP {
 
     /// Using apps is on in these settings (missing: its default, on).
     private static func computerUseOn(_ settings: [String: Any]) -> Bool {
-        settings["computerUse"] as? Bool ?? (schema["computerUse"]?.first as? Bool ?? true)
+        settings["computerUse"] as? Bool ?? Settings.defaults["computerUse"] as? Bool ?? true
     }
 
     // MARK: Files
@@ -232,7 +231,7 @@ enum MCP {
         return String(decoding: data, as: UTF8.self)
     }
 
-    /// Runs `body` holding ~/.config/petal/.lock (shared with petal-mcp.py), so two processes changing the files
+    /// Runs `body` holding ~/.config/petal/.lock, so two processes changing the files
     /// while Petal isn't running take turns: each reads, changes and writes inside it.
     static func locked<T>(_ body: () throws -> T) throws -> T {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -275,7 +274,7 @@ enum MCP {
 
     // MARK: The running Petal
 
-    /// Asks the running Petal over its socket, as petal-mcp.py does.
+    /// Asks the running Petal over its socket.
     static func petal(_ args: String...) -> String { petal(args) }
 
     /// `timeout`: seconds to wait for the answer, or for the next sign Petal is still waiting on the person (nil waits

@@ -84,7 +84,7 @@ final class MenuBar: NSObject, NSMenuDelegate {
 
     // MARK: The mark
 
-    /// Petal's five petals (plugin/assets/petal.svg, without its tile) as a template image, so macOS colors it like
+    /// Petal's five petals (the icon's, without its tile: brand/icon.py) as a template image, so macOS colors it like
     /// the menu bar's own icons; when an update is ready, in blue with a dot.
     static func mark(dot: Bool) -> NSImage {
         let petals: [[CGFloat]] = [

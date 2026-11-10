@@ -1,14 +1,13 @@
 import AppKit
 import Observation
 
-/// Petal's files in ~/.config/petal, the same folder as on Omarchy:
-/// - settings.json: the settings both platforms share, with Omarchy's defaults (`defaults` here lists the keys the
-///   Mac reads; Dock.qml's JsonAdapter and SETTINGS_SCHEMA in petal-mcp.py list them too, with Omarchy's own).
+/// Petal's files in ~/.config/petal:
+/// - settings.json: the settings (`Settings` lists every one, with its default and what it does).
 /// - dock.json: the dock itself. Its apps in the order they show (`apps`: bundle identifiers and https://
-///   addresses), what Omarchy keeps in its own shell config (where the dock sits, auto-hide), and the Mac's own
-///   choices: which dock (Petal or macOS's), opening at login, whether the first-run welcome was seen.
+///   addresses), where the dock sits and whether it hides, and the person's other choices: which dock (Petal or
+///   macOS's), opening at login, whether the first-run welcome was seen.
 /// Each is read again within a second of changing on disk, whoever changed it (the settings window, Claude, an editor).
-/// The Mac has one dock and no modes: a modes.json from before is moved over once, at launch (ModesMigration).
+/// A modes.json from when Petal had focus modes is moved over once, at launch (ModesMigration).
 @MainActor @Observable
 final class Config {
     /// `PETAL_CONFIG_DIR` points Petal at another folder, for benchmarks and tests that must never touch the real one.
@@ -25,23 +24,6 @@ final class Config {
     @ObservationIgnored let settingsFile = folder.appending(path: "settings.json")
     @ObservationIgnored let dockFile = folder.appending(path: "dock.json")
     @ObservationIgnored let instructionsFile = folder.appending(path: "instructions.md")
-
-    static let defaults: [String: Any] = [
-        "dockColor": "", "dockOpacity": 0.45, "dockBorderColor": "#ffffff", "dockBorderOpacity": 0.28, "dockRadius": -1,
-        "dockSheen": true, "dockMargin": -1, "iconSize": 36, "iconPadding": -1, "idleOpacity": 0.7, "separators": true,
-        "hoverLiftAmount": 0.05, "glowStrength": 1.0, "accentColor": "", "popupColor": "", "popupOpacity": 0.74,
-        "font": "Adwaita Sans", "tooltips": true, "hoverLift": true, "appGlow": true, "thisWorkspaceOnly": true,
-        "previews": true, "minimized": true, "badges": true, "bounce": true, "progress": true, "quickActions": true,
-        "recentFiles": true, "dropToOpen": true, "nowPlaying": true, "stacks": true,
-        "stackFolders": ["~/Downloads", "~/Pictures/Screenshots"], "trash": true,
-        "tiling": false, "tilingGaps": 8, "tilingFloat": [String](), "ai": true, "claudeUsage": true, "autoUpdate": true,
-        "claudePath": "", "chatModel": "sonnet", "chatEffort": "medium", "claudeAccess": "auto",
-        "aiProviders": ["claude"], "otherAgents": true, "aiMemory": true, "aiAllowed": [Any](), "finderInDock": true, "chatWhileWorking": "steer", "selectionAsk": true, "notes": true, "notesPad": true, "notesLook": "paper", "notesFolder": "", "notesNotebook": "Inbox", "routines": true, "computerUse": true,
-        "aiNeverLook": ["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"],
-        "shortcuts": true,
-        "magnification": false, "magnificationAmount": 0.5, "menuBarIcon": true, "chatProvider": "claude", "codexModel": "", "codexEffort": "medium", "codexPath": "",
-        "claudeAuth": "subscription", "codexAuth": "subscription",
-    ]
 
     /// settings.json as Petal has it. Reading it whole watches every setting; `bool`, `string` and the rest watch
     /// only their own, so a switch changing draws again only what shows that setting.
@@ -90,14 +72,14 @@ final class Config {
 
     // MARK: Settings
 
-    func bool(_ key: String) -> Bool { watch(key); return values[key] as? Bool ?? Self.defaults[key] as? Bool ?? false }
+    func bool(_ key: String) -> Bool { watch(key); return values[key] as? Bool ?? Settings.defaults[key] as? Bool ?? false }
     func number(_ key: String) -> Double {
         watch(key)
-        return (values[key] as? NSNumber)?.doubleValue ?? (Self.defaults[key] as? NSNumber)?.doubleValue ?? 0
+        return (values[key] as? NSNumber)?.doubleValue ?? (Settings.defaults[key] as? NSNumber)?.doubleValue ?? 0
     }
-    func string(_ key: String) -> String { watch(key); return values[key] as? String ?? Self.defaults[key] as? String ?? "" }
-    func strings(_ key: String) -> [String] { watch(key); return values[key] as? [String] ?? Self.defaults[key] as? [String] ?? [] }
-    func value(_ key: String) -> Any? { watch(key); return values[key] ?? Self.defaults[key] }
+    func string(_ key: String) -> String { watch(key); return values[key] as? String ?? Settings.defaults[key] as? String ?? "" }
+    func strings(_ key: String) -> [String] { watch(key); return values[key] as? [String] ?? Settings.defaults[key] as? [String] ?? [] }
+    func value(_ key: String) -> Any? { watch(key); return values[key] ?? Settings.defaults[key] }
 
     /// Changes one setting; everything else in settings.json stays as it was.
     func set(_ key: String, _ value: Any) {

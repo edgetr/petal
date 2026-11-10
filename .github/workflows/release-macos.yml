@@ -1,8 +1,9 @@
-# Push a tag like macos-v1.0.0 (matching macos/VERSION) to publish Petal for macOS.
-# Builds Petal.app, zips it, writes latest-macos.json (what the
-# Mac updater and get.sh read), and creates the GitHub Release with macos/notes/<version>.md as its text. Uses only the workflow's own GITHUB_TOKEN.
+# Push a tag like macos-v2.0.2 (matching macos/VERSION) to publish Petal.
+# Builds Petal.app, zips it, writes latest-macos.json (what Petal's updater and get.sh read), and creates the GitHub
+# Release with macos/notes/<version>.md as its text, marked as the latest. Then it deletes every release older than
+# the newest three (their git tags stay). Uses only the workflow's own GITHUB_TOKEN.
 #
-# The release is never marked "latest": Omarchy's updater reads the latest release, which must stay a Linux one.
+# Petal finds its releases by the macos-v tag and the latest-macos.json asset: neither name may change.
 name: Release macOS
 
 on:
@@ -75,4 +76,18 @@ jobs:
           # The release's text is What's New in the app: macos/notes/<version>.md when there is one.
           if [ -f "macos/notes/$v.md" ]; then notes=(--notes-file "macos/notes/$v.md"); else notes=(--generate-notes); fi
           gh release create "$GITHUB_REF_NAME" "dist/Petal-$v-macos.zip" dist/latest-macos.json \
-            --title "Petal for macOS $v" "${notes[@]}" --latest=false
+            --title "Petal for macOS $v" "${notes[@]}" --latest
+
+      # Only the newest three releases are kept, by creation date. A deleted release's git tag stays: `petal personal`
+      # takes a version's source from its tag.
+      - name: Keep the newest three releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          old="$(gh release list --limit 200 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("macos-v"))] | sort_by(.createdAt) | reverse | .[3:] | .[].tagName')"
+          for tag in $old; do
+            echo "Deleting the release $tag (its tag stays)"
+            gh release delete "$tag" --yes
+          done

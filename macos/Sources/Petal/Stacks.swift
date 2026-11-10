@@ -33,7 +33,8 @@ enum Stacks {
         return path.hasPrefix(NSHomeDirectory()) ? "~" + path.dropFirst(NSHomeDirectory().count) : path
     }
 
-    /// Omarchy's default folders, translated: ~/Pictures/Screenshots is where macOS keeps screenshots instead.
+    /// The folders that exist. `stackFolders`' default names ~/Pictures/Screenshots: on a Mac without that folder it
+    /// stands for where macOS saves screenshots.
     static func resolve(_ folders: [String]) -> [String] {
         folders.map { $0 == "~/Pictures/Screenshots" && !FileManager.default.fileExists(atPath: url($0).path) ? screenshotsFolder : $0 }
             .filter { FileManager.default.fileExists(atPath: url($0).path) }

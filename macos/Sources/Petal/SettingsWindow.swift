@@ -3,8 +3,7 @@ import Combine
 import SwiftUI
 
 /// The settings window: everything Petal can change, on a window of Liquid Glass that shows what's behind it.
-/// On Omarchy the right-click menu stays tiny and the rest is asking Claude; the Mac adds this window, and its
-/// first field still asks the AI (when there is one).
+/// The right-click menu stays tiny, so this window holds the rest; its first field asks the AI (when there is one).
 @MainActor
 final class SettingsWindow {
     private(set) var window: NSWindow?

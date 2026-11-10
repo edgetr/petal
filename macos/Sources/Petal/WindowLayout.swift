@@ -5,11 +5,11 @@ import Foundation
 // so `macos/checks/run.sh` can check it without moving a single window. Every rectangle here is in the window
 // server's coordinates, as Accessibility counts them: the origin at the top-left of the main screen, y going down.
 
-// MARK: - Tiling: a dwindle tree, as Hyprland's default layout
+// MARK: - Tiling: a dwindle tree
 
 /// A binary tree of windows. Each new window splits the one that had focus; the direction of every split follows the
-/// shape of the space it divides (wider than tall: side by side; otherwise one above the other), as Hyprland's dwindle
-/// does without `preserve_split`.
+/// shape of the space it divides (wider than tall: side by side; otherwise one above the other), and is worked out
+/// again whenever that space changes shape.
 struct TileTree: Equatable {
     indirect enum Node: Equatable {
         case leaf(UInt32)

@@ -4,12 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Petal: a dock with your AI built in</title>
-  <meta name="description" content="Petal replaces the dock on your Mac or on Omarchy, with your own Claude Code or Codex built in. Change anything by asking, and on the Mac leave sticky notes that can do things. Free and open source.">
+  <meta name="description" content="Petal replaces the Dock on your Mac, with your own Claude Code or Codex built in. Change anything by asking, and leave sticky notes that can do things. Free and open source.">
   <meta property="og:title" content="Petal: a dock with your AI built in">
-  <meta property="og:description" content="A dock for the Mac and Omarchy with your own Claude Code or Codex built in. Free and open source.">
+  <meta property="og:description" content="A dock for the Mac with your own Claude Code or Codex built in, and sticky notes that can do things. Free and open source.">
   <meta property="og:url" content="https://petal.codes">
   <meta property="og:type" content="website">
   <link rel="canonical" href="https://petal.codes">
+  <link rel="icon" href="/favicon.ico" sizes="48x48">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="preload" href="/fonts/Geist-latin.woff2" as="font" type="font/woff2" crossorigin>
@@ -34,7 +35,6 @@
     <a href="#ask"><span class="dot"></span><span class="rail-name">Ask</span></a>
     <a href="#notes"><span class="dot"></span><span class="rail-name">Notes</span></a>
     <a href="#ai"><span class="dot"></span><span class="rail-name">Petal AI</span></a>
-    <a href="#modes"><span class="dot"></span><span class="rail-name">Modes</span></a>
     <a href="#dock"><span class="dot"></span><span class="rail-name">The dock</span></a>
     <a href="#faq"><span class="dot"></span><span class="rail-name">Good to know</span></a>
     <a href="#download"><span class="dot"></span><span class="rail-name">Download</span></a>
@@ -44,12 +44,12 @@
     <section class="hero" id="intro" aria-labelledby="hero-title">
       <div class="wrap hero-in">
         <h1 id="hero-title">A dock with your AI built in</h1>
-        <p class="lede">Petal replaces the dock on your Mac or on Omarchy. Your own Claude Code or Codex lives in it, so you change anything by asking, and on the Mac you can hand it work from a sticky note.</p>
+        <p class="lede">Petal replaces the Dock on your Mac. Your own Claude Code or Codex lives in it, so you change anything by asking, and you can hand it work from a sticky note you leave anywhere.</p>
         <div class="actions">
-          <a class="button for-mac" href="/download/mac">Download for Mac</a>
-          <a class="button for-omarchy" href="#download">Install on Omarchy</a>
+          <a class="button" href="/download/mac">Download for Mac</a>
+          <a class="text-button" href="https://github.com/edgetr/petal">See the source</a>
         </div>
-        <p class="small">Free and open source. For macOS 26 or later, and Omarchy 4.5 or later.</p>
+        <p class="small">Free and open source. For macOS 26 or later.</p>
       </div>
       <div class="band">
         <div class="wrap">
@@ -97,7 +97,7 @@
     <section class="section wrap" id="notes" aria-labelledby="notes-title">
       <div class="section-head">
         <h2 id="notes-title">Sticky notes that can do things</h2>
-        <p>On the Mac, Petal Notes are your own writing on paper, stuck where it matters. Drag one off the dock and let it go anywhere. It comes back whenever that place does.</p>
+        <p>Petal Notes are your own writing on paper, stuck where it matters. Drag one off the dock and let it go anywhere. It comes back whenever that place does.</p>
       </div>
       <dl class="facts">
         <div><dt>They stick to things</dt><dd>A sentence, a browser tab, a window, an app, a file, a person you're chatting with, or the screen itself.</dd></div>
@@ -111,7 +111,7 @@
     <section class="section wrap" id="ai" aria-labelledby="ai-title">
       <div class="section-head">
         <h2 id="ai-title">An AI that works in your apps</h2>
-        <p>On the Mac, Petal AI sees what's in front of you and can use your apps for you. It asks before it changes anything, and you can stop it at any moment.</p>
+        <p>Petal AI sees what's in front of you and can use your apps for you. It asks before it changes anything, and you can stop it at any moment.</p>
       </div>
       <dl class="facts">
         <div><dt>Its own pointer</dt><dd>It presses, types and chooses menus with a pink pointer of its own. Yours never moves.</dd></div>
@@ -122,22 +122,10 @@
       </dl>
     </section>
 
-    <section class="section wrap" id="modes" aria-labelledby="modes-title">
-      <div class="section-head">
-        <h2 id="modes-title">On Omarchy, a mode for every workspace</h2>
-        <p>Each workspace remembers its mode, and each mode has its own apps. Move between workspaces and the dock changes with you.</p>
-      </div>
-      <dl class="facts">
-        <div><dt>Focus modes</dt><dd>Building, Writing, Social, or any you ask for: “Add a Gaming mode with Steam and Discord.”</dd></div>
-        <div><dt>Focus cards</dt><dd>Open something that belongs to a distracting mode and a small card asks: stay, or go there.</dd></div>
-        <div><dt>Held notifications</dt><dd>Notifications from outside your mode wait on their own mode, with a count. One that can't wait finds you.</dd></div>
-      </dl>
-    </section>
-
     <section class="section wrap" id="dock" aria-labelledby="dock-title">
       <div class="section-head">
         <h2 id="dock-title">And a good dock</h2>
-        <p>Everything a dock should do, on both.</p>
+        <p>Everything a dock should do, on Liquid Glass.</p>
       </div>
       <dl class="facts">
         <div><dt>Badges and progress</dt><dd>Unread counts on icons, one bounce when an app needs you, and a ring around a download.</dd></div>
@@ -159,7 +147,7 @@
         </details>
         <details>
           <summary><span>Do I need an AI subscription?</span><svg class="faq-mark" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
-          <p>No. The dock works whole without one. With Claude Code or Codex installed and signed in, Petal uses your own plan, and on the Mac you can use your own API key instead.</p>
+          <p>No. The dock works whole without one. With Claude Code or Codex installed and signed in, Petal uses your own plan, or you can use your own API key instead.</p>
         </details>
         <details>
           <summary><span>What leaves my computer?</span><svg class="faq-mark" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
@@ -170,7 +158,7 @@
           <p>Petal isn't signed with an Apple Developer ID. Open the download once, then go to System Settings, Privacy &amp; Security, and choose Open Anyway. Installing with the one line in a terminal skips this step.</p>
         </details>
         <details>
-          <summary><span>What does Petal ask for on the Mac?</span><svg class="faq-mark" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
+          <summary><span>What does Petal ask for?</span><svg class="faq-mark" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
           <p>Accessibility, to see your windows and to use apps when you ask it to, and Screen Recording, for window previews. It gives your own Dock back whenever you quit it.</p>
         </details>
         <details>
@@ -179,7 +167,7 @@
         </details>
         <details>
           <summary><span>What do I need?</span><svg class="faq-mark" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
-          <p>A Mac with macOS 26 or later, or Omarchy 4.5 or later. Petal isn't planned for Windows.</p>
+          <p>A Mac with macOS 26 or later. Petal is for the Mac only.</p>
         </details>
       </div>
     </section>
@@ -188,21 +176,10 @@
       <div class="section-head">
         <img class="mark" src="/icon-176.png" width="72" height="72" alt="">
         <h2 id="download-title">Get Petal</h2>
-        <p>Free and open source. It keeps itself up to date.</p>
+        <p>Free and open source, for macOS 26 or later. Petal takes the place of your Dock, gives it back when you quit, and keeps itself up to date.</p>
       </div>
-      <div class="get">
-        <div>
-          <h3>For Mac</h3>
-          <p>macOS 26 or later. Petal takes the place of your Dock, and gives it back when you quit.</p>
-          <a class="button" href="/download/mac">Download for Mac</a>
-        </div>
-        <div>
-          <h3>For Omarchy</h3>
-          <p>Omarchy 4.5 or later. Petal plugs into Omarchy's shell, so there's nothing else to install.</p>
-          <a class="button" href="/download/omarchy">Download for Omarchy</a>
-        </div>
-      </div>
-      <p class="or">Or install it on either with one line in a terminal.</p>
+      <a class="button" href="/download/mac">Download for Mac</a>
+      <p class="or">Or install it with one line in Terminal, which skips macOS's Open Anyway step.</p>
       <div class="cmd"><code>curl -fsSL https://petal.codes/install.sh | bash</code><button type="button" data-copy>Copy</button></div>
     </section>
   </main>

@@ -9,9 +9,8 @@ struct UsageLimit: Equatable {
 }
 
 /// Usage for the ring around the AI button, every 5 minutes. Codex keeps its limits in its own session logs. Claude's
-/// come as Omarchy's
-/// omarchy-agent-usage-claude does it: the Claude Code login's access token asks Anthropic's usage endpoint for the
-/// 5-hour session and the weekly limit. On macOS Claude Code keeps its login in the Keychain, read here with
+/// come from Anthropic's usage endpoint, asked with the Claude Code login's access token for the 5-hour session and
+/// the weekly limit. Claude Code keeps its login in the Keychain, read here with
 /// macOS's own `security` tool. The token goes nowhere but that one request's Authorization header.
 @MainActor @Observable
 final class Usage {

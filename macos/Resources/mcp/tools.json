@@ -1,0 +1,722 @@
+[
+  {
+    "name": "petal_get_state",
+    "description": "Everything about the user's Petal dock: all settings (with help text and current values), the dock's apps in the order they show, its position/auto-hide and file paths. Call this first.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "petal_set_settings",
+    "description": "Change one or more Petal settings (appearance like dockColor/dockOpacity/iconSize/accentColor, and feature switches like bounce/badges). Applies instantly.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "settings": {
+          "type": "object",
+          "description": "setting name -> new value"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_reset_settings",
+    "description": "Reset settings to their defaults (all, or just the given keys).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_set_dock",
+    "description": "Change the dock's apps, or move the dock. Apps (the dock is one list, the same on every Desktop; ids are bundle ids from petal_list_apps, and an https:// address is a website shortcut): add puts these at the end, remove takes these out, and apps replaces the whole list with these in this order, which is how you reorder (send every app you want kept; petal_get_state gives the list as it is). position: bottom, left or right; autohide: on or off; use: petal or macos picks Petal or macOS's own Dock (the other turns off). Returns what changed, with the apps as they are now.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "position": {
+          "type": "string",
+          "enum": [
+            "bottom",
+            "left",
+            "right"
+          ]
+        },
+        "autohide": {
+          "type": "boolean"
+        },
+        "use": {
+          "type": "string",
+          "enum": [
+            "petal",
+            "macos"
+          ]
+        },
+        "apps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "the whole dock, in the order it shows"
+        },
+        "add": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "apps to put at the end"
+        },
+        "remove": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "apps to take out"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_list_apps",
+    "description": "Installed apps (bundle id and name), optionally filtered by a search word. Use the ids in the dock's apps (petal_set_dock).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_reload",
+    "description": "Restart Petal to load a rebuilt Petal.app (settings don't need this).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "petal_look",
+    "description": "What the user is looking at now: the app and window in front, the browser tab's address and title, selected text and which apps are open. In a sticky note's chat it looks at the note's own window (a note on all of an app: that app's window in front; a note on a tab: its window, with the note's tab as noteTab, only while that tab is the one showing), even after the user has moved on (front: true looks at what's in front now instead). screenshot: \"window\" (the front window, or app's) or \"screen\" saves a PNG and returns its path to read; fields that may hold a password, card number, security code or key are blacked out, and a window Petal can't check isn't shown. clipboard: true adds the clipboard's text. Use it when the user says this, here, what I'm looking at.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "screenshot": {
+          "type": "string",
+          "enum": [
+            "",
+            "window",
+            "screen"
+          ]
+        },
+        "app": {
+          "type": "string",
+          "description": "look at this app instead of the one in front"
+        },
+        "clipboard": {
+          "type": "boolean"
+        },
+        "front": {
+          "type": "boolean",
+          "description": "in a sticky note: what's in front now, not the note's window"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_apps",
+    "description": "Open, quit, hide or bring forward an app (by name or bundle id); open with `open` set opens that address or file (in `app` if given). Quitting asks the user first.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "open",
+            "quit",
+            "hide",
+            "focus"
+          ]
+        },
+        "app": {
+          "type": "string"
+        },
+        "open": {
+          "type": "string",
+          "description": "an https:// address or a file path"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_windows",
+    "description": "The user's windows: list them (id, app, title, minimized, here = on this Desktop), or focus, minimize, close (asks first) or arrange one (layout: left, right, top, bottom, full, center; the dock's room is kept). Pick a window by its id from list, or a word of its title, within `app`.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "focus",
+            "minimize",
+            "close",
+            "arrange"
+          ]
+        },
+        "app": {
+          "type": "string"
+        },
+        "window": {
+          "type": "string"
+        },
+        "layout": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "top",
+            "bottom",
+            "full",
+            "center"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_trash",
+    "description": "Move files or folders to the Trash (asks the user first); never delete files any other way. undo: true puts the last ones back.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "undo": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_remember",
+    "description": "Remember something that will help with this user later: a preference, a habit, how they like things done. learned: true when you noticed it yourself rather than being asked. Keep each one short.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "learned": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_forget",
+    "description": "Forget a memory: by its id, or every one containing `text`. Do it when the user says to, or when one turns out wrong or out of date.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_show",
+    "description": "Open a page in its own window, kept so it can be opened again: a summary of their month, a report, a table, a chart. markdown, or html (a whole page; charts as inline SVG, no outside scripts or images), or path to an .html file you wrote. Each call makes a new page; to change one you made, pass update: the path it returned. Say in one line what's on it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "markdown": {
+          "type": "string"
+        },
+        "html": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "update": {
+          "type": "string",
+          "description": "the path petal_show returned for a page you made, to change that page in place"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_vault",
+    "description": "The user's vault, in their Keychain: logins, contact info (relationship: me, girlfriend, mom…), addresses (each may belong to a contact), payment info and API keys. You see usernames, contact info and addresses in full, and a card's name, last4 and expiry; never a password, card number, security code or key: Petal fills those into fields itself. action list (kind, site): what's saved. fill (fields {field: id from petal_ui}, item: an id from list; for a login, item may be left out and Petal finds the one saved for the page): fields are username, password, name, email, phone, street, street2, city, region, postalCode, country (a country menu too), number, expiry, month, year, securityCode, value (an API key, or an unsorted item's secret); submit: true presses Return after the last (not with payment info: press the order button with petal_act; Return asks to use the app as petal_act does). An item of kind unsorted was saved before the vault had kinds: you see only its title, and filling it (field value) asks the user every time; they sort it in Settings › Vault. Petal decides from the page it reads itself: a login fills by itself only on its own site (or http://localhost) or app, an API key on its service's site, this Mac's pages or an app; elsewhere the user is asked, once for all the fields. Fill one page or app at a time. Payment info fills only on https pages after one Buy card per checkout: pass buying (what, in a few words) and price; Buy covers that card on that exact page, in that window and tab, for the rest of the reply (another page or tab ends it, and Petal asks again); then place the order there (using the browser may ask once, as any app does); after Don't, stop. request (kind login, contact, address, card or apiKey; fields to fill, title, why): the user types what's missing into Petal's card (never into the chat); for a login, Submit fills the page and saves it. new_login (password_id, confirm_id, username_id, username; symbols false or allowed_symbols for sites that limit them): Petal makes a strong password, saves it for the page's site and fills it. From a session outside Petal's own chat (T3 Code, a terminal), the first time your agent uses an item in a project (fill, or new_login for making logins) Petal asks the user (Always for this project, Allow once, Don't); they may allow it ahead in Settings › Vault › Agents. To use an API key in a command (a test, a BYOK app on localhost), run it with the petal command: petal run --key \"<title>\" -- <command>; Petal puts the key in its service's variable (ANTHROPIC_API_KEY, OPENAI_API_KEY…; --env NAME for another, --stdin for its input) and takes it out of what the command prints. You never see a key: never try to get one out. If the user declines, don't find another way.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "list",
+            "fill",
+            "request",
+            "new_login",
+            "use"
+          ]
+        },
+        "item": {
+          "type": "string",
+          "description": "an item's id from list (or its title)"
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "fill or request: {field: id from petal_ui}, like {\"username\": \"e3\", \"password\": \"e4\"}"
+        },
+        "field": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string",
+          "description": "one field's id from petal_ui (with field)"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "login",
+            "contact",
+            "address",
+            "card",
+            "apiKey",
+            "unsorted"
+          ],
+          "description": "list: unsorted too; request: not unsorted"
+        },
+        "site": {
+          "type": "string"
+        },
+        "buying": {
+          "type": "string",
+          "description": "fill with payment info: what you're buying, in a few words"
+        },
+        "price": {
+          "type": "string"
+        },
+        "yearFormat": {
+          "type": "string",
+          "enum": [
+            "YYYY",
+            "YY"
+          ],
+          "description": "fill a card's year or expiry: how the field wants the year, when its placeholder or label doesn't say (Petal reads those itself, and a year menu's own items)"
+        },
+        "submit": {
+          "type": "boolean",
+          "description": "fill: press Return after the last field (never with payment info)"
+        },
+        "title": {
+          "type": "string"
+        },
+        "why": {
+          "type": "string"
+        },
+        "username": {
+          "type": "string"
+        },
+        "password_id": {
+          "type": "string"
+        },
+        "confirm_id": {
+          "type": "string"
+        },
+        "username_id": {
+          "type": "string"
+        },
+        "symbols": {
+          "type": "boolean"
+        },
+        "allowed_symbols": {
+          "type": "string"
+        },
+        "length": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string",
+          "description": "use (older sessions): an item's title; it fills like fill, into id or the field petal_ui saw with the cursor"
+        },
+        "task": {
+          "type": "string",
+          "description": "sessions outside Petal's own chat: the same few words for the task's acts"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_memories",
+    "description": "What Petal AI remembers about the user, each with its id (for petal_forget).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "petal_ui",
+    "description": "The controls of the window in front (in a sticky note's chat, the note's own window; a note on a tab reads and acts only while its tab is the one showing), to use with petal_act: buttons, links, text fields, checkboxes, menus, tabs, rows and the like, visible ones first, up to 150. Each has an id (e12), role, name, value (never a password field's; a secret saved in the vault shows as (hidden) wherever it appears) and frame [x, y, w, h] in screen points. The ids last until the next petal_ui or 5 minutes: call it again whenever the window changes. app: another app's front window; front: true in a sticky note uses what's in front now; find: only controls whose name has this word (for a big window). Apps the user keeps private give only their name.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "app": {
+          "type": "string"
+        },
+        "front": {
+          "type": "boolean"
+        },
+        "find": {
+          "type": "string",
+          "description": "a word in the control's name or value"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_act",
+    "description": "Use a control from the last petal_ui, through Accessibility, with Petal's own pink pointer (the user's pointer never moves). In a sticky note's chat, acting on the note's own window, it works in the background while the user works elsewhere: no pointer, nothing comes forward, their keyboard untouched (only when they have that window in front does it use the pointer, and never while they're typing in it). Some acts can't be done in the background (menus and keys while they use that app, copying and pasting, the vault, a link or file that would open in another app, an app that ignores background typing, a tab that isn't showing): then nothing is done and it says the window must be in front; ask the user in one line to bring it forward (clicking the note in the AI button's preview does), don't bring it forward yourself, then petal_ui again. action press (id): presses a button, link, checkbox, tab or row. type (id, text): puts text in a field (replace: false inserts at the cursor instead; submit: true presses Return after). focus (id). scroll (id; direction up, down, left or right scrolls its area by most of a page; none brings the control into view). menu (path, like \"File > Export…\"): chooses a menu bar item. key (key, like cmd-s, cmd-shift-z, return, escape, tab, down; id focuses that control first): a shortcut its menus have is chosen there, other keys go to the app, which comes forward to take them. menu and key go to the window the last petal_ui looked at (app, if given, must be its app), brought to the front of its app first. The first use of an app in a reply asks the user (in an AI session outside Petal's own chat, the first in a task: name it in task; a new task, two quiet minutes or a Stop asks again). Each act checks the window hasn't moved or changed since petal_ui; when it has, call petal_ui again. What only a real click could do, it says so: ask the user to do it. Never for password fields (petal_vault fills saved passwords) or private apps.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "press",
+            "type",
+            "focus",
+            "scroll",
+            "menu",
+            "key"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "description": "a control's id from petal_ui, like e12"
+        },
+        "text": {
+          "type": "string"
+        },
+        "replace": {
+          "type": "boolean",
+          "description": "type: replace what's in the field (default true)"
+        },
+        "submit": {
+          "type": "boolean",
+          "description": "type: press Return after"
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "up",
+            "down",
+            "left",
+            "right"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "description": "menu: like File > Export…"
+        },
+        "key": {
+          "type": "string",
+          "description": "key: like cmd-s"
+        },
+        "app": {
+          "type": "string",
+          "description": "menu or key: this app instead of the last petal_ui's"
+        },
+        "task": {
+          "type": "string",
+          "description": "a few words for the task this act is part of (sessions outside Petal's own chat): keep it the same across the task's acts"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_routines",
+    "description": "The user's routines (what Petal does by itself: id, their words, trigger, actions, on, last run) and the latest of what they did (history; canPutBack).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "petal_routine_save",
+    "description": "Make a routine from what the user asked, or change one (id). words: their own words. You fill trigger and actions from them, once; Petal runs it without AI except for sorting files by what they are. trigger.on: \"file\" (a file lands in folder, e.g. ~/Downloads, ~/Desktop or screenshots; types: kinds pdf, image, video, audio, archive, installer, document, code or extensions; named: words in its name; both optional), \"app\" (app: name or bundle id; when: \"opens\" or \"front\"), \"time\" (at: \"HH:MM\"; days: 1 = Monday … 7, empty = every day). actions, in order: {do: \"sort\", by: \"ai\" (by what each file is; the quick AI picks an existing subfolder or names a new one for similar files) or \"kind\" (Images, PDFs, …), into: where the subfolders go (the files' folder by default)}, {do: \"move\", to: a folder (a name alone is inside the files' folder)}, {do: \"open\", apps: names, bundle ids or https:// addresses}, {do: \"hide\", apps}, {do: \"shortcut\", name}. sort and move act on the new file; with an app or time trigger they take folder's files. Files are only moved, never deleted. It acts on new files only: when the answer says files are there now, offer petal_routine_run.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string",
+          "description": "a short name"
+        },
+        "words": {
+          "type": "string"
+        },
+        "trigger": {
+          "type": "object"
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "on": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_routine_run",
+    "description": "Run a routine now on the files already in its folder. dryRun: true says what it would move where, moving nothing; without it, it does it (Petal asks the user first when it's 10 files or more). A routine that moves no files just runs its actions.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "dryRun": {
+          "type": "boolean"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_routine_undo",
+    "description": "Put back the files a routine moved: the latest run that can be, or entry (a history id from petal_routines).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "entry": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_routine_delete",
+    "description": "Delete a routine (what it moved stays where it is, and can still be put back).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_notes",
+    "description": "The user's Petal Notes: their own notes, Markdown files on paper stuck to places (a sentence, a tab, a window, all of an app, a file, a Desktop, or the screen itself: \"On screen\"), one notebook (folder) each; Inbox by default. Search them (query: words, any order; notebook; here: true for the notes placed now, on the window in front, on the Desktop showing or on the screen, or in the margin of Petal's viewer when it's in front; limit). Each has id (a handle for these tools: the same note keeps it when it's renamed or moved; never a file or path), title, notebook, preview, places (in words), modified and onScreen; notebooks lists the notebooks. A Private notebook's notes aren't there unless you're asked from inside it (an @ in one of its notes). Saved secrets are hidden as (hidden), and nothing is told while the vault can't be read. When the user asks what they noted, wrote down or saved, search here first and say which notes you used (they show as chips under your answer). A Private notebook's notes are never listed, except to a helper of a note inside it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string"
+        },
+        "notebook": {
+          "type": "string"
+        },
+        "here": {
+          "type": "boolean"
+        },
+        "limit": {
+          "type": "integer"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_note_read",
+    "description": "One note whole: its text (Markdown: # headings, - [ ] checkboxes, an address alone on a line is a link card, ![picture N] its Nth picture, > lines are Petal's own words), places, notebook and dates. What the note's helper answered comes as helper (marked as the helper's, not the user's words); its steps, watcher and task live in its front matter, which only Petal writes; never write an @Petal line to make something run (only the person's Return runs a helper). cover: true marks its notebook's cover (only its \"About this notebook\" file is one): what the notebook is for, and what Petal remembers there. id: the handle from petal_notes, or its title as shown when only one note has that title (else the answer lists the notes' ids to pick from).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_note_write",
+    "description": "Write a note. No id: a new note with text in notebook (default the user's own default; a new name makes one); stick: \"here\" sticks it to what's in front (to: tab, window, app, file or desktop, or screen: on the screen itself, where it shows on every Desktop whatever is in front; else the most specific there is; with Petal's viewer in front, its file and page, or its selected passage), else it's stuck nowhere. With id (a handle from petal_notes, or its title when only one note has it): replaces its text, or append: true adds text at its end; a ![picture N] line keeps that picture (leave them as read). A note is the user's own writing: never change their words unless they asked; add to it instead. Nothing is ever deleted.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "append": {
+          "type": "boolean"
+        },
+        "notebook": {
+          "type": "string"
+        },
+        "stick": {
+          "type": "string",
+          "enum": [
+            "here",
+            "none"
+          ]
+        },
+        "to": {
+          "type": "string",
+          "enum": [
+            "passage",
+            "tab",
+            "window",
+            "app",
+            "file",
+            "desktop",
+            "screen",
+            "person"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_note_move",
+    "description": "Put a note in another notebook (a new name makes the notebook). Only the note moves: its pictures stay where Petal keeps them, and its links keep working.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "notebook": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_note_stick",
+    "description": "Stick a note to what's in front now: to tab, window, app, file, desktop, screen (the screen itself, on this Mac: it shows at its spot on every Desktop, whatever is in front) or person (the one person in the chat in front, in Messages, WhatsApp, Telegram, Slack or Mail; then it shows beside their conversation in any of them) (else the most specific there is: the selected sentence, its tab, its file, the person, its window). also: true keeps its other places; remove: an index from its places takes it off that one (a note keeps at least one).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string",
+          "enum": [
+            "passage",
+            "tab",
+            "window",
+            "app",
+            "file",
+            "desktop",
+            "screen",
+            "person"
+          ]
+        },
+        "also": {
+          "type": "boolean"
+        },
+        "remove": {
+          "type": "integer"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_view",
+    "description": "Open a document in Petal's viewer (part of Petal Notes): a PDF through PDFKit, or Word, PowerPoint, Keynote, Excel, Pages, Numbers, text and pictures through macOS's own Quick Look preview. The notes on that file show in the viewer's margin, lined up with their passage, page or slide; the person selects text and presses Note for an exact spot. path: the file's full path (~/ for the home folder); only a regular file whose final destination (every link followed) is in their home folder and theirs, or on a drive or share mounted under /Volumes and readable by them; anywhere else (/tmp, /System, another user's home) is refused. page: which page or slide to show (a whole number from 1; one the document hasn't is said, and it shows where it was). It never moves or changes the file. Says how it's shown, how many pages or slides it has, and the words of the page or slide it shows (text; ask with page for another; a very long one is its start); names and words are told with saved secrets hidden, and nothing while the vault can't be read. A note's helper whose note is on a document has that document's viewer as its place: petal_look and petal_ui read the viewer's window.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "page": {
+          "type": "integer"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_view_versions",
+    "description": "Try changes to a document on copies first: makes a copy of the file for each of names (\"Shorter\", \"With numbers\") in a folder of Petal's own and shows their pictures under the document in Petal's viewer, each with Use this. Change the copies (never the file itself); their pictures follow. The answer gives set (an id for petal_view_pick) and each version's id, name and path (a version is its id; two may share a name). Picking one only tells you: change the user's own file only after they allowed it. Newer versions of the same file replace these (their copies are removed, all but a picked one; a copy you changed goes to the Trash, never deleted), and every copy is removed when the viewer closes: read the picked one while it's open.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_view_pick",
+    "description": "Which version the person picked with Use this (from your own petal_view_versions set): its id, name and copy's path, or null while they haven't. A pick is told only while the original is the very file, unchanged, the versions were made from; once it was changed, replaced, deleted or refused, the answer is null with why (\"The original changed — make versions again\"; the copies stay). Ask again right before you change the original. wait: seconds to wait for the pick (up to 120).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "set": {
+          "type": "string"
+        },
+        "wait": {
+          "type": "integer"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_note_pdf_comments",
+    "description": "Write the user's notes on a PDF into it as comments (a passage's note as a highlight with its words, any other as a sticky note on its page), so they show in Preview, Acrobat and anywhere else. By default into a copy beside it (\"Name (with notes).pdf\"); into_original: true writes into the PDF itself, only after the user allows it, and keeps the original beside it (\"Name (before notes).pdf\"). Only for a PDF petal_view could open, in a folder the user can write. Saved secrets are never written; nothing is written while the vault can't be read.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "into_original": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+]

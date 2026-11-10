@@ -1,7 +1,7 @@
 import AppKit
 import QuickLookUI
 
-/// The right-click menus, as macOS's own menus (Liquid Glass on macOS 26), with Omarchy's entries in Omarchy's order.
+/// The right-click menus, as macOS's own menus (Liquid Glass on macOS 26).
 @MainActor
 enum Menus {
     static var app: PetalApp { PetalApp.shared }

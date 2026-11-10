@@ -35,19 +35,13 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Petal"
 # The icon: Assets.car holds every appearance (light, dark, tinted, clear); Petal.icns is the fallback.
 cp "$ROOT/brand/macos/Assets.car" "$ROOT/brand/macos/Petal.icns" "$APP/Contents/Resources/"
-cp "$ROOT/plugin/assets/claude.svg" "$ROOT/plugin/assets/openai.svg" "$APP/Contents/Resources/"
-# Which names anyone can register under (co.uk, github.io): the vault fills a login only on its own site (VaultSite).
-cp "$ROOT/macos/Resources/public_suffix_list.dat" "$APP/Contents/Resources/"
-# Claude's Petal tools run inside Petal (`Petal --mcp`); their names, descriptions and settings come from
-# petal-mcp.py (on a Mac it leaves out Omarchy's modes), so Omarchy and the Mac describe the rest the same way.
-mkdir -p "$APP/Contents/Resources/mcp"
-python3 -I "$ROOT/plugin/mcp/petal-mcp.py" --describe > "$APP/Contents/Resources/mcp/tools.json"
-# The person's own changes to Petal's code, kept through updates (`petal personal`; Personal.swift runs it).
-mkdir -p "$APP/Contents/Resources/personal"
-cp "$ROOT/bin/petal-personal" "$APP/Contents/Resources/personal/petal-personal"
-# Petal's skill for Claude Code and Codex, which Petal copies into their skills folders.
-mkdir -p "$APP/Contents/Resources/skill"
-cp "$ROOT/plugin/skill/SKILL.md" "$APP/Contents/Resources/skill/SKILL.md"
+# Everything in macos/Resources goes into the app as it is: the AI apps' marks (claude.svg, openai.svg); the
+# Public Suffix List, which says which names anyone can register under (co.uk, github.io), so the vault fills a login
+# only on its own site (VaultSite); the AI's tools, their names, descriptions and input schemas (mcp/tools.json;
+# `Petal --mcp` serves them); the person's own changes to Petal's code kept through updates (personal/petal-personal;
+# Personal.swift runs it); and Petal's skill for Claude Code and Codex (skill/SKILL.md), which Petal copies into
+# their skills folders.
+cp -R "$ROOT/macos/Resources/." "$APP/Contents/Resources/"
 
 # The commit it's built from: `petal personal` takes Petal's source from it (a release's tag has the same one).
 COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"

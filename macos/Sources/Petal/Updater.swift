@@ -2,8 +2,8 @@ import AppKit
 import CryptoKit
 import Observation
 
-/// Updates from GitHub Releases, as get.sh does on Omarchy: 2 minutes after launch, then every 6 hours, while
-/// autoUpdate is on. macOS releases have their own tags (macos-vX.Y.Z) and carry latest-macos.json:
+/// Updates from GitHub Releases: 2 minutes after launch, then every 6 hours, while autoUpdate is on. Petal's
+/// releases are the tags macos-vX.Y.Z, and each carries latest-macos.json:
 /// {"version": "X.Y.Z", "url": "<zip>", "sha256": "<hex>"}. The new Petal.app replaces this one in place, and the menu bar
 /// offers to restart. A build run from a source checkout is never updated.
 @MainActor @Observable
@@ -40,6 +40,8 @@ final class Updater {
                 guard let latest = try await Self.latest() else { status = "No Mac release yet."; return }
                 let current = PetalApp.shared.version
                 guard Self.newer(latest.version, than: current) else { status = "Petal \(current) is the newest."; return }
+                // Already downloaded and in place: asking again never downloads it a second time.
+                guard ready != latest.version else { status = "Petal \(latest.version) is ready. Restart Petal to finish."; return }
                 status = "Downloading Petal \(latest.version)…"
                 // With the person's own changes to Petal's code, it's rebuilt with them instead (Personal.swift).
                 if try await !Personal.update(to: latest.version, manual: manual) { try await install(latest) }

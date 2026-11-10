@@ -50,7 +50,7 @@ MainActor.assumeIsolated {
         print(CLI.help)
         exit(0)
     case .restoreDock:
-        // `Petal --restore-dock` gives macOS's Dock back without Petal running (bin/petal restore-dock).
+        // `Petal --restore-dock` gives macOS's Dock back without Petal running (`petal restore-dock`).
         SystemDock.restore()
         exit(0)
     case .benchWindowsIdle(let name):

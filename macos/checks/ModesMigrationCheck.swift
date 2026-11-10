@@ -55,7 +55,7 @@ struct ModesMigrationCheck {
         folders { config, support in
             write(modes, config.appending(path: "modes.json"))
             write(#"{"position": "left", "autoHide": true, "welcomed": true, "dock": "petal"}"#, config.appending(path: "dock.json"))
-            write(#"{"iconSize": 44, "modes": true, "focusGuard": false, "holdNotifications": true, "dailySummary": "18:00", "tiling": true, "aiMemory": true, "mine": 1}"#,
+            write(#"{"iconSize": 44, "modes": true, "focusGuard": false, "holdNotifications": true, "dailySummary": "18:00", "tiling": true, "aiMemory": true, "mine": 1, "font": "Adwaita Sans", "dockSheen": true, "popupOpacity": 0.74}"#,
                   config.appending(path: "settings.json"))
             write("keep me\n", config.appending(path: "instructions.md"))
             write(#"{"memories": [{"id": "a1", "text": "likes tea", "mode": "building", "by": "you", "at": 1}]}"#, config.appending(path: "memory.json"))
@@ -75,7 +75,7 @@ struct ModesMigrationCheck {
             expect(!FileManager.default.fileExists(atPath: config.appending(path: "modes.json").path), "modes.json is gone")
             let settings = object(config.appending(path: "settings.json")) ?? [:]
             expect(Set(settings.keys) == ["iconSize", "tiling", "aiMemory", "mine"] && settings["iconSize"] as? Int == 44,
-                   "settings that only meant something with modes are gone; the rest (the person's own keys too) stay", "\(settings.keys.sorted())")
+                   "settings that only meant something with modes, and the looks nothing reads, are gone; the rest (the person's own keys too) stay", "\(settings.keys.sorted())")
             let state = object(support.appending(path: "state.json")) ?? [:]
             expect(Set(state.keys) == ["aiSpend", "stacksSeen"], "state.json keeps what's still used", "\(state.keys.sorted())")
             // No other file written (no backup, no copy of the modes), and what only the removed features read is gone.

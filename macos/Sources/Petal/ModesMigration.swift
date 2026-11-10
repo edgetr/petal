@@ -3,7 +3,8 @@ import Foundation
 /// Petal for macOS had focus modes (a dock per mode, in modes.json) and now has one dock, kept in dock.json as
 /// `apps`. The first launch of this Petal moves the person's dock over, once: the default mode's apps become the
 /// dock's, then modes.json goes. The other modes' apps are dropped, and no copy of anything is kept. Settings that
-/// only meant something with modes leave settings.json, and the files only the removed features read are removed.
+/// only meant something with modes, and six looks Petal never drew, leave settings.json, and the files only the
+/// removed features read are removed.
 /// Foundation only, so `macos/checks/run.sh` runs it on throwaway folders.
 enum ModesMigration {
     enum Outcome: Equatable {
@@ -16,10 +17,12 @@ enum ModesMigration {
     }
 
     /// settings.json keys that only meant something with modes, focus cards, held notifications, the activity
-    /// history or the schedule.
+    /// history or the schedule, and six for looks the dock's glass and Petal's panels never had (a rim, a sheen, a
+    /// popup color, a font): nothing reads any of them.
     static let settings = ["modes", "countdown", "focusGuard", "blockDistractions", "peeks", "holdNotifications",
                            "urgentNotifications", "modeWindows", "aiLearns", "dailySummary", "replyDrafts", "schedule",
-                           "activityLog", "suggestModes", "summary"]
+                           "activityLog", "suggestModes", "summary",
+                           "dockBorderColor", "dockBorderOpacity", "dockSheen", "popupColor", "popupOpacity", "font"]
 
     /// What the removed features kept, by folder: the suggestions answered (config), and the activity history, what
     /// the AI sorted, and the writing style of drafted replies (support).

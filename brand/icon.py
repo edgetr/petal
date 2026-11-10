@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Petal's icon: five slim petals on warm paper, the one at the top in Petal's pink. The pink petal is the mode
-in focus. It is drawn here, in code, and every copy of it is written from this file.
+"""Petal's icon: five slim petals on warm paper, the one at the top (the focus petal) in Petal's pink. It is drawn
+here, in code, and every copy of it is written from this file.
 
-Flat copies (a browser and the Omarchy dock show no glass) go to site/icon.svg, plugin/assets/petal.svg, and the
-site's PNGs (rendered by macOS's sips).
+Flat copies (a browser shows no glass) go to site/icon.svg, the site's PNGs and site/favicon.ico (rendered by
+macOS's sips).
 
 The macOS app icon is the Icon Composer document Petal.icon: each petal is a sliver of Liquid Glass on grained
 paper, with a dark appearance, and a tinted one (which Clear uses too) in which the petals turn white for the
@@ -147,13 +147,34 @@ def compile_icon(document, out):
             shutil.copy(pathlib.Path(tmp) / name, out / name)
 
 
+def flat_png(path, size):
+    """site/icon.svg as a PNG of `size` pixels, by macOS's sips."""
+    subprocess.run(["sips", "-s", "format", "png", "-z", str(size), str(size), str(ROOT / "site/icon.svg"),
+                    "--out", str(path)], check=True, capture_output=True)
+
+
+def favicon(path):
+    """favicon.ico for what asks for that name and can't read an SVG: the flat icon at 16, 32 and 48 pixels, each
+    kept as a PNG inside the file."""
+    images = []
+    with tempfile.TemporaryDirectory() as folder:
+        for size in (16, 32, 48):
+            flat_png(pathlib.Path(folder) / f"{size}.png", size)
+            images.append((size, (pathlib.Path(folder) / f"{size}.png").read_bytes()))
+    offset = 6 + 16 * len(images)
+    entries, data = b"", b""
+    for size, image in images:
+        entries += struct.pack("<BBBBHHII", size, size, 0, 0, 1, 32, len(image), offset + len(data))
+        data += image
+    path.write_bytes(struct.pack("<HHH", 0, 1, len(images)) + entries + data)
+
+
 def main():
     svg = flat_svg()
     (ROOT / "site/icon.svg").write_text(svg)
-    (ROOT / "plugin/assets/petal.svg").write_text(svg)
     for name, size in (("icon-176.png", 176), ("apple-touch-icon.png", 180)):   # the install card at 88pt; iOS
-        subprocess.run(["sips", "-s", "format", "png", "-z", str(size), str(size), str(ROOT / "site/icon.svg"),
-                        "--out", str(ROOT / "site" / name)], check=True, capture_output=True)
+        flat_png(ROOT / "site" / name, size)
+    favicon(ROOT / "site/favicon.ico")
 
     if not ICTOOL.exists():
         raise SystemExit(f"wrote the flat icons; the macOS icon needs Xcode 26 or later with Icon Composer ({ICTOOL})")
@@ -165,7 +186,7 @@ def main():
     previews.mkdir()
     for rendition in ("Default", "Dark", "ClearLight", "ClearDark", "TintedLight", "TintedDark"):
         render(document, previews / f"{rendition.lower()}.png", rendition)
-    print("wrote site/icon.svg, plugin/assets/petal.svg and", BRAND.relative_to(ROOT))
+    print("wrote site/icon.svg and", BRAND.relative_to(ROOT))
 
 
 if __name__ == "__main__":

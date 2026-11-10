@@ -1,7 +1,6 @@
 import Foundation
 
-/// How scripts and Claude reach the running Petal on macOS, as `omarchy-shell petal <fn>` does on Omarchy: a Unix
-/// socket at ~/.config/petal/petal.sock. A client writes one line, the function and its arguments as a JSON array
+/// How scripts and the AI's tools reach the running Petal: a Unix socket at ~/.config/petal/petal.sock. A client writes one line, the function and its arguments as a JSON array
 /// (["dock", "macos"]), and reads one line back. Only the person's own account can open it.
 ///
 ///     printf '["version"]\n' | nc -U ~/.config/petal/petal.sock
