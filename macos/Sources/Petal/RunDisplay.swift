@@ -155,7 +155,7 @@ final class VirtualDisplay {
     }
 }
 
-/// A hidden display for each Petal AI run (`runDisplays`, off by default): the windows a run opens go to a display
+/// A hidden display for each Petal AI run (`runDisplays`, on by default): the windows a run opens go to a display
 /// of its own, which the person never sees and their pointer can't reach, so nothing a run does shows up in front of
 /// them. Questions, Buy cards and the vault's card stay over the dock or on the note, on the person's screen.
 ///
