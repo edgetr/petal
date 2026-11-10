@@ -543,7 +543,7 @@ final class NoteDesk {
         // The screen under the pointer, for the Desktop it shows (read below, off the main thread, when the app has
         // no window in front).
         let mouse = NSEvent.mouseLocation
-        let screen = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main).flatMap(Spaces.screenID)
+        let screen = (Screens.all.first { $0.frame.contains(mouse) } ?? Screens.main).flatMap(Spaces.screenID)
         ClaudePanel.readFront(of: running, tabs: tabs) { read in
             queue.async {
                 // Stale before the app's window is read further: nothing more asked of it.
@@ -599,7 +599,7 @@ final class NoteDesk {
                         if !scene.person.isEmpty {
                             scene.personContact = PersonRead.contact(handle: scene.personHandle, contacts: PetalApp.shared.paper.contacts) ?? ""
                         }
-                        scene.desktop = desktop ?? Self.desktopShowing(on: NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)
+                        scene.desktop = desktop ?? Self.desktopShowing(on: Screens.all.first { $0.frame.contains(mouse) } ?? Screens.main)
                         done(scene, read)
                     }
                 }
@@ -1071,11 +1071,11 @@ final class NoteDesk {
 
     // MARK: Laying out
 
-    private var primaryHeight: CGFloat { NSScreen.screens.first?.frame.height ?? 0 }
+    private var primaryHeight: CGFloat { Screens.all.first?.frame.height ?? 0 }
 
     /// The visible frame (Accessibility's coordinates) of the screen a window is on.
     private func visible(for window: CGRect) -> CGRect? {
-        let screens = NSScreen.screens
+        let screens = Screens.all
         guard let screen = NoteRules.screen(for: NoteRules.appKitFrame(window, primaryHeight: primaryHeight), in: screens.map(\.frame)),
               let visible = screens.first(where: { $0.frame == screen })?.visibleFrame else { return nil }
         return CGRect(x: visible.minX, y: primaryHeight - visible.maxY, width: visible.width, height: visible.height)
@@ -1154,8 +1154,8 @@ final class NoteDesk {
     func spotFrame(_ key: String, size: CGSize) -> CGRect? {
         guard let frame, case .window = placementNow(key), let paper = store.paper(key), let spot = local.spots[paper.noteID] else { return nil }
         let window = NoteRules.appKitFrame(frame, primaryHeight: primaryHeight)
-        let screen = NSScreen.screens.first { $0.frame.intersects(window) }?.visibleFrame ?? window
-        return spot.frame(size: size, window: window, screen: screen, screens: NSScreen.screens.map(\.visibleFrame))
+        let screen = Screens.all.first { $0.frame.intersects(window) }?.visibleFrame ?? window
+        return spot.frame(size: size, window: window, screen: screen, screens: Screens.all.map(\.visibleFrame))
     }
 
     /// A note re-stuck elsewhere (its winning anchor no longer a passage) lets go of its line, pin and found state
@@ -1226,7 +1226,7 @@ final class NoteDesk {
     /// a source picked) and its place isn't in front, the Desktop showing on the main screen.
     func desktops(of paper: PaperNote) -> [Int?] {
         var list = paper.file.places.filter { $0.kind == .desktop }.map(\.desktop)
-        if helpers.summoned.contains(paper.key) { list.append(Self.desktopShowing(on: NSScreen.screens.first)) }
+        if helpers.summoned.contains(paper.key) { list.append(Self.desktopShowing(on: Screens.all.first)) }
         return list
     }
 
@@ -1335,7 +1335,7 @@ final class NoteDesk {
     func openStandalone(_ key: String, at point: CGPoint? = nil, fromLibrary: Bool = false) {
         guard on, takesChanges(), store.paper(key) != nil else { return }
         let mouse = NSEvent.mouseLocation
-        let screen = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame ?? .zero
+        let screen = (Screens.all.first { $0.frame.contains(mouse) } ?? Screens.main)?.visibleFrame ?? .zero
         let corner = point ?? CGPoint(x: screen.midX - PaperLook.openWidth / 2, y: screen.midY + 220)
         // A note in a conflict opens with every other paper of it beside it (all read only, each with Keep this one),
         // through layout like any paper.
@@ -1412,7 +1412,7 @@ final class NoteDesk {
             if had || store.notes.contains(where: keptOnScreen) { placeDesktop() }
             return
         }
-        let screens = NSScreen.screens.compactMap(Spaces.screenID)
+        let screens = Screens.all.compactMap(Spaces.screenID)
         spacesTurn += 1
         let turn = spacesTurn
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1446,13 +1446,13 @@ final class NoteDesk {
                 origin = CGPoint(x: point[0], y: point[1])
             } else {
                 // Nobody put it anywhere yet (a tool stuck it there): down the main screen's right side.
-                origin = NoteShelf.screenRest(index: resting, visible: NSScreen.screens.first?.visibleFrame ?? .zero, paper: PaperLook.folded)
+                origin = NoteShelf.screenRest(index: resting, visible: Screens.all.first?.visibleFrame ?? .zero, paper: PaperLook.folded)
                 resting += 1
             }
             panel.place(paperFrame: CGRect(x: origin.x, y: origin.y - size.height, width: size.width, height: size.height))
             shown(paper.key, panel)
         }
-        for screen in NSScreen.screens {
+        for screen in Screens.all {
             guard let number = Self.desktopShowing(on: screen) else { continue }
             // The validated placement (placementNow's rule): a stale window placement never keeps a note off it.
             let notes = store.notes.filter { paper in
@@ -2462,7 +2462,7 @@ final class NoteDesk {
         let me = getpid()
         drops += 1
         let drop = drops
-        let screens = NSScreen.screens.map { (frame: $0.frame, id: Spaces.screenID($0)) }
+        let screens = Screens.all.map { (frame: $0.frame, id: Spaces.screenID($0)) }
         // The window list is the WindowServer's: asked off the main thread, and what it found checked again before
         // the note is made (Petal Notes still on, no newer drop, the app still running, the window still there).
         DispatchQueue.global(qos: .userInitiated).async {
@@ -2504,7 +2504,7 @@ final class NoteDesk {
     /// The Desktop a screen shows (the one under the pointer, or `screen`), read off the main thread; nil when it
     /// can't be told. Everything that sticks a note to a Desktop asks here and refuses without a number.
     func resolveDesktop(on screen: NSScreen? = nil, _ done: @escaping @MainActor (Int?) -> Void) {
-        let target = screen ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
+        let target = screen ?? Screens.all.first { $0.frame.contains(NSEvent.mouseLocation) } ?? Screens.main
         guard let id = target.flatMap(Spaces.screenID) else { return done(nil) }
         DispatchQueue.global(qos: .userInitiated).async {
             let number = Spaces.desktops([id])[id]
@@ -3156,9 +3156,9 @@ final class NotePanel: NSPanel {
 
     /// `rect` whole on the screen it's mostly on (NoteShelf.wholeOnScreen).
     static func whole(_ rect: NSRect) -> NSRect {
-        let screens = NSScreen.screens
+        let screens = Screens.all
         let area = { (screen: NSScreen) -> CGFloat in let cut = screen.frame.intersection(rect); return cut.isNull ? 0 : cut.width * cut.height }
-        guard let screen = screens.max(by: { area($0) < area($1) }).flatMap({ area($0) > 0 ? $0 : nil }) ?? NSScreen.main else { return rect }
+        guard let screen = screens.max(by: { area($0) < area($1) }).flatMap({ area($0) > 0 ? $0 : nil }) ?? Screens.main else { return rect }
         return NoteShelf.wholeOnScreen(rect, visible: screen.visibleFrame)
     }
 

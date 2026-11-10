@@ -571,9 +571,7 @@ struct ClaudeSettings: View {
                 SettingToggle(key: "claudeUsage", title: "Usage ring", detail: "Around the \(provider.name) button, every 5 minutes.")
                 SettingToggle(key: "ai", title: "Small jobs", detail: "Routines that sort files by what they are, and notes that answer in a line, ask \(provider.name)'s small model.")
             }
-            Card(title: "Using your apps", footer: "Petal AI presses buttons, types and chooses menu items with a pink pointer of its own; yours stays where it is. It asks before it uses each app, and Stop or Esc ends it.") {
-                SettingToggle(key: "computerUse", title: "Let Petal AI use your apps", detail: "Never apps kept private, and never password fields.")
-            }
+            UsingAppsCard()
             MemoryCard()
             PrivacyCard()
             AIHistoryCard()
@@ -591,6 +589,19 @@ struct ClaudeSettings: View {
             Card(title: "Your notes for \(provider.name)", footer: "\(provider.name) reads these every time you ask it something.") {
                 InstructionsEditor()
             }
+        }
+    }
+}
+
+/// Using the person's apps, and where a run's windows open: on their screen, or on a hidden display of its own.
+struct UsingAppsCard: View {
+    var body: some View {
+        Card(title: "Using your apps", footer: "Petal AI presses buttons, types and chooses menu items with a pink pointer of its own; yours stays where it is. It asks before it uses each app, and Stop or Esc ends it.") {
+            SettingToggle(key: "computerUse", title: "Let Petal AI use your apps", detail: "Never apps kept private, and never password fields.")
+            // A hidden display for each run. Where macOS can't make one, the switch says so and stays off.
+            SettingToggle(key: "runDisplays", title: "Give each run a display of its own",
+                          detail: RunDisplays.unavailableWords ?? "A helper's windows open where you don't see them, out of your way. Watch from the AI button, where Show me brings one to your screen.")
+                .disabled(RunDisplays.unavailableWords != nil)
         }
     }
 }

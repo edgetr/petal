@@ -513,6 +513,43 @@ struct BackgroundCheck {
         expect(NoteStatus.previewScrolls(shownNotes.count), "more than fit: the preview scrolls")
         expect(!NoteStatus.previewScrolls(NoteStatus.tilesInView), "as many as fit: side by side")
 
+        // MARK: A window on the run's own hidden display
+
+        var hiddenFront = situation(front: true, focused: true, idle: 30)
+        hiddenFront.hidden = true
+        expect(Background.way(hiddenFront) == .background, "on its own display: the background way, even when that window is its app's front one")
+        var hiddenTyping = situation(front: true, focused: true, idle: 0)
+        hiddenTyping.hidden = true
+        expect(Background.way(hiddenTyping) == .background, "never a wait for the person's typing: they can't be typing there on purpose")
+        var hiddenBehind = situation()
+        hiddenBehind.hidden = true
+        expect(Background.way(hiddenBehind) == .background, "and with its app behind, as any note")
+        expect(Background.behind(hiddenFront, plannedFront: true, changed: false) == .go, "a change planned with its app in front still goes")
+        expect(Background.behind(hiddenFront, plannedFront: false, changed: false) == .again, "its app come to the front since it was planned: decided again")
+        expect(Background.situation(appFront: .yes, windowFocused: .yes, idle: 9, hidden: true)?.hidden == true, "the situation carries it")
+        expect(Background.situation(appFront: .no, windowFocused: .no, idle: 9, hidden: true)?.hidden == true, "behind too")
+        expect(Background.situation(appFront: .unknown, windowFocused: .no, idle: 9, hidden: true) == nil, "unknown is still unknown")
+        expect(Background.situation(appFront: .yes, windowFocused: .yes, idle: 9)?.hidden == false, "a note's own window on the person's screen isn't hidden")
+        // Keys and menus keep to their rule there: only while the person isn't using that app.
+        expect(plan("key", element: false, front: true, main: true) == .needs(.keys), "keys never reach it while the person uses that app")
+        expect(plan("type", text: true, front: true) == .setValue(keysAfter: false), "a field's own value still goes")
+        for reason in Background.Reason.allCases {
+            let told = reason.words("Safari", hidden: true)
+            expect(told.contains("your own display") && told.contains("Show me") && !told.contains("bring the window forward"),
+                   "on its own display, \(reason) says Show me, never bring it forward", told)
+            expect(told.contains("Nothing was done"), "\(reason): nothing was done")
+        }
+        expect(Background.Reason.keys.words("Safari").contains("bring the window forward"), "a note on the person's screen still asks for the window")
+
+        // MARK: Waiting for a display
+
+        let waitingDisplay = NoteStatus.Facts(running: true, activity: "Opening Safari", waitingForDisplay: true)
+        expect(NoteStatus.line(waitingDisplay) == "Waiting for a display", "its turn for a display hasn't come", NoteStatus.line(waitingDisplay))
+        expect(NoteStatus.shows(waitingDisplay) && !NoteStatus.needsYou(waitingDisplay), "it shows, and isn't waiting for the person")
+        expect(NoteStatus.line(NoteStatus.Facts(running: true, asking: "Let Petal AI use Safari?", waitingForDisplay: true)) == "Waiting for you: Let Petal AI use Safari?",
+               "a question for the person comes first")
+        expect(NoteStatus.shows(NoteStatus.Facts(waitingForDisplay: true)), "it shows even between turns")
+
         print("Background: \(passed) passed, \(failures) failed")
         if failures > 0 { exit(1) }
     }

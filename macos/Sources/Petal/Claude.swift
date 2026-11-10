@@ -348,6 +348,7 @@ final class Agent {
         defer { switching = false }
         endRun()
         app.assist.computer.end(noteID.uuidString, forget: true)
+        app.displays.ended(noteID.uuidString)   // another chat: the last one's hidden display goes with it
         askedWith = nil
         keptPlace = nil
         onDisk = false
@@ -403,6 +404,7 @@ final class Agent {
         defer { switching = false }
         endRun()
         app.assist.computer.end(noteID.uuidString, forget: true)
+        app.displays.ended(noteID.uuidString)   // another chat: the last one's hidden display goes with it
         askedWith = nil
         keptPlace = chat.place?.sanitized
         onDisk = true
@@ -775,6 +777,10 @@ final class Agent {
                 prompt += " With petal_ui and petal_act you work in it in the background while the user does something else\(place.kind == .tab ? " (only while its tab is the one showing in its window)" : ""): you can take your time, research with your own tools, and fill in or press what's needed there. When petal_act says it needs the window in front, ask the user."
             }
         }
+        // Hidden displays, while the person has them on: this chat opens on their screen unless it says otherwise.
+        if app.displays.on {
+            prompt += "\n\nHidden displays are on (runDisplays). In this chat the user is with you, so petal_apps opens on their screen as always. For work of your own that they needn't watch (looking something up in an app, filling something in while they do other things), pass on: \"display\" to petal_apps open: the window goes on a display of your own that they don't see, petal_ui (app, or display: true) and petal_act work in it with no pointer and nothing brought forward, and petal_look with screenshot: \"screen\" shows you that display. It goes when your reply is done: an empty window you made is closed, anything else comes to their screen then. Their questions, Buy and the vault's card show to them where they are. They can watch from the AI button's preview, where Show me brings the window to their screen."
+        }
         let remembered = app.assist.memoryBrief()
         if !remembered.isEmpty { prompt += "\n\nWhat you remember about this user ([id] for petal_forget):\n" + remembered }
         return prompt
@@ -867,8 +873,8 @@ final class InputPanel: NSPanel {
     /// button (kept on the screen) and grows out of it; otherwise centered over the dock.
     /// `key: false` shows it without taking the keyboard from the app in front (a note back with its window).
     func showAgain(from anchor: CGRect? = nil, key: Bool = true) {
-        let screen = anchor.flatMap { a in NSScreen.screens.first { $0.frame.intersects(a) } }
-            ?? NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
+        let screen = anchor.flatMap { a in Screens.all.first { $0.frame.intersects(a) } }
+            ?? Screens.all.first { $0.frame.contains(NSEvent.mouseLocation) } ?? Screens.main ?? Screens.all[0]
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
         // The content's own 10-point margin around the glass, then 6 points of space over the dock.
@@ -922,7 +928,7 @@ final class InputPanel: NSPanel {
     func fit() {
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize
-        let screen = self.screen ?? NSScreen.main ?? NSScreen.screens[0]
+        let screen = self.screen ?? Screens.main ?? Screens.all[0]
         let bottom = screen.frame.minY + Self.dockReach(on: screen) + 6 - 10
         let target = NSRect(x: frame.midX - size.width / 2, y: bottom, width: size.width, height: size.height).integral
         guard target != frame else { return }
@@ -1400,7 +1406,7 @@ struct ConversationView: View {
                 .padding(.vertical, 2)
             }
             .scrollIndicators(.never)
-            .frame(maxHeight: (NSScreen.main?.frame.height ?? 900) * 0.5)
+            .frame(maxHeight: (Screens.main?.frame.height ?? 900) * 0.5)
             .fixedSize(horizontal: false, vertical: true)
             .onChange(of: agent.messages.count) { _, _ in
                 withAnimation {

@@ -186,11 +186,8 @@ private final class DockProbe: @unchecked Sendable {
         var origin = CGPoint.zero, extent = CGSize.zero
         AXValueGetValue(position, .cgPoint, &origin)
         AXValueGetValue(size, .cgSize, &extent)
-        var count: UInt32 = 0
-        CGGetActiveDisplayList(0, nil, &count)
-        var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
-        CGGetActiveDisplayList(count, &displays, &count)
-        return NoteShelf.dockBarShowing(CGRect(origin: origin, size: extent), screens: displays.map { CGDisplayBounds($0) })
+        // The person's screens only: a run's hidden display is never where the Dock shows.
+        return NoteShelf.dockBarShowing(CGRect(origin: origin, size: extent), screens: Screens.displays.map { CGDisplayBounds($0) })
     }
 
     private func find() {

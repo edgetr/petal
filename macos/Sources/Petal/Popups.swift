@@ -38,7 +38,7 @@ final class GlassPanel: NSPanel {
             hosting.layoutSubtreeIfNeeded()
             size = hosting.fittingSize
         }
-        let screen = dock?.screenRef ?? NSScreen.main ?? NSScreen.screens[0]
+        let screen = dock?.screenRef ?? Screens.main ?? Screens.all[0]
         let area = screen.frame.insetBy(dx: gap, dy: gap)
         let edge = dock?.glassFrame ?? slot
         var origin: CGPoint
@@ -356,6 +356,14 @@ final class Previews {
 
     /// A note's picture, only if it's of the window the note has now: never its old window's after it moved.
     func noteThumb(_ item: NotePreviewItem) -> NSImage? { NotePicture.current(noteThumbs[item.id], now: item.seen) }
+
+    /// Made-up pictures of runs' hidden displays, for `Petal --snapshot`.
+    @ObservationIgnored private var sampleDisplays: [UUID: NSImage] = [:]
+    /// The picture of a run's own hidden display (RunDisplays keeps the latest), for its tile.
+    func displayThumb(_ item: NotePreviewItem) -> NSImage? {
+        guard let id = item.display else { return nil }
+        return sampleDisplays[id] ?? PetalApp.shared.displays.display(tile: id)?.picture
+    }
     /// Accessibility answers each app in its own time (up to 0.3 s for a busy one), so windows are listed here, each
     /// app on its own: a slow one never holds up the next.
     nonisolated private static let queue = DispatchQueue(label: "petal.previews", qos: .userInitiated, attributes: .concurrent)
@@ -492,7 +500,7 @@ final class Previews {
         pictures = Capture.allowed
         PetalApp.shared.popups.showPreview(id, in: dock)
         capture(found)
-        if id == Self.notes { noteCount = noteItems.count; captureNotes() }
+        if id == Self.notes { noteCount = noteItems.count; captureNotes(); PetalApp.shared.displays.refreshPictures() }
         refresh?.invalidate()
         refresh = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.again() }
@@ -512,6 +520,8 @@ final class Previews {
             // No picture kept of a window that's gone, of an app now kept private, or of a window the note left.
             let now = Dictionary(items.map { ($0.id, $0.seen) }, uniquingKeysWith: { first, _ in first })
             noteThumbs = noteThumbs.filter { id, kept in now[id].map { NotePicture.current(kept, now: $0) != nil } ?? false }
+            // The runs' own displays, live: a new picture of each about once a second while this is open.
+            if sampleNotes == nil { PetalApp.shared.displays.refreshPictures() }
             return captureNotes()
         }
         if id == Self.media {
@@ -605,8 +615,9 @@ final class Previews {
     }
 
     /// What `Petal --snapshot` draws the AI button's preview with.
-    func preview(notes: [NotePreviewItem]?, thumbnails: [UUID: NSImage] = [:]) {
+    func preview(notes: [NotePreviewItem]?, thumbnails: [UUID: NSImage] = [:], displays: [UUID: NSImage] = [:]) {
         sampleNotes = notes
+        sampleDisplays = displays
         let seen = Dictionary((notes ?? []).map { ($0.id, $0.seen) }, uniquingKeysWith: { first, _ in first })
         noteThumbs = Dictionary(uniqueKeysWithValues: thumbnails.compactMap { id, image in
             seen[id].map { (id, NotePicture.Kept(seen: $0, image: image)) }

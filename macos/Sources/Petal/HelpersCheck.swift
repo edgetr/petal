@@ -340,6 +340,7 @@ private final class HelpersChecker {
         twelfth()
         thirteenth()
         fourteenth(number: "14")
+        fifteenth()
         if ai { real() }
         settle()
         print(failures == 0 ? "helpers-check: all passed" : "helpers-check: \(failures) failed")
@@ -877,6 +878,83 @@ private final class HelpersChecker {
             expect(wait(15) { self.state(fifth) == .done }, "the fifth ran once a place was free (\(String(describing: state(fifth))))")
             expect(disk(asker)?.stamps.contains { $0.label.contains("ALLOWED") } == true, "the Allow is stamped on the note's back")
             return "the asker kept its place (\(ClaudePanel.atOnce) of \(ClaudePanel.atOnce) taken, a fifth waiting); Allow's continuation ran at once in the same session, then the fifth"
+        }
+    }
+
+    /// 15. A hidden display for each run, with made-up displays (nothing real is made, nothing is arranged): a helper
+    /// gets one only when it needs it, the next waits its turn and says so, and every ending removes it.
+    func fifteenth() {
+        step("15", "a hidden display for each run (made up)") {
+            var made: [CGDirectDisplayID] = []
+            var removed: [CGDirectDisplayID] = []
+            var next: CGDirectDisplayID = 9000
+            app.displays.useMadeUp({ _, _, _ in
+                next += 1
+                let id = next
+                made.append(id)
+                return RunDisplays.Made(id: id, hiDPI: true, remove: { removed.append(id) })
+            }, placed: { id, size in
+                RunDisplays.Placing(frame: CGRect(x: -20_000 - CGFloat(id - 9000) * 2000, y: -20_000, width: size.width, height: size.height), tried: [])
+            })
+            app.config.set("runDisplays", true)
+            app.config.set("runDisplaysLimit", 1)
+            expect(app.displays.on, "hidden displays are on")
+            var callers: [String] = []
+            var ids: [String] = []
+            for name in ["first", "second"] {
+                let id = note("Display \(name)")
+                plan("chat", turn("\(name) is done.", sleep: 60, session: "display-\(name)"), match: "work on the \(name) thing")
+                ask(id, "@Petal work on the \(name) thing")
+                ids.append(id)
+            }
+            expect(wait(15) { ids.allSatisfy { self.helpers.runs[$0]?.sticky?.agent.running == true } }, "two helpers are at work")
+            callers = ids.compactMap { helpers.runs[$0]?.sticky?.id.uuidString }
+            guard callers.count == 2 else { expect(false, "both have an agent"); return "" }
+            expect(made.isEmpty && app.displays.displays.isEmpty, "none is made before a run needs one (\(made.count))")
+            expect(app.displays.place(for: callers[0], asked: nil) == .display, "a helper opens on its own display")
+            expect(app.displays.place(for: callers[0], asked: "screen") == .screen, "unless it says the person's screen")
+            // The first needs one: made, placed, ready.
+            var firstGot: RunDisplays.Display?
+            var firstFailed: String?
+            app.displays.need(callers[0]) { result in
+                switch result {
+                case .success(let display): firstGot = display
+                case .failure(let why): firstFailed = why.words
+                }
+            }
+            expect(wait(5) { firstGot != nil }, "the first run got its display (\(firstFailed ?? "no answer"))")
+            expect(made.count == 1 && app.displays.display(for: callers[0])?.number == made.first, "one display, the first run's")
+            expect(Screens.runIDs.isEmpty, "nothing real was made: no display is marked as a run's")
+            // The second is past the limit: it waits its turn, and says so where its state shows.
+            var secondGot: RunDisplays.Display?
+            var secondFailed: String?
+            app.displays.need(callers[1]) { result in
+                switch result {
+                case .success(let display): secondGot = display
+                case .failure(let why): secondFailed = why.words
+                }
+            }
+            wait(0.5)
+            expect(secondGot == nil && secondFailed == nil && made.count == 1, "the second waits (limit 1)")
+            expect(app.displays.waits(callers[1]) && !app.displays.waits(callers[0]), "it's known to wait for a display")
+            let waiting = app.claude.note(withID: callers[1])
+            expect(waiting.map { NoteStatus.line(self.app.claude.facts($0)) } == NoteStatus.waitingForDisplay, "its line says Waiting for a display")
+            expect(waiting?.agent.activity.text == NoteStatus.waitingForDisplay, "and so does its note's bar")
+            // The first is stopped: its display goes, and the one waiting gets the next.
+            helpers.stop(ids[0])
+            expect(wait(5) { removed == Array(made.prefix(1)) }, "Stop removed the first run's display (\(removed))")
+            expect(wait(5) { secondGot != nil }, "the second got the next one (\(secondFailed ?? "no answer"))")
+            expect(made.count == 2 && !app.displays.waits(callers[1]), "a second display, nobody waiting")
+            expect(waiting?.agent.activity.text != NoteStatus.waitingForDisplay, "it no longer says it waits")
+            // Turned off while one exists: it goes at once.
+            app.config.set("runDisplays", false)
+            expect(wait(5) { removed.count == 2 && self.app.displays.displays.isEmpty }, "turning hidden displays off removed the last one (\(removed))")
+            expect(app.displays.place(for: callers[1], asked: "display") == .screen, "off: everything opens on the person's screen")
+            var offAnswer: String?
+            app.displays.need(callers[1]) { result in if case .failure(let why) = result { offAnswer = why.words } }
+            expect(offAnswer == RunDisplayRules.off && made.count == 2, "and asking for one says they're off")
+            app.config.set("runDisplaysLimit", 0)
+            return "none before it was needed, the second waited its turn and said so, Stop and the switch each removed theirs (\(made.count) made, \(removed.count) removed, none real)"
         }
     }
 

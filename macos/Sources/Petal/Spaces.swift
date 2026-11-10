@@ -47,8 +47,12 @@ enum Spaces {
         var number = 0
         var found: Int?
         var fullScreen = false
+        // A run's hidden display has a Desktop of its own, which is none of the person's: left out of the count, so
+        // their Desktops keep their numbers while one exists.
+        let hidden = Set(Screens.runIDs.compactMap { uuid(of: $0)?.uppercased() })
         for display in displays {
             let identifier = display["Display Identifier"] as? String ?? ""
+            if !hidden.isEmpty, hidden.contains(identifier.uppercased()) { continue }
             let current = (display["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? Int
             // With "Displays have separate Spaces" off there is one entry, "Main", for every screen.
             let isThisScreen = identifier == "Main" || identifier.caseInsensitiveCompare(wanted ?? "") == .orderedSame
@@ -66,8 +70,12 @@ enum Spaces {
     }
 
     private static func uuid(of screen: NSScreen) -> String? {
-        guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
-              let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { return nil }
+        guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { return nil }
+        return uuid(of: id)
+    }
+
+    nonisolated private static func uuid(of id: CGDirectDisplayID) -> String? {
+        guard let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { return nil }
         return CFUUIDCreateString(nil, uuid) as String
     }
 }

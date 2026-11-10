@@ -195,7 +195,7 @@ enum Tiling {
         let item = DispatchWorkItem {
             if NSEvent.pressedMouseButtons & 1 != 0 && attempts < 300 { settle(id, attempts: attempts + 1); return }
             guard active, let from = layout(of: id) else { return }
-            let top = NSScreen.screens.first?.frame.maxY ?? 0
+            let top = Screens.all.first?.frame.maxY ?? 0
             let mouse = NSEvent.mouseLocation
             let pointer = CGPoint(x: mouse.x, y: top - mouse.y)
             let screens = Windows.screens()

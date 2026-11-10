@@ -105,7 +105,7 @@
   },
   {
     "name": "petal_look",
-    "description": "What the user is looking at now: the app and window in front, the browser tab's address and title, selected text and which apps are open. In a sticky note's chat it looks at the note's own window (a note on all of an app: that app's window in front; a note on a tab: its window, with the note's tab as noteTab, only while that tab is the one showing), even after the user has moved on (front: true looks at what's in front now instead). screenshot: \"window\" (the front window, or app's) or \"screen\" saves a PNG and returns its path to read; fields that may hold a password, card number, security code or key are blacked out, and a window Petal can't check isn't shown. clipboard: true adds the clipboard's text. Use it when the user says this, here, what I'm looking at.",
+    "description": "What the user is looking at now: the app and window in front, the browser tab's address and title, selected text and which apps are open. In a sticky note's chat it looks at the note's own window (a note on all of an app: that app's window in front; a note on a tab: its window, with the note's tab as noteTab, only while that tab is the one showing), even after the user has moved on (front: true looks at what's in front now instead). screenshot: \"window\" (the front window, or app's) or \"screen\" saves a PNG and returns its path to read; fields that may hold a password, card number, security code or key are blacked out, and a window Petal can't check isn't shown. clipboard: true adds the clipboard's text. With a hidden display of your own (runDisplays): app names your window there when you opened one in that app, display: true looks at the window you opened last, and screenshot: \"screen\" is a picture of your display, not the user's screen (front: true is theirs). Use it when the user says this, here, what I'm looking at.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -127,13 +127,17 @@
         "front": {
           "type": "boolean",
           "description": "in a sticky note: what's in front now, not the note's window"
+        },
+        "display": {
+          "type": "boolean",
+          "description": "your own window on your hidden display (the one you opened last, or app's)"
         }
       }
     }
   },
   {
     "name": "petal_apps",
-    "description": "Open, quit, hide or bring forward an app (by name or bundle id); open with `open` set opens that address or file (in `app` if given). Quitting asks the user first.",
+    "description": "Open, quit, hide or bring forward an app (by name or bundle id); open with `open` set opens that address or file (in `app` if given). Quitting asks the user first. When the user has turned on hidden displays (runDisplays), open can put its window on a display of your own that the user doesn't see: on: \"display\" (what a helper in a note and an AI session outside Petal get when they don't say; the first one may wait its turn for a display), on: \"screen\" for the user's own screen (what Petal's quick chat gets; say it whenever the user asked to see or open something for themselves). The reply says where it went. Nothing is activated or brought forward for your own display, and only a window that open made is ever moved there: an address in a browser the user already has open would land as a tab in their window, and an app they already have open shows nothing new, so those say so and open nothing.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -152,13 +156,21 @@
         "open": {
           "type": "string",
           "description": "an https:// address or a file path"
+        },
+        "on": {
+          "type": "string",
+          "enum": [
+            "display",
+            "screen"
+          ],
+          "description": "open: your own hidden display, or the user's screen (only matters while runDisplays is on)"
         }
       }
     }
   },
   {
     "name": "petal_windows",
-    "description": "The user's windows: list them (id, app, title, minimized, here = on this Desktop), or focus, minimize, close (asks first) or arrange one (layout: left, right, top, bottom, full, center; the dock's room is kept). Pick a window by its id from list, or a word of its title, within `app`.",
+    "description": "The user's windows: list them (id, app, title, minimized, here = on this Desktop), or focus, minimize, close (asks first) or arrange one (layout: left, right, top, bottom, full, center; the dock's room is kept). Pick a window by its id from list, or a word of its title, within `app`. A window on your own hidden display (runDisplays) is listed with display: \"yours\"; it's arranged within that display and never comes forward (focus refuses). show brings the windows on your display to the user's screen, behind what they're doing, when they need to see one. Another helper's display and its windows are never listed.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -169,7 +181,8 @@
             "focus",
             "minimize",
             "close",
-            "arrange"
+            "arrange",
+            "show"
           ]
         },
         "app": {
@@ -381,7 +394,7 @@
   },
   {
     "name": "petal_ui",
-    "description": "The controls of the window in front (in a sticky note's chat, the note's own window; a note on a tab reads and acts only while its tab is the one showing), to use with petal_act: buttons, links, text fields, checkboxes, menus, tabs, rows and the like, visible ones first, up to 150. Each has an id (e12), role, name, value (never a password field's; a secret saved in the vault shows as (hidden) wherever it appears) and frame [x, y, w, h] in screen points. The ids last until the next petal_ui or 5 minutes: call it again whenever the window changes. app: another app's front window; front: true in a sticky note uses what's in front now; find: only controls whose name has this word (for a big window). Apps the user keeps private give only their name.",
+    "description": "The controls of the window in front (in a sticky note's chat, the note's own window; a note on a tab reads and acts only while its tab is the one showing), to use with petal_act: buttons, links, text fields, checkboxes, menus, tabs, rows and the like, visible ones first, up to 150. Each has an id (e12), role, name, value (never a password field's; a secret saved in the vault shows as (hidden) wherever it appears) and frame [x, y, w, h] in screen points. The ids last until the next petal_ui or 5 minutes: call it again whenever the window changes. app: another app's front window; front: true in a sticky note uses what's in front now; find: only controls whose name has this word (for a big window). With a hidden display of your own (runDisplays): app reads your window there when you opened one in that app, and display: true reads the window you opened last. Apps the user keeps private give only their name.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -394,13 +407,17 @@
         "find": {
           "type": "string",
           "description": "a word in the control's name or value"
+        },
+        "display": {
+          "type": "boolean",
+          "description": "your own window on your hidden display (the one you opened last, or app's)"
         }
       }
     }
   },
   {
     "name": "petal_act",
-    "description": "Use a control from the last petal_ui, through Accessibility, with Petal's own pink pointer (the user's pointer never moves). In a sticky note's chat, acting on the note's own window, it works in the background while the user works elsewhere: no pointer, nothing comes forward, their keyboard untouched (only when they have that window in front does it use the pointer, and never while they're typing in it). Some acts can't be done in the background (menus and keys while they use that app, copying and pasting, the vault, a link or file that would open in another app, an app that ignores background typing, a tab that isn't showing): then nothing is done and it says the window must be in front; ask the user in one line to bring it forward (clicking the note in the AI button's preview does), don't bring it forward yourself, then petal_ui again. action press (id): presses a button, link, checkbox, tab or row. type (id, text): puts text in a field (replace: false inserts at the cursor instead; submit: true presses Return after). focus (id). scroll (id; direction up, down, left or right scrolls its area by most of a page; none brings the control into view). menu (path, like \"File > Export…\"): chooses a menu bar item. key (key, like cmd-s, cmd-shift-z, return, escape, tab, down; id focuses that control first): a shortcut its menus have is chosen there, other keys go to the app, which comes forward to take them. menu and key go to the window the last petal_ui looked at (app, if given, must be its app), brought to the front of its app first. The first use of an app in a reply asks the user (in an AI session outside Petal's own chat, the first in a task: name it in task; a new task, two quiet minutes or a Stop asks again). Each act checks the window hasn't moved or changed since petal_ui; when it has, call petal_ui again. What only a real click could do, it says so: ask the user to do it. Never for password fields (petal_vault fills saved passwords) or private apps.",
+    "description": "Use a control from the last petal_ui, through Accessibility, with Petal's own pink pointer (the user's pointer never moves). In a sticky note's chat, acting on the note's own window, it works in the background while the user works elsewhere: no pointer, nothing comes forward, their keyboard untouched (only when they have that window in front does it use the pointer, and never while they're typing in it). Some acts can't be done in the background (menus and keys while they use that app, copying and pasting, the vault, a link or file that would open in another app, an app that ignores background typing, a tab that isn't showing): then nothing is done and it says the window must be in front; ask the user in one line to bring it forward (clicking the note in the AI button's preview does), don't bring it forward yourself, then petal_ui again. A window on your own hidden display (runDisplays) is always worked in that way, with no pointer and nothing brought forward; what can't be done there (keys and menus while the user is using that same app, copying and pasting, the vault) says so: try another way or wait, and only if it must be done in front of the user ask them to press Show me (the AI button's preview), which brings the window to their screen. action press (id): presses a button, link, checkbox, tab or row. type (id, text): puts text in a field (replace: false inserts at the cursor instead; submit: true presses Return after). focus (id). scroll (id; direction up, down, left or right scrolls its area by most of a page; none brings the control into view). menu (path, like \"File > Export…\"): chooses a menu bar item. key (key, like cmd-s, cmd-shift-z, return, escape, tab, down; id focuses that control first): a shortcut its menus have is chosen there, other keys go to the app, which comes forward to take them. menu and key go to the window the last petal_ui looked at (app, if given, must be its app), brought to the front of its app first. The first use of an app in a reply asks the user (in an AI session outside Petal's own chat, the first in a task: name it in task; a new task, two quiet minutes or a Stop asks again). Each act checks the window hasn't moved or changed since petal_ui; when it has, call petal_ui again. What only a real click could do, it says so: ask the user to do it. Never for password fields (petal_vault fills saved passwords) or private apps.",
     "inputSchema": {
       "type": "object",
       "properties": {

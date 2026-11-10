@@ -72,7 +72,10 @@ enum Windows {
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
-    nonisolated static func windows(of pid: pid_t) -> [AppWindow] {
+    /// An app's windows. `everywhere`: those on a run's hidden display too (only Petal AI's tools ask, for the run
+    /// whose display it is); otherwise only the ones on the person's screens, so the dock's previews, its window
+    /// lists, minimizing and notes never show or take a window the person can't see.
+    nonisolated static func windows(of pid: pid_t, everywhere: Bool = false) -> [AppWindow] {
         guard trusted else { return [] }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.3)   // a hung app mustn't hang the dock
@@ -92,6 +95,7 @@ enum Windows {
                 AXValueGetValue(size, .cgSize, &extent)
                 frame = CGRect(origin: point, size: extent)
             }
+            if !everywhere, !minimized, Screens.onRunDisplay(frame) { continue }
             // The window server's number stays with the window as others open, close and minimize around it.
             let key = id(of: window).map { "\(pid)-w\($0)" } ?? "\(pid)-\(index)"
             result.append(AppWindow(id: key, pid: pid, title: title, minimized: minimized,
@@ -380,8 +384,8 @@ extension Windows {
     /// Each screen's frame and visible frame in Accessibility's coordinates, with the Desktop it shows (nil on a
     /// full-screen app's Space).
     static func screens() -> [(screen: NSScreen, frame: CGRect, visible: CGRect, desktop: Int?)] {
-        let top = NSScreen.screens.first?.frame.maxY ?? 0
-        return NSScreen.screens.map { ($0, ScreenArea.toAX($0.frame, mainTop: top), ScreenArea.toAX($0.visibleFrame, mainTop: top), Spaces.desktop(on: $0)) }
+        let top = Screens.all.first?.frame.maxY ?? 0
+        return Screens.all.map { ($0, ScreenArea.toAX($0.frame, mainTop: top), ScreenArea.toAX($0.visibleFrame, mainTop: top), Spaces.desktop(on: $0)) }
     }
 
     /// Where a window may go on a screen: its visible frame, less Petal's dock strip while the dock shows and doesn't
@@ -391,8 +395,8 @@ extension Windows {
         let app = PetalApp.shared, config = app.config
         guard app.docks.shown, !config.autoHide, !respectClear || config.keepWindowsClear else { return visible }
         // The same strip as Dock.swift's keepWindowsClear keeps: up to the dock's glass.
-        let top = NSScreen.screens.first?.frame.maxY ?? 0
-        let screen = NSScreen.screens.first { ScreenArea.toAX($0.frame, mainTop: top).equalTo(frame, within: 1) }
+        let top = Screens.all.first?.frame.maxY ?? 0
+        let screen = Screens.all.first { ScreenArea.toAX($0.frame, mainTop: top).equalTo(frame, within: 1) }
         guard let reserve = app.docks.reach(on: screen) else { return visible }
         return ScreenArea.usable(visible: visible, screen: frame, position: config.position, reserve: reserve)
     }

@@ -304,7 +304,7 @@ final class DockController {
     func refresh(with snapshot: WindowList) {
         guard shown else { return }
         lastSnapshot = snapshot
-        let screens = NSScreen.screens
+        let screens = Screens.all
         let ids = Set(screens.compactMap(\.displayID))
         for (id, panel) in panels where !ids.contains(id) {
             panel.close()
@@ -372,7 +372,7 @@ final class DockController {
         guard Windows.trusted else { return }
         let on = config.keepWindowsClear && !config.autoHide
         guard on || !cleared.isEmpty else { return }
-        let top = NSScreen.screens.first?.frame.maxY ?? 0
+        let top = Screens.all.first?.frame.maxY ?? 0
         let docks = panels.values.compactMap { panel -> (panel: DockPanel, screen: CGRect)? in
             guard let area = panel.screenRef?.frame else { return nil }
             return (panel, CGRect(x: area.minX, y: top - area.maxY, width: area.width, height: area.height))   // top-left origin
@@ -477,7 +477,7 @@ final class DockController {
     }
 
     func dock(for screen: NSScreen?) -> ScreenDock? {
-        guard let id = (screen ?? NSScreen.main)?.displayID else { return panels.values.first?.dock }
+        guard let id = (screen ?? Screens.main)?.displayID else { return panels.values.first?.dock }
         return panels[id]?.dock ?? panels.values.first?.dock
     }
 
@@ -488,10 +488,10 @@ final class DockController {
         if panels.count == 1 { return panels.values.first?.dock }
         guard let front = NSWorkspace.shared.frontmostApplication,
               let frame = (lastSnapshot ?? WindowList.current()).onScreenFrames(pid: front.processIdentifier).first
-        else { return dock(for: NSScreen.main) }
-        let top = NSScreen.screens.first?.frame.maxY ?? 0
+        else { return dock(for: Screens.main) }
+        let top = Screens.all.first?.frame.maxY ?? 0
         let center = CGPoint(x: frame.midX, y: top - frame.midY)
-        return dock(for: NSScreen.screens.first { $0.frame.contains(center) })
+        return dock(for: Screens.all.first { $0.frame.contains(center) })
     }
 
     func revealAll() {
@@ -652,7 +652,7 @@ struct WindowList {
 
     /// Apps with a window on the Desktop `screen` shows. Window frames count from the top of the main screen.
     func apps(on screen: NSScreen) -> [String] {
-        let top = NSScreen.screens.first?.frame.maxY ?? 0
+        let top = Screens.all.first?.frame.maxY ?? 0
         var result: [String] = []
         for window in onScreen {
             let center = CGPoint(x: window.frame.midX, y: top - window.frame.midY)

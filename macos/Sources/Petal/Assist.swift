@@ -197,6 +197,8 @@ final class Assist {
         let gone: @Sendable () -> Bool = { request?.hungUp == true }
         let live: @Sendable () -> Bool = { !gone() }
         guard live() else { return }   // its client went before Petal got to it: nothing to answer
+        // An AI session outside Petal keeps its hidden display while it keeps asking (RunDisplays).
+        app.displays.touched(note)
         let args = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
         let send: (Any) -> Void = { result in
             let object: Any = JSONSerialization.isValidJSONObject(result) ? result : ["result": "\(result)"]
@@ -210,7 +212,7 @@ final class Assist {
             // A note's helper waiting for its note's place: never what was there before, or what's in front now.
             if (args["app"] as? String ?? "").isEmpty, args["front"] as? Bool != true, let waiting = app.claude.helperWaiting(note) { return fail(waiting) }
             look(args, place: app.claude.placed(note), note: note, send)
-        case "petal_apps": apps(args, caller: note, live: live, send, fail)
+        case "petal_apps": apps(args, caller: note, label: who.map { $0.agent == .petal ? "" : $0.label } ?? "", live: live, send, fail)
         case "petal_windows": windows(args, caller: note, live: live, send, fail)
         case "petal_trash": trash(args, caller: note, live: live, send, fail)
         case "petal_remember":
@@ -273,11 +275,23 @@ final class Assist {
     /// or for what's in front (`front`).
     private func look(_ args: [String: Any], place: NotePlace? = nil, note: String? = nil, _ send: @escaping (Any) -> Void) {
         let named = args["app"] as? String ?? ""
-        let place = named.isEmpty && args["front"] as? Bool != true ? place : nil
+        let wantsFront = args["front"] as? Bool == true
+        let wantsDisplay = args["display"] as? Bool == true
+        // The run's own window on its hidden display (RunDisplays): asked for (display: true), or the app named has
+        // one there. Never with front: true, which is what the person has in front.
+        let own = wantsFront ? nil : app.displays.window(for: note, app: named, newest: wantsDisplay)
+        let ownDisplay = wantsFront ? nil : app.displays.display(for: note)
+        if wantsDisplay, own == nil, (args["screenshot"] as? String) != "screen" {
+            return send(["note": ownDisplay == nil ? "You have no display of your own now. petal_apps open (on: \"display\") puts a window on one."
+                                                   : "None of your windows\(named.isEmpty ? "" : " of \(named)") is on your display. petal_apps open puts one there."])
+        }
+        let place = own == nil && named.isEmpty && !wantsFront ? place : nil
         let stuck = place?.running
-        let front = place == nil ? frontApp(named: named) : stuck
-        let wanted: CGWindowID? = if case .window(let number)? = place?.target { number } else { nil }
+        let front = own.flatMap { NSRunningApplication(processIdentifier: $0.pid) } ?? (place == nil ? frontApp(named: named) : stuck)
+        let placed: CGWindowID? = if case .window(let number)? = place?.target { number } else { nil }
+        let wanted: CGWindowID? = own?.window ?? placed
         var result: [String: Any] = [:]
+        if own != nil { result["display"] = "This window is on your own display: the person doesn't see it." }
         if let place {
             // A note's window that's gone is said so, and nothing else is looked at in its place.
             guard stuck != nil else {
@@ -345,7 +359,8 @@ final class Assist {
                 guard let match = all.first(where: { Windows.id(of: $0) == wanted }) else {
                     let name = front.localizedName ?? "its app"
                     return DispatchQueue.main.async {
-                        send(["note": "This note's window is closed (it was in \(name)). front: true looks at what's in front now."])
+                        send(["note": own != nil ? "That window of yours is closed (it was in \(name))."
+                                                 : "This note's window is closed (it was in \(name)). front: true looks at what's in front now."])
                     }
                 }
                 window = match
@@ -366,6 +381,10 @@ final class Assist {
             let looked = window
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    // Another run's display is none of this one's: nothing of its window is told.
+                    if looked != nil, self.app.displays.foreign(frame, to: note) {
+                        return send(["note": "\(front.localizedName ?? "That app")'s window there belongs to another helper's work, on a display of its own: Petal keeps them apart."])
+                    }
                     result["window"] = title
                     if !shownSelection.isEmpty { result["selectedText"] = shownSelection }
                     if let shownClipboard { result["clipboard"] = shownClipboard }
@@ -393,7 +412,10 @@ final class Assist {
                             // takes the tab's button from now on).
                             if let tabPlace, let before, let note { self.app.claude.tabSeen(note: note, was: tabPlace, tab: before.tab, window: before.window) }
                             let told = {
-                                if picture != nil { self.did(shot == "screen" ? "Looked at your screen" : "Looked at \(named: front.localizedName ?? "", else: "a window")") }
+                                if picture != nil {
+                                    self.did(shot != "screen" ? "Looked at \(named: front.localizedName ?? "", else: "a window")"
+                                             : ownDisplay != nil ? "Looked at its own display" : "Looked at your screen")
+                                }
                                 send(result)
                             }
                             // A Buy said in this window (by any chat) ends if it now shows another tab or page, before
@@ -424,10 +446,13 @@ final class Assist {
                     let finish = {
                         guard !shot.isEmpty else { return deliver(nil) }
                         Task {
-                            let picture = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", hiding: hidden, excluding: shielded)
+                            // A run with a display of its own sees that display, never the person's screen (front: true does).
+                            let picture = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", display: ownDisplay?.number,
+                                                                hiding: hidden, excluding: shielded)
                             if let path = picture.path {
+                                let what = shot != "screen" ? "window" : ownDisplay != nil ? "display of your own (the person's screen isn't in it; front: true shows that)" : "screen"
                                 result["screenshot"] = path
-                                result["screenshotNote"] = "A PNG of the \(shot == "screen" ? "screen" : "window"); read it to see it. Black boxes are fields that may hold a password, card number, security code or key: Petal hides them."
+                                result["screenshotNote"] = "A PNG of the \(what); read it to see it. Black boxes are fields that may hold a password, card number, security code or key: Petal hides them."
                                     + (picture.note.map { " " + $0 } ?? "")
                             } else {
                                 result["screenshotNote"] = picture.note ?? (Capture.allowed ? "Couldn't take the picture." : "Petal needs Screen Recording for pictures (Petal's settings, Permissions).")
@@ -509,10 +534,12 @@ final class Assist {
     /// that moved or changed size between the list and the picture would have its blackouts in the wrong place, as
     /// would a field that scrolled far, appeared or went while it was taken: then it's taken again once, and after
     /// that there's no picture.
-    nonisolated private static func screenshot(_ window: CGWindowID?, screen: Bool = false, hiding: Set<pid_t> = [], excluding: Set<Int> = []) async -> (path: String?, note: String?) {
+    /// `display`: the screen pictured is this one (a run's own hidden display) rather than the person's main screen.
+    nonisolated private static func screenshot(_ window: CGWindowID?, screen: Bool = false, display: CGDirectDisplayID? = nil,
+                                               hiding: Set<pid_t> = [], excluding: Set<Int> = []) async -> (path: String?, note: String?) {
         var why: String?
         for _ in 0..<2 {
-            let taken = await capture(window, screen: screen, hiding: hiding, excluding: excluding)
+            let taken = await capture(window, screen: screen, display: display, hiding: hiding, excluding: excluding)
             if !taken.moved { return (taken.path, taken.note) }
             why = taken.note
         }
@@ -539,7 +566,8 @@ final class Assist {
 
     /// `excluding`: Petal's own windows showing a Private notebook's note (NotePrivacy.excludedWindows): left out of
     /// a picture of the screen, and a picture of one of them alone is never taken.
-    nonisolated private static func capture(_ window: CGWindowID?, screen: Bool, hiding: Set<pid_t>, excluding: Set<Int> = []) async -> (path: String?, note: String?, moved: Bool) {
+    nonisolated private static func capture(_ window: CGWindowID?, screen: Bool, display wanted: CGDirectDisplayID? = nil, hiding: Set<pid_t>,
+                                            excluding: Set<Int> = []) async -> (path: String?, note: String?, moved: Bool) {
         guard screen || window != nil else { return (nil, nil, false) }
         if !screen, let window, !NotePrivacy.mayCapture(window: Int(window), excluded: excluding) {
             return (nil, "That window shows a note from a Private notebook: Petal takes no picture of it.", false)
@@ -571,7 +599,9 @@ final class Assist {
             watched = [(match, element, pid, match.frame, before)]
             filter = SCContentFilter(desktopIndependentWindow: match)
             area = match.frame
-        } else if let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first {
+        } else if let display = content.displays.first(where: { $0.displayID == (wanted ?? Screens.mainDisplay) })
+                    // "The screen" is the person's, never a run's hidden display; a run's own display that's gone is no picture.
+                    ?? (wanted == nil ? content.displays.first { !Screens.isRun($0.displayID) } : nil) {
             // The screen without the apps kept private, and without Petal's own windows: its previews, banners,
             // cards and stacks can show what's in those apps (and the chat itself needn't be in the picture).
             // Notification banners too: they belong to Notification Center, not their app, and can show a private
@@ -653,13 +683,21 @@ final class Assist {
 
     // MARK: Apps
 
-    private func apps(_ args: [String: Any], caller: String?, live: @escaping @Sendable () -> Bool, _ send: @escaping (Any) -> Void,
+    private func apps(_ args: [String: Any], caller: String?, label: String = "", live: @escaping @Sendable () -> Bool, _ send: @escaping (Any) -> Void,
                       _ fail: @escaping (String) -> Void) {
         let action = args["action"] as? String ?? ""
         let name = args["app"] as? String ?? ""
         let target = args["open"] as? String ?? ""
         switch action {
         case "open":
+            // A run with hidden displays on opens on a display of its own (RunDisplays), unless it says the person's screen.
+            let asked = args["on"] as? String
+            if let caller, app.displays.place(for: caller, asked: asked) == .display {
+                return openOnDisplay(name: name, target: target, caller: caller, label: label, live: live, send, fail)
+            }
+            if asked?.lowercased() == RunDisplayRules.Place.display.rawValue {
+                return fail(app.config.bool("runDisplays") ? RunDisplayRules.unavailable : RunDisplayRules.off)
+            }
             if !target.isEmpty {
                 // An address or a file, in its app (or the one named).
                 let url = target.contains("://") ? URL(string: target) : URL(fileURLWithPath: (target as NSString).expandingTildeInPath)
@@ -722,6 +760,98 @@ final class Assist {
         }
     }
 
+    /// Opens an app, a file or an address on the caller's own hidden display: its display first (now, or once it's its
+    /// turn), then the open without activating anything, and the window that results moved there through
+    /// Accessibility. Only a window that wasn't there before is moved: one the person had is never taken. Where
+    /// nothing new would result (a browser already open takes an address as a tab in the person's own window; an app
+    /// already open shows nothing new), nothing is opened and it says so.
+    private func openOnDisplay(name: String, target: String, caller: String, label: String, live: @escaping @Sendable () -> Bool,
+                               _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+        var url: URL?
+        if !target.isEmpty {
+            url = target.contains("://") ? URL(string: target) : URL(fileURLWithPath: (target as NSString).expandingTildeInPath)
+            guard url != nil else { return fail("That isn't an address or a file.") }
+        } else if name.isEmpty {
+            return fail("Give an app, a file or an address to open.")
+        }
+        let web = ["http", "https"].contains(url?.scheme?.lowercased() ?? "")
+        app.displays.need(caller, label: label) { [weak self] result in
+            guard let self, live() else { return }
+            let display: RunDisplays.Display
+            switch result {
+            case .failure(let why): return fail(why.words)
+            case .success(let got): display = got
+            }
+            let frame = display.frame
+            let index = self.app.displays.nextIndex(for: caller)
+            let found = OpenedOnDisplay()
+            Self.off(live, {
+                let appURL: URL?
+                if !name.isEmpty {
+                    appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID(name))
+                } else {
+                    appURL = url.flatMap { NSWorkspace.shared.urlForApplication(toOpen: $0) }
+                }
+                guard let appURL, let bundle = Bundle(url: appURL)?.bundleIdentifier else {
+                    found.problem = name.isEmpty ? "No app on this Mac opens that." : "No app called \(name) is installed."
+                    return
+                }
+                found.app = appURL.deletingPathExtension().lastPathComponent
+                let running = !NSRunningApplication.runningApplications(withBundleIdentifier: bundle).isEmpty
+                let before = Set(RunDisplays.windowNumbers(bundle: bundle).keys)
+                switch RunDisplayRules.opening(running: running, windows: before.count, address: web, browser: Browsers.kind(bundle) != nil, bare: url == nil) {
+                case .tabInTheirs:
+                    found.problem = "\(found.app) is open with the person's own windows, and an address opens there as a tab in one of them, in front of them. Nothing was opened. Read the page with your own web tools, or pass on: \"screen\" if the person would want it opened on their screen."
+                    return
+                case .nothingNew:
+                    found.problem = "\(found.app) is already open with the person's own windows, and Petal never moves those to your display. Nothing was opened. Open a file or an address in it (that makes a window of your own), or pass on: \"screen\" to use it on their screen."
+                    return
+                case .go: break
+                }
+                // Its asker gone while the app was looked up: nothing opens.
+                guard live() else { return }
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = false
+                configuration.addsToRecentItems = false
+                let done = DispatchSemaphore(value: 0)
+                let finished: @Sendable (NSRunningApplication?, Error?) -> Void = { _, error in
+                    found.problem = error?.localizedDescription
+                    done.signal()
+                }
+                if let url {
+                    NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: configuration, completionHandler: finished)
+                } else {
+                    NSWorkspace.shared.openApplication(at: appURL, configuration: configuration, completionHandler: finished)
+                }
+                _ = done.wait(timeout: .now() + 15)
+                guard found.problem == nil else { return }
+                // What it made: an app still starting takes a while to show its window.
+                let made = RunDisplays.newWindows(bundle: bundle, before: before, timeout: running ? 5 : 15, live: live)
+                for (offset, item) in made.enumerated() {
+                    if RunDisplays.move(item.element, pid: item.pid, to: frame, index: index + offset, live: live) {
+                        found.moved.append(item)
+                    } else {
+                        found.stayed += 1
+                    }
+                }
+            }) { [weak self] ran in
+                guard let self, ran, live() else { return }
+                if let problem = found.problem { return fail(problem) }
+                let what = target.isEmpty ? found.app : target
+                guard !found.moved.isEmpty else {
+                    return send(["opened": what, "on": "the person's screen",
+                                 "note": found.stayed > 0
+                                    ? "\(found.app) wouldn't let Petal move its window, so it's on the person's screen, not your display."
+                                    : "\(found.app) showed no new window for it (it may have opened in a window the person already had), so nothing is on your display."])
+                }
+                self.app.displays.track(found.moved, for: caller, bare: url == nil)
+                self.did("Opened \(named: found.app, else: "an app") on a display of its own")
+                send(["opened": what, "app": found.app, "on": "your own display",
+                      "next": "petal_ui with app: \"\(found.app)\" reads it there, and petal_act works in it without a pointer and without bringing anything forward. The person doesn't see it; petal_look with a screenshot shows you."])
+            }
+        }
+    }
+
     /// Does `work` (which waits on another app) off the main thread, then `then` back on it. `live`: whoever asked
     /// is still there (or the routine still running), read on that thread right before `work`: one gone while it
     /// waited its turn gets nothing done, and `then` hears it didn't run (false). A `work` that waits before its
@@ -749,6 +879,15 @@ final class Assist {
         let action = args["action"] as? String ?? "list"
         let appName = args["app"] as? String ?? ""
         let wanted = args["window"] as? String ?? ""
+        // A run brings what's on its own display to the person's screen: moved there, nothing raised or activated.
+        if action == "show" {
+            guard let caller, app.displays.display(for: caller) != nil else { return fail("You have no display of your own now, so nothing is on one.") }
+            return app.displays.bringOut(for: caller) { count in
+                guard live() else { return }
+                send(["shown": count, "note": count == 0 ? "None of your windows was on your display."
+                                                         : "On the person's screen now, behind what they're doing; nothing came forward. What you open next still goes to your display."])
+            }
+        }
         let pids: [pid_t]
         if !appName.isEmpty {
             guard let running = running(appName) else { return fail("\(appName) isn't open.") }
@@ -758,21 +897,32 @@ final class Assist {
         }
         Self.queue.async {
             var found: [AppWindow] = []
-            for pid in pids { found += Windows.windows(of: pid) }
+            // A run's own display too: whose windows each caller sees is decided below.
+            for pid in pids { found += Windows.windows(of: pid, everywhere: true) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Its asker gone while the windows were read: nothing is asked or done for it.
                     guard live() else { return }
+                    // Another run's display is none of this one's: its windows aren't listed, found or touched.
+                    let found = found.filter { !self.app.displays.foreign($0.frame, to: caller) }
+                    let mine = { (window: AppWindow) in caller.map { self.app.displays.holds(window.frame, for: $0) } ?? false }
                     if action == "list" {
                         let hidden = self.privatePIDs
                         return send(["windows": found.map { w in
-                            ["id": w.id, "app": NSRunningApplication(processIdentifier: w.pid)?.localizedName ?? "", "title": hidden.contains(w.pid) ? "" : w.title,
-                             "minimized": w.minimized, "here": self.app.docks.isOnScreen(w)] as [String: Any]
+                            var item: [String: Any] = ["id": w.id, "app": NSRunningApplication(processIdentifier: w.pid)?.localizedName ?? "",
+                                                       "title": hidden.contains(w.pid) ? "" : w.title,
+                                                       "minimized": w.minimized, "here": self.app.docks.isOnScreen(w)]
+                            if mine(w) { item["display"] = "yours" }
+                            return item
                         }])
                     }
                     let window = found.first { $0.id == wanted } ?? found.first { !wanted.isEmpty && $0.title.localizedCaseInsensitiveContains(wanted) }
                         ?? (wanted.isEmpty ? found.first { !$0.minimized } : nil)
                     guard let window else { return fail("No such window; list them first.") }
+                    // Nothing on a run's own display comes forward: the person can't see it there.
+                    if action == "focus", mine(window) {
+                        return fail("That window is on your own display, where nothing comes forward. Work in it with petal_ui and petal_act; action: show brings your windows to the person's screen (behind what they're doing) when they need to see one.")
+                    }
                     let appName = NSRunningApplication(processIdentifier: window.pid)?.localizedName ?? "the window"
                     // A private app's window is called by its app's name only, in replies and the history.
                     let label = window.title.isEmpty || self.privatePIDs.contains(window.pid) ? appName : window.title
@@ -809,7 +959,7 @@ final class Assist {
                             _ = Windows.place(window.element, pid: window.pid, frame, live: live)
                             DispatchQueue.main.async { send(["arranged": label, "layout": layout]) }
                         }
-                    default: fail("action is list, focus, minimize, close or arrange")
+                    default: fail("action is list, focus, minimize, close, arrange or show")
                     }
                 }
             }
@@ -820,8 +970,14 @@ final class Assist {
     private func arranged(_ window: AppWindow, _ layout: String) -> CGRect? {
         let center = CGPoint(x: window.frame.midX, y: window.frame.midY)
         let screens = Windows.screens()
-        guard let screen = screens.first(where: { $0.frame.contains(center) }) ?? screens.first else { return nil }
-        let a = Windows.usableArea(frame: screen.frame, visible: screen.visible, respectClear: true)
+        let a: CGRect
+        if let own = Screens.runFrames.first(where: { $0.frame.contains(center) }) {
+            // On a run's own display it's arranged there: never pulled onto the person's screen.
+            a = own.frame.insetBy(dx: 12, dy: 12)
+        } else {
+            guard let screen = screens.first(where: { $0.frame.contains(center) }) ?? screens.first else { return nil }
+            a = Windows.usableArea(frame: screen.frame, visible: screen.visible, respectClear: true)
+        }
         switch layout {
         case "left": return CGRect(x: a.minX, y: a.minY, width: a.width / 2, height: a.height)
         case "right": return CGRect(x: a.midX, y: a.minY, width: a.width / 2, height: a.height)
@@ -926,4 +1082,12 @@ final class Assist {
         guard config.bool("aiMemory") else { return "" }
         return memories.map { "- \($0.text) [\($0.id)]" }.joined(separator: "\n")
     }
+}
+
+/// What `Assist.openOnDisplay` found, handed from the thread that opened it to the main one.
+final class OpenedOnDisplay: @unchecked Sendable {
+    var app = ""
+    var problem: String?
+    var moved: [(window: CGWindowID, pid: pid_t, element: AXUIElement)] = []
+    var stayed = 0
 }

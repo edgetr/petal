@@ -45,6 +45,8 @@ final class PetalApp {
     @ObservationIgnored let notesWindow = NotesWindow()
     /// Petal's viewer: documents with their notes in a margin (Viewer.swift).
     let viewers = Viewers()
+    /// A hidden display for each Petal AI run (RunDisplay.swift).
+    let displays = RunDisplays()
     /// Reading and closing browser tabs (Browsers.swift).
     @ObservationIgnored let browsers = Browsers()
     /// Where each AI app is installed, when it is.
@@ -100,6 +102,7 @@ final class PetalApp {
             self.claude.notesSettingChanged()   // sticky notes turned off: no listening, nudges or taking app clicks
             self.paper.settingsChanged()   // Petal Notes on or off, its look or its folder
             self.assist.computer.settingsChanged()   // using apps turned off, or an app made private: what's under way stops
+            self.displays.settingsChanged()   // hidden displays turned off: every one goes; the limit raised: the next waiting gets one
 
         }
         // The notes for the AI, while the settings show them: a change made elsewhere comes in.
@@ -148,6 +151,7 @@ final class PetalApp {
         Routines.flush()
         Windows.stopManaging()
         ipc.stop()
+        displays.quit()   // every hidden display goes, its windows put on the person's screen first
         claude.stopAll()
         SystemDock.restore()
     }
@@ -450,7 +454,8 @@ final class PetalApp {
             let claimed = args.dropFirst(2).first ?? ""
             let caller = who.agent == .petal && !claimed.isEmpty ? claimed : "mcp-\(who.pid)"
             // Its card keeps it waiting however long the person takes; its asker gone, what it had going stops.
-            request.waiting = { [unowned self] in assist.pending?.owner == caller }
+            // (Waiting its turn for a hidden display keeps it waiting the same way.)
+            request.waiting = { [unowned self] in assist.pending?.owner == caller || displays.waits(caller) }
             request.onHangUp { [unowned self] in assist.hungUp(caller) }
             // Who it is goes with the request itself, never looked up again later.
             assist.handle(args.first ?? "", args.dropFirst().first ?? "{}", note: caller, who: who, request: request, reply: reply)
