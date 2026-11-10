@@ -2,13 +2,22 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Petal: a dock with your AI built in</title>
-  <meta name="description" content="Petal replaces the Dock on your Mac, with your own Claude Code or Codex built in. Change anything by asking, and leave sticky notes that can do things. Free and open source.">
-  <meta property="og:title" content="Petal: a dock with your AI built in">
-  <meta property="og:description" content="A dock for the Mac with your own Claude Code or Codex built in, and sticky notes that can do things. Free and open source.">
-  <meta property="og:url" content="https://petal.codes">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Petal: sticky notes that can do things</title>
+  <meta name="description" content="Petal is a dock for the Mac with sticky notes, your own Claude Code or Codex, and a vault. Free and open source, for macOS 26 or later.">
   <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Petal">
+  <meta property="og:title" content="Petal: sticky notes that can do things">
+  <meta property="og:description" content="A dock for the Mac with sticky notes, your own Claude Code or Codex, and a vault. Free and open source.">
+  <meta property="og:url" content="https://petal.codes">
+  <meta property="og:image" content="https://petal.codes/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Petal: sticky notes that can do things. Three paper notes, one of them at work.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Petal: sticky notes that can do things">
+  <meta name="twitter:description" content="A dock for the Mac with sticky notes, your own Claude Code or Codex, and a vault. Free and open source.">
+  <meta name="twitter:image" content="https://petal.codes/og.png">
   <link rel="canonical" href="https://petal.codes">
   <link rel="icon" href="/favicon.ico" sizes="48x48">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
@@ -20,196 +29,329 @@
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
-  <header class="top">
-    <div class="wrap top-in">
-      <a class="brand" href="/"><img src="/icon.svg" width="24" height="24" alt="">Petal</a>
-      <nav aria-label="Site">
-        <a href="https://github.com/edgetr/petal">GitHub</a>
-      </nav>
-      <button class="theme-toggle" type="button" data-toggle-theme aria-pressed="false" aria-label="Switch to dark appearance"><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1z"/></svg></button>
-      <a class="text-link" href="#download">Download</a>
-    </div>
-  </header>
-  <nav class="rail" aria-label="On this page">
-    <a href="#intro" aria-current="true"><span class="dot"></span><span class="rail-name">Petal</span></a>
-    <a href="#ask"><span class="dot"></span><span class="rail-name">Ask</span></a>
-    <a href="#notes"><span class="dot"></span><span class="rail-name">Notes</span></a>
-    <a href="#ai"><span class="dot"></span><span class="rail-name">Petal AI</span></a>
-    <a href="#dock"><span class="dot"></span><span class="rail-name">The dock</span></a>
-    <a href="#faq"><span class="dot"></span><span class="rail-name">Good to know</span></a>
-    <a href="#download"><span class="dot"></span><span class="rail-name">Download</span></a>
+
+  <!-- The page's navigation is a dock. Each tile is a part of Petal, in the color of its part of the page; the
+       dot under one says where you are, as it does under a running app. -->
+  <nav class="dock" aria-label="Petal's parts">
+    <a class="dock-home" href="#top"><img src="/icon.svg" width="40" height="40" alt=""><span class="tip">Top</span></a>
+    <span class="dock-rule" aria-hidden="true"></span>
+    <a class="tile t-orange" href="#notes"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h12v9l-4.5 5H6zM18 14h-4.5v5"/></svg><span class="tip">Notes</span></a>
+    <a class="tile t-blue" href="#ai"><svg class="solid" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 3.5v15.2l4.1-3.8 2.2 5.5 2.8-1.2-2.2-5.2 4.9.2z"/></svg><span class="tip">Petal AI</span></a>
+    <a class="tile t-purple" href="#vault"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.5" cy="15.5" r="3.5"/><path d="M11 13l7.5-7.5M15.5 8.5l2.5 2.5"/></svg><span class="tip">The vault</span></a>
+    <a class="tile t-pink" href="#dock"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="12.5" width="17" height="6.5" rx="3.25"/><path class="dots" d="M7.8 15.75h.01M12 15.75h.01M16.2 15.75h.01"/></svg><span class="tip">The dock</span></a>
+    <a class="tile t-paper" href="#answers"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.2 9.2a2.9 2.9 0 1 1 4.5 2.4c-1 .7-1.7 1.3-1.7 2.5"/><path class="dots" d="M12 17.6h.01"/></svg><span class="tip">Before you install</span></a>
+    <span class="dock-rule" aria-hidden="true"></span>
+    <a class="dock-get" href="/download/mac">Download</a>
   </nav>
 
   <main id="main">
-    <section class="hero" id="intro" aria-labelledby="hero-title">
-      <div class="wrap hero-in">
-        <h1 id="hero-title">A dock with your AI built in</h1>
-        <p class="lede">Petal replaces the Dock on your Mac. Your own Claude Code or Codex lives in it, so you change anything by asking, and you can hand it work from a sticky note you leave anywhere.</p>
-        <div class="actions">
-          <a class="button" href="/download/mac">Download for Mac</a>
-          <a class="text-button" href="https://github.com/edgetr/petal">See the source</a>
+    <section class="field pink hero" id="top" aria-labelledby="hero-title">
+      <div class="in">
+        <div class="top">
+          <a class="brand" href="/"><img src="/icon.svg" width="44" height="44" alt="">Petal</a>
+          <a class="top-link" href="https://github.com/edgetr/petal">GitHub</a>
+          <button class="theme-toggle" type="button" data-toggle-theme aria-pressed="false" aria-label="Switch to dark appearance" hidden><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1z"/></svg></button>
         </div>
-        <p class="small">Free and open source. For macOS 26 or later.</p>
-      </div>
-      <div class="band">
-        <div class="wrap">
-          <!-- A drawn sample of the dock with one note, not a screenshot. Its words are made up. -->
-          <div class="sample" aria-hidden="true">
-            <div class="paper">
-              <p class="paper-where">On this window</p>
-              <p>@Petal put these receipts in a table</p>
-              <p class="paper-ink">Done. Nine receipts, newest first.</p>
+        <div class="hero-grid">
+          <div>
+            <h1 id="hero-title">Sticky notes<br>that can<br>do things</h1>
+            <p class="lede">Petal is a dock for the Mac with sticky notes, your own Claude Code or Codex, and a vault.</p>
+            <div class="get">
+              <a class="button" href="/download/mac">Download for Mac</a>
+              <div class="cmd"><span class="cmd-label">Terminal</span><code>curl -fsSL https://petal.codes/install.sh | bash</code><button type="button" data-copy hidden>Copy</button></div>
             </div>
-            <div class="dock">
-              <span class="tile round ai"><svg class="ring" viewBox="0 0 40 40"><circle class="track" cx="20" cy="20" r="17.5"/><circle class="used" cx="20" cy="20" r="17.5"/></svg><svg class="glyph" viewBox="0 0 24 24"><path d="M12 4.5l1.9 5.6 5.6 1.9-5.6 1.9-1.9 5.6-1.9-5.6-5.6-1.9 5.6-1.9z"/></svg></span>
-              <span class="tile round"><svg class="glyph" viewBox="0 0 24 24"><rect x="4.5" y="5" width="15" height="14" rx="3.5"/><path d="M12 5c-1 3-1.2 5.5-1 8h2M8.8 9.5v1.5M15.2 9.5v1.5M8.5 15c2 1.4 5 1.4 7 0"/></svg></span>
-              <span class="tile round pad"><i></i><i></i></span>
-              <span class="rule"></span>
-              <span class="tile app a1 run"><svg class="glyph" viewBox="0 0 24 24"><path d="M5 8l4 4-4 4M12 16h6"/></svg></span>
-              <span class="tile app a2 run"><svg class="glyph" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7.5"/><path d="M4.5 12h15M12 4.5c3 3 3 12 0 15M12 4.5c-3 3-3 12 0 15"/></svg><b>3</b></span>
-              <span class="tile app a3"><svg class="glyph" viewBox="0 0 24 24"><path d="M4.5 6.5h15v9.5H10l-4 3.5V16H4.5z"/></svg></span>
-              <span class="tile app a4 more"><svg class="glyph" viewBox="0 0 24 24"><path d="M9 17V6l9-1.5V15"/><circle cx="6.8" cy="17" r="2.2"/><circle cx="15.8" cy="15" r="2.2"/></svg></span>
-              <span class="tile app a5 more"><svg class="glyph" viewBox="0 0 24 24"><rect x="4.5" y="5.5" width="15" height="13" rx="2"/><path d="M4.5 9.5h15M8.5 4v3M15.5 4v3"/></svg></span>
-              <span class="tile app a6 more run"><svg class="glyph" viewBox="0 0 24 24"><path d="M5 19l1-4L16 5l3 3L9 18zM14 7l3 3"/></svg></span>
-              <span class="tile round"><svg class="glyph" viewBox="0 0 24 24"><path d="M12 6v12M6 12h12"/></svg></span>
-              <span class="rule"></span>
-              <span class="tile app folder"><svg class="glyph" viewBox="0 0 24 24"><path d="M4.5 7h5l2 2h8v9.5h-15z"/></svg></span>
-              <span class="tile round"><svg class="glyph" viewBox="0 0 24 24"><path d="M6 7.5h12M9.5 7.5V5.5h5v2M7.5 7.5l1 11h7l1-11"/></svg></span>
+            <p class="small">Free and open source. macOS 26 or later.</p>
+            <p class="small" data-not-mac hidden>Petal is for the Mac. Open petal.codes on yours to get it.</p>
+          </div>
+          <div class="cluster">
+            <img class="c-outline" src="/views/hero-outline.webp" width="960" height="933" alt="A Petal note stuck to a web page and a Keynote file: “Talk outline”, with a link, a picture and a checklist.">
+            <img class="c-alex" src="/views/hero-alex.webp" width="510" height="510" alt="A note stuck to a person, Alex: “Size M. Blue, never orange. Birthday in May.”">
+            <img class="c-working" src="/views/helper-working.webp" width="960" height="400" fetchpriority="high" alt="A note at work: “Which of these three venues has step-free access? @Petal check this page and the other two.” Under it: Petal, reading, with Pause and Stop.">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="field orange flush" id="notes" aria-labelledby="notes-title">
+      <div class="in">
+        <h2 id="notes-title">Stick a note to anything</h2>
+        <p class="fact">Drag one off the dock onto a tab, a window, an app, a file or a Desktop. It shows again whenever that place does.</p>
+        <div class="places">
+          <figure class="view reveal p-sentence">
+            <figcaption>A sentence</figcaption>
+            <picture>
+              <source media="(max-width: 719px)" srcset="/views/sentence-note.webp" width="510" height="510">
+              <img src="/views/sentence.webp" width="1800" height="1000" loading="lazy" decoding="async" alt="A document with one sentence marked, “Doors open at 8.”, and the note stuck to it: “Get there by 7:45 for a seat near the front.” Other notes rest as tabs on the window's edge.">
+            </picture>
+          </figure>
+          <figure class="view reveal p-screen">
+            <figcaption>The screen</figcaption>
+            <picture>
+              <img src="/views/screen.webp" width="1300" height="820" loading="lazy" decoding="async" alt="A note on the screen itself, over a window: “Call the plumber. Before noon. Ask about Thursday.”">
+            </picture>
+          </figure>
+          <figure class="view reveal p-person">
+            <figcaption>A person</figcaption>
+            <picture>
+              <img src="/views/person.webp" width="1500" height="812" loading="lazy" decoding="async" alt="A chat with Alex, and beside it the note about Alex: “Size M. Blue, never orange. Birthday in May.”">
+            </picture>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section class="field green flush" id="all-notes" aria-labelledby="all-notes-title">
+      <div class="in">
+        <h2 id="all-notes-title">Every note in one window</h2>
+        <p class="fact">Each note is a Markdown file, each notebook a folder, in your iCloud Drive.</p>
+        <div class="windows reveal">
+          <picture>
+            <source media="(max-width: 719px)" srcset="/views/window-grid-near.webp" width="900" height="807">
+            <img class="w-grid" src="/views/window-grid.webp" width="1900" height="958" loading="lazy" decoding="async" alt="The Petal Notes window: notebooks in a list, one of them Private, and the Garden notebook's ten notes as a grid.">
+          </picture>
+          <img class="w-canvas" src="/views/window-canvas.webp" width="1500" height="885" loading="lazy" decoding="async" alt="The same notebook as a canvas: its notes laid out freely in areas, with arrows between them.">
+        </div>
+      </div>
+    </section>
+
+    <section class="field yellow" id="at-petal" aria-labelledby="at-title">
+      <div class="in">
+        <h2 id="at-title">Write @Petal. Press Return.</h2>
+        <div class="pair">
+          <div class="pair-col">
+            <h3>Everyday</h3>
+            <img class="view reveal" src="/views/helper-ink.webp" width="960" height="777" loading="lazy" decoding="async" alt="A note that says “@Petal bring this back Friday with Slides”. Under it, in ink: “This note and Slides will be in front of you Friday 9:00.”">
+            <img class="view reveal" src="/views/helper-watcher.webp" width="860" height="346" loading="lazy" decoding="async" alt="A note on a lamp's page: “@Petal check this every morning, tell me under $100”. It shows today's price, $118.">
+            <img class="view reveal" src="/views/helper-task.webp" width="860" height="543" loading="lazy" decoding="async" alt="A note put away with its two tabs, a receipt and a mail, and what was still open: “Next: reply to the shop.”">
+          </div>
+          <div class="pair-col">
+            <h3>Engineering</h3>
+            <img class="view reveal" src="/views/helper-code-front.webp" width="900" height="772" loading="lazy" decoding="async" alt="A note on a pull request: “@Petal fix the date picker and open a PR. Done means the tests pass. Have Codex look for holes.” Claude Code answers that it opened a PR and the tests pass; Codex has one objection.">
+            <img class="view reveal" src="/views/helper-code-back.webp" width="900" height="815" loading="lazy" decoding="async" alt="The back of that note: a new worktree of ~/garden, the fix, the tests passing, the PR pushed, and a stamp for each thing you allowed.">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="field ink flush" id="viewer" aria-labelledby="viewer-title">
+      <div class="in">
+        <h2 id="viewer-title">Notes beside your documents</h2>
+        <p class="fact">PDF, Word, PowerPoint, Keynote and Excel. Petal never changes the file.</p>
+        <picture class="viewer reveal">
+          <source media="(max-width: 719px)" srcset="/views/viewer-near.webp" width="1000" height="1127">
+          <img src="/views/viewer.webp" width="1900" height="1165" loading="lazy" decoding="async" alt="Petal's viewer: a PDF, with the notes on two of its passages in the margin beside them.">
+        </picture>
+      </div>
+    </section>
+
+    <section class="field blue" id="ai" aria-labelledby="ai-title">
+      <div class="in">
+        <h2 id="ai-title">Petal AI asks before it acts</h2>
+        <div class="acts">
+          <!-- The window is drawn; the card, the chip and the pointer's shape are Petal's own. -->
+          <div class="scene reveal">
+            <div class="stage">
+              <div class="win" aria-hidden="true">
+                <div class="win-bar"><i></i><i></i><i></i><b>Reports</b><span class="win-btn">Export</span></div>
+                <div class="report">
+                  <div class="report-text"><b>Monthly report</b><i class="l1"></i><i class="l2"></i><i class="l3"></i><i class="l4"></i><i class="l5 gap"></i><i class="l2"></i><i class="l3"></i></div>
+                  <div class="bars"><i class="b1"></i><i class="b2"></i><i class="b3"></i><i class="b4"></i><i class="b5"></i></div>
+                </div>
+              </div>
+              <img class="s-chip" src="/views/chip-export.webp" width="430" height="86" loading="lazy" decoding="async" alt="By Petal AI's pointer: “Pressing Export”, with Stop.">
+              <svg class="s-pointer" viewBox="0 0 28 32" aria-hidden="true"><path d="M3 2.5v19.4l5.3-4.8 2.8 7 3.5-1.6-2.8-6.6 6.2.200z"/></svg>
+              <img class="s-card" src="/views/card-use.webp" width="880" height="234" loading="lazy" decoding="async" alt="Petal's card: “Let Petal AI use Reports? First, pressing Export. Until this reply is done it can press, type and choose menus in Reports with its own pointer; yours stays where it is. Esc stops it.” Don't, Always, Allow.">
+            </div>
+          </div>
+          <figure class="view reveal a-trash">
+            <img src="/views/card-trash.webp" width="880" height="234" loading="lazy" decoding="async" alt="Petal's card: “Move 14 items to the Trash”. Don't, Always, Allow.">
+            <figcaption>Files go to the Trash. Nothing is deleted.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </section>
+
+    <section class="field orange" id="routines" aria-labelledby="routines-title">
+      <div class="in">
+        <h2 id="routines-title">Say it once. It keeps tidying.</h2>
+        <p class="fact">Files are moved, never deleted, and any run can be put back.</p>
+        <div class="routine">
+          <ul class="says">
+            <li>Keep my Downloads tidy</li>
+            <li>When I open Xcode, hide Messages</li>
+          </ul>
+          <div class="win tidy reveal" aria-hidden="true">
+            <div class="win-bar"><i></i><i></i><i></i><b>Downloads</b></div>
+            <div class="folders">
+              <span class="folder f-blue"><i></i><b>3</b>Pictures</span>
+              <span class="folder f-orange"><i></i><b>3</b>Documents</span>
+              <span class="folder f-purple"><i></i><b>2</b>Installers</span>
             </div>
           </div>
         </div>
       </div>
     </section>
 
-    <section class="section wrap" id="ask" aria-labelledby="ask-title">
-      <div class="section-head">
-        <h2 id="ask-title">Change anything by asking</h2>
-        <p>The button at the start of the dock opens a chat with your own Claude Code or Codex. It knows how Petal works, so you say what you want and it's done. When a setting can't do it, it can change Petal's own code, and Petal keeps your change through every update.</p>
-      </div>
-      <dl class="facts">
-        <div><dt>Look</dt><dd>“Make the dock darker.” “Bigger icons.”</dd></div>
-        <div><dt>Behaviour</dt><dd>“Stop the icons from bouncing.” “Move the dock to the left.”</dd></div>
-        <div><dt>Apps</dt><dd>“Put my browser first.” “Add GitHub as a shortcut.”</dd></div>
-        <div><dt>Usage</dt><dd>A ring around the button fills as you use your plan. Hover it to see what's left.</dd></div>
-      </dl>
-    </section>
+    <div class="split">
+      <section class="field paper" id="ask" aria-labelledby="ask-title">
+        <div class="in">
+          <h2 id="ask-title">Change anything by asking</h2>
+          <ul class="says">
+            <li>Bigger icons</li>
+            <li>Dock on the left</li>
+            <li>Tint it orange</li>
+            <li>Hide until I need it</li>
+            <li>Notes in Liquid Glass</li>
+            <li>Make your cursor blue</li>
+          </ul>
+        </div>
+      </section>
+      <section class="field ink" id="code" aria-labelledby="code-title">
+        <div class="in">
+          <h2 id="code-title">Even Petal's own code</h2>
+          <p class="fact">Your change is a commit, rebased onto every release.</p>
+          <!-- Drawn: the chat's panel is Liquid Glass. -->
+          <div class="chat reveal">
+            <p class="me">Put a clock in my dock</p>
+            <p class="step">No setting does that. Changing Petal's code</p>
+            <p class="step">Building your own Petal</p>
+            <p>Done. Your change <b>stays through every update</b>.</p>
+          </div>
+        </div>
+      </section>
+    </div>
 
-    <section class="section wrap" id="notes" aria-labelledby="notes-title">
-      <div class="section-head">
-        <h2 id="notes-title">Sticky notes that can do things</h2>
-        <p>Petal Notes are your own writing on paper, stuck where it matters. Drag one off the dock and let it go anywhere. It comes back whenever that place does.</p>
-      </div>
-      <dl class="facts">
-        <div><dt>They stick to things</dt><dd>A sentence, a browser tab, a window, an app, a file, a person you're chatting with, or the screen itself.</dd></div>
-        <div><dt>They do things</dt><dd>Write @Petal and what you want, then press Return. It works in the background and the answer comes back as ink on the note.</dd></div>
-        <div><dt>They come back</dt><dd>“Bring this back Friday.” “Check this every morning.” A note takes its instructions in plain words.</dd></div>
-        <div><dt>They read with you</dt><dd>Open a PDF, a document or a deck in Petal's viewer and your notes sit in the margin beside the passage.</dd></div>
-        <div><dt>They're yours</dt><dd>Each note is a Markdown file and each notebook a folder, in your iCloud Drive.</dd></div>
-      </dl>
-    </section>
-
-    <section class="section wrap" id="ai" aria-labelledby="ai-title">
-      <div class="section-head">
-        <h2 id="ai-title">An AI that works in your apps</h2>
-        <p>Petal AI sees what's in front of you and can use your apps for you. It asks before it changes anything, and you can stop it at any moment.</p>
-      </div>
-      <dl class="facts">
-        <div><dt>Its own pointer</dt><dd>It presses, types and chooses menus with a pink pointer of its own. Yours never moves.</dd></div>
-        <div><dt>It asks first</dt><dd>Anything that changes something shows a card: Allow, Always or Don't.</dd></div>
-        <div><dt>A vault</dt><dd>It logs in, fills forms and checks out with what you saved, without ever seeing a password, a card number or a key.</dd></div>
-        <div><dt>Routines</dt><dd>“Keep my Downloads tidy.” Describe it once and Petal does it by itself. Files are moved, never deleted.</dd></div>
-        <div><dt>Your other agents</dt><dd>Claude Code or Codex in a terminal can use the vault too, once you allow it for a project.</dd></div>
-      </dl>
-    </section>
-
-    <section class="section wrap" id="dock" aria-labelledby="dock-title">
-      <div class="section-head">
-        <h2 id="dock-title">And a good dock</h2>
-        <p>Everything a dock should do, on Liquid Glass.</p>
-      </div>
-      <dl class="facts">
-        <div><dt>Badges and progress</dt><dd>Unread counts on icons, one bounce when an app needs you, and a ring around a download.</dd></div>
-        <div><dt>Windows</dt><dd>Hover an app to see its windows. Minimized ones wait in the dock as thumbnails.</dd></div>
-        <div><dt>Files</dt><dd>Drop files on an app to open them there. Folders open as stacks, newest first.</dd></div>
-        <div><dt>Websites</dt><dd>Any address can sit in the dock as a shortcut, with the site's own icon.</dd></div>
-        <div><dt>Every screen</dt><dd>One dock per screen, with now playing, and auto-hide when you want the room.</dd></div>
-      </dl>
-    </section>
-
-    <section class="section wrap" id="faq" aria-labelledby="faq-title">
-      <div class="section-head">
-        <h2 id="faq-title">Good to know</h2>
-      </div>
-      <div class="faq">
-        <details>
-          <summary><span>Is Petal free?</span><svg class="faq-mark" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
-          <p>Yes, and open source under the MIT license. There are no accounts, servers or analytics.</p>
-        </details>
-        <details>
-          <summary><span>Do I need an AI subscription?</span><svg class="faq-mark" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
-          <p>No. The dock works whole without one. With Claude Code or Codex installed and signed in, Petal uses your own plan, or you can use your own API key instead.</p>
-        </details>
-        <details>
-          <summary><span>What leaves my computer?</span><svg class="faq-mark" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
-          <p>Petal sends nothing anywhere by itself. What you ask the AI, and what it looks at to answer, goes to it through your own Claude Code or Codex. Passwords, card numbers and keys in the vault stay in your Mac's Keychain and are never shown to the AI.</p>
-        </details>
-        <details>
-          <summary><span>Why does macOS say it can't check Petal?</span><svg class="faq-mark" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
-          <p>Petal isn't signed with an Apple Developer ID. Open the download once, then go to System Settings, Privacy &amp; Security, and choose Open Anyway. Installing with the one line in a terminal skips this step.</p>
-        </details>
-        <details>
-          <summary><span>What does Petal ask for?</span><svg class="faq-mark" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
-          <p>Accessibility, to see your windows and to use apps when you ask it to, and Screen Recording, for window previews. It gives your own Dock back whenever you quit it.</p>
-        </details>
-        <details>
-          <summary><span>How do updates work?</span><svg class="faq-mark" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
-          <p>Petal checks GitHub for a new version now and then and gets it ready. It restarts only when you say so.</p>
-        </details>
-        <details>
-          <summary><span>What do I need?</span><svg class="faq-mark" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 1v12M1 7h12"/></svg></summary>
-          <p>A Mac with macOS 26 or later. Petal is for the Mac only.</p>
-        </details>
+    <section class="field purple" id="vault" aria-labelledby="vault-title">
+      <div class="in">
+        <h2 id="vault-title">It signs in, never seeing passwords</h2>
+        <p class="fact">Logins, cards, addresses and keys, kept in your Mac's Keychain. Petal types them in.</p>
+        <div class="vault">
+          <div class="v-main">
+            <img class="reveal" src="/views/vault-items.webp" width="1300" height="725" loading="lazy" decoding="async" alt="The vault in Petal's settings: two logins, two contacts, an address, a debit card ending 4242 and an OpenAI API key.">
+            <img class="v-import reveal" src="/views/vault-import.webp" width="1300" height="342" loading="lazy" decoding="async" alt="Import and export in the vault: Apple Passwords, Chrome and Proton Pass exports, and Petal's own file.">
+          </div>
+          <div class="v-side">
+            <figure class="view reveal">
+              <img class="chip" src="/views/chip-password.webp" width="470" height="86" loading="lazy" decoding="async" alt="By Petal AI's pointer: “Typing in Password”, with Stop.">
+              <figcaption>A new login gets a strong password, saved here.</figcaption>
+            </figure>
+            <figure class="view reveal">
+              <img src="/views/card-buy.webp" width="800" height="227" loading="lazy" decoding="async" alt="Petal's card: “Buy on lamps.example? Petal AI says: Kitchen lamp, $98. Pays with •••• 4242.” Buy, Don't.">
+              <figcaption>Paying asks once, at every checkout.</figcaption>
+            </figure>
+          </div>
+        </div>
       </div>
     </section>
 
-    <section class="section wrap" id="download" aria-labelledby="download-title">
-      <div class="section-head">
-        <img class="mark" src="/icon-176.png" width="72" height="72" alt="">
-        <h2 id="download-title">Get Petal</h2>
-        <p>Free and open source, for macOS 26 or later. Petal takes the place of your Dock, gives it back when you quit, and keeps itself up to date.</p>
+    <section class="field paper" id="keys" aria-labelledby="keys-title">
+      <div class="in">
+        <h2 id="keys-title">Coding agents use keys, unseen</h2>
+        <div class="keys reveal">
+          <!-- Drawn: a terminal. The card under it is Petal's own. -->
+          <div class="term">
+            <div class="win-bar"><i></i><i></i><i></i><b>Terminal</b></div>
+            <pre><span class="dim">$</span> petal run --key OpenAI -- make test
+<span class="dim">running 42 tests</span>
+<span class="dim">using</span> OPENAI_API_KEY=<span class="key">[OpenAI key]</span>
+<span class="ok">✓</span> 42 tests passed</pre>
+          </div>
+          <img class="k-card" src="/views/card-key.webp" width="880" height="234" loading="lazy" decoding="async" alt="Petal's card: “Codex in Terminal wants your OpenAI key for “make test” in ~/garden. It never sees it: Petal gives it to the command and takes it out of what the command prints.” Always for this project, Allow once, Don't.">
+        </div>
       </div>
-      <a class="button" href="/download/mac">Download for Mac</a>
-      <p class="or">Or install it with one line in Terminal, which skips macOS's Open Anyway step.</p>
-      <div class="cmd"><code>curl -fsSL https://petal.codes/install.sh | bash</code><button type="button" data-copy>Copy</button></div>
+    </section>
+
+    <div class="split">
+      <section class="field pink" id="dock" aria-labelledby="dock-title">
+        <div class="in">
+          <h2 id="dock-title">And still a very good dock</h2>
+          <p class="fact">Badges, window previews, stacks, website shortcuts, now playing and tiling, on every screen.</p>
+          <!-- Drawn, since Liquid Glass can't be drawn off-screen: the bar and its made-up apps. The round buttons,
+               "+", now playing, the Trash and the preview above are Petal's own. -->
+          <div class="scene reveal">
+            <div class="stage pdock">
+              <img class="pd-preview" src="/views/preview-music.webp" width="900" height="478" loading="lazy" decoding="async" alt="A window preview over the dock: Music, playing “Slow morning” by Paper Boats, with its two windows.">
+              <div class="pd-bar" aria-hidden="true">
+                <span class="slot"><img src="/views/dock-ai.webp" width="138" height="138" loading="lazy" alt=""></span>
+                <span class="slot"><img src="/views/dock-finder.webp" width="138" height="138" loading="lazy" alt=""></span>
+                <span class="slot"><img src="/views/dock-pad.webp" width="138" height="138" loading="lazy" alt=""></span>
+                <span class="sep"></span>
+                <span class="slot run"><span class="app a-blue"><svg viewBox="0 0 24 24"><path d="M4.5 6.5h15v9.5H10l-4 3.5V16H4.5z"/></svg><b>3</b></span></span>
+                <span class="slot roomy"><span class="app a-green"><svg viewBox="0 0 24 24"><rect x="4.5" y="5.5" width="15" height="13" rx="2"/><path d="M4.5 9.5h15M8.5 4v3M15.5 4v3"/></svg></span></span>
+                <span class="slot run"><span class="app a-orange"><svg viewBox="0 0 24 24"><path d="M9 17V6l9-1.5V15"/><circle cx="6.8" cy="17" r="2.2"/><circle cx="15.8" cy="15" r="2.2"/></svg></span></span>
+                <span class="slot run"><span class="app a-red"><svg viewBox="0 0 24 24"><path d="M5 8l4 4-4 4M12 16h6"/></svg><svg class="ring" viewBox="0 0 36 36"><circle cx="18" cy="18" r="16.4"/><circle class="on" cx="18" cy="18" r="16.4"/></svg></span></span>
+                <span class="slot"><span class="app a-site"><svg viewBox="0 0 24 24"><path d="M12 20c-4-2.5-6.5-5.4-6.5-9A3.6 3.6 0 0 1 12 8.6 3.6 3.6 0 0 1 18.5 11c0 3.6-2.5 6.5-6.5 9z"/></svg><i></i></span></span>
+                <span class="slot"><img src="/views/dock-add.webp" width="138" height="138" loading="lazy" alt=""></span>
+                <span class="sep"></span>
+                <span class="slot"><img src="/views/dock-playing.webp" width="138" height="138" loading="lazy" alt=""></span>
+                <span class="slot roomy"><span class="app a-stack"><svg viewBox="0 0 24 24"><path d="M4.5 7h5l2 2h8v9.5h-15z"/></svg></span></span>
+                <span class="slot"><img src="/views/dock-trash.webp" width="138" height="138" loading="lazy" alt=""></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="field yellow" id="own" aria-labelledby="own-title">
+        <div class="in">
+          <h2 id="own-title">Or keep your own Mac Dock</h2>
+          <p class="fact">Notes, Petal AI and the vault stay.</p>
+          <div class="own reveal">
+            <img class="own-note" src="/views/hero-dentist.webp" width="510" height="510" loading="lazy" decoding="async" alt="A folded note stuck to a clinic's site: “Book the dentist. Tuesday after 4 works.”">
+            <div class="macdock" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="gap"></i><i></i><i></i></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="field paper" id="film" aria-labelledby="film-title">
+      <div class="in">
+        <h2 id="film-title">Watch the film</h2>
+        <p class="fact">36 seconds, with sound.</p>
+        <div class="film reveal">
+          <video controls playsinline preload="none" poster="/petal-promo-poster.jpg" width="1920" height="1080">
+            <source src="/petal-promo.mp4" type="video/mp4">
+            <a href="/petal-promo.mp4">The film, as a file</a>
+          </video>
+          <button class="play" type="button" data-play aria-label="Play the film, with sound" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.2v13.6L19 12z"/></svg></button>
+        </div>
+      </div>
+    </section>
+
+    <section class="field paper" id="answers" aria-labelledby="answers-title">
+      <div class="in">
+        <h2 id="answers-title">Before you install</h2>
+        <div class="notes">
+          <article class="note n-pink reveal">
+            <h3>Is it free?</h3>
+            <p>Yes. MIT licensed, with no account, no server and no analytics.</p>
+          </article>
+          <article class="note n-blue reveal">
+            <h3>Do I need an AI subscription?</h3>
+            <p>No. The dock and your notes work without one. With Claude Code or Codex signed in, Petal uses your own plan, or your own API key.</p>
+          </article>
+          <article class="note n-green reveal">
+            <h3>What leaves my Mac?</h3>
+            <p>What you ask the AI, and what it looks at to answer, goes through your own Claude Code or Codex. Passwords, cards and keys stay in your Keychain; the AI never sees them.</p>
+          </article>
+          <article class="note n-orange reveal">
+            <h3>Why does macOS say it can't check Petal?</h3>
+            <p>Petal has no Apple Developer ID. Open it once, then choose Open Anyway in System Settings › Privacy &amp; Security. The Terminal line skips this.</p>
+          </article>
+          <article class="note n-yellow reveal">
+            <h3>What does it ask permission for?</h3>
+            <p>Accessibility, to see your windows and use apps when you ask. Screen Recording, for window previews and for looking at your screen when you ask.</p>
+          </article>
+        </div>
+      </div>
     </section>
   </main>
 
-  <footer class="site">
-    <div class="wrap">
-      <div class="foot-grid">
-        <div class="foot-brand">
-          <a class="brand" href="/"><img src="/icon.svg" width="24" height="24" alt="">Petal</a>
-          <p>A dock with your AI built in. Made by <a href="https://edgetr.tech">Edgetr</a>.</p>
-        </div>
-        <div>
-          <p class="foot-label">Petal</p>
-          <a href="#download">Download</a>
-          <a href="https://github.com/edgetr/petal">GitHub</a>
-          <a href="https://github.com/edgetr/petal/releases">Releases</a>
-        </div>
-        <div>
-          <p class="foot-label">Edgetr</p>
-          <a href="https://edgetr.tech">edgetr.tech</a>
-          <a href="https://volplane.me">Volplane</a>
-          <a href="https://sayzen-app.vercel.app">Sayzen</a>
-          <a href="https://fitlink.page">FitLink</a>
-        </div>
-        <div>
-          <p class="foot-label">Contact</p>
-          <a href="mailto:founder@edgetr.tech">founder@edgetr.tech</a>
-        </div>
-      </div>
-      <p class="foot-line">© 2026 Edgetr. Made in Istanbul.</p>
+  <footer class="field pink end">
+    <div class="in">
+      <img src="/icon-176.png" width="88" height="88" alt="">
+      <p class="end-name">Petal</p>
+      <a class="button" href="/download/mac">Download for Mac</a>
+      <p class="end-links"><a href="https://github.com/edgetr/petal">GitHub</a><a href="https://github.com/edgetr/petal/releases">Releases</a><a href="https://edgetr.tech">Made by Edgetr</a></p>
     </div>
   </footer>
 </body>

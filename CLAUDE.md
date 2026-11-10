@@ -19,7 +19,7 @@
 
 - `/code-review` and `/security-review`: the independent review must come from a reviewer that didn't write the code. Use a fresh subagent, or in T3 a `delegate_task` to another provider for a second model's view.
 - `/simplify`: cleanup pass after a feature lands.
-- `frontend-design` and other generic design skills are subordinate to the design language in `AGENTS.md`. The app and the marketing site are different systems; on `site/`, follow Edgetr's. When a skill disagrees (gradients, grain, busy copy, real screenshots, fake product demos), follow `AGENTS.md`.
+- `frontend-design` and other generic design skills are subordinate to the design language in `AGENTS.md`. The app and the marketing site are different systems; `site/` has its own (`AGENTS.md`, Marketing site). When a skill disagrees (gradients, grain, busy copy, real screenshots, fake product demos), follow `AGENTS.md`.
 
 ## T3 Code
 
