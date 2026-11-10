@@ -102,6 +102,7 @@ enum Settings {
         Setting("aiNeverLook", .list(["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"]), "Apps Petal AI never looks into (bundle ids): petal_look gives only their name, window lists leave out their titles, and screenshots leave them out."),
         Setting("selectionAsk", .bool(true), "Selecting text in any app brings up a small \"Ask Petal AI\" button by it (and \"Note\", a new note on that sentence, when notes is on); clicking Ask quotes the text in the chat. (Also in every app's Services menu.) Never in apps kept private or password fields."),
         Setting("computerUse", .bool(true), "Petal AI can use the user's apps for them (petal_ui, petal_act): it presses buttons, types and chooses menu items through Accessibility, with a pink pointer of its own; the user's pointer never moves. A sticky note works in its own window in the background (no pointer, nothing comes forward) and asks the user to bring the window forward for what can't be done there. It asks before it uses each app (once per reply), and Stop or Escape ends it. Never apps in aiNeverLook, never password fields. Off: both tools refuse."),
+        Setting("pointerColor", .string(""), "Color of Petal AI's own pointer (the arrow that shows what it presses while it uses apps), #rrggbb. Empty = Petal's pink."),
         Setting("routines", .bool(true), "Run the user's routines (routines.json): what Petal does by itself when a file lands in a folder, an app opens or at a time. Made with petal_routine_save."),
     ]
 
