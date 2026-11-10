@@ -1777,6 +1777,13 @@ enum NoteShelf {
         return lines.joined(separator: "\n") + "\n\n"
     }
 
+    /// A note just made still says only what it was made with (nothing, or the words selected as its quote): nothing
+    /// of the person's is in it yet, so putting it away lets it go.
+    static func untouched(_ body: String, madeWith: String?) -> Bool {
+        let now = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return now.isEmpty || now == (madeWith ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// What macOS's Dock coming onto the screen (`dockOut`) or leaving it says about Mission Control while Petal's
     /// dock is shown and keeps macOS's hidden: out is Mission Control open, gone is closed. Except in a full-screen
     /// app's Space, where macOS shows its Dock whenever the pointer pushes on the screen's edge: coming out there says
