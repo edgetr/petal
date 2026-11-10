@@ -101,7 +101,6 @@ h1, h2 { color: var(--title, inherit); font-weight: 700; text-wrap: balance; }
 h1 { font-size: clamp(44px, 6.7vw, 112px); line-height: 0.98; letter-spacing: -0.04em; }
 h2 { max-width: 13em; font-size: clamp(40px, 6.4vw, 96px); line-height: 1.02; letter-spacing: -0.035em; }
 h3 { font-size: clamp(22px, 2.2vw, 30px); font-weight: 700; line-height: 1.2; letter-spacing: -0.02em; }
-.fact { max-width: 29em; margin-top: clamp(16px, 2vw, 28px); font-size: clamp(19px, 1.6vw, 23px); font-weight: 600; line-height: 1.4; }
 figcaption { font-size: 19px; font-weight: 600; line-height: 1.3; }
 .view { display: block; }
 .places img, .windows img, .pair img, .cluster img, .own-note, .a-trash img, .v-side img, .s-card, .s-chip, .k-card, .pd-preview { filter: var(--lift); }
@@ -139,7 +138,28 @@ figcaption { font-size: 19px; font-weight: 600; line-height: 1.3; }
   gap: clamp(24px, 4vw, 64px);
   padding-block: clamp(32px, 4vw, 56px) clamp(112px, 14vh, 152px);
 }
-.lede { max-width: 21em; margin-top: clamp(20px, 2.4vw, 32px); font-size: clamp(20px, 1.9vw, 26px); font-weight: 600; line-height: 1.3; }
+/* What Petal is, in four words on four colors; each leads to its part of the page. */
+.four { display: grid; grid-template-columns: repeat(4, 1fr); max-width: 560px; margin-top: clamp(24px, 3vw, 40px); overflow: hidden; border-radius: 14px; }
+.four a {
+  display: flex;
+  align-items: flex-end;
+  height: clamp(72px, 7vw, 96px);
+  padding: 12px 14px;
+  background: var(--c);
+  color: var(--on);
+  font-size: clamp(19px, 1.6vw, 22px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  text-decoration: none;
+}
+.four a:hover { text-decoration: underline; text-underline-offset: 4px; }
+.four a:focus-visible { outline-offset: -5px; }
+.q-orange { --c: var(--orange); --on: var(--ink); }
+.q-blue { --c: var(--blue); --on: #fff; }
+.q-purple { --c: var(--purple); --on: #fff; }
+.q-dock { --c: var(--ink); --on: #fff; }
+[data-theme='dark'] .q-dock { --c: var(--pink); }
 .get { display: flex; flex-wrap: wrap; gap: 12px; margin-top: clamp(24px, 3vw, 40px); }
 .button {
   display: inline-flex;
@@ -205,8 +225,9 @@ figcaption { font-size: 19px; font-weight: 600; line-height: 1.3; }
 
 /* Every note in one window: the grid, and the canvas over its corner; both run off the field's edge. */
 .windows { position: relative; margin-top: clamp(40px, 5vw, 72px); }
+.windows figcaption { margin-bottom: 12px; }
 .w-grid { width: 84%; }
-.w-canvas { position: absolute; right: 0; bottom: -12%; width: 50%; }
+.w-canvas { position: absolute; right: 0; bottom: -10%; width: 50%; }
 
 /* @Petal, for two kinds of people side by side. */
 .pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: clamp(32px, 6vw, 96px); margin-top: clamp(40px, 5vw, 72px); }
@@ -229,6 +250,7 @@ figcaption { font-size: 19px; font-weight: 600; line-height: 1.3; }
 /* Petal AI in an app: a made-up window, with Petal's own chip, pointer and card on it. */
 .acts { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 32px clamp(24px, 3vw, 48px); align-items: end; margin-top: clamp(40px, 5vw, 72px); }
 .acts .scene { grid-column: 1 / 8; }
+.acts-side { grid-column: 8 / 13; display: flex; flex-direction: column; justify-content: space-between; gap: 32px; align-self: stretch; }
 .acts .stage { height: calc(404 * var(--u)); }
 .acts .win { position: absolute; left: 0; top: calc(24 * var(--u)); width: calc(600 * var(--u)); border-radius: calc(14 * var(--u)); }
 .acts .win-bar { gap: calc(8 * var(--u)); height: calc(46 * var(--u)); padding: 0 calc(16 * var(--u)); }
@@ -256,8 +278,17 @@ figcaption { font-size: 19px; font-weight: 600; line-height: 1.3; }
 .s-pointer { position: absolute; left: calc(548 * var(--u)); top: calc(52 * var(--u)); width: calc(28 * var(--u)); height: calc(32 * var(--u)); overflow: visible; }
 .s-pointer path { fill: var(--pink); stroke: #fff; stroke-width: 1.5; stroke-linejoin: round; }
 .s-card { position: absolute; left: calc(32 * var(--u)); top: calc(288 * var(--u)); width: calc(421 * var(--u)); }
-.a-trash { grid-column: 8 / 13; }
-.a-trash figcaption { margin-top: 16px; }
+.a-trash figcaption { margin-top: 12px; }
+
+/* The two AIs, drawn as Petal's welcome lists them. */
+.ais { padding: 6px 20px; border-radius: 22px; background: #1f2025; color: #fff; }
+.ais p { display: grid; grid-template-columns: 44px 1fr auto; column-gap: 14px; align-items: center; padding: 14px 0; }
+.ais p + p { border-top: 1px solid rgba(255, 255, 255, 0.12); }
+.ais img { grid-row: 1 / 3; width: 44px; height: 44px; padding: 10px; border-radius: 50%; background: rgba(255, 255, 255, 0.1); }
+.ais b { align-self: end; font-size: 19px; letter-spacing: -0.01em; line-height: 1.2; }
+.ais span { grid-column: 2; align-self: start; color: rgba(255, 255, 255, 0.64); font-size: 15px; line-height: 1.3; }
+.ais i { position: relative; grid-column: 3; grid-row: 1 / 3; width: 40px; height: 24px; border-radius: 12px; background: var(--pink); }
+.ais i::after { content: ''; position: absolute; right: 2.5px; top: 2.5px; width: 19px; height: 19px; border-radius: 50%; background: #fff; }
 
 /* What someone says, large: the chat's own bubble. */
 .says { display: flex; flex-direction: column; align-items: flex-start; gap: clamp(8px, 1vw, 12px); }
@@ -304,10 +335,8 @@ figcaption { font-size: 19px; font-weight: 600; line-height: 1.3; }
 /* The vault. */
 .vault { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 32px clamp(24px, 3vw, 48px); align-items: start; margin-top: clamp(40px, 5vw, 72px); }
 .v-main { grid-column: 1 / 9; display: grid; gap: clamp(16px, 2vw, 24px); }
-.v-main img { border-radius: 2.3% / 4.1%; }
-.v-main .v-import { border-radius: 2.3% / 8.7%; }
+.v-main img { border-radius: clamp(14px, 1.9vw, 24px); }
 .v-side { grid-column: 9 / 13; display: grid; gap: clamp(28px, 3vw, 40px); }
-.v-side figcaption { margin-top: 12px; }
 .v-side .chip { width: min(100%, 235px); }
 
 /* Keys for coding agents: a drawn terminal, and Petal's card over its corner. */
@@ -369,11 +398,10 @@ figcaption { font-size: 19px; font-weight: 600; line-height: 1.3; }
 .note::after { content: ''; position: absolute; right: 0; bottom: 0; width: 24px; height: 24px; border-bottom-right-radius: 10px; background: rgba(0, 0, 0, 0.13); clip-path: polygon(100% 0, 100% 100%, 0 100%); }
 .note h3 { font-size: clamp(20px, 1.8vw, 24px); font-weight: 600; letter-spacing: -0.01em; }
 .note p { margin-top: 8px; font-size: clamp(17px, 1.4vw, 19px); }
-.n-pink { --sheet: #fde4e6; --bar: #e2527a; grid-column: 1 / 4; rotate: -1.4deg; }
-.n-blue { --sheet: #dfeafb; --bar: #0a7aff; grid-column: 4 / 8; rotate: 0.8deg; margin-top: 28px; }
-.n-green { --sheet: #e6f2dd; --bar: #5dba47; grid-column: 8 / 13; rotate: -0.6deg; }
-.n-orange { --sheet: #ffeadb; --bar: #f5861f; grid-column: 2 / 8; rotate: 0.9deg; }
-.n-yellow { --sheet: #fdf3c9; --bar: #e5b422; grid-column: 8 / 13; rotate: -1.1deg; margin-top: 20px; }
+.n-blue { --sheet: #dfeafb; --bar: #0a7aff; grid-column: 1 / 5; rotate: -1.2deg; }
+.n-green { --sheet: #e6f2dd; --bar: #5dba47; grid-column: 5 / 10; rotate: 0.8deg; margin-top: 24px; }
+.n-orange { --sheet: #ffeadb; --bar: #f5861f; grid-column: 2 / 9; rotate: 0.9deg; }
+.n-yellow { --sheet: #fdf3c9; --bar: #e5b422; grid-column: 9 / 13; rotate: -1.1deg; margin-top: 20px; }
 
 /* The end. */
 .end { padding-block: clamp(72px, 9vw, 120px) 148px; text-align: center; }
@@ -446,19 +474,20 @@ figcaption { font-size: 19px; font-weight: 600; line-height: 1.3; }
 @media (max-width: 899px) {
   .split { grid-template-columns: 1fr; }
   .split .in, .split .field + .field .in { padding-inline: var(--gutter); }
-  .acts .scene, .a-trash { grid-column: 1 / -1; }
-  .a-trash { max-width: 440px; }
+  .acts .scene, .acts-side { grid-column: 1 / -1; }
+  .acts-side { max-width: 440px; }
   .v-main, .v-side { grid-column: 1 / -1; }
   .v-side { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); align-items: start; }
-  .n-pink { grid-column: 1 / 6; }
-  .n-blue { grid-column: 6 / 13; }
-  .n-green { grid-column: 1 / 8; }
-  .n-orange { grid-column: 5 / 13; }
-  .n-yellow { grid-column: 1 / 9; margin-top: 0; }
+  .n-blue { grid-column: 1 / 7; }
+  .n-green { grid-column: 7 / 13; }
+  .n-orange { grid-column: 1 / 9; }
+  .n-yellow { grid-column: 5 / 13; margin-top: 0; }
 }
 
 @media (max-width: 719px) {
   .hero-grid { grid-template-columns: 1fr; align-items: start; padding-bottom: 120px; }
+  .four { grid-template-columns: 1fr 1fr; max-width: none; }
+  .four a { height: 64px; }
   .cluster { margin-inline: -4px; }
 
   .places, .pair, .routine { grid-template-columns: 1fr; }
@@ -466,8 +495,7 @@ figcaption { font-size: 19px; font-weight: 600; line-height: 1.3; }
   .p-sentence img { width: min(78%, 300px); }
   /* A window too wide for a phone runs off the screen's edge, so its note stays large enough to read. */
   .p-screen img, .p-person img { width: 170%; max-width: none; margin-left: -70%; }
-  .windows { margin-inline: calc(-1 * var(--gutter) - 12%); }
-  .w-grid { width: 100%; }
+  .w-grid { width: calc(124% + 2 * var(--gutter)); max-width: none; margin-left: calc(-12% - var(--gutter)); }
   .w-canvas { display: none; }
   .viewer { margin-right: calc(-1 * var(--gutter)); margin-left: -30%; }
   .viewer img { border-radius: 0; }

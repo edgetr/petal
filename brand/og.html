@@ -13,8 +13,14 @@
     body { position: relative; background: #d9367f; color: #fff; font-family: 'Geist', sans-serif; -webkit-font-smoothing: antialiased; }
     .brand { position: absolute; left: 64px; top: 56px; display: flex; align-items: center; gap: 16px; font-size: 44px; font-weight: 700; letter-spacing: -0.02em; }
     .brand img { width: 64px; height: 64px; }
-    h1 { position: absolute; left: 60px; top: 154px; font-size: 86px; font-weight: 700; line-height: 0.98; letter-spacing: -0.04em; }
-    p { position: absolute; left: 64px; top: 446px; width: 500px; font-size: 28px; font-weight: 600; line-height: 1.25; letter-spacing: -0.01em; }
+    h1 { position: absolute; left: 60px; top: 148px; font-size: 86px; font-weight: 700; line-height: 0.98; letter-spacing: -0.04em; }
+    ul { position: absolute; left: 64px; top: 436px; display: grid; grid-template-columns: repeat(4, 116px); overflow: hidden; padding: 0; border-radius: 14px; list-style: none; }
+    li { display: flex; align-items: flex-end; height: 84px; padding: 11px 12px; font-size: 21px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
+    li:nth-child(1) { background: #f2912e; color: #17181c; }
+    li:nth-child(2) { background: #2b6fe6; }
+    li:nth-child(3) { background: #9a52b5; }
+    li:nth-child(4) { background: #17181c; }
+    p { position: absolute; left: 64px; top: 542px; font-size: 24px; font-weight: 600; letter-spacing: -0.01em; }
     .note { position: absolute; filter: drop-shadow(0 14px 24px rgba(0, 0, 0, 0.22)); }
     .outline { left: 800px; top: 34px; width: 372px; rotate: 3deg; }
     .alex { left: 628px; top: 92px; width: 188px; rotate: -6deg; }
@@ -24,7 +30,8 @@
 <body>
   <div class="brand"><img src="../site/icon.svg" alt="">Petal</div>
   <h1>Sticky notes<br>that can<br>do things</h1>
-  <p>A dock for the Mac with sticky notes, your own Claude Code or Codex, and a vault.</p>
+  <ul><li>Notes</li><li>Petal AI</li><li>A vault</li><li>A dock</li></ul>
+  <p>For the Mac. Free and open source.</p>
   <img class="note outline" src="../site/views/hero-outline.webp" alt="">
   <img class="note alex" src="../site/views/hero-alex.webp" alt="">
   <img class="note working" src="../site/views/helper-working.webp" alt="">
