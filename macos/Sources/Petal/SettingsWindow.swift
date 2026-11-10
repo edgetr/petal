@@ -1176,7 +1176,7 @@ struct AboutSettings: View {
             Text("A dock with your notes and your AI built in. Free and open source, by Edgetr.")
                 .multilineTextAlignment(.center).font(.system(size: 13)).foregroundStyle(.secondary).frame(maxWidth: 380)
             HStack {
-                Button("Website") { NSWorkspace.shared.open(URL(string: "https://petal-dock.vercel.app")!) }.buttonStyle(.glass)
+                Button("Website") { NSWorkspace.shared.open(URL(string: "https://petal.codes")!) }.buttonStyle(.glass)
                 Button("GitHub") { NSWorkspace.shared.open(URL(string: "https://github.com/edgetr/petal")!) }.buttonStyle(.glass)
             }
         }

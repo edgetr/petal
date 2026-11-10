@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Petal installer and updater, from GitHub Releases.
 #
-#   curl -fsSL https://petal-dock.vercel.app/install.sh | bash   # install
+#   curl -fsSL https://petal.codes/install.sh | bash   # install
 #   petal update            # update now
 #   petal update --check    # is there a newer version?
 #
