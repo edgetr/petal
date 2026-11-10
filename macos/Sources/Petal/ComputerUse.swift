@@ -2473,14 +2473,17 @@ enum Acting {
 
 // MARK: - The fake cursor
 
-/// Petal AI's own pointer: a soft pink arrow over everything, letting every click through, on every Space. It
+/// Petal AI's own pointer: a soft arrow in Petal's pink (or the person's `pointerColor`) over everything, letting every click through, on every Space. It
 /// glides to each control before the action, with a small ripple on a press, and a glass chip saying what it's
 /// doing with Stop beside it. The pointer fades a few seconds after the last action; while the AI may still act
 /// (`stand`), the chip stays as a small Stop and Escape keeps stopping it. Core Animation moves it; the main thread
 /// only sets where it goes.
 @MainActor
 final class FakeCursor {
-    static let pink = NSColor(red: 0xd9 / 255, green: 0x36 / 255, blue: 0x7f / 255, alpha: 1)
+    /// The pointer's color: the person's own (`pointerColor`, #rrggbb), else Petal's pink.
+    static var tint: NSColor {
+        NSColor(hex: PetalApp.shared.config.string("pointerColor")) ?? NSColor(red: 0xd9 / 255, green: 0x36 / 255, blue: 0x7f / 255, alpha: 1)
+    }
     static let glide: TimeInterval = 0.35
     static let level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.overlayWindow)))
 
@@ -2488,6 +2491,8 @@ final class FakeCursor {
     private var panel: NSPanel?
     private var pill: GlassPanel?
     private let pointer = CALayer()
+    /// The color the pointer's layers were last drawn in.
+    private var drawn: NSColor?
     private var fade: DispatchWorkItem?
     private var monitors: [Any] = []
     /// The pointer is on the screen.
@@ -2523,6 +2528,11 @@ final class FakeCursor {
         let screen = Self.screen(at: point)
         let panel = self.panel ?? make()
         var fresh = !showing
+        // A color chosen since it was last drawn shows the next time the pointer comes out.
+        if fresh, drawn != Self.tint {
+            Self.build(pointer, scale: screen.backingScaleFactor)
+            drawn = Self.tint
+        }
         if panel.frame != screen.frame {
             panel.setFrame(screen.frame, display: false)
             fresh = true
@@ -2567,8 +2577,8 @@ final class FakeCursor {
         guard showing else { return }
         let ring = CAShapeLayer()
         ring.path = CGPath(ellipseIn: CGRect(x: -16, y: -16, width: 32, height: 32), transform: nil)
-        ring.fillColor = Self.pink.withAlphaComponent(0.16).cgColor
-        ring.strokeColor = Self.pink.withAlphaComponent(0.9).cgColor
+        ring.fillColor = Self.tint.withAlphaComponent(0.16).cgColor
+        ring.strokeColor = Self.tint.withAlphaComponent(0.9).cgColor
         ring.lineWidth = 1.5
         ring.position = pointer.position
         ring.contentsScale = panel?.backingScaleFactor ?? 2
@@ -2706,14 +2716,18 @@ final class FakeCursor {
         view.autoresizingMask = [.width, .height]
         panel.contentView = view
         Self.build(pointer, scale: screen.backingScaleFactor)
+        drawn = Self.tint
         pointer.opacity = 0
         view.layer?.addSublayer(pointer)
         self.panel = panel
         return panel
     }
 
-    /// The pointer's layers: an arrow in Petal's pink with a white edge and a soft pink glow, its tip at (0, 0).
+    /// The pointer's layers: an arrow in its color with a white edge and a soft glow of the same, its tip at (0, 0).
+    /// Drawn again, it replaces what was there.
     static func build(_ pointer: CALayer, scale: CGFloat) {
+        let color = tint
+        pointer.sublayers = nil
         pointer.bounds = .zero
         pointer.anchorPoint = .zero
         let path = CGMutablePath()
@@ -2722,14 +2736,14 @@ final class FakeCursor {
         path.closeSubpath()
         let glow = CAShapeLayer()
         glow.path = path
-        glow.fillColor = pink.withAlphaComponent(0.55).cgColor
-        glow.shadowColor = pink.cgColor
+        glow.fillColor = color.withAlphaComponent(0.55).cgColor
+        glow.shadowColor = color.cgColor
         glow.shadowOpacity = 0.9
         glow.shadowRadius = 9
         glow.shadowOffset = .zero
         let arrow = CAShapeLayer()
         arrow.path = path
-        arrow.fillColor = pink.cgColor
+        arrow.fillColor = color.cgColor
         arrow.strokeColor = NSColor.white.withAlphaComponent(0.95).cgColor
         arrow.lineWidth = 1.4
         arrow.lineJoin = .round
@@ -2770,7 +2784,7 @@ struct ActingPill: View {
 
     var body: some View {
         HStack(spacing: 9) {
-            Circle().fill(Color(nsColor: FakeCursor.pink)).frame(width: 7, height: 7)
+            Circle().fill(Color(nsColor: FakeCursor.tint)).frame(width: 7, height: 7)
             if let caption {
                 Text(caption).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
                     .frame(maxWidth: 260, alignment: .leading).fixedSize()
@@ -2782,7 +2796,7 @@ struct ActingPill: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
-                .glassEffect(hovering ? .clear.tint(Color(nsColor: FakeCursor.pink)).interactive() : .clear.interactive(), in: .capsule)
+                .glassEffect(hovering ? .clear.tint(Color(nsColor: FakeCursor.tint)).interactive() : .clear.interactive(), in: .capsule)
                 .contentShape(.capsule)
             }
             .buttonStyle(.plain)

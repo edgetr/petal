@@ -1082,6 +1082,7 @@ struct LookSettings: View {
         Card(title: "Color", footer: "The dock is macOS's own Liquid Glass. A color tints it; leave it empty to keep it clear.") {
             ColorSetting(key: "dockColor", title: "Dock tint")
             ColorSetting(key: "accentColor", title: "Accent")
+            ColorSetting(key: "pointerColor", title: "Petal AI's pointer")
         }
     }
 }
