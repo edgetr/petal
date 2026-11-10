@@ -19,7 +19,7 @@ Petal is an AI-native dock for the Mac, with Claude built in: a native app (macO
 
 The owner is Gökay Ege Süren. The repository is `edgetr/petal` on GitHub (public, MIT; where it is checked out is under Fleet). Petal is an Edgetr product; the studio site (`edgetr/edgetr`, in `~/edgetr`) describes it and follows this file for facts.
 
-- **Status:** released, at 2.0.x (`macos/VERSION`); it updates itself from GitHub Releases.
+- **Status:** released, at 2.1.x (`macos/VERSION`); it updates itself from GitHub Releases.
 - **Business model:** free and open source. Petal has no server and no analytics. Its AI features use the user's own Claude Code or Codex login, and count toward that plan's usage, or the user's own Anthropic or OpenAI API key. Without an AI app, everything else works.
 - **Wording:** Petal is a Mac app: say the Mac for where it runs, and macOS 26 or later for what it needs.
 
