@@ -673,7 +673,7 @@ struct PrivacyCard: View {
                 }
             }
             Menu("Add an app") {
-                ForEach(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !ids.contains($0.bundleIdentifier ?? "") }
+                ForEach(NSWorkspace.shared.personsApplications.filter { $0.activationPolicy == .regular && !ids.contains($0.bundleIdentifier ?? "") }
                     .compactMap { app in app.bundleIdentifier.map { ($0, app.localizedName ?? $0) } }.sorted { $0.1 < $1.1 }, id: \.0) { id, name in
                     Button(name) { app.config.set("aiNeverLook", ids + [id]) }
                 }
@@ -692,6 +692,7 @@ enum AllowedKinds {
         case "close": "Closing windows"
         case "trash": "Moving files to the Trash"
         case "tidy": "Tidying many files at once"
+        case RunBrowsers.kind: "Using a browser of its own"
         default: kind.hasPrefix("computer:") ? "Using \(Apps.cachedName(String(kind.dropFirst(9))) ?? String(kind.dropFirst(9)))" : kind
         }
     }

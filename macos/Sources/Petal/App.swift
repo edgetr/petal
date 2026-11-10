@@ -47,6 +47,8 @@ final class PetalApp {
     let viewers = Viewers()
     /// A hidden display for each Petal AI run (RunDisplay.swift).
     let displays = RunDisplays()
+    /// A browser of its own for each run that needs the web (RunBrowser.swift).
+    @ObservationIgnored let runBrowsers = RunBrowsers()
     /// Reading and closing browser tabs (Browsers.swift).
     @ObservationIgnored let browsers = Browsers()
     /// Where each AI app is installed, when it is.
@@ -133,6 +135,7 @@ final class PetalApp {
         routines.start()
         Skill.install()
         Windows.startManaging()
+        runBrowsers.sweep()   // browsers a Petal that crashed left for its runs are ended, their profiles removed
         if !config.welcomed {
             welcome.show()
         } else {

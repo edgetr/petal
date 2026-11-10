@@ -55,6 +55,17 @@ Use, in this order:
    closed, anything else comes to the user's screen then. Petal's questions, Buy and the vault's card still show to
    the user where they are. `petal_windows` with `action: show` brings your windows to their screen; they can do it
    themselves with Show me in the AI button's preview.
+   A browser of your own (`petal_browser`, with `runDisplays` on): for web work in a run, never the user's own
+   browser. Petal starts a separate copy of a browser they have installed (Chrome, Edge, Brave, Vivaldi or Helium;
+   `runBrowser` picks) with a fresh profile, signed in to nothing, on your display, and drives it directly: no
+   pointer, no keyboard, nothing in front. `open` an address (https, or http on this Mac), `read` the page as text
+   with an id (b12) on every link, button, field, select and checkbox, then `click`, `type`, `select`, `check`,
+   `key`, `scroll` and `wait` by id; `tabs`, `tab`, `close_tab`, `back`, `forward`, `reload`. After anything that
+   may change the page, `read` again. The first use in a reply asks the user once. It never types into a password,
+   card or token field: `petal_vault` fills those into it too (`fields` with ids from `read`), by its own rules,
+   with nothing brought forward. Nothing is downloaded and no file can be chosen; there are no pictures of the page
+   yet (`read` is the page). It goes when your run ends, with everything in it. When the user means the page
+   they're looking at ("this page", "here"), that's `petal_look` and `petal_ui` on their window, as always.
    The vault (`petal_vault`): logins, contact info, addresses, payment info and API keys, filled by Petal
    into fields from `petal_ui` without the AI seeing a secret (`action: fill`, the item and `fields`
    {field: id}). A login fills by itself on its own site or app, an API key on its service's site, this Mac or an

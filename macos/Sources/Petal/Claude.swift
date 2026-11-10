@@ -703,6 +703,16 @@ final class Agent {
             case "key": return "Pressing  " + (input["key"] as? String ?? "")
             default: return "Pressing a button"
             }
+        case "mcp__petal__petal_browser":
+            // Its own browser, in plain words: where it goes, never what it types.
+            switch input["action"] as? String ?? "" {
+            case "open": return "Opening  " + (URLComponents(string: input["address"] as? String ?? "")?.host ?? "a page") + " in its own browser"
+            case "read", "tabs": return "Reading a page in its own browser"
+            case "type": return "Typing in its own browser"
+            case "wait": return "Waiting for a page"
+            case "back", "forward", "reload", "tab", "close_tab", "scroll": return "Moving around in its own browser"
+            default: return "Working in its own browser"
+            }
         case "mcp__petal__petal_trash": return input["undo"] as? Bool == true ? "Putting files back" : "Moving to the Trash"
         case "mcp__petal__petal_remember": return "Remembering  " + (input["text"] as? String ?? "")
         case "mcp__petal__petal_forget": return "Forgetting"
@@ -779,7 +789,7 @@ final class Agent {
         }
         // Hidden displays, while the person has them on: this chat opens on their screen unless it says otherwise.
         if app.displays.on {
-            prompt += "\n\nHidden displays are on (runDisplays). In this chat the user is with you, so petal_apps opens on their screen as always. For work of your own that they needn't watch (looking something up in an app, filling something in while they do other things), pass on: \"display\" to petal_apps open: the window goes on a display of your own that they don't see, petal_ui (app, or display: true) and petal_act work in it with no pointer and nothing brought forward, and petal_look with screenshot: \"screen\" shows you that display. It goes when your reply is done: an empty window you made is closed, anything else comes to their screen then. Their questions, Buy and the vault's card show to them where they are. They can watch from the AI button's preview, where Show me brings the window to their screen."
+            prompt += "\n\nHidden displays are on (runDisplays). In this chat the user is with you, so petal_apps opens on their screen as always. For work of your own that they needn't watch (looking something up in an app, filling something in while they do other things), pass on: \"display\" to petal_apps open: the window goes on a display of your own that they don't see, petal_ui (app, or display: true) and petal_act work in it with no pointer and nothing brought forward, and petal_look with screenshot: \"screen\" shows you that display. It goes when your reply is done: an empty window you made is closed, anything else comes to their screen then. Their questions, Buy and the vault's card show to them where they are. They can watch from the AI button's preview, where Show me brings the window to their screen. For the web in work of your own, petal_browser gives you a browser of your own on that display (a fresh one, signed in to nothing): open an address, read the page as text with an id on each control, then click, type, select and check by id; petal_vault fills logins and cards into it by those ids. When the user asks about the page they're looking at (this page, here), that's still petal_look and petal_ui on their own window, never your browser."
         }
         let remembered = app.assist.memoryBrief()
         if !remembered.isEmpty { prompt += "\n\nWhat you remember about this user ([id] for petal_forget):\n" + remembered }

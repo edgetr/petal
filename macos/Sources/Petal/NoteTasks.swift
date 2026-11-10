@@ -114,7 +114,7 @@ enum NoteTasks {
     static func openAll(_ items: [NoteContract.TaskItem], mac: String, follow: @escaping @Sendable (Data) -> URL?,
                         said: @escaping @MainActor (String) -> Void = { _ in }) -> Int {
         for item in items where item.kind == "window" {
-            if let running = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == item.target && !$0.isTerminated }) { running.activate() }
+            if let running = NSWorkspace.shared.personsApplications.first(where: { $0.bundleIdentifier == item.target && !$0.isTerminated }) { running.activate() }
         }
         let parts = items.filter { url($0) != nil }
         let skipped = items.filter { $0.kind != "window" }.count - parts.count

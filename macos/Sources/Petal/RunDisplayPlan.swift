@@ -56,7 +56,7 @@ enum RunDisplayRules {
         /// A new window results, which is moved to the display.
         case go
         /// A browser that's already open takes an address as a tab in one of the person's own windows, in front of
-        /// them: nothing is opened (a browser of the run's own is not built yet).
+        /// them: nothing is opened (the run's own browser is the way: petal_browser).
         case tabInTheirs
         /// The app is already open and only it was asked for: nothing new would show, and the person's windows are
         /// never moved.

@@ -137,7 +137,7 @@
   },
   {
     "name": "petal_apps",
-    "description": "Open, quit, hide or bring forward an app (by name or bundle id); open with `open` set opens that address or file (in `app` if given). Quitting asks the user first. When the user has turned on hidden displays (runDisplays), open can put its window on a display of your own that the user doesn't see: on: \"display\" (what a helper in a note and an AI session outside Petal get when they don't say; the first one may wait its turn for a display), on: \"screen\" for the user's own screen (what Petal's quick chat gets; say it whenever the user asked to see or open something for themselves). The reply says where it went. Nothing is activated or brought forward for your own display, and only a window that open made is ever moved there: an address in a browser the user already has open would land as a tab in their window, and an app they already have open shows nothing new, so those say so and open nothing.",
+    "description": "Open, quit, hide or bring forward an app (by name or bundle id); open with `open` set opens that address or file (in `app` if given). Quitting asks the user first. When the user has turned on hidden displays (runDisplays), open can put its window on a display of your own that the user doesn't see: on: \"display\" (what a helper in a note and an AI session outside Petal get when they don't say; the first one may wait its turn for a display), on: \"screen\" for the user's own screen (what Petal's quick chat gets; say it whenever the user asked to see or open something for themselves). The reply says where it went. Nothing is activated or brought forward for your own display, and only a window that open made is ever moved there: an address in a browser the user already has open would land as a tab in their window, and an app they already have open shows nothing new, so those say so and open nothing. For the web on your own display, use petal_browser: a browser of your own.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -280,7 +280,7 @@
   },
   {
     "name": "petal_vault",
-    "description": "The user's vault, in their Keychain: logins, contact info (relationship: me, girlfriend, mom…), addresses (each may belong to a contact), payment info and API keys. You see usernames, contact info and addresses in full, and a card's name, last4 and expiry; never a password, card number, security code or key: Petal fills those into fields itself. action list (kind, site): what's saved. fill (fields {field: id from petal_ui}, item: an id from list; for a login, item may be left out and Petal finds the one saved for the page): fields are username, password, name, email, phone, street, street2, city, region, postalCode, country (a country menu too), number, expiry, month, year, securityCode, value (an API key, or an unsorted item's secret); submit: true presses Return after the last (not with payment info: press the order button with petal_act; Return asks to use the app as petal_act does). An item of kind unsorted was saved before the vault had kinds: you see only its title, and filling it (field value) asks the user every time; they sort it in Settings › Vault. Petal decides from the page it reads itself: a login fills by itself only on its own site (or http://localhost) or app, an API key on its service's site, this Mac's pages or an app; elsewhere the user is asked, once for all the fields. Fill one page or app at a time. Payment info fills only on https pages after one Buy card per checkout: pass buying (what, in a few words) and price; Buy covers that card on that exact page, in that window and tab, for the rest of the reply (another page or tab ends it, and Petal asks again); then place the order there (using the browser may ask once, as any app does); after Don't, stop. request (kind login, contact, address, card or apiKey; fields to fill, title, why): the user types what's missing into Petal's card (never into the chat); for a login, Submit fills the page and saves it. new_login (password_id, confirm_id, username_id, username; symbols false or allowed_symbols for sites that limit them): Petal makes a strong password, saves it for the page's site and fills it. From a session outside Petal's own chat (T3 Code, a terminal), the first time your agent uses an item in a project (fill, or new_login for making logins) Petal asks the user (Always for this project, Allow once, Don't); they may allow it ahead in Settings › Vault › Agents. To use an API key in a command (a test, a BYOK app on localhost), run it with the petal command: petal run --key \"<title>\" -- <command>; Petal puts the key in its service's variable (ANTHROPIC_API_KEY, OPENAI_API_KEY…; --env NAME for another, --stdin for its input) and takes it out of what the command prints. You never see a key: never try to get one out. If the user declines, don't find another way.",
+    "description": "The user's vault, in their Keychain: logins, contact info (relationship: me, girlfriend, mom…), addresses (each may belong to a contact), payment info and API keys. You see usernames, contact info and addresses in full, and a card's name, last4 and expiry; never a password, card number, security code or key: Petal fills those into fields itself. action list (kind, site): what's saved. fill (fields {field: id from petal_ui, or from petal_browser read for a page in your own browser, where nothing needs to be in front}, item: an id from list; for a login, item may be left out and Petal finds the one saved for the page): fields are username, password, name, email, phone, street, street2, city, region, postalCode, country (a country menu too), number, expiry, month, year, securityCode, value (an API key, or an unsorted item's secret); submit: true presses Return after the last (not with payment info: press the order button with petal_act; Return asks to use the app as petal_act does). An item of kind unsorted was saved before the vault had kinds: you see only its title, and filling it (field value) asks the user every time; they sort it in Settings › Vault. Petal decides from the page it reads itself: a login fills by itself only on its own site (or http://localhost) or app, an API key on its service's site, this Mac's pages or an app; elsewhere the user is asked, once for all the fields. Fill one page or app at a time. Payment info fills only on https pages after one Buy card per checkout: pass buying (what, in a few words) and price; Buy covers that card on that exact page, in that window and tab, for the rest of the reply (another page or tab ends it, and Petal asks again); then place the order there (using the browser may ask once, as any app does); after Don't, stop. request (kind login, contact, address, card or apiKey; fields to fill, title, why): the user types what's missing into Petal's card (never into the chat); for a login, Submit fills the page and saves it. new_login (password_id, confirm_id, username_id, username; symbols false or allowed_symbols for sites that limit them): Petal makes a strong password, saves it for the page's site and fills it. From a session outside Petal's own chat (T3 Code, a terminal), the first time your agent uses an item in a project (fill, or new_login for making logins) Petal asks the user (Always for this project, Allow once, Don't); they may allow it ahead in Settings › Vault › Agents. To use an API key in a command (a test, a BYOK app on localhost), run it with the petal command: petal run --key \"<title>\" -- <command>; Petal puts the key in its service's variable (ANTHROPIC_API_KEY, OPENAI_API_KEY…; --env NAME for another, --stdin for its input) and takes it out of what the command prints. You never see a key: never try to get one out. If the user declines, don't find another way.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -303,7 +303,7 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "fill or request: {field: id from petal_ui}, like {\"username\": \"e3\", \"password\": \"e4\"}"
+          "description": "fill or request: {field: id from petal_ui, or from petal_browser read}, like {\"username\": \"e3\", \"password\": \"e4\"}"
         },
         "field": {
           "type": "string"
@@ -471,6 +471,98 @@
         "task": {
           "type": "string",
           "description": "a few words for the task this act is part of (sessions outside Petal's own chat): keep it the same across the task's acts"
+        }
+      }
+    }
+  },
+  {
+    "name": "petal_browser",
+    "description": "A browser of your own for web work in a run, when the user has turned on hidden displays (runDisplays): a separate copy of a browser they have installed, with a fresh profile (signed in to nothing, no extensions), on your own display, driven directly: no pointer, no keyboard, nothing comes forward, and the user's own browser is never touched. It goes when your run ends, with everything in it. Use it for work on the web the user needn't watch (look something up, fill a form, check a page). Not for the page the user is looking at (\"this page\", \"here\"): that's petal_look and petal_ui on their own window. action open (address; new_tab: true for another tab): https, or http on this Mac; it starts the browser if needed (the first in a reply asks the user once, and may wait its turn for a display) and answers with the page read. read (find: only what has this word): the page's address and title, then its content as text in reading order, with an id (b1, b2…) on every link, button, field, select and checkbox; frames are indented under their site. A password field's value is never read, and a secret saved in the vault shows as (hidden). Long pages are cut and say what was left out. The ids last until the page changes or it's read again. click (id). type (id, text; replace: false adds at the cursor; submit: true sends the form after). select (id, choice: the option's words). check (id, on: true or false). key (key: enter, tab, shift-tab, escape, up, down, left, right, backspace, delete, space, pageup, pagedown, home, end; id puts the cursor there first). scroll (direction up, down, top or bottom; or id, to bring a control into view). wait (seconds, up to 30; text: until the page shows these words). tabs lists them (t1, t2…), tab (tab: t2) works in another, close_tab (tab) closes one. back, forward, reload. Actions wait for the page to settle; after one that may change the page, read again before using more ids. Never type a password, card number, security code or key: petal_vault fills those into this browser too (action fill, fields {password: \"b4\"} with ids from read), by its own rules: a login only on its own site, payment info only after the user's Buy. Nothing is downloaded (a download is refused and said so) and no file can be chosen for upload. No pictures of the page yet: read is the page; petal_look with screenshot: \"screen\" shows your display. With runDisplays off, or no browser Petal can start installed (Chrome, Edge, Brave, Vivaldi, Helium), it says so: use your own web tools or the user's window instead. If the user declines or stops it, don't find another way.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "open",
+            "read",
+            "click",
+            "type",
+            "select",
+            "check",
+            "key",
+            "scroll",
+            "wait",
+            "tabs",
+            "tab",
+            "close_tab",
+            "back",
+            "forward",
+            "reload"
+          ]
+        },
+        "address": {
+          "type": "string",
+          "description": "open: an https:// address (http:// only on this Mac)"
+        },
+        "new_tab": {
+          "type": "boolean",
+          "description": "open: in a new tab"
+        },
+        "id": {
+          "type": "string",
+          "description": "a control's id from read, like b12"
+        },
+        "find": {
+          "type": "string",
+          "description": "read: only lines and controls with this word"
+        },
+        "text": {
+          "type": "string",
+          "description": "type: what to type; wait: words to wait for"
+        },
+        "replace": {
+          "type": "boolean",
+          "description": "type: replace what's in the field (default true)"
+        },
+        "submit": {
+          "type": "boolean",
+          "description": "type: send the form after"
+        },
+        "choice": {
+          "type": "string",
+          "description": "select: the option to pick, by what it says"
+        },
+        "on": {
+          "type": "boolean",
+          "description": "check: on (default) or off"
+        },
+        "key": {
+          "type": "string",
+          "description": "key: like enter, tab or escape"
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "up",
+            "down",
+            "left",
+            "right",
+            "top",
+            "bottom"
+          ]
+        },
+        "seconds": {
+          "type": "number",
+          "description": "wait: at most this long (default 5, up to 30)"
+        },
+        "tab": {
+          "type": "string",
+          "description": "tab, close_tab: a tab from tabs, like t2"
+        },
+        "task": {
+          "type": "string",
+          "description": "sessions outside Petal's own chat: the same few words for the task's acts"
         }
       }
     }

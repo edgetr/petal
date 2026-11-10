@@ -4,9 +4,14 @@ import Foundation
 /// Which of the processes running Petal's code is a dock. They all share Petal's bundle id and name: the dock, but
 /// also `Petal --mcp` (the AI's tools), `petal <command>` from a shell, the benchmarks, snapshots and checks. Only a
 /// dock counts as "Petal running": the one-at-a-time check at launch, `petal doctor` and the Dock guard.
+///
+/// A dock is started with no arguments, or with macOS's own (`-psn_…`, `-NSDocumentRevisionsDebugMode YES`: one
+/// dash). Anything with two dashes is a tool's flag, and never a dock, whether this Petal knows the flag or not: a
+/// newer Petal's check run beside an older installed one (which has never heard of its flag) must not be taken for a
+/// second dock by it, or the installed one quits at its next start.
 enum PetalProcess {
     /// Flags that start Petal as something other than a dock (main.swift handles each before the dock starts).
-    static let notDockFlags: Set<String> = ["--snapshot", "--routines-check", "--viewer-check", "--helpers-check", "--display-check", "--mcp", "--restore-dock"]
+    static let notDockFlags: Set<String> = ["--snapshot", "--routines-check", "--viewer-check", "--helpers-check", "--display-check", "--browser-check", "--mcp", "--restore-dock"]
     /// Every benchmark: --bench, --bench-dock, --bench-settings, --bench-windows, --bench-windows-child, -idle, --bench-notes.
     static let benchPrefix = "--bench"
 
@@ -36,6 +41,10 @@ enum PetalProcess {
         /// `Petal --display-check <folder>`: makes one real hidden display and puts a TextEdit window on it
         /// (DisplayCheck.swift). It changes the screens for a few seconds: only ever run on purpose, by a person.
         case displayCheck(String)
+        /// `Petal --browser-check`: a run's own browser driven for real, headless, on pages of a local server it
+        /// starts (BrowserCheck.swift). `--live <folder>`: with a real hidden display and a real installed browser: it
+        /// changes the screens for a few seconds, so only ever run on purpose, by a person.
+        case browserCheck(live: String?)
         /// A tool's flag written wrong (`--snapshot` with no folder, a `--bench…` there isn't): its usage, printed
         /// before anything starts, and a non-zero exit. Never a dock.
         case usage(String)
@@ -46,6 +55,7 @@ enum PetalProcess {
     static let usages: [String: String] = [
         "--snapshot": "Petal --snapshot <folder>",
         "--display-check": "Petal --display-check <folder>",
+        "--browser-check": "Petal --browser-check [--live <folder>]",
         "--bench-windows-idle": "Petal --bench-windows-idle <window>",
         "--bench-windows": "Petal --bench-windows [--runs <n>] [--only <window>] [--json <file>] [--png <folder>]",
         "--bench-settings": "Petal --bench-settings [--runs <n>] [--only <window>] [--json <file>] [--png <folder>]",
@@ -99,8 +109,18 @@ enum PetalProcess {
             guard let folder = value(after: "--display-check") else { return usage("--display-check") }
             return .displayCheck(folder)
         }
-        // macOS's own launch arguments (-psn_…, -NSDocumentRevisionsDebugMode) start with "-" and leave it a dock.
+        if words.contains("--browser-check") {
+            guard words.contains("--live") else { return .browserCheck(live: nil) }
+            guard let folder = value(after: "--live") else { return usage("--browser-check") }
+            return .browserCheck(live: folder)
+        }
         if let first, ["-h", "--help", "-help"].contains(first) { return .help }
+        // A flag this Petal doesn't know (another version's tool, or one written wrong): it says so and ends before
+        // anything starts. Never a dock.
+        if let unknown = words.first(where: { $0.hasPrefix("--") }) {
+            return .usage("petal: no flag \"\(unknown)\" (petal --help lists the commands)")
+        }
+        // macOS's own launch arguments (-psn_…, -NSDocumentRevisionsDebugMode) start with one "-" and leave it a dock.
         return .dock
     }
 
@@ -139,7 +159,8 @@ enum PetalProcess {
     /// Petal is running that is a dock. `ps -o comm=` is the program (argv[0], spaces and all), so what follows it in
     /// `ps -o args=` is its words: a first word that isn't a flag is a command (`petal run … -- npm run dev` may run
     /// for hours, and must never keep macOS's Dock hidden after the dock crashed), and so are help and the flags
-    /// above (written wrong, they print their usage and end before a dock starts, so they're never one either).
+    /// above (written wrong, they print their usage and end before a dock starts, so they're never one either), and
+    /// so is any word starting with two dashes, known to this Petal or not (a newer Petal's check).
     /// Anything it can't read (the process ended, words that don't follow the program) counts as running: a guard
     /// unsure whether the dock runs leaves the Dock alone.
     static var shellDockRunning: String {
@@ -155,6 +176,7 @@ enum PetalProcess {
             case "$first" in -h|--help|-help) continue ;; ''|-*) ;; *) continue ;; esac
             case "$words " in
               \(flags)) ;;
+              *" --"*) ;;
               *) return 0 ;;
             esac
           done

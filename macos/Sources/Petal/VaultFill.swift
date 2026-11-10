@@ -462,20 +462,25 @@ extension Assist {
         }
     }
 
-    /// The caller's window from petal_ui and the controls named by id, or nil.
-    private func vaultWindow(_ caller: String?, ids: [String]) -> (map: ComputerUse.Map, entries: [ComputerUse.Entry])? {
+    /// Where the fields named by id are: a page of the caller's own browser (ids from petal_browser read: b3), else
+    /// the caller's window from petal_ui and its controls; or nil.
+    private func vaultWindow(_ caller: String?, ids: [String]) -> VaultSurface? {
+        if let page = vaultPage(caller, ids: ids) { return page }
         guard let caller, let map = computer.maps[caller], Date().timeIntervalSince(map.made) <= UIMap.lifetime else { return nil }
         var entries: [ComputerUse.Entry] = []
         for id in ids {
             guard let entry = map.entries[id] else { return nil }
             entries.append(entry)
         }
-        return (map, entries)
+        return .window(map: map, entries: entries)
     }
 
     private func needsLook(_ caller: String?, ids: [String]) -> String {
         if caller == nil { return ComputerUse.oldTools }
         if ids.isEmpty { return "Call petal_ui first: the vault fills fields of the window it looked at." }
+        if ids.allSatisfy(BrowserOutline.isID) {
+            return "There's no \(ids.joined(separator: ", ")) in the last petal_browser read of your own browser (its ids last until the page changes or it's read again). Call petal_browser read again."
+        }
         return "There's no \(ids.joined(separator: ", ")) in the last petal_ui (ids last until the next petal_ui or 5 minutes). Call petal_ui again."
     }
 
@@ -483,8 +488,14 @@ extension Assist {
     /// id for it), read off the main thread, handed back on it with the vault's items (nil when the vault can't be
     /// read). A tab note's map is read only while the note's tab is the one its window shows (else `fail`): never
     /// another tab's site on a card or in a fill.
-    private func vaultPlaces(_ map: ComputerUse.Map, _ entries: [ComputerUse.Entry], fail: @escaping (String) -> Void,
+    private func vaultPlaces(_ surface: VaultSurface, fail: @escaping (String) -> Void,
                              done: @escaping @MainActor (_ places: [Vault.Place], _ targets: [Vault.Target], _ items: [VaultItem]?) -> Void) {
+        let map: ComputerUse.Map, entries: [ComputerUse.Entry]
+        switch surface {
+        // A page of the run's own browser: the browser itself says where each field is (RunBrowserTool.swift).
+        case .page(let browser, let ids): return vaultPagePlaces(browser, ids, fail: fail, done: done)
+        case .window(let itsMap, let itsEntries): (map, entries) = (itsMap, itsEntries)
+        }
         ComputerUse.readQueue.async {
             if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
                 return DispatchQueue.main.async { fail(ClaudePanel.tabNotShowing) }
@@ -585,7 +596,6 @@ extension Assist {
 
     private func vaultFill(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, gone: (@Sendable () -> Bool)?,
                            _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
-        if let refusal = computer.refusal() { return fail(refusal) }
         guard let wanted = wantedFields(args), !wanted.isEmpty else {
             return fail("Give fields: {field: id} with ids from petal_ui, like {\"username\": \"e3\", \"password\": \"e4\"} (or field and id for one).")
         }
@@ -593,12 +603,15 @@ extension Assist {
             return fail("\(word) isn't a field Petal knows: username, password, name, email, phone, street, street2, city, region, postalCode, country, number, expiry, month, year, securityCode or value.")
         }
         let ids = wanted.map(\.id)
+        // A window petal_ui read needs Accessibility; a page of the run's own browser only that using apps is on.
+        if let refusal = vaultRefusal(caller, ids: ids) { return fail(refusal) }
         guard let caller, let window = vaultWindow(caller, ids: ids) else { return fail(needsLook(caller, ids: ids)) }
-        let map = window.map, entries = window.entries
+        // In the run's own browser, what the vault says of a field names petal_browser's ids.
+        let fail = window.isPage ? { (why: String) in fail(RunBrowsers.words(why)) } : fail
         let ref = args["item"] as? String ?? args["name"] as? String ?? ""
         let task = args["task"] as? String ?? ""
         guard let token = computer.token(caller, task: task, gone: gone) else { return fail(Self.over) }
-        vaultPlaces(map, entries, fail: fail) { places, targets, items in
+        vaultPlaces(window, fail: fail) { places, targets, items in
             guard self.computer.live(caller, token) else { return fail(Self.over) }
             guard let items else { return fail(VaultStore.unreadableText + " Nothing was filled; try again in a moment.") }
             // The item: named, else the login saved for this page (or app), else the only card saved.
@@ -650,7 +663,7 @@ extension Assist {
                         ?? ((args["fourDigitYear"] as? Bool).map { $0 ? "YYYY" : "YY" })
                     plan.payment = item.kind == .card
                     let bought = item.kind == .card
-                        && self.computer.checkout(caller, token: token, place: places[offset], window: map.windowID, card: item.id,
+                        && self.computer.checkout(caller, token: token, place: places[offset], window: window.windowID, card: item.id,
                                                   revision: plan.revision) != nil
                     switch Vault.decide(item, field, target: targets[offset], place: places[offset], checkout: bought) {
                     case .refuse(let why): return fail("\(pair.id): \(why) Nothing was filled.")
@@ -670,11 +683,11 @@ extension Assist {
                 }
                 let go: (Bool) -> Void = { allowed in
                     guard self.computer.live(caller, token) else { return fail(Self.over) }
-                    self.vaultFillAll(plans, entries: entries, map: map, caller: caller, token: token, allowed: allowed,
+                    self.vaultFillAll(plans, on: window, caller: caller, token: token, allowed: allowed,
                                       agent: pass.map { ($0, item.id) }, send: send)
                 }
                 if let buyPlace {
-                    return self.vaultBuy(item, place: buyPlace, args: args, map: map, caller: caller, who: who, token: token, send: send, fail: fail) { go(true) }
+                    return self.vaultBuy(item, place: buyPlace, args: args, on: window, caller: caller, who: who, token: token, send: send, fail: fail) { go(true) }
                 }
                 // One card for every field that doesn't match, naming them all. Payment info a Buy covers fills on that
                 // Buy, without asking to use the browser.
@@ -690,25 +703,35 @@ extension Assist {
 
     /// Fills the fields one after another; the AI hears which were filled, and the first error if any. `agent`: an
     /// agent outside Petal's pass and what it's for, checked again before each field.
-    private func vaultFillAll(_ plans: [VaultFillPlan], entries: [ComputerUse.Entry], map: ComputerUse.Map, caller: String,
+    private func vaultFillAll(_ plans: [VaultFillPlan], on surface: VaultSurface, caller: String,
                               token: Acting.Cancel, allowed: Bool, agent: (pass: AgentPass, item: String)? = nil, send: @escaping (Any) -> Void) {
         var steps = Array(plans.indices)
         var filled: [String] = []
         func next() {
             guard !steps.isEmpty else {
-                var reply: [String: Any] = ["filled": filled, "app": map.appName]
-                if plans.last?.submit == true { reply["next"] = "The window may have changed: call petal_ui again before using more ids." }
+                var reply: [String: Any] = ["filled": filled, "app": surface.appName]
+                if plans.last?.submit == true {
+                    reply["next"] = surface.isPage ? "The page may have changed: call petal_browser read again before using more ids."
+                        : "The window may have changed: call petal_ui again before using more ids."
+                }
                 return send(reply)
             }
             let index = steps.removeFirst()
-            computer.fill(plans[index], entry: entries[index], map: map, caller: caller, token: token, allowed: allowed, agent: agent, send: { reply in
+            let filledOne: (Any) -> Void = { reply in
                 if let declined = (reply as? [String: Any])?["declined"] { return send(["filled": filled, "declined": declined]) }
                 filled.append(plans[index].field.rawValue)
                 next()
-            }, fail: { why in
+            }
+            let failedOne: (String) -> Void = { why in
                 // Stopped because the grant it relied on was removed: said so, not as a Stop.
                 send(["filled": filled, "error": agent?.pass.revoked == true ? AgentPass.revokedText : why])
-            })
+            }
+            switch surface {
+            case .window(let map, let entries):
+                computer.fill(plans[index], entry: entries[index], map: map, caller: caller, token: token, allowed: allowed, agent: agent, send: filledOne, fail: failedOne)
+            case .page(let browser, let ids):
+                vaultPageFill(plans[index], id: ids[index], browser: browser, caller: caller, token: token, allowed: allowed, agent: agent, send: filledOne, fail: failedOne)
+            }
         }
         next()
     }
@@ -716,9 +739,9 @@ extension Assist {
     /// The one card before payment info goes into a shop's page: "Buy on checkout.shop.example?", what Petal AI says
     /// it's buying (its words, marked as such) and the card. Buy lets that card's payment info fill on that exact
     /// host, in that window and tab, for the rest of the reply; Don't (the default) fills nothing.
-    private func vaultBuy(_ item: VaultItem, place: Vault.Place, args: [String: Any], map: ComputerUse.Map, caller: String, who asker: AgentAccess.Caller?, token: Acting.Cancel,
+    private func vaultBuy(_ item: VaultItem, place: Vault.Place, args: [String: Any], on surface: VaultSurface, caller: String, who asker: AgentAccess.Caller?, token: Acting.Cancel,
                           send: @escaping (Any) -> Void, fail: @escaping (String) -> Void, bought: @escaping () -> Void) {
-        guard let shop = place.shop, map.windowID != nil, place.tab.page != nil else {
+        guard let shop = place.shop, let window = surface.windowID, place.tab.page != nil else {
             return fail("Petal couldn't tell which page, tab or window this is, so it fills no payment info here.")
         }
         let what = UIMap.truncate(UIMap.tidy(args["buying"] as? String ?? ""), 160)
@@ -728,7 +751,7 @@ extension Assist {
         let detail = (said.isEmpty ? "\(who) didn't say what it's buying." : "\(who) says: “\(said)”.") + " Pays with \(Vault.cardName(item))."
         // A new Buy card for this window ends the Buy already in it (another card on the same checkout), before the
         // person answers: a Don't, a closed card or no answer never leaves the earlier one usable.
-        let asked = map.windowID.map { computer.endBuys(in: $0) } ?? 0
+        let asked = computer.endBuys(in: window)
         ask("vault-buy", "Buy on \(shop)?", detail: detail, always: true, warn: true, allow: "Buy", owner: caller) { allowed in
             guard allowed else { return send(["declined": "The person said Don't: nothing was filled. Don't buy it, and don't find another way."]) }
             // The card as the Buy card showed it: edited in Settings while the card was open, the Buy counts for
@@ -737,7 +760,7 @@ extension Assist {
             VaultStore.load { result in
                 guard case .success(let items) = result else { return fail(VaultStore.unreadableText + " Nothing was filled; try again in a moment.") }
                 guard let now = items.first(where: { $0.id == item.id }), Vault.sameRevision(shown, now) else { return fail(Vault.changedText) }
-                guard self.computer.allowCheckout(caller, token: token, place: place, map: map, card: item.id, revision: shown, asked: asked) else {
+                guard self.computer.allowCheckout(caller, token: token, place: place, window: window, watching: surface.map, card: item.id, revision: shown, asked: asked) else {
                     return fail("That Buy card is over (a newer one was asked for this window, or the reply ended): nothing was filled. " + Self.over)
                 }
                 self.did("You said Buy on \(named: shop, else: "a shop") (\(named: Vault.cardName(item), else: "a card"))")
@@ -768,12 +791,13 @@ extension Assist {
             }
         }
         let ids = mapped.map(\.1)
-        if !ids.isEmpty, let refusal = computer.refusal() { return fail(refusal) }
-        var window: (map: ComputerUse.Map, entries: [ComputerUse.Entry])?
+        if !ids.isEmpty, let refusal = vaultRefusal(caller, ids: ids) { return fail(refusal) }
+        var window: VaultSurface?
         if !ids.isEmpty {
             guard let found = vaultWindow(caller, ids: ids) else { return fail(needsLook(caller, ids: ids)) }
             window = found
         }
+        let fail = window?.isPage == true ? { (why: String) in fail(RunBrowsers.words(why)) } : fail
         // The reply this belongs to: nothing is saved or filled for a reply that's over.
         var token: Acting.Cancel?
         if let caller {
@@ -803,7 +827,7 @@ extension Assist {
             }
         }
         guard let window else { return show([], [], nil) }
-        vaultPlaces(window.map, window.entries, fail: fail) { places, targets, _ in
+        vaultPlaces(window, fail: fail) { places, targets, _ in
             guard live() else { return fail(Self.over) }
             // Never a card whose Submit couldn't fill: a password only into a password field, one page or app at a
             // time, and so on. What only doesn't match is said on the card.
@@ -815,7 +839,7 @@ extension Assist {
 
     private func vaultAnswered(_ answer: VaultForm.Answer, kind: VaultKind, place: Vault.Place?, mapped: [(VaultField, String)],
                                places: [Vault.Place], targets: [Vault.Target], warned: String?,
-                               window: (map: ComputerUse.Map, entries: [ComputerUse.Entry])?,
+                               window: VaultSurface?,
                                caller: String?, token: Acting.Cancel?, gone: (@Sendable () -> Bool)?, send: @escaping (Any) -> Void) {
         var item = VaultItem(kind: kind, title: answer.title)
         for (field, value) in answer.values { item[field] = value }
@@ -845,7 +869,7 @@ extension Assist {
             let plans = Vault.answeredPlans(title: item.title, fields: used.map { mapped[$0].0 }, values: answer.values,
                                             places: used.map { places[$0] }, targets: used.map { targets[$0] }, saved: stored)
             let go = {
-                self.vaultFillAll(plans, entries: used.map { window.entries[$0] }, map: window.map, caller: caller, token: token, allowed: true) { result in
+                self.vaultFillAll(plans, on: window.picking(used), caller: caller, token: token, allowed: true) { result in
                     if let filled = result as? [String: Any] { reply.merge(filled) { _, new in new } }
                     send(reply)
                 }
@@ -855,7 +879,7 @@ extension Assist {
             switch Vault.recheck(item, used.map { mapped[$0].0 }, targets: used.map { targets[$0] }, places: used.map { places[$0] }, warned: warned) {
             case .fill: go()
             case .refuse(let index, let why):
-                reply["error"] = "\(mapped[used[index]].1): \(why) Nothing was filled."
+                reply["error"] = "\(mapped[used[index]].1): \(window.isPage ? RunBrowsers.words(why) : why) Nothing was filled."
                 send(reply)
             case .ask(let title, let detail):
                 self.ask("vault-fill", title, detail: detail, always: true, warn: true, allow: "Fill anyway", owner: caller) { allowed in
@@ -906,14 +930,14 @@ extension Assist {
     /// fill by itself (one secure page of that site, or an app Petal verified).
     private func vaultNewLogin(_ args: [String: Any], caller: String?, who: AgentAccess.Caller?, gone: (@Sendable () -> Bool)?,
                                _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
-        if let refusal = computer.refusal() { return fail(refusal) }
         let passwordID = args["password_id"] as? String ?? args["id"] as? String ?? ""
         guard !passwordID.isEmpty else { return fail("Give password_id (the new password field's id from petal_ui), and confirm_id if the page asks for it twice.") }
         let confirmID = args["confirm_id"] as? String ?? ""
         let usernameID = args["username_id"] as? String ?? ""
         let ids = [passwordID] + [confirmID, usernameID].filter { !$0.isEmpty }
+        if let refusal = vaultRefusal(caller, ids: ids) { return fail(refusal) }
         guard let caller, let window = vaultWindow(caller, ids: ids) else { return fail(needsLook(caller, ids: ids)) }
-        let map = window.map, entries = window.entries
+        let fail = window.isPage ? { (why: String) in fail(RunBrowsers.words(why)) } : fail
         let username = (args["username"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         let length = (args["length"] as? NSNumber)?.intValue ?? 20
         let symbols = args["symbols"] as? Bool ?? true
@@ -921,7 +945,7 @@ extension Assist {
         let task = args["task"] as? String ?? ""
         if !usernameID.isEmpty, username.isEmpty { return fail("Give username too: the email or username for the new account.") }
         guard let token = computer.token(caller, task: task, gone: gone) else { return fail(Self.over) }
-        vaultPlaces(map, entries, fail: fail) { places, targets, _ in
+        vaultPlaces(window, fail: fail) { places, targets, _ in
             guard self.computer.live(caller, token) else { return fail(Self.over) }
             let place = places[0]
             var item = VaultItem(kind: .login, title: (args["title"] as? String).flatMap { $0.isEmpty ? nil : $0 }
@@ -983,7 +1007,7 @@ extension Assist {
                                             plan.task = task
                                             return plan
                                         }
-                                        self.vaultFillAll(plans, entries: Array(entries.prefix(roles.count)), map: map, caller: caller, token: token, allowed: false,
+                                        self.vaultFillAll(plans, on: window.picking(Array(roles.indices)), caller: caller, token: token, allowed: false,
                                                           agent: agent) { result in
                                             var reply = (result as? [String: Any]) ?? [:]
                                             reply["saved"] = Vault.shown(saving)

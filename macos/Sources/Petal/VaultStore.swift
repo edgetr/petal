@@ -41,6 +41,13 @@ enum VaultStore {
     /// fails closed.
     nonisolated(unsafe) static var standUnreadable = false
 
+    /// The stand-in vault as it is now (a check reads what a tool saved there); empty when there's none.
+    static func itemsForCheck() -> [VaultItem] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stand ?? []
+    }
+
     static func standIn(_ items: [VaultItem]) {
         lock.lock()
         stand = items

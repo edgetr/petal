@@ -444,6 +444,7 @@ final class RunDisplays {
     func quit() {
         timer?.invalidate()
         timer = nil
+        app.runBrowsers.quit()   // each run's own browser ends first: its window never lands on the person's screen
         let target = Self.personArea()
         let deadline = Date().addingTimeInterval(1.5)
         for display in displays.values {
@@ -524,6 +525,7 @@ final class RunDisplays {
     /// A display that couldn't be made or placed: removed, its runs told, the next group's turn.
     private func failed(_ group: String, _ display: Display, _ why: Failure) {
         guard displays[group] === display else { return }
+        app.runBrowsers.displayGoing(group)
         displays[group] = nil
         release(display)
         for waiter in waiters.removeValue(forKey: group) ?? [] { waiter.done(.failure(why)) }
@@ -533,6 +535,7 @@ final class RunDisplays {
     /// macOS took a display away by itself: its windows are wherever macOS put them; the group has none now.
     private func lost(_ group: String, _ display: Display) {
         guard displays[group] === display else { return }
+        app.runBrowsers.displayGoing(group)
         displays[group] = nil
         release(display)
         for waiter in waiters.removeValue(forKey: group) ?? [] { waiter.done(.failure(.ended)) }
@@ -542,6 +545,8 @@ final class RunDisplays {
     /// A group's display goes: what's left on it is settled first, off the main thread (a few seconds at most), then
     /// the display is removed.
     private func remove(_ group: String) {
+        // The run's own browser ends before its display goes, so its window is never left to land on the person's screen.
+        app.runBrowsers.displayGoing(group)
         guard let display = displays.removeValue(forKey: group) else { return }
         for waiter in waiters.removeValue(forKey: group) ?? [] { waiter.done(.failure(.ended)) }
         let left = Array(display.windows.values)
