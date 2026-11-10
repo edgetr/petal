@@ -228,7 +228,6 @@ struct SettingsView: View {
                 .foregroundStyle(.white)
                 .frame(width: 46, height: 46)
                 .background(selection.tint.gradient, in: .rect(cornerRadius: 13))
-                .shadow(color: selection.tint.opacity(0.45), radius: 12, y: 4)
             VStack(alignment: .leading, spacing: 2) {
                 Text(selection.title).font(.system(size: 26, weight: .bold))
                 Text(selection.subtitle).font(.system(size: 13)).foregroundStyle(.secondary)
