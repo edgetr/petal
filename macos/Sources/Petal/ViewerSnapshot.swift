@@ -1109,6 +1109,26 @@ enum ViewerCheck {
         let line = app.assist.history.first?.text ?? ""
         expect(app.assist.history.count > historyBefore && line.hasPrefix("Wrote 1 note into a PDF") && !line.contains(secret) && !line.contains("petalcheck"),
                "the history line never holds the vault's secret (\(line))")
+        // Every line of What Petal AI did goes the same way (Assist.did): whatever it names is redacted before it's
+        // kept, and left out while the vault can't be read; Petal's own words are kept as they are.
+        let count = { app.assist.history.count }
+        var lines = count()
+        app.assist.did("Quit \(named: "An app " + secret, else: "an app")")
+        wait(5) { count() > lines }
+        let quit = app.assist.history.first?.text ?? ""
+        expect(count() > lines && quit.hasPrefix("Quit An app ") && !quit.contains(secret), "a name holding a secret is redacted in the history (\(quit))")
+        lines = count()
+        VaultStore.standUnreadable = true
+        VaultIndex.changed()
+        app.assist.did("Closed \(quoted: "A window " + secret, else: "a window")")
+        wait(5) { count() > lines }
+        VaultStore.standUnreadable = false
+        VaultIndex.changed()
+        let closed = app.assist.history.first?.text ?? ""
+        expect(count() > lines && closed == "Closed a window", "while the vault can't be read the name is left out (\(closed))")
+        lines = count()
+        app.assist.did("Looked at your screen")
+        expect(count() == lines + 1 && app.assist.history.first?.text == "Looked at your screen", "Petal's own words are kept at once, as they are")
         print("fifteenth: " + (ok ? "an older versions request never retires the newer; edited copies to the Trash; a failed reload keeps no identity; history redacted" : "failed"))
         return ok
     }

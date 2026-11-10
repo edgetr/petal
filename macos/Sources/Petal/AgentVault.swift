@@ -139,7 +139,8 @@ extension Assist {
             guard live() else { return fail(ComputerUse.stoppedText) }
             let place = AgentAccess.shown(who.project, home: home)
             let said = AgentAccess.clipped(task, 120)
-            let record = "\(who.label) \(done) in \(place)" + (said.isEmpty ? "" : ": “\(said)”")
+            let saying: HistoryLine = said.isEmpty ? "" : ": \(quoted: said, else: "a task")"
+            let record: HistoryLine = "\(named: who.label, else: "An agent") \(named: done, else: "used your vault") in \(named: place, else: "a project")\(saying)"
             if let grant = AgentAccess.granted(grants.grants, item: item, caller: who) {
                 did(record)
                 return go(grants.pass(.init(kind: .grant(grant.id), operation: operation, item: item), caller: who))
@@ -223,8 +224,9 @@ extension Assist {
             if let clash = AgentAccess.sameVariable(found.map { ($0.item.title, $0.variable) }) { return fail(clash) }
             let titles = found.map(\.item.title)
             let place = AgentAccess.shown(who.project, home: home)
-            let record = "\(who.label) used your \(titles.joined(separator: ", ")) key\(titles.count == 1 ? "" : "s")"
-                + (command.isEmpty ? "" : " for “\(AgentAccess.clipped(command, 60))”") + " in \(place)"
+            let ran: HistoryLine = command.isEmpty ? "" : " for \(quoted: AgentAccess.clipped(command, 60), else: "a command")"
+            let plural: HistoryLine = titles.count == 1 ? " key" : " keys"
+            let record: HistoryLine = "\(named: who.label, else: "An agent") used your \(named: titles.joined(separator: ", "), else: "saved")\(plural)\(ran) in \(named: place, else: "a project")"
             // Read again right before the keys go (the card may have waited): each item still there as it was when
             // Petal asked (its revision), and still allowed by what let it go on (`passes`, by item): the grant must
             // still be there and cover it, and an Allow once is good for this run only. Edited, replaced, deleted or no

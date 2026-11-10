@@ -225,18 +225,18 @@ final class Assist {
             let text = (args["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { return fail("Nothing to remember.") }
             let memory = remember(text, mode: args["mode"] as? String ?? "", learned: args["learned"] as? Bool ?? false)
-            did("Remembered “\(memory.text)”", undo: .forget(memory.id))
+            did("Remembered \(quoted: memory.text, else: "something")", undo: .forget(memory.id))
             send(["remembered": memory.text, "id": memory.id, "mode": memory.mode.isEmpty ? "everywhere" : memory.mode])
         case "petal_forget":
             let gone = forget(id: args["id"] as? String, matching: args["text"] as? String)
-            for memory in gone { did("Forgot “\(memory.text)”", undo: .remember(memory.text, memory.mode)) }
+            for memory in gone { did("Forgot \(quoted: memory.text, else: "something")", undo: .remember(memory.text, memory.mode)) }
             send(["forgot": gone.map(\.text)])
         case "petal_show":
             do {
                 let title = args["title"] as? String ?? "Petal"
                 let file = try Pages.show(title: title, markdown: args["markdown"] as? String,
                                           html: args["html"] as? String, path: args["path"] as? String, update: args["update"] as? String)
-                did("Made a page: \(title)", undo: .open(file.path, title))
+                did("Made a page\(named: ": " + title, else: "")", undo: .open(file.path, title))
                 send(["opened": file.path])
             } catch { fail(error.localizedDescription) }
         case "petal_vault": vault(args, caller: note, who: who, gone: request == nil ? nil : gone, send, fail)
@@ -403,7 +403,7 @@ final class Assist {
                             // takes the tab's button from now on).
                             if let tabPlace, let before, let note { self.app.claude.tabSeen(note: note, was: tabPlace, tab: before.tab, window: before.window) }
                             let told = {
-                                if picture != nil { self.did(shot == "screen" ? "Looked at your screen" : "Looked at \(front.localizedName ?? "a window")") }
+                                if picture != nil { self.did(shot == "screen" ? "Looked at your screen" : "Looked at \(named: front.localizedName ?? "", else: "a window")") }
                                 send(result)
                             }
                             // A Buy said in this window (by any chat) ends if it now shows another tab or page, before
@@ -722,7 +722,7 @@ final class Assist {
                     guard allowed, live() else { return send(["declined": "The person didn't allow quitting \(label)."]) }
                     Self.off(live, { running.terminate() }) { ran in
                         guard ran else { return }
-                        self.did("Quit \(label)")
+                        self.did("Quit \(named: label, else: "an app")")
                         send(["quit": label])
                     }
                 }
@@ -807,7 +807,7 @@ final class Assist {
                                 pressed = true
                             }) { ran in
                                 guard ran, pressed || live() else { return }
-                                self.did("Closed “\(label)”")
+                                self.did("Closed \(quoted: label, else: "a window")")
                                 send(["closed": label])
                             }
                         }
@@ -881,7 +881,7 @@ final class Assist {
                 MainActor.assumeIsolated {
                     self.trashed = moved.map { (from: $0.key, to: $0.value) }
                     if let error, moved.isEmpty { return fail(error.localizedDescription) }
-                    self.did(moved.count == 1 ? "Moved “\(moved.keys.first?.lastPathComponent ?? "")” to the Trash" : "Moved \(moved.count) items to the Trash",
+                    self.did(moved.count == 1 ? "Moved \(quoted: moved.keys.first?.lastPathComponent ?? "", else: "a file") to the Trash" : "Moved \(moved.count) items to the Trash",
                              undo: .putBack(moved.map { [$0.key.path, $0.value.path] }))
                     send(["trashed": moved.keys.map(\.path), "undo": "petal_trash with undo: true puts them back"])
                 }

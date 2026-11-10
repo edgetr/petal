@@ -25,9 +25,25 @@ extension Assist {
         Config.supportFolder.appending(path: "ai-history.json")
     }
 
-    func did(_ text: String, undo: Undo? = nil) {
+    /// The one way a line gets into What Petal AI did. A line of Petal's own words is kept at once; one that names
+    /// anything (HistoryLine) is kept once each name went through the vault's settled redaction, off the main thread
+    /// (the index may read the Keychain), with every name left out while the vault can't be read. Kept by when it
+    /// happened, not when its redaction was done.
+    func did(_ line: HistoryLine, undo: Undo? = nil) {
+        let at = Date()
+        guard line.hasNames else { return keep(Done(at: at, text: line.text(nil), undo: undo)) }
+        Self.lineQueue.async {
+            let text = (VaultIndex.settled { index in index.unreadable ? nil : line.text { index.redacted($0) } } ?? nil) ?? line.text(nil)
+            DispatchQueue.main.async { MainActor.assumeIsolated { self.keep(Done(at: at, text: text, undo: undo)) } }
+        }
+    }
+
+    nonisolated private static let lineQueue = DispatchQueue(label: "petal.ai-history.lines", qos: .utility)
+
+    private func keep(_ done: Done) {
         var list = history
-        list.insert(Done(at: Date(), text: text, undo: undo), at: 0)
+        // Newest first; one whose redaction finished late goes where it happened.
+        list.insert(done, at: list.firstIndex { $0.at <= done.at } ?? list.count)
         history = Array(list.prefix(200))
         saveHistory()
     }

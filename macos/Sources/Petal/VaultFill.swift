@@ -740,7 +740,7 @@ extension Assist {
                 guard self.computer.allowCheckout(caller, token: token, place: place, map: map, card: item.id, revision: shown, asked: asked) else {
                     return fail("That Buy card is over (a newer one was asked for this window, or the reply ended): nothing was filled. " + Self.over)
                 }
-                self.did("You said Buy on \(shop) (\(Vault.cardName(item)))")
+                self.did("You said Buy on \(named: shop, else: "a shop") (\(named: Vault.cardName(item), else: "a card"))")
                 bought()
             }
         }
@@ -885,7 +885,9 @@ extension Assist {
                         return send(reply)
                     }
                     if ok {
-                        self.did("Saved \(saving.kind == .login ? "a login for \(saving.sites.first ?? saving.apps.first ?? saving.title)" : "“\(saving.title)”") in the vault")
+                        let saved: HistoryLine = saving.kind == .login
+                            ? "a login for \(named: saving.sites.first ?? saving.apps.first ?? saving.title, else: "a site")" : "\(quoted: saving.title, else: "an item")"
+                        self.did("Saved \(saved) in the vault")
                         reply["saved"] = Vault.shown(saving)
                     } else {
                         reply["saved"] = false
@@ -972,7 +974,7 @@ extension Assist {
                                             return fail(ok ? "Petal saved the new password as \(saving.title) but filled nothing: " + Self.over : Self.over)
                                         }
                                         guard ok else { return fail("The Keychain didn't take the new password, so nothing was filled.") }
-                                        self.did("Made a strong password for \(place.where_) and saved it in the vault")
+                                        self.did("Made a strong password for \(named: place.where_, else: "a site") and saved it in the vault")
                                         // The login as saved: edited while the fill waits to be allowed (another site), it fills nothing.
                                         let revision = Vault.revision(Vault.normalized(saving))
                                         let plans = roles.indices.map { index -> VaultFillPlan in

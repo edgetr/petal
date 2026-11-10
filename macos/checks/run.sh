@@ -61,6 +61,26 @@ boundary no 'print(NoteHelp.system(NoteHelp.Told(), provider: "Claude", computer
 boundary no 'var t = NoteHelp.Told(); t.place = raw; t.instructions = raw; print(NoteHelp.system(t, provider: "Claude", computerUse: false, brief: ""))'
 boundary yes 'if let s = NoteShield.shield([raw], index: UIMap.SecretIndex([])) { let p: Shielded = "ask: \(s[0]) \(3)"; print(NoteHelp.brief(NoteHelp.Told(ask: p))) }'
 echo "Shielded boundary: a raw string never makes a helper's prompt"
+# What Petal AI did (ai-history.json): a line is Petal's own words, and whatever it names goes in only as a name
+# (HistoryLine), redacted with the vault's index before it's kept (Assist.did, the one way in). The compiler's again:
+# a raw string is not a line, and can't be put into one; the named way compiles and leaves a name out when it must.
+history() {
+    printf '@main struct H { static func main() {\n let raw = String(CommandLine.arguments.count)\n func did(_ line: HistoryLine) { print(line.text(nil), "|", line.text { _ in "(hidden)" }) }\n %s\n } }\n' "$2" > "$out/history.swift"
+    if swiftc -parse-as-library -o "$out/history" Sources/Petal/HistoryLine.swift "$out/history.swift" >/dev/null 2>&1; then built=yes; else built=no; fi
+    if [ "$built" != "$1" ]; then echo "History line: expected compiling '$2' to be $1"; exit 1; fi
+}
+history no 'did(raw)'
+history no 'did("Quit \(raw)")'
+history no 'let line: HistoryLine = "Closed “\(raw)”"; did(line)'
+history no 'did("Quit " + raw)'
+history yes 'did("Quit \(named: raw, else: "an app") and \(quoted: raw, else: "a window"), \(3) times")'
+[ "$("$out/history")" = "Quit an app and a window, 3 times | Quit (hidden) and “(hidden)”, 3 times" ] || { echo "History line: a name left out, or redacted: $("$out/history")"; exit 1; }
+# One `did`, taking only a line; nothing makes a line from a string by its initializer; an entry is made nowhere else.
+[ "$(cat Sources/Petal/*.swift | grep -c 'func did(')" = 1 ] && grep -q 'func did(_ line: HistoryLine, undo: Undo? = nil)' Sources/Petal/AssistMore.swift \
+    && ! grep -n 'HistoryLine(stringLiteral\|HistoryLine(stringInterpolation\|HistoryLine\.init\|as HistoryLine' Sources/Petal/*.swift \
+    && [ "$(grep -l 'Done(at:' Sources/Petal/*.swift | tr '\n' ' ')" = "Sources/Petal/AssistMore.swift " ] \
+    || { echo "Assist.did: every line of What Petal AI did goes through the one function, as a HistoryLine"; exit 1; }
+echo "history: a raw string never makes a line of What Petal AI did"
 # A helper's quick calls go through Brain's Shielded overload only (the one that takes its run's token).
 if grep -nE 'brain\.ask\(' Sources/Petal/NoteHelpers.swift | grep -v 'token:'; then echo "NoteHelpers: a Brain call without its Shielded prompt and token"; exit 1; fi
 # Every run ends in one of three outcomes, early exits too: each `return` in a chat turn's start (Agent.run) is a
