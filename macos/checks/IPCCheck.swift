@@ -49,6 +49,16 @@ struct IPCCheck {
         defer { ipc.stop() }
         guard FileManager.default.fileExists(atPath: path) else { print("FAIL: the throwaway socket isn't there"); exit(1) }
 
+        // 0. A client that connects and hangs up at once, saying nothing (IPC.answering, which `petal doctor` and a
+        //    second Petal run): Petal answers into a socket nobody holds. macOS refuses SO_NOSIGPIPE on a socket whose
+        //    other end is already closed, so that write would raise SIGPIPE and end Petal. It mustn't: this process
+        //    is still here after, and still answers (3, below).
+        for _ in 0..<20 {
+            expect(IPC.answering(), "the throwaway socket answers a probe")
+            Thread.sleep(forTimeInterval: 0.02)   // its socket's thread writes the answer to nobody
+        }
+        spin(0.3)
+
         // 1. The client sends its line and goes while the main thread is busy: by the time the handler's turn comes,
         //    its socket's thread has seen it go. The handler never runs, so nothing is done.
         guard let gone = connectTo(path) else { print("FAIL: can't connect"); exit(1) }

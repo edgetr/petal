@@ -240,7 +240,7 @@ final class APIKeyCheck {
         let finished = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in finished.signal() }
         guard (try? process.run()) != nil else { return AISetup.Result(status: -1, output: "") }
-        input.fileHandleForWriting.write(Data("Reply with the word OK.".utf8))
+        try? input.fileHandleForWriting.write(contentsOf: Data("Reply with the word OK.".utf8))
         try? input.fileHandleForWriting.close()
         if finished.wait(timeout: .now() + 60) == .timedOut {
             process.terminate()

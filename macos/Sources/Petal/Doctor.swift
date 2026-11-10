@@ -233,7 +233,7 @@ enum Doctor {
         process.standardInput = input == nil ? FileHandle.nullDevice : stdin
         guard (try? process.run()) != nil else { return (-1, "") }
         if let input {
-            stdin.fileHandleForWriting.write(Data(input.utf8))
+            try? stdin.fileHandleForWriting.write(contentsOf: Data(input.utf8))
             try? stdin.fileHandleForWriting.close()
         }
         let data = output.fileHandleForReading.readDataToEndOfFile()
