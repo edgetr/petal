@@ -270,6 +270,13 @@ struct NoteHelpCheck {
         expect(NoteHelp.anchor([deskPlace, tabPlace], here: nil) == .away("shop.example/x"), "brought back on the Desktop: it waits for its page")
         expect(NoteHelp.anchor([deskPlace, tabPlace], here: 0) == .away("shop.example/x"), "shown on a Desktop: still waits for its page")
         expect(NoteHelp.anchor([deskPlace], here: nil) == .free && NoteHelp.anchor([], here: nil) == .free, "only on a Desktop, or nowhere: free")
+        // The screen itself is nothing to look at, as a Desktop isn't.
+        let screenPlace = NoteShelf.screenAnchor(mac: "mac-1")!
+        expect(NoteHelp.anchor([screenPlace], here: nil) == .free && NoteHelp.anchor([screenPlace, deskPlace], here: 0) == .free, "only on the screen: free")
+        expect(NoteHelp.anchor([screenPlace, tabPlace], here: nil) == .away("shop.example/x") && NoteHelp.anchor([screenPlace, tabPlace], here: 1) == .placed(1),
+               "kept on screen and on a page: its helper looks at the page, and waits for it")
+        expect(NoteHelp.requirement([screenPlace], here: nil) == nil && NoteHelp.requirement([screenPlace, tabPlace], here: nil) == tabPlace,
+               "a helper's required place is never the screen")
 
         // MARK: Rule B: what a helper tells an AI is Shielded (only NoteShield makes it)
 

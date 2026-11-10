@@ -39,6 +39,9 @@ struct NoteStick: Equatable, Sendable {
         case app
         /// A Desktop (and its mode): the note sits on that Desktop.
         case desktop
+        /// The screen itself, on one Mac (`mac`): the note shows at its spot on every Desktop, whatever is in front.
+        /// On another Mac it's kept as written and shows nowhere.
+        case screen
         /// A person: `title` their name, and what tells them apart from anyone else of that name, `contact` (a vault
         /// contact's id) or `handle` (the chat's own address for them: an email or phone number). The note shows
         /// beside their conversation in any chat app Petal reads a person from (PersonRead); a name alone never.
@@ -54,6 +57,7 @@ struct NoteStick: Equatable, Sendable {
             case .window: 4
             case .app: 5
             case .desktop: 6
+            case .screen: 7
             }
         }
     }
@@ -156,6 +160,7 @@ struct NoteStick: Equatable, Sendable {
         case .window: return NoteShelf.sameWindow(self, other)
         case .app: return app == other.app
         case .desktop: return desktop == other.desktop
+        case .screen: return mac == other.mac
         case .person: return PersonRead.samePerson(self, other)
         }
     }
@@ -191,6 +196,7 @@ struct NoteStick: Equatable, Sendable {
         case .window: return "A window of \(appName.isEmpty ? app : appName)" + (title.isEmpty ? "" : ": “\(title)”")
         case .app: return "Every window of \(appName.isEmpty ? app : appName)"
         case .desktop: return "Desktop \(desktop.map(String.init) ?? "")" + (mode.isEmpty ? "" : " (\(mode))")
+        case .screen: return "On screen"
         case .person: return (title.isEmpty ? "A person" : title) + ", in any chat app"
         }
     }
@@ -216,9 +222,13 @@ struct NoteStick: Equatable, Sendable {
         case .window: return title.isEmpty ? (appName.isEmpty ? "a window" : "\(appName) window") : title
         case .app: return "all of \(appName.isEmpty ? app : appName)"
         case .desktop: return desktop.map { "Desktop \($0)" } ?? "the Desktop"
+        case .screen: return "On screen"
         case .person: return title.isEmpty ? "a person" : title
         }
     }
+
+    /// The place after "also on" in the letterhead ("also on the screen").
+    var alsoLabel: String { kind == .screen ? "the screen" : label() }
 }
 
 /// A spot in a file as a file anchor writes it (Petal's viewer): a PDF passage's bounds on its page, "x y width
@@ -447,8 +457,8 @@ enum NoteMatch {
             return !stick.title.isEmpty && stick.title == scene.title && scene.titleTwins == 1
         case .app:
             return !stick.app.isEmpty && stick.app == scene.app
-        case .desktop:
-            return false   // Desktop notes sit on their Desktop, never on a window
+        case .desktop, .screen:
+            return false   // Desktop and screen notes sit on their Desktop or the screen, never on a window
         case .person:
             // Their conversation in any chat app, by what tells them apart (their contact or address), never a name alone.
             return scene.window != nil && PersonRead.matches(stick, scene)
@@ -1693,6 +1703,43 @@ enum NoteShelf {
         return stick
     }
 
+    /// The screen's anchor, for this Mac only (`mac`: its own id from notes-state.json): unknown, nothing is stuck.
+    static func screenAnchor(mac: String) -> NoteStick? {
+        guard !mac.isEmpty else { return nil }
+        var stick = NoteStick(kind: .screen)
+        stick.mac = mac
+        return stick
+    }
+
+    /// Whether a note is kept on this Mac's screen: one of its places is the screen, recorded with this Mac's id.
+    /// Another Mac's screen place means nothing here.
+    static func onScreen(_ places: [NoteStick], mac: String) -> Bool {
+        !mac.isEmpty && places.contains { $0.kind == .screen && $0.mac == mac }
+    }
+
+    /// "Keep it on screen", chosen in the letterhead's menu: the screen added to the note's places (its other places
+    /// stay: by its window in front it still shows there), or, already on this Mac's screen, taken off again. Nil:
+    /// nothing to change (this Mac's id unknown, or the screen is its only place: a note is never left stuck nowhere
+    /// this way).
+    static func screenToggled(_ places: [NoteStick], mac: String) -> [NoteStick]? {
+        guard let anchor = screenAnchor(mac: mac) else { return nil }
+        if onScreen(places, mac: mac) {
+            let rest = places.filter { !($0.kind == .screen && $0.mac == mac) }
+            return rest.isEmpty ? nil : rest
+        }
+        return places + [anchor]
+    }
+
+    /// Where a note with no spot of its own rests on the screen (`visible`: the main screen's visible frame, AppKit's
+    /// coordinates): down the right side from the top, as many as the screen is tall for, then the next column to the
+    /// left. The paper's top-left corner.
+    static func screenRest(index: Int, visible: CGRect, paper: CGFloat) -> CGPoint {
+        let step = paper + 24
+        let rows = max(1, Int((visible.height - 40) / step))
+        let at = max(0, index)
+        return CGPoint(x: visible.maxX - 40 - paper - CGFloat(at / rows) * step, y: visible.maxY - 40 - CGFloat(at % rows) * step)
+    }
+
     /// A notebook asked for by name: the one that exists whatever its letters' case (`Inbox` for "inbox"), else
     /// the name as asked.
     static func canonicalNotebook(_ wanted: String, existing: [String]) -> String {
@@ -1814,9 +1861,12 @@ enum NoteShelf {
     /// screens show), else nowhere.
     /// `standalone`: the person opened it on its own (from the Petal Notes window or a notebook's stack): it shows
     /// there, before anything else, until it's folded or put away.
-    static func placementNow(window: Int?, desktops: [Int?], showing: Set<Int>, windowValid: Bool = true, standalone: Bool = false) -> Placement {
+    /// `screen`: it's kept on this Mac's screen (`onScreen`): it shows there whatever is in front and whichever
+    /// Desktop shows, unless the window in front is one of its places (the window wins).
+    static func placementNow(window: Int?, desktops: [Int?], showing: Set<Int>, windowValid: Bool = true, standalone: Bool = false,
+                             screen: Bool = false) -> Placement {
         if standalone { return .standalone }
-        return placement(window: windowValid ? window : nil, onDesktopShowing: desktops.contains { $0.map(showing.contains) ?? false })
+        return placement(window: windowValid ? window : nil, onDesktopShowing: desktops.contains { $0.map(showing.contains) ?? false }, onScreen: screen)
     }
 
     /// Whether a paper may be seen now: never while Mission Control is open (every surface hidden until it ends);
@@ -1825,18 +1875,30 @@ enum NoteShelf {
         guard !missionControl else { return false }
         switch placement {
         case .window: return !awaitingRead
-        case .desktop, .standalone: return true
+        case .desktop, .screen, .standalone: return true
         case .none: return false
         }
     }
 
     /// Where a paper shows: by the window in front when one of its places fits it, else on the Desktop showing when
     /// it's stuck there, never both (the window wins).
-    enum Placement: Equatable { case window(Int), desktop, standalone, none }
+    /// On the screen itself (`screen`) comes after the window and before a Desktop: a note kept on screen shows there
+    /// on every Desktop, its own included.
+    enum Placement: Equatable { case window(Int), desktop, screen, standalone, none }
 
-    static func placement(window: Int?, onDesktopShowing: Bool) -> Placement {
+    static func placement(window: Int?, onDesktopShowing: Bool, onScreen: Bool = false) -> Placement {
         if let window { return .window(window) }
+        if onScreen { return .screen }
         return onDesktopShowing ? .desktop : .none
+    }
+
+    /// Whether a paper rests off any window now (on its Desktop, on the screen itself, or opened on its own): a focus
+    /// change leaves it where it is, and where the person drags it is a point on the screen, not a window's corner.
+    static func restsOffWindow(_ placement: Placement) -> Bool {
+        switch placement {
+        case .desktop, .screen, .standalone: return true
+        case .window, .none: return false
+        }
     }
 
     /// What a refused save puts in the journal: the whole note, as a normal save writes it (its front matter, its
@@ -2083,8 +2145,9 @@ enum NoteShelf {
 
     /// Whether a note shows on the Desktop showing on one screen now: stuck to that Desktop, and not placed by the
     /// window in front (a window placement counts only while it's valid: never while a fresh read is awaited).
-    static func onDesktop(window: Int?, desktops: [Int?], screenDesktop: Int, windowValid: Bool) -> Bool {
-        placementNow(window: window, desktops: desktops, showing: [screenDesktop], windowValid: windowValid) == .desktop
+    /// A note kept on the screen (`screen`) shows there, never as a Desktop's.
+    static func onDesktop(window: Int?, desktops: [Int?], screenDesktop: Int, windowValid: Bool, screen: Bool = false) -> Bool {
+        placementNow(window: window, desktops: desktops, showing: [screenDesktop], windowValid: windowValid, screen: screen) == .desktop
     }
 
     /// A decoded picture's weight in the image cache: its pixels, four bytes each.

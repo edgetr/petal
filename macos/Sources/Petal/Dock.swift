@@ -1001,6 +1001,7 @@ struct DockView: View {
     var slot: CGFloat { icon + inset * 2 }
 
     static let finderSlot = "finder"
+    static let padSlot = "notepad"
 
     var body: some View {
         let layout = dock.vertical ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 0))
@@ -1018,6 +1019,10 @@ struct DockView: View {
             }
             if config.bool("finderInDock") {
                 FinderButton(dock: dock, size: icon * 0.95).frame(width: slot, height: slot).magnified(dock, Self.finderSlot)
+            }
+            // The note pad, by the AI button and Finder's: the same in every mode, while Petal Notes is on.
+            if config.bool("notes") && config.bool("notesPad") {
+                NotePadButton(dock: dock, size: icon * 0.95).frame(width: slot, height: slot).magnified(dock, Self.padSlot)
             }
             if modesOn { Separator(vertical: dock.vertical, slot: slot).magnified(dock, "separator:modes", scales: false) }
             stage(layout)
@@ -1239,8 +1244,9 @@ struct ClaudeButton: View {
                                if app.previews.hoverNotes(on, in: dock) { app.tooltips.hide() }
                                else { app.tooltips.show(on ? app.usageTooltip : nil, over: "claude", in: dock) }
                            },
-                           // Dragged out onto a spot: a blank Petal Note there (on the window under it, or the Desktop).
-                           drag: app.config.bool("notes") ? { _, ended in app.paper.dragFromAI(ended: ended) } : nil,
+                           // Dragged out onto a spot: a blank Petal Note there (on the window under it, or the Desktop),
+                           // as from the note pad.
+                           drag: app.config.bool("notes") ? { _, ended in app.paper.dragPaper(ended: ended) } : nil,
                            // A file dropped on it goes to the AI: "summarize it", "what's in it?".
                            files: { urls in
                                dropped = urls.first.map { NSWorkspace.shared.icon(forFile: $0.path) }

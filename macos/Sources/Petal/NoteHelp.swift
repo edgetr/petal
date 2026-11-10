@@ -1817,12 +1817,15 @@ extension NoteHelp {
 
     /// Where a helper may look, by the note's saved places: the one placed on the window in front now; away when it
     /// has a window, tab, app, file or sentence that isn't in front (it waits for it, never looking at whatever is);
-    /// free when it's only on a Desktop or nowhere.
+    /// free when it's only on a Desktop, on the screen itself, or nowhere.
     enum Anchor: Equatable { case placed(Int), away(String), free }
 
+    /// A Desktop or the screen is nothing to look at: a helper's place is a window, tab, app, file or sentence.
+    static func looksAt(_ place: NoteStick) -> Bool { place.kind != .desktop && place.kind != .screen }
+
     static func anchor(_ places: [NoteStick], here: Int?) -> Anchor {
-        if let here, places.indices.contains(here), places[here].kind != .desktop { return .placed(here) }
-        if let away = places.first(where: { $0.kind != .desktop }) { return .away(away.label()) }
+        if let here, places.indices.contains(here), looksAt(places[here]) { return .placed(here) }
+        if let away = places.first(where: looksAt) { return .away(away.label()) }
         return .free
     }
 
@@ -2128,7 +2131,7 @@ extension NoteHelp {
     static func requirement(_ places: [NoteStick], here: Int?) -> NoteStick? {
         switch anchor(places, here: here) {
         case .placed(let index): return places[index]
-        case .away: return places.first { $0.kind != .desktop }
+        case .away: return places.first(where: looksAt)
         case .free: return nil
         }
     }

@@ -53,13 +53,16 @@ Use, in this order:
    The AI button opens the quick question: a chat stuck nowhere, over the dock. Its Stick here turns the
    conversation into a Petal Note on what was in front.
    Petal Notes (macOS, `notes`): the user's own notes on paper, stuck to places (a sentence, a browser tab, a window,
-   all of an app, a file in any app, a Desktop), one Markdown file per note in a notebook (a folder; Inbox by
-   default), in iCloud Drive's Petal Notes when iCloud Drive is on (`notesFolder` picks another folder). `petal_notes`
+   all of an app, a file in any app, a Desktop, or the screen itself, where a note shows on every Desktop whatever is
+   in front), one Markdown file per note in a notebook (a folder; Inbox by default), in iCloud Drive's Petal Notes
+   when iCloud Drive is on (`notesFolder` picks another folder). The person makes one from the note pad in the dock
+   (`notesPad`: a click for a note on what's in front, or a paper dragged off it and let go anywhere; holding Option
+   keeps it on screen), with ⌃⌥N, or with Note by selected text; a paper dragged anywhere stays there. `petal_notes`
    searches them (`query`, `notebook`, `here: true` for the ones on what's in front), `petal_note_read` reads one,
    `petal_note_write` writes one (no `id`: a new note, `stick: "here"` sticks it to what's in front; with `id`:
    replaces its words, or `append: true`), `petal_note_move` puts one in another notebook, `petal_note_stick` sticks
    one to what's in front (with Petal's viewer in front: its file and page, or its selected passage) (`to`: tab,
-   window, app, file, desktop or person; `also: true` keeps its other places). A
+   window, app, file, desktop, screen or person; `also: true` keeps its other places). A
    note on a person shows beside their conversation in Messages, WhatsApp, Telegram, Slack and Mail. The Petal Notes
    window (the menu bar's mark) shows every note by notebook, as a grid or a canvas, with search and the Coming back,
    Watching and Helpers at work views. A notebook kept in the dock is a folder stack (its folder in `stackFolders`);

@@ -170,6 +170,7 @@ Item {
       property string chatWhileWorking: "steer"
       property bool selectionAsk: true
       property bool notes: true
+      property bool notesPad: true
       property string notesLook: "paper"
       property string notesFolder: ""
       property string notesNotebook: "Inbox"

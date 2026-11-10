@@ -123,8 +123,6 @@ extension ClaudePanel {
         lastFront = front
         let known = front.tab?.known == true
         if frontTabKnown != known { frontTabKnown = known }
-        let primary = NSScreen.screens.first?.frame.height ?? 0
-        lastFrontFrame = read.frame.map { NoteRules.appKitFrame($0, primaryHeight: primary) }
         return front
     }
 
@@ -205,7 +203,6 @@ extension ClaudePanel {
             savedPlaces = savedPlaces.filter { $0.value.id != saved.id }
             if let old = saved.place {
                 place.scope = old.scope
-                place.spot = old.spot
                 if let tab = old.tab { place.tab = front.tab.map { NoteRules.follow(tab, to: $0, keepWords: !title.isEmpty) } ?? tab }
                 if title.isEmpty { place.title = old.title }
                 place.mode = old.mode
@@ -353,63 +350,6 @@ extension ClaudePanel {
         if note.ready { note.ready = false; updateReady() }
         if PetalApp.shared.popups.card?.noteID == note.id { PetalApp.shared.popups.dismissCard() }
         unlink(note.agent.chatID)
-    }
-
-    // MARK: Where it sits
-
-    /// Where the note in the panel sits, once the person moved it: on its window, as they left it. nil (over the
-    /// dock) until then, or while it isn't on its own window (opened here from another mode).
-    func stuckFrame(_ size: CGSize) -> CGRect? {
-        guard notesOn, current.attached, let place = current.place, let spot = place.spot, let front = lastFront,
-              let window = lastFrontFrame, NoteRules.sameWindow(place, front) else { return nil }
-        let screens = NSScreen.screens
-        guard let screen = NoteRules.screen(for: window, in: screens.map(\.frame)),
-              let visible = screens.first(where: { $0.frame == screen })?.visibleFrame else { return nil }
-        return spot.frame(size: size, window: window, screen: visible)
-    }
-
-    /// The note in the panel stays when the person clicks elsewhere in its place: they stuck it there.
-    var stuckHere: Bool {
-        guard notesOn, current.attached, let place = current.place, place.spot != nil, let front = lastFront else { return false }
-        return NoteRules.sameWindow(place, front, orUnknown: true)
-    }
-
-    /// The person let go of the note after dragging it: it sticks there, on its window (its nearest corner).
-    func noteMoved(to frame: CGRect) {
-        let note = current
-        guard notesOn, note.attached, let place = note.place, let front = lastFront, NoteRules.sameWindow(place, front),
-              let number = front.window else { return }
-        Self.windowFrame(pid: front.pid, window: number) { found in
-            guard let found, self.current === note, self.lastFront == front else { return }
-            let window = NoteRules.appKitFrame(found, primaryHeight: NSScreen.screens.first?.frame.height ?? 0)
-            self.lastFrontFrame = window
-            note.place?.spot = NoteSpot.stick(panel: frame, window: window)
-        }
-    }
-
-    /// The window the open note sits on moved or resized: the note goes with it. Its frame is read off the main
-    /// thread; a move meanwhile reads it once more when that's done, never a queue of reads.
-    private func follow(_ element: AXUIElement, window number: CGWindowID) {
-        guard !following else { followAgain = true; return }
-        following = true
-        // Accessibility's elements may be asked from any thread; Swift can't know that.
-        nonisolated(unsafe) let moving = element
-        Self.windowQueue.async {
-            let frame = Windows.frame(of: moving)
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    self.following = false
-                    if let frame, self.lastFront?.window == number {
-                        self.lastFrontFrame = NoteRules.appKitFrame(frame, primaryHeight: NSScreen.screens.first?.frame.height ?? 0)
-                        if self.isOpen { self.fit() }
-                    }
-                    if self.followAgain {
-                        self.followAgain = false
-                        self.follow(moving, window: number)
-                    }
-                }
-            }
-        }
     }
 
     /// A chat picked from the list: the note holding it, else carried on. With notes on, it sticks again to its
@@ -697,22 +637,6 @@ extension ClaudePanel {
         return read
     }
 
-    /// One window's frame now (Accessibility's, top-left origin), when it's its app's focused one; off the main thread.
-    static func windowFrame(pid: pid_t, window number: CGWindowID, _ done: @escaping @MainActor (CGRect?) -> Void) {
-        windowQueue.async {
-            var frame: CGRect?
-            if Windows.trusted {
-                let element = AXUIElementCreateApplication(pid)
-                AXUIElementSetMessagingTimeout(element, 0.3)
-                if let window: AXUIElement = Windows.value(element, kAXFocusedWindowAttribute), Windows.id(of: window) == number {
-                    frame = Windows.frame(of: window)
-                }
-            }
-            let found = frame
-            DispatchQueue.main.async { MainActor.assumeIsolated { done(found) } }
-        }
-    }
-
     /// The window of `pid` a Chromium tab is in now, from that window's bounds (the browser's answer, top-left
     /// origin): `old` while it's still that one, else the one window with those bounds; nil when that's unsure (none,
     /// or two alike). Off the main thread.
@@ -875,7 +799,6 @@ extension ClaudePanel {
                 // That window is in front from now on, before the read says more (its tab, its frame): a note closing
                 // meanwhile is judged against it, never against the window that was in front before.
                 lastFront = FrontPlace(pid: event.pid, app: front.bundleIdentifier ?? "", window: window, tab: nil)
-                lastFrontFrame = nil
             }
             if isOpen, current.attached, let place = current.place, place.kind != .app, place.pid == event.pid,
                let window = event.window, let mine = place.window, mine != window {
@@ -893,11 +816,6 @@ extension ClaudePanel {
             // Only a look, never a step away first: these also come when the keyboard moves inside the same page
             // (a click into a field), and the note would blink on every click.
             lookSoon(at: front.processIdentifier)
-        case .moved, .resized:
-            // The open note's window: the note goes with it, where the person left it.
-            guard isOpen, current.place?.spot != nil, let element = event.element, let window = event.window,
-                  let front = lastFront, front.pid == event.pid, front.window == window, stuckHere else { return }
-            follow(element, window: window)
         case .closed:
             guard let window = event.window else { return }
             lost { NoteRules.gone($0, closed: window) }
@@ -908,7 +826,7 @@ extension ClaudePanel {
 
     /// The notes whose window closed or app quit (`gone`): from now on they open as plain chats. The one open on that
     /// window is put away, kept as when the person goes elsewhere: with its window gone nothing else would (it's no
-    /// longer stuck anywhere), and one the person moved would stay over whatever comes forward next.
+    /// longer stuck anywhere).
     private func lost(_ gone: (NotePlace) -> Bool) {
         let shown = isOpen && current.attached && current.place.map { place in
             gone(place) && lastFront.map { NoteRules.sameWindow(place, $0, orUnknown: true) } == true
@@ -932,10 +850,7 @@ extension ClaudePanel {
         // app's window or tab) steps away at once, before anything is read: it never stays over the next app while
         // that app answers. The read only decides what shows next.
         let now = FrontPlace(pid: pid, app: running.bundleIdentifier ?? "", window: nil, tab: nil)
-        if lastFront?.pid != pid {
-            lastFront = now
-            lastFrontFrame = nil
-        }
+        if lastFront?.pid != pid { lastFront = now }
         if isOpen, current.attached, let place = current.place, !NoteRules.sameWindow(place, now, orUnknown: true) { stepAway() }
         // Also a browser whose tabs may take back a note (it quit with them, or they're kept from before).
         guard notes.contains(where: { $0.attached }) || running.bundleIdentifier.map(recoverableTabs) == true else { return }
@@ -943,7 +858,7 @@ extension ClaudePanel {
     }
 
     /// One of Petal's own windows took the keyboard (Settings, the welcome, a page, a recipe, an alert): an open note
-    /// steps away as when another app comes forward (one the person moved would otherwise stay over it), and comes
+    /// steps away as when another app comes forward, and comes
     /// back with its place (that app coming forward again). Petal's panels that never bring Petal forward (the note
     /// itself, cards, popups, the dock, the overview) don't count.
     private func ownWindowCameForward(_ window: NSWindow) {
@@ -1001,7 +916,7 @@ extension ClaudePanel {
 
     /// Something else is in front (another app, window or tab): an open note stuck elsewhere steps away; the note
     /// stuck here that was open when the person left or is done comes back (without taking the keyboard from the
-    /// app), where they left it. When several fit (a tab's, its window's, its app's), the most specific shows.
+    /// app), over the dock. When several fit (a tab's, its window's, its app's), the most specific shows.
     private func frontChanged(_ front: FrontPlace, title: String) {
         if let pending = pendingOpen, let place = pending.place {
             // A tab's note: its own tab in front (a browser that couldn't be asked to show it waits for the person to),
@@ -1106,8 +1021,7 @@ extension ClaudePanel {
     }
 
     /// The panel closed: on purpose (×, Escape, the AI button), stepping away, or a click elsewhere. A click
-    /// elsewhere in the note's own window puts it away (one the person moved stays: InputPanel.stays); going to
-    /// another window, it comes back with this one.
+    /// elsewhere in the note's own window puts it away; going to another window, it comes back with this one.
     func closed() {
         // However it closed, nothing opens it again behind the person's back: opens, restores and windows being
         // brought forward are cancelled.
