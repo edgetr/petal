@@ -238,7 +238,7 @@ enum RoutinesCheck {
             process.standardError = FileHandle.nullDevice
             var answer: [String: Any]?
             if (try? process.run()) != nil {
-                input.fileHandleForWriting.write(Data(prompt.utf8))
+                try? input.fileHandleForWriting.write(contentsOf: Data(prompt.utf8))
                 try? input.fileHandleForWriting.close()
                 let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
                 process.waitUntilExit()

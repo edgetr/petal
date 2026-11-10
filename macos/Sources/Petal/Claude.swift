@@ -583,7 +583,7 @@ final class Agent {
                 if handle == nil { process.terminate() }
                 bound = handle
             }
-            input.fileHandleForWriting.write(Data(prompt.utf8))
+            try? input.fileHandleForWriting.write(contentsOf: Data(prompt.utf8))
             try? input.fileHandleForWriting.close()
         } catch {
             token?.unbind(bound)

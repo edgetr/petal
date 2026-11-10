@@ -113,7 +113,7 @@ final class Brain {
                     handle = token.bind { [weak process] in process?.terminate() }
                     if handle == nil { process.terminate() }
                 }
-                input.fileHandleForWriting.write(Data(job.prompt.utf8))
+                try? input.fileHandleForWriting.write(contentsOf: Data(job.prompt.utf8))
                 try? input.fileHandleForWriting.close()
                 let data = output.fileHandleForReading.readDataToEndOfFile()
                 process.waitUntilExit()

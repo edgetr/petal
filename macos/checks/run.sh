@@ -714,6 +714,11 @@ perl -0777 -ne '
 n=$(grep -n 'NSScreen\.screens\|NSScreen\.main\|CGGetActiveDisplayList\|CGGetOnlineDisplayList\|CGMainDisplayID' Sources/Petal/*.swift | grep -v '^Sources/Petal/Screens\.swift:\|^Sources/Petal/DisplayCheck\.swift:' || true)
 if [ -n "$n" ]; then echo "screens: read outside Screens (Screens.swift):"; echo "$n"; exit 1; fi
 echo "screens: only through Screens"
+# A write into a helper program's input fails quietly when that program has gone (the throwing write): the other
+# one raises, which would end Petal now that a broken pipe no longer does (IPC.surviveBrokenPipes).
+n=$(grep -n 'fileHandleForWriting\.write(' Sources/Petal/*.swift | grep -v 'write(contentsOf:' || true)
+if [ -n "$n" ]; then echo "pipes: a write that raises when its reader has gone:"; echo "$n"; exit 1; fi
+echo "pipes: a reader that has gone never ends Petal"
 # Whether a display is there is asked of macOS's own list (Screens.isOnline): CGDisplayIsOnline goes on saying yes
 # for the id of a display that's gone, so nothing relies on it (DisplayCheck.swift prints what it says, as information).
 n=$(grep -n 'CGDisplayIsOnline' Sources/Petal/*.swift | grep -v '^Sources/Petal/DisplayCheck\.swift:\|^Sources/Petal/Screens\.swift:[0-9]*: *///' || true)

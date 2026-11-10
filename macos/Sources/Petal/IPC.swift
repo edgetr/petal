@@ -77,7 +77,18 @@ final class IPC {
         } == 0
     }
 
+    /// A write into a pipe or socket nobody holds any more must never end Petal: without this macOS sends SIGPIPE,
+    /// which quits the process on the spot. SO_NOSIGPIPE on each client's socket (below) isn't enough: macOS refuses
+    /// it (EINVAL) on a socket whose other end has already closed, which is exactly what `answering` leaves behind,
+    /// so `petal doctor`, or a second Petal starting, used to end the running one. A handler that does nothing, not
+    /// SIG_IGN: an ignored signal is inherited by every program Petal starts (the AI apps, their shells), and a
+    /// handler isn't. With it the write just fails (EPIPE), and the writer carries on.
+    nonisolated static func surviveBrokenPipes() {
+        signal(SIGPIPE) { _ in }
+    }
+
     func start() {
+        Self.surviveBrokenPipes()
         guard !Self.answering() else { return }
         unlink(Self.path)
         fd = socket(AF_UNIX, SOCK_STREAM, 0)

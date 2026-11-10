@@ -120,6 +120,8 @@ MainActor.assumeIsolated {
     while !others().isEmpty && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
     if !others().isEmpty { exit(0) }
 
+    // Before anything writes into a pipe or a socket: one whose other end has gone must never end the dock.
+    IPC.surviveBrokenPipes()
     let delegate = AppDelegate()
     app.delegate = delegate
     app.setActivationPolicy(.accessory)
