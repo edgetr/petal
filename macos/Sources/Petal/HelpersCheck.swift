@@ -781,6 +781,13 @@ private final class HelpersChecker {
             expect(wait(limit) { model.lensAnswer?.text == "Cheaper, same team." }, "the settled selection answered (\(model.lensAnswer?.text ?? "nothing"))")
             expect(calls("quick").count == moving + 1 && !sent(calls("quick").last).contains("<selected>\nCosts fell"), "a selection still moving asks nothing: one call, about where it settled")
 
+            // Cleared before it settled: a selection made and let go asks nothing (no call for a selection that's gone).
+            let cleared = calls("quick").count
+            select("Costs fell")
+            model.unselected()
+            wait(1.5)
+            expect(calls("quick").count == cleared, "a selection cleared before it settled asks nothing (\(calls("quick").count - cleared) call(s))")
+
             // The newest wins: a slow answer for an older selection never shows once a newer one was asked.
             let racing = calls("quick").count
             plan("quick", ["#sleep 4"] + quick(["answer": "The old answer."]), match: "<selected>\nA made-up report")

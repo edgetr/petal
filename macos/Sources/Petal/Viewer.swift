@@ -1047,6 +1047,8 @@ final class ViewerModel: Identifiable {
     func selected(page: Int, bounds: CGRect, range: NSRange, anchor: CGPoint) {
         // The selection before is gone at once (its Note with it); the new one is offered only once its read is in.
         let turn = turns.begin("selection")
+        // The lens was waiting to ask about the selection before: it asks nothing now.
+        lensSoon?.cancel()
         if selection != nil { selection = nil }
         // Text selected on the pages of the load before, while the file is read again, is never offered: a passage
         // only ever from the pages of the current load.
@@ -1075,6 +1077,8 @@ final class ViewerModel: Identifiable {
     /// No selection (or one the viewer doesn't offer a Note for): an answer still on its way is dropped.
     func unselected() {
         _ = turns.begin("selection")
+        // Cleared before the lens asked: nothing is asked (a paid call for a selection that's gone).
+        lensSoon?.cancel()
         if selection != nil { selection = nil }
         settleSelection()
     }
@@ -1319,7 +1323,10 @@ final class ViewerModel: Identifiable {
     func selectionSettled(page: Int, text: String, paragraph: NSRange, selected: NSRange, bounds: CGRect) {
         guard let key = lensKey, let noteID = desk.store.paper(key)?.noteID else { return }
         lensSoon?.cancel()
+        // Asked only about the selection that's still the one: a newer selection, or none, since then asks nothing.
+        let turn = turns.current("selection")
         let work = DispatchWorkItem { [weak self] in
+            guard MainActor.assumeIsolated({ self?.turns.isLatest("selection", turn) ?? false }) else { return }
             Viewers.queue.async {
                 let told = VaultIndex.settled { index -> (String, String)? in
                     guard !index.unreadable else { return nil }
@@ -1330,7 +1337,7 @@ final class ViewerModel: Identifiable {
                 } ?? nil
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
-                        guard let self, let told, self.lensKey == key else { return }
+                        guard let self, let told, self.lensKey == key, self.turns.isLatest("selection", turn) else { return }
                         let request = ViewerLensRequest(noteID: noteID, page: page + 1, paragraph: told.0, selected: told.1, bounds: bounds)
                         self.askLens(request)
                     }
