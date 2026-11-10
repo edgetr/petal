@@ -558,12 +558,12 @@ struct NotesCheck {
         expect(NoteShelf.untouched("", madeWith: nil) && NoteShelf.untouched("> a word\n\n", madeWith: "> a word\n\n"), "a new note with nothing, or only its quote, is untouched")
         expect(!NoteShelf.untouched("> a word\n\nmine", madeWith: "> a word\n\n") && !NoteShelf.untouched("mine", madeWith: nil), "one the person wrote in isn't")
         // macOS's Dock is showing only when its bar sits on a screen (as read on macOS 27.3: hidden it waits at the edge).
-        let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
-        expect(NoteShelf.dockBarShowing(CGRect(x: 363, y: 1019, width: 1194, height: 51), screens: [screen]), "its bar on the screen (Mission Control): showing")
-        expect(!NoteShelf.dockBarShowing(CGRect(x: 363, y: 1080, width: 1194, height: 51), screens: [screen]), "its bar just past the bottom edge: hidden")
-        expect(!NoteShelf.dockBarShowing(.zero, screens: [screen]), "a Dock that just started, its bar with no size yet: not showing")
-        expect(!NoteShelf.dockBarShowing(CGRect(x: 363, y: 1060, width: 1194, height: 51), screens: [screen]), "mostly past the edge (sliding away): not showing")
-        expect(NoteShelf.dockBarShowing(CGRect(x: 1920, y: 300, width: 51, height: 600), screens: [screen, CGRect(x: 1920, y: 0, width: 1440, height: 900)]), "on a second screen's edge: showing")
+        let dockScreen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        expect(NoteShelf.dockBarShowing(CGRect(x: 363, y: 1019, width: 1194, height: 51), screens: [dockScreen]), "its bar on the screen (Mission Control): showing")
+        expect(!NoteShelf.dockBarShowing(CGRect(x: 363, y: 1080, width: 1194, height: 51), screens: [dockScreen]), "its bar just past the bottom edge: hidden")
+        expect(!NoteShelf.dockBarShowing(.zero, screens: [dockScreen]), "a Dock that just started, its bar with no size yet: not showing")
+        expect(!NoteShelf.dockBarShowing(CGRect(x: 363, y: 1060, width: 1194, height: 51), screens: [dockScreen]), "mostly past the edge (sliding away): not showing")
+        expect(NoteShelf.dockBarShowing(CGRect(x: 1920, y: 300, width: 51, height: 600), screens: [dockScreen, CGRect(x: 1920, y: 0, width: 1440, height: 900)]), "on a second screen's edge: showing")
         // While Petal hides macOS's Dock, its window coming onto the screen is Mission Control (macOS 27 sends no event).
         expect(NoteShelf.missionControl(dockOut: true, fullScreen: false, open: false) == true, "macOS's Dock came out while Petal hides it: Mission Control opened")
         expect(NoteShelf.missionControl(dockOut: false, fullScreen: false, open: true) == false, "it left the screen: Mission Control closed")
