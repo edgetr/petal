@@ -2,7 +2,7 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// The first launch: bring macOS's Dock along as a mode, let Petal see windows, then Petal takes the Dock's place.
+/// The first launch: bring macOS's Dock along, let Petal see windows, then Petal takes the Dock's place.
 /// "Not now" keeps macOS's Dock; Petal's settings can switch any time.
 @MainActor
 final class Welcome {
@@ -11,7 +11,7 @@ final class Welcome {
 
     func show() {
         PetalApp.shared.refreshSystemFacts()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 920),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: WelcomeView.height),
                               styleMask: [.titled, .closable, .fullSizeContentView], backing: .buffered, defer: false)
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
@@ -30,13 +30,13 @@ struct WelcomeView: View {
     let done: () -> Void
     @State private var bringDock = true
     @State private var atLogin = true
-    @State private var day = ""
     /// Checked every second; the window draws again only when one changes.
     @State private var trusted = Windows.trusted
     @State private var capture = Capture.allowed
     @State private var askingBrowsers = false
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     private let browsersTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+    static let height: CGFloat = 780
 
     var body: some View {
         let accent = SettingsSection.dock.tint
@@ -47,13 +47,13 @@ struct WelcomeView: View {
                     .shadow(color: .black.opacity(0.35), radius: 20, y: 10)
                 VStack(spacing: 6) {
                     Text("Meet Petal").font(.system(size: 32, weight: .bold))
-                    Text("A dock with a focus mode for every Desktop, and AI built in if you want it.")
+                    Text("A dock with your notes on it, and AI built in if you want it.")
                         .font(.system(size: 14)).foregroundStyle(.secondary)
                 }
                 GlassEffectContainer(spacing: 12) {
                     VStack(spacing: 12) {
                         step(symbol: "dock.rectangle", title: "Bring your Dock along",
-                             detail: "Your Dock's apps become a mode, My Dock, and its folders become stacks.") {
+                             detail: "Your Dock's apps become Petal's, in the same order, and its folders become stacks.") {
                             Toggle("", isOn: $bringDock).toggleStyle(.switch).labelsHidden()
                         } extra: {
                             HStack(spacing: -6) {
@@ -68,36 +68,18 @@ struct WelcomeView: View {
                                 Text("Optional. Without it, Petal is still a whole dock.").font(.system(size: 12)).foregroundStyle(.secondary)
                             }
                             ProviderList()
-                            if let provider = app.chatProvider, case .ready = app.aiSetup.state(provider) {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    TextField("What do you do on this Mac? Like “I code, write papers and talk to friends”", text: $day, axis: .vertical)
-                                        .lineLimit(1...3)
-                                        .textFieldStyle(.plain)
-                                        .padding(10)
-                                        .background(.black.opacity(0.12), in: .rect(cornerRadius: 10))
-                                    Text("Optional. \(provider.name) builds your modes from it.").font(.system(size: 11)).foregroundStyle(.secondary)
-                                }
-                            }
                         }
                         .padding(14).frame(width: 520).glassEffect(.regular, in: .rect(cornerRadius: 20))
                         step(symbol: "macwindow.on.rectangle", title: "Let Petal see your windows",
-                             detail: "For window lists, badges and focus cards. macOS asks once.") {
+                             detail: "For window lists, badges and notes on windows. macOS asks once.") {
                             if trusted {
                                 Label("Allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 12, weight: .medium))
                             } else {
                                 Button("Allow…") { Windows.askForPermission() }.buttonStyle(.glass)
                             }
                         } extra: { EmptyView() }
-                        step(symbol: "bell.badge", title: "Let Petal see notifications",
-                             detail: "Optional. To hold them in modes that hold them. macOS calls it Full Disk Access.") {
-                            if app.notes.canRead {
-                                AllowedLabel()
-                            } else {
-                                Button("Open Settings…") { NotificationAccessRow.openSettings() }.buttonStyle(.glass)
-                            }
-                        } extra: { EmptyView() }
                         step(symbol: "safari", title: "Let Petal see your tabs",
-                             detail: "Optional. Which site a tab is on, to keep distracting ones in their mode. Each browser asks once.") {
+                             detail: "Optional. Which site a tab is on, for notes on a tab and for Petal AI. Each browser asks once.") {
                             BrowserAccessButton(asking: $askingBrowsers)
                         } extra: { EmptyView() }
                         step(symbol: "rectangle.dashed.badge.record", title: "Window previews",
@@ -125,10 +107,6 @@ struct WelcomeView: View {
                         app.config.setDock("welcomed", true)
                         app.useDock("petal")
                         done()
-                        if !day.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            let text = day
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { app.describeDay(text) }
-                        }
                     }
                     .buttonStyle(.glassProminent)
                     .tint(accent)
@@ -139,7 +117,7 @@ struct WelcomeView: View {
             }
             .padding(28)
         }
-        .frame(width: 640, height: 920)
+        .frame(width: 640, height: Self.height)
         .onReceive(timer) { _ in
             let nowTrusted = Windows.trusted, nowCapture = Capture.allowed
             if nowTrusted != trusted { trusted = nowTrusted }
@@ -172,6 +150,32 @@ struct WelcomeView: View {
         .padding(14)
         .frame(width: 520)
         .glassEffect(.regular, in: .rect(cornerRadius: 20))
+    }
+}
+
+/// Allowed, Allow…, or Open Settings… for a browser that said no. Each browser asks once, from this button only.
+struct BrowserAccessButton: View {
+    @Environment(PetalApp.self) private var app
+    @Binding var asking: Bool
+
+    var body: some View {
+        let browsers = app.browsers
+        if asking {
+            ProgressView().controlSize(.small)
+        } else if !browsers.refused.isEmpty {
+            Button("Open Settings…") {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") { NSWorkspace.shared.open(url) }
+            }
+            .buttonStyle(.glass)
+        } else if browsers.allAllowed || Browsers.installed().isEmpty {
+            Label("Allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 12, weight: .medium))
+        } else {
+            Button("Allow…") {
+                asking = true
+                browsers.askAll { asking = false }
+            }
+            .buttonStyle(.glass)
+        }
     }
 }
 
