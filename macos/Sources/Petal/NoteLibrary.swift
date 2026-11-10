@@ -394,7 +394,11 @@ extension NoteLibrary {
         }
         let source = id + "\u{0}" + folder
         let a = fnv(source, 0xcbf2_9ce4_8422_2325), b = fnv(source, 0x8422_2325_cbf2_9ce4)
-        var bytes = (0..<8).map { UInt8((a >> (8 * $0)) & 0xff) } + (0..<8).map { UInt8((b >> (8 * $0)) & 0xff) }
+        // Low byte first, a's eight then b's. Written as a loop: as one expression, an older compiler gives up on it.
+        var bytes: [UInt8] = []
+        for word in [a, b] {
+            for index in 0..<8 { bytes.append(UInt8(truncatingIfNeeded: word >> UInt64(8 * index))) }
+        }
         bytes[6] = (bytes[6] & 0x0f) | 0x50   // a name-based UUID's version
         bytes[8] = (bytes[8] & 0x3f) | 0x80
         let uuid = UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
