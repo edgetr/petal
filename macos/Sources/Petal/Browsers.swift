@@ -6,8 +6,8 @@ import Observation
 /// The browser's front tab: its real address.
 ///
 /// - Chromium browsers (Helium, Chrome, Arc, Brave, Edge, Vivaldi, Opera, Aside) and Safari answer AppleScript. Each asks
-///   once for Automation permission; Petal only asks from a button (the welcome window or settings), never by
-///   surprise, and until then reads the tab's title instead.
+///   once for Automation permission; Petal only asks from a button (a note's place menu where a tab is first wanted,
+///   or settings), never by surprise, and until then reads the tab's title instead.
 /// - Firefox and Zen don't script tabs: Petal reads the address field through Accessibility. The pointer never moves.
 @MainActor @Observable
 final class Browsers {
@@ -32,20 +32,28 @@ final class Browsers {
 
     /// One AppleScript at a time, off the main thread: a busy browser can take a while to answer.
     @ObservationIgnored private let queue = DispatchQueue(label: "tech.edgetr.petal.browsers")
-    /// Each running browser's answer, as last asked (for the settings and welcome windows).
+    /// Each running browser's answer, as last asked (for the settings window).
     private(set) var states: [String: Access] = [:]
 
     // MARK: Permission
 
     enum Access { case allowed, notAsked, denied, notRunning }
 
-    /// Whether Petal may script this browser, without asking (or, with `ask`, macOS asks the person once). Only a
-    /// running browser can say: asking about one that isn't running waits for it, so that's never done. Called off
-    /// the main thread: a busy browser can take a while.
+    /// Whether Petal may script this app (a browser, or Music and Spotify for what's playing), without asking (or,
+    /// with `ask`, macOS asks the person once). Only a running app can say: asking about one that isn't running
+    /// waits for it, so that's never done. Called off the main thread: a busy app can take a while.
     nonisolated static func access(_ bundleID: String, ask: Bool = false) -> Access {
         // While a run has a browser of this very app going (RunBrowser.swift), a script sent to the app by its id
         // could be answered by that copy instead of the person's: neither is asked anything until it's gone.
         if !ask, RunBrowsers.running(bundle: bundleID) { return .notRunning }
+        let answer = permission(bundleID, ask: ask)
+        seenLock.lock()
+        seen[bundleID] = answer
+        seenLock.unlock()
+        return answer
+    }
+
+    nonisolated private static func permission(_ bundleID: String, ask: Bool) -> Access {
         guard let running = NSRunningApplication.persons(withBundleIdentifier: bundleID).first,
               let desc = NSAppleEventDescriptor(processIdentifier: running.processIdentifier).aeDesc else { return .notRunning }
         switch AEDeterminePermissionToAutomateTarget(desc, typeWildCard, typeWildCard, ask) {
@@ -53,6 +61,27 @@ final class Browsers {
         case OSStatus(errAEEventWouldRequireUserConsent): return .notAsked
         case OSStatus(errAEEventNotPermitted): return .denied
         default: return .notRunning
+        }
+    }
+
+    /// Each app's answer the last time `access` looked, for what can't wait on the app to draw (a menu, a preview).
+    nonisolated(unsafe) private static var seen: [String: Access] = [:]
+    nonisolated private static let seenLock = NSLock()
+
+    /// The app, as last looked at, is running and hasn't been asked yet: where its tabs or its song are first
+    /// wanted, a line offers to ask (a note's place menu, the player's preview), and until then nothing is sent to it.
+    nonisolated static func waiting(_ bundleID: String) -> Bool {
+        seenLock.lock()
+        defer { seenLock.unlock() }
+        return seen[bundleID] == .notAsked
+    }
+
+    /// Asks one running app, from the line that offered it: macOS shows its own prompt, once. `done` on the main thread.
+    func ask(_ bundleID: String, done: @escaping @MainActor (Access) -> Void) {
+        Task {
+            let answer = await Task.detached { Self.access(bundleID, ask: true) }.value
+            if Self.kind(bundleID) != nil { states[bundleID] = answer }
+            done(answer)
         }
     }
 
