@@ -374,7 +374,8 @@ extension NoteDesk {
         return ["written": handle(paper), "title": NoteShield.Derived { NoteTold.title(body, $0) }]
     }
 
-    /// What's in front now, read off the main thread, as one place: `kind` (tab, window, app, file, desktop) or the
+    /// What's in front now, read off the main thread, as one place: `kind` (tab, window, app, file, desktop, or
+    /// screen: the screen itself, where the note shows on every Desktop whatever is in front) or the
     /// most specific there is (a passage only with a selection). The read goes through `NoteDesk.read`, whose final
     /// privacy filter leaves an app kept private nothing but itself; its selection is never read for the AI, and a
     /// selection holding something from the vault isn't stuck to (VaultIndex, as petal_ui hides it). Nothing comes
@@ -383,6 +384,11 @@ extension NoteDesk {
     private func stickHere(kind: String?, live: @escaping @Sendable () -> Bool, refuse: ((String) -> Void)? = nil,
                            _ done: @escaping @MainActor (NoteStick?) -> Void) {
         let wanted = kind.flatMap(NoteStick.Kind.init(rawValue:))
+        if wanted == .screen {
+            // The screen itself, on this Mac: nothing is read of what's in front.
+            guard let anchor = NoteShelf.screenAnchor(mac: local.mac) else { return done(nil) }
+            return done(anchor)
+        }
         if wanted == .desktop {
             // The Desktop showing under the pointer, read off the main thread (whichever dock): unknown, refused.
             return resolveDesktop { number in

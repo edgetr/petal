@@ -62,6 +62,8 @@ struct PaperView: View {
     /// Turned over and folded by its holder when it isn't the desk (Petal's viewer's margin).
     var flipped: (() -> Void)? = nil
     var folded: (() -> Void)? = nil
+    /// On the desk, what picks the paper up (PaperGrab): right under its words and controls, over its own surface.
+    var grab: PaperGrab? = nil
 
     @Environment(\.snapshotting) private var snapshotting
     /// This paper's editor, as the desk knows it: only its own going away clears its registration (the same note
@@ -76,8 +78,10 @@ struct PaperView: View {
             .padding(.top, face == .open ? 16 : 15).padding(.horizontal, face == .open ? 18 : 14).padding(.bottom, face == .open ? 14 : 12)
             .frame(width: face == .folded ? PaperLook.folded : width,
                    height: face == .folded ? PaperLook.folded : nil, alignment: .topLeading)
-            // The strip is the paper's width, whatever room the paper is offered.
-            .overlay(alignment: .top) { strip }
+            // Under the words and controls, over the paper's own surface: where it's picked up and dragged.
+            .background { if let grab, !snapshotting { grab } }
+            // The strip is the paper's width, whatever room the paper is offered (and part of what's picked up).
+            .overlay(alignment: .top) { strip.allowsHitTesting(false) }
         .overlay(alignment: .bottomTrailing) { corner }
         .clipShape(.rect(cornerRadius: 12))
         // The shadow is the paper's alone: on the whole view SwiftUI would give every letter one too.
@@ -149,6 +153,8 @@ struct PaperView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .clipped()
             }
+            // On the desk the folded paper's words are part of what's picked up (the grab area is right under them).
+            .allowsHitTesting(grab == nil)
             if conflict {
                 Button("Keep this one") { desk?.keep(paper.key) }.buttonStyle(.plain)
                     .font(.system(size: 11, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
@@ -162,6 +168,7 @@ struct PaperView: View {
                 Text(unsaved ? "Not saved yet: trying again" : footer).font(.system(size: 11))
                     .foregroundStyle(unsaved ? Color(red: 0.7, green: 0.15, blue: 0.12) : glass ? .secondary : PaperLook.footer).lineLimit(1)
                     .minimumScaleFactor(0.85)
+                    .allowsHitTesting(grab == nil)
                 // A watcher's Pause (or Go on), on the folded note.
                 if !unsaved, let watch = paper.file.watch {
                     Text("·").font(.system(size: 11)).foregroundStyle(glass ? .secondary : PaperLook.footer).padding(.horizontal, -2)
@@ -257,6 +264,7 @@ struct PaperView: View {
     private var back: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("The back of this note").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(words)
+                .allowsHitTesting(grab == nil)
             // What a helper did, and what was allowed (tap a stamp to take it back).
             HelperBack(paper: paper, tint: tint, glass: glass, desk: desk)
             VStack(alignment: .leading, spacing: 4) {
@@ -267,9 +275,11 @@ struct PaperView: View {
                     Text("Not stuck anywhere yet.").font(.system(size: 12.5)).foregroundStyle(glass ? .secondary : PaperLook.footer)
                 }
             }
-            Text("In \(notebook)").font(.system(size: 12.5)).foregroundStyle(words)
+            // (On the desk, the back's own words are part of what's picked up, as the folded paper's are.)
+            .allowsHitTesting(grab == nil)
+            Text("In \(notebook)").font(.system(size: 12.5)).foregroundStyle(words).allowsHitTesting(grab == nil)
             Text("Made \(NoteDesk.when(paper.file.created)) · changed \(NoteDesk.when(paper.file.modified))")
-                .font(.system(size: 11)).foregroundStyle(glass ? .secondary : Color(white: 0.53))
+                .font(.system(size: 11)).foregroundStyle(glass ? .secondary : Color(white: 0.53)).allowsHitTesting(grab == nil)
             if let desk {
                 Button("Show the file") { desk.reveal(paper.key) }.buttonStyle(.plain)
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))

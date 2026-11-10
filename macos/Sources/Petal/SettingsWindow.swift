@@ -1317,8 +1317,9 @@ struct NotesCard: View {
 
     var body: some View {
         Card(title: "Notes") {
-            SettingToggle(key: "notes", title: "Petal Notes", detail: "Your own notes on paper, stuck to a sentence, a tab, a window, an app, a file or a Desktop. ⌃⌥N makes one where you are.")
+            SettingToggle(key: "notes", title: "Petal Notes", detail: "Your own notes on paper, stuck to a sentence, a tab, a window, an app, a file, a Desktop or the screen itself. ⌃⌥N makes one where you are.")
             if app.config.bool("notes") {
+                SettingToggle(key: "notesPad", title: "Note pad in the dock", detail: "A pad of paper by the AI button: click it for a note on what's in front, or drag a paper off it and let go anywhere. Hold Option to keep it on screen.")
                 HStack {
                     Text("Look").font(.system(size: 13))
                     Spacer()

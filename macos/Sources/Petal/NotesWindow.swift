@@ -992,6 +992,7 @@ struct GridPaper: View, Equatable {
         guard let first = paper.file.places.first else { return nil }
         switch first.kind {
         case .desktop: return first.desktop.map { "On Desktop \($0)" } ?? "On the Desktop"
+        case .screen: return "On screen"
         case .window: return first.appName.isEmpty ? first.label() : first.appName + (first.title.isEmpty ? "" : " · " + first.title)
         case .person: return first.title + " · any chat app"
         default: return NoteText.site(first.label())

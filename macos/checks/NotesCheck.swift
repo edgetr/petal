@@ -1059,6 +1059,80 @@ struct NotesCheck {
         same.url = "https://a.example/two"; same.title = "Two"
         expect(NoteMatch.followTab(same, moved, keepWords: true) == nil, "nothing changed: nothing saved")
 
+        // MARK: A note on the screen itself
+
+        // The file keeps it as written: its kind and the Mac it's on, and whatever a later Petal adds to it.
+        let onScreen = NoteShelf.screenAnchor(mac: "mac-1")!
+        expect(onScreen.kind == .screen && onScreen.mac == "mac-1", "the screen's anchor names this Mac")
+        expect(NoteShelf.screenAnchor(mac: "") == nil, "this Mac's id unknown: nothing is stuck")
+        var later = onScreen
+        later.extra = [(key: "display", lines: ["    display: \"left\""])]
+        var sticky = NoteFile(id: "SC1", created: when, modified: when, body: "Call back before noon")
+        var itsWindow = NoteStick(kind: .window)
+        itsWindow.app = "com.apple.TextEdit"; itsWindow.mac = "mac-1"; itsWindow.pid = 42; itsWindow.window = 7
+        sticky.places = [itsWindow, later]
+        let stickyText = sticky.serialized()
+        let stickyBack = NoteFile.parse(stickyText, fallbackID: "X", fallbackDate: Date())
+        expect(stickyText.contains("  - kind: screen\n    mac: mac-1\n    display: \"left\""), "the screen place as written", stickyText)
+        expect(stickyBack == sticky && stickyBack.serialized() == stickyText, "a note on the screen reads back as it was written, and writes the same again")
+        expect(stickyBack.places[1].kind == .screen && stickyBack.places[1].extra.first?.key == "display", "with a later Petal's key kept")
+
+        // It ranks last, and never fits a window: a note also stuck to the window in front shows there.
+        expect(NoteStick.Kind.allCases.allSatisfy { $0 == .screen || $0.rank < NoteStick.Kind.screen.rank }, "the screen is the last place tried")
+        let textEdit = NoteScene(mac: "mac-1", app: "com.apple.TextEdit", pid: 42, window: 7, title: "Draft")
+        expect(!NoteMatch.fits(onScreen, textEdit), "the screen is never a window's place")
+        expect(NoteMatch.best([onScreen, itsWindow], textEdit) == 1, "also on the window in front: that place wins")
+        expect(NoteMatch.best([onScreen], textEdit) == nil, "only on the screen: no place on a window")
+
+        // Per Mac: this Mac's screen only; on another Mac it's kept and shows nowhere.
+        expect(NoteShelf.onScreen([itsWindow, onScreen], mac: "mac-1"), "kept on this Mac's screen")
+        expect(!NoteShelf.onScreen([itsWindow, onScreen], mac: "mac-2"), "another Mac's screen place means nothing here")
+        expect(!NoteShelf.onScreen([itsWindow], mac: "mac-1") && !NoteShelf.onScreen([onScreen], mac: ""), "not on the screen; this Mac unknown: no")
+        expect(onScreen.samePlace(NoteShelf.screenAnchor(mac: "mac-1")!) && !onScreen.samePlace(NoteShelf.screenAnchor(mac: "mac-2")!),
+               "the same place only on the same Mac")
+
+        // One placement: the window in front first, then the screen (on every Desktop), then its Desktop.
+        expect(NoteShelf.placementNow(window: nil, desktops: [], showing: [], screen: true) == .screen, "nothing in front fits: on the screen, whichever Desktop shows")
+        expect(NoteShelf.placementNow(window: nil, desktops: [2], showing: [2], screen: true) == .screen, "also on the Desktop showing: still the screen's")
+        expect(NoteShelf.placementNow(window: 0, desktops: [], showing: [], screen: true) == .window(0), "its window in front: by the window")
+        expect(NoteShelf.placementNow(window: 0, desktops: [], showing: [], windowValid: false, screen: true) == .screen,
+               "its window's read awaited: on the screen meanwhile")
+        expect(NoteShelf.placementNow(window: nil, desktops: [], showing: [], standalone: true, screen: true) == .standalone, "opened on its own: there")
+        expect(NoteShelf.placementNow(window: nil, desktops: [2], showing: [2]) == .desktop, "not on the screen: its Desktop, as before")
+        expect(!NoteShelf.onDesktop(window: nil, desktops: [2], screenDesktop: 2, windowValid: true, screen: true)
+               && NoteShelf.onDesktop(window: nil, desktops: [2], screenDesktop: 2, windowValid: true), "a note kept on the screen is never placed twice, as a Desktop's too")
+        // Shown through the one rule: hidden while Mission Control is open, there through a wait for a window's read.
+        expect(!NoteShelf.mayShow(.screen, missionControl: true, awaitingRead: false), "Mission Control open: the screen's notes hidden too")
+        expect(NoteShelf.mayShow(.screen, missionControl: false, awaitingRead: true) && NoteShelf.mayShow(.screen, missionControl: false, awaitingRead: false),
+               "a read awaited: a note on the screen stays")
+        expect(NoteShelf.isHere(.screen), "on the screen is here, for the note tools")
+        expect(NoteShelf.restsOffWindow(.screen) && NoteShelf.restsOffWindow(.desktop) && NoteShelf.restsOffWindow(.standalone)
+               && !NoteShelf.restsOffWindow(.window(0)) && !NoteShelf.restsOffWindow(.none), "which papers a focus change leaves where they are")
+        // It never asks for room beside a window.
+        expect(!NoteRoom.wanted([(placement: .screen, open: true, moved: false)]), "a note on the screen never narrows a window")
+        expect(!NoteRoom.wanted([(placement: .window(0), open: true, moved: true)]) && NoteRoom.wanted([(placement: .window(0), open: true, moved: false)]),
+               "nor does one the person left somewhere on its window; one still beside it does")
+
+        // "Keep it on screen": added to its places, taken off again, never left stuck nowhere.
+        expect(NoteShelf.screenToggled([itsWindow], mac: "mac-1") == [itsWindow, onScreen], "kept on screen: its window's place stays")
+        expect(NoteShelf.screenToggled([itsWindow, onScreen], mac: "mac-1") == [itsWindow], "chosen again: taken off")
+        expect(NoteShelf.screenToggled([onScreen], mac: "mac-1") == nil, "the screen its only place: it stays")
+        expect(NoteShelf.screenToggled([itsWindow], mac: "") == nil, "this Mac unknown: nothing changes")
+        let otherMac = NoteShelf.screenAnchor(mac: "mac-2")!
+        expect(NoteShelf.screenToggled([otherMac], mac: "mac-1") == [otherMac, onScreen], "another Mac's screen place is kept beside this one's")
+
+        // What it says: "On screen" in the letterhead, the back and to the tools; "also on the screen" after another place.
+        expect(onScreen.label() == "On screen" && onScreen.words == "On screen" && onScreen.alsoLabel == "the screen", "its words")
+        expect(itsWindow.alsoLabel == itsWindow.label(), "every other place says the same after \"also on\"")
+
+        // With no spot of its own it rests down the main screen's right side, never two in one place.
+        let visibleScreen = CGRect(x: 0, y: 0, width: 1440, height: 870)
+        let rests = (0..<12).map { NoteShelf.screenRest(index: $0, visible: visibleScreen, paper: 170) }
+        expect(Set(rests.map { "\($0.x),\($0.y)" }).count == 12, "each rests in its own place")
+        expect(rests[0] == CGPoint(x: 1440 - 40 - 170, y: 870 - 40) && rests[1].x == rests[0].x && rests[1].y < rests[0].y, "from the top right, down")
+        expect(rests[4].x < rests[0].x && rests[4].y == rests[0].y, "a column as tall as the screen has room for (four here), then the next one left")
+        expect(rests.allSatisfy { visibleScreen.contains(CGRect(x: $0.x, y: $0.y - 170, width: 170, height: 170)) }, "all of them whole on the screen")
+
         // MARK: Paper colors (the sketch's color-mix)
 
         let blue = NoteInk.hex("#007aff")!

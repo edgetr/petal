@@ -76,6 +76,9 @@ extension Snapshot {
             ("note-edge-tabs", scene(edgeScene(app: app, keys: [sentence.key, other.key, folded.key, open.key], sentence: sentence))),
         ]
         for (name, view) in shots { write(render(view, app: app, size: nil), name: name, folder: folder) }
+        anywhere(app: app, folder: folder, root: root, day: day)
+        // (`anywhere` shows its own made-up notes: the ones above again for what follows.)
+        app.paper.store.preview([folded, open, other, sentence], notebooks: books)
         helpers(app: app, folder: folder, root: root, day: day, scene: { scene($0) })
 
         // The quick question, with Stick here.
@@ -211,6 +214,64 @@ extension Snapshot {
         ])
         ask.agent.sources = [NoteSource(noteID: "H4", title: "Kitchen lamp"), NoteSource(noteID: "H5", title: "Renew the bike lock")]
         write(render(AnyView(ClaudePanelView(panel: ask)), app: app, size: nil), name: "quick-question-sources", folder: folder)
+    }
+
+    /// The note pad on the dock with a paper being dragged off it, and a note kept on the screen itself, over a
+    /// made-up window and the desk beside it. Made-up notes, never the person's.
+    @MainActor private static func anywhere(app: PetalApp, folder: String, root: URL, day: Date) {
+        // The pad by the AI button and Finder's, as the dock draws them (the real buttons, on glass), and the paper
+        // that comes off it, held up and to the right of the pad as it's dragged away (Option held: "Stays on screen").
+        let dock = ScreenDock()
+        let icon: CGFloat = 36, slot: CGFloat = 46
+        let size = icon * 0.95
+        let row = HStack(spacing: 0) {
+            ClaudeButton(dock: dock, size: size).frame(width: slot, height: slot)
+            FinderButton(dock: dock, size: size).frame(width: slot, height: slot)
+            NotePadButton(dock: dock, size: size).frame(width: slot, height: slot)
+            Separator(vertical: false, slot: slot)
+            ForEach(["#4f8ef7", "#2fb36d", "#f2a33a", "#a550a7", "#ff5f57"], id: \.self) { hex in
+                RoundedRectangle(cornerRadius: icon * 0.24).fill(Color(nsColor: NSColor(hex: hex) ?? .gray)).frame(width: icon, height: icon)
+                    .frame(width: slot, height: slot)
+            }
+        }
+        .padding(4)
+        .glassEffect(.regular, in: .rect(cornerRadius: (slot + 8) / 2.6))
+        let padScene = ZStack(alignment: .bottomLeading) {
+            row
+            // Its paper's corner by the pointer, 70 points up and right of the pad's middle.
+            PaperGhost(color: app.paper.store.color(of: app.paper.defaultNotebook), kept: true)
+                .offset(x: 4 + slot * 2.5 + 50, y: -(slot + 30))
+        }
+        .frame(width: 4 + slot * 9 + 30, height: slot + 8 + 30 + PaperGhost.size.height, alignment: .bottomLeading)
+        .padding(40)
+        write(render(AnyView(padScene), app: app, size: nil), name: "dock-note-pad", folder: folder)
+
+        // A note kept on the screen: above the window in front, where it was left, whatever that window is.
+        var call = NoteFile(id: "S5", created: day, modified: Date().addingTimeInterval(-1800), body: "# Call the plumber\nBefore noon. Ask about Thursday.")
+        if let screen = NoteShelf.screenAnchor(mac: "this-mac") { call.places = [screen] }
+        let kept = PaperNote(file: call, url: root.appending(path: "Inbox/Call the plumber.md"), notebook: "Inbox")
+        app.paper.store.preview([kept], notebooks: [Notebook(name: "Inbox", folder: root.appending(path: "Inbox"), color: "#007aff", cover: nil, count: 1)])
+        let head = app.paper.letterhead(kept)
+        let width: CGFloat = 560, height: CGFloat = 400
+        let screenScene = ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 14).fill(.white).shadow(color: .black.opacity(0.22), radius: 30, y: 22)
+                .overlay { RoundedRectangle(cornerRadius: 14).stroke(.black.opacity(0.25), lineWidth: 0.5) }
+                .frame(width: width, height: height)
+            Rectangle().fill(Color(white: 0.95)).frame(width: width, height: 52)
+                .clipShape(UnevenRoundedRectangle(topLeadingRadius: 14, topTrailingRadius: 14))
+            Text("This week").font(.system(size: 26, weight: .bold)).foregroundStyle(Color(white: 0.07)).offset(x: 44, y: 88)
+            ForEach(0..<8, id: \.self) { row in
+                Capsule().fill(Color(white: 0.91)).frame(width: CGFloat([460, 400, 430, 300, 450, 380, 420, 260][row]), height: 9)
+                    .offset(x: 44, y: 140 + CGFloat(row) * 24)
+            }
+            // Half over the window's edge, half over the desk: it's on the screen, not on the window.
+            PaperView(paper: kept, color: app.paper.store.color(of: kept.notebook), glass: false, face: .folded,
+                      place: head.place, notebook: head.notebook, others: head.others, footer: NoteDesk.when(kept.file.modified))
+                .offset(x: width - 96, y: 210)
+        }
+        .frame(width: width + 110, height: height + 10, alignment: .topLeading)
+        .padding(40).background(desk).environment(\.colorScheme, .light)
+        write(render(AnyView(screenScene), app: app, size: nil), name: "note-on-screen", folder: folder)
     }
 
     /// A made-up window with a sentence highlighted, its notes resting as tabs on its right edge (one with a count,

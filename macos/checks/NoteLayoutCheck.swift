@@ -399,6 +399,36 @@ struct NoteLayoutCheck {
         let outside = NoteSpot.stick(panel: CGRect(x: 950, y: 500, width: 300, height: 200), window: window)
         expect(outside.corner == .topRight && outside.dx > 0, "left beside its window, it stays beside it", "\(outside)")
 
+        // A note left anywhere stays exactly there: over its window, beside it, or on another screen than its window's.
+        let second = CGRect(x: 1440, y: 0, width: 1920, height: 1080)
+        let folded = CGSize(width: 170, height: 170)
+        for rect in [CGRect(x: 400, y: 300, width: 170, height: 170),      // over the middle of its window
+                     CGRect(x: 1000, y: 650, width: 170, height: 170),     // beside it, on its screen
+                     CGRect(x: 20, y: 20, width: 170, height: 170),        // the screen's far corner
+                     CGRect(x: 2200, y: 500, width: 170, height: 170)] {   // on the second screen
+            let spot = NoteSpot.stick(panel: rect, window: window)
+            expect(spot.frame(size: folded, window: window, screen: screen, screens: [screen, second]) == rect, "left there, it's there", "\(rect)")
+        }
+        let far = NoteSpot.stick(panel: CGRect(x: 2200, y: 500, width: 170, height: 170), window: window)
+        expect(far.frame(size: folded, window: window, screen: screen) != CGRect(x: 2200, y: 500, width: 170, height: 170),
+               "(kept to the window's own screen, it would be pulled back)")
+        // It keeps that spot as it opens and folds: its stuck corner stays put, and folded again it's back exactly.
+        let overWindow = CGRect(x: 400, y: 300, width: 170, height: 170)
+        let stuck = NoteSpot.stick(panel: overWindow, window: window)
+        let opened = stuck.frame(size: CGSize(width: 360, height: 420), window: window, screen: screen, screens: [screen, second])
+        expect(NoteSpot.point(stuck.corner, of: opened) == NoteSpot.point(stuck.corner, of: overWindow), "opened, its stuck corner hasn't moved", "\(opened)")
+        expect(stuck.frame(size: folded, window: window, screen: screen, screens: [screen, second]) == overWindow, "folded again: exactly where it was")
+        // And as its window moves or resizes, by the same corner.
+        expect(stuck.frame(size: folded, window: moved, screen: screen, screens: [screen, second]) == overWindow.offsetBy(dx: 200, dy: -50), "it moves with its window")
+        expect(far.frame(size: folded, window: moved, screen: screen, screens: [screen, second]) == CGRect(x: 2400, y: 450, width: 170, height: 170),
+               "on the second screen too")
+        // Kept whole on the screen it's on: one pushed past an edge moves in from it, on that screen.
+        let edge = far.frame(size: folded, window: window.offsetBy(dx: 1100, dy: 0), screen: screen, screens: [screen, second])
+        expect(second.contains(edge) && edge.maxX == second.maxX, "past the second screen's edge: whole on it", "\(edge)")
+        // On no screen at all (its screen unplugged): whole on its window's.
+        let gone = far.frame(size: folded, window: window, screen: screen, screens: [screen])
+        expect(screen.contains(gone), "its screen gone: on the window's screen", "\(gone)")
+
         // MARK: A chat picked from the list
 
         expect(NoteRules.restoredThere(tabAsked: true, tabFound: nil, windowOpen: { true }) == nil,

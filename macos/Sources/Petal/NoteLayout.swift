@@ -2,8 +2,8 @@ import CoreGraphics
 import Foundation
 
 // The pure side of AI sticky notes (StickyNotes.swift): what a note is stuck to, which notes fit what's in front,
-// telling browser tabs apart, and where a note moved by the person sits on its window. No AppKit, so
-// macos/checks/run.sh checks it on its own.
+// and telling browser tabs apart; and where a paper of Petal Notes the person moved sits on its window (NoteSpot).
+// No AppKit, so macos/checks/run.sh checks it on its own.
 
 /// What a note is stuck to: one browser tab, one window, or every window of an app ("All of Slack").
 enum NoteScope: String, Codable, Sendable, CaseIterable {
@@ -58,8 +58,8 @@ struct NoteTab: Codable, Equatable, Sendable {
     var known: Bool { id != nil || element != nil }
 }
 
-/// Where the person left a note on its window: tied to the window's nearest corner, so it keeps its spot when the
-/// window moves or resizes. `dx`, `dy`: from that corner of the window to the same corner of the note (points,
+/// Where the person left a note's paper on its window (Petal Notes; the chat's own panel never moves): tied to the
+/// window's nearest corner, so it keeps its spot when the window moves or resizes. `dx`, `dy`: from that corner of the window to the same corner of the note (points,
 /// y going up, as AppKit's screen coordinates).
 struct NoteSpot: Codable, Equatable, Sendable {
     enum Corner: String, Codable, Sendable {
@@ -97,11 +97,21 @@ struct NoteSpot: Codable, Equatable, Sendable {
         y = min(max(y, screen.minY), screen.maxY - size.height)
         return CGRect(x: x, y: y, width: size.width, height: size.height).integral
     }
+
+    /// The same, for a paper the person may have left anywhere (`screens`: every screen's visible frame): kept
+    /// whole on the screen the spot itself is mostly on, so a note dragged to another screen than its window's stays
+    /// there; on none of them (a screen unplugged), on the window's (`screen`).
+    func frame(size: CGSize, window: CGRect, screen: CGRect, screens: [CGRect]) -> CGRect {
+        let free = frame(size: size, window: window, screen: CGRect(x: -1e7, y: -1e7, width: 2e7, height: 2e7))
+        func area(_ visible: CGRect) -> CGFloat { let cut = visible.intersection(free); return cut.isNull ? 0 : cut.width * cut.height }
+        let best = screens.max { area($0) < area($1) }
+        return frame(size: size, window: window, screen: best.flatMap { area($0) > 0 ? $0 : nil } ?? screen)
+    }
 }
 
 /// The window a note is stuck to: the app, the window server's number for the window, its title then, and the mode
-/// it was asked in; for a tab, which tab; and, once the person moved it, where on the window. Kept with the chat
-/// (Chats.swift), so the chat still knows where it was asked and a note comes back where it was left.
+/// it was asked in; for a tab, which tab. Kept with the chat (Chats.swift), so the chat still knows where it was
+/// asked. (A chat kept by an earlier Petal may also say `spot`, where its panel was dragged to: no longer read.)
 struct NotePlace: Codable, Equatable, Sendable {
     var pid: Int32
     var app: String          // bundle id
@@ -113,8 +123,6 @@ struct NotePlace: Codable, Equatable, Sendable {
     /// nil: a window (chats kept before notes could stick to tabs and apps).
     var scope: NoteScope? = nil
     var tab: NoteTab? = nil
-    /// nil until the person moves it: it opens over the dock.
-    var spot: NoteSpot? = nil
 
     var kind: NoteScope { scope ?? .window }
 
