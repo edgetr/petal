@@ -19,7 +19,7 @@ extension Acting {
     nonisolated static func situation(_ map: ComputerUse.Map, front: Bool? = nil) -> Background.Situation? {
         let appFront = front.map { $0 ? Background.Known.yes : .no } ?? frontState(map.pid)
         let window = appFront == .yes ? windowState(map) : .no
-        return Background.situation(appFront: appFront, windowFocused: window, idle: idle())
+        return Background.situation(appFront: appFront, windowFocused: window, idle: idle(), hidden: map.hidden)
     }
 
     /// A menu item that opens something (Background.menuOpens): its own title and shortcut, else the title asked for.

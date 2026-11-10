@@ -226,7 +226,7 @@ struct HelperBar: View {
 
     /// The card's words' room: the screen, less the paper around it and its measured buttons.
     private var formRoom: CGFloat {
-        NoteHelp.formRoom(screen: NSScreen.main?.visibleFrame.height ?? 800, chrome: 230, actions: actionsHeight)
+        NoteHelp.formRoom(screen: Screens.main?.visibleFrame.height ?? 800, chrome: 230, actions: actionsHeight)
     }
 
     var body: some View {
@@ -245,6 +245,10 @@ struct HelperBar: View {
                     PulseDot(color: PaperLook.color(tint), pulsing: run.map { !$0.paused } ?? (helper?.state == .working))
                     Text(line(run: run, helper: helper)).font(.system(size: 11.5)).foregroundStyle(glass ? Color.secondary : PaperLook.footer).lineLimit(1)
                     Spacer(minLength: 6)
+                    // It works on a hidden display of its own: its window comes to the person's screen.
+                    if let caller = run?.sticky?.id.uuidString, app.displays.display(for: caller) != nil {
+                        NoteButton(title: "Show me") { app.displays.showMe(caller: caller) }
+                    }
                     if run != nil || helper?.state == .working {
                         NoteButton(title: run?.paused == true ? "Go on" : "Pause") { desk?.helpers.pause(noteID) }
                     }
@@ -278,6 +282,7 @@ struct HelperBar: View {
     private func line(run: NoteHelpers.Run?, helper: NoteHelp.Helper?) -> String {
         if let run {
             if run.paused { return "\(run.who) · paused" }
+            if app.displays.waits(run.sticky?.id.uuidString) { return run.who + " · " + NoteStatus.waitingForDisplay }
             let step = run.sticky?.agent.activity.text ?? ""
             return run.who + " · " + (step.isEmpty ? "working" : step)
         }

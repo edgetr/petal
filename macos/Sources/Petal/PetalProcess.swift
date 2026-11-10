@@ -6,7 +6,7 @@ import Foundation
 /// dock counts as "Petal running": the one-at-a-time check at launch, `petal doctor` and the Dock guard.
 enum PetalProcess {
     /// Flags that start Petal as something other than a dock (main.swift handles each before the dock starts).
-    static let notDockFlags: Set<String> = ["--snapshot", "--routines-check", "--viewer-check", "--helpers-check", "--mcp", "--restore-dock"]
+    static let notDockFlags: Set<String> = ["--snapshot", "--routines-check", "--viewer-check", "--helpers-check", "--display-check", "--mcp", "--restore-dock"]
     /// Every benchmark: --bench, --bench-dock, --bench-settings, --bench-windows, --bench-windows-child, -idle, --bench-notes.
     static let benchPrefix = "--bench"
 
@@ -33,6 +33,9 @@ enum PetalProcess {
         case viewerCheck
         /// `Petal --helpers-check [--ai]`: helpers in notes run end to end, headless, on throwaway folders.
         case helpersCheck(ai: Bool)
+        /// `Petal --display-check <folder>`: makes one real hidden display and puts a TextEdit window on it
+        /// (DisplayCheck.swift). It changes the screens for a few seconds: only ever run on purpose, by a person.
+        case displayCheck(String)
         /// A tool's flag written wrong (`--snapshot` with no folder, a `--bench…` there isn't): its usage, printed
         /// before anything starts, and a non-zero exit. Never a dock.
         case usage(String)
@@ -42,6 +45,7 @@ enum PetalProcess {
     /// How each tool is written, for `.usage`.
     static let usages: [String: String] = [
         "--snapshot": "Petal --snapshot <folder>",
+        "--display-check": "Petal --display-check <folder>",
         "--bench-windows-idle": "Petal --bench-windows-idle <window>",
         "--bench-windows": "Petal --bench-windows [--runs <n>] [--only <window>] [--json <file>] [--png <folder>]",
         "--bench-settings": "Petal --bench-settings [--runs <n>] [--only <window>] [--json <file>] [--png <folder>]",
@@ -90,6 +94,10 @@ enum PetalProcess {
         if words.contains("--snapshot") {
             guard let folder = value(after: "--snapshot") else { return usage("--snapshot") }
             return .snapshot(folder)
+        }
+        if words.contains("--display-check") {
+            guard let folder = value(after: "--display-check") else { return usage("--display-check") }
+            return .displayCheck(folder)
         }
         // macOS's own launch arguments (-psn_…, -NSDocumentRevisionsDebugMode) start with "-" and leave it a dock.
         if let first, ["-h", "--help", "-help"].contains(first) { return .help }

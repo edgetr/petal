@@ -90,7 +90,7 @@ final class SelectionAsk {
                 var rect = CGRect.zero
                 AXValueGetValue(value as! AXValue, .cgRect, &rect)
                 if rect.width > 1, rect.height > 1 {
-                    let top = NSScreen.screens.first?.frame.maxY ?? 0
+                    let top = Screens.all.first?.frame.maxY ?? 0
                     bounds = CGRect(x: rect.minX, y: top - rect.maxY, width: rect.width, height: rect.height)
                 }
             }
@@ -101,7 +101,7 @@ final class SelectionAsk {
     private func show(at bounds: CGRect?, mouse: NSPoint) {
         // Just above the selection's end, else just above the pointer.
         let anchor = bounds.map { CGRect(x: $0.maxX - 2, y: $0.maxY, width: 2, height: 2) } ?? CGRect(x: mouse.x, y: mouse.y + 10, width: 2, height: 2)
-        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main ?? NSScreen.screens[0]
+        let screen = Screens.all.first { $0.frame.contains(mouse) } ?? Screens.main ?? Screens.all[0]
         toldLater?.cancel()
         shownAt = (anchor, screen)
         panel.show(SelectionButton(note: app.paper.on, ask: { [weak self] in self?.ask() }, write: { [weak self] in self?.note() }), near: anchor, on: screen)

@@ -96,6 +96,29 @@ enum Snapshot {
         app.previews.preview(notes: notes, thumbnails: [ids[0]: picture, ids[1]: editor])
         write(render(AnyView(PreviewView(id: Previews.notes) {}), app: app, size: nil), name: "preview-notes", folder: folder)
         app.previews.preview(notes: nil)
+        // Hidden displays (runDisplays): a helper at work on a display of its own (its display, live, with Show me),
+        // one waiting its turn for a display, and an AI session outside Petal on its own. The picture is made up.
+        let display = NSImage(size: NSSize(width: 240, height: 150), flipped: false) { rect in
+            NSColor(red: 0.16, green: 0.2, blue: 0.3, alpha: 1).setFill(); rect.fill()
+            NSColor(white: 0.97, alpha: 1).setFill(); NSBezierPath(roundedRect: NSRect(x: 14, y: 20, width: 150, height: 110), xRadius: 6, yRadius: 6).fill()
+            NSColor(white: 0.86, alpha: 1).setFill(); NSRect(x: 14, y: 116, width: 150, height: 14).fill()
+            NSColor(white: 0.7, alpha: 1).setFill()
+            for row in 0..<5 { NSRect(x: 26, y: 98 - CGFloat(row) * 15, width: CGFloat(120 - row * 14), height: 6).fill() }
+            NSColor(white: 0.2, alpha: 1).setFill(); NSBezierPath(roundedRect: NSRect(x: 120, y: 34, width: 106, height: 70), xRadius: 6, yRadius: 6).fill()
+            return true
+        }
+        let shown = (0..<3).map { _ in UUID() }
+        let onDisplays = [
+            NotePreviewItem(id: shown[0], app: "", appName: "", title: "Compare the three quotes", line: NoteStatus.step("Typing in “Total”"),
+                            working: true, needsYou: false, hidden: false, pid: 0, window: nil, attached: false, display: shown[0]),
+            NotePreviewItem(id: shown[1], app: "", appName: "", title: "Book the dentist", line: NoteStatus.waitingForDisplay,
+                            working: true, needsYou: false, hidden: false, pid: 0, window: nil, attached: false),
+            NotePreviewItem(id: shown[2], app: "", appName: "", title: "Claude Code in T3 Code", line: "Working on a display of its own",
+                            working: true, needsYou: false, hidden: false, pid: 0, window: nil, attached: false, display: shown[2], outside: true),
+        ]
+        app.previews.preview(notes: onDisplays, displays: [shown[0]: display, shown[2]: editor])
+        write(render(AnyView(PreviewView(id: Previews.notes) {}), app: app, size: nil), name: "preview-notes-displays", folder: folder)
+        app.previews.preview(notes: nil)
         // The sites' own icons, fetched from the sites (up to 10 s).
         let samples = ["https://github.com", "https://www.figma.com"]
         for id in samples { _ = Sites.shared.icon(id) }
@@ -132,6 +155,8 @@ enum Snapshot {
             * A note no longer covers the update notice
             """, link: nil))), CGSize(width: 560, height: 600)))
         views.append(("settings-windows", AnyView(VStack { WindowsCard(showTiling: true) }.padding(20)), CGSize(width: 640, height: 420)))
+        // Using your apps, with the switch for a hidden display for each run.
+        views.append(("settings-run-displays", AnyView(VStack { UsingAppsCard() }.padding(20)), CGSize(width: 640, height: 260)))
         views.append(("settings-api-keys", AnyView(VStack(spacing: 14) { ForEach(Provider.allCases) { APIKeyCard(provider: $0) } }.padding(20)), CGSize(width: 640, height: 420)))
         // Petal AI using an app: its first question, the chip with Stop by its pointer, and the pointer itself.
         app.assist.preview(Assist.Request(kind: "computer:com.apple.Safari", title: "Let Petal AI use Safari?",

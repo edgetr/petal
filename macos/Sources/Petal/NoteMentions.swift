@@ -275,7 +275,7 @@ final class MentionMenuPanel: NSPanel {
             contentView = made
         }
         let size = host?.fittingSize ?? NSSize(width: 270, height: 100)
-        let screen = NSScreen.screens.first { $0.frame.intersects(rect) }?.visibleFrame ?? NSScreen.main?.visibleFrame ?? rect
+        let screen = Screens.all.first { $0.frame.intersects(rect) }?.visibleFrame ?? Screens.main?.visibleFrame ?? rect
         var origin = NSPoint(x: rect.minX - 10, y: rect.minY - size.height)
         if origin.y < screen.minY { origin.y = rect.maxY }
         origin.x = min(max(origin.x, screen.minX), screen.maxX - size.width)

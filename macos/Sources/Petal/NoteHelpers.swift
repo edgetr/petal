@@ -500,6 +500,17 @@ final class NoteHelpers {
     /// A run that failed (a refusal, a launch error, a guard, nothing found): `end` with its reason.
     private func fail(_ run: Run, _ reason: String, settings: Bool = false) { end(run, .failed(reason, settings: settings)) }
 
+    /// A run's name among the runs sharing its note's hidden display.
+    nonisolated static func displayRun(_ token: RunToken) -> String { "run-" + token.id }
+
+    /// A run no longer holds its note's hidden display (it ended, or was paused): with the note's last run the
+    /// display goes. `after`: once whatever this run hands on has begun (a second opinion keeps the display).
+    private func leaveDisplay(_ run: Run, after: Bool) {
+        let names = [Self.displayRun(run.token)] + (run.sticky.map { [$0.id.uuidString] } ?? [])
+        let leave = { for name in names { PetalApp.shared.displays.ended(name) } }
+        if after { DispatchQueue.main.async { MainActor.assumeIsolated { leave() } } } else { leave() }
+    }
+
     /// A run ended: out of `runs` (or the looks), its agent gone.
     private func release(_ run: Run) {
         if runs[run.noteID] === run {
@@ -514,6 +525,8 @@ final class NoteHelpers {
             lenses.finish(run.noteID, run.token)
             if lensAt[run.noteID] === run { lensAt.removeValue(forKey: run.noteID) }
         }
+        // Its hold on its note's hidden display goes, once whatever it hands on has begun.
+        leaveDisplay(run, after: true)
         retire(run)
         // Its calls waiting in the quick queue are dropped on the next pass (asked later, never from inside one).
         app.brain.resume()
@@ -567,6 +580,10 @@ final class NoteHelpers {
         run.startNotebook = paper.notebook
         run.startBook = store?.binding(paper.notebook)
         for stamp in paper.file.stamps where stamp.mac == mac { run.token.hold(stamp.grant) }
+        // Everything this note starts shares one hidden display (RunDisplays): a second opinion begun as the run it
+        // reviews ends keeps the display that run had.
+        let token = run.token
+        app.displays.join(Self.displayRun(token), group: RunDisplayRules.group(caller: "", paper: paper.noteID)) { token.state == .running }
         runs[paper.noteID] = run
         working(paper.noteID, step: step, asked: asked, who: who)
         return run
@@ -663,6 +680,8 @@ final class NoteHelpers {
             return end(run, .stopped("Stopped: this can't be paused. Ask again to start it over."))
         }
         guard run.token.pause() else { return }
+        // Paused, it holds no hidden display: Go on gets one again when it next opens something.
+        leaveDisplay(run, after: false)
         if let sticky = run.sticky { app.assist.decline(owner: sticky.id.uuidString) }
         write(noteID) { file in file.helper?.state = .waiting; file.helper?.step = "Paused" }
     }
@@ -1095,7 +1114,8 @@ final class NoteHelpers {
                 guard !words.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return self.fail(run, NoteHelp.bareHint.text + ".") }
                 // Its whole system prompt, made only of Shielded parts (no window or tab title, no raw text), as told now.
                 agent.helperSystem = NoteHelp.system(told, provider: launch.provider == .claude ? "Claude" : "Codex",
-                                                     computerUse: self.app.config.bool("computerUse"), brief: launch.brief(told))
+                                                     computerUse: self.app.config.bool("computerUse"), runDisplays: self.app.displays.on,
+                                                     brief: launch.brief(told))
                 if !run.launched {
                     run.from = agent.messages.count
                     run.launched = true
@@ -1799,6 +1819,7 @@ final class NoteHelpers {
     /// A run parked by a tool's admission: paused where it is, its note saying what it waits for.
     private func park(_ run: Run, _ reason: String) {
         guard !run.parked, run.token.pause() else { return }
+        leaveDisplay(run, after: false)
         run.parked = true
         write(run.noteID) { file in file.helper?.state = .waiting; file.helper?.step = reason }
     }

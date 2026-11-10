@@ -25,6 +25,10 @@ struct NotePreviewItem: Identifiable, Equatable {
     let attached: Bool
     /// Stuck to all of its app: its picture may be any of that app's windows.
     var appWide = false
+    /// The run works on a hidden display of its own (RunDisplays): the tile shows that display, live, with Show me.
+    var display: UUID? = nil
+    /// An AI session outside Petal (T3 Code, a terminal), which has no note: its display's own tile.
+    var outside = false
 
     var seen: NotePicture.Seen {
         NotePicture.Seen(app: app, attached: attached, pid: pid, window: window, hidden: hidden, appWide: appWide)
@@ -40,7 +44,8 @@ extension ClaudePanel {
         let asking = PetalApp.shared.assist.pending.flatMap { $0.owner == note.id.uuidString ? $0.title : nil }
         let waiting = !agent.running && !agent.waiting.isEmpty
         return NoteStatus.Facts(running: agent.running || waiting, ready: note.ready, asking: asking, needs: agent.needs,
-                                activity: waiting ? "Waiting for another note to finish" : agent.activity.text)
+                                activity: waiting ? "Waiting for another note to finish" : agent.activity.text,
+                                waitingForDisplay: PetalApp.shared.displays.waits(note.id.uuidString))
     }
 
     /// The notes the preview shows, waiting for the person first.
@@ -49,6 +54,13 @@ extension ClaudePanel {
         let helpers = PetalApp.shared.paper.helpers
         let all = notes.filter { $0.paper == nil || helpers.previewable($0) }.map { ($0, facts($0)) }
         let assist = PetalApp.shared.assist
+        let displays = PetalApp.shared.displays
+        // An AI session outside Petal working on a display of its own has no note: a tile of its own, after the notes.
+        let outside = displays.outside.map { display in
+            NotePreviewItem(id: display.id, app: "", appName: "", title: display.label.isEmpty ? "An AI session" : display.label,
+                            line: "Working on a display of its own", working: true, needsYou: false, hidden: false, pid: 0, window: nil,
+                            attached: false, display: display.id, outside: true)
+        }
         return NoteStatus.order(all.map(\.1)).map { index in
             let (note, facts) = all[index]
             let place = note.attached ? note.place : nil
@@ -58,8 +70,8 @@ extension ClaudePanel {
             return NotePreviewItem(id: note.id, app: place?.app ?? "", appName: place?.appName ?? "", title: note.agent.title,
                                    line: NoteStatus.line(facts), working: facts.running, needsYou: NoteStatus.needsYou(facts),
                                    hidden: hidden, pid: place?.pid ?? 0, window: window, attached: place != nil,
-                                   appWide: place?.kind == .app)
-        }
+                                   appWide: place?.kind == .app, display: displays.display(for: note.id.uuidString)?.id)
+        } + outside
     }
 
     /// Some note waits for the person (its window in front, its tab showing, an answer) and isn't open in front of
@@ -71,7 +83,8 @@ extension ClaudePanel {
     /// A note picked in the preview: its window (and tab) comes forward and it opens there; a chat stuck to no window
     /// (or one whose window is gone) opens as it is.
     func openFromPreview(_ id: UUID) {
-        guard let note = notes.first(where: { $0.id == id }) else { return }
+        // An outside session's tile has no note to open: clicking it is Show me.
+        guard let note = notes.first(where: { $0.id == id }) else { return showFromPreview(id) }
         if note.paper != nil { return PetalApp.shared.paper.helpers.show(note) }
         if notesOn, note.attached, let place = note.place { go(to: note, place: place) } else { present(note) }
     }
@@ -79,8 +92,15 @@ extension ClaudePanel {
     /// Stop on a note in the preview: its reply ends where it is, and what it was doing in the app with it. One
     /// still waiting for room never starts: what it was to send goes back into the note, unsent.
     func stopFromPreview(_ id: UUID) {
-        guard let note = notes.first(where: { $0.id == id }) else { return }
+        guard let note = notes.first(where: { $0.id == id }) else { return PetalApp.shared.displays.stop(tile: id) }
         stop(note)
+    }
+
+    /// Show me, on a run with a hidden display of its own: its windows come to the person's screen, and it goes on.
+    func showFromPreview(_ id: UUID) {
+        let displays = PetalApp.shared.displays
+        if let note = notes.first(where: { $0.id == id }) { return displays.showMe(caller: note.id.uuidString) }
+        if let display = displays.display(tile: id) { displays.showMe(group: display.group) }
     }
 
     /// Stop, from the preview or the note's own panel.
@@ -167,7 +187,14 @@ struct NoteTile: View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.25))
-                if let image, item.pictured {
+                if item.display != nil {
+                    // Its own display, live; before the first picture (or without Screen Recording), a plain mark.
+                    if let shown = app.previews.displayThumb(item) {
+                        Image(nsImage: shown).resizable().scaledToFit().padding(3)
+                    } else {
+                        Image(systemName: "display").font(.system(size: 30, weight: .light)).foregroundStyle(.white.opacity(0.7))
+                    }
+                } else if let image, item.pictured {
                     Image(nsImage: image).resizable().scaledToFit().padding(3)
                 } else if item.attached {
                     VStack(spacing: 6) {
@@ -184,6 +211,11 @@ struct NoteTile: View {
             .overlay(alignment: .topTrailing) {
                 if item.working { RoundButton(symbol: "stop.fill", size: 22) { app.claude.stopFromPreview(item.id) }.padding(6).help("Stop") }
             }
+            .overlay(alignment: .bottomLeading) {
+                if item.display != nil {
+                    ShowMeButton { done(); app.claude.showFromPreview(item.id) }.padding(6)
+                }
+            }
             HStack(spacing: 6) {
                 if item.attached { AppIconView(id: item.app, size: 14) }
                 Text(item.title.isEmpty ? (item.appName.isEmpty ? "Petal AI" : item.appName) : item.title)
@@ -199,6 +231,24 @@ struct NoteTile: View {
         .contentShape(.rect)
         .onHover { hovering = $0 }
         .onTapGesture { done(); app.claude.openFromPreview(item.id) }
+    }
+}
+
+/// "Show me", on a run that works on a hidden display of its own: its window comes to the person's screen.
+struct ShowMeButton: View {
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text("Show me").font(.system(size: 11, weight: .medium))
+                .padding(.horizontal, 9).frame(height: 22)
+                .glassEffect(hovering ? .clear.tint(Color(nsColor: PetalApp.shared.accent)).interactive() : .clear.interactive(), in: .capsule)
+                .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Bring its window to your screen")
     }
 }
 

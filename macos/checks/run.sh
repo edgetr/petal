@@ -42,7 +42,7 @@ swiftc -parse-as-library -O -o "$out/papernotes" Sources/Petal/NoteFile.swift So
 swiftc -parse-as-library -O -o "$out/notelibrary" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteTasks.swift Sources/Petal/ViewerFile.swift checks/NoteLibraryCheck.swift
 "$out/notelibrary"
 # A note's text in the editor and back: the same Markdown, line for line (AppKit, nothing shown).
-swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteMentions.swift Sources/Petal/NoteEditor.swift Sources/Petal/EditMenu.swift checks/NoteRichCheck.swift
+swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/Screens.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteMentions.swift Sources/Petal/NoteEditor.swift Sources/Petal/EditMenu.swift checks/NoteRichCheck.swift
 "$out/noterich"
 # Petal Notes' files on throwaway folders in the temporary folder: saves that keep both, names from the disk, no
 # writes through symbolic links, two notebooks' Todo.md, a renamed file's bookmark, the journal's launch recovery
@@ -623,6 +623,10 @@ swiftc -parse-as-library -O -o "$out/viewer" Sources/Petal/NoteFile.swift Source
 "$out/viewer"
 swiftc -parse-as-library -O -o "$out/background" Sources/Petal/Background.swift Sources/Petal/UIMap.swift checks/BackgroundCheck.swift
 "$out/background"
+# A hidden display for each Petal AI run: who gets one and who waits, sharing, release on every ending, the limit,
+# where one goes, which displays are the person's, what a run leaves behind (RunDisplayPlan; no display is ever made).
+swiftc -parse-as-library -O -o "$out/rundisplay" Sources/Petal/RunDisplayPlan.swift checks/RunDisplayCheck.swift
+"$out/rundisplay"
 swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Petal/UIMap.swift checks/VaultCheck.swift
 "$out/vault"
 swiftc -parse-as-library -O -o "$out/agents" Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/AgentAccessCheck.swift
@@ -685,6 +689,17 @@ perl -0777 -ne '
     }
     END { if ($bad) { print "$bad card(s) without an owner\n"; exit 1 } print "asks: all $calls name their owner\n" }
 ' Sources/Petal/*.swift
+# A run's hidden display is never the person's screen: everything that picks or lists screens asks `Screens`
+# (Screens.swift), which leaves run displays out. So nothing else reads AppKit's or CoreGraphics' own lists
+# (DisplayCheck.swift counts AppKit's on purpose, to show the display is in one and not in the other).
+n=$(grep -n 'NSScreen\.screens\|NSScreen\.main\|CGGetActiveDisplayList\|CGGetOnlineDisplayList\|CGMainDisplayID' Sources/Petal/*.swift | grep -v '^Sources/Petal/Screens\.swift:\|^Sources/Petal/DisplayCheck\.swift:' || true)
+if [ -n "$n" ]; then echo "screens: read outside Screens (Screens.swift):"; echo "$n"; exit 1; fi
+echo "screens: only through Screens"
+# Whether a display is there is asked of macOS's own list (Screens.isOnline): CGDisplayIsOnline goes on saying yes
+# for the id of a display that's gone, so nothing relies on it (DisplayCheck.swift prints what it says, as information).
+n=$(grep -n 'CGDisplayIsOnline' Sources/Petal/*.swift | grep -v '^Sources/Petal/DisplayCheck\.swift:\|^Sources/Petal/Screens\.swift:[0-9]*: *///' || true)
+if [ -n "$n" ]; then echo "displays: CGDisplayIsOnline is relied on:"; echo "$n"; exit 1; fi
+echo "displays: online by macOS's own list"
 # Quitting answers later (notes are saved first), and AppKit waits for the answer inside `terminate`. Called from a
 # block of the main dispatch queue (a signal's handler, an asyncAfter), that wait stops the queue, the answer never
 # arrives and Petal never quits. So the one call to terminate is PetalApp.quit's, from the run loop, and the answer

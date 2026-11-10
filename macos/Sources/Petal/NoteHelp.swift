@@ -2520,11 +2520,12 @@ extension NoteHelp {
 
     /// A helper's whole system prompt, made only of `Shielded` parts (no window or tab title, no raw text): what it
     /// is, Petal's tools, its place, the person's notes and memory, then the brief.
-    static func system(_ t: Told, provider: Shielded, computerUse: Bool, brief: Shielded) -> Shielded {
+    static func system(_ t: Told, provider: Shielded, computerUse: Bool, runDisplays: Bool = false, brief: Shielded) -> Shielded {
         var words: Shielded = """
         You are \(provider), running inside Petal on the user's Mac as a helper in one of their Petal Notes. Petal's tools (the petal MCP server) are yours: petal_look and petal_ui look at the note's own place, petal_act uses it (in the background when it can; when it says the window must be in front, ask the user), petal_apps and petal_windows open and arrange apps, petal_notes and petal_note_read read their notes (a Private notebook's only from inside it), petal_vault fills logins, addresses and cards without you seeing a secret (paying shows the user a Buy card first; never type a password, card or key yourself), petal_trash moves files to the Trash (never delete files any other way). Petal asks the user before what changes things; if they say no, don't find another way.
         """
         if computerUse { words = words + "\n\nYou may use the user's apps with petal_ui and petal_act; call petal_ui first and again after anything changes the window." }
+        if runDisplays { words = words + "\n\n" + ownDisplay }
         if t.placeIsFile {
             words = words + "\n\nThe note is on a document. Open in Petal's viewer, that viewer's window is the note's place: petal_look and petal_ui read it there, and petal_view gives the words of the page it shows (page: another one). Never change the user's own file from there: try a change on copies first (petal_view_versions), and change the original only after they allow it."
         }
@@ -2535,6 +2536,9 @@ extension NoteHelp {
         if !t.memory.isEmpty { words = words + "\n\nWhat you remember about this user:\n\(t.memory)" }
         return words + "\n\n\(brief)"
     }
+
+    /// What a run is told about its own hidden display (`runDisplays`): Petal's own words, the same for the chat.
+    static let ownDisplay: Shielded = "The user has turned on hidden displays: what you open with petal_apps (action: open, with an app, a file or an address) goes on a display of your own that they don't see, so your work never shows up in front of them; the first open may wait its turn for a display. The reply says where it went. Read and use a window there with petal_ui (app: its app, or display: true for the one you opened last) and petal_act, which work in it with no pointer and nothing brought forward; petal_look with screenshot: \"screen\" shows you your display. The display goes when you're done: a window you opened and left empty is closed, anything else comes to the user's screen then. Pass on: \"screen\" only for what the user asked to see themselves. Petal's questions, Buy and the vault's card still show to the user where they are; never ask them to look at your display. If something can only be done in front of them, say so in one line and ask them to press Show me."
 
     /// "Check this against @Notebook": each of its notes shielded whole first, then its title derived and its words
     /// cut, and the whole limited.

@@ -16,6 +16,9 @@ enum Background {
         var windowFocused: Bool
         /// Seconds since the person last pressed a key, clicked or scrolled.
         var idle: TimeInterval
+        /// The window is on the run's own hidden display (RunDisplay.swift): the person can't see it, so it's never
+        /// worked on with the pointer, whatever is in front.
+        var hidden = false
     }
 
     /// A fact read through Accessibility: an error or a timeout is `unknown`, never taken for `no`.
@@ -23,13 +26,13 @@ enum Background {
 
     /// A note's situation from what was read: `appFront`, then (only when it's in front) whether the note's window is
     /// its focused one. Nil when either couldn't be told: then nothing changes there (`unsure`), never assumed behind.
-    static func situation(appFront: Known, windowFocused: Known, idle: TimeInterval) -> Situation? {
+    static func situation(appFront: Known, windowFocused: Known, idle: TimeInterval, hidden: Bool = false) -> Situation? {
         switch appFront {
         case .unknown: return nil
-        case .no: return Situation(note: true, appFront: false, windowFocused: false, idle: idle)
+        case .no: return Situation(note: true, appFront: false, windowFocused: false, idle: idle, hidden: hidden)
         case .yes:
             guard windowFocused != .unknown else { return nil }
-            return Situation(note: true, appFront: true, windowFocused: windowFocused == .yes, idle: idle)
+            return Situation(note: true, appFront: true, windowFocused: windowFocused == .yes, idle: idle, hidden: hidden)
         }
     }
 
@@ -55,6 +58,8 @@ enum Background {
 
     static func way(_ situation: Situation) -> Way {
         guard situation.note else { return .foreground }
+        // On the run's own display nobody is looking: always the background way, never the pointer, never a wait.
+        if situation.hidden { return .background }
         // The note's own window is the one the person has in front: they can see it, so it's done there, as always,
         // but never while they're typing or clicking in it.
         if situation.appFront && situation.windowFocused { return typingThere(situation) ? .wait : .foreground }
@@ -296,8 +301,10 @@ enum Background {
             }
         }
 
-        /// What the AI is told.
-        func words(_ app: String) -> String {
+        /// What the AI is told. `hidden`: the window is on the run's own display, where nothing can come forward: the
+        /// person brings it to their screen with Show me.
+        func words(_ app: String, hidden: Bool = false) -> String {
+            if hidden { return onDisplay(app) }
             let why: String
             switch self {
             case .menu: why = "Choosing from \(app)'s menus needs that window in front."
@@ -312,6 +319,24 @@ enum Background {
                 return "This note's tab isn't the one showing in its window, and a browser doesn't let anything use a tab in the background. Nothing was done. Ask the person to show that tab (clicking this note in the AI button's preview does), then petal_ui again."
             }
             return why + " Nothing was done, and Petal didn't bring it forward, so as not to interrupt the person. Say in one line what you need and ask them to bring the window forward (clicking this note in the AI button's preview does it); once it's in front, petal_ui again and carry on."
+        }
+
+        /// The same for a window on the run's own display: nothing there can come forward, so the ways out are another
+        /// way of doing it, waiting until the person has left that app, or the person's own Show me.
+        private func onDisplay(_ app: String) -> String {
+            let why: String
+            switch self {
+            case .menu: why = "\(app)'s menus act on the window the person is using there (or its window in front), not on yours."
+            case .keys: why = "Keys go to the window the person is using in \(app), not to yours."
+            case .focus: why = "Moving the cursor there would move the person's own in \(app)."
+            case .clipboard: why = "Copying and pasting use the person's clipboard."
+            case .vault: why = "The vault fills only a window in front of the person."
+            case .ignored: why = "\(app) ignored the typing in a window that isn't in front."
+            case .didntStick: why = "The text didn't stay in that field."
+            case .opens: why = "That opens something (a link, a file, a window, or another app), which could come up in front of the person."
+            case .tab: why = "Its tab isn't the one showing in its window."
+            }
+            return why + " Nothing was done. This window is on your own display, where nothing comes forward. Try another way (type into the field itself, press a button instead of a key or a menu), or wait until the person isn't using \(app); if it can only be done in front of them, say in one line what you need and ask them to press Show me (on this run in the AI button's preview), which brings the window to their screen, then petal_ui again."
         }
     }
 
@@ -618,14 +643,19 @@ enum NoteStatus {
         var needs: String?
         /// Its latest step, in plain words.
         var activity = ""
+        /// Its turn for a hidden display hasn't come (RunDisplayPlan): it waits in line.
+        var waitingForDisplay = false
     }
+
+    /// What a run waiting its turn for a display says, wherever its state shows.
+    static let waitingForDisplay = "Waiting for a display"
 
     /// The preview shows this many tiles side by side; more scroll sideways, none left out.
     static let tilesInView = 4
     static func previewScrolls(_ count: Int) -> Bool { count > tilesInView }
 
     /// Shown in the preview: working (or queued for room: `running`), waiting for the person, or done and not seen.
-    static func shows(_ facts: Facts) -> Bool { facts.running || facts.ready || needsYou(facts) }
+    static func shows(_ facts: Facts) -> Bool { facts.running || facts.ready || needsYou(facts) || facts.waitingForDisplay }
 
     /// Waiting for the person: the AI button gets a small ✦.
     static func needsYou(_ facts: Facts) -> Bool { facts.asking != nil || facts.needs != nil }
@@ -633,6 +663,7 @@ enum NoteStatus {
     static func line(_ facts: Facts) -> String {
         if let asking = facts.asking { return "Waiting for you: " + asking }
         if let needs = facts.needs { return "Waiting for you: " + needs }
+        if facts.waitingForDisplay { return waitingForDisplay }
         if facts.running { return step(facts.activity) }
         return facts.ready ? "Done" : ""
     }

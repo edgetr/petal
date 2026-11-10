@@ -58,7 +58,11 @@ final class ComputerUse {
         /// Its chat's `places` count when it was read: a note stuck somewhere else since can't use it.
         var place = 0
         /// Read for a sticky note's own window (or tab), not `front: true` or another app: its acts go in the background.
+        /// Also a window on the run's own hidden display (`hidden`).
         var ownPlace = false
+        /// The window is on the caller's own hidden display (RunDisplay.swift): its acts always go the background
+        /// way, with no pointer, whatever is in front.
+        var hidden = false
     }
 
     /// One chat's reply (its turn; one task of an AI session outside Petal): the apps it may use, whether the person
@@ -189,9 +193,21 @@ final class ComputerUse {
                       _ fail: @escaping (String) -> Void) {
         let named = (args["app"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         // A sticky note's own window, as petal_look does, unless an app or what's in front is asked for.
-        let place = named.isEmpty && args["front"] as? Bool != true ? app.claude.placed(caller) : nil
+        let wantsFront = args["front"] as? Bool == true
+        let wantsDisplay = args["display"] as? Bool == true
+        // The run's own window on its hidden display: asked for (display: true: the one it opened last, or of the app
+        // named), or the app named has one there. Never with front: true, which is what the person has in front.
+        let own = wantsFront ? nil : app.displays.window(for: caller, app: named, newest: wantsDisplay)
+        if wantsDisplay, own == nil {
+            return fail(app.displays.display(for: caller) == nil
+                ? "You have no display of your own now. petal_apps open (on: \"display\") puts a window on one."
+                : "None of your windows\(named.isEmpty ? "" : " of \(named)") is on your display. petal_apps open puts one there.")
+        }
+        let place = own == nil && named.isEmpty && !wantsFront ? app.claude.placed(caller) : nil
         let target: NSRunningApplication?
-        if let place {
+        if let own {
+            target = NSRunningApplication(processIdentifier: own.pid)
+        } else if let place {
             target = place.running
             guard target != nil else {
                 return fail(place.kind == .app ? "This note is stuck to \(place.appName), which isn't open. front: true uses what's in front now."
@@ -208,12 +224,13 @@ final class ComputerUse {
         }
         let pid = target.processIdentifier
         // A note asked where its app showed no window has none to read: never a window its app shows later.
-        let wanted: CGWindowID?
+        var wanted: CGWindowID?
         switch place?.target ?? .focused {
         case .nothing: return fail(ClaudePanel.noWindow(name))
         case .window(let number): wanted = number
         case .focused: wanted = nil
         }
+        if let own { wanted = own.window }
         let find = args["find"] as? String ?? ""
         // A note stuck to one tab reads its window only while that tab is the one showing, checked before and after.
         let tabPlace = place.flatMap { $0.kind == .tab && $0.tab != nil ? $0 : nil }
@@ -236,8 +253,17 @@ final class ComputerUse {
                     guard let reading = settled, !reading.vaultUnreadable else {
                         return fail(VaultStore.unreadableText + " Petal can't hide its secrets, so it doesn't read windows until it can: try again in a moment.")
                     }
-                    if reading.gone { return fail("This note's window is closed (it was in \(name)). front: true uses what's in front now.") }
+                    if reading.gone {
+                        return fail(own != nil ? "That window of yours is closed (it was in \(name))."
+                                               : "This note's window is closed (it was in \(name)). front: true uses what's in front now.")
+                    }
                     guard let window = reading.window else { return fail("\(name) has no window open.") }
+                    // Another run's display is none of this one's: nothing read there goes back.
+                    if self.app.displays.foreign(reading.windowFrame, to: caller) {
+                        return fail("\(name)'s window there belongs to another helper's work, on a display of its own: Petal keeps them apart.")
+                    }
+                    // On the caller's own display: worked on in the background, always.
+                    let hidden = self.app.displays.holds(reading.windowFrame, for: caller)
                     // Another tab came forward while it read (or Petal can't tell any more): nothing it read goes back.
                     var stuckTab: NotePlace?
                     if let tabPlace {
@@ -266,13 +292,14 @@ final class ComputerUse {
                     let made = Map(pid: pid, bundle: bundle, appName: name, window: window, windowID: reading.windowID,
                                    windowFrame: reading.windowFrame, lists: reading.lists, fingerprint: reading.fingerprint,
                                    entries: entries, count: entries.count, made: Date(), tabPlace: stuckTab, place: stuck,
-                                   ownPlace: place != nil)
+                                   ownPlace: place != nil || hidden, hidden: hidden)
                     self.maps[caller] = made
                     self.keepSweeping()
                     // Its tab shows again: the note no longer waits for that.
                     if place != nil, self.agent(caller)?.needs == Background.Reason.tab.status { self.waitsFor(caller, nil) }
                     var result: [String: Any] = ["app": name, "window": reading.title, "elements": list,
                                                  "note": "Act with petal_act by id. These ids last until the next petal_ui, or 5 minutes; call petal_ui again once the window changes."]
+                    if hidden { result["display"] = "This window is on your own display: the person doesn't see it, and petal_act works in it without a pointer and without bringing anything forward." }
                     if picked.left > 0 { result["more"] = "\(picked.left) more not listed: pass find (a word in its name) to narrow." }
                     if reading.timedOut { result["partial"] = "The window is big: this is what Petal read in time." }
                     if list.isEmpty { result["empty"] = "No controls found\(find.isEmpty ? "" : " matching “\(find)”"). The app may not support Accessibility well; petal_look with a screenshot shows it." }
@@ -570,7 +597,9 @@ final class ComputerUse {
         let first = caption.prefix(1).lowercased() + caption.dropFirst()
         let lasting = session.turn == Self.outside ? "For this task" : "Until this reply is done"
         // A note on its own window works there in the background: said so, since nothing will show it working.
-        let detail = job.map.ownPlace
+        let detail = job.map.hidden
+            ? "First, \(first). \(lasting) it can press and type in a \(name) window on a display of its own, out of your way: nothing comes forward, and your pointer and keyboard stay yours. Stop it from its note or the AI button."
+            : job.map.ownPlace
             ? "First, \(first). \(lasting) it can press and type in this note's \(name) window in the background, while you work elsewhere: nothing comes forward, and your pointer and keyboard stay yours. Stop it from its note."
             : "First, \(first). \(lasting) it can press, type and choose menus in \(name) with its own pointer; yours stays where it is. Esc stops it."
         assist.ask("computer:\(bundle)", "Let Petal AI use \(name)?", detail: detail,
@@ -811,7 +840,11 @@ final class ComputerUse {
         // note's app jump forward by itself, unless the person does something from here on.
         let baseline = Background.Baseline(front: NSWorkspace.shared.frontmostApplication?.processIdentifier,
                                            at: ProcessInfo.processInfo.systemUptime)
+        // On the run's own display: a window the act opens there (a button that opens one) is the run's too.
+        let display = map.hidden ? app.displays.display(for: job.caller)?.frame : nil
+        let next = app.displays.nextIndex(for: job.caller)
         Self.actQueue.async {
+            let before = display == nil ? [] : Set(RunDisplays.windowNumbers(pid: map.pid).keys)
             var outcome = Acting.Outcome()
             if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
                 outcome.needs = .tab
@@ -824,8 +857,22 @@ final class ComputerUse {
                                              cancel: cancel, baseline: baseline)
                 }
             }
+            // What it opened, when the person did nothing meanwhile (a window of theirs is never taken): onto the
+            // run's display, without raising it.
+            var opened: [(window: CGWindowID, pid: pid_t, element: AXUIElement)] = []
+            // Only what can open one (a press, a key, a menu item): typing and scrolling never wait for it.
+            if let display, ["press", "key", "menu"].contains(job.action), outcome.error == nil, outcome.needs == nil, !outcome.again,
+               !cancel.stopped, ProcessInfo.processInfo.systemUptime - Acting.idle() < baseline.at {
+                let bundle = map.bundle
+                opened = RunDisplays.newWindows(bundle: bundle, before: before, timeout: 0.6, live: { !cancel.stopped })
+                    .filter { $0.pid == map.pid }
+                for (offset, item) in opened.enumerated() {
+                    _ = RunDisplays.move(item.element, pid: item.pid, to: display, index: next + offset, live: { !cancel.stopped })
+                }
+            }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    if !opened.isEmpty { self.app.displays.track(opened, for: job.caller, bare: false) }
                     // The person came back to that window before anything changed: decided again, by the same
                     // rules (the pointer and its pause if it's in front now), within the same patience.
                     guard outcome.again else { return self.done(job, outcome) }
@@ -943,11 +990,14 @@ final class ComputerUse {
         if job.cancel.stopped { return job.fail(whyStopped(job)) }
         // What the background can't do: the person brings the window forward (the note says so, and the AI button).
         if let reason = outcome.needs {
-            waitsFor(job.caller, reason)
-            return job.fail(reason.words(job.appName))
+            // On its own display nothing waits for the window to come forward: the AI is told the other ways.
+            if !job.map.hidden { waitsFor(job.caller, reason) }
+            return job.fail(reason.words(job.appName, hidden: job.map.hidden))
         }
         if let error = outcome.error { return job.fail(error) }
         if job.map.ownPlace { waitsFor(job.caller, nil) }
+        // Its own window on its display isn't empty any more: it's never closed with the display.
+        if job.map.hidden { app.displays.changed(job.map.windowID, by: job.caller) }
         // What its own typing, focusing or scrolling changed in the window isn't a change behind its back.
         if let fingerprint = outcome.fingerprint, maps[job.caller]?.id == job.map.id { maps[job.caller]?.fingerprint = fingerprint }
         assist.did(historyLine(job, outcome))
@@ -1107,7 +1157,7 @@ final class ComputerUse {
 
     /// Accessibility's top-left point as AppKit's (bottom-left, from the main screen).
     static func screenPoint(_ point: CGPoint) -> CGPoint {
-        let height = NSScreen.screens.first?.frame.maxY ?? 0
+        let height = Screens.all.first?.frame.maxY ?? 0
         return CGPoint(x: point.x, y: height - point.y)
     }
 }
@@ -2569,7 +2619,7 @@ final class FakeCursor {
     }
 
     private static func screen(at point: CGPoint) -> NSScreen {
-        NSScreen.screens.first { $0.frame.contains(point) } ?? NSScreen.main ?? NSScreen.screens[0]
+        Screens.all.first { $0.frame.contains(point) } ?? Screens.main ?? Screens.all[0]
     }
 
     /// A small ripple at the tip: a press.
@@ -2702,7 +2752,7 @@ final class FakeCursor {
     }
 
     private func make() -> NSPanel {
-        let screen = NSScreen.main ?? NSScreen.screens[0]
+        let screen = Screens.main ?? Screens.all[0]
         let panel = NSPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = Self.level
         panel.backgroundColor = .clear

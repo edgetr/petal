@@ -184,7 +184,7 @@ struct PaperView: View {
     /// The open paper within the screen (NoteHelp.paperHeights): the editor, then the ink (scrolling past what fits),
     /// with room always kept for the helper's controls.
     private var heights: (editor: CGFloat, ink: CGFloat) {
-        let screen = NSScreen.main?.visibleFrame.height ?? 800
+        let screen = Screens.main?.visibleFrame.height ?? 800
         // (The watcher's corner, when it has one, takes its room above the words.)
         let corner: CGFloat = NoteHelp.corner(paper.file.watch) == nil ? 0 : 44
         return NoteHelp.paperHeights(screen: screen, chrome: 110 + corner, editor: PaperLook.maxOpen - 70, ink: .greatestFiniteMagnitude, controls: max(controlsHeight, 40))

@@ -57,7 +57,7 @@ enum Bench {
         }
         print(String(format: "%-34@ %8.2f ms", "slowest app to read (AX)" as NSString, slowest.1), slowest.0)
         time("AXIsProcessTrusted") { _ = AXIsProcessTrusted() }
-        time("Desktop of the main screen") { _ = Spaces.desktop(on: NSScreen.main ?? NSScreen.screens[0]) }
+        time("Desktop of the main screen") { _ = Spaces.desktop(on: Screens.main ?? Screens.all[0]) }
         time("app names, every running app") { for app in running { _ = Apps.name(app.bundleIdentifier ?? "") } }
         time("now playing (AppleScript)", runs: 3) { _ = NowPlaying.current() }
         time("config files read") {
@@ -277,7 +277,7 @@ enum DockBench {
         let dock = ScreenDock()
         dock.desktop = 1
         // As DockPanel: as wide as the screen, the dock centered in it.
-        let width = NSScreen.main?.frame.width ?? 1512
+        let width = Screens.main?.frame.width ?? 1512
         let window = NSWindow(contentRect: NSRect(x: -20000, y: -20000, width: width, height: 120), styleMask: [.borderless],
                               backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false

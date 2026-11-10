@@ -42,6 +42,19 @@ Use, in this order:
    act on a window that changed since (another row selected, another title) is refused: call `petal_ui` again.
    Never private apps or password fields; what only a real click could do, ask the user to do. Only the user
    turns `computerUse` on.
+   A hidden display for each run (`runDisplays`, off unless the user turned it on): `petal_apps` with
+   `action: open` puts the window it makes on a display of your own that the user doesn't see and their pointer can't
+   reach (the default for a helper in a note and for a session outside Petal; `on: "screen"` opens on the user's
+   screen instead, which is what to say whenever they asked to see or open something themselves; Petal's quick chat
+   opens on their screen unless it says `on: "display"`). The first open may wait its turn ("Waiting for a
+   display"). Then `petal_ui` (`app`, or `display: true` for the window you opened last) and `petal_act` work in it
+   with no pointer and nothing brought forward, and `petal_look` with `screenshot: "screen"` shows your display.
+   Only a window your open made is ever moved there: an address in a browser the user already has open, or an app
+   they already have open asked for by itself, opens nothing and says so. The display goes when your run ends (a
+   helper's run, a chat's reply, a session's process or ten quiet minutes): a window you opened and left empty is
+   closed, anything else comes to the user's screen then. Petal's questions, Buy and the vault's card still show to
+   the user where they are. `petal_windows` with `action: show` brings your windows to their screen; they can do it
+   themselves with Show me in the AI button's preview.
    The vault (`petal_vault`): logins, contact info, addresses, payment info and API keys, filled by Petal
    into fields from `petal_ui` without the AI seeing a secret (`action: fill`, the item and `fields`
    {field: id}). A login fills by itself on its own site or app, an API key on its service's site, this Mac or an
