@@ -6,8 +6,21 @@ import AppKit
 /// `petal_view_pick` tells the agent which one the person picked ("Use this"), only the agent that asked;
 /// `petal_note_pdf_comments` writes the notes on a PDF into it as comments (a copy beside it by default; the PDF
 /// itself only when asked, after the person allows it, keeping the original beside it). No note's words are told:
-/// the answers name the file the agent gave and the copies Petal made.
+/// the answers name the file the agent gave and the copies Petal made. The notes an answer counts, and the notes
+/// written into a PDF for an agent, are sources like any other: only those their asker may read (a Private
+/// notebook's only for a helper of a note inside it: NoteHelpers.mayRead, the note tools' rule), and a note's helper
+/// is answered only through its admission gate (Assist.handle, NoteHelpers.admitTool: before the tool, and again
+/// right before its answer).
 extension Viewers {
+    /// Whether an agent may be told of (or handed, in a PDF's comments) a note: a Private notebook's only for a
+    /// helper of a note inside it. `caller` nil: the person themselves (the viewer's own button).
+    func readable(_ paper: PaperNote, by caller: String?) -> Bool {
+        guard let caller else { return true }
+        let helpers = app.paper.helpers
+        let asking = app.claude.note(withID: caller)?.paper.flatMap { helpers.paper($0) }
+        return helpers.mayRead(paper.notebook, from: asking)
+    }
+
     func handle(_ name: String, _ args: [String: Any], caller: String, live: @escaping @Sendable () -> Bool,
                 _ answer: @escaping (Any) -> Void, _ refuse: @escaping (String) -> Void) {
         // Everything told goes through the vault's redaction first (NoteShield, as the note tools' answers): file
@@ -17,16 +30,17 @@ extension Viewers {
         // (which may wait on the vault), then that state read again right before it's delivered. Still the same,
         // it goes; changed meanwhile (the original replaced, the viewer closed, a pick held back), the answer is
         // made again from what's true now, never the earlier one. Nothing goes to an asker that hung up.
-        func told(_ make: @escaping @MainActor () -> Told, attempt: Int = 0) {
+        /// `fit`: the redacted answer made to fit (a page's words cut short only once they're redacted whole).
+        func told(_ make: @escaping @MainActor () -> Told, attempt: Int = 0, fit: @escaping @MainActor (Any) -> Any = { $0 }) {
             let first = make()
             guard let value = first.value else { return fail(first.refusal ?? NoteShield.unreadable) }
             Self.shielded(value) { out in
                 guard live() else { return }
                 guard make().mark == first.mark else {
                     // Three tries at most: a viewer that never settles is said so, not told stale.
-                    return attempt < 2 ? told(make, attempt: attempt + 1) : fail("The viewer kept changing while Petal answered: ask again.")
+                    return attempt < 2 ? told(make, attempt: attempt + 1, fit: fit) : fail("The viewer kept changing while Petal answered: ask again.")
                 }
-                if let out { answer(out) } else { refuse(NoteShield.unreadable) }
+                if let out { answer(fit(out)) } else { refuse(NoteShield.unreadable) }
             }
         }
         guard app.paper.on else { return fail("Petal Notes is off in Petal's settings (notes); the viewer is part of it.") }
@@ -45,19 +59,32 @@ extension Viewers {
                 case .failure(let refusal): fail(refusal.description)
                 case .success(let model):
                     model.whenLoaded(within: Self.loadLimit) { _ in
-                        // What it shows as the answer goes out: closed meanwhile (while it was read, or while the
-                        // answer was redacted), said so, never a page count or "still loading"; reloaded or replaced
-                        // meanwhile, told again as it is then.
-                        told {
-                            guard !model.isClosed else { return Told(refusal: Self.closedText) }
-                            var told = self.told(model)
-                            // The page asked for is checked only against a finished document: while it loads or
-                            // reloads the answer says it's loading (never the pages of the document before).
-                            if let page, !model.loading, !model.live, model.pageCount > 0, ViewerPages.index(page, count: model.pageCount) == nil {
-                                told["note"] = "It has \(model.pageCount) \(model.unit.word)s; \(model.unit.word) \(page) isn't one, so it shows \(model.unit.word) \(model.current + 1)."
-                            }
-                            return Told(told, state: model.shownState)
+                        // The words of the page it shows, read off the main thread from this load's own copy of the
+                        // document (ViewerText), told with the rest: redacted whole with the answer, cut short after.
+                        let source = model.text
+                        let shown = model.current
+                        let tell = { (words: String?) in
+                            // What it shows as the answer goes out: closed meanwhile (while it was read, or while the
+                            // answer was redacted), said so, never a page count or "still loading"; reloaded or replaced
+                            // meanwhile, told again as it is then.
+                            told({
+                                guard !model.isClosed else { return Told(refusal: Self.closedText) }
+                                var told = self.told(model, caller: caller)
+                                // The page asked for is checked only against a finished document: while it loads or
+                                // reloads the answer says it's loading (never the pages of the document before).
+                                if let page, !model.loading, !model.live, model.pageCount > 0, ViewerPages.index(page, count: model.pageCount) == nil {
+                                    told["note"] = "It has \(model.pageCount) \(model.unit.word)s; \(model.unit.word) \(page) isn't one, so it shows \(model.unit.word) \(model.current + 1)."
+                                }
+                                // Only the page still shown, of the load its words were read from.
+                                if let words, !words.isEmpty, !model.loading, model.text === source, model.current == shown {
+                                    told[model.unit.word] = shown + 1
+                                    told["text"] = words
+                                }
+                                return Told(told, state: model.shownState)
+                            }, fit: Self.fitText)
                         }
+                        guard let source, !model.loading, !model.live, model.pageCount > 0 else { return tell(nil) }
+                        source.read(page: shown, selected: NSRange(location: NSNotFound, length: 0), paragraph: { _ in nil }) { text, _, _ in tell(text) }
                     }
                 }
             }
@@ -184,6 +211,15 @@ extension Viewers {
         }
     }
 
+    /// A page's words in `petal_view`'s answer, made to fit once the whole answer is redacted (never cut before).
+    static let textLimit = 12_000
+    static func fitText(_ answer: Any) -> Any {
+        guard var told = answer as? [String: Any], let text = told["text"] as? String, text.count > textLimit else { return answer }
+        told["text"] = String(text.prefix(textLimit)) + "…"
+        told["textCut"] = "This is the start of the page; it goes on."
+        return told
+    }
+
     /// How long `petal_view` waits for a document to be read (Quick Look's export and WebKit's pages, a file iCloud
     /// brings down first), under the socket's own 150 seconds.
     static let loadLimit: Double = 120
@@ -192,7 +228,8 @@ extension Viewers {
 
     /// What `petal_view` says about a file once it's shown: its name, how it's shown, and its pages or slides; still
     /// being read at the limit, that it's still loading (never a count of pages it hasn't read yet).
-    func told(_ model: ViewerModel) -> [String: Any] {
+    /// `caller`: who's told (its notes are counted only as far as it may read them).
+    func told(_ model: ViewerModel, caller: String? = nil) -> [String: Any] {
         var result: [String: Any] = ["opened": model.name]
         if model.loading {
             result["loading"] = true
@@ -206,7 +243,7 @@ extension Viewers {
             result["shown"] = model.kind == .pdf ? "PDF" : "Quick Look's pages"
             result[model.unit == .slide ? "slides" : "pages"] = model.pageCount
         }
-        result["notes"] = model.notes.count
+        result["notes"] = model.notes.filter { readable($0.paper, by: caller) }.count
         return result
     }
 
@@ -237,7 +274,9 @@ extension Viewers {
     private func comments(_ pdf: URL, file: ViewerFileID, onFile: Set<String>, intoOriginal: Bool, caller: String?, live: @escaping @Sendable () -> Bool,
                           _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let comments = app.paper.store.notes.compactMap { paper -> ViewerPDFComments.Comment? in
-            guard paper.version == nil, let index = ViewerMatch.place(paper.file.places, onFile: { onFile.contains(ViewerFiles.key($0)) }) else { return nil }
+            // For an agent, only the notes it may read (a Private notebook's never leave it in a file an agent reads).
+            guard paper.version == nil, readable(paper, by: caller),
+                  let index = ViewerMatch.place(paper.file.places, onFile: { onFile.contains(ViewerFiles.key($0)) }) else { return nil }
             // The words as written: the writer redacts them whole before anything is cut.
             return ViewerPDFComments.Comment(stick: paper.file.places[index], body: paper.file.body,
                                             color: PaperLook.rgb(app.paper.store.color(of: paper.notebook)))

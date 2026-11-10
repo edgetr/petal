@@ -844,6 +844,21 @@ final class PictureCell: NSTextAttachmentCell {
 final class NoteTextView: NSTextView {
     var style = NoteRich.Style(ink: .black, dim: .gray, petal: .black, accent: .systemBlue)
     var changed: () -> Void = {}
+    /// Helpers (NoteHelpers): Return at the end of a line that calls one runs it; the names the @ menu offers and
+    /// chips bind to; the notebook's color the mentions are drawn in. The @ menu and the chips' state.
+    var helperReturn: (String, NoteLine) -> Void = { _, _ in }
+    /// Which lines may run on Return, by their identity here (`NoteLine.mark`, an attribute on the line's characters),
+    /// never by their words: a line the person typed or pasted into gets a new mark that can run; undo, redo,
+    /// autocorrect and text from outside take the mark off the lines they touch and never give one. In memory only.
+    private(set) var runnable: Set<String> = []
+    /// The changes about to be made (where, in the text after them, what's inserted, and whether the person made it),
+    /// read in `didChangeText`.
+    private var pendingEdits: [(location: Int, inserted: String, person: Bool)] = []
+    /// Inside an automatic correction (spelling, quotes, dashes): not the person's typing.
+    private var correcting = false
+    var mentionNames: () -> (notes: [String], notebooks: [String], place: String) = { ([], [], "") }
+    var tint = NoteInk.RGB(r: 0, g: 0.48, b: 1)
+    let mentions = MentionState()
     /// The note's folder, which its picture links are read from.
     /// Shared with every picture in this editor's text (NoteFolder).
     let folderRef = NoteFolder(URL(fileURLWithPath: "/"))
@@ -869,14 +884,113 @@ final class NoteTextView: NSTextView {
     /// ⌘Z never applies an old range to new text.
     func replaceFromOutside(_ text: NSAttributedString) {
         textStorage?.setAttributedString(text)
+        // Every line came from outside: none can run.
+        runnable.removeAll()
         history.removeAllActions()
         MainActor.assumeIsolated { NotePictures.shared.editorChanged() }
     }
 
+    /// What the person changes (typing, pasting, deleting, undoing) is recorded before it's made; text from outside
+    /// (`replaceFromOutside`) never comes through here.
+    override func shouldChangeText(inRanges affectedRanges: [NSValue], replacementStrings: [String]?) -> Bool {
+        let allowed = super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
+        if allowed, let replacementStrings { record(affectedRanges.map(\.rangeValue), replacementStrings) }
+        return allowed
+    }
+
+    override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        let before = pendingEdits.count
+        let allowed = super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
+        if allowed, pendingEdits.count == before, let replacementString { record([affectedCharRange], [replacementString]) }
+        return allowed
+    }
+
+    private func record(_ ranges: [NSRange], _ strings: [String]) {
+        // The person's own change: not an undo or redo, not an automatic correction.
+        let person = !history.isUndoing && !history.isRedoing && !correcting
+        var delta = 0
+        for (range, text) in zip(ranges, strings).sorted(by: { $0.0.location < $1.0.location }) {
+            pendingEdits.append((range.location + delta, text, person))
+            delta += (text as NSString).length - range.length
+        }
+    }
+
+    override func handleTextCheckingResults(_ results: [NSTextCheckingResult], forRange range: NSRange, types checkingTypes: NSTextCheckingTypes,
+                                            options: [NSSpellChecker.OptionKey: Any] = [:], orthography: NSOrthography, wordCount: Int) {
+        correcting = true
+        defer { correcting = false }
+        super.handleTextCheckingResults(results, forRange: range, types: checkingTypes, options: options, orthography: orthography, wordCount: wordCount)
+    }
+
+    /// The lines a change touched lose their mark (they can't run any more); the lines the person's own typing or
+    /// pasting put characters on get a new one that can (NoteHelp.editedLines).
+    private func remark(_ edits: [(location: Int, inserted: String, person: Bool)]) {
+        guard let storage = textStorage else { return }
+        let text = string
+        for edit in edits {
+            for (line, marks) in NoteHelp.editedLines(after: text, location: edit.location, inserted: edit.inserted, person: edit.person)
+            where NSMaxRange(line) <= storage.length {
+                storage.enumerateAttribute(NoteLine.key, in: line) { value, _, _ in if let old = value as? String { runnable.remove(old) } }
+                storage.removeAttribute(NoteLine.key, range: line)
+                guard marks, line.length > 0 else { continue }
+                let mark = UUID().uuidString
+                storage.addAttribute(NoteLine.key, value: mark, range: line)
+                runnable.insert(mark)
+            }
+        }
+        typingAttributes[NoteLine.key] = nil
+    }
+
+    /// The line `range` (without its break) as one that may run now: its one mark, over all of it, still runnable.
+    func runnableLine(_ range: NSRange) -> NoteLine? {
+        guard let storage = textStorage, range.length > 0, NSMaxRange(range) <= storage.length else { return nil }
+        var whole = NSRange()
+        guard let mark = storage.attribute(NoteLine.key, at: range.location, longestEffectiveRange: &whole, in: range) as? String,
+              whole == range, runnable.contains(mark) else { return nil }
+        return NoteLine(mark: mark, view: self)
+    }
+
+    /// A line's run failed, was stopped or refused, or its follow-up never ran: it may run again, if it's still here
+    /// as it was (its mark on it).
+    func runnableAgain(_ mark: String) {
+        guard let storage = textStorage else { return }
+        var found = false
+        storage.enumerateAttribute(NoteLine.key, in: NSRange(location: 0, length: storage.length)) { value, _, stop in
+            if value as? String == mark { found = true; stop.pointee = true }
+        }
+        if found { runnable.insert(mark) }
+    }
+
+    /// Ran: the line as it is now won't run again until the person edits it.
+    func ran(_ mark: String) { runnable.remove(mark) }
+
     /// Typed, pasted, undone: the pictures it contains may have changed (the holding rule weighs them again).
     override func didChangeText() {
+        let edits = pendingEdits
+        pendingEdits = []
+        remark(edits)
         super.didChangeText()
-        MainActor.assumeIsolated { NotePictures.shared.editorChanged() }
+        MainActor.assumeIsolated {
+            NotePictures.shared.editorChanged()
+            decorateMentions()
+            updateMentionMenu()
+        }
+    }
+
+    override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+        MainActor.assumeIsolated { if mentions.menu?.isVisible == true { updateMentionMenu() } }
+    }
+
+    /// The @ menu takes the arrows, Tab and Escape while it's open (Return picks, in insertNewline).
+    override func doCommand(by selector: Selector) {
+        let handled = MainActor.assumeIsolated { mentionCommand(selector) }
+        if !handled { super.doCommand(by: selector) }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        MainActor.assumeIsolated { drawMentionChips() }
     }
 
     /// Remove on the paper, while this editor is open: those pictures' attachments deleted here, as an edit saved
@@ -1042,6 +1156,18 @@ final class NoteTextView: NSTextView {
     }
 
     override func insertNewline(_ sender: Any?) {
+        // The @ menu open: Return picks what's selected in it.
+        if MainActor.assumeIsolated({ pickMention() }) { return }
+        // Return at the very end of a line that calls a helper (only here, the person's own key): it's asked, once the
+        // line is saved.
+        let calling = MainActor.assumeIsolated { helperLine() }
+        defer {
+            if let calling {
+                flushNow()
+                let ask = helperReturn
+                DispatchQueue.main.async { ask(calling.words, calling.line) }
+            }
+        }
         let kind = lineKind
         let line = lineRange
         let words = ((textStorage?.string ?? "") as NSString).substring(with: line).trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FFFC}")))
@@ -1301,6 +1427,7 @@ final class NoteTextView: NSTextView {
     /// Escape goes to the paper's window, which handles it once for every face of the note (NotePanel); in Petal's
     /// viewer's margin, which has no such panel, to the margin's own fold (`escape`).
     override func cancelOperation(_ sender: Any?) {
+        if MainActor.assumeIsolated({ mentions.menu?.isVisible == true }) { MainActor.assumeIsolated { closeMentionMenu() }; return }
         if let escape { escape() } else { window?.cancelOperation(sender) }
     }
 }
@@ -1318,6 +1445,31 @@ final class NoteEditorHandle {
     /// Remove on the paper while this editor is open: those pictures deleted here, as typing is; undo calls the
     /// first closure (their bytes accepted again), redo the second (removed again).
     var removePictures: (Set<String>, @escaping (String) -> Void, @escaping (String) -> Void) -> Void = { _, _, _ in }
+    /// Its typing not saved yet, taken to be saved with something else in one write (a helper's metadata): the text
+    /// and the base it was typed on; nil when nothing waits. Its own save is called off.
+    var take: () -> (body: String, base: String?)? = { nil }
+    /// That one write was made: its text is what the editor's next save is made on.
+    var landed: (String?) -> Void = { _ in }
+}
+
+/// One @ line in an open editor, known by its identity there (a mark on its characters), never by its words: what
+/// Return hands a helper. It runs once; a run that fails or is stopped, a refusal, or a follow-up never sent makes it
+/// runnable again while its editor is open and the line is as it was. A restart (or a closed editor) leaves nothing
+/// runnable: edit the line to run it again.
+final class NoteLine: @unchecked Sendable {
+    static let key = NSAttributedString.Key("petal.helperLine")
+    let mark: String
+    weak var view: NoteTextView?
+
+    init(mark: String, view: NoteTextView?) {
+        self.mark = mark
+        self.view = view
+    }
+
+    /// Ran: it won't run again until the person edits it.
+    @MainActor func take() { view?.ran(mark) }
+    /// May run again (if it's still there as it was).
+    @MainActor func again() { view?.runnableAgain(mark) }
 }
 
 /// The editor in SwiftUI: the note's lines in, the note's lines out (saved a moment after the person stops typing).
@@ -1347,6 +1499,12 @@ struct NoteEditorView: NSViewRepresentable {
     /// Back at what's saved after a refused save (the person undid it): the journal's snapshot of the refused typing
     /// is settled (`saved`: the note's file as this editor last had it).
     var settled: (String?) -> Void = { _ in }
+    /// Return at the end of a line that calls a helper (@Petal): the line.
+    var helperReturn: (String, NoteLine) -> Void = { _, _ in }
+    /// What the @ menu offers and the chips bind to.
+    var names: () -> (notes: [String], notebooks: [String], place: String) = { ([], [], "") }
+    var accent: NSColor = .controlAccentColor
+    var tint = NoteInk.RGB(r: 0, g: 0.48, b: 1)
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         /// The Edit menu's Undo and Redo (and typing's undo) use the editor's own history.
@@ -1519,6 +1677,25 @@ struct NoteEditorView: NSViewRepresentable {
             MainActor.assumeIsolated { coordinator.seal(text) }
         }
         handle.busy = { [weak coordinator] in MainActor.assumeIsolated { coordinator?.marker.dirty == true } }
+        handle.take = { [weak coordinator, weak text] in
+            guard let coordinator, let text, let storage = text.textStorage else { return nil }
+            return MainActor.assumeIsolated {
+                guard coordinator.marker.dirty else { return nil }
+                coordinator.saveLater?.cancel()
+                coordinator.saveLater = nil
+                let body = NoteBlock.body(NoteRich.blocks(storage))
+                coordinator.body = body
+                return (body, coordinator.base)
+            }
+        }
+        handle.landed = { [weak coordinator] next in
+            guard let coordinator else { return }
+            MainActor.assumeIsolated {
+                if let next { coordinator.base = next }
+                _ = coordinator.marker.saved()
+                coordinator.parent.idle()
+            }
+        }
         handle.insert = { [weak text] path, file, caption, at, length, selected in
             guard let text else { return false }
             return MainActor.assumeIsolated { text.insertPicture(path: path, file: file, caption: caption, at: at, length: length, selected: selected) }
@@ -1528,6 +1705,9 @@ struct NoteEditorView: NSViewRepresentable {
             MainActor.assumeIsolated { _ = text.removePictures(named: names, restore: restore, retire: retire) }
         }
         text.say = say
+        text.helperReturn = helperReturn
+        text.mentionNames = names
+        text.tint = tint
         text.flushNow = { [weak coordinator, weak text] in
             guard let coordinator, let text else { return }
             MainActor.assumeIsolated { coordinator.flush(text) }
@@ -1542,6 +1722,7 @@ struct NoteEditorView: NSViewRepresentable {
         NotePictures.shared.register(text)
         // From outside (a sync, a tool, a reload, another note): its undo history goes with the old text.
         text.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks(paper.file.body), folder: text.folderRef, style: style))
+        text.decorateMentions()
         text.typingAttributes = NoteRich.attributes("text", style)
         text.insertionPointColor = style.ink
         DispatchQueue.main.async { coordinator.measure(text) }
@@ -1555,6 +1736,9 @@ struct NoteEditorView: NSViewRepresentable {
         text.escape = escape
         text.noteID = paper.noteID
         text.noteFolder = paper.url.deletingLastPathComponent()
+        text.helperReturn = helperReturn
+        text.mentionNames = names
+        text.tint = tint
         let coordinator = context.coordinator
         // Another note in this paper, or the file changed elsewhere while the person isn't typing here: read again.
         // A newer version (another Mac, another editor) taken at once by an idle editor, typing here or not; one with
@@ -1594,6 +1778,7 @@ struct NoteEditorView: NSViewRepresentable {
     static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
         if let text = scroll.documentView as? NoteTextView {
             MainActor.assumeIsolated {
+                text.closeMentionMenu()
                 coordinator.flush(text)
                 coordinator.parent.register(nil)
                 // Closed: the pictures it showed let their bytes go once nothing else needs them.

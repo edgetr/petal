@@ -10,6 +10,12 @@ import SwiftUI
 @MainActor @Observable
 final class NoteDesk {
     let store = NoteStore()
+    /// Helpers in notes (@Petal), watchers, chains, notes coming back and morning notes.
+    let helpers = NoteHelpers()
+
+    /// The helpers know their desk (its store, this Mac's id) from the first moment, started or not: what they
+    /// decide for the note tools and Petal's viewer (which notes a caller may read) never runs without the store.
+    init() { helpers.desk = self }
     /// Notes showing, each folded, open or turned over (by paper key). Opening or folding one changes which
     /// pictures are on screen (NotePictures' retry).
     var faces: [String: PaperFace] = [:] { didSet { NotePictures.shared.visibilityChanged() } }
@@ -130,6 +136,7 @@ final class NoteDesk {
         // vault can't be read, a plain name. And the names Petal made so, known again.
         NoteStore.nameRedactor = { text in VaultIndex.settled { $0.unreadable ? nil : $0.redacted(text) } ?? nil }
         store.onChange = { [weak self] in self?.refresh() }
+        helpers.start(self)
         watchApps()
         // The one visibility signal for missing pictures: papers revealed and open now.
         NotePictures.shared.visible = { [weak self] in self?.picturesOnScreen() ?? [] }
@@ -185,6 +192,34 @@ final class NoteDesk {
                         self.followFolderSetting()
                     }
                     self.settingsChanged()
+                }
+            }
+        }
+    }
+
+    /// For `Petal --helpers-check` only: the desk's own start without the parts that watch the person's apps, windows
+    /// and Desktops (nothing is looked at, shown or narrowed). The real store, its sessions and journal, entered the
+    /// one way (`switchRoot`, as at launch); the helpers started on it; a change of the notes heard as `refresh`
+    /// hears it for them (their held results tried again, what waited for a place asked again).
+    func startHeadless(root: URL, then done: @escaping @MainActor () -> Void) {
+        guard Headless.on else { return }
+        NoteStore.nameRedactor = { text in VaultIndex.settled { $0.unreadable ? nil : $0.redacted(text) } ?? nil }
+        store.onChange = { [weak self] in
+            self?.helpers.applyHeld()
+            self?.helpers.placedNow()
+        }
+        helpers.start(self)
+        hookStore()
+        store.onProblem = { [weak self] text in self?.say(text) }
+        let setting = app.config.string("notesFolder")
+        NoteStore.io.async {
+            let loaded = NoteLocal.load()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.local = loaded
+                    self.rootCache = (setting, root)
+                    self.ready = true
+                    self.store.switchRoot(to: root, launch: true) { done() }
                 }
             }
         }
@@ -380,12 +415,14 @@ final class NoteDesk {
     /// Another notes folder: what's typed is saved into the folder it was typed in (each note's session, drained off
     /// the main thread), every open note and editor of the old folder is put away and every window narrowed for one
     /// gets its width back (narrowing under way cancelled first), then the new folder's notes come.
-    private func switchFolder(to root: URL) {
+    func switchFolder(to root: URL) {
         lookSoon?.cancel()
         looks += 1
         giveBackAll {}
         // Petal's viewer first: what's typed in a margin is saved and its editor closed before the store stops taking
         // changes, and the margin stays read only until the new folder is ready.
+        // The helpers' runs, looks and summons for this folder's notes end with it.
+        helpers.folderSwitching()
         app.viewers.folderSwitching(true)
         // Every editor of the old folder sealed: its composition committed, its text no longer editable, what's typed
         // saved into the folder it was typed in. Nothing can change after it.
@@ -412,7 +449,11 @@ final class NoteDesk {
     /// Said on the paper from its editor (a copy refused).
     func tell(_ text: String) { say(text) }
 
+    /// For `Petal --helpers-check` only: what the desk says (nothing shows headless), as it's said.
+    @ObservationIgnored var heard: ((String) -> Void)?
+
     private func say(_ text: String) {
+        heard?(text)
         // Said by the AI button of the dock under the pointer (never a window-list lookup on the main thread); with
         // macOS's Dock chosen there's no button to say it by.
         let mouse = NSEvent.mouseLocation
@@ -631,6 +672,8 @@ final class NoteDesk {
             }
         }
         if fits != here { here = fits }
+        // Only now that `here` says what's in front: a running helper follows its note's places.
+        helpers.placesFollow()
         followTitles(scene, fits)
         followTabs(scene)
         followFiles(scene)
@@ -1034,6 +1077,7 @@ final class NoteDesk {
 
     /// The tabs on the window in front, and its notes that are showing beside it.
     func layout() {
+        defer { helpers.placedNow() }
         // Notes opened on their own show where they were opened, whatever is in front.
         if !missionControlOpen { placeStandalone() }
         // Mission Control open, or the front window changed and its read isn't in yet: nothing shows meanwhile.
@@ -1108,6 +1152,12 @@ final class NoteDesk {
         if kept != found { found = kept }
     }
 
+    /// Whether a paper is on the screen now (its panel revealed, not hidden by going clear).
+    func isShowing(_ key: String) -> Bool { panels[key]?.unveiled == true }
+
+    /// Whether a paper is on the screen on a face that shows its watcher's corner (folded or open, not its back).
+    func isShowingCorner(_ key: String) -> Bool { isShowing(key) && (faces[key] ?? .folded) != .back }
+
     /// The pictures on screen: those of papers whose panel is revealed (not hidden by going clear) and open
     /// (NoteShelf.picturesOnScreen), editors and read-only papers alike.
     func picturesOnScreen() -> Set<String> {
@@ -1144,7 +1194,7 @@ final class NoteDesk {
     /// Where a paper belongs right now (NoteShelf.placementNow): by the window in front, on a Desktop showing now, or
     /// nowhere.
     func placementNow(_ key: String) -> NoteShelf.Placement {
-        let desktops = store.paper(key)?.file.places.filter { $0.kind == .desktop }.map(\.desktop) ?? []
+        let desktops = store.paper(key).map(desktops(of:)) ?? []
         // A window placement counts only once it's fresh: never while a read is awaited (permission lost, focus
         // changed) or its tab is being read again.
         return NoteShelf.placementNow(window: here[key], desktops: desktops, showing: Set(Self.spaces.values),
@@ -1152,6 +1202,26 @@ final class NoteDesk {
     }
 
     private func isDesktop(_ key: String) -> Bool { placementNow(key) == .desktop }
+
+    /// The Desktops a paper shows on: its own Desktop places, and, while it's summoned (coming back, a watcher's hit,
+    /// a source picked) and its place isn't in front, the Desktop showing on the main screen.
+    func desktops(of paper: PaperNote) -> [Int?] {
+        var list = paper.file.places.filter { $0.kind == .desktop }.map(\.desktop)
+        if helpers.summoned.contains(paper.key) { list.append(Self.desktopShowing(on: NSScreen.screens.first)) }
+        return list
+    }
+
+    /// A note was summoned: the Desktops are read (when no note was on one) and it's placed the one way.
+    func summoned() {
+        if Self.spaces.isEmpty { refreshSpaces() } else { placeDesktop() }
+        layout()
+    }
+
+    /// Open all on a task (the note's own button, and the Petal Notes window's): its parts through the one opener
+    /// (NoteTasks.openAll), a file found by the one file resolver; what couldn't be opened is said.
+    func openAll(_ items: [NoteContract.TaskItem]) {
+        NoteTasks.openAll(items, mac: local.mac, follow: { ViewerLoader.follow($0) }) { [weak self] in self?.tell($0) }
+    }
 
     /// "Here" for the note tools: placed now (placementNow), or in the margin of Petal's viewer while it has the
     /// keyboard (it's the current place then).
@@ -1315,7 +1385,7 @@ final class NoteDesk {
     /// Reads which Desktop each screen shows, off the main thread, then places the Desktop's notes. Skipped while no
     /// note is on a Desktop.
     func refreshSpaces() {
-        guard on, !Headless.on, store.notes.contains(where: { $0.file.places.contains { $0.kind == .desktop } }) else {
+        guard on, !Headless.on, !helpers.summoned.isEmpty || store.notes.contains(where: { $0.file.places.contains { $0.kind == .desktop } }) else {
             if !Self.spaces.isEmpty { Self.spaces = [:]; placeDesktop() }
             return
         }
@@ -1343,7 +1413,7 @@ final class NoteDesk {
             guard let number = Self.desktopShowing(on: screen) else { continue }
             // The validated placement (placementNow's rule): a stale window placement never keeps a note off it.
             let notes = store.notes.filter { paper in
-                standalone[paper.key] == nil && NoteShelf.onDesktop(window: here[paper.key], desktops: paper.file.places.filter { $0.kind == .desktop }.map(\.desktop), screenDesktop: number,
+                standalone[paper.key] == nil && NoteShelf.onDesktop(window: here[paper.key], desktops: desktops(of: paper), screenDesktop: number,
                                     windowValid: !awaitingRead && !hiddenForTab(paper.key))
             }
             for (index, paper) in notes.enumerated() {
@@ -1487,6 +1557,7 @@ final class NoteDesk {
         editors[key]?.flush()
         faces[key] = nil
         if keyboard == key { keyboard = nil }
+        helpers.dismissed(key)
         panels[key]?.conceal()
         if let paper = store.paper(key) {
             local.shown.removeAll { $0 == paper.noteID }
@@ -1524,7 +1595,7 @@ final class NoteDesk {
         panels[key]?.refit()
     }
 
-    private func isDesktopNote(_ key: String) -> Bool { store.paper(key)?.file.places.contains { $0.kind == .desktop } == true }
+    private func isDesktopNote(_ key: String) -> Bool { store.paper(key).map { !desktops(of: $0).isEmpty } == true }
 
     /// Notes open for writing in Petal's viewer's margin, by the note's identity (its holder key, NoteShelf.holderKey:
     /// an id-less note's is its path id with its file's instance): told to fold before the desk opens one, so a note
@@ -1694,18 +1765,23 @@ final class NoteDesk {
     /// dropped: saved through the note; kept beside a paper that turned read only; when its folder is being switched
     /// away from or is no longer the one in use, handed to that folder's own drain (NoteStore.drainLate: stored there,
     /// or in Unsaved notes); else journaled under its note's id for the next launch (NoteStore.journalUnsaved).
-    func write(_ key: String, body: String, base: String?) -> String? {
-        write(key, noteID: nil, instance: "", body: body, base: base)
+    /// `also`: a helper's metadata, written in the same snapshot as the typing (one based write, never two).
+    func write(_ key: String, body: String, base: String?, also: ((inout NoteFile) -> Void)? = nil,
+               done: (@MainActor (NoteStore.Outcome) -> Void)? = nil) -> String? {
+        write(key, noteID: nil, instance: "", body: body, base: base, also: also, done: done)
     }
 
     /// `noteID` and `instance`: the note the editor was typed in. Its file renamed or moved while the editor was open
     /// (Petal's viewer's margin, a final save as it closes), the save goes to that note as it is now, by its identity
     /// (NoteShelf.saveTarget, NoteStore.currentID): never lost to a key that's gone, never a guess.
-    func write(_ key: String, noteID: String?, instance: String, body: String, base: String?) -> String? {
+    func write(_ key: String, noteID: String?, instance: String, body: String, base: String?, also: ((inout NoteFile) -> Void)? = nil,
+               done: (@MainActor (NoteStore.Outcome) -> Void)? = nil) -> String? {
         let papers = store.notes.map { (key: $0.key, id: $0.noteID, instance: $0.instance, version: $0.version) }
         // With the note it was typed in known, only a paper that is that note (never another note that took its key).
         let target = noteID.map { id in NoteShelf.saveTarget(key: key, noteID: id, instance: instance, papers: papers, current: store.currentID) } ?? key
         guard let target, let paper = store.paper(target) else {
+            // (What was to be written with it, a helper's metadata, wasn't: its asker keeps it and tries again.)
+            done?(.failed)
             // Its folder switched away from (the note is in a session that ended): to that folder's drain.
             if let late = store.drainLate(key: key, body: body, base: base) { return late }
             // Refused (the paper gone, or no paper is surely that note): the typing goes into the journal under the
@@ -1721,20 +1797,23 @@ final class NoteDesk {
             // Typed just as it became one of two papers: kept in the copy beside it, never dropped (handled: the
             // editor doesn't keep it as unsaved).
             if paper.version == nil, paper.file.body != body { store.keepAside(key, body: body) }
+            done?(.failed)
             return paper.revision ?? base ?? ""
         }
         // Petal's own changes since (a place followed or added) don't make this a conflict; words changed do.
         let base = NoteShelf.rebase(editor: base, current: paper.revision, currentBody: paper.file.body)
-        guard paper.file.body != body else { return base }
+        guard paper.file.body != body || also != nil else { done?(.written); return base }
         if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fresh.remove(key) }
         // Links the person typed (an address alone on a line): their pages' titles may be fetched; a link already
         // in the note (from sync) never is.
         let links = { (text: String) in Set(NoteBlock.blocks(text).compactMap { if case .link(let url) = $0 { url } else { nil } }) }
         for url in links(body).subtracting(links(paper.file.body)) { LinkPreviews.shared.requested(url) }
-        let next = store.change(key, base: base) { $0.body = body }
+        let next = store.change(key, base: base, edit: { $0.body = body; also?(&$0) }, done: done)
         // Refused (the notes' folder switching or not ready yet, a drain): to the drain of the folder it was typed in
         // when that session has ended; else the typing goes into the journal under its note's id at once, made on
         // what the editor had (put back at the next launch if it never lands).
+        // (`done` hears a refusal either way: what `also` would have written is its asker's to keep and try again.)
+        if next == nil { done?(.failed) }
         if next == nil, let late = store.drainLate(key: key, body: body, base: base) { return late }
         if next == nil {
             store.journalUnsaved(noteID: paper.noteID, path: paper.url.path, base: base ?? paper.revision,
@@ -1950,6 +2029,7 @@ final class NoteDesk {
         let new = paper.key
         guard old != new else { return }
         faces = NoteShelf.rekeyed(faces, old, new)
+        helpers.rekeyed(old, new)
         if keyboard == old { keyboard = new }
         if hovered == old { hovered = new }
         keyboardWanted.rekey(old, new)
@@ -2028,7 +2108,21 @@ final class NoteDesk {
         return (place, person ? "any chat app · " + paper.notebook : paper.notebook, others)
     }
 
-    func footer(_ paper: PaperNote) -> String { Self.when(paper.file.modified) }
+    /// The folded note's one line of what's coming: a helper at work, when it comes back, its watcher, or when it
+    /// was written.
+    func footer(_ paper: PaperNote) -> String {
+        let file = paper.file
+        if let run = helpers.runs[paper.noteID] {
+            let step = run.sticky?.agent.activity.text ?? ""
+            return run.paused ? "Paused" : step.isEmpty ? "Working" : step
+        }
+        if let helper = file.helper, helper.state == .failed { return "Couldn't finish" }
+        if let helper = file.helper, helper.state != .done { return helper.step.isEmpty ? "Working" : helper.step }
+        if let back = file.back { return NoteHelp.backLine(back, now: Date()) }
+        if let watch = file.watch { return watch.foot(thisMac: watch.mac == local.mac) }
+        if file.fromPetal { return "From Petal · " + Self.when(file.created) }
+        return Self.when(file.modified)
+    }
 
     static func when(_ date: Date) -> String {
         let calendar = Calendar.current
@@ -2754,6 +2848,8 @@ final class NoteDesk {
     /// The files changed (here or on another Mac): papers and tabs show what they say now.
     func refresh() {
         guard on else { return }
+        // Answers held through a conflict: applied once their note is one writable paper (after Keep this one).
+        helpers.applyHeld()
         WindowEvents.shared.titles("papernotes", pagesStuck || windowsStuck)
         // Notes shown on this Mac before it last quit show again.
         for paper in store.notes where local.shown.contains(paper.noteID) && faces[paper.key] == nil { faces[paper.key] = .folded }
@@ -2950,6 +3046,12 @@ struct NotePanelContent: View {
     let key: String
     weak var panel: NotePanel?
 
+    /// What changes a paper's height from a helper: its file as written, a run, a question waiting on it.
+    private func helperShape(_ paper: PaperNote) -> String {
+        let run = desk.helpers.runs[paper.noteID]
+        return "\(paper.revision?.count ?? 0)|\(paper.file.ink.count)|\(run != nil)|\(run?.sticky?.agent.pendingAsk.count ?? 0)|\(run?.paused == true)|\(desk.helpers.card(paper.noteID)?.id.uuidString ?? "")"
+    }
+
     var body: some View {
         if let paper = desk.store.paper(key) {
             let face = desk.faces[key] ?? .folded
@@ -2968,6 +3070,8 @@ struct NotePanelContent: View {
                 .modifier(FoldedTouch(folded: face == .folded, open: { desk.open(key) }, drag: { panel?.drag() }, dropped: { panel?.dragEnded() }))
                 .padding(PaperLook.margin)
                 .onChange(of: face) { _, _ in DispatchQueue.main.async { panel?.refit() } }
+                // A helper's ink, step or card came or went: the paper fits itself again.
+                .onChange(of: helperShape(paper)) { _, _ in DispatchQueue.main.async { panel?.refit() } }
         }
     }
 }

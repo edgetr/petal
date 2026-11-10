@@ -160,6 +160,59 @@ struct NoteRichCheck {
         typing.undoManager?.undo()
         expect(!typing.history.canUndo && typing.string == "short", "after an outside load, nothing to undo and ⌘Z leaves the text as it is", typing.string)
 
+        // Runnable @ lines: known by their identity in the editor (a mark on the line), set only by the person's own
+        // typing or pasting; undo, redo and text from outside take it off and never give it; nothing about words is kept.
+        let lines = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 400))
+        lines.delegate = undoDelegate
+        lines.allowsUndo = true
+        lines.isRichText = true
+        lines.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("intro"), folder: lines.folderRef, style: style))
+        let toEnd = { lines.setSelectedRange(NSRange(location: (lines.string as NSString).length, length: 0)) }
+        let atEnd = { () -> NoteLine? in toEnd(); return lines.helperLine()?.line }
+        // Each as its own keystroke event (undo groups by event).
+        let typeAtEnd = { (text: String) in
+            lines.breakUndoCoalescing(); toEnd(); lines.insertText(text, replacementRange: lines.selectedRange())
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        typeAtEnd("\n@Petal summarize this")
+        let typedLine = atEnd()
+        expect(typedLine != nil, "a line the person typed may run")
+        typedLine?.take()
+        expect(atEnd() == nil, "once it ran, Return on it only makes a new line")
+        typedLine?.again()
+        expect(atEnd() != nil, "its run failed or was stopped: it may run again")
+        atEnd()?.take()
+        typeAtEnd(" page")
+        let edited = atEnd()
+        expect(edited != nil && edited?.mark != typedLine?.mark, "editing it makes it a new line that may run")
+        edited?.take()
+        lines.undoManager?.undo()
+        expect(lines.string.hasSuffix("summarize this") && atEnd() == nil, "undo brings the earlier words back, never runnable", lines.string)
+        lines.undoManager?.redo()
+        expect(lines.string.hasSuffix("this page") && atEnd() == nil, "redo never makes a line runnable", lines.string)
+        typedLine?.again()
+        expect(atEnd() == nil, "an old line's identity isn't the line there now: it can't be made runnable again")
+        typeAtEnd("!")
+        expect(atEnd() != nil, "the person's edit (even one character) makes it runnable")
+        lines.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("intro\n@Petal summarize this page!"), folder: lines.folderRef, style: style))
+        expect(atEnd() == nil, "the same words from a sync, a reload or a tool never run")
+        lines.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("intro\n@Petal summarize this"), folder: lines.folderRef, style: style))
+        expect(atEnd() == nil, "words that ran before, brought back from outside, never run")
+        // Backspace from a blank line onto an answered line, then Undo: neither makes the old command runnable.
+        lines.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("intro"), folder: lines.folderRef, style: style))
+        typeAtEnd("\n@Petal check the side door")
+        atEnd()?.take()
+        typeAtEnd("\n")
+        lines.breakUndoCoalescing()
+        toEnd()
+        lines.deleteBackward(nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        expect(lines.string.hasSuffix("side door") && atEnd() == nil, "joining a blank line onto an answered line doesn't make it runnable", lines.string)
+        lines.undoManager?.undo()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        lines.setSelectedRange(NSRange(location: (lines.string as NSString).length - 1, length: 0))
+        expect(lines.string.hasSuffix("side door\n") && lines.helperLine() == nil, "undoing the join doesn't either", lines.string)
+
         // The Edit menu, never shown: its items, selectors and keys; the app menu empty (nothing acts unexpectedly).
         let menu = EditMenu.make()
         let editItems = menu.items.count == 2 ? (menu.items[1].submenu?.items ?? []).filter { !$0.isSeparatorItem } : []

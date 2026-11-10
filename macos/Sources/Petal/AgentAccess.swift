@@ -622,6 +622,26 @@ enum AgentAccess {
         }
     }
 
+    /// The git repository a folder is really in, or nil: the nearest folder above it with a `.git`, which is that
+    /// repository when it's a repository's own folder, and a linked worktree's main checkout only when git made it
+    /// one (`worktreeMain`); a `.git` file that isn't such a worktree's (a submodule's, or one anyone wrote) and a
+    /// `.git` that is a symbolic link are no repository here. `path` is absolute with links resolved.
+    static func repository(_ path: String, files: GitFiles) -> String? {
+        var folder = standard(path)
+        while true {
+            if let mark = files.mark(folder) {
+                switch mark {
+                case .folder: return folder
+                case .file(let text): return worktreeMain(folder, gitFile: text, files: files)
+                case .link: return nil
+                }
+            }
+            guard folder != "/" else { return nil }
+            folder = (folder as NSString).deletingLastPathComponent
+            if folder.isEmpty { folder = "/" }
+        }
+    }
+
     /// The main checkout of the worktree at `folder`, whose `.git` file says `gitFile`, only when git itself made it
     /// so: the gitdir it names exists and is an entry in a repository's `.git/worktrees/`, and that entry's own
     /// `gitdir` file points back at this folder's `.git` (every path with its links resolved), a `.git` in this very

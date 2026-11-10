@@ -76,6 +76,7 @@ extension Snapshot {
             ("note-edge-tabs", scene(edgeScene(app: app, keys: [sentence.key, other.key, folded.key, open.key], sentence: sentence))),
         ]
         for (name, view) in shots { write(render(view, app: app, size: nil), name: name, folder: folder) }
+        helpers(app: app, folder: folder, root: root, day: day, scene: { scene($0) })
 
         // The quick question, with Stick here.
         app.paper.previewCapture()
@@ -85,6 +86,131 @@ extension Snapshot {
             .init(kind: .claude, text: "At **8:00**. The guide suggests getting there by 7:45 for a seat near the front."),
         ])
         write(render(AnyView(ClaudePanelView(panel: ask)), app: app, size: nil), name: "quick-question", folder: folder)
+    }
+
+    /// Phase 2's papers: the @ menu with its chips, ink on the front, the back with steps and stamps, a watcher, a
+    /// task put away, a coding helper's result beside its back, a helper at work, and a quick question with the notes
+    /// it used. Made-up notes, never the person's.
+    @MainActor private static func helpers(app: PetalApp, folder: String, root: URL, day: Date, scene: (AnyView) -> AnyView) {
+        let now = Date()
+        let names: (notes: [String], notebooks: [String], place: String) = (["Slides", "Venue"], ["Work", "Home"], "garden.example")
+        func paper(_ note: PaperNote, _ face: PaperFace, color: String = "#007aff") -> PaperView {
+            PaperView(paper: note, color: NSColor(hex: color) ?? .systemBlue, glass: false, face: face, place: app.paper.letterhead(note).place,
+                      notebook: note.notebook, others: app.paper.letterhead(note).others, footer: app.paper.footer(note), names: names)
+        }
+        var page = NoteStick(kind: .tab)
+        page.url = "https://garden.example/talks"
+        let friday = NoteHelp.when("Friday", now: now)?.date ?? now
+
+        // The @ menu, its chips, and ink on the front.
+        var plan = NoteFile(id: "H1", created: day, body: """
+            # Garden talk
+            Ask about the side room before Thursday. Bring the clicker.
+            https://github.com
+            @Petal bring @this back @Friday with @[Slides]
+            """)
+        plan.places = [page]
+        plan.back = friday
+        plan.ink = [NoteHelp.Ink(who: "✦ Petal", text: "This note and Slides will be in front of you Friday 9:00.")]
+        plan.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", asked: "@Petal bring @this back @Friday with @[Slides]", at: now)
+        let planned = PaperNote(file: plan, url: root.appending(path: "Work/Garden talk.md"), notebook: "Work")
+        let menu = MentionMenuView(choices: MentionChoice.choices("", notes: ["Slides", "Venue"], notebooks: ["Work", "Home"]), selected: 0,
+                                   accent: NSColor(hex: "#007aff") ?? .systemBlue, pick: { _ in })
+        var draft = plan
+        draft.ink = []
+        draft.helper = nil
+        draft.back = nil
+        draft.body = "# Garden talk\nAsk about the side room before Thursday. Bring the clicker.\n@Petal bring @this back @Friday with @[Slides]\n@"
+        let typing = PaperNote(file: draft, url: planned.url, notebook: "Work")
+        app.paper.store.preview([planned], notebooks: [Notebook(name: "Work", folder: root.appending(path: "Work"), color: "#007aff", cover: nil, count: 1)])
+        let shots1: [(String, AnyView)] = [
+            ("helper-at-menu", scene(AnyView(ZStack(alignment: .topLeading) {
+                paper(typing, .open)
+                menu.offset(x: 240, y: 150)
+            }.frame(width: 520, height: 400, alignment: .topLeading)))),
+            ("helper-ink", scene(AnyView(paper(planned, .open)))),
+        ]
+        for (name, view) in shots1 { write(render(view, app: app, size: nil), name: name, folder: folder) }
+
+        // A coding helper's result, and the back of that note: steps and stamps.
+        var pr = NoteStick(kind: .tab)
+        pr.url = "https://github.com/example/garden/pull/42"
+        var fix = NoteFile(id: "H2", created: day, body: "@Petal use Opus 5.5 to fix the date picker and open a PR. Done means the tests pass. Have GPT 6.1 Sol look for holes")
+        fix.places = [pr]
+        fix.ink = [NoteHelp.Ink(who: "Opus 5.5", text: "Opened a PR into #42: the picker now keeps the time zone. The tests pass.",
+                                proof: ["tests ✓", "diff +9 −3", "PR #43"], link: "https://github.com/example/garden/pull/43", code: true, finish: "the tests pass"),
+                   NoteHelp.Ink(who: "GPT 6.1 Sol", text: "1. Does the week view use the same picker? It still shows the old time.", objections: 1)]
+        fix.steps = ["New worktree of ~/garden", "Found it: the picker drops the time zone", "Fixed DatePicker.swift", "The tests pass", "Pushed, opened PR #43"]
+        fix.stamps = [NoteHelp.Stamp(label: "ALLOWED · CLAUDE · ~/GARDEN", grant: "always:code:/Users/someone/garden", mac: "m"),
+                      NoteHelp.Stamp(label: "ALWAYS · GIT PUSH", grant: "rules:Bash(git push)", mac: "m")]
+        fix.helper = NoteHelp.Helper(state: .done, who: "Opus 5.5", step: "", at: now.addingTimeInterval(-240))
+        let fixed = PaperNote(file: fix, url: root.appending(path: "Work/Date picker.md"), notebook: "Work")
+
+        // A helper at work: its step, Pause and Stop.
+        var busy = NoteFile(id: "H3", created: day, body: "Which of these three venues has step-free access?\n@Petal check this page and the other two")
+        busy.places = [page]
+        busy.helper = NoteHelp.Helper(state: .working, who: "✦ Petal", step: "Reading garden.example/access", at: now)
+        let working = PaperNote(file: busy, url: root.appending(path: "Work/Venues.md"), notebook: "Work")
+
+        // A watcher: its newest number in the corner, the older ones struck.
+        var lamp = NoteFile(id: "H4", created: day, body: "@Petal check this every morning, tell me under $100")
+        var shop = NoteStick(kind: .tab)
+        shop.url = "https://lamps.example/kitchen"
+        lamp.places = [shop]
+        var watch = NoteHelp.Watch(every: "1d", line: "under $100", mac: app.paper.local.mac, at: "09:00", url: shop.url)
+        watch.record("$139", at: day)
+        watch.record("$129", at: day)
+        watch.record("$118", at: now)
+        lamp.watch = watch
+        let watcher = PaperNote(file: lamp, url: root.appending(path: "Home/Kitchen lamp.md"), notebook: "Home")
+
+        // A task put away.
+        var task = NoteFile(id: "H5", created: day, body: "# Renew the bike lock\nTwo shops; the cheaper one ships next week.")
+        task.task = [NoteHelp.TaskItem(kind: .tab, title: "Lock A", target: "https://locks.example/a"),
+                     NoteHelp.TaskItem(kind: .tab, title: "Lock B", target: "https://locks.example/b"),
+                     NoteHelp.TaskItem(kind: .file, title: "Receipt.pdf", target: "/Users/someone/Receipt.pdf"),
+                     NoteHelp.TaskItem(kind: .mail, title: "Shop", target: "message://x")]
+        task.ink = [NoteHelp.Ink(who: "✦ Petal · put away today", text: "You were comparing delivery dates. Still open: which one fits the old bracket. Next: reply to the shop.")]
+        let away = PaperNote(file: task, url: root.appending(path: "Inbox/Renew the bike lock.md"), notebook: "Inbox")
+
+        // A morning note from Petal.
+        var morning = NoteFile(id: "H6", created: now, body: "The date picker PR is open and its tests pass. The lamp is $118, was $129. Nothing else needs you.")
+        morning.fromPetal = true
+        var desk = NoteStick(kind: .desktop)
+        desk.desktop = 2
+        morning.places = [desk]
+        let fromPetal = PaperNote(file: morning, url: root.appending(path: "Work/Morning.md"), notebook: "Work")
+
+        app.paper.store.preview([planned, fixed, working, watcher, away, fromPetal],
+                                notebooks: [Notebook(name: "Work", folder: root.appending(path: "Work"), color: "#f7821b", cover: nil, count: 4),
+                                            Notebook(name: "Home", folder: root.appending(path: "Home"), color: "#e0567a", cover: nil, count: 1),
+                                            Notebook(name: "Inbox", folder: root.appending(path: "Inbox"), color: "#8c8c8c", cover: nil, count: 1)])
+        let shots2: [(String, AnyView)] = [
+            ("helper-back", scene(AnyView(paper(fixed, .back, color: "#f7821b")))),
+            ("helper-code", scene(AnyView(HStack(alignment: .top, spacing: 30) {
+                paper(fixed, .open, color: "#f7821b")
+                paper(fixed, .back, color: "#f7821b").rotationEffect(.degrees(1))
+            }))),
+            ("helper-working", scene(AnyView(paper(working, .open, color: "#f7821b")))),
+            ("helper-watcher", scene(AnyView(HStack(alignment: .top, spacing: 30) {
+                paper(watcher, .folded, color: "#e0567a")
+                paper(watcher, .open, color: "#e0567a")
+            }))),
+            ("helper-task", scene(AnyView(HStack(alignment: .top, spacing: 30) {
+                paper(fromPetal, .folded, color: "#f7821b").rotationEffect(.degrees(1.5))
+                paper(away, .open, color: "#8c8c8c")
+            }))),
+        ]
+        for (name, view) in shots2 { write(render(view, app: app, size: nil), name: name, folder: folder) }
+
+        // A quick question that used notes: a chip for each.
+        let ask = ClaudePanel()
+        ask.agent.preview([
+            .init(kind: .user, text: "Which lamp did I want, and is it cheaper yet?"),
+            .init(kind: .claude, text: "The **kitchen lamp** from lamps.example. It's $118 this morning, down from $129; you asked to hear when it's under $100."),
+        ])
+        ask.agent.sources = [NoteSource(noteID: "H4", title: "Kitchen lamp"), NoteSource(noteID: "H5", title: "Renew the bike lock")]
+        write(render(AnyView(ClaudePanelView(panel: ask)), app: app, size: nil), name: "quick-question-sources", folder: folder)
     }
 
     /// A made-up window with a sentence highlighted, its notes resting as tabs on its right edge (one with a count,

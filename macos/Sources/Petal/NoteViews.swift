@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Petal Notes' paper: its sizes, type and colors, as the sketch has them (notes-round2.html). A note is a square
 /// of paper folded at 170 points; open it grows to 360 wide and as tall as its writing. Paper is an opaque warm
@@ -44,10 +45,18 @@ struct PaperView: View {
     var editorHeight: CGFloat = 0
     var desk: NoteDesk?
     var conflict = false
+    /// The helper's controls as last drawn (HelperControlsHeight).
+    @State private var controlsHeight: CGFloat = 0
     /// Its last write failed: kept here, tried again, and said on the paper.
     var unsaved = false
     /// Pictures whose bytes couldn't be saved: said on the paper, with Try again and Remove.
     var pictureTrouble = 0
+    /// What @ binds to where there's no desk (snapshots): notes and notebooks by name, and the place's words.
+    var names: (notes: [String], notebooks: [String], place: String)? = nil
+
+    private var bindable: (notes: [String], notebooks: [String], place: String) {
+        names ?? desk?.helpers.names(for: paper.key) ?? ([], [], "")
+    }
     /// Open, its width (Petal's viewer's margin is narrower than the room beside a window).
     var width: CGFloat = PaperLook.openWidth
     /// Turned over and folded by its holder when it isn't the desk (Petal's viewer's margin).
@@ -95,9 +104,11 @@ struct PaperView: View {
     /// The folded corner (flip to the back) and the faint @.
     private var corner: some View {
         HStack(alignment: .bottom, spacing: 0) {
+            // A folded watcher's line takes the room (the sketch's watchers carry no @).
             Text("@").font(.system(size: 13, weight: .semibold)).foregroundStyle(glass ? Color.primary.opacity(0.22) : Color.black.opacity(0.22))
                 .padding(.trailing, 8).padding(.bottom, 9)
-                .help("@ for a helper, a note or a place (coming soon)")
+                .opacity(face == .folded && paper.file.watch != nil ? 0 : 1)
+                .help("@ for a helper, a note or a notebook; Return on the line asks it")
             Button { if let flipped { flipped() } else { desk?.flip(paper.key) } } label: { FoldCorner().fill(Color.black.opacity(0.13)).frame(width: 24, height: 24).contentShape(.rect) }
                 .buttonStyle(.plain)
                 .help(face == .back ? "Turn it back over" : "Turn it over")
@@ -107,7 +118,9 @@ struct PaperView: View {
     @ViewBuilder private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Folded, a page is its site alone, as the sketch's folded notes say it.
-            Letterhead(place: face == .folded ? NoteText.site(place) : place, notebook: notebook, others: face == .folded ? "" : others, tint: tint, glass: glass,
+            // Petal's own note (a morning note) says so, with the time it was left: "from Petal · 08:00".
+            Letterhead(place: paper.file.fromPetal ? "from Petal · " + paper.file.created.formatted(date: .omitted, time: .shortened)
+                       : face == .folded ? NoteText.site(place) : place, notebook: notebook, others: face == .folded ? "" : others, tint: tint, glass: glass,
                        tapPlace: { desk?.placeMenu(paper.key) }, tapNotebook: { desk?.notebookMenu(paper.key) })
                 .padding(.bottom, 9)
             switch face {
@@ -120,6 +133,7 @@ struct PaperView: View {
 
     private var foldedBody: some View {
         VStack(alignment: .leading, spacing: 0) {
+            watchCorner
             Group {
                 let titled = NoteBlock.blocks(paper.file.body).first { !$0.words.trimmingCharacters(in: .whitespaces).isEmpty }.map { if case .heading = $0 { true } else { false } } ?? false
                 let title = paper.file.title
@@ -131,7 +145,7 @@ struct PaperView: View {
                         .font(.system(size: 13.5, weight: .medium))
                         .lineSpacing(13.5 * 1.32 - 16.1)
                 }
-                    .foregroundStyle(words)
+                    .foregroundStyle(paper.file.fromPetal && !glass ? HelperLook.ink(tint) : words)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .clipped()
             }
@@ -140,15 +154,51 @@ struct PaperView: View {
                     .font(.system(size: 11, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
                     .padding(.bottom, 4)
             }
-            HStack(spacing: 6) {
+            HStack(spacing: paper.file.watch != nil ? 4 : 6) {
+                // Something coming (back at a time, a helper at work): the sketch's dot before the line.
+                if !unsaved, paper.file.back != nil || paper.file.helper.map({ $0.state == .working || $0.state == .waiting }) == true {
+                    PulseDot(color: Color(nsColor: color), pulsing: paper.file.helper?.state == .working)
+                }
                 Text(unsaved ? "Not saved yet: trying again" : footer).font(.system(size: 11))
                     .foregroundStyle(unsaved ? Color(red: 0.7, green: 0.15, blue: 0.12) : glass ? .secondary : PaperLook.footer).lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                // A watcher's Pause (or Go on), on the folded note.
+                if !unsaved, let watch = paper.file.watch {
+                    Text("·").font(.system(size: 11)).foregroundStyle(glass ? .secondary : PaperLook.footer).padding(.horizontal, -2)
+                    Button(watch.paused ? "Go on" : "Pause") { desk?.helpers.pause(paper.noteID) }.buttonStyle(.plain)
+                        .font(.system(size: 11)).foregroundStyle(glass ? .secondary : PaperLook.footer).underline(watch.paused)
+                }
             }
-            .padding(.trailing, 44)
+            .padding(.trailing, paper.file.watch != nil ? 0 : 44)
+            .opacity(paper.file.fromPetal && !unsaved ? 0 : 1)
+        }
+    }
+
+    /// The open paper within the screen (NoteHelp.paperHeights): the editor, then the ink (scrolling past what fits),
+    /// with room always kept for the helper's controls.
+    private var heights: (editor: CGFloat, ink: CGFloat) {
+        let screen = NSScreen.main?.visibleFrame.height ?? 800
+        // (The watcher's corner, when it has one, takes its room above the words.)
+        let corner: CGFloat = NoteHelp.corner(paper.file.watch) == nil ? 0 : 44
+        return NoteHelp.paperHeights(screen: screen, chrome: 110 + corner, editor: PaperLook.maxOpen - 70, ink: .greatestFiniteMagnitude, controls: max(controlsHeight, 40))
+    }
+
+    /// The helper's ink and its controls, the controls measured (a form's buttons too) so the paper keeps their room.
+    private var helperFront: some View {
+        HelperFront(paper: paper, tint: tint, glass: glass, desk: desk, inkRoom: heights.ink).padding(.bottom, 18)
+            .onPreferenceChange(HelperControlsHeight.self) { controlsHeight = $0 }
+    }
+
+    /// A watcher's newest value in the corner, the old ones struck (the sketch's .num): on the open paper as on the
+    /// folded one, so a crossing it's told is seen whichever face shows.
+    @ViewBuilder private var watchCorner: some View {
+        if let watch = paper.file.watch, NoteHelp.corner(watch) != nil {
+            WatchCorner(watch: watch, tint: tint, glass: glass).frame(maxWidth: .infinity, alignment: .trailing).padding(.top, -4).padding(.bottom, 2)
         }
     }
 
     @ViewBuilder private var openBody: some View {
+        watchCorner
         if pictureTrouble > 0, let desk {
             HStack(spacing: 10) {
                 Text(pictureTrouble == 1 ? "Picture couldn't be saved" : "\(pictureTrouble) pictures couldn't be saved")
@@ -175,10 +225,12 @@ struct PaperView: View {
         }
         // One of a conflict's papers is read only, with Keep this one: nothing typed into it could be kept.
         if snapshotting || desk == nil {
-            NoteBodyView(paper: paper, tint: tint, accent: color, glass: glass).padding(.bottom, 18)
+            NoteBodyView(paper: paper, tint: tint, accent: color, glass: glass, names: bindable)
+            helperFront
         } else if conflict {
             // Read only, in a scroll view as tall as the editor may be: a long one never runs off the screen.
-            ConflictBody(paper: paper, tint: tint, accent: color, glass: glass, resized: { desk?.measured(paper.key, $0) }).padding(.bottom, 18)
+            ConflictBody(paper: paper, tint: tint, accent: color, glass: glass, resized: { desk?.measured(paper.key, $0) })
+            helperFront
         } else if let desk {
             NoteEditorView(paper: paper, style: desk.style(color, glass: glass), focus: keyboard,
                            height: { desk.measured(paper.key, $0) },
@@ -193,15 +245,20 @@ struct PaperView: View {
                            // In a paper's own panel, Escape goes up to the panel (handled once there); in Petal's viewer's
                            // margin there's no such panel, so it folds the note there.
                            escape: folded,
-                           settled: { desk.settleUnsaved(paper.key, noteID: paper.noteID, instance: paper.instance, saved: $0) })
-                .frame(height: min(PaperLook.maxOpen - 70, max(PaperLook.minOpen - 70, editorHeight)))
-                .padding(.bottom, 18)
+                           settled: { desk.settleUnsaved(paper.key, noteID: paper.noteID, instance: paper.instance, saved: $0) },
+                           helperReturn: { desk.helpers.returned(paper.key, line: $0, at: $1) },
+                           names: { desk.helpers.names(for: paper.key) },
+                           accent: color, tint: tint)
+                .frame(height: min(heights.editor, max(PaperLook.minOpen - 70, editorHeight)))
+            helperFront
         }
     }
 
     private var back: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("The back of this note").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(words)
+            // What a helper did, and what was allowed (tap a stamp to take it back).
+            HelperBack(paper: paper, tint: tint, glass: glass, desk: desk)
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(Array(paper.file.places.enumerated()), id: \.offset) { _, stick in
                     Text(NoteDesk.describe(stick)).font(.system(size: 12.5)).foregroundStyle(words).lineLimit(2)
@@ -287,6 +344,7 @@ struct NoteBodyView: View {
     let tint: NoteInk.RGB
     let accent: NSColor
     let glass: Bool
+    var names: (notes: [String], notebooks: [String], place: String) = ([], [], "")
 
     var body: some View {
         let words: Color = glass ? .primary : PaperLook.words
@@ -314,6 +372,8 @@ struct NoteBodyView: View {
                         .padding(.vertical, 4)
                 case .bullet(let text):
                     Text("• " + NoteText.plain(text)).font(.system(size: 13.5)).foregroundStyle(words).lineSpacing(3)
+                case .text(let text) where text.contains("@"):
+                    Text(MentionLine.attributed(text, tint: tint, names: names)).font(.system(size: 13.5)).foregroundStyle(words).lineSpacing(3)
                 case .text(let text):
                     Text(NoteText.plain(text).isEmpty ? " " : NoteText.plain(text)).font(.system(size: 13.5)).foregroundStyle(words).lineSpacing(3)
                 }
@@ -370,6 +430,9 @@ struct PictureView: View {
         }
         .frame(height: 96).frame(maxWidth: .infinity).clipped()
         .clipShape(.rect(cornerRadius: 9))
+        // Dragged out of the note: the picture's bytes, read (when dropped) from the file NoteStore.pictureFile allows
+        // (inside the notes' root, through no link), never a path.
+        .onDrag { PictureView.provider(link: link, folder: folder, caption: caption) }
         .overlay { RoundedRectangle(cornerRadius: 9).stroke(.black.opacity(0.15), lineWidth: 0.5) }
         .overlay(alignment: .bottomLeading) {
             if !caption.isEmpty {
@@ -378,6 +441,24 @@ struct PictureView: View {
                     .padding(.leading, 8).padding(.bottom, 6)
             }
         }
+    }
+}
+
+extension PictureView {
+    static func provider(link: String, folder: URL, caption: String) -> NSItemProvider {
+        let provider = NSItemProvider()
+        let name = (link as NSString).lastPathComponent
+        let type = UTType(filenameExtension: (name as NSString).pathExtension) ?? .png
+        provider.suggestedName = caption.isEmpty ? (name as NSString).deletingPathExtension : caption
+        provider.registerDataRepresentation(forTypeIdentifier: type.identifier, visibility: .all) { done in
+            guard let file = NoteStore.pictureFile(link, noteFolder: folder), let data = try? Data(contentsOf: file) else {
+                done(nil, CocoaError(.fileReadNoPermission))
+                return nil
+            }
+            done(data, nil)
+            return nil
+        }
+        return provider
     }
 }
 

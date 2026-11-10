@@ -193,62 +193,6 @@ final class MailStaging: NSObject, NSSharingServiceDelegate {
     }
 }
 
-// MARK: - A task's parts
-
-extension NoteTasks {
-    /// Open all: each part of a task through the normal open paths: a tab (http or https only) in the person's
-    /// browser, a mail (a `message:` address only) in Mail, a file in its own app only once it's resolved (aliases and
-    /// symbolic links followed, off the main thread) and found to be a document (`fileAction`); anything else is shown
-    /// in Finder, selected, never opened, and said. Asynchronous throughout (Launch Services never asked on the main
-    /// thread to wait), never moving the pointer; nothing is sent or changed. Returns how many parts it will try.
-    @MainActor @discardableResult
-    static func openAll(_ items: [NoteContract.TaskItem], said: @escaping @MainActor (String) -> Void = { _ in }) -> Int {
-        let urls = openable(items)
-        let skipped = items.count - urls.count
-        DispatchQueue.global(qos: .userInitiated).async {
-            let decided = urls.map { url in url.isFileURL ? decide(url) : (url, FileAction.open) }
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    let failed = Counter()
-                    let group = DispatchGroup()
-                    var revealed: [URL] = []
-                    for (url, action) in decided {
-                        if action == .reveal { revealed.append(url); continue }
-                        group.enter()
-                        let configuration = NSWorkspace.OpenConfiguration()
-                        configuration.activates = true
-                        NSWorkspace.shared.open(url, configuration: configuration) { _, error in
-                            if error != nil { failed.add() }
-                            group.leave()
-                        }
-                    }
-                    if !revealed.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(revealed) }
-                    group.notify(queue: .main) {
-                        MainActor.assumeIsolated {
-                            var words: [String] = []
-                            if !revealed.isEmpty {
-                                words.append(revealed.count == 1 ? "\(revealed[0].lastPathComponent) isn't a document, so Petal showed it in Finder instead of opening it."
-                                                                 : "\(revealed.count) parts aren't documents, so Petal showed them in Finder instead of opening them.")
-                            }
-                            let missed = failed.value + skipped
-                            if missed > 0 { words.append(missed == 1 ? "One part couldn't be opened." : "\(missed) parts couldn't be opened.") }
-                            if !words.isEmpty { said(words.joined(separator: " ")) }
-                        }
-                    }
-                }
-            }
-        }
-        return urls.count
-    }
-
-    private final class Counter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var count = 0
-        func add() { lock.withLock { count += 1 } }
-        var value: Int { lock.withLock { count } }
-    }
-}
-
 // MARK: - A notebook's stack
 
 /// A notebook in the dock: a little pile of paper in its color.

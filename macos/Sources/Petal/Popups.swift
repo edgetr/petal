@@ -1161,6 +1161,8 @@ struct AskCard: View {
 struct AskRequestView: View {
     @Environment(PetalApp.self) private var app
     let request: Assist.Request
+    /// On a note: the room its words get on this screen (they scroll past it); its buttons always stay below them.
+    var room: CGFloat? = nil
 
     /// Whose question it is: the chat's AI, or an agent outside Petal (Claude Code, Codex, or a terminal's).
     @ViewBuilder private var mark: some View {
@@ -1168,11 +1170,17 @@ struct AskRequestView: View {
     }
 
     var body: some View {
-        if let form = request.form { VaultFormView(request: request, form: form) } else { question }
+        if let form = request.form { VaultFormView(request: request, form: form, room: room) } else { question }
     }
 
     private var question: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let room { BoundedScroll(maxHeight: room) { words } } else { words }
+            actions.background(GeometryReader { Color.clear.preference(key: FormActionsHeight.self, value: $0.size.height) })
+        }
+    }
+
+    private var words: some View {
             HStack(alignment: .top, spacing: 10) {
                 mark.frame(width: 18, height: 18)
                 VStack(alignment: .leading, spacing: 3) {
@@ -1183,6 +1191,10 @@ struct AskRequestView: View {
                 }
                 Spacer(minLength: 0)
             }
+    }
+
+    /// Allow, Don't, Always, Buy: never inside the scroll.
+    private var actions: some View {
             HStack(spacing: 8) {
                 Spacer()
                 if request.warn {
@@ -1196,8 +1208,13 @@ struct AskRequestView: View {
                     Button(request.allow) { app.assist.choose(.once, for: request.id) }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
                 }
             }
-        }
     }
+}
+
+/// The measured height of a card's buttons (on a note: kept below its scrolling words).
+struct FormActionsHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 struct SummaryCard: View {

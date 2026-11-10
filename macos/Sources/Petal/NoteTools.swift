@@ -17,7 +17,7 @@ extension NoteDesk {
     /// `asker`: the note the request comes from (PETAL_NOTE: a helper's @ inside a note, by the note's id), or nil.
     /// A Private notebook's notes (and its name) are told, found, written and moved only for a request from inside it
     /// (NotePrivacy.readable); to every other asker they aren't there.
-    func handle(_ name: String, _ args: [String: Any], asker: String? = nil, live: @escaping @Sendable () -> Bool = { true },
+    func handle(_ name: String, _ args: [String: Any], asker: String? = nil, caller: String? = nil, live: @escaping @Sendable () -> Bool = { true },
                 _ answer: @escaping (Any) -> Void, _ refuse: @escaping (String) -> Void) {
         let inside = asker.flatMap { store.current($0)?.notebook }
         // An existing notebook by its actual folder (its name as read, never cleaned up: a Private folder renamed in
@@ -29,6 +29,18 @@ extension NoteDesk {
         // or use for it (cleaned, any case: "Secret." or "secret" is Secret); both must be readable.
         let destination = { [store] (notebook: String) in
             NotePrivacy.destinationReadable(notebook, existing: store.notebooks.map(\.name), privateBooks: store.privateBooks, asker: inside)
+        }
+        // The notes a quick question (or a helper) used: chips under its answer, each opening its note.
+        // Their titles derived from their whole bodies once shielded (never cut from the raw text first).
+        let used = { (papers: [PaperNote]) in
+            guard let agent = caller.flatMap({ self.app.claude.note(withID: $0)?.agent }) else { return }
+            let fresh = papers.filter { paper in !agent.sources.contains { $0.noteID == paper.noteID } }
+            guard !fresh.isEmpty else { return }
+            NoteHelpers.shield(fresh.map(\.file.body)) { shown in
+                for (paper, words) in zip(fresh, shown ?? []) where !agent.sources.contains(where: { $0.noteID == paper.noteID }) {
+                    agent.sources.append(NoteSource(noteID: paper.noteID, title: words.title.isEmpty ? "A note" : words.title.text))
+                }
+            }
         }
         // Everything told goes through the vault's redaction first (NoteShield, the rule petal_ui and petal_look
         // follow), off the main thread; while the vault can't be read, nothing of the notes is told.
@@ -82,6 +94,7 @@ extension NoteDesk {
                 // The vault unreadable, or changing all the while: nothing searched, and said why.
                 guard let hits = hits ?? nil else { return refuse(NoteShield.unreadable) }
                 let found = hits.map { papers[$0] }
+                if found.count <= 3 { used(found) }
                 // Every match counted (not only those listed) goes through the delivery fence: a notebook made Private
                 // while the search ran can't show up in the count either.
                 told.books.formUnion(found.map(\.notebook))
@@ -92,9 +105,21 @@ extension NoteDesk {
             }
         case "petal_note_read":
             resolve(args["id"] as? String ?? "", readable: readable, told: told, refuse, fail) { paper in
+            used([paper])
             // Its whole text, its pictures as `![picture N]`: never a pictures' folder or file name.
             var result = self.summary(paper, text: true)
             if paper.file.cover { result["cover"] = true }
+            // What the note's helper answered (a chained helper reads its predecessor's), marked as the helper's and
+            // shielded with the rest of the answer.
+            if !paper.file.ink.isEmpty {
+                result["helper"] = ["note": "Written on the note by its helper (Petal), not by the user.",
+                                    "ink": paper.file.ink.map { ink -> [String: Any] in
+                                        var out: [String: Any] = ["who": ink.heading(among: paper.file.ink), "text": ink.text]
+                                        if !ink.link.isEmpty { out["link"] = ink.link }
+                                        if !ink.proof.isEmpty { out["proof"] = ink.proof }
+                                        return out
+                                    }]
+            }
             if self.store.readOnly(paper) { result["note"] = "This note changed in two places at once: the person sees both papers until they keep one, and it can't be changed until then." }
             send(result)
             }

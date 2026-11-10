@@ -67,6 +67,8 @@ enum NoteContract {
         var last = ""
         var history: [String] = []
         var paused = false
+        /// A crossing the helpers couldn't confirm (its number): drawn faintly beside the corner, never as the value.
+        var unconfirmed = ""
     }
 
     struct Helper: Equatable {
@@ -82,7 +84,8 @@ enum NoteContract {
     static func watch(_ file: NoteFile) -> Watch? {
         guard let map = file.mapValue("watch") else { return nil }
         return Watch(every: map["every"]?.first ?? "", line: map["line"]?.first ?? "", last: map["last"]?.first ?? "",
-                     history: Array((map["history"] ?? []).prefix(5)), paused: map["paused"]?.first == "true")
+                     history: Array((map["history"] ?? []).prefix(5)), paused: map["paused"]?.first == "true",
+                     unconfirmed: map["unconfirmed"]?.first ?? "")
     }
 
     static func helper(_ file: NoteFile) -> Helper? {
@@ -101,6 +104,10 @@ enum NoteContract {
         var kind: String
         var title: String
         var target: String
+        /// A file's: a bookmark to it and the very file it was put away as (`fileID`, as a note's file place records
+        /// it), when the task kept them: what Open all finds it by, wherever it went (NoteTasks.located).
+        var bookmark = ""
+        var fileID = ""
     }
 
     /// The note's `task:` items, written on one line (`task: [ { kind: tab, title: …, url_or_path: … } ]`) or as a
@@ -122,7 +129,8 @@ enum NoteContract {
         }
         return maps.compactMap { map in
             guard let kind = map["kind"], !kind.isEmpty else { return nil }
-            return TaskItem(kind: kind, title: map["title"] ?? "", target: map["url_or_path"] ?? map["url"] ?? map["path"] ?? "")
+            return TaskItem(kind: kind, title: map["title"] ?? "", target: map["url_or_path"] ?? map["url"] ?? map["path"] ?? "",
+                            bookmark: map["bookmark"] ?? "", fileID: map["fileID"] ?? "")
         }
     }
 
@@ -554,85 +562,6 @@ extension NoteRoom {
             guard case .window = note.placement else { return false }
             return note.open && !note.moved
         }
-    }
-}
-
-/// A task a note holds (`task:`): its parts as chips, and Open all, which brings them back through the normal open
-/// paths (a tab by its address, a file by its path, a mail by its message address), never moving the pointer. The
-/// one place that opens a task's parts, for the Petal Notes window and the note itself alike.
-enum NoteTasks {
-    /// A part in a few words: a tab's site (or title), a file's name, "Mail · title", a window's title.
-    static func chip(_ item: NoteContract.TaskItem) -> String {
-        switch item.kind {
-        case "tab":
-            let host = NoteText.host(item.target)
-            return host.isEmpty ? (item.title.isEmpty ? "A tab" : item.title) : host
-        case "file": return item.target.isEmpty ? (item.title.isEmpty ? "A file" : item.title) : (item.target as NSString).lastPathComponent
-        case "mail": return "Mail" + (item.title.isEmpty ? "" : " · " + item.title)
-        default: return item.title.isEmpty ? "A window" : item.title
-        }
-    }
-
-    /// Where a part opens: a tab only at a web address (http or https), a file only at an absolute path, a mail only
-    /// by its message address (`message:`, or a Message-ID in angle brackets); a window has nothing to open (nil).
-    static func url(_ item: NoteContract.TaskItem) -> URL? {
-        let target = item.target.trimmingCharacters(in: .whitespaces)
-        switch item.kind {
-        case "tab":
-            guard let url = URL(string: target), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return nil }
-            return url
-        case "file":
-            if target.hasPrefix("file://") { return URL(string: target).flatMap { $0.isFileURL ? $0 : nil } }
-            let path = (target as NSString).expandingTildeInPath
-            return path.hasPrefix("/") && !path.contains("\0") ? URL(fileURLWithPath: path) : nil
-        case "mail":
-            if target.lowercased().hasPrefix("message:") { return URL(string: target) }
-            guard target.hasPrefix("<"), target.hasSuffix(">"),
-                  let id = target.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: ".@-_"))) else { return nil }
-            return URL(string: "message://" + id)
-        default:
-            return nil
-        }
-    }
-
-    /// The parts Open all opens, in order (a file still to be checked by `fileAction` once it's resolved).
-    static func openable(_ items: [NoteContract.TaskItem]) -> [URL] { items.compactMap(url) }
-
-    /// What Open all (or a note dropped on an app) may do with a file, decided on what it really is once its aliases
-    /// and symbolic links are resolved: opened only when it's a document (conforms to `UTType.content`) and nothing
-    /// that runs or points elsewhere (an app, an executable or script of any kind, a `.command`, `.tool`, `.workflow`
-    /// or `.terminal` file, an installer package, a disk image, an alias or link, a web, internet or file location).
-    /// Anything else is shown in Finder, selected, never opened.
-    enum FileAction: Equatable { case open, reveal }
-
-    static let neverOpened: Set<String> = ["app", "command", "tool", "workflow", "terminal", "pkg", "mpkg", "dmg", "sparseimage", "sparsebundle",
-                                            "webloc", "inetloc", "fileloc", "sh", "zsh", "bash", "csh", "ksh", "py", "rb", "pl", "scpt", "scptd",
-                                            "applescript", "action", "jar", "prefpane", "kext", "plugin", "bundle", "service", "framework", "dylib",
-                                            "so", "osax", "mobileconfig", "xpc", "appex", "url", "alias", "saver", "qlgenerator", "mdimporter"]
-
-    static let neverTypes: [String] = ["com.apple.application", "com.apple.application-bundle", "public.executable", "public.unix-executable",
-                                       "public.script", "public.shell-script", "com.apple.applescript.script", "com.apple.applescript.text",
-                                       "com.apple.terminal.shell-script", "com.apple.automator-workflow", "com.apple.terminal.session",
-                                       "com.apple.installer-package-archive", "com.apple.disk-image", "public.disk-image", "com.apple.alias-file",
-                                       "public.symlink", "com.apple.web-internet-location", "com.apple.internet-location",
-                                       "com.apple.file-internet-location"]
-
-    /// A file as it really is: its alias or symbolic links resolved, then what it is (`fileAction`). The resolved file
-    /// is what's opened or shown. Off the main thread.
-    nonisolated static func decide(_ url: URL) -> (URL, FileAction) {
-        let resolved = (try? URL(resolvingAliasFileAt: url, options: [.withoutUI, .withoutMounting])) ?? url
-        let real = resolved.resolvingSymlinksInPath()
-        let values = try? real.resourceValues(forKeys: [.contentTypeKey, .isDirectoryKey, .isSymbolicLinkKey, .isAliasFileKey])
-        guard FileManager.default.fileExists(atPath: real.path), values?.isSymbolicLink != true, values?.isAliasFile != true else { return (real, .reveal) }
-        return (real, fileAction(type: values?.contentType, ext: real.pathExtension, isDirectory: values?.isDirectory == true))
-    }
-
-    /// `type`: the resolved file's type; `isDirectory`: it's a folder (a document package, like Keynote's, is one).
-    static func fileAction(type: UTType?, ext: String, isDirectory: Bool) -> FileAction {
-        guard let type, type.conforms(to: .content), !neverOpened.contains(ext.lowercased()) else { return .reveal }
-        for id in neverTypes { if let never = UTType(id), type.conforms(to: never) { return .reveal } }
-        if isDirectory && !type.conforms(to: .package) { return .reveal }   // a folder is shown, never opened
-        return .open
     }
 }
 

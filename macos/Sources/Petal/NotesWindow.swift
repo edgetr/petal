@@ -849,7 +849,7 @@ struct TaskChips: View {
                 if let first = items.first { chip(NoteTasks.chip(first)) }
                 if items.count > 1 { chip("+\(items.count - 1)").fixedSize() }
             }
-            Button { NoteTasks.openAll(items) { app.paper.tell($0) } } label: {
+            Button { app.paper.openAll(items) } label: {
                 Text("Open all \(items.count)").underline().font(.system(size: 10.5, weight: .medium)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
             }
             .buttonStyle(.plain)
@@ -876,6 +876,11 @@ struct WatchNumber: View {
                 .foregroundStyle(PaperLook.color(NoteInk.mix(tint, 0.65, NoteInk.black)))
             if !watch.history.isEmpty {
                 Text(watch.history.prefix(2).joined(separator: " · ")).font(.system(size: 11)).strikethrough().foregroundStyle(Color(white: 0.6))
+            }
+            // A crossing that couldn't be confirmed: its number, faint, as on the note itself (WatchCorner); the last
+            // accepted value stays above it.
+            if !watch.unconfirmed.isEmpty {
+                Text(watch.unconfirmed + " · couldn't confirm").font(.system(size: 9.5)).foregroundStyle(Color(white: 0.6)).lineLimit(1)
             }
         }
     }

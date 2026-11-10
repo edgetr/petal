@@ -122,6 +122,11 @@ struct NoteStoreCheck {
         picturesStay(root: root)
         pictureLinks(root: root)
         removeRefusedReadOnly(root: root)
+        helperAnswerDrained(root: root)
+        carriedOntoCopy(root: root)
+        heldThroughKeptBoth(root: root)
+        resultThroughConflict(root: root)
+        coverPrivacy(root: root)
         caseMove(root: root)
         versionGroups(root: root)
         canvasFile(root: root)
@@ -701,6 +706,272 @@ struct NoteStoreCheck {
 
     /// Remove (pictures that couldn't be saved) is refused on a read-only paper, its recovery bytes kept; on a
     /// note that can change, they go only once the note without their references has landed.
+    /// A helper's answer (Petal's own change of metadata, NoteHelpers.write): in the notes journal the moment it's
+    /// made, and on disk once quitting drains the session's work.
+    @MainActor static func helperAnswerDrained(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Helped")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Helped.md")
+        _ = NoteStore.create(NoteFile(id: "HJ1", body: "My words").serialized(), at: file, root: root)
+        let store = NoteStore(root: root)
+        let read = NoteStore.read(root)
+        store.preview(read.notes, notebooks: read.notebooks)
+        guard let paper = store.notes.first(where: { $0.noteID == "HJ1" }) else { return expect(false, "the note is read") }
+        let made = store.change(paper.key, touch: false) { file in
+            file.ink = [NoteHelp.Ink(who: "✦ Petal", text: "The answer")]
+            file.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", at: Date())
+        }
+        expect(made?.contains("The answer") == true && store.paper(paper.key)?.file.ink.first?.text == "The answer", "in memory at once")
+        NoteJournal.queue.sync {}
+        let journaled = NoteJournal.read(NoteJournal.file("HJ1"))
+        expect(journaled?.text.contains("The answer") == true && journaled?.text.contains("My words") == true, "in the notes journal the moment it's made (a whole snapshot)")
+        let drained = DispatchSemaphore(value: 0)
+        store.drain { drained.signal() }
+        let until = Date().addingTimeInterval(10)
+        while drained.wait(timeout: .now()) == .timedOut && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        expect(text(file)?.contains("The answer") == true && text(file)?.contains("My words") == true, "drained at quit: the answer is on disk, with the person's words", text(file) ?? "nil")
+    }
+
+    /// A helper's output whose write was kept beside the file (`.keptBoth`) stays in the helpers' journal, held while
+    /// the note is two papers, and is applied to the paper the person keeps; only a `.written` lets it go. A second
+    /// opinion's result is held the same way.
+    @MainActor static func heldThroughKeptBoth(root outer: URL) {
+        let fm = FileManager.default
+        let root = outer.appending(path: "HeldRoot")
+        let folder = root.appending(path: "Held")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Held.md")
+        _ = NoteStore.create(NoteFile(id: "HK1", body: "Mine").serialized(), at: file, root: root)
+        let store = NoteStore(root: root)
+        func reread() { let read = NoteStore.read(root); store.preview(read.notes, notebooks: read.notebooks) }
+        func settle(_ until: () -> Bool) {
+            let end = Date().addingTimeInterval(10)
+            while !until() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        }
+        reread()
+        guard let paper = store.notes.first(where: { $0.noteID == "HK1" }) else { return expect(false, "the note is read") }
+        // The answer and a second opinion's result, journaled as made.
+        var answer = paper.file
+        answer.ink = [NoteHelp.Ink(who: "✦ Petal", text: "The answer"),
+                      NoteHelp.Ink(who: "GPT", text: "A hole", objections: 1)]
+        answer.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", at: Date())
+        let entry = HelperJournal.Entry(noteID: "HK1", answer: answer.serialized(), at: Date())
+        var journal = HelperJournal.adding(entry, to: [])
+        let held = NoteFile.parse(entry.answer, fallbackID: "HK1", fallbackDate: entry.at)
+        // Changed on another Mac before it lands: the write is kept beside the file.
+        try? Data(NoteFile(id: "HK1", body: "Elsewhere").serialized().utf8).write(to: file)
+        var outcome: NoteStore.Outcome?
+        _ = store.change(paper.key, edit: { NoteHelp.applyAnswer(held, to: &$0) }, done: { outcome = $0 })
+        settle { outcome != nil }
+        guard case .keptBoth(let copy)? = outcome else { return expect(false, "the answer's write was kept beside the file", "\(String(describing: outcome))") }
+        // The rule NoteHelpers keeps: an entry goes only when its write landed on the paper meant (`.written`).
+        if outcome == .written { journal.removeAll { $0 == entry } }
+        expect(journal == [entry], "kept beside the file (.keptBoth): still held in the journal")
+        reread()
+        let papers = store.notes.filter { $0.noteID == "HK1" }
+        expect(NoteHelp.answerTarget(papers: papers.count, readOnly: papers.first.map(store.readOnly) ?? true) == .hold,
+               "two papers now: held, not written to either", "\(papers.count)")
+        // The person keeps the file the other Mac wrote: the copy goes, the note is one paper again.
+        try? fm.removeItem(at: copy)
+        reread()
+        guard let kept = store.notes.first(where: { $0.noteID == "HK1" }) else { return expect(false, "the kept paper is read") }
+        expect(NoteHelp.answerTarget(papers: store.notes.filter { $0.noteID == "HK1" }.count, readOnly: store.readOnly(kept)) == .write,
+               "one writable paper again: the held answer is applied")
+        outcome = nil
+        _ = store.change(kept.key, edit: { NoteHelp.applyAnswer(held, to: &$0) }, done: { outcome = $0 })
+        settle { outcome != nil }
+        if outcome == .written { journal.removeAll { $0 == entry } }
+        expect(outcome == .written && journal.isEmpty, "landed on the kept paper (.written): let go", "\(String(describing: outcome))")
+        let landed = text(file) ?? ""
+        expect(landed.contains("Elsewhere") && landed.contains("The answer") && landed.contains("A hole"),
+               "the kept paper has its own words, the answer and the second opinion's result", landed)
+    }
+
+    /// A run's result is one value through the journal and one based write (the store's own `change`, as NoteHelpers
+    /// writes): a recalculation whose note went into conflict leaves no "done" without its formula, on either paper,
+    /// and both land together on the paper kept. A reviewer's result, landing on a note whose answer changed on
+    /// another Mac meanwhile, adds only its own opinion: the newer answer on disk stays as it is.
+    @MainActor static func resultThroughConflict(root outer: URL) {
+        let fm = FileManager.default
+        let root = outer.appending(path: "ResultRoot")
+        let folder = root.appending(path: "Results")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Sums.md")
+        var working = NoteFile(id: "RS1", body: "Flights: 412\nHotel: 300")
+        working.helper = NoteHelp.Helper(state: .working, who: "✦ Petal", step: "Working out the formula", at: Date())
+        _ = NoteStore.create(working.serialized(), at: file, root: root)
+        let store = NoteStore(root: root)
+        func reread() { let read = NoteStore.read(root); store.preview(read.notes, notebooks: read.notebooks) }
+        func settle(_ until: () -> Bool) {
+            let end = Date().addingTimeInterval(10)
+            while !until() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        }
+        reread()
+        guard let paper = store.notes.first(where: { $0.noteID == "RS1" }) else { return expect(false, "the note is read") }
+        // The recalculation's one result: its formula and `done`, journaled as one entry.
+        let done = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", asked: "@Petal make this recalculate", at: Date())
+        let result = NoteHelp.Result(answer: nil, calc: NoteHelp.Calc(label: "Total", formula: "sum()"), helper: .set(done))
+        var journal = HelperJournal.adding(result, note: "RS1", notebook: "Results", sources: [], at: Date(), to: [])
+        guard journal.count == 1 else { return expect(false, "a result is one journal entry") }
+        let entry = journal[0]
+        let held = NoteFile.parse(entry.answer, fallbackID: "RS1", fallbackDate: entry.at)
+        // The note changes on another Mac before it lands: conflict.
+        var elsewhere = working
+        elsewhere.body = "Flights: 412\nHotel: 300\nTrain: 80"
+        try? Data(elsewhere.serialized().utf8).write(to: file)
+        var outcome: NoteStore.Outcome?
+        _ = store.change(paper.key, edit: { NoteHelp.applyAnswer(held, to: &$0) }, done: { outcome = $0 })
+        settle { outcome != nil }
+        guard case .keptBoth(let copy)? = outcome else { return expect(false, "the result's write was kept beside the file", "\(String(describing: outcome))") }
+        if outcome == .written { journal.removeAll { $0 == entry } }
+        let original = NoteFile.parse(text(file) ?? "", fallbackID: "x", fallbackDate: Date())
+        expect(original.calc == nil && original.helper?.state != .done, "in conflict: the note says neither done nor a formula", text(file) ?? "")
+        let beside = NoteFile.parse(text(copy) ?? "", fallbackID: "x", fallbackDate: Date())
+        expect((beside.calc != nil) == (beside.helper?.state == .done), "the copy kept beside it never has done without the formula either", text(copy) ?? "")
+        expect(journal == [entry], "and the whole result is still held")
+        // Keep this one (the other Mac's file): the held result lands whole, in one write.
+        try? fm.removeItem(at: copy)
+        reread()
+        guard let kept = store.notes.first(where: { $0.noteID == "RS1" }) else { return expect(false, "the kept paper is read") }
+        outcome = nil
+        _ = store.change(kept.key, edit: { NoteHelp.applyAnswer(held, to: &$0) }, done: { outcome = $0 })
+        settle { outcome != nil }
+        let landed = NoteFile.parse(text(file) ?? "", fallbackID: "x", fallbackDate: Date())
+        expect(outcome == .written && landed.calc?.formula == "sum()" && landed.helper?.state == .done && landed.body.contains("Train: 80"),
+               "kept: the formula and done land together on the paper kept, its words as they were", text(file) ?? "")
+
+        // A reviewer's result on a note whose answer was replaced from another Mac while it worked.
+        let reviewedFile = folder.appending(path: "Reviewed.md")
+        let first = NoteHelp.Ink(who: "✦ Petal", text: "It adds up to 712.")
+        var before = NoteFile(id: "RS2", body: "Question")
+        before.ink = [first]
+        _ = NoteStore.create(before.serialized(), at: reviewedFile, root: root)
+        reread()
+        let opinion = NoteHelp.Result(opinion: NoteHelp.Ink(who: "GPT 6.1 Sol", text: "1. Is the train in it?", objections: 1), reviewed: NoteHelp.inkHash(first), helper: .keep)
+        let newer = NoteHelp.Ink(who: "✦ Petal", text: "It adds up to 792, with the train.")
+        var synced = before
+        synced.ink = [newer]
+        try? Data(synced.serialized().utf8).write(to: reviewedFile)
+        reread()
+        guard let reviewed = store.notes.first(where: { $0.noteID == "RS2" }) else { return expect(false, "the reviewed note is read") }
+        outcome = nil
+        _ = store.change(reviewed.key, edit: { opinion.apply(to: &$0) }, done: { outcome = $0 })
+        settle { outcome != nil }
+        let after = NoteFile.parse(text(reviewedFile) ?? "", fallbackID: "x", fallbackDate: Date()).ink
+        expect(outcome == .written && after.count == 2 && after[0] == newer && after[1].who == "GPT 6.1 Sol" && after[1].opinion,
+               "a reviewer's result on disk: the newer answer untouched, only its opinion added", text(reviewedFile) ?? "")
+        expect(after.count == 2 && NoteHelp.reviewedEarlier(after[1], among: after) && after[1].heading(among: after).hasSuffix(NoteHelp.earlierWords),
+               "and its opinion says it reviewed an earlier answer")
+    }
+
+    /// A session's writes after a conflict copy: the person's typing and a helper's metadata go in one snapshot (one
+    /// based write: one copy, never two), and a later write made on it carries onto that copy, never a third paper.
+    @MainActor static func carriedOntoCopy(root outer: URL) {
+        let fm = FileManager.default
+        // A notes folder of its own (nothing another check left behind).
+        let root = outer.appending(path: "CarriedRoot")
+        let folder = root.appending(path: "Carried")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Carried.md")
+        _ = NoteStore.create(NoteFile(id: "CC1", body: "Before").serialized(), at: file, root: root)
+        let store = NoteStore(root: root)
+        let read = NoteStore.read(root)
+        store.preview(read.notes, notebooks: read.notebooks)
+        guard let paper = store.notes.first(where: { $0.noteID == "CC1" }), let base = paper.revision else { return expect(false, "the note is read") }
+        // Changed on another Mac meanwhile.
+        try? Data(NoteFile(id: "CC1", body: "Changed elsewhere").serialized().utf8).write(to: file)
+        // The person's typing (on the base they typed on) and the helper's answer: one snapshot.
+        _ = store.change(paper.key, base: base, edit: { file in
+            file.body = "Typed here"
+            file.ink = [NoteHelp.Ink(who: "✦ Petal", text: "First answer")]
+        })
+        // A later helper write, made on that snapshot.
+        _ = store.change(paper.key, touch: false, edit: { file in file.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", at: Date()) })
+        let drained = DispatchSemaphore(value: 0)
+        store.drain { drained.signal() }
+        let until = Date().addingTimeInterval(10)
+        while drained.wait(timeout: .now()) == .timedOut && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let papers = ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".md") }.sorted()
+        expect(papers.count == 2, "one conflict copy, never a third paper", "\(papers)")
+        let copy = papers.first { $0 != "Carried.md" }.map { folder.appending(path: $0) }
+        expect(text(file)?.contains("Changed elsewhere") == true && text(file)?.contains("First answer") == false, "the other Mac's words stay in the file")
+        expect(copy.flatMap(text)?.contains("Typed here") == true && copy.flatMap(text)?.contains("First answer") == true
+               && copy.flatMap(text)?.contains("state: done") == true, "the typing, the answer and the later write all on the one copy", copy.flatMap(text) ?? "nil")
+        // The rule itself.
+        expect(NoteShelf.carryTarget(base: "t1", carried: ("/c.md", "t1", "C1"))?.path == "/c.md" && NoteShelf.carryTarget(base: "t1", carried: ("/c.md", "t1", "C1"))?.id == "C1"
+               && NoteShelf.carryTarget(base: "t0", carried: ("/c.md", "t1", "C1")) == nil && NoteShelf.carryTarget(base: "t1", carried: nil) == nil,
+               "a write made on what was kept beside the file goes there, checked against the copy's own id; any other, the file")
+        // An identity write's conflict copy (a note with no id of its own given one, while its file changed elsewhere):
+        // the next write carries onto that copy, checked against the copy's new id, never a third paper.
+        let idless = root.appending(path: "Idless")
+        try? fm.createDirectory(at: idless, withIntermediateDirectories: true)
+        let handFile = idless.appending(path: "By hand.md")
+        _ = NoteStore.create("Written by hand", at: handFile, root: root)
+        let session = 9_000_001
+        NoteDisk.states[session] = NoteDisk.State(url: handFile, noteID: NoteStore.noteID(of: "Written by hand", at: handFile, root: root), revision: "Written by hand")
+        try? Data("Changed elsewhere".utf8).write(to: handFile)
+        var given = NoteFile(id: "NEWID", body: "Written by hand")
+        let withID = given.serialized()
+        let identityWrite = NoteStore.perform(.write(text: withID, base: "Written by hand"), session: session, root: root)
+        given.body = "Written by hand, and more"
+        let next = NoteStore.perform(.write(text: given.serialized(), base: withID), session: session, root: root)
+        let idlessPapers = ((try? fm.contentsOfDirectory(atPath: idless.path)) ?? []).filter { $0.hasSuffix(".md") }
+        expect({ if case .keptBoth = identityWrite.outcome { return true } else { return false } }() && { if case .keptBoth = next.outcome { return true } else { return false } }()
+               && idlessPapers.count == 2, "the identity write's copy takes the next write too: two papers, not three", "\(idlessPapers)")
+        expect(idlessPapers.compactMap { text(idless.appending(path: $0)) }.contains { $0.contains("and more") && $0.contains("NEWID") } && text(handFile) == "Changed elsewhere",
+               "the next write is on the copy (its new id); the file keeps what changed elsewhere")
+        NoteDisk.states[session] = nil
+    }
+
+    /// Notebook privacy read from cover files only (Phase 3's rule), on real folders: the cover and its conflict copy
+    /// count, `cover: true` in another file doesn't, an unreadable cover makes it unknown, another note doesn't.
+    @MainActor static func coverPrivacy(root outer: URL) {
+        let fm = FileManager.default
+        let root = outer.appending(path: "CoverRoot")
+        let write = { (book: String, name: String, file: NoteFile) in
+            let folder = root.appending(path: book)
+            try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            try? Data(file.serialized().utf8).write(to: folder.appending(path: name))
+        }
+        var privateCover = NoteFile(id: "C1", body: "# About")
+        privateCover.cover = true
+        privateCover.set("private", .text("true"))
+        var openCover = privateCover
+        openCover.set("private", nil)
+        write("Closed", "About this notebook.md", privateCover)
+        write("Open", "About this notebook.md", openCover)
+        write("Open", "Plan.md", NoteFile(id: "N1", body: "words"))
+        write("Copy", "About this notebook.md", openCover)
+        write("Copy", "About this notebook (conflicted copy).md", privateCover)
+        write("Impostor", "About this notebook.md", openCover)
+        write("Impostor", "Secret plan.md", privateCover)   // cover: true and private in another file: ignored
+        write("Unreadable", "About this notebook.md", openCover)
+        write("OtherUnread", "About this notebook.md", openCover)
+        write("OtherUnread", "Locked note.md", NoteFile(id: "N2", body: "x"))
+        let lockedCover = root.appending(path: "Unreadable/About this notebook.md")
+        let lockedNote = root.appending(path: "OtherUnread/Locked note.md")
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: lockedCover.path)
+        try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: lockedNote.path)
+        let books = NoteStore.read(root).notebooks
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: lockedCover.path)
+        try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: lockedNote.path)
+        // Read by the store's one reading of a notebook's privacy (Phase 3's: isPrivate, privacyUnknown), which the
+        // helpers ask through NotePrivacy.
+        let isPrivate = { (name: String) in books.first { $0.name == name }?.isPrivate }
+        let unknown = { (name: String) in books.first { $0.name == name }?.privacyUnknown }
+        expect(isPrivate("Closed") == true && isPrivate("Open") == false, "a cover read: private or open")
+        expect(isPrivate("Copy") == true, "a cover's conflict copy counts (one says private: private)")
+        expect(isPrivate("Impostor") == true, "cover: true and private: true in a file that isn't the cover: not a cover, and its notebook isn't known to be open (it fails closed)",
+               "\(String(describing: isPrivate("Impostor"))) \(String(describing: unknown("Impostor")))")
+        expect(isPrivate("Unreadable") == true && unknown("Unreadable") == true, "an unreadable cover: unknown (private)")
+        expect(isPrivate("OtherUnread") == false && unknown("OtherUnread") == false, "another note unreadable doesn't make it unknown")
+        let privateBooks = NotePrivacy.privateBooks(notebooks: books.map { (name: $0.name, isPrivate: $0.isPrivate) }, held: ["Gone"])
+        expect(!NotePrivacy.readable(notebook: "Closed", privateBooks: privateBooks, asker: "Open") && NotePrivacy.readable(notebook: "Closed", privateBooks: privateBooks, asker: "Closed")
+               && NotePrivacy.readable(notebook: "Open", privateBooks: privateBooks, asker: nil) && !NotePrivacy.readable(notebook: "Gone", privateBooks: privateBooks, asker: nil),
+               "what a helper may read follows: a Private (or unknown, or unread) notebook only from inside it")
+    }
+
     @MainActor static func removeRefusedReadOnly(root: URL) {
         let fm = FileManager.default
         let folder = root.appending(path: "Removal")

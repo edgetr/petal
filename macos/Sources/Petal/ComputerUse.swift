@@ -69,7 +69,13 @@ final class ComputerUse {
         var apps: Set<String> = []
         var stopped = false
         var last = Date()
-        let cancel = Acting.Cancel()
+        /// For a note's helper, bound to its run (`Acting.Cancel(run:)`): stopped whenever that run isn't running.
+        let cancel: Acting.Cancel
+
+        init(turn: String, run: RunToken? = nil) {
+            self.turn = turn
+            cancel = Acting.Cancel(run: run)
+        }
         /// The Buy cards the person answered Buy in this reply: each lets payment info fill on its exact host, in its
         /// window, with its card (Vault.Checkout).
         var checkouts: [Vault.Checkout] = []
@@ -155,6 +161,10 @@ final class ComputerUse {
         sweep()
         if let refusal = refusal() { return fail(refusal) }
         guard let caller, !caller.isEmpty else { return fail(Self.oldTools) }
+        // A note's helper whose note moved to a place that isn't in front: its default look and act wait for it,
+        // never taken from what was there before (or what's in front now).
+        if (args["app"] as? String ?? "").trimmingCharacters(in: .whitespaces).isEmpty, args["front"] as? Bool != true,
+           let waiting = app.claude.helperWaiting(caller) { return fail(waiting) }
         if name == "petal_ui" { look(args, caller: caller, gone: gone, send, fail) } else { act(args, caller: caller, gone: gone, send, fail) }
     }
 
@@ -179,7 +189,7 @@ final class ComputerUse {
                       _ fail: @escaping (String) -> Void) {
         let named = (args["app"] as? String ?? "").trimmingCharacters(in: .whitespaces)
         // A sticky note's own window, as petal_look does, unless an app or what's in front is asked for.
-        let place = named.isEmpty && args["front"] as? Bool != true && app.claude.notesOn ? app.claude.note(withID: caller)?.place : nil
+        let place = named.isEmpty && args["front"] as? Bool != true ? app.claude.placed(caller) : nil
         let target: NSRunningApplication?
         if let place {
             target = place.running
@@ -626,7 +636,8 @@ final class ComputerUse {
 
     private func fresh(_ caller: String, turn: String, task: String = "") -> Session {
         if sessions[caller] != nil { cancelWork(of: caller) }
-        var made = Session(turn: turn)
+        // A note's helper: every action of the reply is bound to its run's token, checked right before it acts.
+        var made = Session(turn: turn, run: app.claude.note(withID: caller)?.agent.token)
         made.task = task
         sessions[caller] = made
         return made
@@ -739,7 +750,11 @@ final class ComputerUse {
         sessions[job.caller]?.last = Date()
         if let error = stale(job) { job.fail(error); return finished() }
         let map = maps[job.caller] ?? job.map
-        agent(job.caller)?.activity = job.caption
+        // What it's doing, as its chat's activity: shielded here, where it's made, with no wait and no hop (so
+        // captions can't arrive out of order), and only for the turn this job belongs to (`stale` just said it isn't over).
+        if let agent = agent(job.caller), sessions[job.caller].map({ $0.turn == "\(agent.turn)" }) ?? false {
+            agent.caption(job.caption, turn: agent.turn)
+        }
         guard map.ownPlace else { return show(job, map) }
         decide(job, map, since: Date())
     }
@@ -998,7 +1013,9 @@ final class ComputerUse {
         cursor.hide()
         for caller in callers {
             cancelWork(of: caller)
-            if let agent = app.claude.note(withID: caller)?.agent, agent.running { agent.personStopped() }
+            // A note's helper stops through its run (NoteHelpers.stop); a chat is told it was stopped.
+            if let paper = app.claude.note(withID: caller)?.paper { app.paper.helpers.stop(paper) }
+            else if let agent = app.claude.note(withID: caller)?.agent, agent.running { agent.personStopped() }
         }
         keepSweeping()
     }

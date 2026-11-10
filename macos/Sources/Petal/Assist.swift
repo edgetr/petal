@@ -82,7 +82,12 @@ final class Assist {
              allow: String = "Allow", owner: String?, keep: String? = nil, mark: AgentAccess.Agent? = nil, kept: (() -> Void)? = nil,
              typed: ((VaultForm.Answer) -> Void)? = nil, done: @escaping (Bool) -> Void) {
         // `always` (the vault) asks every time: neither Full access nor an earlier Always skips it.
-        if form == nil, !always, !warn, config.string("claudeAccess") == "full" || config.strings("aiAllowed").contains(kind) { return done(true) }
+        // An automatic approval (an Always given earlier, or Full access) is registered on the asking helper's run
+        // first: taking that Always back cancels every run using it. A run that isn't going on is refused.
+        if form == nil, !always, !warn,
+           let grant = NoteHelp.autoGrant(kind: kind, fullAccess: config.string("claudeAccess") == "full", allowed: config.strings("aiAllowed")) {
+            return done(app.paper.helpers.authorized(owner, grant))
+        }
         settle(false)   // one question at a time: a newer one replaces an older one, which is declined
         formTyped = typed
         keptAlways = keep == nil ? nil : kept
@@ -92,7 +97,10 @@ final class Assist {
         answer = done
         // In the chat when it's open and the question is its own (the card shows there); over the dock otherwise
         // (another chat or AI session asking).
-        if !app.claude.isOpen || !showsInChat(request) {
+        if let owner, app.paper.helpers.owns(owner) {
+            // A helper in a note asks on the note itself.
+            app.paper.helpers.asking(owner)
+        } else if !app.claude.isOpen || !showsInChat(request) {
             // Over the dock; with no Petal dock showing (macOS's in use), in the chat asking, which shows the question.
             if app.docks.focusedDock?.panel != nil { app.popups.show(FocusCard(kind: .ask, title: title, reason: detail)) }
             else if let owner, let note = app.claude.note(withID: owner) { app.claude.present(note) }
@@ -119,6 +127,7 @@ final class Assist {
         }
         formTyped = nil
         if choice == .always, pending.keep != nil { keptAlways?() }
+        app.paper.helpers.answered(pending, choice)
         if choice == .always, !pending.every {
             var allowed = config.strings("aiAllowed")
             if !allowed.contains(pending.kind) { allowed.append(pending.kind); config.set("aiAllowed", allowed) }
@@ -175,7 +184,20 @@ final class Assist {
     /// client hangs up, its cards are answered Don't (hungUp) and what it started off the main thread neither asks nor
     /// acts.
     func handle(_ name: String, _ json: String, note: String? = nil, who: AgentAccess.Caller? = nil, request: IPC.Pending? = nil,
-                reply: @escaping @MainActor (String) -> Void) {
+                reply answer: @escaping @MainActor (String) -> Void) {
+        // A note's helper: the admission gate (NoteHelpers.admit), from what's true now, before the tool runs and
+        // again right before its answer goes back (what it waited on may have changed meanwhile).
+        let reply: @MainActor (String) -> Void = { [weak self] text in
+            if let refusal = self?.app.paper.helpers.admitTool(note) {
+                let data = (try? JSONSerialization.data(withJSONObject: ["error": refusal])) ?? Data("{}".utf8)
+                return answer(String(decoding: data, as: UTF8.self))
+            }
+            answer(text)
+        }
+        if let refusal = app.paper.helpers.admitTool(note) {
+            let data = (try? JSONSerialization.data(withJSONObject: ["error": refusal])) ?? Data("{}".utf8)
+            return answer(String(decoding: data, as: UTF8.self))
+        }
         // Read on any thread: the socket's own flag, set the moment its client closes. Every change made for an
         // outside caller reads it on the thread making the change, right before it (`off`, an act's or a vault
         // call's `Acting.Cancel`, a routine's `RoutineStop`), never waiting for the main thread's `hungUp`.
@@ -191,7 +213,10 @@ final class Assist {
         let fail = { (text: String) in send(["error": text]) }
         switch name {
         // The note's window as it is now (a note stuck to none, or notes off: what's in front).
-        case "petal_look": look(args, place: app.claude.notesOn ? note.flatMap { app.claude.note(withID: $0) }?.place : nil, note: note, send)
+        case "petal_look":
+            // A note's helper waiting for its note's place: never what was there before, or what's in front now.
+            if (args["app"] as? String ?? "").isEmpty, args["front"] as? Bool != true, let waiting = app.claude.helperWaiting(note) { return fail(waiting) }
+            look(args, place: app.claude.placed(note), note: note, send)
         case "petal_apps": apps(args, caller: note, live: live, send, fail)
         case "petal_windows": windows(args, caller: note, live: live, send, fail)
         case "petal_trash": trash(args, caller: note, live: live, send, fail)
@@ -225,7 +250,8 @@ final class Assist {
             app.viewers.handle(name, args, caller: note ?? "petal", live: live, send, fail)
         case _ where NoteDesk.tools.contains(name):
             // Its asker hanging up stops what's still to come: each change checks `live` right before it's made.
-            app.paper.handle(name, args, asker: note, live: live, send, fail)
+            // `asker`: the note a helper's request comes from (its paper's id), what Private notebooks go by; `caller`: its chat.
+            app.paper.handle(name, args, asker: note.flatMap { app.claude.note(withID: $0)?.paper }, caller: note, live: live, send, fail)
         case "petal_memories":
             let mode = args["mode"] as? String
             send(["memories": memories.filter { mode == nil || $0.mode == mode || $0.mode.isEmpty }.map(record)])

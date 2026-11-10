@@ -40,12 +40,14 @@ extension ClaudePanel {
         let asking = PetalApp.shared.assist.pending.flatMap { $0.owner == note.id.uuidString ? $0.title : nil }
         let waiting = !agent.running && !agent.waiting.isEmpty
         return NoteStatus.Facts(running: agent.running || waiting, ready: note.ready, asking: asking, needs: agent.needs,
-                                activity: waiting ? "Waiting for another note to finish" : agent.activity)
+                                activity: waiting ? "Waiting for another note to finish" : agent.activity.text)
     }
 
     /// The notes the preview shows, waiting for the person first.
     var previewItems: [NotePreviewItem] {
-        let all = notes.map { ($0, facts($0)) }
+        // A helper of a note in a Private notebook never shows here.
+        let helpers = PetalApp.shared.paper.helpers
+        let all = notes.filter { $0.paper == nil || helpers.previewable($0) }.map { ($0, facts($0)) }
         let assist = PetalApp.shared.assist
         return NoteStatus.order(all.map(\.1)).map { index in
             let (note, facts) = all[index]
@@ -70,6 +72,7 @@ extension ClaudePanel {
     /// (or one whose window is gone) opens as it is.
     func openFromPreview(_ id: UUID) {
         guard let note = notes.first(where: { $0.id == id }) else { return }
+        if note.paper != nil { return PetalApp.shared.paper.helpers.show(note) }
         if notesOn, note.attached, let place = note.place { go(to: note, place: place) } else { present(note) }
     }
 
@@ -82,6 +85,8 @@ extension ClaudePanel {
 
     /// Stop, from the preview or the note's own panel.
     func stop(_ note: StickyNote) {
+        // A note's helper stops through its run (NoteHelpers.stop), wherever Stop was pressed.
+        if let paper = note.paper { return PetalApp.shared.paper.helpers.stop(paper) }
         if let unsent = note.agent.withdrawWaiting() {
             note.draft = [unsent, note.draft].filter { !$0.isEmpty }.joined(separator: "\n\n")
             return
@@ -216,7 +221,7 @@ struct NoteActivityLine: View {
                 }
             } else {
                 Image(systemName: "moon.zzz").font(.system(size: 10)).foregroundStyle(.secondary)
-                Text("In the background · " + NoteStatus.step(agent.activity)).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Text("In the background · " + NoteStatus.step(agent.activity.text)).font(.system(size: 11.5)).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 0)
             }

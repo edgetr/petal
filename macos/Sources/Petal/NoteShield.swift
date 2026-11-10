@@ -81,3 +81,111 @@ enum NoteShield {
         }
     }
 }
+
+// MARK: - Shielded: what a note's helper may tell an AI
+
+/// Text a note's helper may tell an AI: made only here, from text redacted whole with the vault's index (a place
+/// filtered for apps kept private first), or derived from such text after it was redacted (its title, a prefix, a
+/// range of it). Prompts are written as `Shielded` literals: their interpolation takes only other `Shielded` values
+/// and numbers, so a raw `String` can't be put into one; `Agent.send(_: Shielded)`, Brain's helper calls and every
+/// helper prompt builder take nothing else.
+struct Shielded: Equatable, Sendable, CustomStringConvertible, ExpressibleByStringInterpolation {
+    typealias StringLiteralType = StaticString
+    let text: String
+
+    fileprivate init(verified text: String) { self.text = text }
+    /// Petal's own words (a literal in its code).
+    init(stringLiteral value: StaticString) { text = value.description }
+    init(stringInterpolation: Interpolation) { text = stringInterpolation.text }
+
+    struct Interpolation: StringInterpolationProtocol {
+        typealias StringLiteralType = StaticString
+        fileprivate var text = ""
+        init(literalCapacity: Int, interpolationCount: Int) { text.reserveCapacity(literalCapacity) }
+        mutating func appendLiteral(_ literal: StaticString) { text += literal.description }
+        mutating func appendInterpolation(_ value: Shielded) { text += value.text }
+        mutating func appendInterpolation(_ value: Int) { text += String(value) }
+        /// A number exactly as it is (never rounded: a watcher's value is decided on, rounded only when drawn).
+        mutating func appendInterpolation(_ value: Double) {
+            text += value == value.rounded() && abs(value) < 1e15 ? String(Int64(value)) : String(value)
+        }
+    }
+
+    var description: String { text }
+    var isEmpty: Bool { text.isEmpty }
+
+    static func + (a: Shielded, b: Shielded) -> Shielded { Shielded(verified: a.text + b.text) }
+
+    static func joined(_ parts: [Shielded], separator: Shielded) -> Shielded {
+        Shielded(verified: parts.map(\.text).joined(separator: separator.text))
+    }
+
+    /// Cut after redaction: never through a secret, which is already gone.
+    func prefix(_ count: Int) -> Shielded { Shielded(verified: text.count > count ? String(text.prefix(max(0, count - 1))) + "…" : text) }
+
+    /// The title of a note's redacted text (derived after redaction).
+    var title: Shielded { Shielded(verified: NoteText.title(text)) }
+
+    /// The finish line ("done means …") in the redacted words.
+    var finishLine: Shielded? { NoteHelp.finishLine(text).map { Shielded(verified: $0) } }
+
+    /// Anything derived from the redacted text (a proof line, a link, a count's words): never from raw text.
+    func derive(_ make: (String) -> String) -> Shielded { Shielded(verified: make(text)) }
+    func deriveAll(_ make: (String) -> [String]) -> [Shielded] { make(text).map { Shielded(verified: $0) } }
+
+    /// Its first sentence (derived after redaction).
+    var firstSentence: Shielded { Shielded(verified: text.components(separatedBy: CharacterSet(charactersIn: ".\n")).first ?? text) }
+
+    /// The line without its @Petal.
+    var spoken: Shielded { Shielded(verified: NoteHelp.spoken(text)) }
+
+    /// The note's labelled numbers ("Flights: 412"), read only from its redacted text: a row any part of which was
+    /// redacted (it held a secret, or part of one) is left out, never cut down to what's left of it.
+    var rows: [(label: Shielded, value: Double)] {
+        text.components(separatedBy: "\n").filter { !$0.contains(UIMap.hidden) }
+            .flatMap { NoteHelp.values($0) }.map { (Shielded(verified: $0.label), $0.value) }
+    }
+
+    /// What a watcher in these (redacted) words watches for, and when.
+    var watch: (every: String, at: String, line: Shielded)? {
+        NoteHelp.watchWords(text).map { ($0.every, $0.at, Shielded(verified: $0.line)) }
+    }
+
+    /// What a chain in these (redacted) words asks once its note is done.
+    var chainAsk: Shielded? { NoteHelp.chainWords(text).map { Shielded(verified: $0.ask) } }
+
+    /// A range of the redacted text (a value found on a shielded page, and the words before it).
+    func substring(_ range: NSRange) -> Shielded {
+        let ns = text as NSString
+        let safe = NSIntersectionRange(range, NSRange(location: 0, length: ns.length))
+        return Shielded(verified: ns.substring(with: safe))
+    }
+}
+
+extension NoteShield {
+    /// What a line says when it can't be checked right now.
+    static let working: Shielded = "Working…"
+
+    /// A line shown outside its own chat (the AI button's preview, a note's status line, the pointer's caption), with
+    /// no wait: redacted now, where it's made, with the vault's index when that's already made and readable
+    /// (`VaultIndex.cached`, which never reads the Keychain); else a plain generic line. Never a hop, never a wait.
+    static func now(_ text: String, index: UIMap.SecretIndex?) -> Shielded {
+        guard let index, !index.unreadable, let made = shield([text], index: index)?.first else { return working }
+        return made
+    }
+
+    /// The one way to make `Shielded`: each text redacted whole with the vault's index (nothing cut or derived
+    /// before); nil while the vault can't be read.
+    static func shield(_ texts: [String], index: UIMap.SecretIndex) -> [Shielded]? {
+        guard !index.unreadable else { return nil }
+        return texts.map { Shielded(verified: index.redacted($0)) }
+    }
+
+    /// A note's place as a helper may tell it: an app kept private as only what it is (`scrubbed`), then every field
+    /// redacted whole, then its words and its sentence derived. Nil while the vault can't be read.
+    static func place(_ stick: NoteStick, appPrivate: Bool, index: UIMap.SecretIndex) -> (words: Shielded, quote: Shielded)? {
+        guard !index.unreadable else { return nil }
+        let place = (appPrivate ? stick.scrubbed : stick).redacted { index.redacted($0) }
+        return (Shielded(verified: place.words), Shielded(verified: place.quote))
+    }
+}

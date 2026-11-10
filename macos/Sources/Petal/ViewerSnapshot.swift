@@ -638,6 +638,14 @@ enum ViewerCheck {
     /// The twelfth review: a corrupt PDF reports its error to whoever waited for the load (never a success with 0
     /// pages); Petal's viewer with the keyboard is the desk's current place: "here" lists its margin notes,
     /// `stick: "here"` attaches to its file and page, and ⌃⌥N makes a note in its margin.
+    /// The store's notebooks as a read of the notes' folder finds them (the check has no folder watcher). The note
+    /// tools tell an agent only of notes in a notebook known to be open (helpers' Private notebooks: one the store
+    /// hasn't read counts as private), so the check reads them before it asks the tools.
+    private static func readBooks(_ app: PetalApp) {
+        let store = app.paper.store
+        store.preview(store.notes, notebooks: NoteStore.read(store.root).notebooks)
+    }
+
     private static func twelfth(_ source: URL, app: PetalApp) -> Bool {
         var ok = true
         func expect(_ condition: Bool, _ what: String) { if !condition { print("twelfth: FAIL \(what)"); ok = false } }
@@ -683,6 +691,8 @@ enum ViewerCheck {
         func notesHere() -> [String: Any]? {
             var listed: [String: Any]?
             var refused: String?
+            readBooks(app)
+
             app.paper.handle("petal_notes", ["here": true], live: { true }, { listed = $0 as? [String: Any] }, { refused = $0 })
             wait(10) { listed != nil || refused != nil }
             if let refused { print("twelfth: petal_notes refused: \(refused)") }
@@ -697,6 +707,8 @@ enum ViewerCheck {
         // stick: "here" from an agent: attached to the file and page.
         var wrote: Any?
         var refused: String?
+        readBooks(app)
+
         app.paper.handle("petal_note_write", ["text": "Stuck from the viewer twelve", "stick": "here"], live: { true }, { wrote = $0 }, { refused = $0 })
         wait(20) { wrote != nil || refused != nil }
         wait(5) { app.paper.store.notes.contains { $0.file.body == "Stuck from the viewer twelve" } }
@@ -705,6 +717,8 @@ enum ViewerCheck {
                "stick: \"here\" attaches to the viewer's file and page (\(refused ?? ""))")
         // Nothing stuck to a window or tab of Petal's own.
         var nowhere: Any?
+        readBooks(app)
+
         app.paper.handle("petal_note_write", ["text": "Not on a window twelve", "stick": "here", "to": "window"], live: { true }, { nowhere = $0 }, { nowhere = $0 })
         wait(20) { nowhere != nil }
         expect(app.paper.store.notes.first { $0.file.body == "Not on a window twelve" }?.file.places.isEmpty ?? true, "a window asked for in the viewer: stuck nowhere")
@@ -918,10 +932,14 @@ enum ViewerCheck {
         wait(20) { !onB.loading }
         app.viewers.keyID = onB.id
         var listed: [String: Any]?
+        readBooks(app)
+
         app.paper.handle("petal_notes", ["query": "On A fourteen"], live: { true }, { listed = $0 as? [String: Any] }, { _ in listed = [:] })
         wait(10) { listed != nil }
         let handle = (listed?["notes"] as? [[String: Any]])?.first?["id"] as? String ?? ""
         var stuck: Any?
+        readBooks(app)
+
         app.paper.handle("petal_note_stick", ["id": handle, "to": "file", "also": true], live: { true }, { stuck = $0 }, { stuck = $0 })
         wait(20) { stuck != nil }
         wait(5) { (app.paper.store.paper(paper.key)?.file.places.count ?? 0) == 2 }
