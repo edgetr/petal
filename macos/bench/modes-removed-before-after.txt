@@ -76,4 +76,4 @@ every window opened once, ms CPU                                 4409       3442
 every window opened once, MB peak                               431.7      399.1
 in the background after closing them all, ms CPU a second        10.3       10.2
 
-The app's executable (arm64): 24085040 bytes before, 21109728 after.
+The app's executable (arm64): 24085040 bytes before, 21109072 after.
