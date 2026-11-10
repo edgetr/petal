@@ -401,7 +401,7 @@ A check never waits a length of time and then looks: each wait is for the thing 
 
 ### A helper's own display
 
-With `runDisplays` on (off by default), a helper's windows open on a hidden display of its own (`RunDisplay.swift`, its pure rules in `RunDisplayPlan.swift`). What a helper's run has to do with it:
+With `runDisplays` on (the default), a helper's windows open on a hidden display of its own (`RunDisplay.swift`, its pure rules in `RunDisplayPlan.swift`). What a helper's run has to do with it:
 
 - **One display per note.** `NoteHelpers.begin` joins the run to its note's group (`RunDisplayRules.group`: `note-<id>`, under the name `NoteHelpers.displayRun(token)`), which makes nothing; the display is made the first time one of the note's runs opens something with `petal_apps` (`RunDisplays.need`). A second opinion is a new run on the same note, so it shares the display: `release` lets the ended run go one turn of the main queue later (`leaveDisplay(after: true)`), after `handOn` has begun the reviewer's run, which has joined by then.
 - **Every ending lets go.** `release` (every end: done, failed, stopped, the note gone) and `pause` and `park` (Pause takes the display away; Go on gets one again at the next open) call `leaveDisplay`; with the note's last run the display is removed. As a net, `RunDisplays` asks each run once a second whether it still goes (a helper's: its token is running) and lets it go after two misses.
