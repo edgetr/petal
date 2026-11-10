@@ -39,17 +39,12 @@ enum Doctor {
                 : ", signed \(signer ?? "ad hoc"): macOS may ask for its permissions again after each update."))
 
         // The files, which Petal won't overwrite while they're broken.
-        let seed = Bundle.main.url(forResource: "modes", withExtension: "json")
-        for (name, fallback) in [("settings.json", Data("{}\n".utf8)), ("dock.json", Data("{}\n".utf8)),
-                                 ("modes.json", seed.flatMap { try? Data(contentsOf: $0) })] {
+        let fallback = Data("{}\n".utf8)
+        for name in ["settings.json", "dock.json"] {
             let url = folder.appending(path: name)
-            guard FileManager.default.fileExists(atPath: url.path) else {
-                if name == "modes.json" { note("warn", "files", "modes.json is missing; Petal starts from its default modes.") }
-                continue
-            }
-            guard Config.parse(url) == nil else { continue }
+            guard FileManager.default.fileExists(atPath: url.path), Config.parse(url) == nil else { continue }
             var fixed: String?
-            if fix, let fallback {
+            if fix {
                 let backup = url.path + ".broken-" + Self.stamp()
                 try? FileManager.default.copyItem(atPath: url.path, toPath: backup)
                 try? fallback.write(to: url, options: .atomic)
@@ -61,35 +56,18 @@ enum Doctor {
         let unknown = settings.keys.filter { Config.defaults[$0] == nil }.sorted()
         if !unknown.isEmpty { note("warn", "files", "Unknown settings (ignored): \(unknown.joined(separator: ", ")).") }
 
-        // Modes.
-        let modesURL = folder.appending(path: "modes.json")
-        if var modes = Config.parse(modesURL) {
-            let ids = (modes["modes"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String }
-            var problems: [String] = []
-            var changed = false
-            if ids.isEmpty { problems.append("there are no modes") }
-            if let first = ids.first, !ids.contains(modes["defaultMode"] as? String ?? "") {
-                problems.append("the default mode doesn't exist")
-                if fix { modes["defaultMode"] = first; changed = true }
-            }
-            let workspaces = modes["workspaces"] as? [String: Any] ?? [:]
-            let stale = workspaces.filter { !ids.contains($0.value as? String ?? "") }
-            if !stale.isEmpty {
-                problems.append("Desktops \(stale.keys.sorted().joined(separator: ", ")) point at modes that don't exist")
-                if fix { modes["workspaces"] = workspaces.filter { ids.contains($0.value as? String ?? "") }; changed = true }
-            }
-            if changed { Config.writeObject(modes, to: modesURL) }
-            if problems.isEmpty {
-                let apps = Set((modes["modes"] as? [[String: Any]] ?? []).flatMap { $0["apps"] as? [String] ?? [] })
-                let missing = apps.filter { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) == nil }.sorted()
-                note("ok", "modes", "\(ids.count) modes." + (missing.isEmpty ? "" : " Not installed (skipped in the dock): \(missing.prefix(8).joined(separator: ", "))."))
-            } else {
-                note(ids.isEmpty ? "error" : "warn", "modes", "In modes.json: " + problems.joined(separator: "; ") + ".", fixed: changed ? "fixed" : nil)
-            }
+        // The dock's apps.
+        let dock = Config.parse(folder.appending(path: "dock.json")) ?? [:]
+        if let apps = dock["apps"] as? [String] {
+            let missing = apps.filter { !Sites.isWeb($0) && NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) == nil }.sorted()
+            note("ok", "apps", "\(apps.count) in your dock." + (missing.isEmpty ? "" : " Not installed (skipped in the dock): \(missing.prefix(8).joined(separator: ", "))."))
+        } else if FileManager.default.fileExists(atPath: folder.appending(path: "modes.json").path) {
+            // Petal for macOS had modes once; opening it moves the default mode's apps into the dock, unless it can't read them.
+            note("warn", "apps", "Your dock from when Petal had modes (modes.json) hasn't been moved over. Open Petal; if the dock stays empty, "
+                 + "modes.json can't be read: choose Import Dock in Petal's settings, or add apps with “+”.")
         }
 
         // macOS's Dock: never left hidden without Petal running.
-        let dock = Config.parse(folder.appending(path: "dock.json")) ?? [:]
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
             .contains { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && PetalProcess.isDock(pid: $0.processIdentifier) }
         if SystemDock.isReplaced && !running {
@@ -109,38 +87,6 @@ enum Doctor {
             && (dock["dock"] as? String ?? "petal") == "petal" {
             if fix { DockGuard.install() }
             note("warn", "dock", "The guard that gives macOS its Dock back if Petal crashes isn't installed.", fixed: fix ? "installed it" : nil)
-        }
-
-        // Per-mode windows: none left off-screen. The Dock guard runs without Accessibility, so it can't move
-        // windows; after a crash, Petal's next launch brings them back (or `petal restore-windows`).
-        let waiting = Parking.waiting()
-        if waiting > 0 && !running {
-            var fixed: String?
-            if fix && AXIsProcessTrusted() { fixed = "brought back \(Parking.restoreEverything())" }
-            note("error", "windows", "\(waiting) window\(waiting == 1 ? " is" : "s are") waiting off-screen since Petal last quit unexpectedly. "
-                 + "Open Petal, or run petal restore-windows, to bring them back.", fixed: fixed)
-        } else if settings["modeWindows"] as? Bool == true {
-            note("ok", "windows", "Each mode keeps its own windows. If Petal ever quits unexpectedly, its next launch brings back "
-                 + "the windows it had put away; the Dock guard can't move windows, so it doesn't.")
-        }
-
-        // Held notifications: the running Petal says whether it can hold them (macOS gives Petal.app its permissions,
-        // not this command).
-        let holdWanted = settings["holdNotifications"] as? Bool ?? true
-        let holdingModes = (Config.parse(modesURL)?["modes"] as? [[String: Any]] ?? []).filter { $0["hold"] as? Bool == true }
-        if holdWanted && !holdingModes.isEmpty && running {
-            let reply = MCP.petal("holding")
-            if let status = try? JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any] {
-                if status["works"] as? Bool == true {
-                    note("ok", "notes", "Holding notifications works (\(status["way"] as? String == "closer" ? "Petal closes macOS's banners" : "Do Not Disturb while holding")).")
-                } else {
-                    note("warn", "notes", "Petal holds no notifications. \(status["why"] as? String ?? "") Petal's settings, under Focus, show how.")
-                }
-            }
-        }
-        if FileManager.default.fileExists(atPath: Quiet.marker.path) && !running {
-            if fix { Quiet.turnOff(wait: true) }
-            note("warn", "notes", "Do Not Disturb that Petal turned on is still on, and Petal isn't running.", fixed: fix ? "turned it off" : nil)
         }
 
         // The AI apps.

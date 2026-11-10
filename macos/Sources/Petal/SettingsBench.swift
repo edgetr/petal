@@ -29,7 +29,7 @@ enum SettingsBench {
 
     /// Before anything reads the settings or Petal's state: a copy of the settings in a temporary folder, unless
     /// `PETAL_CONFIG_DIR` already points somewhere (only the real folder is read), and an empty temporary folder for
-    /// what Petal keeps in Application Support (`PETAL_SUPPORT_DIR`: activity, spend, sorting, chats, pages), so a
+    /// what Petal keeps in Application Support (`PETAL_SUPPORT_DIR`: spend, chats, pages, what routines did), so a
     /// headless run never reads or writes the person's state. The bench's own runs inherit both.
     static func isolate() {
         Headless.on = true
@@ -43,7 +43,7 @@ enum SettingsBench {
         let real = URL(fileURLWithPath: NSHomeDirectory()).appending(path: ".config/petal")
         let copy = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "petal-bench-\(getpid())")
         try? FileManager.default.createDirectory(at: copy, withIntermediateDirectories: true)
-        for name in ["modes.json", "settings.json", "dock.json", "instructions.md", "instructions.draft.md", "routines.json", "memory.json"] {
+        for name in ["settings.json", "dock.json", "instructions.md", "instructions.draft.md", "routines.json", "memory.json"] {
             try? FileManager.default.copyItem(at: real.appending(path: name), to: copy.appending(path: name))
         }
         setenv("PETAL_CONFIG_DIR", copy.path, 1)
@@ -603,7 +603,7 @@ enum WindowBench {
         _ = measure(window) { _ = app.settings.prepare(.dock) }
         for section in SettingsSection.allCases.dropFirst() + [.dock] { _ = measure(window) { send(.select(section)) } }
         // Opened again a moment after it was closed (as a person does), on the Dock page as Settings… opens it,
-        // and on Modes as "Edit in Settings…" does.
+        // and on AI as "Open Settings › AI" does.
         var opens: [Sample] = [], others: [Sample] = []
         for _ in 0..<runs {
             closeAsAPerson(app.settings.window)
@@ -613,11 +613,11 @@ enum WindowBench {
         for _ in 0..<runs {
             closeAsAPerson(app.settings.window)
             RunLoop.main.run(until: Date().addingTimeInterval(1.5))
-            others.append(measure(window) { _ = app.settings.prepare(.modes) })
+            others.append(measure(window) { _ = app.settings.prepare(.claude) })
         }
         result.rows.append(("open, cold (first in a process)", stat(colds.compactMap { $0.opens["Settings"] })))
         result.rows.append(("open, warm (again)", stat(opens)))
-        result.rows.append(("open on Modes (again)", stat(others)))
+        result.rows.append(("open on AI (again)", stat(others)))
         // What opening costs before it: a fresh view made while the window is closed (nobody waits for it).
         var ahead: [Sample] = []
         for _ in 0..<runs {
@@ -698,7 +698,7 @@ enum WindowBench {
 
         // Doing nothing, each page alone in a fresh process.
         step("settings: idle")
-        for section in [SettingsSection.dock, .claude, .focus, .permissions] {
+        for section in [SettingsSection.dock, .claude, .permissions] {
             if let idle = idleChild("Settings: \(section.rawValue)") { result.idle.append((section.title, idle.cpu, idle.bodies)) }
         }
         // The person closes it.

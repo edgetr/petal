@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-// The maths behind per-mode windows (Parking.swift) and tiling (Tiling.swift), kept free of AppKit and Accessibility
+// The maths behind tiling (Tiling.swift) and where a window may go on a screen, kept free of AppKit and Accessibility
 // so `macos/checks/run.sh` can check it without moving a single window. Every rectangle here is in the window
 // server's coordinates, as Accessibility counts them: the origin at the top-left of the main screen, y going down.
 
@@ -206,56 +206,5 @@ enum ScreenArea {
         let x = min(max(frame.minX, area.minX), area.maxX - width)
         let y = min(max(frame.minY, area.minY), area.maxY - height)
         return CGRect(x: x, y: y, width: width, height: height)
-    }
-}
-
-// MARK: - Parking: other modes' windows wait just off-screen
-
-enum ParkingLayout {
-    /// How much of a parked window stays on its screen, as AeroSpace leaves it: one point, so macOS still counts the
-    /// window as on this Desktop and doesn't move it back.
-    static let sliver: CGFloat = 1
-
-    /// Where a window of `size` waits: its top-left one point inside the bottom-right corner of `screen`. When another
-    /// screen sits there (to the right or below), the bottom-left corner instead, so the window doesn't show up on
-    /// that screen; when both are taken, whichever overlaps the other screens least.
-    static func parkedOrigin(size: CGSize, screen: CGRect, others: [CGRect]) -> CGPoint {
-        let right = CGPoint(x: screen.maxX - sliver, y: screen.maxY - sliver)
-        let left = CGPoint(x: screen.minX + sliver - size.width, y: screen.maxY - sliver)
-        func spill(_ origin: CGPoint) -> CGFloat {
-            let frame = CGRect(origin: origin, size: size)
-            return others.reduce(0) { total, other in
-                let cut = frame.intersection(other)
-                return total + (cut.isNull ? 0 : cut.width * cut.height)
-            }
-        }
-        let a = spill(right), b = spill(left)
-        return b < a ? left : right
-    }
-
-    /// True when a window is where Petal parks windows: a sliver of it on a screen, no more than a few points. A
-    /// window found like this that Petal isn't keeping (left by a crash, or reopened there by its app) is brought
-    /// back. One wholly off every screen isn't: apps keep helper windows out there on purpose.
-    static func looksParked(_ frame: CGRect, screens: [CGRect]) -> Bool {
-        guard frame.width > 8, frame.height > 8 else { return false }
-        let visible = screens.reduce(CGFloat(0)) { total, screen in
-            let cut = frame.intersection(screen)
-            return total + (cut.isNull ? 0 : cut.width * cut.height)
-        }
-        return visible > 0 && visible <= 16
-    }
-
-    /// Where a stranded window goes back: its own size (no larger than the area), centred in the area.
-    static func rescued(_ frame: CGRect, in area: CGRect) -> CGRect {
-        let width = min(frame.width, area.width), height = min(frame.height, area.height)
-        return CGRect(x: (area.midX - width / 2).rounded(), y: (area.midY - height / 2).rounded(), width: width, height: height)
-    }
-
-    /// Which windows a mode switch moves on one Desktop: those owned by another mode go out, those of `mode` that
-    /// are parked come back. `owners` maps each window on the Desktop to its mode; `parked` the ones parked now.
-    static func plan(mode: String, owners: [UInt32: String], parked: Set<UInt32>) -> (park: [UInt32], restore: [UInt32]) {
-        let park = owners.filter { $0.value != mode && !parked.contains($0.key) }.map(\.key).sorted()
-        let restore = owners.filter { $0.value == mode && parked.contains($0.key) }.map(\.key).sorted()
-        return (park, restore)
     }
 }

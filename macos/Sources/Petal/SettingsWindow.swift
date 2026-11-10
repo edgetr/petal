@@ -65,17 +65,15 @@ final class SettingsWindow {
 }
 
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case dock, modes, claude, vault, routines, focus, apps, look, permissions, about
+    case dock, claude, vault, routines, apps, look, permissions, about
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .dock: "Dock"
-        case .modes: "Modes"
         case .claude: "AI"
         case .vault: "Vault"
         case .routines: "Routines"
-        case .focus: "Focus"
         case .apps: "Apps & Extras"
         case .look: "Look"
         case .permissions: "Permissions"
@@ -86,11 +84,9 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .dock: "dock.rectangle"
-        case .modes: "circle.hexagongrid.fill"
         case .claude: "sparkles"
         case .vault: "key.fill"
         case .routines: "wand.and.sparkles"
-        case .focus: "scope"
         case .apps: "square.grid.2x2.fill"
         case .look: "paintbrush.pointed.fill"
         case .permissions: "lock.shield.fill"
@@ -101,11 +97,9 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var tint: Color {
         switch self {
         case .dock: Color(red: 0.85, green: 0.21, blue: 0.50)
-        case .modes: Color(red: 0.69, green: 0.55, blue: 1.0)
         case .claude: Color(red: 0.85, green: 0.47, blue: 0.34)
         case .vault: Color(red: 0.32, green: 0.66, blue: 0.62)
         case .routines: Color(red: 0.95, green: 0.68, blue: 0.22)
-        case .focus: Color(red: 0.30, green: 0.68, blue: 0.95)
         case .apps: Color(red: 0.35, green: 0.78, blue: 0.55)
         case .look: Color(red: 1.0, green: 0.62, blue: 0.48)
         case .permissions: Color(red: 0.55, green: 0.58, blue: 0.65)
@@ -115,12 +109,10 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 
     var subtitle: String {
         switch self {
-        case .dock: "Choose your dock, and where it sits."
-        case .modes: "Each Desktop has its own mode, with its own apps."
+        case .dock: "Choose your dock, where it sits, and how windows sit with it."
         case .claude: "Claude, Codex, or no AI at all."
         case .vault: "What Petal AI fills in for you, without seeing secrets."
         case .routines: "What Petal does by itself, in your words."
-        case .focus: "Gentle cards when you drift from your mode."
         case .apps: "What the dock shows besides your apps."
         case .look: "Size, motion and color."
         case .permissions: "What macOS lets Petal see."
@@ -250,11 +242,9 @@ struct SettingsView: View {
         let _ = BodyCount.hit("page")
         switch selection {
         case .dock: DockSettings()
-        case .modes: ModesSettings()
         case .claude: ClaudeSettings()
         case .vault: VaultSettings()
         case .routines: RoutinesSettings()
-        case .focus: FocusSettings()
         case .apps: AppsSettings()
         case .look: LookSettings()
         case .permissions: PermissionsSettings()
@@ -381,7 +371,7 @@ struct DockSettings: View {
     var body: some View {
         let _ = BodyCount.hit("DockSettings")
         HStack(spacing: 14) {
-            DockChoice(title: "Petal", detail: "A mode for every Desktop, and Claude.", selected: app.config.whichDock == "petal") {
+            DockChoice(title: "Petal", detail: "Your apps, Petal Notes and Petal AI.", selected: app.config.whichDock == "petal") {
                 PetalDockSketch()
             } choose: { app.useDock("petal") }
             DockChoice(title: "macOS Dock", detail: "Apple's own. Petal stays off.", selected: app.config.whichDock == "macos") {
@@ -413,12 +403,13 @@ struct DockSettings: View {
             }
             Toggle("Open Petal at login", isOn: Binding(get: { app.openAtLogin }, set: { app.openAtLogin = $0 }))
                 .toggleStyle(.switch).controlSize(.small)
-            SettingToggle(key: "menuBarIcon", title: "Petal in the menu bar", detail: "Your mode, your Desktops, and updates.")
+            SettingToggle(key: "menuBarIcon", title: "Petal in the menu bar", detail: "Petal Notes, settings and updates.")
         }
 
+        WindowsCard()
         ShortcutsCard()
 
-        Card(title: "Bring your Dock along", footer: "Copies macOS's Dock into a mode called My Dock, which every Desktop starts in, and its folders into stacks. Your Dock itself doesn't change.") {
+        Card(title: "Bring your Dock along", footer: "Petal's dock gets the apps of macOS's Dock, in its order, in place of its own, and its folders as stacks. macOS's Dock itself doesn't change.") {
             HStack(spacing: -6) {
                 ForEach(app.systemDockApps.prefix(9), id: \.self) { id in
                     Image(nsImage: Apps.icon(id)).resizable().frame(width: 34, height: 34)
@@ -467,22 +458,17 @@ struct DockChoice<Sketch: View>: View {
     }
 }
 
-/// A small drawing of Petal's dock, with the default mode's own apps.
+/// A small drawing of Petal's dock, with its own apps.
 struct PetalDockSketch: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
-        let mode = app.config.mode(id: app.config.defaultMode)
         HStack(spacing: 5) {
-            ModeIcon(icon: mode?.icon ?? "", size: 10)
-                .foregroundStyle(mode.map { Color(nsColor: $0.color) } ?? .pink)
-                .frame(width: 22, height: 22)
-                .glassEffect(.regular, in: .circle)
-            ForEach((mode?.apps ?? []).filter(Apps.shows).prefix(6), id: \.self) { id in
-                Image(nsImage: Apps.icon(id)).resizable().frame(width: 22, height: 22)
-            }
             Image(systemName: "sparkle").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
                 .frame(width: 22, height: 22).background(SettingsSection.claude.tint.gradient, in: .circle)
+            ForEach(app.config.apps.filter(Apps.shows).prefix(7), id: \.self) { id in
+                DockIcon(id: id, size: 22)
+            }
         }
         .padding(6)
         .glassEffect(.regular, in: .capsule)
@@ -503,243 +489,6 @@ struct MacDockSketch: View {
         }
         .padding(6)
         .background(.white.opacity(0.18), in: .rect(cornerRadius: 10))
-    }
-}
-
-// MARK: - Modes
-
-struct ModesSettings: View {
-    @Environment(PetalApp.self) private var app
-    @State private var editing: Mode?
-
-    var body: some View {
-        let _ = BodyCount.hit("ModesSettings")
-        SettingToggle(key: "modes", title: "Focus modes", detail: "Each Desktop's own mode, with its own apps.")
-            .padding(16).glassEffect(.regular, in: .rect(cornerRadius: 20))
-        WindowsCard()
-
-        DescribeDayCard()
-        SuggestionsCard()
-
-        let columns = [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)]
-        LazyVGrid(columns: columns, spacing: 14) {
-            ForEach(app.config.modes) { mode in
-                ModeCard(mode: mode, isDefault: mode.id == app.config.defaultMode, desktops: app.config.desktops(in: mode.id))
-                    .onTapGesture { editing = mode }
-            }
-            Button {
-                editing = Mode(id: "mode\(Int(Date().timeIntervalSince1970) % 100000)", name: "New mode", icon: "circle.fill",
-                               color: NSColor(hex: "#5fb8ff")!, about: "", apps: [], sites: [], focusDelay: 0, allow: [])
-            } label: {
-                VStack(spacing: 8) {
-                    Image(systemName: "plus").font(.system(size: 22, weight: .semibold))
-                    Text("New mode").font(.system(size: 13, weight: .medium))
-                }
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, minHeight: 150)
-                .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
-            .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
-        }
-
-        Card(title: "Desktops", footer: "Switching Desktop swaps the dock to that Desktop's mode. Clicking the mode button in the dock changes it too.") {
-            let count = max(app.desktopCount, app.config.workspaces.keys.compactMap(Int.init).max() ?? 0, 1)
-            ForEach(1...count, id: \.self) { number in
-                HStack {
-                    Text("Desktop \(number)")
-                    Spacer()
-                    Picker("", selection: Binding(get: { app.config.mode(forDesktop: number)?.id ?? "" },
-                                                  set: { app.config.setMode($0, forDesktop: number) })) {
-                        ForEach(app.config.modes) { mode in Text(mode.name).tag(mode.id) }
-                    }
-                    .labelsHidden()
-                    .frame(width: 180)
-                }
-            }
-            Button("See every Desktop") { app.overview.show() }.buttonStyle(.glass)
-        }
-        ScheduleCard()
-        ShareDockCard()
-        .sheet(item: $editing) { mode in
-            ModeEditor(mode: mode, isNew: !app.config.modes.contains { $0.id == mode.id }).environment(app)
-        }
-    }
-}
-
-struct ModeCard: View {
-    let mode: Mode
-    let isDefault: Bool
-    let desktops: [Int]
-
-    var body: some View {
-        let _ = BodyCount.hit("ModeCard")
-        let color = Color(nsColor: mode.color)
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                ModeIcon(icon: mode.icon, size: 15)
-                    .foregroundStyle(.white)
-                    .frame(width: 34, height: 34)
-                    .background(color.gradient, in: .circle)
-                    .shadow(color: color.opacity(0.5), radius: 8, y: 3)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(mode.name).font(.system(size: 15, weight: .semibold))
-                    Text(mode.about.isEmpty ? " " : mode.about).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                }
-            }
-            HStack(spacing: -5) {
-                ForEach(mode.apps.filter(Apps.shows).prefix(7), id: \.self) { id in
-                    Image(nsImage: Apps.icon(id)).resizable().frame(width: 30, height: 30)
-                }
-                if mode.apps.isEmpty { Text("No apps yet").font(.system(size: 11)).foregroundStyle(.secondary) }
-            }
-            .frame(height: 30)
-            HStack(spacing: 6) {
-                if isDefault { Chip(text: "Default", color: color) }
-                ForEach(desktops, id: \.self) { Chip(text: "Desktop \($0)", color: color) }
-            }
-            .frame(height: 18)
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
-        .contentShape(.rect)
-        .glassEffect(.regular.tint(color.opacity(0.10)).interactive(), in: .rect(cornerRadius: 20))
-    }
-}
-
-struct Chip: View {
-    let text: String
-    let color: Color
-
-    var body: some View {
-        Text(text).font(.system(size: 10, weight: .semibold))
-            .padding(.horizontal, 7).padding(.vertical, 2)
-            .background(color.opacity(0.22), in: .capsule)
-    }
-}
-
-struct ModeEditor: View {
-    @Environment(PetalApp.self) private var app
-    @Environment(\.dismiss) private var dismiss
-    @State var mode: Mode
-    let isNew: Bool
-    @State private var adding = false
-    @State private var sitesText = ""
-
-    static let symbols = ["hammer", "pencil", "bubble.left.and.bubble.right", "book", "music.note", "gamecontroller",
-                          "paintbrush", "briefcase", "graduationcap", "film", "camera", "heart", "leaf", "moon",
-                          "sun.max", "cart", "dumbbell", "airplane", "house", "dock.rectangle", "sparkle", "circle.fill"]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                ModeIcon(icon: mode.icon, size: 18).foregroundStyle(.white)
-                    .frame(width: 44, height: 44).background(Color(nsColor: mode.color).gradient, in: .circle)
-                TextField("Name", text: $mode.name).font(.system(size: 20, weight: .semibold)).textFieldStyle(.plain)
-                ColorPicker("", selection: Binding(get: { Color(nsColor: mode.color) }, set: { mode.color = NSColor($0) }),
-                            supportsOpacity: false).labelsHidden()
-            }
-            LazyVGrid(columns: Array(repeating: GridItem(.fixed(30), spacing: 6), count: 11), spacing: 6) {
-                ForEach(Self.symbols, id: \.self) { symbol in
-                    Button { mode.icon = symbol } label: {
-                        Image(systemName: symbol).frame(width: 30, height: 30)
-                            .background(mode.icon == symbol ? Color(nsColor: mode.color).opacity(0.35) : .clear, in: .rect(cornerRadius: 8))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            TextField("What it's for (Claude sorts new apps with this)", text: $mode.about, axis: .vertical)
-                .lineLimit(2...3)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Apps").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
-                ScrollView(.horizontal) {
-                    HStack(spacing: 8) {
-                        ForEach(mode.apps, id: \.self) { id in
-                            VStack(spacing: 3) {
-                                Image(nsImage: Apps.icon(id)).resizable().frame(width: 36, height: 36)
-                                Text(Apps.name(id)).font(.system(size: 9)).lineLimit(1).frame(width: 52)
-                            }
-                            .overlay(alignment: .topTrailing) {
-                                Button { mode.apps.removeAll { $0 == id } } label: {
-                                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        Button { adding = true } label: {
-                            Image(systemName: "plus").frame(width: 36, height: 36).background(.quaternary, in: .rect(cornerRadius: 9))
-                        }
-                        .buttonStyle(.plain)
-                        .popover(isPresented: $adding) {
-                            AppPicker { mode.apps.append($0.id); adding = false }
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-            TextField("Sites, comma separated (domains like github.com, or words in tab titles)", text: $sitesText)
-            Toggle(isOn: Binding(get: { mode.isDistracting }, set: { mode.distracting = $0 })) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Distracting")
-                    Text("Pulls you away from work, like social media or games. Getting in takes a wait, and in other modes its apps and sites are blocked.")
-                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .toggleStyle(.switch)
-            if mode.isDistracting {
-                HStack {
-                    Text("Wait to get in")
-                    Slider(value: Binding(get: { mode.wait }, set: { mode.focusDelay = $0 }), in: 5...120, step: 5)
-                    Text("\(Int(mode.wait)) s").monospacedDigit().frame(width: 52)
-                }
-            }
-            Toggle("Hold notifications from other apps", isOn: $mode.hold).toggleStyle(.switch)
-            ShortcutPicker(name: $mode.shortcut)
-            HStack {
-                if !isNew {
-                    Button("Delete", role: .destructive) { app.config.delete(mode: mode.id); dismiss() }
-                    Button("Make default") { app.config.setDefaultMode(mode.id) }
-                }
-                Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("Save") {
-                    mode.sites = sitesText.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-                    app.config.save(mode)
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.glassProminent)
-            }
-        }
-        .padding(20)
-        .frame(width: 520)
-        .onAppear { sitesText = mode.sites.joined(separator: ", ") }
-    }
-}
-
-/// The "+" search: installed apps, filtered as you type.
-struct AppPicker: View {
-    let pick: (InstalledApp) -> Void
-    @State private var query = ""
-
-    var body: some View {
-        VStack(spacing: 8) {
-            TextField("Search apps", text: $query).textFieldStyle(.roundedBorder)
-            List(Apps.search(query).prefix(60)) { app in
-                Button { pick(app) } label: {
-                    HStack {
-                        Image(nsImage: Apps.icon(app.id)).resizable().frame(width: 20, height: 20)
-                        Text(app.name)
-                        Spacer()
-                    }
-                    .contentShape(.rect)
-                }
-                .buttonStyle(.plain)
-            }
-            .listStyle(.plain)
-        }
-        .padding(10)
-        .frame(width: 280, height: 360)
     }
 }
 
@@ -821,8 +570,7 @@ struct ClaudeSettings: View {
             }
             Card(title: "In the background") {
                 SettingToggle(key: "claudeUsage", title: "Usage ring", detail: "Around the \(provider.name) button, every 5 minutes.")
-                SettingToggle(key: "ai", title: "Sort new apps and sites", detail: "\(provider.name) decides which mode something new belongs to.")
-                DailySummaryRow()
+                SettingToggle(key: "ai", title: "Small jobs", detail: "Routines that sort files by what they are, and notes that answer in a line, ask \(provider.name)'s small model.")
             }
             Card(title: "Using your apps", footer: "Petal AI presses buttons, types and chooses menu items with a pink pointer of its own; yours stays where it is. It asks before it uses each app, and Stop or Esc ends it.") {
                 SettingToggle(key: "computerUse", title: "Let Petal AI use your apps", detail: "Never apps kept private, and never password fields.")
@@ -848,14 +596,13 @@ struct ClaudeSettings: View {
     }
 }
 
-/// What Petal AI remembers, everywhere and per mode, each with a way to forget it.
+/// What Petal AI remembers, each with a way to forget it.
 struct MemoryCard: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
         Card(title: "Memory", footer: "Petal AI keeps what helps it help you, so you don't have to say it twice. All of it is here; ask it to forget anything.") {
             SettingToggle(key: "aiMemory", title: "Remember what helps", detail: "What you ask it to, and what it notices along the way.")
-            SettingToggle(key: "aiLearns", title: "Learn from each mode", detail: "Once a day, from the apps you use in it and for how long.")
             if app.config.bool("aiMemory") {
                 if app.assist.memories.isEmpty {
                     Text("Nothing yet.").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -864,8 +611,6 @@ struct MemoryCard: View {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(memory.text).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 8)
-                        Text(app.config.modes.first { $0.id == memory.mode }?.name ?? "Everywhere")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
                         RoundButton(symbol: "xmark") { app.assist.forget(id: memory.id, matching: nil) }
                     }
                 }
@@ -925,38 +670,6 @@ struct PrivacyCard: View {
             }
             .fixedSize()
         }
-    }
-}
-
-/// The day's summary: on or off, and when.
-struct DailySummaryRow: View {
-    @Environment(PetalApp.self) private var app
-
-    var body: some View {
-        let time = app.config.string("dailySummary")
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Summary of the day").font(.system(size: 13))
-                Text("A card with your day in each mode, and a line from Petal AI.").font(.system(size: 11)).foregroundStyle(.secondary)
-            }
-            Spacer()
-            if !time.isEmpty {
-                DatePicker("", selection: Binding(get: { Self.date(time) }, set: { app.config.set("dailySummary", Self.text($0)) }),
-                           displayedComponents: .hourAndMinute).labelsHidden().datePickerStyle(.field)
-            }
-            Toggle("", isOn: Binding(get: { !time.isEmpty }, set: { app.config.set("dailySummary", $0 ? "18:00" : "") }))
-                .toggleStyle(.switch).labelsHidden()
-        }
-    }
-
-    static func date(_ text: String) -> Date {
-        let parts = text.split(separator: ":").compactMap { Int($0) }
-        return Calendar.current.date(bySettingHour: parts.first ?? 18, minute: parts.dropFirst().first ?? 0, second: 0, of: Date()) ?? Date()
-    }
-
-    static func text(_ date: Date) -> String {
-        let parts = Calendar.current.dateComponents([.hour, .minute], from: date)
-        return String(format: "%02d:%02d", parts.hour ?? 18, parts.minute ?? 0)
     }
 }
 
@@ -1262,9 +975,7 @@ final class InstructionsStore: @unchecked Sendable {
     }
 }
 
-// MARK: - Focus, apps, look
-
-// FocusSettings is in FocusSettings.swift.
+// MARK: - Apps, look
 
 struct AppsSettings: View {
     @Environment(PetalApp.self) private var app
@@ -1406,13 +1117,11 @@ struct PermissionsSettings: View {
 
     var body: some View {
         let _ = BodyCount.hit("PermissionsSettings")
-        Permission(symbol: "accessibility", title: "Accessibility", detail: "Window previews, minimized windows, badges, and focus cards.",
+        Permission(symbol: "accessibility", title: "Accessibility", detail: "Window previews, minimized windows, badges, notes on windows, and Petal AI using your apps.",
                    granted: trusted) { Windows.askForPermission() }
         Permission(symbol: "rectangle.dashed.badge.record", title: "Screen Recording", detail: "A picture of each window in previews; without it, they list windows by name. Petal never records: it takes a still while you hover an app.",
                    granted: capture) { Capture.askForPermission() }
-        Permission(symbol: "bell.badge", title: "Full Disk Access", detail: "Seeing notifications, to hold them in modes that hold them. Petal only reads Notification Center's list.",
-                   granted: app.notes.canRead) { NotificationAccessRow.openSettings() }
-        Permission(symbol: "safari", title: "Browsers", detail: "Which site a tab is on, and closing a distracting one. Each browser asks once.",
+        Permission(symbol: "safari", title: "Browsers", detail: "Which site a tab is on, for notes on a tab and for Petal AI. Each browser asks once.",
                    granted: Browsers.installed().isEmpty ? nil : app.browsers.allAllowed) { app.browsers.askAll {} }
         Permission(symbol: "music.note", title: "Music and Spotify", detail: "Now playing. macOS asks the first time a player is open.",
                    granted: nil) {}
@@ -1464,7 +1173,7 @@ struct AboutSettings: View {
                 .shadow(color: .black.opacity(0.3), radius: 18, y: 8)
             Text("Petal").font(.system(size: 30, weight: .bold))
             Text("Version \(app.version)").foregroundStyle(.secondary)
-            Text("A dock with a focus mode for every Desktop, and Claude built in. Free and open source, by Edgetr.")
+            Text("A dock with your notes and your AI built in. Free and open source, by Edgetr.")
                 .multilineTextAlignment(.center).font(.system(size: 13)).foregroundStyle(.secondary).frame(maxWidth: 380)
             HStack {
                 Button("Website") { NSWorkspace.shared.open(URL(string: "https://petal-dock.vercel.app")!) }.buttonStyle(.glass)

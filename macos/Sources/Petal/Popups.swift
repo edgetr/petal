@@ -3,7 +3,7 @@ import ImageIO
 import Observation
 import SwiftUI
 
-/// A borderless glass panel that sits over a dock slot: tooltips, previews, stacks and cards.
+/// A borderless glass panel that sits over a dock slot: tooltips, previews, stacks and Petal AI's question.
 @MainActor
 final class GlassPanel: NSPanel {
     private let hosting = NSHostingView(rootView: AnyView(EmptyView()))
@@ -55,45 +55,6 @@ final class GlassPanel: NSPanel {
         if front || !isVisible { orderFrontRegardless() }
     }
 
-    /// Shows a card next to `slot` (a mode button), with its tail pointing at it: above it on a bottom dock, beside
-    /// it on a side dock. The card is laid out once to find its place, then again with the tail where the button is.
-    func show<Content: View>(pointingAt slot: CGRect, dock: DockPanel, gap: CGFloat = 4, content: (Tail) -> Content) {
-        let position = PetalApp.shared.config.position
-        let edge: Tail.Edge = position == "left" ? .leading : position == "right" ? .trailing : .bottom
-        hosting.rootView = AnyView(content(Tail(edge: edge, offset: 0)).environment(PetalApp.shared))
-        hosting.layoutSubtreeIfNeeded()
-        let size = hosting.fittingSize
-        let screen = dock.screenRef ?? NSScreen.main ?? NSScreen.screens[0]
-        let area = screen.frame.insetBy(dx: 8, dy: 8)
-        var origin: CGPoint
-        switch edge {
-        case .leading: origin = CGPoint(x: slot.maxX + gap, y: slot.midY - size.height / 2)
-        case .trailing: origin = CGPoint(x: slot.minX - gap - size.width, y: slot.midY - size.height / 2)
-        case .bottom: origin = CGPoint(x: slot.midX - size.width / 2, y: slot.maxY + gap)
-        }
-        origin.x = min(max(origin.x, area.minX), area.maxX - size.width)
-        origin.y = min(max(origin.y, area.minY), area.maxY - size.height)
-        // How far the button is from the card's middle (SwiftUI counts y downward).
-        let offset = edge == .bottom ? slot.midX - (origin.x + size.width / 2) : (origin.y + size.height / 2) - slot.midY
-        hosting.rootView = AnyView(content(Tail(edge: edge, offset: offset)).environment(PetalApp.shared))
-        setFrame(NSRect(origin: origin, size: size).integral, display: true)
-        ignoresMouseEvents = !interactive
-        if alphaValue != 1 { Self.opaque(self) }
-        orderFrontRegardless()
-    }
-
-    /// At the screen's top right, under the menu bar.
-    func showInCorner<Content: View>(_ content: Content, on screen: NSScreen) {
-        hosting.rootView = AnyView(content.environment(PetalApp.shared))
-        hosting.layoutSubtreeIfNeeded()
-        let size = hosting.fittingSize
-        let visible = screen.visibleFrame
-        setFrame(NSRect(x: visible.maxX - size.width - 8, y: visible.maxY - size.height - 4, width: size.width, height: size.height).integral, display: true)
-        ignoresMouseEvents = !interactive
-        if alphaValue != 1 { Self.opaque(self) }
-        orderFrontRegardless()
-    }
-
     /// By a point on the screen (Petal AI's own pointer): below and to the right of it, kept on the screen.
     func show<Content: View>(_ content: Content, near point: CGPoint, on screen: NSScreen) {
         hosting.rootView = AnyView(content.environment(PetalApp.shared))
@@ -121,8 +82,8 @@ final class GlassPanel: NSPanel {
     /// Gone from sight, letting the mouse through, and showing nothing (so nothing in it keeps drawing), but still
     /// on the screen: taking a window with macOS's glass off the screen waits on the window server for up to half
     /// a second, which held the dock up every time a preview, a card or a tooltip went away.
-    /// One that took typing (a reply card, a secret) gives it back to the app in front, so keys don't go on to a
-    /// card no one can see.
+    /// One that took typing (a secret) gives it back to the app in front, so keys don't go on to a card no one can
+    /// see.
     func hide() {
         guard alphaValue != 0 || !ignoresMouseEvents else { return }
         alphaValue = 0
@@ -143,55 +104,6 @@ final class GlassPanel: NSPanel {
 
     /// Showing, not just on the screen (see `hide`).
     var shown: Bool { isVisible && alphaValue > 0 }
-}
-
-/// The small triangle on a card that points at the mode button it's about.
-struct Tail: Equatable {
-    enum Edge { case bottom, leading, trailing }
-    var edge: Edge
-    var offset: CGFloat
-    static let size: CGFloat = 9
-}
-
-/// A rounded card with its tail.
-struct CardShape: Shape {
-    let tail: Tail?
-    var radius: CGFloat = 16
-
-    func path(in rect: CGRect) -> Path {
-        guard let tail else { return RoundedRectangle(cornerRadius: radius, style: .continuous).path(in: rect) }
-        var body = rect
-        switch tail.edge {
-        case .bottom: body.size.height -= Tail.size
-        case .leading: body.origin.x += Tail.size; body.size.width -= Tail.size
-        case .trailing: body.size.width -= Tail.size
-        }
-        let path = RoundedRectangle(cornerRadius: radius, style: .continuous).path(in: body)
-        let half = Tail.size
-        var point = Path()
-        switch tail.edge {
-        case .bottom:
-            let x = min(max(body.midX + tail.offset, body.minX + radius + half), body.maxX - radius - half)
-            point.move(to: CGPoint(x: x - half, y: body.maxY - 1))
-            point.addLine(to: CGPoint(x: x, y: rect.maxY))
-            point.addLine(to: CGPoint(x: x + half, y: body.maxY - 1))
-        case .leading, .trailing:
-            let y = min(max(body.midY + tail.offset, body.minY + radius + half), body.maxY - radius - half)
-            let base = tail.edge == .leading ? body.minX + 1 : body.maxX - 1
-            point.move(to: CGPoint(x: base, y: y - half))
-            point.addLine(to: CGPoint(x: tail.edge == .leading ? rect.minX : rect.maxX, y: y))
-            point.addLine(to: CGPoint(x: base, y: y + half))
-        }
-        point.closeSubpath()
-        return path.union(point)
-    }
-}
-
-extension View {
-    /// Room inside the card for its tail.
-    func roomForTail(_ tail: Tail?) -> some View {
-        padding(tail?.edge == .bottom ? .bottom : tail?.edge == .leading ? .leading : .trailing, tail == nil ? 0 : Tail.size)
-    }
 }
 
 /// The slot's name, on a small glass pill outside the dock, with no delay. AppKit's own glass and a label, sized
@@ -251,22 +163,22 @@ final class Tooltips {
     func hide() { panel.alphaValue = 0 }   // see GlassPanel.hide
 }
 
-/// Stacks, previews and cards: one open at a time; clicking elsewhere closes the stack.
+/// Stacks, previews and Petal AI's question: one open at a time; clicking elsewhere closes the stack.
 @MainActor @Observable
 final class Popups {
     @ObservationIgnored private let panel = GlassPanel()
     @ObservationIgnored private let cardPanel = GlassPanel()
     @ObservationIgnored private var monitor: Any?
     private(set) var kind: String?           // "stack", "preview"
-    private(set) var card: FocusCard?
+    /// Petal AI's question is up over the dock (AskCard), for the person to answer there.
+    private(set) var asking = false
     /// The open stack's files.
     @ObservationIgnored private(set) var stack: StackContents?
     @ObservationIgnored private var anchor: String?
     @ObservationIgnored private weak var openDock: ScreenDock?
     @ObservationIgnored private var keys: Any?
-    @ObservationIgnored private var fade: DispatchWorkItem?
 
-    var anyOpen: Bool { kind != nil || card != nil }
+    var anyOpen: Bool { kind != nil || asking }
 
     init() {
         monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
@@ -275,12 +187,9 @@ final class Popups {
                 if !self.panel.frame.contains(NSEvent.mouseLocation) { self.closeAll() }
             }
         }
-        // Escape answers a card the way × does (cards never take the keyboard from the app in front).
+        // Escape answers the question Don't (it never takes the keyboard from the app in front).
         keys = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            MainActor.assumeIsolated {
-                guard event.keyCode == 53, let card = self?.card else { return }
-                PetalApp.shared.focus.dismiss(card)
-            }
+            MainActor.assumeIsolated { if event.keyCode == 53 { self?.closeAsk() } }
         }
     }
 
@@ -382,53 +291,30 @@ final class Popups {
         return corridor.standardized.insetBy(dx: -4, dy: -4).contains(mouse)
     }
 
-    /// One card at a time; a newer one replaces an older one. A card about a mode points at that mode's button.
-    func show(_ card: FocusCard) {
+    /// Petal AI's question (`Assist.pending`) over the middle of the dock, when the chat asking isn't showing it.
+    func showAsk() {
         guard let dock = PetalApp.shared.docks.focusedDock, let panelRef = dock.panel else { return }
-        self.card = card
+        asking = true
         closeAll()
         panelRef.reveal()
-        fade?.cancel()
         GlassPanel.opaque(cardPanel)
-        if let mode = card.pointsAt, let slot = panelRef.screenFrame(of: "mode:\(mode)") {
-            cardPanel.show(pointingAt: slot, dock: panelRef) { CardView(card: card, tail: $0) }
-        } else if [.summary, .suggestion, .made, .reply].contains(card.kind) {
-            // Nothing on the dock to point at: top right, out of the dock's way, as macOS's own notices sit.
-            cardPanel.showInCorner(CardView(card: card), on: panelRef.screenRef ?? NSScreen.main ?? NSScreen.screens[0])
-        } else {
-            let pill = panelRef.frame
-            cardPanel.show(CardView(card: card), over: CGRect(x: pill.midX - 1, y: pill.minY, width: 2, height: pill.height), dock: panelRef)
-        }
-        // A card asking for a secret takes the keyboard for it.
-        // One taking the place of a card that had the keyboard (a notice over a reply being written) gives it back.
-        if card.kind == .reply || (card.kind == .ask && PetalApp.shared.assist.pending?.takesKeys == true) {
+        let pill = panelRef.frame
+        cardPanel.show(AskCard(), over: CGRect(x: pill.midX - 1, y: pill.minY, width: 2, height: pill.height), dock: panelRef)
+        // A question asking for a secret takes the keyboard for it.
+        if PetalApp.shared.assist.pending?.takesKeys == true {
             cardPanel.takesKeys = true
             cardPanel.makeKey()
         } else {
             cardPanel.releaseKeys()
         }
-        // A peek fades out by itself.
-        if card.kind == .peek {
-            let work = DispatchWorkItem { [weak self] in
-                guard let self, self.card?.id == card.id else { return }
-                NSAnimationContext.runAnimationGroup({ context in
-                    context.duration = 0.4
-                    self.cardPanel.animator().alphaValue = 0
-                }, completionHandler: {
-                    MainActor.assumeIsolated { if self.card?.id == card.id { self.dismissCard() } }
-                })
-            }
-            fade = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: work)
-        }
     }
 
-    func dismissCard() {
-        let asking = card?.kind == .ask
-        fade?.cancel()
-        card = nil
-        if asking { PetalApp.shared.assist.cardClosed() }
-        cardPanel.hide()   // made opaque again as the next card shows
+    /// The question goes; one that had no answer yet is answered Don't.
+    func closeAsk() {
+        guard asking else { return }
+        asking = false
+        PetalApp.shared.assist.cardClosed()
+        cardPanel.hide()   // made opaque again as the next one shows
     }
 }
 
@@ -559,7 +445,7 @@ final class Previews {
     }
 
     private func canOpen(in dock: ScreenDock) -> Bool {
-        dock.dragging == nil && PetalApp.shared.popups.card == nil && PetalApp.shared.popups.kind != "stack"
+        dock.dragging == nil && !PetalApp.shared.popups.asking && PetalApp.shared.popups.kind != "stack"
     }
 
     private func schedule(_ id: String, in dock: ScreenDock) {
@@ -1029,121 +915,8 @@ struct RightClick: NSViewRepresentable {
     }
 }
 
-// MARK: - Cards
+// MARK: - Petal AI's question
 
-/// A card over the dock: a focus card (block, move or peek), a held notification that can't wait, a suggested mode,
-/// a mode just made from one, or the weekly summary. Updates are in the menu bar, not here.
-struct FocusCard: Identifiable, Equatable {
-    enum Kind { case block, move, peek, note, suggestion, made, summary, ask, reply, noteReady }
-    let id = UUID()
-    let kind: Kind
-    var bundleID = ""
-    var title = ""
-    var target: Mode?
-    var here: Mode?
-    var reason = ""
-    var desktop: Int?
-    var front: Front?
-    var note: HeldNote?
-    var suggestion: Insights.Suggestion?
-    var summary: Insights.Summary?
-    var working = false
-    /// A sticky note done in another mode (noteReady).
-    var noteID: UUID?
-
-    static func == (a: FocusCard, b: FocusCard) -> Bool { a.id == b.id && a.working == b.working && a.kind == b.kind }
-
-    /// The mode button the card points at: the mode it's about; a peek's is the mode you're in.
-    var pointsAt: String? {
-        switch kind {
-        case .block, .move, .note, .noteReady: target?.id
-        case .peek: here?.id
-        default: nil
-        }
-    }
-}
-
-struct CardView: View {
-    @Environment(PetalApp.self) private var app
-    let card: FocusCard
-    var tail: Tail? = nil
-
-    var body: some View {
-        Group {
-            switch card.kind {
-            case .block, .move, .peek: FrontCard(card: card)
-            case .note: NoteCard(card: card)
-            case .suggestion, .made: suggestionCard
-            case .summary: SummaryCard(card: card)
-            case .ask: AskCard()
-            case .reply: ReplyCard(card: card)
-            case .noteReady: NoteReadyCard(card: card)
-            }
-        }
-        .padding(card.kind == .peek ? 12 : 16)
-        .frame(minWidth: card.kind == .peek ? 0 : 300, maxWidth: card.kind == .peek || card.kind == .note || card.kind == .noteReady || card.kind == .block || card.kind == .move ? 380 : 420)
-        .fixedSize(horizontal: card.kind == .peek, vertical: false)
-        .roomForTail(tail)
-        .glassEffect(.regular, in: CardShape(tail: tail))
-        .padding(6)
-    }
-
-    // MARK: Suggestions
-
-    private var suggestionCard: some View {
-        let suggestion = card.suggestion
-        let mode = card.kind == .made ? card.target : app.config.modes.first { $0.id == suggestion?.mode }
-        return VStack(alignment: .trailing, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                AppIcons(ids: suggestion?.apps ?? [], size: 30)
-                VStack(alignment: .leading, spacing: 4) {
-                    if card.kind == .made, let mode {
-                        Text("\(Text(mode.name).bold()) is ready.").font(.system(size: 13))
-                        Text("With \(Insights.list((suggestion?.apps ?? []).map(Apps.name))). Put a Desktop in it from the mode switcher.")
-                            .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    } else if let suggestion {
-                        Text(suggestion.text(modeName: mode?.name ?? suggestion.mode)).font(.system(size: 13))
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text(suggestion.kind == .mode ? "A mode of their own, with just these apps in its dock." : "\(suggestion.names.first ?? "It") joins \(mode?.name ?? "the mode")'s apps in the dock.")
-                            .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                Spacer(minLength: 0)
-                RoundButton(symbol: "xmark") { app.popups.dismissCard() }
-            }
-            HStack(spacing: 8) {
-                if card.kind == .made, let mode {
-                    Button("OK") { app.popups.dismissCard() }.buttonStyle(.glass)
-                    if let desktop = card.desktop {
-                        Button("Use it here") { app.popups.dismissCard(); app.requestMode(mode.id, desktop: desktop) }
-                            .buttonStyle(.glassProminent).tint(Color(nsColor: mode.color))
-                    }
-                } else if let suggestion {
-                    if card.working { ProgressView().controlSize(.small) }
-                    Button("Not now") { app.insights.decline(card) }.buttonStyle(.glass).disabled(card.working)
-                    Button(suggestion.kind == .mode ? "Make it" : "Keep it") { app.insights.accept(card) }
-                        .buttonStyle(.glassProminent).tint(Color(nsColor: mode?.color ?? app.accent)).disabled(card.working)
-                }
-            }
-        }
-    }
-}
-
-/// A few app icons, overlapping a little.
-struct AppIcons: View {
-    let ids: [String]
-    let size: CGFloat
-
-    var body: some View {
-        HStack(spacing: -size * 0.35) {
-            ForEach(ids.prefix(3), id: \.self) { id in
-                Image(nsImage: Apps.icon(id)).resizable().frame(width: size, height: size)
-            }
-        }
-    }
-}
-
-/// The weekly summary: time in each mode, its top apps, and how focus cards went. Plain and kind.
 /// Petal AI wants to do something that changes things: Allow once, Always (for this kind), or Don't. The chat panel
 /// shows the same question in the conversation when it's open. An agent outside Petal asking for the vault gets
 /// Always for this project, Allow once, and Don't as the default (AgentVault.swift).
@@ -1151,10 +924,16 @@ struct AskCard: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
-        if let request = app.assist.pending {
-            // Its own view per question: nothing typed for one is ever kept for the next.
-            AskRequestView(request: request).id(request.id)
+        Group {
+            if let request = app.assist.pending {
+                // Its own view per question: nothing typed for one is ever kept for the next.
+                AskRequestView(request: request).id(request.id)
+            }
         }
+        .padding(16)
+        .frame(minWidth: 300, maxWidth: 420)
+        .glassEffect(.regular, in: .rect(cornerRadius: 16, style: .continuous))
+        .padding(6)
     }
 }
 
@@ -1215,56 +994,6 @@ struct AskRequestView: View {
 struct FormActionsHeight: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
-}
-
-struct SummaryCard: View {
-    @Environment(PetalApp.self) private var app
-    let card: FocusCard
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(card.summary?.title ?? "Your week").font(.system(size: 13, weight: .bold))
-                Spacer()
-                RoundButton(symbol: "xmark") { app.popups.dismissCard() }
-            }
-            if !card.reason.isEmpty {
-                Text("✦ " + card.reason).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
-            }
-            if let summary = card.summary { SummaryRows(summary: summary) }
-            HStack {
-                Spacer()
-                Button("Thanks") { app.popups.dismissCard() }.buttonStyle(.glass)
-            }
-        }
-    }
-}
-
-struct SummaryRows: View {
-    @Environment(PetalApp.self) private var app
-    let summary: Insights.Summary
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if summary.modes.isEmpty {
-                Text("Nothing yet: Petal notes which app is in front, a minute at a time, while you use your Mac.")
-                    .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            ForEach(summary.modes.prefix(5), id: \.id) { mode in
-                let color = Color(nsColor: app.config.modes.first { $0.id == mode.id }?.color ?? app.accent)
-                HStack(spacing: 10) {
-                    ModeIcon(icon: app.config.modes.first { $0.id == mode.id }?.icon ?? "circle.fill", size: 12)
-                        .foregroundStyle(color).frame(width: 22)
-                    Text(Insights.Summary.line(mode)).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 6)
-                    AppIcons(ids: mode.apps.map(\.id), size: 20)
-                }
-            }
-            if let line = summary.cardsLine {
-                Text(line).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
 }
 
 /// Small pictures of image files for stacks, made off the main thread and kept.

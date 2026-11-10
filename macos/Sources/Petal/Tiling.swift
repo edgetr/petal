@@ -2,12 +2,11 @@ import AppKit
 import Carbon.HIToolbox
 import SwiftUI
 
-/// Tiling (`tiling`, off by default): a tiling window manager inside Petal. The ordinary, resizable windows of the
-/// mode in front on each Desktop showing fill its screen, dwindle-style as Hyprland lays them out (WindowLayout.swift
-/// holds the maths), inside the visible frame less Petal's dock strip, with `tilingGaps` around and between them.
-/// Dialogs, sheets, windows that can't be resized, minimized and full-screen windows, apps in `tilingFloat`, and
-/// Petal's own panels float. With per-mode windows on, each mode has its own layout and parked windows are left out.
-/// Turning it off leaves every window where it is.
+/// Tiling (`tiling`, off by default): a tiling window manager inside Petal. The ordinary, resizable windows on each
+/// Desktop showing fill its screen, dwindle-style as Hyprland lays them out (WindowLayout.swift holds the maths),
+/// inside the visible frame less Petal's dock strip, with `tilingGaps` around and between them. Dialogs, sheets,
+/// windows that can't be resized, minimized and full-screen windows, apps in `tilingFloat`, and Petal's own panels
+/// float. Turning it off leaves every window where it is.
 @MainActor
 enum Tiling {
     struct Key: Identifiable {
@@ -36,8 +35,9 @@ enum Tiling {
     /// The keys someone else already has.
     private(set) static var taken: Set<UInt32> = []
 
-    private static var trees: [String: TileTree] = [:]
-    private static var layouts: [String: [CGWindowID: CGRect]] = [:]
+    /// Each Desktop's layout, by its number.
+    private static var trees: [Int: TileTree] = [:]
+    private static var layouts: [Int: [CGWindowID: CGRect]] = [:]
     private static var floated: Set<CGWindowID> = []
     /// What each window was asked for, and what it took: an app that refuses a frame (its minimum size) isn't asked again.
     private static var applied: [CGWindowID: (target: CGRect, actual: CGRect)] = [:]
@@ -97,11 +97,6 @@ enum Tiling {
         settling?.cancel()
     }
 
-    /// The mode of `desktop` changed (App.swift's apply, after Parking has swapped the windows).
-    static func modeChanged(desktop: Int) {
-        if active { retile() }
-    }
-
     // MARK: Laying out
 
     private static func scheduleRetile(after delay: Double = 0.12) {
@@ -109,11 +104,6 @@ enum Tiling {
         let item = DispatchWorkItem { retile() }
         work = item
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
-    }
-
-    private static func treeKey(desktop: Int) -> String {
-        guard Parking.active else { return "\(desktop)" }
-        return "\(desktop)|\(config.mode(forDesktop: desktop)?.id ?? "")"
     }
 
     /// Lays out every Desktop showing. Windows already where they belong aren't touched, so this is cheap when
@@ -125,17 +115,12 @@ enum Tiling {
         let list = Windows.onScreen()
         let gaps = CGFloat(max(0, config.number("tilingGaps")))
         let floatApps = Set(config.strings("tilingFloat"))
-        let perMode = Parking.active
         for screen in screens {
-            guard let desktop = screen.desktop else { continue }   // a full-screen app's Space
-            let key = treeKey(desktop: desktop)
-            let mode = config.mode(forDesktop: desktop)?.id ?? ""
+            guard let key = screen.desktop else { continue }   // a full-screen app's Space
             let here = list.filter { window in
                 let center = CGPoint(x: window.frame.midX, y: window.frame.midY)
-                guard screen.frame.contains(center), !floated.contains(window.id), !floatApps.contains(window.bundleID),
-                      Parking.parked[window.id] == nil else { return false }
-                if perMode && Parking.owners[window.id]?.mode != mode { return false }
-                return canTile(window)
+                return screen.frame.contains(center) && !floated.contains(window.id) && !floatApps.contains(window.bundleID)
+                    && canTile(window)
             }
             var tree = trees[key] ?? TileTree()
             // Back to front, so on a first layout the window in front is the newest, at the end of the spiral.
@@ -164,8 +149,8 @@ enum Tiling {
     }
 
     /// The layout a window is in, among the Desktops showing.
-    private static func layout(of id: CGWindowID) -> String? {
-        let showing = Set(Windows.screens().compactMap(\.desktop).map(treeKey(desktop:)))
+    private static func layout(of id: CGWindowID) -> Int? {
+        let showing = Set(Windows.screens().compactMap(\.desktop))
         return layouts.first { showing.contains($0.key) && $0.value[id] != nil }?.key
     }
 
@@ -186,7 +171,7 @@ enum Tiling {
                 if history.count > 64 { history.removeLast() }
             }
         case .moved, .resized:
-            guard let id = event.window, let element = event.element, Parking.parked[id] == nil, let done = applied[id],
+            guard let id = event.window, let element = event.element, let done = applied[id],
                   let now = Windows.frame(of: element), !now.equalTo(done.actual, within: 2), layout(of: id) != nil else { return }
             // Someone is dragging or resizing a tiled window: wait for the mouse to let go.
             settle(id, attempts: 0)
@@ -215,7 +200,7 @@ enum Tiling {
             let pointer = CGPoint(x: mouse.x, y: top - mouse.y)
             let screens = Windows.screens()
             if let screen = screens.first(where: { $0.frame.contains(pointer) }), let desktop = screen.desktop {
-                let to = treeKey(desktop: desktop)
+                let to = desktop
                 let other = layouts[to].flatMap { TileLayout.window(at: pointer, in: $0, except: id) }
                 if to == from, let other {
                     trees[from]?.swap(id, other)
@@ -266,7 +251,7 @@ enum Tiling {
             }
             retile()
         case 221:
-            let showing = Set(Windows.screens().compactMap(\.desktop).map(treeKey(desktop:)))
+            let showing = Set(Windows.screens().compactMap(\.desktop))
             for key in layout(of: focused.id).map({ [$0] }) ?? Array(showing) { trees[key]?.rebalance() }
             retile()
         default:
@@ -281,16 +266,14 @@ enum Tiling {
 
 // MARK: - Settings
 
-/// The settings rows for per-mode windows and tiling.
+/// The settings rows for tiling.
 struct WindowsCard: View {
     @Environment(PetalApp.self) private var app
     /// Shows tiling's rows whatever the setting (for `--snapshot`).
     var showTiling = false
 
     var body: some View {
-        Card(title: "Windows", footer: "Quitting Petal, or turning these off, leaves every window where you can see it.") {
-            SettingToggle(key: "modeWindows", title: "Each mode keeps its own windows",
-                          detail: "Switching mode puts the other modes' windows and tabs away, and brings this one's back.")
+        Card(title: "Windows", footer: "Quitting Petal, or turning this off, leaves every window where it is.") {
             SettingToggle(key: "tiling", title: "Tile windows", detail: "Windows sit side by side and fill the screen, with no overlap.")
             if showTiling || app.config.bool("tiling") {
                 SettingSlider(key: "tilingGaps", title: "Gaps", range: 0...32)

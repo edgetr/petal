@@ -58,7 +58,7 @@ final class Signals {
         watchDownloads(in: watchFolders)
         // When each stack was last opened, read before the folders are.
         folders.queue.async {
-            let saved = ActivityLog.state()["stacksSeen"] as? [String: Double] ?? [:]
+            let saved = PetalState.read()["stacksSeen"] as? [String: Double] ?? [:]
             DispatchQueue.main.async { MainActor.assumeIsolated { self.seen = saved } }
         }
         watchStackFolders()
@@ -170,7 +170,7 @@ final class Signals {
 
     private func saveSeen() {
         guard let seen else { return }
-        folders.queue.async { ActivityLog.setState("stacksSeen", seen) }
+        folders.queue.async { PetalState.set("stacksSeen", seen) }
     }
 
     /// The Trash after something is dropped on it or it's emptied, without waiting for the next look.

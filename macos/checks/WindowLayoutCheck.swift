@@ -15,7 +15,6 @@ struct WindowLayoutCheck {
         tiling()
         neighbours()
         areas()
-        parking()
         print(failures == 0 ? "ok: \(passed) checks" : "\(failures) of \(passed + failures) checks failed")
         exit(failures == 0 ? 0 : 1)
     }
@@ -136,42 +135,5 @@ struct WindowLayoutCheck {
         expect(tall == CGRect(x: 100, y: 33, width: 600, height: 879), "a too-tall frame is shortened to fit", "\(tall)")
         let inside = CGRect(x: 200, y: 200, width: 300, height: 300)
         expect(ScreenArea.fit(inside, in: bottom) == inside, "a frame inside stays")
-    }
-
-    static func parking() {
-        let main = CGRect(x: 0, y: 0, width: 1512, height: 982)
-        let size = CGSize(width: 800, height: 600)
-        let origin = ParkingLayout.parkedOrigin(size: size, screen: main, others: [])
-        expect(origin == CGPoint(x: 1511, y: 981), "parked at the bottom-right corner, 1 pt in", "\(origin)")
-        let parked = CGRect(origin: origin, size: size)
-        let onScreen = parked.intersection(main)
-        expect(onScreen.width == 1 && onScreen.height == 1, "one point stays visible", "\(onScreen)")
-        expect(ParkingLayout.looksParked(parked, screens: [main]), "a parked frame looks parked")
-        expect(!ParkingLayout.looksParked(CGRect(x: 100, y: 100, width: 800, height: 600), screens: [main]), "a normal window doesn't")
-        expect(!ParkingLayout.looksParked(CGRect(x: 1400, y: 900, width: 800, height: 600), screens: [main]), "a window half off doesn't")
-        expect(!ParkingLayout.looksParked(CGRect(x: -10000, y: -10000, width: 800, height: 600), screens: [main]), "a helper window kept wholly off-screen doesn't")
-
-        // A second screen to the right: park at the bottom-left corner instead, so nothing shows on it.
-        let rightScreen = CGRect(x: 1512, y: 0, width: 1920, height: 1080)
-        let o2 = ParkingLayout.parkedOrigin(size: size, screen: main, others: [rightScreen])
-        let f2 = CGRect(origin: o2, size: size)
-        expect(o2 == CGPoint(x: -799, y: 981), "a screen to the right parks bottom-left", "\(o2)")
-        expect(f2.intersection(rightScreen).isNull, "nothing on the other screen")
-        expect(ParkingLayout.looksParked(f2, screens: [main, rightScreen]), "bottom-left parked looks parked")
-        // On the right screen, with the main one to its left: bottom-right stays fine (below main's bottom it is
-        // still clear, since the right screen is taller).
-        let o3 = ParkingLayout.parkedOrigin(size: size, screen: rightScreen, others: [main])
-        expect(CGRect(origin: o3, size: size).intersection(main).isNull, "parked off the right screen avoids the main one", "\(o3)")
-
-        let area = CGRect(x: 0, y: 33, width: 1512, height: 879)
-        let back = ParkingLayout.rescued(parked, in: area)
-        expect(area.contains(back) && back.size == size, "a stranded window comes back whole, centred", "\(back)")
-
-        let owners: [UInt32: String] = [1: "work", 2: "work", 3: "social", 4: "social", 5: "design"]
-        let plan = ParkingLayout.plan(mode: "social", owners: owners, parked: [3, 5])
-        expect(plan.park == [1, 2], "switching to social parks work's windows", "\(plan)")
-        expect(plan.restore == [3], "and brings social's parked one back", "\(plan)")
-        let same = ParkingLayout.plan(mode: "social", owners: owners, parked: [1, 2, 5])
-        expect(same.park.isEmpty && same.restore.isEmpty, "nothing moves when already in place")
     }
 }

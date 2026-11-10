@@ -25,7 +25,7 @@ struct PetalProcessCheck {
             [petal, "--snapshot", "/tmp/snap"], [petal, "--routines-check", "--ai"], [petal, "--restore-dock"],
             [petal, "--helpers-check"], [petal, "--helpers-check", "--ai"], [petal, "--viewer-check", "/tmp/a.pdf"], [petal, "--viewer-check"],
             [petal, "--bench-notes"], [petal, "--bench-notes", "--json", "/tmp/n.json"],
-            [petal, "mode", "social"], [petal, "doctor"], [petal, "report"], [petal, "run", "--key", "x", "--", "env"],
+            [petal, "dock", "macos"], [petal, "doctor"], [petal, "report"], [petal, "run", "--key", "x", "--", "env"],
             [petal, "no-such-command"], [petal, "-psn_0_1", "--mcp"],
         ]
         for argv in others { expect(!PetalProcess.isDock(arguments: argv), "not a dock: \(argv)") }
@@ -36,7 +36,7 @@ struct PetalProcessCheck {
             ([petal], .dock), ([petal, "-psn_0_1"], .dock), ([petal, "-NSDocumentRevisionsDebugMode", "YES"], .dock),
             ([petal, "--mcp"], .mcp), ([petal, "-psn_0_1", "--mcp"], .mcp),
             ([petal, "run", "--key", "x", "--", "x", "--mcp"], .command(["run", "--key", "x", "--", "x", "--mcp"])),
-            ([petal, "mode", "social"], .command(["mode", "social"])), ([petal, "no-such-command"], .command(["no-such-command"])),
+            ([petal, "dock", "macos"], .command(["dock", "macos"])), ([petal, "no-such-command"], .command(["no-such-command"])),
             ([petal, "-h"], .help), ([petal, "--help"], .help),
             ([petal, "--restore-dock"], .restoreDock),
             ([petal, "--snapshot", "/tmp/snap"], .snapshot("/tmp/snap")),
@@ -84,7 +84,7 @@ struct PetalProcessCheck {
             ([[petal, "--mcp"], [petal, "--snapshot", "/tmp/s"], [petal, "--routines-check"], [petal, "--restore-dock"]], false),
             ([[petal, "--bench-dock"], [petal, "-psn_0_1"]], true),
             ([[petal, "-NSDocumentRevisionsDebugMode", "YES"]], true),
-            ([[petal, "mode", "social"]], false),
+            ([[petal, "dock", "macos"]], false),
             ([[petal, "doctor"], [petal, "no-such-command"]], false),
             ([[petal, "run", "--key", "Anthropic", "--", "npm", "run", "dev"]], false),
             ([[spaced, "run", "--key", "x", "--stdin", "--", "sh", "-c", "sleep 3600"]], false),

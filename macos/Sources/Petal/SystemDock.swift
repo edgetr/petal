@@ -21,7 +21,7 @@ enum SystemDock {
 
     static var isReplaced: Bool { FileManager.default.fileExists(atPath: backup.path) }
 
-    /// The apps in macOS's Dock, in its order, as bundle ids: "Import Dock" makes them a mode.
+    /// The apps in macOS's Dock, in its order, as bundle ids: "Import Dock" makes them Petal's apps.
     static func apps() -> [String] { readApps() }
 
     /// The same, from any thread (the settings window shows `PetalApp.systemDockApps`, read off the main thread).

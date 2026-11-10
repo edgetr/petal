@@ -1,6 +1,6 @@
 ---
 name: petal
-description: Petal, the user's dock (on Omarchy or macOS) with a focus mode for every workspace or Desktop. Use when the user asks to change, explain or fix anything about their dock, its modes, apps, look or AI, or when something about Petal seems broken.
+description: Petal, the user's dock, on Omarchy (with a focus mode for every workspace) or macOS (one dock, with Petal Notes and Petal AI). Use when the user asks to change, explain or fix anything about their dock, its apps, its modes (Omarchy), look or AI, or when something about Petal seems broken.
 metadata:
   short-description: Change, explain and fix the Petal dock
 ---
@@ -8,8 +8,13 @@ metadata:
 # Petal
 
 Petal is the user's dock, from Edgetr (free, open source: github.com/edgetr/petal). It runs on Omarchy (a plugin for
-Omarchy's shell) and on macOS (Petal.app, which replaces macOS's Dock). Each workspace (Omarchy) or Desktop (macOS)
-has its own focus mode, and the dock shows that mode's apps. This skill is installed by Petal itself.
+Omarchy's shell) and on macOS (Petal.app, which replaces macOS's Dock). This skill is installed by Petal itself.
+
+The two differ in one big way. **Modes are Omarchy's:** there, each workspace has its own focus mode, and the dock
+shows that mode's apps (with focus cards, held notifications, a schedule and an activity history built on them).
+**The Mac has one dock and no modes:** one list of apps and website shortcuts, the same on every Desktop, with Petal
+AI, the vault, routines and Petal Notes. Check which one you're on (`uname`, or `petal_get_state`: only Omarchy's has
+`modes`) before you reach for a mode.
 
 ## Changing the dock
 
@@ -18,13 +23,16 @@ registers its MCP server (`petal`) with Claude Code and Codex and puts `petal` o
 Use, in this order:
 
 1. Petal's MCP tools, when the `petal` server is connected: `petal_get_state` first, then `petal_set_settings`,
-   `petal_set_dock`, `petal_save_mode`, `petal_delete_mode`, `petal_set_default_mode`, `petal_switch_mode`,
-   `petal_list_apps`, `petal_reload`, `petal_reset_settings` (every setting back to its default: ask first).
+   `petal_set_dock`, `petal_list_apps`, `petal_reload`, `petal_reset_settings` (every setting back to its default:
+   ask first). On Omarchy also the mode tools: `petal_save_mode`, `petal_delete_mode`, `petal_set_default_mode`,
+   `petal_switch_mode`. On macOS the dock's apps are changed with `petal_set_dock`: `add` puts apps at the end,
+   `remove` takes some out, and `apps` is the whole list in the order it shows, which is how to reorder (bundle ids
+   from `petal_list_apps`; an `https://` address is a website shortcut).
    On macOS also Petal AI's tools, done by the running Petal with its own permissions: `petal_look` (what's in front:
    app, window, browser tab address, selected text; a screenshot when asked), `petal_apps`, `petal_windows`,
    `petal_trash` (the Trash, never deleting; quitting, closing and trashing ask the user first), and memory:
-   `petal_remember`, `petal_forget`, `petal_memories` (everywhere or per mode); and routines, what Petal does by
-   itself from the user's own words ("keep my Downloads tidy", "when I open Figma, switch to Design"):
+   `petal_remember`, `petal_forget`, `petal_memories`; and routines, what Petal does by
+   itself from the user's own words ("keep my Downloads tidy", "when I open Xcode, hide Messages"):
    `petal_routine_save` (their words, plus the trigger and actions you fill in), `petal_routines`,
    `petal_routine_run` (`dryRun: true` shows what it would do with the files there now), `petal_routine_undo` (puts
    moved files back), `petal_routine_delete`. Routines only move files, never delete them.
@@ -98,27 +106,28 @@ Use, in this order:
    `petal_view_pick` (`set`, `wait` up to 120 s) says which one the user picked (its `id`, name and path), only while the original is the very file, unchanged, the versions were made from (else null with why: make versions again; the copies stay), so ask again right before changing the original. Newer versions replace a set (its copies go, all but a picked one; a copy you changed goes to the Trash), and every copy goes when the viewer closes, so read the picked one while it's open. Change their own file only after they allow it. `petal_note_pdf_comments` writes the
    notes on a PDF into a copy beside it as comments (`into_original: true` writes into the PDF itself, only after the
    user allows it, keeping the original beside it).
-   Changes apply instantly. `petal_export_recipe` / `petal_import_recipe` share a dock as a `.petal` file (modes,
-   apps by name, look; nothing personal) or add one someone shared (`look: true` also takes its look; say what it
-   adds before importing); `petal_suggestions` and `petal_summary` read the
-   private activity history.
+   Changes apply instantly. On Omarchy, `petal_export_recipe` / `petal_import_recipe` share a dock as a `.petal`
+   file (modes, apps by name, look; nothing personal) or add one someone shared (`look: true` also takes its look;
+   say what it adds before importing), and `petal_suggestions` and `petal_summary` read the private activity history.
 2. The `petal` command: `petal get` (everything, with each setting's help), `petal set <key> <json value>`,
-   `petal mode <id>`, `petal current`, `petal modes`, `petal dock petal|macos` (macOS), `petal restart`,
-   `petal recipe export [<file>]`, `petal recipe import <file> [--look]`, `petal suggest`, `petal summary`,
-   `petal overview` (macOS: every Desktop and its mode), `petal run --key "<title>" -- <command>` (macOS: a
-   command with an API key from the vault, below), `petal panel [page]` (Omarchy: the Petal menu);
-   `petal help` lists them all.
+   `petal restart`. Omarchy: `petal mode <id>`, `petal current`, `petal modes`, `petal recipe export [<file>]`,
+   `petal recipe import <file> [--look]`, `petal suggest`, `petal summary`, `petal panel [page]` (the Petal menu).
+   macOS: `petal apps` (the dock's apps, in order), `petal dock petal|macos`, `petal run --key "<title>" -- <command>`
+   (a command with an API key from the vault, below). `petal help` lists them all.
 3. The files in `~/.config/petal/`; Petal reloads them within a second:
 
 - `settings.json`: settings; `petal_get_state` (or `petal get`) lists every key with its default and help.
-- `modes.json`: `{"defaultMode", "workspaces": {"<n>": "<mode id>"}, "modes": [{"id", "name", "icon", "color",
-  "about", "apps", "sites", "distracting", "focusDelay", "hold", "allow"}]}`. On Omarchy apps are desktop ids and icons
-  Nerd Font glyphs; on macOS apps are bundle ids, icons SF Symbol names, and workspace numbers are Desktop numbers. An
+- `modes.json` (Omarchy only): `{"defaultMode", "workspaces": {"<n>": "<mode id>"}, "modes": [{"id", "name", "icon",
+  "color", "about", "apps", "sites", "distracting", "focusDelay", "hold", "allow"}]}`. Apps are desktop ids and icons
+  Nerd Font glyphs. An
   `apps` entry that's an `https://` address is a website shortcut (the site's own icon, with a globe badge).
   `distracting` marks a mode like Social or Gaming (missing: the AI decides once and writes it); `focusDelay` is
   only a distracting mode's wait to get in (30 s if 0). `allow` holds apps and sites that are fine in the mode
   without being in its dock ("Keep it here" on a card adds them).
-- `dock.json` (macOS): `position` (bottom, left, right), `autoHide`, `dock` (petal or macos), `keepWindowsClear`.
+- `dock.json` (macOS): the dock itself. `apps` (its apps in the order they show: bundle ids, and `https://`
+  addresses for website shortcuts), `position` (bottom, left, right), `autoHide`, `dock` (petal or macos),
+  `keepWindowsClear`. A Mac has no `modes.json`: one from an earlier Petal was moved into `apps` (its default
+  mode's) the first time this Petal opened, and nothing reads one there now.
   On Omarchy, position and auto-hide live in Omarchy's shell config (`omarchy-dock position|autohide`).
 - `instructions.md`: the user's own notes for the AI in Petal's panel.
 - `instructions.draft.md` (macOS): the notes typed in Settings, there only while they and a change made elsewhere
@@ -148,20 +157,19 @@ Keep the JSON valid: Petal won't overwrite a file it can't read, and won't apply
 
 More that shapes a dock:
 
-- **Modes by time:** the `schedule` setting, `[{"mode", "days": [1-7, 1 = Monday], "from": "HH:MM", "to": "HH:MM"}]`;
-  when a block starts, the workspace or Desktop in front switches to that mode.
-- **A mode's reach beyond the dock:** on macOS, `shortcut` names a Shortcuts-app shortcut run when a Desktop enters
-  the mode (for example one that turns on a Focus). On Omarchy, `hyprland` (`{"borderColor": "#rrggbb" | "mode",
-  "gapsIn", "gapsOut", "wallpaper"}`) styles its workspaces while one is in front; it's applied at runtime, so never
-  write it into Hyprland's config.
-- **Shortcuts** (`shortcuts`): Control-Option-1…9 / Space / = (and N, a new Petal Note where you are) on macOS, Super+Ctrl+Alt on Omarchy, only where free.
-- **Activity, suggestions and the weekly summary** (`activityLog`, `suggestModes`, `summary`) are private and local:
-  which app is in front, a line a minute, never titles; `activityLog: false` stops it.
-- **Magnification** (macOS: `magnification`, `magnificationAmount`) and Petal's menu bar icon (`menuBarIcon`).
-- **Each mode's own windows** (`modeWindows`, off by default): switching mode swaps the windows and tabs. On macOS
-  the other modes' windows wait just off-screen on the same Desktop (`petal restore-windows` brings every one back);
-  on Omarchy each mode has its own workspace.
-- **Tiling** (macOS: `tiling`, `tilingGaps`, `tilingFloat`): Petal tiles the mode's windows like Hyprland;
+- **Modes by time** (Omarchy): the `schedule` setting, `[{"mode", "days": [1-7, 1 = Monday], "from": "HH:MM", "to":
+  "HH:MM"}]`; when a block starts, the workspace in front switches to that mode.
+- **A mode's reach beyond the dock** (Omarchy): `hyprland` (`{"borderColor": "#rrggbb" | "mode", "gapsIn", "gapsOut",
+  "wallpaper"}`) styles its workspaces while one is in front; it's applied at runtime, so never write it into
+  Hyprland's config.
+- **Shortcuts** (`shortcuts`): Control-Option-Space / = (and N, a new Petal Note where you are) on macOS; Super+Ctrl+Alt
+  on Omarchy, with 1…9 for its modes; only where free.
+- **Activity, suggestions and the weekly summary** (Omarchy: `activityLog`, `suggestModes`, `summary`) are private and
+  local: which app is in front, a line a minute, never titles; `activityLog: false` stops it.
+- **Magnification** (macOS: `magnification`, `magnificationAmount`) and Petal's menu bar mark (`menuBarIcon`).
+- **Each mode's own windows** (Omarchy: `modeWindows`, off by default): switching mode swaps the windows and tabs;
+  each mode has its own workspace.
+- **Tiling** (macOS: `tiling`, `tilingGaps`, `tilingFloat`): Petal tiles each Desktop's windows like Hyprland;
   Control-Option-arrows focus, with Shift swap, Control-Option-T floats a window, Control-Option-R rebalances.
 
 ## Testing with the user's keys and logins (macOS)
@@ -207,21 +215,20 @@ and `… report`. Logs: `petal logs` (Omarchy's shell log; on macOS Petal's own 
   `api`). The key is pasted in Settings › AI and kept in the Keychain; only Petal's own runs use it. Never ask for a
   key, put one in a file or the environment, or change `~/.claude`, `~/.codex` or their logins to switch.
 - On macOS, Petal hides macOS's Dock while it runs and gives it back on quit; `petal restore-dock` gives it back by
-  hand. Permissions it may need: Accessibility (window lists, badges, focus cards, per-mode windows, tiling), Screen
-  Recording (previews), Automation for each browser (reading and closing a tab), and Full Disk Access (reading
-  notifications, to hold them).
-- Focus cards (`focusGuard`): what's in front that belongs to a distracting mode is blocked ("x.com · belongs to
+  hand. Permissions it may need: Accessibility (window lists, badges, notes on windows, using apps, tiling), Screen
+  Recording (previews) and Automation for each browser (reading a tab's address).
+- Focus cards (Omarchy; `focusGuard`): what's in front that belongs to a distracting mode is blocked ("x.com · belongs to
   Social": Stay closes the tab or hides the app; Go to Social starts its wait); something from another mode gets
   "fits Design · Move to Design?" with Keep it here; something new is sorted by the AI once (kept in its mode's
   `sites` or `allow`), and a peek says where it went (`peeks`). Only distracting modes wait to get in
   (`countdown`); each extra press halves the wait.
-- Held notifications (`holdNotifications`, a mode's `hold`): they wait on their mode with a count; one that can't
-  wait pops out of its mode's button (`urgentNotifications`). On macOS Petal reads them from Notification Center's
-  database (Full Disk Access) and keeps macOS's banners away while holding; `petal doctor` says whether it can.
+- Held notifications (Omarchy; `holdNotifications`, a mode's `hold`): they wait on their mode with a count; one that
+  can't wait pops out of its mode's button (`urgentNotifications`).
 
 ## Changing Petal itself
 
-Make each dock the user's own with settings, modes and the look first; they apply instantly and survive updates.
+Make each dock the user's own with settings, its apps (and modes, on Omarchy) and the look first; they apply
+instantly and survive updates.
 When something truly needs code, change Petal's **personal source**: a git repository of Petal's source that every
 update is combined with, so the user's changes are never lost.
 

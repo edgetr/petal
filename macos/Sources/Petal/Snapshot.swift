@@ -21,8 +21,12 @@ enum Snapshot {
         ])
         let dock = ScreenDock()
         dock.desktop = 1
-        dock.mode = app.config.mode(forDesktop: 1)
-        dock.items = (dock.mode?.apps ?? []).filter(Apps.shows).prefix(7).enumerated().map { index, id in
+        // The dock's own apps, or (an empty dock, as in a throwaway folder) a few every Mac has.
+        let installed = Apps.installed().map(\.id)
+        let own = app.config.apps.filter(Apps.shows)
+        let sample = ["com.apple.Safari", "com.apple.mail", "com.apple.Notes", "com.apple.iCal", "com.apple.Music", "com.apple.Terminal",
+                      "com.apple.Preview"].filter(installed.contains)
+        dock.items = (own.isEmpty ? sample : own).prefix(7).enumerated().map { index, id in
             DockItem(id: id, pinned: true, running: index % 3 == 0, windows: index % 3 == 0 ? (index == 0 ? 2 : 1) : 0, here: true, active: index == 0)
         }
         dock.stageSlots = dock.items.count + 1
@@ -34,59 +38,15 @@ enum Snapshot {
             .init(kind: .claude, text: "Done — icons are now **44 pt**, up from 36. Say *smaller* if it's too much."),
             .init(kind: .ask, text: "defaults write com.apple.finder AppleShowAllFiles -bool true"),
         ])
-        let installed = Apps.installed().map(\.id)
-        let pick = { (wanted: [String]) in wanted.filter(installed.contains) + installed.filter { !wanted.contains($0) } }
-        let sampleNew = Insights.Suggestion(kind: .mode, key: "a+b", apps: Array(pick(["com.figma.Desktop", "com.linear", "com.apple.Preview"]).prefix(2)),
-                                            minutes: 260, days: 4)
-        let sampleAdd = Insights.Suggestion(kind: .add, key: "add", apps: Array(pick(["com.tinyspeck.slackmacgap", "com.apple.MobileSMS"]).prefix(1)),
-                                            mode: app.config.modes.first?.id ?? "", minutes: 90, days: 5)
-        let sampleSummary = Insights.Summary(title: "Last week", from: Date().addingTimeInterval(-7 * 86400), to: Date(),
-                                             modes: app.config.modes.prefix(3).enumerated().map { index, mode in
-                                                 .init(id: mode.id, name: mode.name, minutes: [740, 185, 40][index],
-                                                       apps: mode.apps.filter(installed.contains).prefix(3).enumerated().map { ($0.element, [500, 150, 60][$0.offset]) })
-                                             }, cardsShown: 8, wentBack: 5)
-
         var views: [(String, AnyView, CGSize?)] = [
             ("dock", AnyView(DockView(dock: dock)), nil),
-            ("welcome", AnyView(WelcomeView {}), CGSize(width: 640, height: 920)),
+            ("welcome", AnyView(WelcomeView {}), CGSize(width: 640, height: WelcomeView.height)),
             ("claude-empty", AnyView(ClaudePanelView(panel: ClaudePanel())), nil),
             ("claude-chat", AnyView(ClaudePanelView(panel: app.claude)), nil),
             ("search", AnyView(AppSearchView(search: app.search)), nil),
             ("stack", AnyView(StackView(contents: StackContents(folder: "~/Downloads", entries: Stacks.entries("~/Downloads", limit: 12))) {}), nil),
-            ("card-suggest", AnyView(CardView(card: FocusCard(kind: .suggestion, suggestion: sampleNew))), nil),
-            ("card-add", AnyView(CardView(card: FocusCard(kind: .suggestion, suggestion: sampleAdd))), nil),
-            ("card-made", AnyView(CardView(card: FocusCard(kind: .made, target: app.config.modes.last, desktop: 1, suggestion: sampleNew))), nil),
-            ("card-summary", AnyView(CardView(card: FocusCard(kind: .summary, summary: sampleSummary))), nil),
         ]
-        // The focus guard's cards and a notification that can't wait, each with its tail (bottom dock; then a side dock's).
-        for kind in ["block", "move", "peek", "note"] {
-            if let card = FocusCard.sample(kind, app: app, here: dock.mode, desktop: 1) {
-                views.append(("card-\(kind)", AnyView(CardView(card: card, tail: Tail(edge: .bottom, offset: kind == "peek" ? 0 : -90))), nil))
-            }
-        }
-        if let other = app.config.modes.first(where: { $0.id != dock.mode?.id }) {
-            let card = FocusCard(kind: .noteReady, bundleID: "com.apple.Safari", title: "Compare these two plans", target: other,
-                                 reason: "Pricing – Linear", noteID: UUID())
-            views.append(("card-note-ready", AnyView(CardView(card: card, tail: Tail(edge: .bottom, offset: -90))), nil))
-        }
-        if let card = FocusCard.sample("block", app: app, here: dock.mode, desktop: 1) {
-            views.append(("card-block-left", AnyView(CardView(card: card, tail: Tail(edge: .leading, offset: 20))), nil))
-        }
-        // The mode switcher: a countdown into a distracting mode, with Stay; a website shortcut with its globe.
         try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
-        if let social = app.config.modes.first(where: { $0.isDistracting && $0.id != dock.mode?.id }) {
-            app.pendingMode = PendingMode(desktop: 1, mode: social.id, deadline: Date().addingTimeInterval(19), total: social.wait)
-            write(render(AnyView(DockView(dock: dock)), app: app, size: nil), name: "dock-countdown", folder: folder)
-            app.pendingMode = nil
-        }
-        // Held notifications waiting on two modes: counts on their buttons.
-        for (index, mode) in app.config.modes.filter({ $0.id != dock.mode?.id }).prefix(2).enumerated() {
-            for n in 0..<(index == 0 ? 3 : 1) {
-                app.notes.preview(HeldNote(id: Int64(index * 10 + n), app: "com.apple.mail", title: "", subtitle: "", body: "x", date: Date(), mode: mode.id))
-            }
-        }
-        write(render(AnyView(DockView(dock: dock)), app: app, size: nil), name: "dock-held", folder: folder)
-        for mode in app.config.modes { app.notes.clear(mode.id) }
         // Stacks with something new, a full Trash, and a song playing.
         let stackFolders = Stacks.resolve(app.config.strings("stackFolders"))
         app.signals.preview(trashEmpty: false, fresh: Set(stackFolders.prefix(1)),
@@ -143,7 +103,6 @@ enum Snapshot {
         while Date() < until && samples.contains(where: { Sites.shared.icon($0) == nil }) { RunLoop.main.run(until: Date().addingTimeInterval(0.2)) }
         let sites = ScreenDock()
         sites.desktop = 2
-        sites.mode = dock.mode
         sites.items = Array(dock.items.prefix(3)) + ["https://github.com", "https://www.figma.com", "https://example.invalid"].map {
             DockItem(id: $0, pinned: true, running: false, windows: 0, here: false, active: false)
         }
@@ -160,44 +119,24 @@ enum Snapshot {
         views.append(("site-icons", AnyView(HStack(spacing: 14) {
             ForEach(["https://github.com", "https://www.figma.com", "https://example.invalid"], id: \.self) { SiteIcon(id: $0, size: 64) }
         }.padding(14)), nil))
-        views.append(("banner", AnyView(BannerView(notes: [FocusCard.sample("note", app: app, here: dock.mode)?.note].compactMap { $0 },
-                                                    heading: nil, color: nil, open: {})), nil))
-        if let social = app.config.modes.first(where: \.isDistracting), let note = FocusCard.sample("note", app: app, here: dock.mode)?.note {
-            views.append(("banner-held", AnyView(BannerView(notes: [note, note], heading: "2 notifications held for \(social.name)",
-                                                             color: social.color, open: {})), nil))
-        }
-        if let mode = dock.mode {
-            views.append(("menubar-mode", AnyView(HStack(spacing: 4) {
-                Image(nsImage: MenuBar.modeImage(mode.icon, dot: false)).renderingMode(.template).foregroundStyle(.white)
-                Text(mode.name).font(.system(size: 13)).foregroundStyle(.white)
-            }.padding(10)), nil))
-        }
-        let recipeFile = URL(fileURLWithPath: folder).appending(path: "sample.petal")
-        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
-        try? Data(##"{"petal":1,"name":"Ada's Omarchy","from":"omarchy","modes":[{"id":"building","name":"Building","icon":"x","color":"#b18cff","about":"code and terminals","apps":["com.mitchellh.ghostty","code","zed"]},{"id":"music","name":"Music","color":"#ff9f5f","about":"listening","apps":["spotify","steam"]}],"apps":{"com.mitchellh.ghostty":"Ghostty","code":"Visual Studio Code","zed":"Zed","spotify":"Spotify","steam":"Steam"},"settings":{"iconSize":48,"appGlow":false},"dock":{"position":"left","autoHide":true}}"##.utf8).write(to: recipeFile)
-        if let plan = try? Recipe.plan(recipeFile) {
-            views.append(("recipe", AnyView(RecipeImportView(url: recipeFile, plan: plan) {}), nil))
-        }
-        views.append(("overview", AnyView(OverviewView {}), nil))
         views.append(("whats-new", AnyView(ReleaseNotesView(version: "0.2.0", preloaded: .init(body: """
             ## Petal 0.2.0
 
-            Your dock learns a little: **suggested modes** and a *weekly summary*, from a history that stays on your Mac.
+            Your dock holds **your notes** now, and a *note pad* to take a paper from.
 
-            - Share your dock as a `.petal` file, by AirDrop or Messages
-            - Keyboard shortcuts: ⌃⌥1…9 switch modes
+            - Drag a paper off the note pad and let go anywhere
+            - Keyboard shortcuts: ⌃⌥N for a new note
             - Magnification, and [a menu bar icon](https://github.com/edgetr/petal)
 
             ### Fixes
-            * Focus cards no longer cover the update card
+            * A note no longer covers the update notice
             """, link: nil))), CGSize(width: 560, height: 600)))
-        views.append(("describe-day", AnyView(DescribeDaySheet()), nil))
         views.append(("settings-windows", AnyView(VStack { WindowsCard(showTiling: true) }.padding(20)), CGSize(width: 640, height: 420)))
         views.append(("settings-api-keys", AnyView(VStack(spacing: 14) { ForEach(Provider.allCases) { APIKeyCard(provider: $0) } }.padding(20)), CGSize(width: 640, height: 420)))
         // Petal AI using an app: its first question, the chip with Stop by its pointer, and the pointer itself.
         app.assist.preview(Assist.Request(kind: "computer:com.apple.Safari", title: "Let Petal AI use Safari?",
                                           detail: "First, pressing Export. Until this reply is done it can press, type and choose menus in Safari with its own pointer; yours stays where it is. Esc stops it."))
-        write(render(AnyView(CardView(card: FocusCard(kind: .ask))), app: app, size: nil), name: "card-ask-computer", folder: folder)
+        write(render(AnyView(AskCard()), app: app, size: nil), name: "card-ask-computer", folder: folder)
         app.assist.preview(nil)
         // The vault's cards: a login it doesn't have yet, the one Buy card of a checkout, an address, and a login on a
         // page that isn't its site.
@@ -223,7 +162,7 @@ enum Snapshot {
         ]
         for (name, request) in cards {
             app.assist.preview(request)
-            write(render(AnyView(CardView(card: FocusCard(kind: .ask))), app: app, size: nil), name: name, folder: folder)
+            write(render(AnyView(AskCard()), app: app, size: nil), name: name, folder: folder)
         }
         app.assist.preview(nil)
         views.append(("computer-pill", AnyView(ActingPill(caption: "Pressing Export") {}), nil))
@@ -238,11 +177,6 @@ enum Snapshot {
                 Image(nsImage: mark).renderingMode(rendering).foregroundStyle(.white)
                 Image(nsImage: mark).renderingMode(rendering).resizable().frame(width: 72, height: 72).foregroundStyle(.white)
             }.padding(12)), nil))
-        }
-        if let mode = dock.mode {
-            let image = MenuBar.modeImage(mode.icon, dot: true)
-            views.append(("menubar-mode-dot", AnyView(Image(nsImage: image).renderingMode(image.isTemplate ? .template : .original)
-                .foregroundStyle(.white).padding(10)), nil))
         }
         for section in SettingsSection.allCases {
             views.append(("settings-\(section.rawValue)", AnyView(SettingsView(selection: section)), CGSize(width: 920, height: 700)))
@@ -263,7 +197,6 @@ enum Snapshot {
         Magnifier.forced = true
         let magnified = ScreenDock()
         magnified.desktop = 1
-        magnified.mode = dock.mode
         magnified.items = dock.items
         magnified.stageSlots = dock.stageSlots
         _ = render(AnyView(DockView(dock: magnified)), app: app, size: nil)

@@ -109,16 +109,15 @@ struct NoteSpot: Codable, Equatable, Sendable {
     }
 }
 
-/// The window a note is stuck to: the app, the window server's number for the window, its title then, and the mode
-/// it was asked in; for a tab, which tab. Kept with the chat (Chats.swift), so the chat still knows where it was
-/// asked. (A chat kept by an earlier Petal may also say `spot`, where its panel was dragged to: no longer read.)
+/// The window a note is stuck to: the app, the window server's number for the window and its title then; for a tab,
+/// which tab. Kept with the chat (Chats.swift), so the chat still knows where it was asked. (A chat kept by an earlier
+/// Petal may also say `spot`, where its panel was dragged to, and `mode`, the mode it was asked in: no longer read.)
 struct NotePlace: Codable, Equatable, Sendable {
     var pid: Int32
     var app: String          // bundle id
     var appName: String
     var window: UInt32?      // CGWindowID; nil for an app with no window
     var title: String
-    var mode: String         // the mode's id
     var desktop: Int?
     /// nil: a window (chats kept before notes could stick to tabs and apps).
     var scope: NoteScope? = nil

@@ -393,7 +393,7 @@ extension NoteDesk {
             // The Desktop showing under the pointer, read off the main thread (whichever dock): unknown, refused.
             return resolveDesktop { number in
                 guard live() else { return }
-                guard let desk = NoteShelf.desktopAnchor(number: number, mode: self.modeID(desktop: number)) else {
+                guard let desk = NoteShelf.desktopAnchor(number: number) else {
                     if let refuse { refuse(Self.desktopUnknown) } else { done(nil) }
                     return
                 }

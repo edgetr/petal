@@ -7,9 +7,6 @@ import WebKit
 @MainActor
 enum BenchTargets {
     static func all(app: PetalApp) -> [WindowBench.Target] {
-        let modes = app.config.modes
-        let here = app.config.mode(forDesktop: 1)
-
         // The chat: empty, and a long conversation of markdown-heavy replies.
         let empty = ClaudePanel()
         let long = ClaudePanel()
@@ -54,7 +51,7 @@ enum BenchTargets {
         login[.username] = "ada@example.com"
         login[.password] = "sample-password-1"
 
-        var targets: [WindowBench.Target] = [
+        let targets: [WindowBench.Target] = [
             // The floor: a panel with one line of text, nothing else. What the bench itself costs.
             .init(name: "Control (one line of text)", view: { AnyView(Text("Petal").padding(20)) }),
             .init(name: "Chat, empty", view: { AnyView(ClaudePanelView(panel: empty)) }, actions: [
@@ -68,7 +65,7 @@ enum BenchTargets {
                 ("typing in the chat field (a key)", { long.draft = long.draft.count > 30 ? "" : long.draft + "a" }),
             ], reset: { long.agent.preview(conversation); long.draft = "" }),
             .init(name: "Chats list", view: { AnyView(ClaudePanelView(panel: chats)) }),
-            .init(name: "Welcome", size: CGSize(width: 640, height: 920), view: { AnyView(WelcomeView {}) }),
+            .init(name: "Welcome", size: CGSize(width: 640, height: WelcomeView.height), view: { AnyView(WelcomeView {}) }),
             .init(name: "What's New", size: CGSize(width: 560, height: 600),
                   view: { AnyView(ReleaseNotesView(version: "1.0.0", preloaded: .init(body: notesText, link: nil))) }),
             .init(name: "Vault editor", size: CGSize(width: 640, height: 520), view: { AnyView(VaultEditor(item: login, isNew: false) {}) }),
@@ -81,7 +78,6 @@ enum BenchTargets {
                 return AnyView(PreviewView(id: "com.spotify.client") {})
             }, reset: { app.previews.preview(windows: [], pictures: false) }),
             .init(name: "Stack", view: { AnyView(StackView(contents: StackContents(folder: stackFolder.path, entries: entries)) {}) }),
-            .init(name: "Overview", view: { AnyView(OverviewView {}) }),
             .init(name: "\"+\" search", view: { AnyView(AppSearchView(search: app.search)) }, actions: [
                 ("typing a search (a key)", {
                     let words = ["s", "sa", "saf", "safa", "", "m", "ma", "mai", ""]
@@ -90,19 +86,6 @@ enum BenchTargets {
                 }),
             ], reset: { app.search.query = "" }),
         ]
-        for kind in ["block", "move", "peek"] {
-            if let card = FocusCard.sample(kind, app: app, here: here, desktop: 1) {
-                targets.append(.init(name: "Card, \(kind)", view: { AnyView(CardView(card: card, tail: Tail(edge: .bottom, offset: -90))) }))
-            }
-        }
-        if !modes.isEmpty {
-            let summary = Insights.Summary(title: "Last week", from: Date().addingTimeInterval(-7 * 86400), to: Date(),
-                                           modes: modes.prefix(3).enumerated().map { index, mode in
-                                               .init(id: mode.id, name: mode.name, minutes: [740, 185, 40][index],
-                                                     apps: mode.apps.prefix(3).enumerated().map { ($0.element, [500, 150, 60][$0.offset]) })
-                                           }, cardsShown: 8, wentBack: 5)
-            targets.append(.init(name: "Card, summary", view: { AnyView(CardView(card: FocusCard(kind: .summary, summary: summary))) }))
-        }
         return targets
     }
 
@@ -111,14 +94,14 @@ enum BenchTargets {
         """
         ## Petal 1.\(n)
 
-        Your dock learns a little: **suggested modes** and a *weekly summary*, from a history that stays on your Mac.
+        Your dock holds **your notes** now, and a *note pad* to take a paper from.
 
-        - Share your dock as a `.petal` file, by AirDrop or Messages
-        - Keyboard shortcuts: ⌃⌥1…9 switch modes
+        - Drag a paper off the note pad and let go anywhere
+        - Keyboard shortcuts: ⌃⌥N for a new note
         - Magnification, and [a menu bar icon](https://github.com/edgetr/petal)
 
         ### Fixes
-        * Focus cards no longer cover the update card
+        * A note no longer covers the update notice
         * The vault fills addresses in Safari again
         """
     }.joined(separator: "\n\n")

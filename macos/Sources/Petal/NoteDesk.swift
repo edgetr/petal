@@ -2243,7 +2243,6 @@ final class NoteDesk {
             s.pid = scene.pid
             s.window = scene.window
             s.title = app.assist.neverLook(scene.app) ? "" : scene.title
-            s.mode = modeHere
             return s
         }
         switch NoteShelf.frontOffer(window: scene.window, none: read.none) {
@@ -2251,7 +2250,7 @@ final class NoteDesk {
         case .unknown: return []
         case .desktop:
             // Which Desktop it is (read off the main thread with the scene), or no note: never one stuck to no Desktop.
-            return NoteShelf.desktopAnchor(number: scene.desktop, mode: modeID(desktop: scene.desktop)).map { [$0] } ?? []
+            return NoteShelf.desktopAnchor(number: scene.desktop).map { [$0] } ?? []
         }
         if let passage, !passage.quote.isEmpty, scene.tab != nil || !scene.file.isEmpty {
             var s = stick(.passage)
@@ -2490,7 +2489,6 @@ final class NoteDesk {
                         guard let desktop else { return self.say("Petal couldn't tell which Desktop that is, so no note was made.") }
                         var desk = NoteStick(kind: .desktop)
                         desk.desktop = desktop
-                        desk.mode = self.modeID(desktop: desktop)
                         self.make(on: desk, at: landing)
                         return
                     }
@@ -2516,11 +2514,6 @@ final class NoteDesk {
 
     static let desktopUnknown = "Petal couldn't tell which Desktop is showing, so nothing was changed."
 
-    /// The mode a Desktop is in (modes.json's workspaces, NoteShelf.modeID): never asked of the dock.
-    func modeID(desktop: Int?) -> String { NoteShelf.modeID(desktop: desktop, workspaces: app.config.workspaces, defaultMode: app.config.defaultMode) }
-
-    /// The mode of the Desktop under the pointer, from the Desktops last read (no window server on the main thread).
-    var modeHere: String { modeID(desktop: Self.desktopShowing(on: NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main)) }
     /// Handles of a conflict's papers beyond the note's own (by paper key), for this run.
     @ObservationIgnored private var handlesSaving = false
 
@@ -2788,7 +2781,7 @@ final class NoteDesk {
         menu.addItem(ActionItem("Put it on this Desktop") { [weak self] in
             self?.resolveDesktop(on: screen) { number in
                 guard let self else { return }
-                guard let desk = NoteShelf.desktopAnchor(number: number, mode: self.modeID(desktop: number)) else { return self.say(Self.desktopUnknown) }
+                guard let desk = NoteShelf.desktopAnchor(number: number) else { return self.say(Self.desktopUnknown) }
                 self.restick(key, [desk])
             }
         })

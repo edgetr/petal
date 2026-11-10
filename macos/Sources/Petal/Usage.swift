@@ -40,7 +40,7 @@ final class Usage {
     }
 
     private func loadSpend() {
-        let saved = ActivityLog.state()["aiSpend"] as? [String: Any] ?? [:]
+        let saved = PetalState.read()["aiSpend"] as? [String: Any] ?? [:]
         spentMonth = saved["month"] as? String ?? Self.month()
         for provider in Provider.allCases { spentBy[provider] = saved[provider.rawValue] as? Double }
         if spentMonth != Self.month() { spentMonth = Self.month(); spentBy = [:] }
@@ -52,7 +52,7 @@ final class Usage {
         spentBy[provider, default: 0] += dollars
         var record: [String: Any] = ["month": spentMonth]
         for (key, value) in spentBy { record[key.rawValue] = value }
-        spendQueue.async { ActivityLog.setState("aiSpend", record) }
+        spendQueue.async { PetalState.set("aiSpend", record) }
     }
 
     /// "$1.20 this month" for an AI on an API key; nil on a subscription.

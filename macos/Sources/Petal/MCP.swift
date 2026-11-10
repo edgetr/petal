@@ -2,13 +2,12 @@ import Foundation
 
 /// Claude's Petal tools on macOS: `Petal --mcp` speaks the Model Context Protocol on stdin and stdout, so a Mac
 /// needs nothing installed for them (petal-mcp.py would need python3, which a Mac only has with Apple's developer
-/// tools). The tools' names, descriptions, settings and mode fields come from petal-mcp.py, written into the app
-/// by build.sh as Resources/mcp/tools.json, so both platforms describe them the same way; what each tool does on a
-/// Mac is here, as in petal-mcp.py's macOS branch.
+/// tools). The tools' names, descriptions and settings come from petal-mcp.py (the ones the Mac has: modes and
+/// their tools are Omarchy's), written into the app by build.sh as Resources/mcp/tools.json, so both platforms
+/// describe them the same way; what each tool does on a Mac is here, as in petal-mcp.py's macOS branch.
 enum MCP {
     static let folder = Config.folder
     static let settingsFile = folder.appending(path: "settings.json")
-    static let modesFile = folder.appending(path: "modes.json")
     static let dockFile = folder.appending(path: "dock.json")
     /// The running Petal's socket (`PETAL_SOCKET` points a client at another, for testing).
     static let socket = ProcessInfo.processInfo.environment["PETAL_SOCKET"].flatMap { $0.isEmpty ? nil : $0 } ?? folder.appending(path: "petal.sock").path
@@ -70,12 +69,11 @@ enum MCP {
         init(_ text: String) { errorDescription = text }
     }
 
-    /// Inside the running Petal (set at its start): settings, modes and dock changes go through its Config.
+    /// Inside the running Petal (set at its start): settings and dock changes go through its Config.
     nonisolated(unsafe) static var inPetal = false
 
-    /// The tools that change settings.json, modes.json or dock.json.
-    static let writeTools: Set<String> = ["petal_set_settings", "petal_reset_settings", "petal_set_dock", "petal_save_mode",
-                                          "petal_delete_mode", "petal_set_default_mode", "petal_import_recipe"]
+    /// The tools that change settings.json or dock.json.
+    static let writeTools: Set<String> = ["petal_set_settings", "petal_reset_settings", "petal_set_dock"]
 
     static func call(_ name: String, _ args: [String: Any]) throws -> Any {
         // While Petal runs, a change is made by Petal itself, in order with every other change (two notes changing
@@ -92,10 +90,10 @@ enum MCP {
             }
             let dock = read(dockFile) ?? [:]
             let environment = ProcessInfo.processInfo.environment
-            return ["settings": effective, "settings_help": help, "modes": read(modesFile) ?? [:],
-                    "mode_fields": description["mode_fields"] ?? [:], "current_mode": petal("current"),
-                    "dock": ["position": dock["position"] ?? "bottom", "autohide": dock["autoHide"] ?? false, "dock": dock["dock"] ?? "petal"],
-                    "files": ["settings": settingsFile.path, "modes": modesFile.path,
+            return ["settings": effective, "settings_help": help,
+                    "dock": ["apps": dock["apps"] as? [String] ?? [], "position": dock["position"] ?? "bottom",
+                             "autohide": dock["autoHide"] ?? false, "dock": dock["dock"] ?? "petal"],
+                    "files": ["settings": settingsFile.path, "dock": dockFile.path,
                               "instructions": folder.appending(path: "instructions.md").path,
                               "plugin_source": Personal.sourceForAgents ?? environment["PETAL_SOURCE"] ?? "",
                               "app": environment["PETAL_APP"] ?? Bundle.main.bundlePath],
@@ -143,9 +141,22 @@ enum MCP {
             if let position = args["position"] as? String, !["bottom", "left", "right"].contains(position) {
                 throw Failure("position must be bottom, left or right (the menu bar holds the top)")
             }
+            // The dock's apps: the whole list in its order, or a few added at the end or taken out.
+            func ids(_ key: String) throws -> [String]? {
+                guard let value = args[key] else { return nil }
+                guard let list = value as? [String] else { throw Failure("\(key) is a list of bundle ids and https:// addresses") }
+                return list.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            }
+            let whole = try ids("apps"), add = try ids("add"), remove = try ids("remove")
             try update(dockFile) { dock in
                 if let position = args["position"] as? String { dock["position"] = position; done["position"] = position }
                 if let hide = args["autohide"] as? Bool { dock["autoHide"] = hide; done["autohide"] = hide }
+                guard whole != nil || add != nil || remove != nil else { return }
+                var apps: [String] = []
+                for app in (whole ?? dock["apps"] as? [String] ?? []) + (add ?? []) where !apps.contains(app) { apps.append(app) }
+                apps.removeAll { remove?.contains($0) == true }
+                dock["apps"] = apps
+                done["apps"] = apps
             }
             if let use = args["use"] as? String {
                 guard ["petal", "macos"].contains(use) else { throw Failure("use must be petal or macos") }
@@ -157,72 +168,8 @@ enum MCP {
                 }
             }
             return done
-        case "petal_save_mode":
-            guard let mode = args["mode"] as? [String: Any], let id = mode["id"] as? String, !id.isEmpty else {
-                throw Failure("mode.id is required")
-            }
-            var saved: [String: Any] = [:]
-            try update(modesFile, fallback: ["defaultMode": id, "workspaces": [:], "modes": []]) { data in
-                var modes = data["modes"] as? [[String: Any]] ?? []
-                if let index = modes.firstIndex(where: { $0["id"] as? String == id }) {
-                    modes[index].merge(mode) { _, new in new }
-                    saved = modes[index]
-                } else {
-                    var new: [String: Any] = ["name": id.capitalized, "icon": "circle.fill", "color": "#ff5fae", "about": "",
-                                              "apps": [], "sites": [], "focusDelay": 0, "distracting": false, "hold": false, "allow": []]
-                    new.merge(mode) { _, new in new }
-                    modes.append(new)
-                    saved = new
-                }
-                data["modes"] = modes
-                if data["workspaces"] == nil { data["workspaces"] = [String: Any]() }
-                if (data["defaultMode"] as? String ?? "").isEmpty { data["defaultMode"] = id }
-            }
-            return ["ok": true, "mode": saved]
-        case "petal_delete_mode":
-            let id = args["id"] as? String ?? ""
-            try update(modesFile) { data in
-                let all = data["modes"] as? [[String: Any]] ?? []
-                let kept = all.filter { $0["id"] as? String != id }
-                guard kept.count < all.count else { throw Failure("No mode with id \"\(id)\"") }
-                guard !kept.isEmpty else { throw Failure("Petal needs at least one mode") }
-                data["modes"] = kept
-                data["workspaces"] = (data["workspaces"] as? [String: Any] ?? [:]).filter { $0.value as? String != id }
-                if data["defaultMode"] as? String == id { data["defaultMode"] = kept[0]["id"] }
-            }
-            return ["ok": true]
-        case "petal_set_default_mode":
-            let id = args["id"] as? String ?? ""
-            try update(modesFile) { data in
-                guard (data["modes"] as? [[String: Any]] ?? []).contains(where: { $0["id"] as? String == id }) else {
-                    throw Failure("No mode with id \"\(id)\"")
-                }
-                data["defaultMode"] = id
-            }
-            return ["ok": true]
-        case "petal_switch_mode":
-            return ["result": petal("mode", args["id"] as? String ?? "")]
         case "petal_list_apps":
             return apps(matching: args["query"] as? String ?? "")
-        case "petal_export_recipe":
-            return ["path": try Recipe.export(path: args["path"] as? String, name: args["name"] as? String)]
-        case "petal_import_recipe":
-            let plan = try importPlan(args)
-            return try Recipe.apply(plan, look: args["look"] as? Bool ?? false)
-        case "petal_suggestions":
-            guard Insights.setting("activityLog") else { return ["suggestions": [], "note": "The activity history is off (activityLog)."] }
-            return ["suggestions": Insights.suggestions().map(\.json)]
-        case "petal_summary":
-            guard Insights.setting("activityLog") else { return ["note": "The activity history is off (activityLog)."] }
-            // The last `days` (up to the 30 the history keeps), or from/to (YYYY-MM-DD); the last 7 days by default.
-            let format = DateFormatter()
-            format.dateFormat = "yyyy-MM-dd"
-            let days = min(30, max(1, (args["days"] as? NSNumber)?.intValue ?? 7))
-            let to = (args["to"] as? String).flatMap(format.date).map { $0.addingTimeInterval(86400) } ?? Date()
-            let from = (args["from"] as? String).flatMap(format.date) ?? to.addingTimeInterval(-Double(days) * 86400)
-            var json = Insights.summary(from: from, to: to, title: "From \(format.string(from: from))").json
-            json["byDay"] = Insights.byDay(from: from, to: to)
-            return json
         case "petal_look", "petal_apps", "petal_windows", "petal_trash", "petal_remember", "petal_forget", "petal_memories", "petal_show", "petal_vault", "petal_ui", "petal_act",
              "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete",
              "petal_notes", "petal_note_read", "petal_note_write", "petal_note_move", "petal_note_stick",
@@ -257,8 +204,8 @@ enum MCP {
 
     // MARK: Files
 
-    /// The three files Petal keeps in memory: inside Petal, asked of it (its own changes may not be written yet).
-    private static func kept(_ url: URL) -> Bool { [settingsFile.path, modesFile.path, dockFile.path].contains(url.path) }
+    /// The two files Petal keeps in memory: inside Petal, asked of it (its own changes may not be written yet).
+    private static func kept(_ url: URL) -> Bool { [settingsFile.path, dockFile.path].contains(url.path) }
 
     /// One of the write tools, done by the running Petal (["mcpCall", name, json]); nil when Petal isn't running
     /// (or is one from before this), to be done here.
@@ -272,16 +219,11 @@ enum MCP {
     }
 
     /// What the running Petal does for `viaPetal`: one line of JSON, the result or the error.
-    /// `plan`: a recipe import's plan, made off the main thread (`importPlan`).
-    static func answer(_ name: String, _ json: String, plan: Result<Recipe.Plan, Error>? = nil) -> String {
+    static func answer(_ name: String, _ json: String) -> String {
         var reply: [String: Any]
         do {
             let args = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
-            if let plan {
-                reply = ["result": try Recipe.apply(plan.get(), look: args["look"] as? Bool ?? false)]
-            } else {
-                reply = ["result": try call(name, args)]
-            }
+            reply = ["result": try call(name, args)]
         } catch {
             reply = ["error": error.localizedDescription]
         }
@@ -308,7 +250,7 @@ enum MCP {
     }
 
     /// Changes a file in place. A file that's there but isn't valid JSON is left alone, with an error for Claude.
-    /// Inside Petal, settings, modes and dock changes go through its Config; elsewhere every change is made under
+    /// Inside Petal, settings and dock changes go through its Config; elsewhere every change is made under
     /// the lock, read to written, and written whole (renamed into place).
     static func update(_ url: URL, fallback: [String: Any] = [:], _ change: @escaping (inout [String: Any]) throws -> Void) throws {
         if inPetal, Thread.isMainThread, kept(url) {
@@ -397,16 +339,6 @@ enum MCP {
             .map { ["id": $0.id, "name": $0.name] }
     }
 
-    /// What importing the recipe in `args` would add (reads it and finds its apps: off the main thread in Petal).
-    static func importPlan(_ args: [String: Any]) throws -> Recipe.Plan {
-        guard let path = args["path"] as? String, !path.isEmpty else { throw Failure("path is required") }
-        return try Recipe.plan(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
-    }
-
-    static func importPlan(_ json: String) throws -> Recipe.Plan {
-        try importPlan((try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:])
-    }
-
     /// Every app in the usual places: bundle id, name, and where it is.
     static func installed() -> [(id: String, name: String, path: String)] {
         let roots = ["/Applications", "/Applications/Utilities", "/System/Applications", "/System/Applications/Utilities",
@@ -425,7 +357,7 @@ enum MCP {
                 seen.insert(id)
                 let name = bundle.infoDictionary?["CFBundleDisplayName"] as? String ?? bundle.infoDictionary?["CFBundleName"] as? String
                     ?? (path as NSString).lastPathComponent.replacingOccurrences(of: ".app", with: "")
-                found.append((id, Insights.plain(name), path))
+                found.append((id, Apps.plain(name), path))
             }
         }
         return found.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }

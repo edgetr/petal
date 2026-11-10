@@ -3,8 +3,9 @@ import AppKit
 /// `Petal --routines-check [--ai]`: runs routines on throwaway folders in the temporary folder, without the rest of
 /// Petal (no dock, no settings, nothing in ~/.config/petal): making one through Petal AI's tool, a dry run, tidying
 /// what's there, putting it back, new files settling (a growing file, a Chrome and a Firefox download), a second,
-/// pickier routine winning, and the file-name patterns and times. With --ai, sorting asks Claude Haiku (the
-/// person's own `claude`, a few quick calls); without, it sorts by kind.
+/// pickier routine winning, the file-name patterns and times, and routines saved when the Mac had modes (kept as
+/// written, never run). With --ai, sorting asks Claude Haiku (the person's own `claude`, a few quick calls); without,
+/// it sorts by kind.
 @MainActor
 enum RoutinesCheck {
     static func run(ai: Bool) -> Never {
@@ -182,8 +183,43 @@ enum RoutinesCheck {
         }
         Routines.flush()
         check(fm.fileExists(atPath: Routines.file.path) && Routines.file.path.hasPrefix(state.path), "kept in the test's own folder")
-        print(failures == 0 ? "routines: all good" : "routines: \(failures) failed")
         routines.stop()
+
+        // Routines saved when the Mac had modes (started by one, or switching to one): listed, never run, and
+        // written back as they were.
+        let old = root.appending(path: "Old")
+        try? fm.createDirectory(at: old, withIntermediateDirectories: true)
+        let entered: [String: Any] = ["id": "m1", "name": "Tidy in Social", "words": "when I go to Social, tidy this", "on": true, "lastResult": "",
+                                      "trigger": ["on": "mode", "mode": "social"], "actions": [["do": "sort", "by": "kind", "folder": old.path, "into": ""]]]
+        let switches: [String: Any] = ["id": "m2", "name": "Design files", "words": "sort these and switch to Design", "on": true, "lastResult": "",
+                                       "trigger": ["on": "file", "folder": old.path, "types": [String](), "named": [String]()],
+                                       "actions": [["do": "mode", "mode": "design"], ["do": "sort", "by": "kind", "folder": "", "into": ""]]]
+        Config.writeObject(["routines": [entered, switches]], to: Routines.file)
+        let kept = Routines()
+        kept.standalone = true
+        var keptStarted = false
+        kept.start { keptStarted = true }
+        wait(5) { keptStarted }
+        check(kept.list.map(\.id) == ["m1", "m2"] && kept.list.allSatisfy(\.usesModes), "routines that used modes are still listed")
+        let told = (tool("petal_routines", [:], kept)["routines"] as? [[String: Any]]) ?? []
+        check(told.count == 2 && told.allSatisfy { ($0["skipped"] as? String)?.contains("modes") == true }, "each says it's skipped, and why")
+        fm.createFile(atPath: old.appending(path: "left alone.png").path, contents: Data(repeating: 65, count: 100))
+        check(tool("petal_routine_run", ["id": "m1"], kept)["error"] != nil && tool("petal_routine_run", ["id": "m2", "dryRun": true], kept)["error"] != nil,
+              "running one by hand is refused")
+        RunLoop.main.run(until: Date().addingTimeInterval(6))   // long past a new file settling
+        check(fm.fileExists(atPath: old.appending(path: "left alone.png").path) && kept.log.count == routines.log.count, "a file landing starts neither: nothing moved")
+        check(tool("petal_routine_save", ["words": "x", "trigger": ["on": "mode", "mode": "social"], "actions": [["do": "hide", "apps": ["Mail"]]]], kept)["error"] != nil
+              && tool("petal_routine_save", ["words": "x", "trigger": ["on": "time", "at": "09:00"], "actions": [["do": "mode", "mode": "design"]]], kept)["error"] != nil,
+              "a new routine can't start with a mode or switch to one")
+        // Another routine saved beside them writes the file again: theirs come back as they were written.
+        _ = tool("petal_routine_save", ["words": "Hide Mail at nine", "trigger": ["on": "time", "at": "09:00"], "actions": [["do": "hide", "apps": ["Mail"]]]], kept)
+        Routines.flush()
+        let written = (Config.parse(Routines.file)?["routines"] as? [[String: Any]]) ?? []
+        check(written.count == 3 && (written.first { $0["id"] as? String == "m1" }?["trigger"] as? NSDictionary) == (entered["trigger"] as? NSDictionary)
+              && ((written.first { $0["id"] as? String == "m2" }?["actions"] as? [NSDictionary])?.first) == (["do": "mode", "mode": "design"] as NSDictionary),
+              "and they're written back as they were")
+        kept.stop()
+        print(failures == 0 ? "routines: all good" : "routines: \(failures) failed")
         try? fm.removeItem(at: root)
         exit(failures == 0 ? 0 : 1)
     }

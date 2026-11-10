@@ -37,7 +37,7 @@ struct NoteStick: Equatable, Sendable {
         case window
         /// Every window of an app.
         case app
-        /// A Desktop (and its mode): the note sits on that Desktop.
+        /// A Desktop: the note sits on that Desktop.
         case desktop
         /// The screen itself, on one Mac (`mac`): the note shows at its spot on every Desktop, whatever is in front.
         /// On another Mac it's kept as written and shows nowhere.
@@ -85,7 +85,6 @@ struct NoteStick: Equatable, Sendable {
     /// saw it, so never written.
     var tabElement: Int? = nil
     var desktop: Int? = nil
-    var mode = ""
     /// A person's vault contact, by the contact's id (never its details).
     var contact = ""
     /// A person's address in their chat (an email or phone number), when the app shows one.
@@ -98,15 +97,15 @@ struct NoteStick: Equatable, Sendable {
     /// The file it was made on, as the disk knew it then ("device:inode"; ViewerFileID): a file and a sentence in one
     /// are found again by it wherever the file went, and a new file that took its old path is never it.
     var fileID = ""
-    /// Keys this Petal doesn't know (a later one's, or the person's own), each with its lines exactly as written
-    /// (nested ones too), written back as they were.
+    /// Keys this Petal doesn't know (a later one's, the person's own, or `mode` from when the Mac had modes), each
+    /// with its lines exactly as written (nested ones too), written back as they were.
     var extra: [(key: String, lines: [String])] = []
 
     static func == (a: NoteStick, b: NoteStick) -> Bool {
         a.kind == b.kind && a.app == b.app && a.appName == b.appName && a.url == b.url && a.title == b.title && a.path == b.path
             && a.bookmark == b.bookmark && a.quote == b.quote && a.before == b.before && a.after == b.after && a.mac == b.mac
             && a.pid == b.pid && a.window == b.window && a.tabID == b.tabID && a.shared == b.shared && a.tabElement == b.tabElement
-            && a.desktop == b.desktop && a.mode == b.mode && a.contact == b.contact && a.handle == b.handle
+            && a.desktop == b.desktop && a.contact == b.contact && a.handle == b.handle
             && a.page == b.page && a.slide == b.slide && a.bounds == b.bounds && a.fileID == b.fileID
             && a.extra.map(\.key) == b.extra.map(\.key) && a.extra.map(\.lines) == b.extra.map(\.lines)
     }
@@ -117,7 +116,6 @@ struct NoteStick: Equatable, Sendable {
         s.app = app
         s.appName = appName
         s.desktop = desktop
-        s.mode = mode
         return s
     }
 
@@ -195,7 +193,7 @@ struct NoteStick: Equatable, Sendable {
             return "The file " + name + (spot.isEmpty ? "" : ", " + spot) + (appName.isEmpty ? "" : " (in any app)")
         case .window: return "A window of \(appName.isEmpty ? app : appName)" + (title.isEmpty ? "" : ": “\(title)”")
         case .app: return "Every window of \(appName.isEmpty ? app : appName)"
-        case .desktop: return "Desktop \(desktop.map(String.init) ?? "")" + (mode.isEmpty ? "" : " (\(mode))")
+        case .desktop: return "Desktop \(desktop.map(String.init) ?? "")"
         case .screen: return "On screen"
         case .person: return (title.isEmpty ? "A person" : title) + ", in any chat app"
         }
@@ -635,8 +633,7 @@ struct NoteFile: Equatable, Sendable {
                 var fields: [(String, String)] = [("kind", place.kind.rawValue)]
                 let strings: [(String, String)] = [("app", place.app), ("appName", place.appName), ("url", place.url), ("title", place.title),
                                                    ("path", place.path), ("bookmark", place.bookmark), ("quote", place.quote),
-                                                   ("before", place.before), ("after", place.after), ("mac", place.mac), ("mode", place.mode),
-                                                   ("fileID", place.fileID)]
+                                                   ("before", place.before), ("after", place.after), ("mac", place.mac), ("fileID", place.fileID)]
                 for (key, value) in strings where !value.isEmpty { fields.append((key, Self.quoted(value))) }
                 if let pid = place.pid { fields.append(("pid", "\(pid)")) }
                 if let window = place.window { fields.append(("window", "\(window)")) }
@@ -725,7 +722,6 @@ struct NoteFile: Equatable, Sendable {
                 case "before": stick.before = value
                 case "after": stick.after = value
                 case "mac": stick.mac = value
-                case "mode": stick.mode = value
                 case "fileID": stick.fileID = value
                 case "pid": stick.pid = Int32(value)
                 case "window": stick.window = UInt32(value)
@@ -1684,7 +1680,7 @@ enum NoteShelf {
         }
     }
 
-    /// Which of Petal's shortcuts are registered: the dock's (modes, the AI, "+") while its dock shows, the notes'
+    /// Which of Petal's shortcuts are registered: the dock's (the AI, "+") while its dock shows, the notes'
     /// (⌃⌥N) while notes are on, whichever dock is chosen; none while shortcuts are off.
     static func shortcutGroups(shortcuts: Bool, dockShown: Bool, notes: Bool) -> (dock: Bool, notes: Bool) {
         (shortcuts && dockShown, shortcuts && notes)
@@ -1695,11 +1691,10 @@ enum NoteShelf {
     static func stopMove(afterFlush outcome: Bool) -> Bool { outcome }
 
     /// A Desktop anchor only with the Desktop's number: unknown, nothing is stuck there (and nothing else changes).
-    static func desktopAnchor(number: Int?, mode: String) -> NoteStick? {
+    static func desktopAnchor(number: Int?) -> NoteStick? {
         guard let number else { return nil }
         var stick = NoteStick(kind: .desktop)
         stick.desktop = number
-        stick.mode = mode
         return stick
     }
 
@@ -1763,13 +1758,6 @@ enum NoteShelf {
     /// A capture of what's in front for the quick question: only the latest opening's lands (an earlier one's
     /// callback, arriving late, is dropped).
     static func captureCurrent(_ generation: Int, latest: Int) -> Bool { generation == latest }
-
-    /// A Desktop note's mode: the one that Desktop is in (modes.json's workspaces), else the default; never asked of
-    /// the dock (which may not be showing).
-    static func modeID(desktop: Int?, workspaces: [String: String], defaultMode: String) -> String {
-        guard let desktop else { return "" }
-        return workspaces[String(desktop)] ?? defaultMode
-    }
 
     /// Reads of what's in front: one at a time, later requests one follow-up (the same gate as passage scans), and a
     /// read whose look is gone by the time it would query an app does nothing more.

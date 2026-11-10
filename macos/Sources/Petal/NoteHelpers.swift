@@ -516,7 +516,7 @@ final class NoteHelpers {
         }
         retire(run)
         // Its calls waiting in the quick queue are dropped on the next pass (asked later, never from inside one).
-        app.focus.brain.resume()
+        app.brain.resume()
     }
 
     /// What was asked of a run while it worked, handed on once it succeeded: a second opinion asked meanwhile (with
@@ -689,14 +689,14 @@ final class NoteHelpers {
         case .startWaiting:
             guard run.token.goOn(), let call = run.call else { return }
             write(run.noteID) { file in file.helper?.state = .working; file.helper?.step = "Going on" }
-            app.focus.brain.resume()
+            app.brain.resume()
             // What's said now is said after the turn that waited.
             if let words { followUps.add(words, note: run.noteID, token: run.token, line: line) }
             start(run, call)
         case .carryOn:
             guard run.token.goOn(), let sticky = run.sticky else { return }
             write(run.noteID) { file in file.helper?.state = .working; file.helper?.step = "Going on" }
-            app.focus.brain.resume()
+            app.brain.resume()
             if sticky.agent.running {
                 if let words { followUps.add(words, note: run.noteID, token: run.token, line: line) }
             } else if let words {
@@ -1119,7 +1119,7 @@ final class NoteHelpers {
             // turn there comes.
             run.call = nil
             let told = ToldRef()
-            app.focus.brain.ask(key: key, token: run.token, provider: provider, gate: quickGate(run), make: { [weak self] ready in
+            app.brain.ask(key: key, token: run.token, provider: provider, gate: quickGate(run), make: { [weak self] ready in
                 guard let self else { return ready(.over) }
                 self.prepare(run, call) { prepared in
                     switch prepared {
@@ -1234,7 +1234,7 @@ final class NoteHelpers {
         raw.coverOf = mayRead(paper.notebook, from: paper) ? paper.notebook : nil
         // The person's own notes for the AI and what Petal remembers: shielded too, in the helper's own system prompt.
         raw.instructionsFile = app.config.instructionsFile
-        raw.memory = app.assist.memoryBrief(mode: nil)
+        raw.memory = app.assist.memoryBrief()
         return raw
     }
 
@@ -1349,7 +1349,7 @@ final class NoteHelpers {
                     }
                     // With no quick AI (or none that answers): its own plain words, from the same shielded sources.
                     let plainly = { self.start(run, Call(sources: sources, words: { _ in "" }, to: .local { told in finish(nil, told) })) }
-                    guard self.app.focus.brain.enabled else { return plainly() }
+                    guard self.app.brain.enabled else { return plainly() }
                     // Where they stopped, from what was open only, by the quick AI.
                     self.start(run, Call(sources: sources, words: { NoteHelp.awayRequest($0) },
                                          to: .quick(key: "away|\(paper.noteID)|\(run.token.id)", provider: provider) { reply, told in
@@ -1533,7 +1533,7 @@ final class NoteHelpers {
             if case .go = admit(run) { run.parked = false; goOn(run) }
         }
         // Quick calls waiting on their gate are asked again.
-        app.focus.brain.resume()
+        app.brain.resume()
         // Calls the gate held, and turns that waited before their process started: once it admits, they start (and
         // are made then, from their sources as they are then).
         for run in runs.values where run.token.admits {
@@ -1691,7 +1691,7 @@ final class NoteHelpers {
                 let scope: NoteScope = stick.kind == .app ? .app : (stick.kind == .tab || stick.kind == .passage) && scene.tab != nil ? .tab : .window
                 let name = NSRunningApplication(processIdentifier: scene.pid)?.localizedName ?? stick.appName
                 return NotePlace(pid: scene.pid, app: scene.app, appName: name, window: scene.window, title: scene.title,
-                                 mode: desk.modeID(desktop: scene.desktop), desktop: scene.desktop, scope: scope, tab: scope == .tab ? scene.tab : nil)
+                                 desktop: scene.desktop, scope: scope, tab: scope == .tab ? scene.tab : nil)
             }
         }
         return viewing.flatMap { app.viewers.place(of: $0) }
@@ -2193,7 +2193,7 @@ final class NoteHelpers {
             var file = NoteFile(id: stable, body: lines.prefix(6).joined(separator: " "))
             file.fromPetal = true
             self.desk?.resolveDesktop { number in
-                if let place = NoteShelf.desktopAnchor(number: number, mode: self.desk?.modeID(desktop: number) ?? "") { file.places = [place] }
+                if let place = NoteShelf.desktopAnchor(number: number) { file.places = [place] }
                 // Still that notes' folder, and its notebook wherever it is now (renamed meanwhile: there); not
                 // surely found, nothing is made (a later tick tries again).
                 guard store.session === session, case .found(let notebook) = store.resolve(book) else { self.mornings.remove(stable); return }
@@ -2289,7 +2289,7 @@ final class NoteHelpers {
         // question is made; not found there again, nothing is asked); else the number the quick AI found.
         let decide = { (value: Double?, hint: String?, plainly: Bool) in
             guard let value, NoteHelp.crossed(value, line: watch.line), !watch.hit else { return finish(value, hint, .plain) }
-            guard self.app.focus.brain.enabled else {
+            guard self.app.brain.enabled else {
                 return finish(value, hint, NoteHelp.watchVerdict(crossed: true, alreadyHit: false, confirmation: nil, asked: false))
             }
             self.start(run, Call(sources: sources, words: { told in
@@ -2306,7 +2306,7 @@ final class NoteHelpers {
         if !text.isEmpty, let found = NoteHelp.pick(text, line: watch.line, hint: watch.hint, last: last) {
             return decide(found.value, NoteHelp.hint(before: found, in: text), true)
         }
-        guard !text.isEmpty, app.focus.brain.enabled else { return finish(nil, nil, .plain) }
+        guard !text.isEmpty, app.brain.enabled else { return finish(nil, nil, .plain) }
         // Couldn't tell plainly: the quick AI finds it once (and the words before it for next time); a value it finds
         // that crosses the line is confirmed like any other.
         start(run, Call(sources: sources, words: { NoteHelp.watchFind($0) },
@@ -2344,7 +2344,7 @@ final class NoteHelpers {
         guard let desk, desk.on else { return answer(.couldnt("Petal Notes is off.")) }
         guard desk.acceptsChanges else { return answer(.couldnt(NoteStore.gettingReady)) }
         guard let paper = paper(request.noteID) else { return answer(.couldnt("This note has two versions: keep one first.")) }
-        guard app.focus.brain.enabled else { return answer(.couldnt("Choose an AI in Petal's settings, under AI, and this note can answer here.")) }
+        guard app.brain.enabled else { return answer(.couldnt("Choose an AI in Petal's settings, under AI, and this note can answer here.")) }
         let made = Run(token: lenses.start(paper.noteID), noteID: paper.noteID, asked: "", who: Self.petalWho)
         made.kind = .lens
         made.startNotebook = paper.notebook

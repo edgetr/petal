@@ -92,7 +92,7 @@ final class Viewers {
     func place(of model: ViewerModel) -> NotePlace? {
         guard let window = windows[model.id], window.windowNumber > 0 else { return nil }
         return NotePlace(pid: getpid(), app: NSRunningApplication.current.bundleIdentifier ?? "", appName: "Petal's viewer",
-                         window: CGWindowID(window.windowNumber), title: model.name, mode: "", desktop: nil, scope: .window)
+                         window: CGWindowID(window.windowNumber), title: model.name, desktop: nil, scope: .window)
     }
 
     /// The viewer whose window has the keyboard, by its model's id (ViewerWindow): while it does, it's the desk's

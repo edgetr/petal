@@ -3,13 +3,12 @@ import ApplicationServices
 import Carbon
 import Observation
 
-/// The browser's front tab: its real address, and closing it.
+/// The browser's front tab: its real address.
 ///
 /// - Chromium browsers (Helium, Chrome, Arc, Brave, Edge, Vivaldi, Opera, Aside) and Safari answer AppleScript. Each asks
 ///   once for Automation permission; Petal only asks from a button (the welcome window or settings), never by
 ///   surprise, and until then reads the tab's title instead.
-/// - Firefox and Zen don't script tabs: Petal reads the address field through Accessibility, and closes a tab with
-///   ⌘W sent to that browser alone. The pointer never moves.
+/// - Firefox and Zen don't script tabs: Petal reads the address field through Accessibility. The pointer never moves.
 @MainActor @Observable
 final class Browsers {
     enum Kind { case chromium, safari, gecko }
@@ -570,32 +569,6 @@ final class Browsers {
         return NoteTab(element: element, index: strip.map { $0.selected + 1 }, count: strip?.tabs.count,
                        url: address ?? "", title: title.isEmpty ? windowTitle : title)
     }
-    // MARK: Closing
-
-    /// Closes the browser's front tab.
-    func closeTab(of app: NSRunningApplication) {
-        guard let id = app.bundleIdentifier, let kind = Self.kind(id) else { return }
-        switch kind {
-        case .gecko:
-            Self.commandW(app)
-        case .chromium, .safari:
-            let source = "tell application id \"\(id)\" to close \(kind == .safari ? "current tab" : "active tab") of front window"
-            queue.async {
-                if Self.access(id) == .allowed { _ = Self.run(source) } else { DispatchQueue.main.async { Self.commandW(app) } }
-            }
-        }
-    }
-
-    /// ⌘W to that app only, as its own File menu would close a tab.
-    static func commandW(_ app: NSRunningApplication) {
-        let source = CGEventSource(stateID: .combinedSessionState)
-        for down in [true, false] {
-            let event = CGEvent(keyboardEventSource: source, virtualKey: 0x0D, keyDown: down)   // W
-            event?.flags = .maskCommand
-            event?.postToPid(app.processIdentifier)
-        }
-    }
-
     nonisolated private static func run(_ source: String) -> String? {
         var error: NSDictionary?
         let result = NSAppleScript(source: source)?.executeAndReturnError(&error)

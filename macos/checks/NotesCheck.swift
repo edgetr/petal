@@ -621,17 +621,22 @@ struct NotesCheck {
         expect(NoteShelf.onPermission(live: false) == (true, true) && NoteShelf.onPermission(live: true) == (false, true), "hide on revocation, read afresh on return")
 
         // A Desktop anchor only with the Desktop's number: unknown, refused (nothing changes).
-        expect(NoteShelf.desktopAnchor(number: nil, mode: "work") == nil, "the Desktop showing unknown (macOS's Dock chosen, nothing read yet): refused")
-        expect(NoteShelf.desktopAnchor(number: 3, mode: "work")?.desktop == 3, "known: the anchor, with its number")
+        expect(NoteShelf.desktopAnchor(number: nil) == nil, "the Desktop showing unknown (macOS's Dock chosen, nothing read yet): refused")
+        expect(NoteShelf.desktopAnchor(number: 3)?.desktop == 3, "known: the anchor, with its number")
 
         // Space and screen changes are followed while notes are on, with or without Accessibility.
         expect(NoteShelf.spaceSignals(notesOn: true, accessibility: false) && !NoteShelf.spaceSignals(notesOn: false, accessibility: true),
                "Accessibility taken away: Desktops still followed; notes off: not")
 
-        // A Desktop note's mode comes from its Desktop's number, never from the dock.
-        expect(NoteShelf.modeID(desktop: 2, workspaces: ["2": "social"], defaultMode: "work") == "social", "its Desktop's mode")
-        expect(NoteShelf.modeID(desktop: 3, workspaces: ["2": "social"], defaultMode: "work") == "work", "a Desktop with none set: the default")
-        expect(NoteShelf.modeID(desktop: nil, workspaces: ["2": "social"], defaultMode: "work") == "", "no Desktop: none")
+        // A place from when the Mac had modes still says `mode`: kept as written, on the place it was on, and read by
+        // nothing (the note shows on its Desktop, whatever the mode said).
+        let moded = "---\nid: 5F0C2A1E-0000-4000-8000-000000000001\nplaces:\n  - kind: desktop\n    mode: \"social\"\n    desktop: 2\n  - kind: app\n    app: \"com.apple.Safari\"\n---\nBuy milk\n"
+        let old = NoteFile.parse(moded, fallbackID: "", fallbackDate: Date())
+        expect(old.places.count == 2 && old.places[0].kind == .desktop && old.places[0].desktop == 2, "a Desktop place with a mode is still its Desktop's")
+        expect(old.places[0].extra.map(\.key) == ["mode"] && old.places[1].extra.isEmpty, "the mode is kept on its own place, as a key Petal doesn't read")
+        let again = old.serialized()
+        expect(again.contains("    mode: \"social\"") && NoteFile.parse(again, fallbackID: "", fallbackDate: Date()).places == old.places, "and written back as it was")
+        expect(old.places[0].label() == "Desktop 2", "its label is its Desktop")
 
         // Reads of what's in front: one at a time, one follow-up; a stale one asks the app nothing more.
         var readGate = NoteShelf.ReadGate()

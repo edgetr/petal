@@ -3,7 +3,7 @@
 set -euo pipefail
 config="$HOME/.config/petal"
 
-# Petal for macOS: the same commands, sent to the running Petal over its socket.
+# Petal for macOS: its own commands (one dock, no modes), sent to the running Petal over its socket.
 if [[ $(uname) == Darwin ]]; then
   ipc() {
     local json="[" sep="" arg
@@ -11,12 +11,11 @@ if [[ $(uname) == Darwin ]]; then
     printf '%s]\n' "$json" | nc -U "$config/petal.sock" || echo "Petal isn't running" >&2
   }
   case "${1:-help}" in
-    mode)     ipc mode "${2:?usage: petal mode <id>}" ;;
-    stay|current|ask|search|settings|restart|version|reveal|check) ipc "$1" ;;
+    ask|search|settings|restart|version|reveal) ipc "$1" ;;
     chat)     shift; ipc chat "$*" ;;
     dock)     ipc dock "${2:-}" ;;
     update)   ipc update ;;
-    doctor|report|recipe|suggest|summary|get|set)
+    doctor|report|apps|get|set)
       app="/Applications/Petal.app/Contents/MacOS/Petal"
       [[ -x $app ]] || app="$(dirname "$(readlink -f "$0")")/../macos/build/Petal.app/Contents/MacOS/Petal"
       exec "$app" "$@" ;;
@@ -25,21 +24,17 @@ if [[ $(uname) == Darwin ]]; then
       if pgrep -xq Petal; then ipc dock macos
       elif [[ -x /Applications/Petal.app/Contents/MacOS/Petal ]]; then /Applications/Petal.app/Contents/MacOS/Petal --restore-dock
       else defaults write com.apple.dock autohide -bool false; defaults delete com.apple.dock autohide-delay 2>/dev/null; defaults delete com.apple.dock no-bouncing 2>/dev/null; killall Dock; fi ;;
-    modes)    osascript -l JavaScript -e "var d=JSON.parse($.NSString.stringWithContentsOfFileEncodingError('$config/modes.json',4,null).js); d.modes.map(m=>m.id+' - '+m.name+' | '+(m.apps||[]).join(', ')).join('\\n')" ;;
-    edit)     open -t "$config/modes.json" ;;
+    edit)     open -t "$config/dock.json" ;;
     logs)     log show --last 30m --style compact --predicate 'process == "Petal"' 2>/dev/null | tail -n "${2:-40}" ;;
     *)
       cat <<'HELP'
-petal mode <id>       put this Desktop in a mode (waits out a focus countdown)
-petal stay            cancel a countdown
-petal current         print this Desktop's mode
-petal modes           list modes and their apps
+petal apps            the dock's apps, in the order they show
 petal ask             open the Claude panel
 petal chat <text>     ask Claude something
 petal search          open the add-apps search
 petal settings        open Petal's settings
 petal dock [petal|macos]  which dock is showing, or switch
-petal edit            edit ~/.config/petal/modes.json
+petal edit            edit ~/.config/petal/dock.json
 petal restart         restart Petal
 petal update          check for a new Petal now
 petal restore-dock    give macOS's Dock back, even if Petal crashed or was deleted

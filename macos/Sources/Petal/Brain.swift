@@ -1,13 +1,13 @@
 import AppKit
 
-/// Quick JSON calls that sort activity into modes (Brain.qml), to the chosen AI's quick, cheap setting (Claude
-/// Haiku; Codex at low effort): one at a time, answers cached.
+/// Quick JSON calls to the chosen AI's quick, cheap setting (Claude Haiku; Codex at low effort), for routines that
+/// sort files by what they are and for helpers in notes: one at a time, answers cached.
 @MainActor
 final class Brain {
     /// What a note helper's call is made into when its turn in the line comes (`NoteHelpers.prepare`): its words, a
     /// wait (its run paused, or its gate: it goes back in line), or nothing to send.
     enum Made { case go(Shielded), wait, over }
-    /// What a call sends: Petal's own sorting prompt, or a note helper's words, made only when the call starts (never
+    /// What a call sends: a routine's sorting prompt, or a note helper's words, made only when the call starts (never
     /// kept in the line as text).
     private enum Words {
         case text(String)
@@ -23,65 +23,6 @@ final class Brain {
         let app = PetalApp.shared
         guard app.config.bool("ai"), let provider = app.chatProvider else { return false }
         return app.paths[provider] != nil && app.aiReady(provider)
-    }
-
-    func classifyWindow(app: String, title: String, key: String? = nil, done: @escaping ([String: Any]?) -> Void) {
-        let prompt = """
-        You sort a user's desktop activity into focus modes.
-        Modes:
-        \(modesBrief)
-
-        Focused window: app="\(app)" title="\(title)"
-        Which mode does this activity belong to? Use null if none fits.
-        Reply with ONLY JSON: {"mode": "<id>"|null, "reason": "<max 8 words, what it is>"}
-        """
-        ask(prompt, key: key.map { "w|" + $0 } ?? "w|\(app)|\(title)", done: done)
-    }
-
-    /// Which mode a notification belongs to, and whether it can't wait (Brain.qml's classifyNotification).
-    func classifyNotification(app: String, title: String, body: String, done: @escaping ([String: Any]?) -> Void) {
-        let prompt = """
-        You triage notifications for a user in focus modes.
-        Modes:
-        \(modesBrief)
-
-        Notification from app "\(app)": "\(title)" — "\(body.prefix(300))"
-        Which mode does it belong to, and is it time-sensitive (needs an answer within the hour, or is an emergency)?
-        Reply with ONLY JSON: {"mode": "<id>"|null, "urgent": true|false, "reason": "<max 8 words>"}
-        """
-        ask(prompt, key: "n|\(app)|\(title)|\(body)", done: done)
-    }
-
-    /// Whether a mode pulls you away from work: asked once for a mode that doesn't say.
-    func isDistracting(_ mode: Mode, done: @escaping ([String: Any]?) -> Void) {
-        let apps = mode.apps.prefix(12).map(Apps.name).joined(separator: ", ")
-        let prompt = """
-        A focus mode in a dock is named "\(mode.name)". It's for: \(mode.about.isEmpty ? "(not said)" : mode.about). Its apps: \(apps.isEmpty ? "(none yet)" : apps).
-        Is it a mode that's mainly for distraction, like social media, chatting with friends, videos or games? An everyday or general mode with a mix of apps (work tools among them) is not.
-        Reply with ONLY JSON: {"distracting": true|false}
-        """
-        ask(prompt, key: "d|\(mode.id)|\(mode.name)|\(mode.about)", done: done)
-    }
-
-    /// A name, symbol, color and about for a new mode holding `apps` (names), unlike the modes there are.
-    func nameMode(apps: [String], done: @escaping ([String: Any]?) -> Void) {
-        let colors = PetalApp.shared.config.modes.map(\.hex).joined(separator: ", ")
-        let prompt = """
-        You name focus modes for a dock. Each mode has its own apps; the user switches a Desktop into a mode.
-        Modes they have:
-        \(modesBrief)
-
-        These apps are often used together: \(apps.joined(separator: ", ")).
-        Name a new mode for them: 1 or 2 words, unlike the existing names. Pick an SF Symbol name for its icon, a #rrggbb color unlike these (\(colors)), and a short about: what the mode is for, used to sort new apps into it. Say whether it pulls you away from work, like social media, chat, videos or games.
-        Reply with ONLY JSON: {"name": "<name>", "icon": "<SF Symbol>", "color": "#rrggbb", "about": "<under 12 words>", "distracting": true|false}
-        """
-        ask(prompt, key: "n|" + apps.joined(separator: "|"), done: done)
-    }
-
-    private var modesBrief: String {
-        PetalApp.shared.config.modes.map { m in
-            "- \(m.id) (\(m.name)): \(m.about)" + (m.sites.isEmpty ? "" : "; sites: " + m.sites.joined(separator: ", "))
-        }.joined(separator: "\n")
     }
 
     /// One quick JSON call (answers cached by `key`).

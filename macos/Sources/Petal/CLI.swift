@@ -3,36 +3,25 @@ import AppKit
 /// `petal` on macOS: Petal.app's own executable, linked as ~/.local/bin/petal, with the same commands as bin/petal on
 /// Omarchy, so any agent (T3 Code, Claude Code, Codex in a terminal) or person can drive the dock from a shell.
 enum CLI {
-    static let commands: Set<String> = ["mode", "stay", "current", "desktop", "ask", "chat", "search", "settings", "reveal", "check",
-                                        "dock", "restart", "version", "update", "modes", "get", "set", "restore-dock", "restore-windows", "help", "logs", "chats",
-                                        "recipe", "suggest", "summary", "overview", "personal", "bench", "run"]
+    static let commands: Set<String> = ["desktop", "ask", "chat", "search", "settings", "reveal", "dock", "restart", "version", "update",
+                                        "apps", "get", "set", "restore-dock", "help", "logs", "chats", "personal", "bench", "run"]
 
     static let help = """
-    petal mode <id>           put this Desktop in a mode (waits out a focus countdown)
-    petal stay                cancel a countdown
-    petal current             this Desktop's mode
-    petal modes               the modes and their apps
-    petal get                 everything about the dock: settings (with help), modes, files
+    petal apps                the dock's apps, in the order they show
+    petal get                 everything about the dock: settings (with help), its apps, files
     petal set <key> <value>   change a setting (value as JSON: true, 44, "#d9367f", ["~/Downloads"])
     petal dock [petal|macos]  which dock is showing, or switch
     petal ask | chat <text>   open the AI panel, or ask it something
     petal chats               your kept chats with Petal AI, to read again or carry on
     petal search | settings   open the "+" search, or Petal's settings
     petal restart | update    restart Petal, or check for a new one
-    petal recipe export [<file>]           share your dock: modes, apps and look in a .petal file
-    petal recipe import <file> [--look] [--dry-run]
-                              add the modes from a .petal file (and its look, with --look)
-    petal suggest [--json]    modes Petal would suggest from your activity
-    petal summary [--json]    the last 7 days in your modes
-    petal overview            every Desktop and its mode
     petal doctor [--fix]      check Petal, and repair what it safely can
     petal report "<what>"     tell Petal's maker what went wrong (a GitHub issue; shown to you first)
     petal restore-dock        give macOS its Dock back, even if Petal crashed
     petal logs [<minutes>]    Petal's own log, the last 30 minutes (or as many as asked)
-    petal bench               time the dock's clicks (brings apps forward and switches modes for ~15 s;
-                              results in ~/Library/Logs/Petal/bench.json)
-    petal bench quiet         only hovering the icons and a setting back and forth (no app or mode changes)
-    petal restore-windows     bring back every window put away for another mode, even if Petal crashed
+    petal bench               time the dock's clicks (brings apps forward for ~15 s; results in
+                              ~/Library/Logs/Petal/bench.json)
+    petal bench quiet         only hovering the icons and a setting back and forth (no app comes forward)
     petal personal …          your own changes to Petal's code, kept through updates (petal personal help)
     petal run --key "<title>" [--env NAME] [--stdin] -- <command…>
                               run a command with an API key from your vault, for an agent testing with a real
@@ -50,11 +39,8 @@ enum CLI {
         switch command {
         case "help":
             print(help)
-        case "modes":
-            let modes = (MCP.read(MCP.modesFile)?["modes"] as? [[String: Any]]) ?? []
-            for mode in modes {
-                print("\(mode["id"] ?? "") - \(mode["name"] ?? "") | \((mode["apps"] as? [String] ?? []).joined(separator: ", "))")
-            }
+        case "apps":
+            for app in MCP.read(MCP.dockFile)?["apps"] as? [String] ?? [] { print(app) }
         case "get":
             output(try? MCP.call("petal_get_state", [:]))
         case "set":
@@ -62,28 +48,12 @@ enum CLI {
             let text = rest.dropFirst().joined(separator: " ")
             let value = (try? JSONSerialization.jsonObject(with: Data(text.utf8), options: .fragmentsAllowed)) ?? text
             do { output(try MCP.call("petal_set_settings", ["settings": [rest[0]: value]])) } catch { fail(error.localizedDescription) }
-        case "recipe":
-            recipe(rest)
-        case "suggest":
-            guard Insights.setting("activityLog") else { fail("The activity history is off (petal set activityLog true).") }
-            let found = Insights.suggestions()
-            if rest.contains("--json") { output(["suggestions": found.map(\.json)]) }
-            else if found.isEmpty { print("Nothing to suggest yet.") }
-            else { for suggestion in found { print("- " + (suggestion.json["text"] as? String ?? "")) } }
-        case "summary":
-            guard Insights.setting("activityLog") else { fail("The activity history is off (petal set activityLog true).") }
-            let summary = Insights.summary(lastWeek: false)
-            if rest.contains("--json") { output(summary.json) }
-            else if summary.modes.isEmpty { print("Nothing yet: Petal notes which app is in front, a minute at a time.") }
-            else { print(summary.title + ":"); for line in summary.lines { print("  " + line) } }
         case "chat":
             print(MCP.petal("chat", rest.joined(separator: " ")))
         case "personal":
             Personal.command(rest)
         case "run":
             AgentRun.run(rest)
-        case "restore-windows":
-            restoreWindows()
         case "restore-dock":
             // Done here, not by the running Petal: it has to work when Petal has crashed.
             MainActor.assumeIsolated {
@@ -95,64 +65,10 @@ enum CLI {
             let minutes = rest.first.flatMap(Int.init) ?? 30
             let lines = MainActor.assumeIsolated { Doctor.logLines(minutes: minutes) }
             print(lines.isEmpty ? "Nothing in Petal's log in the last \(minutes) minutes." : lines.joined(separator: "\n"))
-        case "mode":
-            guard let id = rest.first else { fail("usage: petal mode <id>") }
-            print(MCP.petal("mode", id))
         default:
             print(MCP.petal(([command] + rest)))
         }
         exit(0)
-    }
-
-    /// `petal recipe export [<file>]` and `petal recipe import <file> [--look]`.
-    static func recipe(_ args: [String]) {
-        switch args.first {
-        case "export":
-            do { print(try Recipe.export(path: args.dropFirst().first, name: nil)) } catch { fail(error.localizedDescription) }
-        case "import":
-            guard let path = args.dropFirst().first(where: { !$0.hasPrefix("--") }) else { fail("usage: petal recipe import <file> [--look]") }
-            let look = args.contains("--look")
-            do {
-                let plan = try Recipe.plan(URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
-                print("\(plan.name) adds \(plan.modes.count == 1 ? "a mode" : "\(plan.modes.count) modes"):")
-                for mode in plan.modes {
-                    print("  \(mode.name) (\(mode.id)): \(mode.apps.map(Insights.name).joined(separator: ", "))"
-                          + (mode.missing.isEmpty ? "" : "; not on this Mac: " + mode.missing.joined(separator: ", ")))
-                }
-                if look && !plan.lookChanges.isEmpty {
-                    print("Its look changes: " + plan.lookChanges.map { Recipe.lookNames[$0] ?? $0 }.joined(separator: ", "))
-                }
-                if args.contains("--dry-run") { exit(0) }
-                if isatty(0) != 0 {
-                    print("Add \(plan.modes.count == 1 ? "it" : "them")? [y/N] ", terminator: "")
-                    guard readLine()?.lowercased().hasPrefix("y") == true else { exit(1) }
-                }
-                try Recipe.apply(plan, look: look)
-                print("Added.")
-            } catch {
-                fail(error.localizedDescription)
-            }
-        default:
-            fail("usage: petal recipe export [<file>] | petal recipe import <file> [--look]")
-        }
-    }
-
-    /// The running Petal brings the windows back; without it, this command does, if the terminal may move windows.
-    static func restoreWindows() {
-        MainActor.assumeIsolated { restoreWindowsHere() }   // CLI.run runs on the main thread (main.swift)
-    }
-
-    @MainActor private static func restoreWindowsHere() {
-        let reply = MCP.petal("restoreWindows")
-        if reply.hasPrefix("Brought back") || reply.hasPrefix("No windows") { print(reply); return }
-        guard AXIsProcessTrusted() else {
-            let waiting = Parking.waiting()
-            if waiting == 0 { print("No windows were waiting off-screen."); return }
-            fail("\(waiting) window\(waiting == 1 ? " is" : "s are") waiting off-screen, and this terminal isn't allowed to move windows "
-                 + "(System Settings > Privacy & Security > Accessibility). Open Petal: it brings them back as it starts.")
-        }
-        let count = Parking.restoreEverything()
-        print(count == 0 ? "No windows were waiting off-screen." : "Brought back \(count) window\(count == 1 ? "" : "s").")
     }
 
     static func output(_ value: Any?) {

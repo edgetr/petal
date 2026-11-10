@@ -1534,7 +1534,7 @@ enum ViewerCheck {
         expect(ViewerVersionStore.location == versionsRoot && ViewerVersionStore.shared?.root == versionsRoot,
                "the check's versions in a throwaway root of its own (\(ViewerVersionStore.shared?.root.path ?? "none"))")
         expect(Viewers.sweepsAtLaunch(arguments: ["/Applications/Petal.app/Contents/MacOS/Petal"], headless: false), "the dock sweeps at launch")
-        for words in [["--snapshot", "/tmp/x"], ["--viewer-check", "a.pdf"], ["--bench"], ["--mcp"], ["current"]] {
+        for words in [["--snapshot", "/tmp/x"], ["--viewer-check", "a.pdf"], ["--bench"], ["--mcp"], ["version"]] {
             expect(!Viewers.sweepsAtLaunch(arguments: ["/Applications/Petal.app/Contents/MacOS/Petal"] + words, headless: false), "\(words[0]) never sweeps")
         }
         expect(!Viewers.sweepsAtLaunch(arguments: ["/Applications/Petal.app/Contents/MacOS/Petal"], headless: true), "a headless run never sweeps")

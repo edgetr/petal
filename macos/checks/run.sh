@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Checks the window maths (tiling and parking), when the dock looks at the windows, and which controls Petal AI is
+# Checks the window maths (tiling), a dock from when the Mac had modes moving into dock.json once (ModesMigration, on
+# throwaway folders in the temporary folder), when the dock looks at the windows, and which controls Petal AI is
 # told about (UIMap), where notes' tabs and AI sticky notes show and sit (NoteLayout), Petal Notes' files, places, edge tabs and
 # room beside a window (NoteFile), how a note works in the background and what its
 # preview says (Background), the vault's pure side (sites, 2FA codes, exports, when it fills by itself), and agents
@@ -16,6 +17,10 @@ out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 swiftc -parse-as-library -O -o "$out/check" Sources/Petal/WindowLayout.swift checks/WindowLayoutCheck.swift
 "$out/check"
+# The Mac's modes are gone: the default mode's apps become dock.json's, modes.json goes, no other file is written, a
+# second launch changes nothing, and an unreadable modes.json gives an empty dock and is left alone.
+swiftc -parse-as-library -O -o "$out/modes" Sources/Petal/ModesMigration.swift checks/ModesMigrationCheck.swift
+"$out/modes"
 swiftc -parse-as-library -O -o "$out/look" Sources/Petal/LookSchedule.swift checks/LookScheduleCheck.swift
 "$out/look"
 swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIMapCheck.swift
@@ -313,7 +318,7 @@ if grep -n '"answered"' Sources/Petal/NoteHelp.swift; then echo "NoteHelp: the a
 # Quick calls check a named AI and go through the gate when they start; a second opinion in a worktree is checked first.
 perl -0777 -ne '
     my $quick = () = /guard let provider = quickProviderOrFail\(run\) else \{ return \}/g;
-    my $gated = () = /app\.focus\.brain\.ask\(key: key, token: run\.token, provider: provider, gate: quickGate\(run\), make:/g;
+    my $gated = () = /app\.brain\.ask\(key: key, token: run\.token, provider: provider, gate: quickGate\(run\), make:/g;
     my $asks = () = /brain\.ask\(/g;
     unless ($quick == 2 && $gated == 1 && $asks == 1 && /func quickGate\(.*?switch self\.admit\(run\)/s && /Self\.verifyTree\(stored, noteID: paper\.noteID, token: run\.token\)/
             && /NoteHelp\.reviewTreeOK\(/) { print "NoteHelpers: quick calls must check their AI and gate; reviewers their worktree\n"; exit 1 }
@@ -331,7 +336,7 @@ perl -0777 -ne '
     unless (/guard let provider = named \?\? app\.chatProvider else \{ return \.none \}.*?return app\.aiReady\(provider\) \? \.go\(provider\) : \.none/s && !/aiReady\(chat\)/) {
         print "Brain: each call picks its own AI before checking it is ready\n"; exit 1 }
     print "brain: each call picks its own AI first\n";
-' Sources/Petal/Focus.swift
+' Sources/Petal/Brain.swift
 # Only a run that succeeded writes `done` (what chains and morning notes wait for), inside `end` once its token
 # completed; every other reply is a faint word that leaves the note's ink and helper line as they are.
 perl -0777 -ne '
@@ -382,7 +387,7 @@ perl -0777 -ne '
     unless (/let step = queue\.pass \{/ && /for entry in step\.dropped \{ DispatchQueue\.main\.async \{ entry\.job\.done\(nil\) \} \}/
             && /func resume\(\) \{ DispatchQueue\.main\.async/ && !/queue\.removeAll|for job in queue/) { print "Brain: the quick queue must take calls out first and never call back inside a pass\n"; exit 1 }
     print "brain: calls out of the queue first, answered outside the pass\n";
-' Sources/Petal/Focus.swift
+' Sources/Petal/Brain.swift
 perl -0777 -ne '
     unless (/private func end\(_ run: Run, _ ending: Ending\) \{.*?guard run\.token\.completion == nil, /s
             && /case \.fail\(let reason\):\s*DispatchQueue\.main\.async \{ MainActor\.assumeIsolated \{ self\.fail\(run/s) {
@@ -520,7 +525,7 @@ perl -0777 -ne '
     unless (/case made\(\(\@escaping \@MainActor \(Made\) -> Void\) -> Void\)/ && /func ask\(key: String, token: RunToken, provider: Provider\? = nil, gate: \(\(\) -> Bool\)\? = nil,\s*make:/
             && !/func ask\(_ prompt: Shielded/ && /case \.wait:.*?self\.queue\.putBack\(entry\)/s) { print "Brain: a helper call waits as how it is made, never as words\n"; exit 1 }
     print "brain: a helper call is made when its turn comes\n";
-' Sources/Petal/Focus.swift
+' Sources/Petal/Brain.swift
 grep -q 'enum Item { case say(String), review(NoteHelp.Model, asked: String) }' Sources/Petal/NoteHelp.swift || { echo "FollowUpQueue: a follow-up waits as the line the person wrote"; exit 1; }
 # B: a result lands only after the gate is asked again, on the main actor, right before; a finished answer lands
 # paused or not (a paused run hands nothing on); a result held through a conflict is asked about again when applied.

@@ -30,7 +30,7 @@ final class StickyNote {
     var draft = ""
     var attachments: [URL] = []
     var quotes: [ClaudePanel.Quote] = []
-    /// Done while the person was somewhere else: its app's icon (and its mode, if another) has a nudge.
+    /// Done while the person was somewhere else: its app's icon has a nudge.
     var ready = false
     /// Open when the person went to another window: it comes back with its window.
     @ObservationIgnored var away = false
@@ -195,7 +195,7 @@ extension ClaudePanel {
         // A tab Petal can't tell from the others (Safari's only tab, with no tab strip): its window's note instead.
         let tab = front.tab?.known == true ? front.tab : nil
         var place = NotePlace(pid: front.pid, app: front.app, appName: app.localizedName ?? "", window: front.window, title: title,
-                              mode: dock?.mode?.id ?? "", desktop: dock?.desktop, scope: tab == nil ? .window : .tab, tab: tab)
+                              desktop: dock?.desktop, scope: tab == nil ? .window : .tab, tab: tab)
         // A chat kept for this tab, window or app from before Petal (or the browser) last started, carried on: by
         // the note that already holds it (picked from the list since), or a new one.
         if case .kept(let saved)? = found {
@@ -205,7 +205,6 @@ extension ClaudePanel {
                 place.scope = old.scope
                 if let tab = old.tab { place.tab = front.tab.map { NoteRules.follow(tab, to: $0, keepWords: !title.isEmpty) } ?? tab }
                 if title.isEmpty { place.title = old.title }
-                place.mode = old.mode
                 place.desktop = old.desktop ?? place.desktop
             }
             // A note holding the chat already (picked from the list since, maybe carried on) wins over the copy kept
@@ -348,7 +347,6 @@ extension ClaudePanel {
         note.windowGone = false
         note.away = false
         if note.ready { note.ready = false; updateReady() }
-        if PetalApp.shared.popups.card?.noteID == note.id { PetalApp.shared.popups.dismissCard() }
         unlink(note.agent.chatID)
     }
 
@@ -660,7 +658,7 @@ extension ClaudePanel {
             let running = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             MainActor.assumeIsolated { if let running { self?.appCameForward(running) } }
         }
-        // One of Petal's own windows (Settings, the welcome, a page, a recipe) in front: the app in front is Petal,
+        // One of Petal's own windows (Settings, the welcome, a page) in front: the app in front is Petal,
         // which appCameForward leaves alone.
         NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] note in
             let window = note.object as? NSWindow
@@ -730,7 +728,7 @@ extension ClaudePanel {
         }
         listenIfNeeded()
         guard !notesOn else { return }
-        cancelPending()   // a note's window being brought forward (or a mode's countdown before it) opens nothing
+        cancelPending()   // a note's window being brought forward opens nothing
         // The chat showing becomes the loose chat, stuck to no window: from now on it looks at what's in front.
         if current !== loose, current.place != nil, isOpen {
             current.place = nil
@@ -740,7 +738,6 @@ extension ClaudePanel {
         guard notes.contains(where: { $0.ready || $0.away }) else { return }
         for note in notes { note.ready = false; note.away = false }
         updateReady()
-        if PetalApp.shared.popups.card?.kind == .noteReady { PetalApp.shared.popups.dismissCard() }
     }
 
     /// An app was made private: what its windows and tabs said (titles, addresses) goes from every note, the chats
@@ -857,7 +854,7 @@ extension ClaudePanel {
         look(at: running)
     }
 
-    /// One of Petal's own windows took the keyboard (Settings, the welcome, a page, a recipe, an alert): an open note
+    /// One of Petal's own windows took the keyboard (Settings, the welcome, a page, an alert): an open note
     /// steps away as when another app comes forward, and comes
     /// back with its place (that app coming forward again). Petal's panels that never bring Petal forward (the note
     /// itself, cards, popups, the dock, the overview) don't count.
@@ -1005,7 +1002,6 @@ extension ClaudePanel {
             note.agent.reset()
             note.ready = false
             note.away = false
-            if PetalApp.shared.popups.card?.noteID == note.id { PetalApp.shared.popups.dismissCard() }
         }
         updateReady()
     }
@@ -1054,8 +1050,7 @@ extension ClaudePanel {
 
     // MARK: Done while away
 
-    /// A note's turn ended. If the person isn't looking at it, its app's icon gets a nudge (a badge and one bounce),
-    /// and a note from another mode nudges that mode's button too, with a card to open it here.
+    /// A note's turn ended. If the person isn't looking at it, its app's icon gets a nudge (a badge and one bounce).
     func finished(_ note: StickyNote) {
         startWaiting()
         // A helper in a note: its answer goes on the note.
@@ -1063,15 +1058,7 @@ extension ClaudePanel {
         guard notesOn, !(isOpen && current === note), note.agent.messages.contains(where: { $0.kind == .user }) else { return }
         note.ready = true
         updateReady()
-        guard let place = note.place else { return }
-        let app = PetalApp.shared
-        if !place.app.isEmpty { app.signals.bounce(place.app) }
-        let here = app.docks.focusedDock?.mode?.id
-        if !place.mode.isEmpty, place.mode != here, let mode = app.config.modes.first(where: { $0.id == place.mode }),
-           app.popups.card == nil, !isOpen {
-            app.popups.show(FocusCard(kind: .noteReady, bundleID: place.app, title: note.agent.title, target: mode,
-                                      reason: place.title.isEmpty ? place.appName : place.title, noteID: note.id))
-        }
+        if let app = note.place?.app, !app.isEmpty { PetalApp.shared.signals.bounce(app) }
     }
 
     /// Notes waiting for room start, in order, while fewer than `atOnce` work. Called whenever a run ends or is
@@ -1084,25 +1071,19 @@ extension ClaudePanel {
     func updateReady() {
         let ready = notes.filter { $0.ready }
         let apps = Set(ready.compactMap { $0.place?.app }.filter { !$0.isEmpty })
-        var modes: [String: Int] = [:]
-        for note in ready { if let mode = note.place?.mode, !mode.isEmpty { modes[mode, default: 0] += 1 } }
         if apps != readyApps { readyApps = apps }
-        if modes != readyModes { readyModes = modes }
     }
 
-    /// The app's icon was clicked and one of its notes is done: its window comes forward (in its mode) and the note
-    /// opens on it. False when no note of that app is waiting (or notes are off): the click does what it always does.
+    /// The app's icon was clicked and one of its notes is done: its window comes forward and the note opens on it.
+    /// False when no note of that app is waiting (or notes are off): the click does what it always does.
     func openReady(app bundleID: String) -> Bool {
         guard notesOn, let note = notes.first(where: { $0.ready && $0.place?.app == bundleID }), let place = note.place else { return false }
         go(to: note, place: place)
         return true
     }
 
-    /// Brings a note's window forward and opens the note on it. When the Desktop the note was asked on has left the
-    /// note's mode, that Desktop (not the one showing) goes back to it first.
+    /// Brings a note's window forward and opens the note on it.
     func go(to note: StickyNote, place: NotePlace) {
-        let app = PetalApp.shared
-        app.popups.dismissCard()
         if isOpen { close() }   // first: its closing cancels what's pending, never this
         cancelPending()
         // An app's note: whichever of its app's windows; a window's or a tab's: its own window's app.
@@ -1111,87 +1092,78 @@ extension ClaudePanel {
             : NSRunningApplication(processIdentifier: place.pid).flatMap { $0.isTerminated ? nil : $0 }
         guard !note.windowGone, let running else { return present(note, key: true) }
         let pid = running.processIdentifier
-        // Taken now, before any mode's countdown: anything opened, closed or turned off meanwhile cancels it.
+        // Anything opened, closed or turned off from here on cancels it.
         let ticket = pendingTicket
-        let bring = {
-            guard ticket == self.pendingTicket, self.notesOn else { return }
-            // Its window is in front already (and, for a tab's note, its tab): nothing to wait for.
-            if self.inFront(place), place.kind != .tab || self.lastFront.map({ self.holds(note, $0) }) == true {
-                return self.present(note, key: true, fromIcon: true)
+        guard notesOn else { return }
+        // Its window is in front already (and, for a tab's note, its tab): nothing to wait for.
+        if self.inFront(place), place.kind != .tab || self.lastFront.map({ self.holds(note, $0) }) == true {
+            return self.present(note, key: true, fromIcon: true)
+        }
+        self.pendingOpen = note
+        // If the window never says it's in front (another Desktop, a slow app), it's asked once more; the note
+        // opens only when its window really is in front.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            guard ticket == self.pendingTicket, self.pendingOpen === note else { return }
+            self.pendingOpen = nil
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+            Self.readFront(of: running) { read in
+                guard ticket == self.pendingTicket, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
+                let seen = self.saw(running, read)
+                // A tab's note only on its tab: the browser may not have shown it (or couldn't tell which it is);
+                // it stays done (its nudge too) until its tab shows.
+                let now = note.place ?? place
+                guard now.kind == .tab ? self.holds(note, seen) : NoteRules.sameWindow(now, seen)
+                else { return }
+                self.present(note, key: true, fromIcon: true)
             }
-            self.pendingOpen = note
-            // If the window never says it's in front (another Desktop, a slow app), it's asked once more; the note
-            // opens only when its window really is in front.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                guard ticket == self.pendingTicket, self.pendingOpen === note else { return }
-                self.pendingOpen = nil
-                guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
-                Self.readFront(of: running) { read in
-                    guard ticket == self.pendingTicket, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
-                    let seen = self.saw(running, read)
-                    // A tab's note only on its tab: the browser may not have shown it (or couldn't tell which it is);
-                    // it stays done (its nudge too) until its tab shows.
-                    let now = note.place ?? place
-                    guard now.kind == .tab ? self.holds(note, seen) : NoteRules.sameWindow(now, seen)
-                    else { return }
-                    self.present(note, key: true, fromIcon: true)
-                }
-            }
-            self.bringing = pid
-            // Numbered now: closing, another app coming forward or another bringing stops both the tab's switch and
-            // the window's.
-            let request = NoteFocus.next()
-            let url = running.bundleURL
-            // A tab's note: its tab shows first (Chromium browsers by its id; Safari, Firefox and Zen by its button).
-            if place.kind == .tab, let tab = place.tab {
-                let app = place.app, window = place.window
-                let chromium = Browsers.kind(app) == .chromium && tab.id != nil
-                Self.tabQueue.async {
-                    let shown = Browsers.select(tab, bundleID: app, still: { NoteFocus.current(request) })
-                    // Its tab closed while its window stayed open (only a closed window says so by itself): the
-                    // note opens as a plain chat, and its nudge goes, instead of waiting for a tab that won't show.
-                    if shown.shown == .missing {
-                        DispatchQueue.main.async {
-                            MainActor.assumeIsolated {
-                                guard ticket == self.pendingTicket, NoteFocus.current(request), !(self.isOpen && self.current === note) else { return }
-                                self.cancelPending()
-                                note.windowGone = true
-                                self.present(note, key: true)
-                                self.listenIfNeeded()
-                            }
+        }
+        self.bringing = pid
+        // Numbered now: closing, another app coming forward or another bringing stops both the tab's switch and
+        // the window's.
+        let request = NoteFocus.next()
+        let url = running.bundleURL
+        // A tab's note: its tab shows first (Chromium browsers by its id; Safari, Firefox and Zen by its button).
+        if place.kind == .tab, let tab = place.tab {
+            let app = place.app, window = place.window
+            let chromium = Browsers.kind(app) == .chromium && tab.id != nil
+            Self.tabQueue.async {
+                let shown = Browsers.select(tab, bundleID: app, still: { NoteFocus.current(request) })
+                // Its tab closed while its window stayed open (only a closed window says so by itself): the
+                // note opens as a plain chat, and its nudge goes, instead of waiting for a tab that won't show.
+                if shown.shown == .missing {
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            guard ticket == self.pendingTicket, NoteFocus.current(request), !(self.isOpen && self.current === note) else { return }
+                            self.cancelPending()
+                            note.windowGone = true
+                            self.present(note, key: true)
+                            self.listenIfNeeded()
                         }
-                        return
                     }
-                    guard chromium else { return }
-                    // A Chromium tab may be in another window by now (dragged there before Petal looked): the window
-                    // that holds it is the one brought forward, and the note's window from now on.
-                    Self.windowQueue.async {
-                        guard NoteFocus.current(request) else { return }
-                        let number = shown.shown == .shown ? Self.windowHolding(pid: pid, old: window, bounds: shown.bounds) : window
-                        Self.bringForward(pid: pid, window: number, app: url, request: request)
-                        guard let number, number != window else { return }
-                        DispatchQueue.main.async {
-                            MainActor.assumeIsolated {
-                                guard ticket == self.pendingTicket, NoteFocus.current(request), var now = note.place, now.kind == .tab,
-                                      now.pid == pid, now.tab?.id == tab.id else { return }
-                                now.window = number
-                                note.place = now
-                            }
+                    return
+                }
+                guard chromium else { return }
+                // A Chromium tab may be in another window by now (dragged there before Petal looked): the window
+                // that holds it is the one brought forward, and the note's window from now on.
+                Self.windowQueue.async {
+                    guard NoteFocus.current(request) else { return }
+                    let number = shown.shown == .shown ? Self.windowHolding(pid: pid, old: window, bounds: shown.bounds) : window
+                    Self.bringForward(pid: pid, window: number, app: url, request: request)
+                    guard let number, number != window else { return }
+                    DispatchQueue.main.async {
+                        MainActor.assumeIsolated {
+                            guard ticket == self.pendingTicket, NoteFocus.current(request), var now = note.place, now.kind == .tab,
+                                  now.pid == pid, now.tab?.id == tab.id else { return }
+                            now.window = number
+                            note.place = now
                         }
                     }
                 }
-                // A Chromium tab's window is brought forward once the browser says which it is.
-                if chromium { return }
             }
-            Self.bringForward(pid: pid, window: place.kind == .app ? nil : place.window, app: url, request: request)
+            // A Chromium tab's window is brought forward once the browser says which it is.
+            if chromium { return }
         }
-        let desktop = place.desktop ?? app.docks.focusedDock?.desktop
-        if let desktop, !place.mode.isEmpty, app.config.modes.contains(where: { $0.id == place.mode }),
-           app.config.mode(forDesktop: desktop)?.id != place.mode {
-            app.requestMode(place.mode, desktop: desktop, then: bring)
-        } else {
-            bring()
-        }
+        Self.bringForward(pid: pid, window: place.kind == .app ? nil : place.window, app: url, request: request)
     }
 
     /// Brings one window forward, all of it on `windowQueue` (Accessibility and Launch Services may wait on the
@@ -1240,58 +1212,12 @@ extension ClaudePanel {
         }
     }
 
-    /// "Open here": the note, over this dock, without going to its window or mode.
-    func openHere(_ id: UUID) {
-        PetalApp.shared.popups.dismissCard()
-        cancelPending()
-        guard let note = notes.first(where: { $0.id == id }) else { return }
-        present(note, key: true)
-    }
-
-    /// "Go to <mode>" on the card.
-    func goTo(_ id: UUID) {
-        guard let note = notes.first(where: { $0.id == id }), let place = note.place else { return PetalApp.shared.popups.dismissCard() }
-        go(to: note, place: place)
-    }
-
     /// The dock button the note comes out of: its app's icon when the dock shows it, else the AI button.
     func anchor(for note: StickyNote) -> CGRect? {
         let panel = PetalApp.shared.docks.focusedDock?.panel
         if note.place?.app == "com.apple.finder", let frame = panel?.screenFrame(of: DockView.finderSlot) { return frame }
         if let app = note.place?.app, !app.isEmpty, let frame = panel?.screenFrame(of: app) { return frame }
         return panel?.screenFrame(of: "claude")
-    }
-}
-
-/// A note done in another mode, out of that mode's button: "Safari · Your note is ready", Open here or Go to Design.
-struct NoteReadyCard: View {
-    @Environment(PetalApp.self) private var app
-    let card: FocusCard
-
-    var body: some View {
-        let target = card.target
-        let color = Color(nsColor: target?.color ?? app.accent)
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 10) {
-                AppIconView(id: card.bundleID, size: 28)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("\(Text(card.title.isEmpty ? Apps.name(card.bundleID) : card.title).bold()) · your note is ready")
-                        .font(.system(size: 13)).lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                    Text("\(card.reason) · in \(target?.name ?? "another mode")")
-                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                }
-                Spacer(minLength: 8)
-                RoundButton(symbol: "xmark") { app.popups.dismissCard() }
-            }
-            HStack(spacing: 8) {
-                Spacer(minLength: 0)
-                Button("Open here") { if let id = card.noteID { app.claude.openHere(id) } }.buttonStyle(.glass)
-                if let target {
-                    Button("Go to \(target.name)") { if let id = card.noteID { app.claude.goTo(id) } }
-                        .buttonStyle(.glassProminent).tint(color)
-                }
-            }
-        }
     }
 }
 

@@ -9,8 +9,8 @@ import SwiftUI
 
 // MARK: - The pad
 
-/// The note pad, as its own button by the AI button and Finder's (`notesPad`, while `notes` is on), the same in
-/// every mode: a small stack of paper in the default notebook's color on clear glass. A click makes a blank note on
+/// The note pad, as its own button by the AI button and Finder's (`notesPad`, while `notes` is on): a small stack of
+/// paper in the default notebook's color on clear glass. A click makes a blank note on
 /// what's in front, open to write in (as ⌃⌥N does); a drag takes a paper off it, and wherever that's let go the note
 /// is made, stuck to the window under it at that spot, else on that Desktop (holding Option: on the screen itself).
 /// A surface to click never moves or grows on hover: nothing here does.
